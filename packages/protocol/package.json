@@ -47,7 +47,6 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@better-compute/core": "workspace:*",
     "@bufbuild/protobuf": "^2.15.0"
   }
 }

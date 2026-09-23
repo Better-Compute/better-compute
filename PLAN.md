@@ -285,14 +285,14 @@ better-compute/
 ├─ vendor/better-iam/{*.tgz, SOURCE.json}   .claude/coordination.md   .github/workflows/{ci,daemon,emulation,sim,release}.yml
 ```
 
-The root is `better-compute-workspace`: private, ESM, MIT, `packageManager: pnpm@11.19.0`, `engines.node >=22.12.0`. Every package uses better-iam's `package.json` block [CONV §2]: `files`; exports with only `{types, import}`; `sideEffects:false`; `publishConfig.access public`; `repository.directory`; `tsc -b`; `workspace:*` mirrored in tsconfig `references`.
+The root is `better-compute-workspace`: private, ESM, Apache-2.0, `packageManager: pnpm@11.19.0`, `engines.node >=22.12.0`. Every package uses better-iam's `package.json` block [CONV §2]: `files`; exports with only `{types, import}`; `sideEffects:false`; `publishConfig.access public`; `repository.directory`; `tsc -b`; `workspace:*` mirrored in tsconfig `references`.
 
 ### 4.2 Package table
 
 | Package | Responsibility | Depends on | Umbrella subpath | Runs where | Lands |
 |---|---|---|---|---|---|
 | `core` | browser-safe contracts: IDs, `ComputeError`, domain types, state tables; every `define*` helper except `defineStep`/`defineProfile` (provision) and `defineProvider` (vps); `manifest`, `ComputeModule`, `IamPort`, `SqlExecutor`, `Clock`, sinks; `./conformance` | — | `./core` | anywhere | P0 |
-| `protocol` | buf-generated agent/site/driver v1; golden vectors | core | `./protocol` | anywhere | P0 |
+| `protocol` | buf-generated agent/site/driver v1; golden vectors | — (only `@bufbuild/protobuf`) | `./protocol` | anywhere | P0 |
 | `inventory` | hashing, diffs, labels, `gpu-models.json`, health → conditions; `inventoryModule` (always-on built-in) | core, protocol | **`./inventory`** | control plane | P0 stub; v0.1 |
 | `capacity` | atoms, bookings, quotas, rollups, `Placer`s, filters/scorers; `capacityModule` (always-on built-in) | core, inventory | `./capacity` | api, worker | v0.1 |
 | `provision` | workflow engine, `defineStep`, `defineProfile`, config units, renderers, images; `provisionModule` | core, protocol, inventory | **`./provision`** | worker | P0 stub; v0.2 |
@@ -1842,8 +1842,8 @@ A phase closes only when its exit tests are green in CI. `bench/REFERENCE.md` de
 | D3 | Storage | **compute's store is Postgres/PGlite only** (Postgres ≥16, CI on 17); the embedded IAM dev/test store is better-iam's SQLite adapter |
 | D4 | gRPC bidi + gateway tier | **Yes**; WebSocket fallback in v0.4, signed frames only |
 | D5 | v0.1 excludes PXE, VPS, containers and agent confirmation | **Yes** (confirmation v0.3; x509pop, XID, DCGM v0.2) |
-| D6 | Install git (not on PATH), `git init`; GitHub org/repo | **Yes, before P0**; `better-compute/better-compute` (confirm availability) |
-| D7 | npm scope, license | `@better-compute/*`, **MIT** including Go; Daytona (AGPL) for patterns only |
+| D6 | git (not on PATH), `git init`; GitHub org/repo | **Done in P0** with GitHub Desktop's bundled git (no system install); `better-compute/better-compute` (confirm availability) |
+| D7 | npm scope, license | `@better-compute/*`, **Apache-2.0** including Go, matching better-iam (which moved from MIT to Apache-2.0); Daytona (AGPL) for patterns only |
 | D8 | First provider | **Hetzner** (Cloud + Robot), then Proxmox |
 | D9 | Quota semantics for future reservations | **Conservative**: count all non-terminal |
 | D10 | Default GPU binding | **`hold`** (CDI), consumed by an operator-run workload manager in v0.1 |

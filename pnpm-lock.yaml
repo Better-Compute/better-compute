@@ -225,9 +225,6 @@ importers:
 
   packages/protocol:
     dependencies:
-      '@better-compute/core':
-        specifier: workspace:*
-        version: link:../core
       '@bufbuild/protobuf':
         specifier: ^2.15.0
         version: 2.15.0
