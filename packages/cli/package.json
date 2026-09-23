@@ -1,0 +1,81 @@
+{
+  "name": "@better-compute/cli",
+  "version": "0.1.0",
+  "description": "The better-compute command line.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "gpu",
+    "bare-metal",
+    "capacity",
+    "provisioning",
+    "infrastructure",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "better-compute": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/core": "workspace:*",
+    "@better-compute/server": "workspace:*",
+    "@better-compute/client": "workspace:*",
+    "@better-compute/postgres": "workspace:*"
+  },
+  "peerDependencies": {
+    "@better-compute/testing": "workspace:*",
+    "@electric-sql/pglite": "^0.5.8",
+    "@better-iam/server": "^0.1.0",
+    "@better-iam/cli": "^0.1.0",
+    "@better-iam/adapter-sqlite": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@better-compute/testing": {
+      "optional": true
+    },
+    "@electric-sql/pglite": {
+      "optional": true
+    },
+    "@better-iam/server": {
+      "optional": true
+    },
+    "@better-iam/cli": {
+      "optional": true
+    },
+    "@better-iam/adapter-sqlite": {
+      "optional": true
+    }
+  }
+}

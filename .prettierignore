@@ -1,0 +1,11 @@
+node_modules
+dist
+pnpm-lock.yaml
+artifacts
+work
+vendor
+*.tsbuildinfo
+packages/protocol/src/gen
+daemon
+docs/research
+PLAN.md

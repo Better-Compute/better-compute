@@ -1,0 +1,75 @@
+{
+  "name": "@better-compute/testing",
+  "version": "0.1.0",
+  "description": "Testing kit for better-compute: fixtures, simulated daemons, sim clock and conformance runners.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/testing#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/testing"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "gpu",
+    "bare-metal",
+    "capacity",
+    "provisioning",
+    "infrastructure",
+    "testing",
+    "simulator"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/core": "workspace:*",
+    "@better-compute/protocol": "workspace:*",
+    "@better-compute/server": "workspace:*",
+    "@better-compute/postgres": "workspace:*"
+  },
+  "peerDependencies": {
+    "@better-iam/core": "^0.1.0",
+    "@better-iam/server": "^0.1.0",
+    "@better-iam/adapter-sqlite": "^0.1.0",
+    "@electric-sql/pglite": "^0.5.8"
+  },
+  "peerDependenciesMeta": {
+    "@better-iam/core": {
+      "optional": true
+    },
+    "@better-iam/server": {
+      "optional": true
+    },
+    "@better-iam/adapter-sqlite": {
+      "optional": true
+    },
+    "@electric-sql/pglite": {
+      "optional": true
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "better-compute-workspace",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false && tsc -p tests/tsconfig.client.json",
+    "test": "vitest run",
+    "test:postgres": "vitest run tests/postgres-conformance.test.ts tests/postgres-schema.test.ts",
+    "check": "pnpm typecheck && pnpm test && pnpm lint:repo && pnpm validate:packages",
+    "lint:repo": "node scripts/check-deps.mjs && node scripts/check-sql-now.mjs && node scripts/umbrella.mjs --check",
+    "validate:packages": "node scripts/validate-packages.mjs",
+    "pack:all": "node scripts/pack.mjs",
+    "check:packed-types": "node scripts/check-packed-types.mjs",
+    "test:packed": "node scripts/packed-smoke.mjs",
+    "bench:scale": "vitest run --config vitest.bench.config.ts",
+    "umbrella": "node scripts/umbrella.mjs",
+    "proto:gen": "node scripts/proto-gen.mjs",
+    "proto:check": "node scripts/proto-gen.mjs --check",
+    "sync:iam": "node scripts/sync-better-iam.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "docs:api": "node scripts/api-reference.mjs"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
+    "@better-iam/adapter-sqlite": "0.1.0",
+    "@better-iam/cli": "0.1.0",
+    "@better-iam/client": "0.1.0",
+    "@better-iam/core": "0.1.0",
+    "@better-iam/server": "0.1.0",
+    "@bufbuild/buf": "1.73.0",
+    "@bufbuild/protobuf": "^2.15.0",
+    "@bufbuild/protoc-gen-es": "^2.15.0",
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "^22.19.0",
+    "@types/pg": "^8.15.5",
+    "fast-check": "^4.10.2",
+    "pnpm": "11.19.0",
+    "prettier": "3.6.2",
+    "publint": "^0.3.15",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

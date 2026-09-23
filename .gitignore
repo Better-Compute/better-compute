@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+artifacts/
+work/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+.npmrc
+.claude/settings.local.json
+daemon/bin/
+daemon/dist/

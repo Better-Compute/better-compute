@@ -1,0 +1,28 @@
+{
+  "$comment": "Source of the umbrella's subpath files, exports, dependencies and tsconfig references. Run `pnpm umbrella` after editing; `pnpm lint:repo` fails on drift. src/index.ts is curated by hand.",
+  "subpaths": {
+    "./core": "@better-compute/core",
+    "./protocol": "@better-compute/protocol",
+    "./inventory": "@better-compute/inventory",
+    "./provision": "@better-compute/provision",
+    "./metal": "@better-compute/metal",
+    "./vps": "@better-compute/vps",
+    "./server": "@better-compute/server",
+    "./postgres": "@better-compute/postgres",
+    "./pglite": "@better-compute/postgres/pglite",
+    "./client": "@better-compute/client",
+    "./cli": "@better-compute/cli",
+    "./testing": "@better-compute/testing"
+  },
+  "bin": {
+    "better-compute": "@better-compute/cli"
+  },
+  "optionalPeers": {
+    "@better-iam/adapter-sqlite": "^0.1.0",
+    "@better-iam/cli": "^0.1.0",
+    "@better-iam/client": "^0.1.0",
+    "@better-iam/core": "^0.1.0",
+    "@better-iam/server": "^0.1.0",
+    "@electric-sql/pglite": "^0.5.8"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/inventory"
+    },
+    {
+      "path": "./packages/provision"
+    },
+    {
+      "path": "./packages/metal"
+    },
+    {
+      "path": "./packages/vps"
+    },
+    {
+      "path": "./packages/postgres"
+    },
+    {
+      "path": "./packages/server"
+    },
+    {
+      "path": "./packages/client"
+    },
+    {
+      "path": "./packages/cli"
+    },
+    {
+      "path": "./packages/testing"
+    },
+    {
+      "path": "./packages/better-compute"
+    }
+  ]
+}

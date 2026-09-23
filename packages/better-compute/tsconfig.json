@@ -1,0 +1,45 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../cli"
+    },
+    {
+      "path": "../client"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../inventory"
+    },
+    {
+      "path": "../metal"
+    },
+    {
+      "path": "../postgres"
+    },
+    {
+      "path": "../protocol"
+    },
+    {
+      "path": "../provision"
+    },
+    {
+      "path": "../server"
+    },
+    {
+      "path": "../testing"
+    },
+    {
+      "path": "../vps"
+    }
+  ]
+}
