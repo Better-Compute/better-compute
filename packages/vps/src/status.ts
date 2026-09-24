@@ -41,26 +41,31 @@ export function instanceReportsOf(report: Pick<StatusReport, 'instances'>): Inst
 /**
  * `reports.status` for hosted VPS (§11.1, v0.3): feeds `StatusReport.instances` into
  * `reportInstances` (with `instancesComplete` → `complete`), inside the gateway's ingest transaction.
- * Orphans (leaks) are published as one `instance.orphaned` event per report that has any; status
- * reports are coalesced latest-wins, so this is bounded by the report rate.
+ * Orphans (leaks) are published as `instance.orphaned` when a node's orphan set changes (kept in
+ * memory, so a restart announces current leaks once more). The event is published in the ingest
+ * transaction; if that rolls back, the next report announces again only after the set changes.
  *
  * ```ts
- * createGateway({ reports: { ...gatewayReportHandlers, status: composeStatus(xidStatusHandler, instanceStatusHandler({ events })) } })
+ * createGateway({ reports: { ...gatewayReportHandlers, status: [xidStatusHandler, instanceStatusHandler({ events })] } })
  * ```
  */
 export function instanceStatusHandler(options: InstanceStatusHandlerOptions = {}) {
   const log = options.log ?? ((message: string) => console.warn(message));
-  return async (
+  // The last orphan set announced per node: reports repeat about once a second, leaks persist.
+  const announced = new Map<string, string>();
+  return async function vpsInstanceStatus(
     tx: SqlTx,
     context: InstanceStatusContext,
     report: Pick<StatusReport, 'instances' | 'instancesComplete'>,
-  ): Promise<{ updated: number; orphans: string[] }> => {
+  ): Promise<{ updated: number; orphans: string[] }> {
     const reports = instanceReportsOf(report);
     // An empty, incomplete report says nothing; an empty complete one means the runtime holds nothing.
     if (reports.length === 0 && !report.instancesComplete) return { updated: 0, orphans: [] };
     const result = await reportInstances(tx, context.work, context.nodeId, reports, {
       complete: report.instancesComplete,
     });
+    const key = result.orphans.join('\u0000');
+    if (key === (announced.get(context.nodeId) ?? '')) return result;
     if (result.orphans.length > 0) {
       if (options.events)
         await options.events.publish(tx, {
@@ -74,6 +79,8 @@ export function instanceStatusHandler(options: InstanceStatusHandlerOptions = {}
           `vps: node ${context.nodeId} runs ${result.orphans.length} instance(s) no live row places there: ${result.orphans.slice(0, 20).join(', ')}`,
         );
     }
+    if (key) announced.set(context.nodeId, key);
+    else announced.delete(context.nodeId);
     return result;
   };
 }

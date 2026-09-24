@@ -618,6 +618,16 @@ describe('hosted instances', () => {
     expect(published).toEqual([
       { type: 'instance.orphaned', data: { nodeId: node, instanceIds: ['inst_leak'] } },
     ]);
+    // The same leak in the next report is not announced again; failures are attributable by name.
+    await db.transaction((tx) =>
+      handler(
+        tx,
+        context,
+        status([{ instanceId: 'inst_leak', state: InstanceObservedState.RUNNING }], false),
+      ),
+    );
+    expect(published).toHaveLength(1);
+    expect(handler.name).toBe('vpsInstanceStatus');
     await reconcile(created.id);
     expect(await get(created.id)).toMatchObject({
       state: 'running',
