@@ -68,6 +68,7 @@ describe('migrate', () => {
       'core/0005_audit_commit_order',
       'core/0006_pool_archive',
       'core/0007_device_health',
+      'core/0008_session_versions',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
