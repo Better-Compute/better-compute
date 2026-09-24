@@ -52,6 +52,40 @@ enum BootArch {
   BOOT_ARCH_X86_64_EFI_HTTP = 4;
 }
 
+// site.httpProxy: one HTTPS request made by the site agent on the control plane's behalf, for
+// agent-less profiles (e.g. Talos, PLAN.md §5.6 walkthrough 3) whose API is reachable only inside the
+// site. P5 holds: the control plane never dials into a site. The agent enforces, whatever the command
+// says: the host resolves to an address of `target_node_id` known to the site (its inventory or BMC
+// network), https only unless the address is on the provisioning VLAN, no redirects, a response cap
+// (default 1 MiB) and the timeout. Anything else fails with "forbidden-target".
+message HttpProxyRequest {
+  // The node the request is about; the target host must be one of its addresses.
+  string target_node_id = 1;
+  string url = 2;
+  // "GET", "POST", "PUT", "DELETE".
+  string method = 3;
+  repeated HttpProxyHeader headers = 4;
+  bytes body = 5;
+  // Pinned SubjectPublicKeyInfo SHA-256 of the target's TLS certificate (Talos uses its own CA).
+  bytes tls_spki_sha256 = 6;
+  uint32 timeout_ms = 7;
+  // Headers whose values are secret refs, fetched with SecretRequest and never logged.
+  repeated HttpProxyHeader secret_headers = 8;
+}
+
+message HttpProxyHeader {
+  string name = 1;
+  string value = 2;
+}
+
+message HttpProxyResponse {
+  uint32 status = 1;
+  repeated HttpProxyHeader headers = 2;
+  bytes body = 3;
+  // The body exceeded the cap and was cut.
+  bool truncated = 4;
+}
+
 // boot.cleanUp: drops the machine's proxy-DHCP entries and iPXE script (workflow cleanup).
 message BootCleanUpRequest {
   string node_id = 1;
