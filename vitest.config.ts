@@ -19,6 +19,7 @@ const scoped: Record<string, string> = {
   '@better-compute/iam': 'iam/src/index.ts',
   '@better-compute/events': 'events/src/index.ts',
   '@better-compute/audit': 'audit/src/index.ts',
+  '@better-compute/fleet': 'fleet/src/index.ts',
   '@better-compute/observability': 'observability/src/index.ts',
   'better-compute/iam/plugin': 'better-compute/src/iam-plugin.ts',
   'better-compute/iam/testing': 'better-compute/src/iam-testing.ts',

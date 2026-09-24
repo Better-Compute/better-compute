@@ -38,6 +38,9 @@
       "path": "./packages/audit"
     },
     {
+      "path": "./packages/fleet"
+    },
+    {
       "path": "./packages/observability"
     },
     {
