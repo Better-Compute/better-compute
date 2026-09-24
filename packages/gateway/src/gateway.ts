@@ -146,6 +146,8 @@ export interface GatewayOptions {
   livenessFlushMs?: number;
   dispatchIntervalMs?: number;
   dispatchBatch?: number;
+  /** Poke-driven dispatch runs start at most this often (default 10 ms). */
+  pokeWindowMs?: number;
   /** How often open sessions are checked for a newer NodeSpec generation (default 10 000 ms). */
   specSweepMs?: number;
   busyBackoff?: { initialMs?: number; maxMs?: number };
@@ -786,6 +788,10 @@ export function createGateway(options: GatewayOptions): Gateway {
         if (session && !session.closed && session.epoch === command.epoch) sendCommand(session, command);
       }
       // Cancels requested after dispatch: one Cancel per session, until the daemon settles it.
+      // Scanned at most once per dispatch interval (pokes come per enqueue; cancels are rare).
+      const now = clock.now();
+      if (!options.manual && now - lastCancelScanMs < dispatchIntervalMs) return sent.length;
+      lastCancelScanMs = now;
       for (const cancel of await store.cancels(id)) {
         const session = sessions.get(cancel.nodeId);
         if (!session || session.closed || session.epoch !== cancel.epoch || session.cancelsSent.has(cancel.id))
@@ -880,6 +886,9 @@ export function createGateway(options: GatewayOptions): Gateway {
   }
 
   let pokeScheduled = false;
+  let lastPokeRunMs = -Infinity;
+  let lastCancelScanMs = -Infinity;
+  const pokeWindowMs = options.pokeWindowMs ?? 10;
   const pokedSpecs = new Set<string>();
   let unsubscribe: (() => void) | undefined;
 
@@ -1089,15 +1098,19 @@ export function createGateway(options: GatewayOptions): Gateway {
       for (const nodeId of nodeIds ?? []) pokedSpecs.add(nodeId);
       if (pokeScheduled) return;
       pokeScheduled = true;
-      setImmediate(() => {
+      // Pokes arrive per enqueue: runs start at most every `pokeWindowMs`, each taking everything
+      // pending, so a burst costs a few dispatch passes instead of one per command.
+      const wait = Math.max(0, lastPokeRunMs + pokeWindowMs - performance.now());
+      setTimeout(() => {
         pokeScheduled = false;
+        lastPokeRunMs = performance.now();
         jobs.dispatch.tick().catch((error: unknown) => log.warn('gateway: dispatch failed', { cause: String(error) }));
         if (!pokedSpecs.size) return;
         // Only the named nodes: a full sweep per poke would scan every session (the sweep does that).
         const targets = [...pokedSpecs].flatMap((nodeId) => sessions.get(nodeId) ?? []);
         pokedSpecs.clear();
         pushSpecs(targets).catch((error: unknown) => log.warn('gateway: spec push failed', { cause: String(error) }));
-      });
+      }, wait);
     },
 
     sessions() {
