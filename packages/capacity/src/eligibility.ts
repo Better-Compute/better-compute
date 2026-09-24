@@ -10,6 +10,11 @@ export interface EligibilityNode {
   noScheduleReasons: readonly string[];
   trust: NodeTrust;
   ownerTenantId: string;
+  /**
+   * The spec generation the node last converged (§3.3 step 7: schedulable from 1 on). Views that do
+   * not carry it (hand-built `NodeView`s) are not held back by it.
+   */
+  observedGeneration?: number;
 }
 
 /** The pool columns schedulability depends on. */
@@ -56,6 +61,8 @@ export function ineligibility(
   if (node.cordoned) return { bucket: 'maintenance', reason: 'cordoned' };
   if (!schedulableProvisionStates.includes(node.provisionState))
     return { bucket: 'provisioning', reason: `provision state ${node.provisionState}` };
+  if (node.observedGeneration !== undefined && node.observedGeneration < 1)
+    return { bucket: 'provisioning', reason: 'awaiting its first converged spec' };
   if (node.connectivity !== 'connected')
     return { bucket: 'unreachable', reason: `connectivity ${node.connectivity}` };
   if (node.noScheduleReasons.length > 0)
@@ -80,5 +87,6 @@ export function nodeBucket(node: EligibilityNode, pool: EligibilityPool): Capaci
  */
 export const schedulableSql = `n.role = 'host' AND NOT n.maintenance AND NOT n.cordoned
    AND n.connectivity = 'connected' AND n.provision_state IN ('adopted', 'deployed')
+   AND n.observed_generation >= 1
    AND cardinality(n.no_schedule_reasons) = 0
    AND (n.trust = 'platform' OR (n.trust = 'tenant-owned' AND p.owner_tenant_id = n.owner_tenant_id))`;

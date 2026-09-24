@@ -103,6 +103,7 @@ export interface NodeRow {
   connectivity: Connectivity;
   trust: NodeTrust;
   noScheduleReasons: string[];
+  observedGeneration: number;
 }
 
 interface RawNode {
@@ -117,13 +118,14 @@ interface RawNode {
   connectivity: Connectivity;
   trust: NodeTrust;
   no_schedule_reasons: string[] | null;
+  observed_generation: string | number;
 }
 
 /** Every node of a pool, ordered by id. */
 export async function readPoolNodes(tx: SqlTx, poolId: string): Promise<NodeRow[]> {
   const { rows } = await tx.query<RawNode>(
     `SELECT id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
-            connectivity, trust, no_schedule_reasons
+            connectivity, trust, no_schedule_reasons, observed_generation
        FROM nodes WHERE pool_id = $1 ORDER BY id`,
     [poolId],
   );
@@ -139,6 +141,7 @@ export async function readPoolNodes(tx: SqlTx, poolId: string): Promise<NodeRow[
     connectivity: row.connectivity,
     trust: row.trust,
     noScheduleReasons: row.no_schedule_reasons ?? [],
+    observedGeneration: Number(row.observed_generation),
   }));
 }
 

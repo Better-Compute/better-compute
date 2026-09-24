@@ -17,3 +17,4 @@ export * from './reservations.js';
 export * from './module.js';
 export * from './usage.js';
 export * from './partition.js';
+export * from './gang.js';

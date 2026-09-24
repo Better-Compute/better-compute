@@ -26,6 +26,7 @@ import {
   markAllocationReleased,
   readQuotas,
   reservationWork,
+  wakePendingForNode,
   type CapacityApi,
 } from '@better-compute/capacity';
 
@@ -1141,5 +1142,117 @@ describe('fleet-scoped methods', () => {
       id: fleetResourceId,
     });
     expect(fleetResourceId).toBe('global');
+  });
+});
+
+describe('gang reservations (v0.5)', () => {
+  it('book, bind and release every member together; quota and IAM see the whole gang', async () => {
+    const gang = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 4 }], gang: { size: 2 } }),
+    )) as Rsv;
+    expect(gang.state).toBe('placed');
+    expect((await readQuotas(db, 'acme', poolId))[0]).toMatchObject({ used: 8 });
+    expect(recorded.authz.at(-1)!.attributes).toMatchObject({ gpuCount: 8, gangSize: 2 });
+
+    await reconcile(gang.id);
+    const nodes = [...new Set(recorded.invalidated)].sort();
+    expect(nodes).toEqual(['node_01jz00000000000000000000na', 'node_01jz00000000000000000000nb']);
+    const work = moduleContext(db).work;
+    const [first] = await deviceAssignments(db, nodes[0]!);
+    const [second] = await deviceAssignments(db, nodes[1]!);
+    await db.transaction((tx) =>
+      markAllocationBound(tx, work, first!.allocationId, { cdiDevices: ['a'] }),
+    );
+    await reconcile(gang.id);
+    expect(
+      ((await call('reservations', 'get', { tenantId: 'acme', reservationId: gang.id })) as Rsv)
+        .state,
+    ).toBe('binding');
+    await db.transaction((tx) =>
+      markAllocationBound(tx, work, second!.allocationId, { cdiDevices: ['b'] }),
+    );
+    await reconcile(gang.id);
+    expect(
+      ((await call('reservations', 'get', { tenantId: 'acme', reservationId: gang.id })) as Rsv)
+        .state,
+    ).toBe('active');
+
+    await call('reservations', 'release', { tenantId: 'acme', reservationId: gang.id });
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(0);
+    const { rows } = await db.query(`SELECT 1 FROM allocations WHERE released_at IS NULL`);
+    expect(rows).toEqual([]);
+  });
+
+  it('previews gangs, and a gang larger than the pool stays pending', async () => {
+    const fits = (await call(
+      'capacity',
+      'preview',
+      create({ devices: [{ class: 'gpu', count: 2 }], gang: { size: 2 }, idempotencyKey: 'p' }),
+    )) as { fits: boolean; candidates: unknown[] };
+    expect(fits).toMatchObject({ fits: true });
+    expect(fits.candidates).toHaveLength(2);
+    await db.query(`UPDATE quota_usage SET max = 100`);
+    const tooBig = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 1 }], gang: { size: 3 }, idempotencyKey: 'big' }),
+    )) as Rsv;
+    expect(tooBig).toMatchObject({
+      state: 'pending',
+      conditions: [
+        { type: 'Unschedulable', message: expect.stringContaining('no gang of 3 nodes') },
+      ],
+    });
+    await expect(
+      call('reservations', 'create', create({ gang: { size: 1 }, idempotencyKey: 'bad' })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+});
+
+describe('waking pending reservations', () => {
+  it('re-places a pending reservation as soon as a release frees room', async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+    const big = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 4 }] }),
+    )) as Rsv;
+    await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 4 }], idempotencyKey: 'b2' }),
+    );
+    const waiting = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 4 }], idempotencyKey: 'b3' }),
+    )) as Rsv;
+    expect(waiting.state).toBe('pending');
+    recorded.work = [];
+    await call('reservations', 'release', { tenantId: 'acme', reservationId: big.id });
+    expect(recorded.work).toContainEqual({ kind: reservationWork, key: waiting.id });
+    await reconcile(waiting.id);
+    const placed = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: waiting.id,
+    })) as Rsv;
+    expect(placed.state).toBe('placed');
+  });
+
+  it('wakes a node’s pool on node-controller edges', async () => {
+    await db.query(`UPDATE nodes SET cordoned = true`);
+    const waiting = (await call('reservations', 'create', create())) as Rsv;
+    recorded.work = [];
+    await db.query(`UPDATE nodes SET cordoned = false`);
+    const woken = await db.transaction((tx) =>
+      wakePendingForNode(tx, moduleContext(db).work, 'node_01jz00000000000000000000na'),
+    );
+    expect(woken).toBe(1);
+    expect(recorded.work).toEqual([{ kind: reservationWork, key: waiting.id }]);
+    expect(
+      await db.transaction((tx) => wakePendingForNode(tx, moduleContext(db).work, 'node_missing')),
+    ).toBe(0);
   });
 });

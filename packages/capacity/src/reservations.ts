@@ -13,6 +13,7 @@ import {
   type DeviceClass,
   type DeviceRequest,
   type EventPublisher,
+  type GangSpec,
   type HoldBinding,
   type Json,
   type MethodContext,
@@ -34,6 +35,7 @@ import {
   type AllocationRecord,
 } from './bookings.js';
 import { chargeQuota, quotaDemand, refundQuota } from './quota.js';
+import { assertGang } from './gang.js';
 import { assertSelector } from './selector.js';
 
 // Reservations (PLAN.md §3.4, §10.5): request-as-resource drafts decided by IAM, placed by the
@@ -71,6 +73,8 @@ export interface CreateReservationInput {
   leaseSeconds?: number;
   idempotencyKey: string;
   wait?: { timeoutMs: number };
+  /** Book `gang.size` nodes, each taking `devices`, all or nothing (v0.5). */
+  gang?: GangSpec;
 }
 
 function fail(message: string): never {
@@ -117,6 +121,7 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
       'spot',
       'idempotencyKey',
       'wait',
+      'gang',
     ],
     'The request',
   );
@@ -199,6 +204,11 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
     onlyKeys(wait, ['timeoutMs'], 'wait');
     result.wait = { timeoutMs: integer(wait.timeoutMs, 0, 30_000, 'wait.timeoutMs') };
   }
+  if (input.gang !== undefined) {
+    assertGang(input.gang);
+    result.gang = { size: input.gang.size };
+    if (input.gang.topologyKey !== undefined) result.gang.topologyKey = input.gang.topologyKey;
+  }
   return result;
 }
 
@@ -214,6 +224,7 @@ export function reservationSpec(input: CreateReservationInput): ReservationSpec 
   if (input.topology !== undefined) spec.topology = input.topology;
   if (input.start !== undefined) spec.start = input.start;
   if (input.leaseSeconds !== undefined) spec.leaseSeconds = input.leaseSeconds;
+  if (input.gang !== undefined) spec.gang = { ...input.gang };
   return spec;
 }
 
@@ -512,8 +523,9 @@ export function reservationAttributes(
 ): AuthzAttributes {
   const attributes: AuthzAttributes = {
     gpuModel: pool.gpuModel ?? 'other',
-    gpuCount: wholeGpus(spec.devices),
-    gpuSlices: gpuSlices(spec.devices),
+    gpuCount: wholeGpus(spec.devices) * (spec.gang?.size ?? 1),
+    gpuSlices: gpuSlices(spec.devices) * (spec.gang?.size ?? 1),
+    gangSize: spec.gang?.size ?? 1,
     durationHours: Math.round((durationMs / hour) * 1000) / 1000,
     region: pool.region,
     binding: spec.binding ?? 'hold',
@@ -709,6 +721,7 @@ function placementRequest(row: ReservationRow, during: TimeRange) {
     reservationId: row.id,
     devices: row.request.devices,
     ...(row.request.topology !== undefined ? { topology: row.request.topology } : {}),
+    ...(row.request.gang !== undefined ? { gang: row.request.gang } : {}),
     during,
   };
 }
@@ -838,6 +851,7 @@ export async function endReservation(
     next = await move(tx, releasing, 'complete');
   }
   await publish(deps, tx, next, `reservation.${next.state}`, { reason: why });
+  await wakePendingReservations(tx, deps.work, row.poolId);
   return next;
 }
 
@@ -853,6 +867,7 @@ async function failReservation(
     conditions: withCondition(row.conditions, condition, deps.clock.now()),
   });
   await publish(deps, tx, failed, 'reservation.failed', { reason: condition.reason ?? '' });
+  await wakePendingReservations(tx, deps.work, row.poolId);
   return failed;
 }
 
@@ -879,6 +894,7 @@ export async function cancelReservation(
   await releaseBookings(tx, row, deps);
   const cancelled = await move(tx, row, 'cancel');
   await publish(deps, tx, cancelled, 'reservation.cancelled');
+  await wakePendingReservations(tx, deps.work, row.poolId);
   return reservationView(tx, cancelled);
 }
 
@@ -963,7 +979,7 @@ export async function prepareExtend(
       status: 'replay',
       result: { reservation: await reservationView(tx, row), extended: false },
     };
-  const gpuCount = wholeGpus(row.request.devices);
+  const gpuCount = wholeGpus(row.request.devices) * (row.request.gang?.size ?? 1);
   await context.authz.setPending(
     tx,
     { type: 'reservation', id: row.id, tenantId: row.tenantId },
@@ -1384,4 +1400,39 @@ export async function listReservations(
   const result: { items: Reservation[]; cursor?: string } = { items };
   if (rows.length > limit) result.cursor = page[page.length - 1]!.id;
   return result;
+}
+
+/**
+ * Wakes a pool's pending reservations now instead of at their 30 s backoff: capacity freed (a
+ * release, cancel or failure) or appeared (a node converged its first spec, was uncordoned or
+ * adopted). Capacity calls it on its own releases; node controllers call it on their edges. Oldest
+ * first, at most `limit` (placement re-checks everything, so a spurious wake-up is harmless).
+ */
+export async function wakePendingReservations(
+  tx: SqlTx,
+  work: ModuleContext['work'],
+  poolId: string,
+  limit = 50,
+): Promise<number> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM reservations WHERE pool_id = $1 AND state = 'pending'
+      ORDER BY created_at, id LIMIT $2`,
+    [poolId, limit],
+  );
+  for (const row of rows) await work.enqueue(tx, reservationWork, row.id);
+  return rows.length;
+}
+
+/** `wakePendingReservations` for every pool a node belongs to (node-controller edges). */
+export async function wakePendingForNode(
+  tx: SqlTx,
+  work: ModuleContext['work'],
+  nodeId: string,
+): Promise<number> {
+  const { rows } = await tx.query<{ pool_id: string | null }>(
+    `SELECT pool_id FROM nodes WHERE id = $1`,
+    [nodeId],
+  );
+  const poolId = rows[0]?.pool_id;
+  return poolId ? wakePendingReservations(tx, work, poolId) : 0;
 }

@@ -2,6 +2,7 @@ import {
   ComputeError,
   newId,
   type Allocation,
+  type GangSpec,
   type IdGenerator,
   type PlacementContext,
   type PlacementOutcome,
@@ -10,6 +11,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { schedulableSql } from './eligibility.js';
+import { assertGang, chooseGang, maxGangSize, planGangs } from './gang.js';
 import { choosePlan, planPlacement, summarizeRejections, type NodePlan } from './pipeline.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
 import { loadNodeViews, lockPool, type PoolRow } from './store.js';
@@ -53,7 +55,7 @@ type Commit = { ok: true; allocation: Allocation } | { ok: false; reason: string
 const iso = (ms: number) => new Date(ms).toISOString();
 
 /**
- * Writes one plan inside `SAVEPOINT capacity_place_<n>` (§10.3). Every statement is guarded: it
+ * Writes one plan inside its own savepoint (§10.3). Every statement is guarded: it
  * returns fewer rows instead of raising, so a lost race rolls back to the savepoint and the
  * admission transaction lives on to replan.
  */
@@ -62,10 +64,9 @@ async function commitPlan(
   request: PlacementRequest,
   pool: PoolRow,
   plan: NodePlan,
-  attempt: number,
+  savepoint: string,
   ids: IdGenerator,
 ): Promise<Commit> {
-  const savepoint = `capacity_place_${attempt}`;
   await tx.query(`SAVEPOINT ${savepoint}`);
   const conflict = async (reason: string): Promise<Commit> => {
     await tx.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
@@ -198,6 +199,7 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
       context: PlacementContext,
     ): Promise<PlacementOutcome> {
       assertPlacementRequest(request);
+      if (request.gang !== undefined) assertGang(request.gang);
       const pool = await lockPool(tx, request.poolId);
       if (pool.archived) return { status: 'pending', reason: 'the pool is archived' };
       if (context.admission)
@@ -205,6 +207,18 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
 
       const excluded = new Set(request.excludeNodes ?? []);
       const views = await loadNodeViews(tx, pool, request.during);
+      if (request.gang !== undefined)
+        return placeGang(
+          tx,
+          request,
+          request.gang,
+          pool,
+          views,
+          excluded,
+          context,
+          maxAttempts,
+          ids,
+        );
       const conflicts: string[] = [];
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const { ranked, rejected } = planPlacement(
@@ -225,7 +239,14 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
             reason: conflicts.length ? `${why}; after conflicts: ${conflicts.join('; ')}` : why,
           };
         }
-        const result = await commitPlan(tx, request, pool, choice, attempt, ids);
+        const result = await commitPlan(
+          tx,
+          request,
+          pool,
+          choice,
+          `capacity_place_${attempt}`,
+          ids,
+        );
         if (result.ok) return { status: 'placed', allocations: [result.allocation] };
         conflicts.push(result.reason);
         excluded.add(choice.nodeId);
@@ -236,4 +257,87 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
       };
     },
   });
+}
+
+/**
+ * Places a gang (§10.3, v0.5): plans every node for the per-node request, groups the fits by the
+ * topology key, picks a group, and commits all its members inside one outer savepoint. A lost race
+ * on any member rolls the whole gang back and replans without that node, up to `maxAttempts`.
+ */
+async function placeGang(
+  tx: SqlTx,
+  request: PlacementRequest,
+  gang: GangSpec,
+  pool: PoolRow,
+  views: Awaited<ReturnType<typeof loadNodeViews>>,
+  excluded: Set<string>,
+  context: PlacementContext,
+  maxAttempts: number,
+  ids: IdGenerator,
+): Promise<PlacementOutcome> {
+  if (gang.size > maxGangSize) throw new ComputeError('INVALID_INPUT', 'gang too large');
+  const conflicts: string[] = [];
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { ranked, rejected } = planPlacement(
+      { ...request, excludeNodes: [...excluded] },
+      views,
+      pool,
+      {
+        plugins: context.plugins,
+        weights: context.weights,
+      },
+    );
+    const { gangs, reason } = planGangs(ranked, views, gang);
+    const choice = chooseGang(gangs, () => context.random(), context.topN);
+    if (!choice) {
+      const why =
+        ranked.length === 0
+          ? summarizeRejections(rejected)
+          : rejected.length > 0
+            ? `${reason!}; ${summarizeRejections(rejected)}`
+            : reason!;
+      return {
+        status: 'pending',
+        reason: conflicts.length ? `${why}; after conflicts: ${conflicts.join('; ')}` : why,
+      };
+    }
+    const outer = `capacity_gang_${attempt}`;
+    await tx.query(`SAVEPOINT ${outer}`);
+    const allocations: Allocation[] = [];
+    let lost: { nodeId: string; reason: string } | undefined;
+    try {
+      for (const [index, member] of choice.members.entries()) {
+        const result = await commitPlan(
+          tx,
+          request,
+          pool,
+          member,
+          `capacity_place_${attempt}_${index}`,
+          ids,
+        );
+        if (!result.ok) {
+          lost = { nodeId: member.nodeId, reason: result.reason };
+          break;
+        }
+        allocations.push(result.allocation);
+      }
+    } catch (error) {
+      await tx.query(`ROLLBACK TO SAVEPOINT ${outer}`);
+      await tx.query(`RELEASE SAVEPOINT ${outer}`);
+      throw error;
+    }
+    if (lost) {
+      await tx.query(`ROLLBACK TO SAVEPOINT ${outer}`);
+      await tx.query(`RELEASE SAVEPOINT ${outer}`);
+      conflicts.push(lost.reason);
+      excluded.add(lost.nodeId);
+      continue;
+    }
+    await tx.query(`RELEASE SAVEPOINT ${outer}`);
+    return { status: 'placed', allocations };
+  }
+  return {
+    status: 'pending',
+    reason: `Unschedulable after ${maxAttempts} conflicting gang attempts: ${conflicts.join('; ')}`,
+  };
 }

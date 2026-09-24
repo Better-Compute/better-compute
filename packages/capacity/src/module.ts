@@ -25,6 +25,7 @@ import {
 } from '@better-compute/core';
 import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
+import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
 import { inlinePlacer } from './placer.js';
 import {
@@ -935,11 +936,31 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
           pool,
           { plugins: options.plugins ?? [], weights: options.weights ?? {} },
         );
+        const toCandidate = ({ nodeId, atoms, score }: (typeof plan.ranked)[number]) => ({
+          nodeId,
+          atoms,
+          score,
+        });
+        if (input.gang !== undefined) {
+          // A gang fits when one topology group holds `size` fitting nodes: show the best gang.
+          const { gangs, reason } = planGangs(plan.ranked, views, input.gang);
+          const best = gangs[0];
+          const preview: CapacityPreview = {
+            fits: best !== undefined,
+            candidates: best ? best.members.map(toCandidate) : [],
+          };
+          if (!best)
+            preview.reason =
+              plan.ranked.length === 0
+                ? summarizeRejections(plan.rejected)
+                : plan.rejected.length > 0
+                  ? `${reason!}; ${summarizeRejections(plan.rejected)}`
+                  : reason!;
+          return preview;
+        }
         const preview: CapacityPreview = {
           fits: plan.ranked.length > 0,
-          candidates: plan.ranked
-            .slice(0, 10)
-            .map(({ nodeId, atoms, score }) => ({ nodeId, atoms, score })),
+          candidates: plan.ranked.slice(0, 10).map(toCandidate),
         };
         if (!preview.fits) preview.reason = summarizeRejections(plan.rejected);
         return preview;

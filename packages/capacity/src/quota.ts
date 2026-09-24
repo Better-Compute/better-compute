@@ -9,16 +9,21 @@ import { ComputeError, type DeviceRequest, type SqlTx } from '@better-compute/co
 // pool_capacity_rollup. Charges precede placement and refunds precede releases, so concurrent
 // reserve and release transactions never wait on each other in a cycle.
 
-/** What a request counts against quota, per resource: device classes by count, then scalars. */
+/**
+ * What a request counts against quota, per resource: device classes by count, then scalars; a gang
+ * counts once for all its nodes (`size` × the per-node request).
+ */
 export function quotaDemand(request: {
   devices: readonly DeviceRequest[];
   resources?: Readonly<Record<string, number>>;
+  gang?: { size: number };
 }): Record<string, number> {
   const demand: Record<string, number> = {};
+  const nodes = request.gang?.size ?? 1;
   for (const device of request.devices)
-    if (device.count > 0) demand[device.class] = (demand[device.class] ?? 0) + device.count;
+    if (device.count > 0) demand[device.class] = (demand[device.class] ?? 0) + device.count * nodes;
   for (const [resource, amount] of Object.entries(request.resources ?? {}))
-    if (amount > 0) demand[resource] = (demand[resource] ?? 0) + amount;
+    if (amount > 0) demand[resource] = (demand[resource] ?? 0) + amount * nodes;
   return demand;
 }
 
