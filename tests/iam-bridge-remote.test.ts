@@ -217,5 +217,18 @@ describe('remoteIam', () => {
       'session=1',
     );
     expect(() => credentialHeaders({})).toThrow(/No credential/);
+    // The incoming request's framing headers never reach IAM's (different) request.
+    const forwarded = new Headers(
+      credentialHeaders({
+        headers: {
+          authorization: 'Bearer from-request',
+          'content-length': '999',
+          'content-type': 'text/plain',
+          host: 'compute.example.com',
+          'x-forwarded-for': '203.0.113.7',
+        },
+      }),
+    );
+    expect([...forwarded.keys()].sort()).toEqual(['authorization', 'x-forwarded-for']);
   });
 });

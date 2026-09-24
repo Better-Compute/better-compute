@@ -137,9 +137,30 @@ const sessionKinds: ReadonlySet<string> = new Set([
   'delegated',
 ]);
 
+/**
+ * Headers forwarded to IAM with a caller's credential. Credentials often carry the whole incoming request's
+ * headers; forwarding `content-length`, `host` or `content-type` onto a different request would corrupt it,
+ * so only identity and client-context headers pass.
+ */
+export const forwardedCredentialHeaders: readonly string[] = [
+  'authorization',
+  'cookie',
+  'origin',
+  'user-agent',
+  'x-forwarded-for',
+  'x-real-ip',
+  'forwarded',
+  'x-request-id',
+];
+
 /** A caller's credential as request headers (a token becomes `Authorization: Bearer`). */
 export function credentialHeaders(credential: Credential): HeadersInit {
-  const headers = new Headers(credential.headers);
+  const given = new Headers(credential.headers);
+  const headers = new Headers();
+  for (const name of forwardedCredentialHeaders) {
+    const value = given.get(name);
+    if (value !== null) headers.set(name, value);
+  }
   if (credential.token !== undefined) headers.set('authorization', `Bearer ${credential.token}`);
   if (!headers.has('authorization') && !headers.has('cookie'))
     throw new ComputeError('UNAUTHENTICATED', 'No credential was presented');
