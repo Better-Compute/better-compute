@@ -22,6 +22,7 @@ import {
   type EmbeddedIamOptions,
 } from './embedded.js';
 import { createFlagCache, type FlagCache } from './flags.js';
+import { iamJobReconcilers, type IamJobReconcilerOptions, type IamJobsHost } from './jobs.js';
 import { sqlInbox, type InboxWriter } from './inbox.js';
 import { computeIamPlugin, type ComputeIamPlugin, type ComputeIamPluginOptions } from './plugin.js';
 import {
@@ -54,6 +55,11 @@ export type BridgeIamHost = EmbeddedIamHost & {
   store?: { get(collection: string, id: string): Promise<Record<string, unknown> | undefined> };
 };
 
+export interface BridgeEmbeddedOptions extends EmbeddedIamOptions {
+  /** Run better-iam's scheduler jobs as singleton reconcilers of the iam module. */
+  runIamJobs?: boolean | IamJobReconcilerOptions;
+}
+
 /** The `iam` module: projection and inbox lifecycle, IamInbox, IamReconcile and the usage sink. */
 export type IamModule = ComputeModule<'iam'> & {
   start(context: Pick<ModuleContext, 'sql'>): Promise<void>;
@@ -76,8 +82,11 @@ export interface ComputeIamBridge {
   localInbox(): InboxWriter;
   /** better-iam's `resolveResource`; other types go to `hostFallback`. */
   resolveResource(hostFallback?: ResourceResolver): ResourceResolver;
-  /** The IamPort over an embedded better-iam. */
-  embedded(iam: BridgeIamHost, options?: EmbeddedIamOptions): EmbeddedIam;
+  /**
+   * The IamPort over an embedded better-iam. `runIamJobs` adds better-iam's scheduler jobs to the iam
+   * module (worker role `iam`): required when compute's processes are the only IAM hosts (§12.1).
+   */
+  embedded(iam: BridgeIamHost, options?: BridgeEmbeddedOptions): EmbeddedIam;
   /** Pass to `betterCompute({ modules })`. */
   readonly modules: readonly [IamModule];
   readonly plugins: readonly ComputeModule[];
@@ -236,8 +245,26 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
           ...(embeddedOptions.clock ? { clock: embeddedOptions.clock } : {}),
           ...(embeddedOptions.flagTtlMs === undefined ? {} : { ttlMs: embeddedOptions.flagTtlMs }),
         });
+      const { runIamJobs, ...portOptions } = embeddedOptions;
+      if (runIamJobs) {
+        const jobsHost = iam as unknown as Partial<IamJobsHost>;
+        if (
+          typeof jobsHost.events?.dispatch !== 'function' ||
+          typeof jobsHost.auth?.dispatchOutbox !== 'function' ||
+          typeof jobsHost.billing?.checkBudgets !== 'function' ||
+          typeof jobsHost.billing?.closePeriod !== 'function' ||
+          typeof jobsHost.sweepExpired !== 'function'
+        )
+          throw new ComputeError(
+            'INVALID_CONFIG',
+            'runIamJobs needs a betterIam() instance (events, auth, billing, sweepExpired)',
+          );
+        module.reconcilers!.push(
+          ...iamJobReconcilers(jobsHost as IamJobsHost, runIamJobs === true ? {} : runIamJobs),
+        );
+      }
       port = embeddedIam(iam, {
-        ...embeddedOptions,
+        ...portOptions,
         ...(rootTenantId === undefined ? {} : { rootTenantId }),
         flags,
         successorOf:
