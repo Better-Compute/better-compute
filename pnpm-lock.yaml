@@ -253,6 +253,15 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/console-kit:
+    dependencies:
+      '@better-compute/client':
+        specifier: workspace:*
+        version: link:../client
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/core: {}
 
   packages/events:
