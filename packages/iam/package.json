@@ -45,6 +45,10 @@
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
   "sideEffects": false,
@@ -55,11 +59,15 @@
     "@better-compute/core": "workspace:*"
   },
   "peerDependencies": {
+    "@better-iam/adapter-sqlite": "^0.1.0",
     "@better-iam/client": "^0.1.0",
     "@better-iam/core": "^0.1.0",
     "@better-iam/server": "^0.1.0"
   },
   "peerDependenciesMeta": {
+    "@better-iam/adapter-sqlite": {
+      "optional": true
+    },
     "@better-iam/client": {
       "optional": true
     },
@@ -68,6 +76,7 @@
     }
   },
   "devDependencies": {
+    "@better-iam/adapter-sqlite": "0.1.0",
     "@better-iam/client": "0.1.0",
     "@better-iam/core": "0.1.0",
     "@better-iam/server": "0.1.0"

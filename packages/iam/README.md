@@ -46,6 +46,8 @@ Until the projection is loaded, every compute decision is denied and inbox write
 
 `@better-compute/iam/plugin` exports only what an IAM host installs: the catalog, the plugin and the inbox writers.
 
+`@better-compute/iam/testing` is for tests only. `createEmbeddedTestIam({ sql?, inbox?, sessionJwts?, runIamJobs? })` starts a real better-iam on in-memory SQLite. It carries compute's plugin, resolver and inbox, and it is bootstrapped with a root administrator (TOTP MFA) and two active organizations (`acme`, `other`). Each organization has an owner credential and `member`, `signIn`, `policy`, `grant` and `share` helpers, and the kit returns the embedded `port`. It needs `@better-iam/server` and `@better-iam/adapter-sqlite`. `spyIamPort(port)` records every IAM call, attributed to the code path that made it (`spy.path('heartbeat', fn)`), for the "zero IAM calls on fleet paths" check.
+
 Peer dependencies: `@better-iam/core` (required), `@better-iam/server` and `@better-iam/client` (optional). Remote mode (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) arrives in v0.4.
 
 ## License

@@ -10,6 +10,7 @@
     "./vps": "@better-compute/vps",
     "./iam": "@better-compute/iam",
     "./iam/plugin": "@better-compute/iam/plugin",
+    "./iam/testing": "@better-compute/iam/testing",
     "./server": "@better-compute/server",
     "./gateway": "@better-compute/gateway",
     "./pki": "@better-compute/pki",
