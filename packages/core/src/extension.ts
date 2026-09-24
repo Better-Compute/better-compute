@@ -816,6 +816,18 @@ export interface MethodContext extends ModuleContext {
   admission?: AdmissionContext;
   requestId: string;
   signal?: AbortSignal;
+  /**
+   * Composite methods (e.g. `fleet.apply`), phase 1: decides another method's call exactly as the
+   * envelope would for the current caller (tenant pre-check, validation, one IAM decision), with no
+   * transaction open (IAM is never awaited inside a compute transaction). Methods with `admission`
+   * are refused with `UNSUPPORTED`. Only available to methods declared `transaction: 'manual'`.
+   */
+  check?(path: `${string}/${string}`, input: unknown): Promise<void>;
+  /**
+   * Phase 2: runs a call that `check` allowed earlier in this same method call, inside `tx`, without
+   * another decision. Any other call is refused with `ACCESS_DENIED`.
+   */
+  invoke?<O = unknown>(tx: SqlTx, path: `${string}/${string}`, input: unknown): Promise<O>;
 }
 
 export type MethodKind = 'read' | 'mutation' | 'public';
@@ -847,6 +859,12 @@ export interface MethodDefinition<I = any, O = any> {
    * (allowed) or `denied` (refused).
    */
   admission?: MethodAdmission<I, O>;
+  /**
+   * `auto` (default): the envelope runs the handler in a transaction. `manual`: the handler runs with no
+   * transaction open and opens its own through `ctx.sql.transaction` (composite methods that use
+   * `ctx.check` then `ctx.invoke`); the envelope still writes the mutation's audit row after success.
+   */
+  transaction?: 'auto' | 'manual';
 }
 
 /** What `MethodAdmission.prepare` decided about the request. */
