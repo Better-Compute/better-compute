@@ -99,6 +99,9 @@ export function watchEvents(options: WatchOptions): Watcher {
     status('open');
     failures = 0;
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    // Stop ends a read in progress even when the transport ignores the abort signal.
+    const cancel = () => void reader.cancel().catch(() => undefined);
+    controller.signal.addEventListener('abort', cancel, { once: true });
     let buffer = '';
     for (;;) {
       const { value, done } = await reader.read();

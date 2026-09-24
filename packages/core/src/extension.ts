@@ -114,10 +114,6 @@ export interface DriverContext {
   /** Stable across retries of the same operation. */
   idempotencyKey: string;
   signal: AbortSignal;
-  /** Epoch ms the operation must finish by, when the caller set one (carried to bcx plugins). */
-  deadline?: number;
-  /** W3C trace context of the calling step (carried to bcx plugins). */
-  traceparent?: string;
   clock: Clock;
   secrets: SecretResolver;
   log: Logger;

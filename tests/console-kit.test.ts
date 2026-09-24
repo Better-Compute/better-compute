@@ -7,6 +7,7 @@ import {
   describeAction,
   matchesType,
   parseSseBlock,
+  startLiveConsole,
   watchEvents,
   type ComputeEventMessage,
   type ComputeRequester,
@@ -209,6 +210,51 @@ describe('event stream', () => {
     expect(requests[1]!.lastEventId).toBe('1');
     expect(statuses).toContain('open');
     expect(statuses.at(-1)).toBe('stopped');
+  });
+});
+
+describe('live console', () => {
+  it('loads, follows the stream, routes events and forgets permissions after access events', async () => {
+    const calls: string[] = [];
+    const api: ComputeRequester = {
+      async $request<O>(path: string) {
+        calls.push(path);
+        return (path.endsWith('/get') ? { id: 'rsv_1', state: 'active' } : { items: [] }) as O;
+      },
+    };
+    let cleared = 0;
+    const permissions = {
+      clear: () => cleared++,
+    } as unknown as Parameters<typeof startLiveConsole>[1]['permissions'];
+    const events = [
+      'id: 1\ndata: {"id":"e1","type":"reservation.active","tenantId":"acme","subject":"reservation/rsv_1"}\n\n',
+      'id: 2\ndata: {"id":"e2","type":"iam.binding.revoked","tenantId":"acme","subject":"tenant/acme"}\n\n',
+    ].join('');
+    const fetch = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(events));
+          },
+        }),
+      )) as unknown as typeof globalThis.fetch;
+    const live = await startLiveConsole(api, {
+      tenantId: 'acme',
+      watchUrl: 'https://compute.test/api/compute/watch',
+      fetch,
+      permissions,
+    });
+    const seen: string[] = [];
+    live.onEvent((event) => seen.push(event.type));
+    for (let i = 0; i < 100 && live.connection.get().lastEventId !== 'e2'; i++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(calls).toEqual(
+      expect.arrayContaining(['nodes/list', 'pools/list', 'reservations/list', 'reservations/get']),
+    );
+    expect(cleared).toBe(1);
+    expect(live.connection.get()).toMatchObject({ status: 'open', lastEventId: 'e2' });
+    await live.stop();
+    expect(live.connection.get().status).toBe('stopped');
   });
 });
 
