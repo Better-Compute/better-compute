@@ -13,3 +13,5 @@ export * from './bookings.js';
 export * from './quota.js';
 export * from './rollup.js';
 export * from './migrations.js';
+export * from './reservations.js';
+export * from './module.js';

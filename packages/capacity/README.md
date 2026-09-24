@@ -9,9 +9,52 @@ Capacity for better-compute (PLAN.md §10.2–§10.6). This package covers:
 It depends on `@better-compute/core` and `@better-compute/inventory`. The server registers it
 before any injected module. Most apps reach it through `better-compute/capacity`.
 
-**Status: v0.1 in progress.** The placement pipeline, the InlinePlacer, quotas, bookings and
-rollups work. `capacityModule` (pools, capacity, quotas and reservations API groups) lands next,
-on the server's admission hook.
+**Status: v0.1.** Working now:
+
+- the placement pipeline, the InlinePlacer, quotas, bookings and rollups;
+- `capacityModule`, which serves the §9.2 `pools`, `capacity`, `reservations` and `quotas` groups.
+  Reservation creates and extends run on the server's admission hook.
+
+Still to come:
+
+- `pools.update` and `pools.archive`, `capacity.timeline` and `quotas.set`, in v0.2;
+- shared GPUs and cross-node gangs, in v0.5.
+
+## capacityModule
+
+```ts
+import { capacityModule, createCapacityPort } from 'better-compute/capacity';
+
+const capacity = capacityModule({ plugins: [], weights: { spread: 0.5 }, topN: 5 });
+// The server registers it after inventoryModule. createCapacityPort(context) backs ctx.capacity.
+```
+
+- **`reservations.create`**
+  - Transaction 1 (`admission.prepare`) looks up the idempotency key per tenant and caller
+    identity. The same request replays. A different request under the same key is `CONFLICT`. A
+    refused key stays `ACCESS_DENIED`.
+  - It then writes the deterministic draft (`draftId('rsv', …)`) and its authz row. The row's
+    attributes are `gpuModel`, `gpuCount`, `durationHours`, `region`, `binding`, `spot`,
+    `renewable` and `projectId`.
+  - Transaction 2 charges quota, then places the reservation. The result is `placed`, or
+    `pending` with `Unschedulable`.
+- **`reservations.extend`** writes the pending change (`durationHours` after the change, for
+  `BoundedExtend`) before the decision. It then raises every allocation's end all-or-nothing. On a
+  conflict it answers `{ extended: false, availableUntil }`.
+- **`reservations.renew`** moves the lease deadline.
+- **`release`** ends a reservation at `compute_now()`.
+- **`cancel`** withdraws a reservation that has not started.
+- **The `capacity.reservations` reconciler** walks each reservation through placed → binding
+  (node spec invalidated) → active (after `markAllocationBound`) → released at its end or when
+  its lease lapses.
+  - A pending reservation retries every 30 s until `policy.maxPending` (default 24 h).
+  - A bind timeout (5 min) re-places the reservation twice, then fails it.
+- **`capacity.rollup`** rebuilds every pool's rollup every 5 minutes.
+- **`nodeSpec`** puts the CDI assignments of started reservations in the node's `devices`
+  section.
+- **`pools.offer`** enforces the offering validator. A pool with tenant-owned nodes, or a
+  `timeslice`/`mps` pool, goes only to its owner.
+- **`capacity.preview`** dry-runs a request without booking it.
 
 ```ts
 import { inlinePlacer, parseSelector } from 'better-compute/capacity';
