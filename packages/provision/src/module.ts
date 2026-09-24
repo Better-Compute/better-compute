@@ -102,11 +102,15 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
       reconcileWorkflows(context, { ...engineOptions, signal: context.signal, stepContext: context }, key),
   };
 
+  // The engine resolves every step and profile, but provision registers only its own: the modules
+  // passed in register theirs themselves, and the registry refuses an extension registered twice.
+  const borrowed = new Set<unknown>(fromModules);
+  const borrowedProfiles = new Set<unknown>((options.modules ?? []).flatMap((module) => module.profiles ?? []));
   const module = defineModule({
     name: 'provision',
     migrations: [...provisionMigrations],
-    extensions: steps.list(),
-    profiles: moduleProfiles,
+    extensions: steps.list().filter((step) => !borrowed.has(step)),
+    profiles: moduleProfiles.filter((profile) => !borrowedProfiles.has(profile)),
     nodeSpec: provisionNodeSpec([...builtinConfigUnits, ...(options.configUnits ?? [])]),
     reconcilers: remediation
       ? [
