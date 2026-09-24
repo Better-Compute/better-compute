@@ -161,6 +161,40 @@ export const fleetCommands = [
     },
   }),
   defineCommand({
+    name: 'fleet status',
+    group: 'Fleet',
+    summary: 'Show the last applied document and whether the fleet drifted from it (fleet.status)',
+    description:
+      "fleet status shows the planHash, author and time of the tenant's last fleet apply, and the drift the fleet.drift job found when it last re-planned that document (every 15 minutes by default): changes made outside fleet, listed like fleet plan. With --fail-on-drift it exits FLEET_DRIFTED while there is drift, for monitoring.",
+    target: 'token',
+    flags: {
+      tenant: tenantFlag,
+      'fail-on-drift': {
+        type: 'boolean',
+        description: 'Exit FLEET_DRIFTED while the fleet drifted',
+      },
+    },
+    examples: ['better-compute fleet status', 'better-compute fleet status --fail-on-drift'],
+    async run({ flags, api, note, print }) {
+      const status = (await (await api()).call('fleet/status', { tenantId: flags.tenant! })) as {
+        applied?: { planHash: string };
+        drift?: Pick<Plan, 'changes' | 'summary'>;
+      };
+      if (!status.applied) note('No FleetConfig document was applied for this tenant yet.');
+      else if (!status.drift) note('The fleet matches the applied document.');
+      else for (const line of describePlan(status.drift)) note(line);
+      if (flags['fail-on-drift'] && status.drift) {
+        print(status);
+        throw new CliError(
+          'FLEET_DRIFTED',
+          'The fleet differs from the applied document',
+          'Run fleet export to see the fleet, then fleet apply the document again (or update it).',
+        );
+      }
+      return status;
+    },
+  }),
+  defineCommand({
     name: 'fleet apply',
     group: 'Fleet',
     summary: 'Apply a FleetConfig document (fleet.plan, then fleet.apply)',

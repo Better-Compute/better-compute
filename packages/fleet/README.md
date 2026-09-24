@@ -46,6 +46,20 @@ Every method decides `compute:fleet:admin` on the `fleet` scope (`global`, which
 
   Pass the reviewed `planHash` to apply exactly the plan that was shown. If the state has moved since then, apply fails with the same drift error.
 
+- **`fleet.status`** reports the last applied document (its `planHash`, who applied it and when) and any drift.
+
+## Drift
+
+Every apply, including one with nothing to change, records the document it applied in `fleet_applied` (migration `fleet/0002_applied`). The `fleet.drift` reconciler re-plans each recorded document every 15 minutes (`fleetModule({ driftEvery })`). A non-empty plan means someone changed the fleet outside fleet:
+
+- It publishes `fleet.drifted` once per distinct drift, with the summary and up to 50 changes.
+- It publishes `fleet.converged` when the drift clears on its own.
+- `fleet.status` shows the drift as of the last check.
+
+Applying the document again resets it. From the CLI, `better-compute fleet status --fail-on-drift` exits `FLEET_DRIFTED` for monitoring.
+
+## Ids
+
 Created objects get deterministic ids. The idempotency key is `fleet:<tenant>:<kind>:<name>`, and the id is `draftId(prefix, tenant, caller, key)`, so a retried apply converges instead of duplicating. The module's table `fleet_names` (migration `fleet/0001_names`) maps names to ids.
 
 ```ts

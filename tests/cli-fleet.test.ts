@@ -165,6 +165,23 @@ describe('fleet commands', () => {
     expect(bad).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
   });
 
+  it('status reports drift and exits FLEET_DRIFTED with --fail-on-drift', async () => {
+    const drift = {
+      changes: [{ kind: 'pool', name: 'vps-fra', action: 'update', fields: ['policy'] }],
+      summary: { create: 0, update: 1, delete: 0, unchanged: 0 },
+    };
+    const clean = await run(['fleet', 'status'], () =>
+      ok({ tenantId: 'root', applied: { planHash: HASH } }),
+    );
+    expect(clean.ok && clean.notes).toContain('matches the applied document');
+    const drifted = await run(['fleet', 'status', '--fail-on-drift'], () =>
+      ok({ tenantId: 'root', applied: { planHash: HASH }, drift }),
+    );
+    expect(drifted).toMatchObject({ ok: false, code: 'FLEET_DRIFTED' });
+    expect(drifted.notes).toContain('~ pool vps-fra (policy)');
+    expect(drifted.calls).toEqual([{ path: 'fleet/status', body: { tenantId: 'root' } }]);
+  });
+
   it('describes a plan in one line per change plus a summary', () => {
     expect(describePlan(planOf())).toEqual([
       '+ site fra',

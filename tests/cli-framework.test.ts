@@ -157,6 +157,7 @@ describe('help and the manifest', () => {
       'capacity',
       'fleet export',
       'fleet plan',
+      'fleet status',
       'fleet apply',
       'pki init',
       'pki show',

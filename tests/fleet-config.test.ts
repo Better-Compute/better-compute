@@ -17,12 +17,15 @@ import { capacityMigrations, capacityModule, createCapacityPort } from '@better-
 import { defineProvider, vps, vpsMigrations } from '@better-compute/vps';
 import {
   canonical,
+  checkDrift,
+  fleetAppliedMigration,
   fleetKey,
   fleetModule,
   fleetNamesMigration,
   validateFleetConfig,
   type ApplyResult,
   type FleetConfig,
+  type FleetStatus,
   type PlanResult,
 } from '@better-compute/fleet';
 
@@ -33,6 +36,8 @@ import {
 
 const T0 = Date.UTC(2026, 8, 24, 12);
 let db: SqlExecutor;
+let published: string[] = [];
+let enqueued: string[] = [];
 
 const root: Caller = {
   identityId: 'usr_root',
@@ -64,8 +69,16 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     log: { debug() {}, info() {}, warn() {}, error() {} },
     capacity: createCapacityPort({ clock }, { random: () => 0, topN: 1 }),
     authz: { async upsert() {}, async remove() {}, async setPending() {} },
-    events: { async publish() {} },
-    work: { async enqueue() {} },
+    events: {
+      async publish(_tx: SqlTx, event: { type: string }) {
+        published.push(event.type);
+      },
+    },
+    work: {
+      async enqueue(_tx: SqlTx, kind: string, key: string) {
+        enqueued.push(`${kind}:${key}`);
+      },
+    },
     desired: { async invalidate() {} },
   } as unknown as ModuleContext;
 }
@@ -137,7 +150,7 @@ const vpsApi = vps({ runtimes: ['libvirt-kvm'], providers: [fakeCloud] }).api!(
   moduleContext(db!),
 ) as unknown as Record<string, Record<string, Definition>>;
 const fleetApi = fleetModule().api!(moduleContext(db!)) as unknown as {
-  fleet: Record<'export' | 'plan' | 'apply', Definition>;
+  fleet: Record<'export' | 'plan' | 'apply' | 'status', Definition>;
 };
 
 const routes: Record<string, Definition> = {
@@ -207,7 +220,7 @@ function methodContext(sql: SqlExecutor): MethodContext {
   return context as unknown as MethodContext;
 }
 
-async function fleet<O>(method: 'export' | 'plan' | 'apply', raw: unknown): Promise<O> {
+async function fleet<O>(method: 'export' | 'plan' | 'apply' | 'status', raw: unknown): Promise<O> {
   const definition = fleetApi.fleet[method];
   const input = definition.validate(raw);
   if (definition.transaction === 'manual')
@@ -245,7 +258,12 @@ const clone = (): FleetConfig => JSON.parse(JSON.stringify(base)) as FleetConfig
 
 beforeAll(async () => {
   db = pglite();
-  await db.migrate([...capacityMigrations, ...vpsMigrations, fleetNamesMigration]);
+  await db.migrate([
+    ...capacityMigrations,
+    ...vpsMigrations,
+    fleetNamesMigration,
+    fleetAppliedMigration,
+  ]);
 });
 afterAll(async () => {
   await db.close();
@@ -254,6 +272,7 @@ afterAll(async () => {
 beforeEach(async () => {
   for (const table of [
     'fleet_names',
+    'fleet_applied',
     'flavors',
     'quota_usage',
     'pool_offers',
@@ -265,6 +284,62 @@ beforeEach(async () => {
     await db.query(`DELETE FROM ${table}`);
   await useSimClock(db, T0);
   composite = { checks: [], invokes: [] };
+  published = [];
+  enqueued = [];
+});
+
+describe('drift against the applied document', () => {
+  const drift = () => db.transaction((tx) => checkDrift(moduleContext(db), tx, 'root'));
+  const status = () => fleet<FleetStatus>('status', { tenantId: 'root' });
+  const fleetEvents = () => published.filter((type) => type.startsWith('fleet.'));
+
+  it('records the applied document, reports drift once, and reports convergence', async () => {
+    expect(await status()).toEqual({ tenantId: 'root' });
+    const applied = await apply(base);
+    expect(await status()).toMatchObject({
+      applied: { planHash: applied.plan.planHash, appliedBy: 'usr_root', prune: false },
+    });
+    expect(await drift()).toBeUndefined();
+    expect(fleetEvents()).toEqual([]);
+
+    // Someone changes a pool outside fleet.
+    const poolId = await draftId('pool', 'root', 'usr_root', fleetKey('root', 'pool', 'vps-fra'));
+    await db.query(`UPDATE pools SET policy = '{"maxDuration":"P1D"}'::jsonb WHERE id = $1`, [
+      poolId,
+    ]);
+    const found = await drift();
+    expect(found?.changes).toEqual([
+      { kind: 'pool', name: 'vps-fra', action: 'update', fields: ['policy'] },
+    ]);
+    expect(fleetEvents()).toEqual(['fleet.drifted']);
+    expect((await status()).drift?.summary.update).toBe(1);
+    // The same drift is not announced again.
+    await drift();
+    expect(fleetEvents()).toEqual(['fleet.drifted']);
+
+    // The fleet moves back on its own: convergence is announced once.
+    await db.query(`UPDATE pools SET policy = '{"maxDuration":"P7D"}'::jsonb WHERE id = $1`, [
+      poolId,
+    ]);
+    expect(await drift()).toBeUndefined();
+    expect(fleetEvents()).toEqual(['fleet.drifted', 'fleet.converged']);
+    expect((await status()).drift).toBeUndefined();
+  });
+
+  it('an empty apply still records the document; the reconciler fans out per tenant', async () => {
+    await apply(base);
+    await db.query('DELETE FROM fleet_applied');
+    const again = await apply(base);
+    expect(again.applied).toBe(0);
+    expect((await status()).applied?.planHash).toBe(again.plan.planHash);
+
+    const reconciler = fleetModule().reconcilers!.find((entry) => entry.name === 'fleet.drift')!;
+    expect(reconciler.periodic).toEqual([{ key: 'all', every: '15m' }]);
+    const context = { ...moduleContext(db), signal: new AbortController().signal };
+    await reconciler.run(context, 'all');
+    expect(enqueued).toEqual(['fleet.drift:tenant:root']);
+    await expect(reconciler.run(context, 'tenant:root')).resolves.toBe('DONE');
+  });
 });
 
 describe('fleet.apply', () => {

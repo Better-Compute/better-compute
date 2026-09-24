@@ -1,17 +1,24 @@
-import { createHash } from 'node:crypto';
 import {
   ComputeError,
   defineMethod,
-  draftId,
   fleetResourceId,
   type ComputeModule,
+  type Duration,
   type MethodContext,
   type MethodDefinition,
   type SqlTx,
 } from '@better-compute/core';
 import { validateFleetConfig, type FleetConfig } from './config.js';
-import { canonical, planFleet, type FleetCall, type FleetPlan } from './plan.js';
-import { exportFleetConfig, fleetNamesMigration, readFleetState, type NamedKind } from './state.js';
+import {
+  fleetAppliedMigration,
+  fleetDriftReconciler,
+  planAs,
+  readFleetStatus,
+  recordApplied,
+  type FleetStatus,
+} from './drift.js';
+import type { FleetCall, FleetPlan } from './plan.js';
+import { exportFleetConfig, fleetNamesMigration, readFleetState } from './state.js';
 
 export interface ExportInput {
   tenantId: string;
@@ -45,15 +52,16 @@ export type FleetApi = {
     export: MethodDefinition<ExportInput, { config: FleetConfig; missing: string[] }>;
     plan: MethodDefinition<PlanInput, PlanResult>;
     apply: MethodDefinition<ApplyInput, ApplyResult>;
+    status: MethodDefinition<ExportInput, FleetStatus>;
   };
 };
 
+export interface FleetModuleOptions {
+  /** How often `fleet.drift` re-plans every applied document (default 15m). */
+  driftEvery?: Duration;
+}
+
 const tenantPattern = /^[A-Za-z0-9._:-]{1,128}$/;
-const idPrefix: Record<NamedKind, 'site' | 'pool' | 'pacct'> = {
-  site: 'site',
-  pool: 'pool',
-  providerAccount: 'pacct',
-};
 
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value))
@@ -78,29 +86,11 @@ function parsePlan(value: unknown, keys: readonly string[]): PlanInput & Record<
   };
 }
 
-/** The hash `plan` returns and `apply` compares: over the calls only, which is what apply runs. */
-export function planHash(calls: readonly FleetCall[]): string {
-  return createHash('sha256')
-    .update(canonical(calls.map(({ path, input }) => ({ path, input }))))
-    .digest('hex');
-}
-
 const drift = (message: string) => new ComputeError('CONFIG_DRIFT', message);
 
-async function plan(context: MethodContext, tx: SqlTx, input: PlanInput): Promise<PlanResult> {
-  const identityId = context.caller?.identityId;
-  const state = await readFleetState(tx, input.tenantId);
-  const result = await planFleet(input.config, state, {
-    prune: input.prune ?? false,
-    async idFor(kind, key) {
-      // Creates run as this caller, so their draft ids derive from this caller's identity.
-      if (!identityId)
-        throw new ComputeError('UNAUTHENTICATED', 'fleet needs an authenticated caller');
-      return draftId(idPrefix[kind], input.tenantId, identityId, key);
-    },
-  });
-  return { ...result, planHash: planHash(result.calls) };
-}
+// Creates run as this caller, so their draft ids derive from this caller's identity.
+const plan = (context: MethodContext, tx: SqlTx, input: PlanInput): Promise<PlanResult> =>
+  planAs(tx, input.tenantId, context.caller?.identityId, input.config, input.prune ?? false);
 
 async function recordNames(
   tx: SqlTx,
@@ -130,8 +120,10 @@ async function recordNames(
  * against them; `apply` runs the plan through the owning modules' own methods, each decided for the
  * caller (`ctx.check`, no transaction open) and then run in one transaction (`ctx.invoke`), after
  * re-planning inside it: if the state moved in between, nothing is applied (`CONFIG_DRIFT`).
+ * The applied document is kept; `fleet.status` and the `fleet.drift` reconciler report when the
+ * fleet no longer matches it (events `fleet.drifted` / `fleet.converged`).
  */
-export function fleetModule(): ComputeModule<'fleet', FleetApi> {
+export function fleetModule(options: FleetModuleOptions = {}): ComputeModule<'fleet', FleetApi> {
   const resource = () => ({ type: 'fleet', id: fleetResourceId });
   const api = (): FleetApi => ({
     fleet: {
@@ -184,7 +176,18 @@ export function fleetModule(): ComputeModule<'fleet', FleetApi> {
             );
           if (input.planHash !== undefined && input.planHash !== first.planHash)
             throw drift('The fleet changed since the plan was made; plan again');
-          if (!first.calls.length) return { plan: first, applied: 0 };
+          const applied = {
+            tenantId: input.tenantId,
+            config: input.config,
+            prune: input.prune ?? false,
+            planHash: first.planHash,
+            identityId: context.caller!.identityId,
+          };
+          if (!first.calls.length) {
+            // Nothing to change: the document still becomes the one drift is checked against.
+            await context.sql.transaction((tx) => recordApplied(tx, applied));
+            return { plan: first, applied: 0 };
+          }
 
           // Phase 1: one decision per call, as the caller, with no transaction open.
           for (const call of first.calls) await context.check(call.path, call.input);
@@ -199,15 +202,24 @@ export function fleetModule(): ComputeModule<'fleet', FleetApi> {
               const result = await invoke(tx, call.path, call.input);
               await recordNames(tx, input.tenantId, call, result);
             }
+            await recordApplied(tx, applied);
           });
           return { plan: first, applied: first.calls.length };
         },
+      }),
+      status: defineMethod<ExportInput, FleetStatus>({
+        action: 'compute:fleet:admin',
+        kind: 'read',
+        resource,
+        validate: (value) => ({ tenantId: object(value, ['tenantId']).tenantId as string }),
+        handler: (context, input) => readFleetStatus(context.sql as SqlTx, input.tenantId),
       }),
     },
   });
   return {
     name: 'fleet',
-    migrations: [fleetNamesMigration],
+    migrations: [fleetNamesMigration, fleetAppliedMigration],
     api,
+    reconcilers: [fleetDriftReconciler(options.driftEvery ? { every: options.driftEvery } : {})],
   };
 }
