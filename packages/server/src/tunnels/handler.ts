@@ -21,9 +21,10 @@ import { acceptWebSocket, isWebSocketUpgrade, rejectUpgrade } from './websocket.
 // one protobuf `TunnelFrame` (data on channel 0/1, resize, closed). The api checks the ticket
 // (signature, audience, its own jti set), finds the node's gateway and relays through the
 // host-supplied `TunnelRelay` (e.g. `gatewayControlClient(...).openTunnel`), so the server never
-// imports the gateway. The gateway and the daemon verify the ticket again (P14). While the tunnel
-// is open the caller's credential is re-checked every 60 s; IAM unreachable for 2 min, a refusal or
-// 12 h end it.
+// imports the gateway. The gateway and the daemon verify the ticket again (P14).
+// While the tunnel is open the caller is re-authorized every 60 s by identity (the ticket's `sub`,
+// `ses`, `tnt`, `inst`: browsers cannot send headers on a WebSocket); a refusal, IAM unreachable
+// for 2 min or 12 h end it. `handleTunnel` never rejects: every failure is answered on the socket.
 
 /** A tunnel as the gateway relays it (`gatewayControlClient().openTunnel()` satisfies it). */
 export interface RelayedTunnel {
@@ -44,29 +45,41 @@ export interface TunnelRelay {
   }): Promise<RelayedTunnel>;
 }
 
+export interface TunnelReauthorization {
+  /** The verified ticket: `sub` (identity), `ses` (IAM session), `tnt`, `inst`, `op`, `aud`. */
+  claims: ExecTicketClaims;
+  /** The upgrade request's Authorization/cookie, when the client could send them. */
+  credential?: Credential;
+}
+
 export interface HandleTunnelOptions {
   /** The deployment's store (`node_sessions` lookup). */
   sql: SqlExecutor;
   /** The same issuer `tunnels.open` uses: its JWKS verifies the ticket. */
   issuer: ExecTicketIssuer;
   relay: TunnelRelay;
+  /**
+   * Re-checks the caller every `reauthorizeMs` (§7.6): the identity and session in the ticket are
+   * still live and still allowed `compute:instances:exec` (or `nodes:console`) on the target. False
+   * ends the tunnel; a throw or a hang past `authorizeTimeoutMs` counts as IAM unreachable.
+   */
+  authorize(input: TunnelReauthorization): Promise<boolean>;
   /** The API base path (default `/api/compute`). */
   basePath?: string;
   /** When set, the ticket's `iss` must equal it. */
   issuerName?: string;
-  /** This api's own jti set (default in-memory). */
+  /** This api's own jti set (default: one per issuer in this process). */
   jtiCache?: ReplayCache;
   now?: () => number;
-  /**
-   * Re-checks the caller with the upgrade request's credential (its Authorization header or
-   * cookie): false ends the tunnel, a throw counts as IAM unreachable.
-   */
-  authorize?(credential: Credential, claims: ExecTicketClaims): Promise<boolean>;
   reauthorizeMs?: number;
+  /** One re-authorization may take this long (default 10 s). */
+  authorizeTimeoutMs?: number;
   iamOutageMs?: number;
   maxDurationMs?: number;
   /** Largest caller message (default 1 MiB). */
   maxMessageBytes?: number;
+  /** WebSocket keepalive: a ping this often, closed when nothing arrives for two periods (default 30 s). */
+  pingIntervalMs?: number;
   /** Called when a tunnel ends, for audit. */
   onClose?(event: { tunnelId: string; nodeId: string; subject: string; reason: string }): void;
 }
@@ -91,9 +104,17 @@ function peek(ticket: string): { aud?: unknown } | undefined {
   }
 }
 
+function pathOf(req: IncomingMessage): string | undefined {
+  try {
+    return new URL(req.url ?? '/', 'http://tunnel.local').pathname;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Handles one `upgrade` request. Returns false when the path is not a tunnel path (the host passes
- * the request on), true when it answered it (tunnel opened or refused).
+ * the request on), true when it answered it (tunnel opened or refused). Never rejects.
  */
 export async function handleTunnel(
   req: IncomingMessage,
@@ -102,16 +123,44 @@ export async function handleTunnel(
   options: HandleTunnelOptions,
 ): Promise<boolean> {
   const basePath = (options.basePath ?? '/api/compute').replace(/\/+$/, '');
-  const url = new URL(req.url ?? '/', 'http://tunnel.local');
   const prefix = `${basePath}/tunnels/`;
-  if (!url.pathname.startsWith(prefix)) return false;
-  const ticket = decodeURIComponent(url.pathname.slice(prefix.length));
+  const path = pathOf(req);
+  if (path === undefined || !path.startsWith(prefix)) return false;
+  // Node drops the server's socket error listener before 'upgrade': a client reset must not crash.
+  socket.on('error', () => undefined);
+  let tunnel: RelayedTunnel | undefined;
+  try {
+    return await open(req, socket, head, options, path.slice(prefix.length), (relayed) => {
+      tunnel = relayed;
+    });
+  } catch {
+    tunnel?.close();
+    if (!socket.destroyed)
+      rejectUpgrade(socket, 500, { error: { code: 'INTERNAL_ERROR', message: 'Tunnel failed' } });
+    return true;
+  }
+}
+
+async function open(
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  options: HandleTunnelOptions,
+  encoded: string,
+  opened: (tunnel: RelayedTunnel) => void,
+): Promise<boolean> {
   const refuse = (status: number, code: string, message: string) => {
-    rejectUpgrade(socket, status, { error: { code, message } });
+    if (!socket.destroyed) rejectUpgrade(socket, status, { error: { code, message } });
     return true;
   };
   if (!isWebSocketUpgrade(req))
-    return refuse(426, 'METHOD_NOT_ALLOWED', 'Open tunnels with a WebSocket upgrade');
+    return refuse(426, 'METHOD_NOT_ALLOWED', 'Open tunnels with a WebSocket upgrade (version 13)');
+  let ticket: string;
+  try {
+    ticket = decodeURIComponent(encoded);
+  } catch {
+    return refuse(400, 'INVALID_INPUT', 'Malformed ticket');
+  }
   const now = options.now ?? Date.now;
   const aud = peek(ticket)?.aud;
   if (typeof aud !== 'string' || !aud.startsWith('node:'))
@@ -133,6 +182,7 @@ export async function handleTunnel(
     'SELECT gateway_id FROM node_sessions WHERE node_id = $1',
     [nodeId],
   );
+  if (socket.destroyed) return true;
   const gatewayId = rows[0]?.gateway_id;
   if (!gatewayId) return refuse(409, 'INVALID_STATE', 'The node is not connected');
   let tunnel: RelayedTunnel;
@@ -146,23 +196,34 @@ export async function handleTunnel(
       isComputeError(error) ? error.message : 'The gateway refused the tunnel',
     );
   }
+  opened(tunnel);
+  // The caller may have gone while the gateway opened the tunnel: nothing to relay to.
+  if (socket.destroyed || !socket.readable || !socket.writable) {
+    tunnel.close();
+    return true;
+  }
 
   const ws = acceptWebSocket(req, socket, head, {
     ...(options.maxMessageBytes ? { maxMessageBytes: options.maxMessageBytes } : {}),
+    ...(options.pingIntervalMs ? { pingIntervalMs: options.pingIntervalMs } : {}),
   });
-  const credential: Credential = {
-    headers: Object.fromEntries(
-      (['authorization', 'cookie'] as const)
-        .filter((name) => typeof req.headers[name] === 'string')
-        .map((name) => [name, req.headers[name] as string]),
-    ),
+  const headers = Object.fromEntries(
+    (['authorization', 'cookie'] as const)
+      .filter((name) => typeof req.headers[name] === 'string')
+      .map((name) => [name, req.headers[name] as string]),
+  );
+  const reauthorization: TunnelReauthorization = {
+    claims,
+    ...(Object.keys(headers).length ? { credential: { headers } } : {}),
   };
   let ended = false;
-  const timers: NodeJS.Timeout[] = [];
+  let lifetime: ReturnType<typeof setTimeout> | undefined;
+  let nextCheck: ReturnType<typeof setTimeout> | undefined;
   const end = (code: number, reason: string) => {
     if (ended) return;
     ended = true;
-    for (const timer of timers) clearInterval(timer);
+    clearTimeout(lifetime);
+    clearTimeout(nextCheck);
     tunnel.close();
     if (!ws.closed) ws.close(code, reason);
     options.onClose?.({ tunnelId: claims.sid, nodeId, subject: claims.sub, reason });
@@ -198,35 +259,40 @@ export async function handleTunnel(
       void tunnel.drained().then(() => ws.resume());
     }
   });
-  ws.onClose(() => end(1000, 'caller-closed'));
+  ws.onClose((_code, reason) => end(1000, reason || 'caller-closed'));
 
   // Lifetime and re-authorization (§7.6).
-  const maxDuration = options.maxDurationMs ?? 12 * 3_600_000;
-  timers.push(
-    setTimeout(() => end(1008, 'max-duration'), maxDuration) as unknown as NodeJS.Timeout,
-  );
-  if (options.authorize) {
-    const every = options.reauthorizeMs ?? 60_000;
-    const outage = options.iamOutageMs ?? 120_000;
-    let lastOk = now();
-    let checking = false;
-    timers.push(
-      setInterval(() => {
-        if (checking || ended) return;
-        checking = true;
-        options.authorize!(credential, claims)
-          .then((allowed) => {
-            if (allowed) lastOk = now();
-            else end(1008, 'revoked');
-          })
-          .catch(() => {
-            if (now() - lastOk >= outage) end(1011, 'iam-unreachable');
-          })
-          .finally(() => {
-            checking = false;
-          });
-      }, every),
-    );
-  }
+  lifetime = setTimeout(() => end(1008, 'max-duration'), options.maxDurationMs ?? 12 * 3_600_000);
+  const every = options.reauthorizeMs ?? 60_000;
+  const outage = options.iamOutageMs ?? 120_000;
+  const timeout = options.authorizeTimeoutMs ?? 10_000;
+  let lastOk = now();
+  let checking = false;
+  const tick = () => {
+    if (ended) return;
+    // The outage rule holds even while a check hangs.
+    if (now() - lastOk >= outage) return end(1011, 'iam-unreachable');
+    if (!checking) {
+      checking = true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('authorize timed out')), timeout);
+      });
+      Promise.race([options.authorize(reauthorization), deadline])
+        .then((allowed) => {
+          if (allowed === true) lastOk = now();
+          else end(1008, 'revoked');
+        })
+        .catch(() => {
+          if (now() - lastOk >= outage) end(1011, 'iam-unreachable');
+        })
+        .finally(() => {
+          clearTimeout(timer);
+          checking = false;
+        });
+    }
+    nextCheck = setTimeout(tick, every);
+  };
+  nextCheck = setTimeout(tick, every);
   return true;
 }

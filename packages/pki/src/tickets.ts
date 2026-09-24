@@ -48,6 +48,8 @@ export interface ExecTicketClaims {
   tnt?: string;
   inst?: string;
   port?: number;
+  /** The caller's IAM session: re-authorization checks it is still live (§7.6). */
+  ses?: string;
 }
 
 export interface IssueExecTicketInput {
@@ -58,6 +60,8 @@ export interface IssueExecTicketInput {
   tenantId?: string;
   instanceId?: string;
   port?: number;
+  /** The caller's IAM session id (`ses`). */
+  sessionId?: string;
   /** Default and maximum 60. */
   ttlSeconds?: number;
 }
@@ -140,6 +144,7 @@ export function createExecTicketIssuer(options: {
         ...(input.tenantId !== undefined ? { tnt: input.tenantId } : {}),
         ...(input.instanceId !== undefined ? { inst: input.instanceId } : {}),
         ...(input.port !== undefined ? { port: input.port } : {}),
+        ...(input.sessionId !== undefined ? { ses: input.sessionId } : {}),
       };
       const current = keys[0]!;
       const signingInput = `${encode({ alg: 'ES256', typ: execTicketType, kid: current.kid })}.${encode(claims)}`;

@@ -1,5 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { connect as netConnect, type AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { create } from '@bufbuild/protobuf';
 import {
@@ -40,6 +41,8 @@ import {
   tunnelsModule,
   type OpenedTunnel,
   type RelayedTunnel,
+  type HandleTunnelOptions,
+  type TunnelReauthorization,
   type TunnelRelay,
 } from '../packages/server/src/tunnels/index.js';
 
@@ -289,9 +292,10 @@ interface Recorded {
 }
 
 /** A relay whose "node" echoes data frames back and ends when the caller sends `closed`. */
-function echoRelay(recorded: Recorded): TunnelRelay {
+function echoRelay(recorded: Recorded, openDelayMs = 0): TunnelRelay {
   return {
     async open(input) {
+      if (openDelayMs) await new Promise((resolve) => setTimeout(resolve, openDelayMs));
       recorded.opened.push({
         nodeId: input.nodeId,
         tunnelId: input.tunnelId,
@@ -361,24 +365,56 @@ function echoRelay(recorded: Recorded): TunnelRelay {
   };
 }
 
-async function listen(options: {
-  relay: TunnelRelay;
-  authorize?: () => Promise<boolean>;
-}): Promise<{ server: Server; base: string }> {
+async function listen(
+  options: { relay: TunnelRelay } & Partial<HandleTunnelOptions>,
+): Promise<{ server: Server; base: string; port: number; outcomes: unknown[] }> {
+  const outcomes: unknown[] = [];
   const server = createServer((_req, res) => res.writeHead(404).end());
   server.on('upgrade', (req, socket, head) => {
+    // The documented mount: handleTunnel must never reject.
     void handleTunnel(req, socket, head, {
       sql: db,
       issuer,
-      relay: options.relay,
-      ...(options.authorize ? { authorize: options.authorize, reauthorizeMs: 50 } : {}),
-    }).then((handled) => {
-      if (!handled) socket.destroy();
-    });
+      authorize: async () => true,
+      reauthorizeMs: 50,
+      ...options,
+    }).then(
+      (handled) => {
+        outcomes.push(handled);
+        if (!handled) socket.destroy();
+      },
+      (error) => outcomes.push({ rejected: error }),
+    );
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
-  return { server, base: `ws://127.0.0.1:${port}/api/compute` };
+  return { server, base: `ws://127.0.0.1:${port}/api/compute`, port, outcomes };
+}
+
+/** A raw WebSocket client over TCP, for what browsers never send. */
+function rawClient(port: number, path: string, extraHeaders = '') {
+  const socket = netConnect(port, '127.0.0.1');
+  const chunks: Buffer[] = [];
+  socket.on('data', (chunk) => chunks.push(chunk));
+  const closed = new Promise<void>((resolve) => socket.on('close', () => resolve()));
+  socket.on('error', () => undefined);
+  const key = randomBytes(16).toString('base64');
+  socket.write(
+    `GET ${path} HTTP/1.1\r\nhost: 127.0.0.1\r\nupgrade: websocket\r\nconnection: Upgrade\r\n` +
+      `sec-websocket-key: ${key}\r\n${extraHeaders || 'sec-websocket-version: 13\r\n'}\r\n`,
+  );
+  const masked = (opcode: number, payload: Buffer) => {
+    const mask = randomBytes(4);
+    const body = Buffer.from(payload.map((byte, i) => byte ^ mask[i % 4]!));
+    return Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | payload.length]), mask, body]);
+  };
+  return {
+    socket,
+    closed,
+    text: () => Buffer.concat(chunks).toString('latin1'),
+    bytes: () => Buffer.concat(chunks),
+    sendFrame: (opcode: number, payload = Buffer.alloc(0)) => socket.write(masked(opcode, payload)),
+  };
 }
 
 function connect(url: string) {
@@ -519,6 +555,147 @@ describe('GET /tunnels/{ticket}', () => {
       expect(closed).toMatchObject({ code: 1008, reason: 'revoked' });
       await until(() => recorded.closed > 0);
       expect(recorded.closed).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// Regressions from the security review of 680c66f: handleTunnel never rejects, survives peers that
+// vanish at any point, re-authorizes by identity, and enforces the IAM outage rule.
+describe('tunnel endpoint hardening', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+
+  it('answers a malformed ticket and a failing store instead of rejecting (HIGH 1)', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const good = await listen({ relay: echoRelay(recorded) });
+    const broken = await listen({
+      relay: echoRelay(recorded),
+      sql: { ...db, query: () => Promise.reject(new Error('database down')) } as SqlExecutor,
+    });
+    try {
+      const bad = rawClient(good.port, '/api/compute/tunnels/%zz');
+      await bad.closed;
+      expect(bad.text()).toMatch(/^HTTP\/1\.1 400/);
+      const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      const down = rawClient(broken.port, `/api/compute/${ticket.path}`);
+      await down.closed;
+      expect(down.text()).toMatch(/^HTTP\/1\.1 500/);
+      expect([...good.outcomes, ...broken.outcomes]).toEqual([true, true]);
+    } finally {
+      good.server.close();
+      broken.server.close();
+    }
+  });
+
+  it('survives a caller that resets while the gateway opens, and closes the relay (HIGH 2)', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const { server, port, outcomes } = await listen({ relay: echoRelay(recorded, 150) });
+    try {
+      const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      const client = rawClient(port, `/api/compute/${ticket.path}`);
+      await until(() => recorded.opened.length > 0 || outcomes.length > 0);
+      client.socket.resetAndDestroy();
+      await until(() => recorded.closed > 0);
+      expect(recorded.closed).toBe(1);
+      await until(() => outcomes.length > 0);
+      expect(outcomes).toEqual([true]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('ends the tunnel when the caller half-closes without a Close frame (MEDIUM 3)', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const { server, port } = await listen({ relay: echoRelay(recorded) });
+    try {
+      const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      const client = rawClient(port, `/api/compute/${ticket.path}`);
+      await until(() => client.text().startsWith('HTTP/1.1 101'));
+      client.socket.end();
+      await until(() => recorded.closed > 0);
+      expect(recorded.closed).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('closes on the IAM outage rule even when authorize hangs (MEDIUM 4)', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const { server, base } = await listen({
+      relay: echoRelay(recorded),
+      authorize: () => new Promise<boolean>(() => undefined),
+      reauthorizeMs: 20,
+      authorizeTimeoutMs: 30,
+      iamOutageMs: 120,
+    });
+    try {
+      const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      const client = connect(`${base}/${ticket.path}`);
+      expect(await client.opened).toBe(true);
+      expect(await client.closed).toMatchObject({ code: 1011, reason: 'iam-unreachable' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('re-authorizes by identity and session when the client sends no headers (MEDIUM 5)', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const seen: TunnelReauthorization[] = [];
+    const { server, base } = await listen({
+      relay: echoRelay(recorded),
+      authorize: async (input) => {
+        seen.push(input);
+        return true;
+      },
+      reauthorizeMs: 20,
+    });
+    try {
+      const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      const tunnel = connectTunnel({ url: `${base}/${ticket.path}` });
+      await tunnel.ready;
+      await until(() => seen.length >= 3);
+      expect(seen[0]!.credential).toBeUndefined();
+      expect(seen[0]!.claims).toMatchObject({
+        sub: 'usr_alice',
+        ses: 's',
+        tnt: 'acme',
+        inst: INSTANCE,
+        sid: ticket.tunnelId,
+      });
+      tunnel.close();
+      await tunnel.exited;
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses other WebSocket versions and protocol violations (LOW)', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const { server, port } = await listen({ relay: echoRelay(recorded) });
+    try {
+      const old = rawClient(port, '/api/compute/tunnels/x', 'sec-websocket-version: 8\r\n');
+      await old.closed;
+      expect(old.text()).toMatch(/^HTTP\/1\.1 426[\s\S]*sec-websocket-version: 13/);
+
+      for (const [opcode, payload] of [
+        [0xb, Buffer.alloc(0)], // reserved control opcode
+        [0x8, Buffer.from([0x03, 0xed])], // close code 1005 may not be sent
+        [0x8, Buffer.from([0x03])], // a one-byte close payload
+      ] as const) {
+        const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+        const client = rawClient(port, `/api/compute/${ticket.path}`);
+        await until(() => client.text().startsWith('HTTP/1.1 101'));
+        client.sendFrame(opcode, payload);
+        await client.closed;
+        // The server's close frame carries 1002 (protocol error).
+        const bytes = client.bytes();
+        const close = bytes.lastIndexOf(0x88);
+        expect(close).toBeGreaterThan(0);
+        expect(bytes.readUInt16BE(close + 2)).toBe(1002);
+      }
+      await settle();
+      expect(recorded.closed).toBe(recorded.opened.length);
     } finally {
       server.close();
     }
