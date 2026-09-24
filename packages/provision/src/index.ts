@@ -37,6 +37,7 @@ export * from './command-step.js';
 export * from './remediation.js';
 export * from './renderers.js';
 export * from './config-units.js';
+export * from './join-resolvers.js';
 export type * from './api.js';
 export { provisionApi } from './api.js';
 
