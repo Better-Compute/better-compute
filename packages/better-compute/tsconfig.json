@@ -60,6 +60,9 @@
       "path": "../provision"
     },
     {
+      "path": "../rollout"
+    },
+    {
       "path": "../server"
     },
     {

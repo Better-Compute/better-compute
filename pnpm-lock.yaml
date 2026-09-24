@@ -156,6 +156,9 @@ importers:
       '@better-compute/provision':
         specifier: workspace:*
         version: link:../provision
+      '@better-compute/rollout':
+        specifier: workspace:*
+        version: link:../rollout
       '@better-compute/server':
         specifier: workspace:*
         version: link:../server
@@ -402,6 +405,18 @@ importers:
       '@better-compute/inventory':
         specifier: workspace:*
         version: link:../inventory
+      '@better-compute/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/rollout:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/pki':
+        specifier: workspace:*
+        version: link:../pki
       '@better-compute/protocol':
         specifier: workspace:*
         version: link:../protocol

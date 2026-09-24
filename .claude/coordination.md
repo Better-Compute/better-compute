@@ -292,4 +292,7 @@ Rules for v0.1:
   (`fleetModule()`: fleet.export/plan/apply, composite apply via check/invoke, `fleet/0001_names`), CLI
   `packages/cli/src/commands/fleet.ts`, `tests/{fleet-config,cli-fleet}.test.ts`. Committed 9ccff66, 05e6265.
   Hosts register `fleetModule()` next to capacity + vps; apply needs W5a check/invoke with replay-only admissions.
+- (Feature expansion [9ec62d], v0.4 Rollout controller, 2026-09-24, offered by [56cfd7]) new package
+  `packages/rollout/**` (`rolloutModule()`: releases + rollouts groups, rollout/0001 tables, `rollout` reconciler,
+  NodeSpec.daemon via nodeSpec(), daemon.upgrade kind), `tests/rollout-*.test.ts`. Also pki `release.ts` (b226081).
 - (Feature expansion [9ec62d], v0.4 audit primitives, 2026-09-24; split with [1f44fd] per [56cfd7]) pure crypto only in `packages/pki/src/audit.ts`: RFC 6962 hashing, inclusion + consistency proofs, `signCheckpoint`/`verifyCheckpoint` ('audit-checkpoint'), the bundle's audit signing key; CLI `audit verify|prove|checkpoint` calling `@better-compute/audit`. No table in pki (`packages/audit` owns it).

@@ -90,6 +90,10 @@
       "types": "./dist/fleet.d.ts",
       "import": "./dist/fleet.js"
     },
+    "./rollout": {
+      "types": "./dist/rollout.d.ts",
+      "import": "./dist/rollout.js"
+    },
     "./audit": {
       "types": "./dist/audit.d.ts",
       "import": "./dist/audit.js"
@@ -157,6 +161,7 @@
     "@better-compute/postgres": "workspace:*",
     "@better-compute/protocol": "workspace:*",
     "@better-compute/provision": "workspace:*",
+    "@better-compute/rollout": "workspace:*",
     "@better-compute/server": "workspace:*",
     "@better-compute/testing": "workspace:*",
     "@better-compute/vps": "workspace:*"
