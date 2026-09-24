@@ -31,6 +31,7 @@ export {
 export { builtinSteps, waitAgentJoined, waitGenerationObserved } from './builtin-steps.js';
 export { builtinProfileTenant, createProfile, deleteProfile, profileSource, updateProfile } from './profiles.js';
 export { provisionMigrations } from './migrations.js';
+export * from './images.js';
 export type * from './api.js';
 export { provisionApi } from './api.js';
 

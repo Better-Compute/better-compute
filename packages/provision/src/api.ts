@@ -12,6 +12,15 @@ import {
 } from '@better-compute/core';
 import { abortWorkflow, retryWorkflow, type EngineOptions, type StepRow, type WorkflowRow } from './engine.js';
 import { expandProfile, type ExpansionIssue, type PlannedStep } from './expand.js';
+import {
+  listImages,
+  promoteImage,
+  readImage,
+  registerImage,
+  type CatalogImage,
+  type ImageKind,
+  type RegisterImageInput,
+} from './images.js';
 import { createProfile, deleteProfile, profileSource, updateProfile } from './profiles.js';
 
 // The `profiles` and `workflows` groups of PLAN.md §9.2 (v0.2 rows). Workflows start from other
@@ -123,7 +132,27 @@ export interface WorkflowView extends Workflow {
   steps: (WorkflowStep & { phase: PlannedStep['phase']; startedAt?: number; finishedAt?: number; error?: Json })[];
 }
 
+export interface RegisterImageRequest extends RegisterImageInput {
+  tenantId: string;
+}
+export interface ImageRefInput {
+  tenantId: string;
+  imageId: string;
+}
+export interface ListImagesInput {
+  tenantId: string;
+  kind?: ImageKind;
+  limit?: number;
+  cursor?: string;
+}
+
 export type ProvisionApi = {
+  images: {
+    register: MethodDefinition<RegisterImageRequest, CatalogImage>;
+    get: MethodDefinition<ImageRefInput, CatalogImage>;
+    list: MethodDefinition<ListImagesInput, { items: CatalogImage[]; cursor?: string }>;
+    promote: MethodDefinition<ImageRefInput, CatalogImage>;
+  };
   profiles: {
     create: MethodDefinition<CreateProfileInput, Profile>;
     get: MethodDefinition<ProfileRefInput, Profile>;
@@ -223,8 +252,82 @@ export function provisionApi(context: ModuleContext, options: EngineOptions & { 
     return { ...input, tenantId: tenant(input.tenantId), nodeId: nodeId(input.nodeId), workflowId: workflowId(input.workflowId) };
   };
   const nodeResource = (input: { nodeId: string }) => ({ type: 'node', id: input.nodeId });
+  const imageRef = (raw: unknown): ImageRefInput => {
+    const input = object(raw, ['tenantId', 'imageId']);
+    return { tenantId: tenant(input.tenantId), imageId: isId(input.imageId, 'img') ? input.imageId : fail('imageId must be an img_ id') };
+  };
+  const imageResource = (input: { imageId: string }) => ({ type: 'image', id: input.imageId });
+  const rootTenant = () => context.iam?.rootTenantId ?? 'root';
+  const text = (value: unknown, name: string, max: number): string =>
+    typeof value === 'string' && value.length > 0 && value.length <= max ? value : fail(`${name} must be a string of at most ${max} characters`);
 
   return {
+    images: {
+      register: defineMethod<RegisterImageRequest, CatalogImage>({
+        action: 'compute:images:publish',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'tenant', id: input.tenantId }),
+        validate(raw) {
+          const input = object(raw, ['tenantId', 'ref', 'kind', 'format', 'compression', 'sha256', 'sizeBytes', 'source', 'signature', 'signerId']);
+          const out: RegisterImageRequest = {
+            tenantId: tenant(input.tenantId),
+            ref: text(input.ref, 'ref', 200),
+            format: ['raw', 'qcow2', 'iso'].includes(input.format as string) ? (input.format as RegisterImageRequest['format']) : fail("format must be 'raw', 'qcow2' or 'iso'"),
+            sha256: text(input.sha256, 'sha256', 64),
+            source: text(input.source, 'source', 2048),
+          };
+          if (input.kind !== undefined) out.kind = input.kind === 'os' || input.kind === 'ramdisk' ? input.kind : fail("kind must be 'os' or 'ramdisk'");
+          if (input.compression !== undefined)
+            out.compression = ['none', 'zstd', 'gzip'].includes(input.compression as string)
+              ? (input.compression as RegisterImageRequest['compression'])
+              : fail("compression must be 'none', 'zstd' or 'gzip'");
+          if (input.sizeBytes !== undefined) {
+            if (typeof input.sizeBytes !== 'number' || !Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0) fail('sizeBytes must be a whole number');
+            out.sizeBytes = input.sizeBytes;
+          }
+          if (input.signature !== undefined) out.signature = text(input.signature, 'signature', 1024);
+          if (input.signerId !== undefined) out.signerId = text(input.signerId, 'signerId', 128);
+          return out;
+        },
+        handler: (ctx, input) =>
+          ctx.sql.transaction((tx) => registerImage(tx, ctx.authz, input.tenantId, rootTenant(), input)),
+      }),
+      get: defineMethod<ImageRefInput, CatalogImage>({
+        action: 'compute:images:read',
+        kind: 'read',
+        resource: imageResource,
+        validate: imageRef,
+        handler: (ctx, input) => readImage(ctx.sql, input.tenantId, input.imageId),
+      }),
+      list: defineMethod<ListImagesInput, { items: CatalogImage[]; cursor?: string }>({
+        action: 'compute:images:read',
+        kind: 'read',
+        resource: (input) => ({ type: 'tenant', id: input.tenantId }),
+        validate(raw) {
+          const input = object(raw, ['tenantId', 'kind', 'limit', 'cursor']);
+          const out: ListImagesInput = { tenantId: tenant(input.tenantId) };
+          if (input.kind !== undefined) out.kind = input.kind === 'os' || input.kind === 'ramdisk' ? input.kind : fail("kind must be 'os' or 'ramdisk'");
+          const limit = optionalPositive(input.limit, 'limit', 200);
+          if (limit !== undefined) out.limit = limit;
+          const after = cursor(input.cursor);
+          if (after !== undefined) out.cursor = after;
+          return out;
+        },
+        handler: (ctx, input) =>
+          listImages(ctx.sql, input.tenantId, {
+            limit: input.limit ?? 50,
+            ...(input.cursor ? { after: input.cursor } : {}),
+            ...(input.kind ? { kind: input.kind } : {}),
+          }),
+      }),
+      promote: defineMethod<ImageRefInput, CatalogImage>({
+        action: 'compute:images:publish',
+        kind: 'mutation',
+        resource: imageResource,
+        validate: imageRef,
+        handler: (ctx, input) => ctx.sql.transaction((tx) => promoteImage(tx, ctx.authz, input.tenantId, input.imageId)),
+      }),
+    },
     profiles: {
       create: defineMethod<CreateProfileInput, Profile>({
         action: 'compute:profiles:manage',

@@ -7,9 +7,31 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
 **Status: v0.2 workflow engine.**
 
 - Implemented: `defineStep`, `defineProfile`, `provisionModule()` (the workflow engine, its
-  tables, the Workflow reconciler), `ctx.workflows`, and the `profiles` and `workflows` API
-  groups.
-- Still to come: the `images` group, config units, renderers and the image catalog.
+  tables, the Workflow reconciler), `ctx.workflows`, the image catalog, and the `profiles`,
+  `workflows` and `images` API groups.
+- Still to come: config units and renderers.
+
+## Image catalog (PLAN.md §11.5)
+
+- **Migration.** `provision/0002_images` creates `images`, `image_signers` and `image_locations`.
+- **`images.register`** records an image by `ref` (`name@version`), `sha256`, `format`,
+  `compression` and `source` (`https://` or `oci://`).
+  - A `signature` (base64, over `imageSigningInput(...)`) must verify against `signerId` on the
+    tenant's allowlist or the platform's (Ed25519, or ECDSA P-256 over SHA-256). A verified image
+    carries `verified: true`.
+  - Unsigned images are private forever (a table CHECK enforces it).
+  - Ramdisks must be signed by a platform signer.
+  - Signers are managed with `addImageSigner` / `revokeImageSigner`.
+- **`images.promote`** makes a verified image public by writing a wildcard (`tenantId: '*'`)
+  authz row.
+- **`images.get` / `images.list`** return the tenant's own images and public ones.
+  `resolveImageRef(tx, tenantId, ref)` prefers the tenant's own image.
+- **Site caches.**
+  - `recordImageLocation` and `touchImageLocation` (which can also pin an image while a deploy
+    streams it) track what each site holds.
+  - `imagesCachedAt(siteId)` feeds the `image-cached` scorer.
+  - `evictionCandidates(siteId, bytes, inUse)` picks least-recently-used ready images, never
+    pinned or in-use ones.
 
 ## The workflow engine (PLAN.md §11.2)
 

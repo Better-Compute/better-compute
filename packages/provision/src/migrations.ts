@@ -94,4 +94,58 @@ CREATE UNIQUE INDEX workflow_steps_inflight_node ON workflow_steps (node_id)
 CREATE INDEX workflow_steps_command ON workflow_steps (command_id) WHERE command_id IS NOT NULL;
 `,
   },
+  {
+    name: 'provision/0002_images',
+    sql: `
+-- The image catalog (PLAN.md §11.5). Images are built outside the control plane and registered by
+-- digest; a signature from a signer on the tenant's allowlist makes them verified.
+CREATE TABLE image_signers (
+  tenant_id text NOT NULL,
+  id text NOT NULL,
+  algorithm text NOT NULL CHECK (algorithm IN ('ed25519', 'ecdsa-p256')),
+  -- SPKI PEM.
+  public_key text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT compute_now(),
+  revoked_at timestamptz,
+  PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE images (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL,
+  -- name@version, unique per tenant.
+  ref text NOT NULL,
+  kind text NOT NULL DEFAULT 'os' CHECK (kind IN ('os', 'ramdisk')),
+  format text NOT NULL CHECK (format IN ('raw', 'qcow2', 'iso')),
+  compression text NOT NULL CHECK (compression IN ('none', 'zstd', 'gzip')),
+  sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  size_bytes bigint CHECK (size_bytes >= 0),
+  -- Where site caches pull it from (https:// or oci://).
+  source text NOT NULL,
+  signature bytea,
+  signer_tenant_id text,
+  signer_id text,
+  verified bool NOT NULL,
+  visibility text NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
+  created_at timestamptz NOT NULL DEFAULT compute_now(),
+  deleted_at timestamptz,
+  version bigint NOT NULL DEFAULT 1,
+  -- Unsigned images stay tenant-only.
+  CHECK (verified OR visibility = 'private')
+);
+CREATE UNIQUE INDEX images_ref ON images (tenant_id, ref) WHERE deleted_at IS NULL;
+CREATE INDEX images_public ON images (ref) WHERE visibility = 'public' AND deleted_at IS NULL;
+-- Which site caches hold an image, for the image-cached scorer and LRU eviction.
+CREATE TABLE image_locations (
+  image_id text NOT NULL REFERENCES images,
+  site_id text NOT NULL,
+  state text NOT NULL CHECK (state IN ('pulling', 'ready', 'failed', 'evicting')),
+  size_bytes bigint,
+  pinned bool NOT NULL DEFAULT false,
+  last_used_at timestamptz NOT NULL DEFAULT compute_now(),
+  updated_at timestamptz NOT NULL DEFAULT compute_now(),
+  PRIMARY KEY (image_id, site_id)
+);
+CREATE INDEX image_locations_site ON image_locations (site_id, state, last_used_at);
+`,
+  },
 ]);

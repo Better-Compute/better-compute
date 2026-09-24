@@ -472,7 +472,7 @@ describe('provisionModule', () => {
   it('registers migrations, the reconciler, built-in steps and the engine', async () => {
     const module = provisionModule({ steps: [record], profiles: [defineProfile({ id: 'shipped', version: 1, target: 'metal', steps: [{ use: 'test.record' }] })] });
     expect(module.name).toBe('provision');
-    expect(module.migrations!.map((m) => m.name)).toEqual(['provision/0001_workflows']);
+    expect(module.migrations!.map((m) => m.name)).toEqual(['provision/0001_workflows', 'provision/0002_images']);
     expect(module.reconcilers!.map((r) => [r.name, r.shardBy])).toEqual([['workflow', 'node']]);
     expect(module.engineOptions.steps.get('wait.agentJoined')).toBeDefined();
     expect(() => provisionModule({ steps: [record, record] })).toThrow(/registered twice/);
