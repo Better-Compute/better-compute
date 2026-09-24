@@ -73,8 +73,23 @@ export interface EmbeddedIamHost {
           action: string;
           resource: { type: string; id: string };
           reason: string;
+          validSeconds?: number;
         },
-      ): Promise<{ id: string }>;
+      ): Promise<{ id: string; expiresAt?: number }>;
+      /** Used to reuse a pending request for the same action and resource instead of asking twice. */
+      listConfirmations?(
+        credential: CredentialInput,
+        input: { tenantId: string; status?: 'pending' },
+      ): Promise<
+        {
+          id: string;
+          action: string;
+          resource: { type: string; id: string };
+          status: string;
+          expired?: boolean;
+          expiresAt?: number;
+        }[]
+      >;
     };
   };
 }
@@ -227,17 +242,37 @@ export function embeddedIam(iam: EmbeddedIamHost, options: EmbeddedIamOptions = 
         return answers;
       }),
     requestConfirmation: async (credential, decision) => {
+      const input = credentialInput(credential);
+      const { validSeconds } = decision as { validSeconds?: unknown };
       try {
-        const confirmation = await iam.api.delegations.requestConfirmation(
-          credentialInput(credential),
-          {
-            tenantId: decision.tenantId,
-            action: decision.action,
-            resource: { type: decision.resource.type, id: decision.resource.id },
-            reason: decision.reason,
-          },
+        // A retry before the person decided reuses the pending request instead of asking again.
+        const pending = await iam.api.delegations
+          .listConfirmations?.(input, { tenantId: decision.tenantId, status: 'pending' })
+          .catch(() => []);
+        const same = pending?.find(
+          (item) =>
+            item.status === 'pending' &&
+            item.expired !== true &&
+            item.action === decision.action &&
+            item.resource.type === decision.resource.type &&
+            item.resource.id === decision.resource.id,
         );
-        return { confirmationId: confirmation.id };
+        if (same)
+          return {
+            confirmationId: same.id,
+            ...(same.expiresAt === undefined ? {} : { expiresAt: same.expiresAt }),
+          };
+        const confirmation = await iam.api.delegations.requestConfirmation(input, {
+          tenantId: decision.tenantId,
+          action: decision.action,
+          resource: { type: decision.resource.type, id: decision.resource.id },
+          reason: decision.reason,
+          ...(typeof validSeconds === 'number' ? { validSeconds } : {}),
+        });
+        return {
+          confirmationId: confirmation.id,
+          ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+        };
       } catch (error) {
         const { code } = error as { code?: unknown };
         if (code === 'INVALID_INPUT' && (error as Error).message === notHeldBack)

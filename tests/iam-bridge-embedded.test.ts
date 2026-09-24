@@ -175,9 +175,10 @@ describe('embeddedIam: identity and decisions', () => {
         reason: 'Nightly training run',
       });
     expect(await ask('compute:reservations:read')).toBe('not-held-back');
-    expect(await ask('compute:reservations:create')).toEqual({
-      confirmationId: expect.any(String),
-    });
+    const asked = await ask('compute:reservations:create');
+    expect(asked).toEqual({ confirmationId: expect.any(String), expiresAt: expect.any(Number) });
+    // Asking again while the first request is pending reuses it.
+    expect(await ask('compute:reservations:create')).toEqual(asked);
   });
 
   it('serves flags from the cache: one isEnabled per (tenant, key) until invalidated', async () => {

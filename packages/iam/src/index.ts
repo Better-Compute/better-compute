@@ -14,4 +14,5 @@ export * from './worker.js';
 export * from './jobs.js';
 export * from './setup.js';
 export * from './spy.js';
+export * from './confirmation.js';
 export * from './bridge.js';
