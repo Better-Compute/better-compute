@@ -1,0 +1,58 @@
+# goreleaser (v2.6 or later) configuration for bcd, PLAN.md §6 "Release artifacts".
+#
+# Run from daemon/:
+#   goreleaser release --snapshot --clean     local build into daemon/dist/
+#   goreleaser release --clean                tagged release (from .github/workflows/release.yml, v0.1)
+#
+# Produces bcd_<version>_linux_{amd64,arm64}.tar.gz with a .sha256 file each. The install script
+# downloads one archive and checks its sha256; the api serves both from
+# GET {basePath}/downloads/bcd/{version}/{os}-{arch}.
+version: 2
+
+project_name: bcd
+
+builds:
+  - id: bcd
+    main: ./cmd/bcd
+    binary: bcd
+    goos: [linux]
+    goarch: [amd64, arm64]
+    # go-nvml dlopens libnvidia-ml through cgo, so release builds need a C cross-compiler; zig cc
+    # targets both architectures from one host (the alternative is per-architecture Docker buildx).
+    # Release builds use no tags: real NVML and real hardware. -tags nonvml,fakehw is for tests.
+    env:
+      - CGO_ENABLED=1
+      - >-
+        {{- if eq .Arch "amd64" }}CC=zig cc -target x86_64-linux-gnu.2.28{{- end }}
+        {{- if eq .Arch "arm64" }}CC=zig cc -target aarch64-linux-gnu.2.28{{- end }}
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: bcd
+    formats: [tar.gz]
+    name_template: "bcd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  # One <archive>.sha256 per archive, next to it.
+  split: true
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+# TODO(v0.1): SBOMs (syft) and cosign signatures once the release pipeline exists (PLAN.md §6, §13).
+# sboms:
+#   - artifacts: archive
+# signs:
+#   - artifacts: checksum
+
+# Publishing stays off until .github/workflows/release.yml owns it.
+release:
+  disable: true

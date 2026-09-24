@@ -1,0 +1,134 @@
+// Payloads and results of the built-in v0.1 command kinds (PLAN.md §7.3). A Command carries the
+// request in CommandBody.payload (google.protobuf.Any); the CommandUpdate carries the serialized
+// result in `result`. The kind table (lane and flags) lives in @better-compute/protocol
+// (`commandKinds`) and in the daemon's dispatcher; both must agree.
+//
+// Stability: FROZEN with agent/v1. Changes are additive only. Later kinds (diag.dcgm, wipe,
+// deploy.*, boot.kexec, driver.invoke, daemon.upgrade, …) add their own messages.
+syntax = "proto3";
+
+package bettercompute.agent.v1;
+
+option go_package = "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1;agentv1";
+
+// ---------------------------------------------------------------------------------------------
+// diag.nvml: lane control, retry-safe, attested. The v0.1 adopt acceptance check (§3.3 step 7).
+
+message DiagNvmlRequest {
+  // GPUs to check; empty checks every GPU.
+  repeated string gpu_uuids = 1;
+  // When non-zero, fewer visible GPUs fails the check "gpu.count".
+  uint32 expected_gpu_count = 2;
+}
+
+message DiagNvmlResult {
+  // Every check on every GPU passed.
+  bool passed = 1;
+  // GPUs visible to NVML.
+  uint32 gpu_count = 2;
+  string driver_version = 3;
+  // Node-level checks, e.g. "nvml.init", "gpu.count".
+  repeated DiagnosticCheck checks = 4;
+  // Sorted by uuid.
+  repeated GpuDiagnostic gpus = 5;
+}
+
+message GpuDiagnostic {
+  string uuid = 1;
+  bool passed = 2;
+  // e.g. "ecc.uncorrectable", "row-remap.pending", "row-remap.failure", "pcie.link", "xid.recent".
+  repeated DiagnosticCheck checks = 3;
+}
+
+message DiagnosticCheck {
+  string name = 1;
+  bool passed = 2;
+  string message = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// inventory.refresh: lane control, retry-safe. The requested sections are (re)sent as
+// InventorySection frames before the command succeeds.
+
+message InventoryRefreshRequest {
+  // Section names to send; empty sends every section.
+  repeated string sections = 1;
+  // Re-collect from the hardware first instead of resending the last collection.
+  bool rescan = 2;
+}
+
+message InventoryRefreshResult {
+  // Section name → SHA-256 of the section content as sent.
+  map<string, bytes> section_hashes = 1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// logs.collect: lane bulk, retry-safe. Logs go to a presigned object-store URL, never over the
+// session (P8). The bundle is scanned for bcjt_/biam_ tokens before upload.
+
+message LogsCollectRequest {
+  // Presigned HTTPS PUT URL.
+  string upload_url = 1;
+  // Headers the presigned request requires.
+  repeated HttpHeader upload_headers = 2;
+  // systemd units; empty means bcd's own units.
+  repeated string units = 3;
+  // How far back to collect.
+  uint32 lookback_seconds = 4;
+  // Upload cap; the bundle is truncated (oldest first) beyond it.
+  uint64 max_bytes = 5;
+  // Include the support bundle (bcd status, doctor, journal metadata, inventory).
+  bool support_bundle = 6;
+}
+
+message HttpHeader {
+  string name = 1;
+  string value = 2;
+}
+
+message LogsCollectResult {
+  uint64 uploaded_bytes = 1;
+  // SHA-256 of the uploaded object.
+  bytes sha256 = 2;
+  bool truncated = 3;
+  // e.g. "application/zstd".
+  string content_type = 4;
+}
+
+// ---------------------------------------------------------------------------------------------
+// node.reboot: lane control, retry-safe, self-terminating, destructive (signed from v0.2).
+// Completes as SUCCEEDED{rebooted} once the daemon is back with another boot_id; never replayed.
+
+message NodeRebootRequest {
+  string reason = 1;
+  // Wait before rebooting (lets the CommandUpdate RUNNING reach the gateway).
+  uint32 delay_ms = 2;
+}
+
+message NodeRebootResult {
+  // The boot that ran the command; CommandUpdate.boot_id is the new one.
+  string previous_boot_id = 1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// gpu.reset: lane control, NOT retry-safe, attested, destructive (signed from v0.2). Used after a
+// release and for remediation (XID 63). Fails for a GPU that still has processes or a live
+// assignment.
+
+message GpuResetRequest {
+  // At least one GPU; an empty list fails "invalid-payload".
+  repeated string gpu_uuids = 1;
+}
+
+message GpuResetResult {
+  // Sorted by uuid.
+  repeated GpuResetOutcome gpus = 1;
+}
+
+message GpuResetOutcome {
+  string uuid = 1;
+  bool reset = 2;
+  // ECC and row-remap state read after the reset.
+  bool healthy = 3;
+  string message = 4;
+}

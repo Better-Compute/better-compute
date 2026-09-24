@@ -1,0 +1,31 @@
+# Wire contracts (PLAN.md §4.1, §7). Run through `node scripts/proto-gen.mjs` (lint, generate,
+# --check, --baseline, --breaking); it uses the buf binary from node_modules (@bufbuild/buf).
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    # STANDARD is buf's current name for the DEFAULT category (DEFAULT is deprecated in buf 1.73).
+    - STANDARD
+  ignore_only:
+    # PLAN.md §7.7 keeps the planned service names (AgentGateway, bcx DriverPlugin); a "Service"
+    # suffix would add nothing to either.
+    SERVICE_SUFFIX:
+      - proto/bettercompute/agent/v1/session.proto
+      - proto/bettercompute/driver/v1/driver.proto
+    # Session and Tunnel are bidi streams of frames (AgentFrame -> ServerFrame, TunnelFrame both
+    # ways), not request/response pairs; Join and Renew still follow the standard names.
+    RPC_REQUEST_STANDARD_NAME:
+      - proto/bettercompute/agent/v1/session.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - proto/bettercompute/agent/v1/session.proto
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - proto/bettercompute/agent/v1/session.proto
+breaking:
+  use:
+    - FILE
+  ignore:
+    # DRAFT packages, unstable until their phase freezes them (site v0.2, bcx v0.5). Remove the
+    # entry, then refresh proto/baseline.binpb (`node scripts/proto-gen.mjs --baseline`), when one is.
+    - proto/bettercompute/site
+    - proto/bettercompute/driver

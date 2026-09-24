@@ -1,0 +1,25 @@
+{
+  "welcome": {
+    "epoch": "7",
+    "sessionId": "ses_01J8Z3T0000000000000000001",
+    "gatewayId": "gw-fsn1-a",
+    "protocolVersion": 1,
+    "heartbeatIntervalMs": 10000,
+    "leaseTtlMs": 40000,
+    "credits": [
+      { "lane": "LANE_CONTROL", "credits": 8 },
+      { "lane": "LANE_PROVISION", "credits": 4 },
+      { "lane": "LANE_BULK", "credits": 2 }
+    ],
+    "ackedEventSeq": "40",
+    "requestSections": ["gpus"],
+    "serverTime": "2026-09-23T12:00:00Z",
+    "trust": {
+      "body": "CAE=",
+      "signature": {
+        "kid": "join-signing-1",
+        "sig": "EREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREQ=="
+      }
+    }
+  }
+}

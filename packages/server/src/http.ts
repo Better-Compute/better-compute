@@ -1,0 +1,251 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { ComputeError, isComputeError, newId, type ComputeErrorBody } from '@better-compute/core';
+import type { Operations } from './operations.js';
+import type { ResolvedOptions } from './options.js';
+import type { RegisteredMethod, Registry } from './registry.js';
+import { serverInfo } from './version.js';
+
+/** JSON request bodies above this are refused with `PAYLOAD_TOO_LARGE` (PLAN.md §9.1). */
+export const maxBodyBytes = 65_536;
+
+/** Headers every answer carries: never cached, never sniffed, never leaking the URL as a referrer. */
+const hardened = {
+  'cache-control': 'no-store',
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+};
+const requestIdPattern = /^[A-Za-z0-9._:-]{1,128}$/;
+const segmentPattern = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+
+const notFound = () => new ComputeError('NOT_FOUND', 'Endpoint not found');
+const tooLarge = () => new ComputeError('PAYLOAD_TOO_LARGE', 'Request body too large');
+
+/** The caller's `X-Request-Id` when it is short and plain; otherwise a fresh one. */
+function requestIdOf(headers: Headers): string {
+  const value = headers.get('x-request-id');
+  return value && requestIdPattern.test(value) ? value : newId('req');
+}
+
+/** Reads at most `limit` bytes of the body; more is `PAYLOAD_TOO_LARGE`. */
+async function limitedBody(request: Request, limit: number): Promise<Uint8Array> {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) throw tooLarge();
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const item = await reader.read();
+    if (item.done) break;
+    size += item.value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge();
+    }
+    chunks.push(item.value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+/** The request body as a JSON object; an empty body is `{}`. */
+async function jsonObject(request: Request): Promise<Record<string, unknown>> {
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(
+      await limitedBody(request, maxBodyBytes),
+    );
+  } catch (error) {
+    if (isComputeError(error)) throw error;
+    throw new ComputeError('INVALID_INPUT', 'The body is not valid UTF-8');
+  }
+  if (!text.trim()) return {};
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new ComputeError('INVALID_INPUT', 'The body is not valid JSON');
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body))
+    throw new ComputeError('INVALID_INPUT', 'The body must be a JSON object');
+  return body as Record<string, unknown>;
+}
+
+/** Whether an error's code and message are safe to show; anything else is `INTERNAL_ERROR`. */
+function presentable(error: unknown): error is ComputeError {
+  return isComputeError(error) && error.code !== 'INTERNAL_ERROR';
+}
+
+/** `{ error: { code, message, retryAfterMs?, details? } }` with the error's status. */
+function errorResponse(error: unknown): Response {
+  let status = 500;
+  let body: ComputeErrorBody = { code: 'INTERNAL_ERROR', message: 'Internal server error' };
+  if (presentable(error)) {
+    status = error.status >= 400 && error.status <= 599 ? error.status : 500;
+    body =
+      typeof error.toBody === 'function'
+        ? error.toBody()
+        : { code: error.code, message: error.message };
+  }
+  const headers: Record<string, string> = { ...hardened };
+  // Rate-limited callers learn when to come back (RFC 9110 Retry-After, in seconds).
+  if (body.retryAfterMs !== undefined)
+    headers['retry-after'] = String(Math.max(1, Math.ceil(body.retryAfterMs / 1000)));
+  if (status === 405) headers.allow = 'GET, POST';
+  return Response.json({ error: body }, { status, headers });
+}
+
+export interface HttpHost {
+  options: ResolvedOptions;
+  registry: Registry;
+  operations: Operations;
+}
+
+/**
+ * The fetch and Node transports (PLAN.md §9.1). `POST {basePath}/{group}/{method}` and
+ * `POST {basePath}/plugins/{id}/{group}/{method}` take JSON objects with `X-Better-Compute: 1`;
+ * `GET` serves only `/health` and `/.well-known/better-compute`.
+ */
+export function createHttp({ options, registry, operations }: HttpHost) {
+  const { basePath, database, log } = options;
+
+  /** A route below the base path; the registry's Map never answers for inherited names. */
+  function route(path: string): RegisteredMethod | undefined {
+    const parts = path.split('/');
+    if (!parts.every((part) => segmentPattern.test(part))) return undefined;
+    if (parts.length === 2 || (parts.length === 4 && parts[0] === 'plugins'))
+      return registry.method(path);
+    return undefined;
+  }
+
+  /** Unauthenticated operator endpoints. `/health` pings the store and reveals only up or down. */
+  async function operational(path: string): Promise<Response> {
+    if (path === 'health') {
+      const started = Date.now();
+      try {
+        await database.query('SELECT 1');
+        return Response.json(
+          { status: 'ok', database: 'ok', latencyMs: Date.now() - started, time: started },
+          { headers: hardened },
+        );
+      } catch {
+        return Response.json(
+          { status: 'unavailable', database: 'error', time: started },
+          { status: 503, headers: hardened },
+        );
+      }
+    }
+    if (path === '.well-known/better-compute')
+      return Response.json(serverInfo(basePath), { headers: hardened });
+    throw notFound();
+  }
+
+  async function handler(request: Request): Promise<Response> {
+    const requestId = requestIdOf(request.headers);
+    const answer = (response: Response) => {
+      response.headers.set('x-request-id', requestId);
+      return response;
+    };
+    let path = '(unknown)';
+    try {
+      const url = new URL(request.url);
+      if (!url.pathname.startsWith(`${basePath}/`)) throw notFound();
+      path = url.pathname.slice(basePath.length + 1);
+      if (request.method === 'GET') return answer(await operational(path));
+      if (request.method !== 'POST')
+        throw new ComputeError(
+          'METHOD_NOT_ALLOWED',
+          'Use POST, or GET for /health and /.well-known/better-compute',
+        );
+      if (
+        !request.headers.get('content-type')?.toLowerCase().startsWith('application/json') ||
+        request.headers.get('x-better-compute') !== '1'
+      )
+        throw new ComputeError(
+          'CSRF_REJECTED',
+          'JSON and the X-Better-Compute: 1 header are required',
+        );
+      // An accepted IAM cookie counts only from this deployment's own origin; an unaccepted one is
+      // dropped from the credential by the envelope.
+      if (options.acceptIamCookie && request.headers.has('cookie')) {
+        const origin = request.headers.get('origin');
+        if (!origin) throw new ComputeError('CSRF_REJECTED', 'Cookie requests require Origin');
+        if (origin !== options.origin)
+          throw new ComputeError('UNTRUSTED_ORIGIN', 'Origin is not trusted');
+      }
+      const method = route(path);
+      if (!method) throw notFound();
+      const body = await jsonObject(request);
+      // IAM sees the request id the caller sees.
+      const headers = new Headers(request.headers);
+      headers.set('x-request-id', requestId);
+      const data = await operations.call(method, { headers }, body, {
+        requestId,
+        signal: request.signal,
+      });
+      return answer(Response.json({ data: data ?? null }, { headers: hardened }));
+    } catch (error) {
+      if (!presentable(error))
+        log.error('Unhandled error in a compute request', {
+          requestId,
+          route: route(path)?.path ?? '(unknown)',
+          error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+        });
+      return answer(errorResponse(error));
+    }
+  }
+
+  async function send(res: ServerResponse, response: Response): Promise<void> {
+    res.statusCode = response.status;
+    response.headers.forEach((value, key) => res.setHeader(key, value));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  }
+
+  async function nodeHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      if (['TRACE', 'CONNECT', 'TRACK'].includes(req.method ?? ''))
+        throw new ComputeError('METHOD_NOT_ALLOWED', 'Method is not supported');
+      let url: URL;
+      try {
+        url = new URL(req.url ?? '/', options.baseURL);
+      } catch {
+        throw new ComputeError('INVALID_INPUT', 'Invalid request target');
+      }
+      const headers = new Headers();
+      for (const [key, value] of Object.entries(req.headers))
+        if (value !== undefined)
+          for (const item of Array.isArray(value) ? value : [value]) headers.append(key, item);
+      let body: Uint8Array<ArrayBuffer> | undefined;
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          const buffer = Buffer.from(chunk as Uint8Array);
+          size += buffer.length;
+          if (size > maxBodyBytes) {
+            const response = errorResponse(tooLarge());
+            response.headers.set('x-request-id', requestIdOf(headers));
+            return await send(res, response);
+          }
+          chunks.push(buffer);
+        }
+        body = new Uint8Array(Buffer.concat(chunks));
+      }
+      await send(res, await handler(new Request(url, { method: req.method, headers, body })));
+    } catch (error) {
+      if (res.writableEnded || res.destroyed) return;
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      await send(res, errorResponse(error));
+    }
+  }
+
+  return { handler, nodeHandler };
+}

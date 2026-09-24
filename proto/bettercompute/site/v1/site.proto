@@ -1,0 +1,121 @@
+// Site agent contracts (`bcd site`, PLAN.md §3.5, §8.5): boot lease state, proxy-DHCP entries,
+// iPXE scripts, BMC operations and discovery assertions.
+//
+// Stability: DRAFT / UNSTABLE until v0.2. Excluded from `buf breaking` (buf.yaml); fields and
+// messages may change without notice. Site agents speak the agent/v1 Session; these messages are
+// payloads of site command kinds and the `site` section of agent/v1 NodeSpec.
+syntax = "proto3";
+
+package bettercompute.site.v1;
+
+import "bettercompute/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/better-compute/better-compute/daemon/gen/bettercompute/site/v1;sitev1";
+
+// The `site` section of a site agent's NodeSpec.
+message SiteSpec {
+  BootLeaseState boot = 1;
+}
+
+// The site:<id>:boot lease as published by the SiteBoot controller. Only the active holder answers
+// proxyDHCP, serves iPXE scripts and vouches for discovery. An agent that loses its session
+// self-fences after ttl_ms: it stops all three.
+message BootLeaseState {
+  bool active = 1;
+  // Lease epoch; every assertion the agent signs carries it, and the control plane rejects older
+  // epochs.
+  uint64 epoch = 2;
+  uint32 ttl_ms = 3;
+}
+
+// One machine the active boot server answers for (boot.prepareRamdisk / boot.cleanUp).
+message ProxyDhcpEntry {
+  // PXE MAC, lowercase colon form.
+  string mac = 1;
+  string product_uuid = 2;
+  BootArch arch = 3;
+  // First-stage boot file served over TFTP or HTTP (e.g. an iPXE build).
+  string boot_file = 4;
+  // HTTPS URL of this machine's iPXE script, served by the site agent.
+  string ipxe_script_url = 5;
+  string workflow_id = 6;
+  // Server time after which the entry is dropped.
+  google.protobuf.Timestamp not_after = 7;
+}
+
+enum BootArch {
+  BOOT_ARCH_UNSPECIFIED = 0;
+  BOOT_ARCH_BIOS = 1;
+  BOOT_ARCH_X86_64_EFI = 2;
+  BOOT_ARCH_ARM64_EFI = 3;
+  BOOT_ARCH_X86_64_EFI_HTTP = 4;
+}
+
+// The parameters iPXE sends when chainloading (${mac}, ${uuid}, ${buildarch}, ${platform}, …).
+// The site agent matches them against its entries; an unknown machine becomes a discovery event.
+message IpxeScriptRequest {
+  string mac = 1;
+  string uuid = 2;
+  string ip = 3;
+  // iPXE ${buildarch}: "x86_64", "arm64", "i386".
+  string buildarch = 4;
+  // iPXE ${platform}: "efi", "pcbios".
+  string platform = 5;
+  string serial = 6;
+  string asset = 7;
+}
+
+message IpxeScript {
+  // The rendered script, starting with "#!ipxe". Carries the single-use discovery credential.
+  string script = 1;
+  google.protobuf.Timestamp not_after = 2;
+}
+
+// A BMC operation run by a site agent through bmclib (steps with runsOn: site).
+message BmcOperationRequest {
+  // "redfish" or "ipmi" (or a vendor driver).
+  string driver = 1;
+  // Host or URL of the BMC.
+  string address = 2;
+  // Secret ref of the BMC credentials, fetched with SecretRequest; never a value.
+  string credentials_ref = 3;
+  // "<kind>.<operation>", e.g. "power.setPower", "management.setBootDevice",
+  // "virtual-media.insert", "inspect.inspect".
+  string operation = 4;
+  // Operation arguments, canonical JSON.
+  string args_json = 5;
+  // SHA-256 of the BMC certificate's SubjectPublicKeyInfo, when pinned.
+  bytes tls_spki_sha256 = 6;
+}
+
+message BmcOperationResult {
+  bool ok = 1;
+  // Operation result, canonical JSON (e.g. {"power":"on"}).
+  string result_json = 2;
+  string error_code = 3;
+  string message = 4;
+}
+
+// A site agent's statement that a PXE-booted machine asked for a boot from this MAC/IP. It vouches
+// for the ramdisk's `discovery` join (v0.2). Signing purpose "discovery-assertion", parts [body],
+// by the site agent's node key.
+message SignedDiscoveryAssertion {
+  // Serialized DiscoveryAssertion.
+  bytes body = 1;
+  bettercompute.common.v1.Signature sig = 2;
+}
+
+message DiscoveryAssertion {
+  string site_id = 1;
+  // The vouching site agent.
+  string site_agent_node_id = 2;
+  // BootLeaseState.epoch held while vouching.
+  uint64 boot_lease_epoch = 3;
+  string mac = 4;
+  string ip = 5;
+  string product_uuid = 6;
+  string workflow_id = 7;
+  google.protobuf.Timestamp issued_at = 8;
+  google.protobuf.Timestamp not_after = 9;
+}

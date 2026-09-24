@@ -1,0 +1,12 @@
+{
+  "update": {
+    "commandId": "cmd_01J8Z3R0000000000000000001",
+    "state": "COMMAND_STATE_SUCCEEDED",
+    "result": "CAEQAhoJNTgwLjY1LjA2Ig0KCW52bWwuaW5pdBABIg0KCWdwdS5jb3VudBABKkMKKEdQVS00YzFmMmUzZC0wYTFiLTRjNWQtOGU5Zi0wYTFiMmMzZDRlNWYQARoVChFlY2MudW5jb3JyZWN0YWJsZRABKkMKKEdQVS05ZThkN2M2Yi01YTRmLTRlM2QtMmMxYi0wYTlmOGU3ZDZjNWIQARoVChFlY2MudW5jb3JyZWN0YWJsZRAB",
+    "bootId": "3f1c2a9e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+    "nodeSig": {
+      "kid": "lJ3xk0kS2k3m5n6p7q8r9s0t1u2v3w4x5y6z7a8b9c0",
+      "sig": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWg=="
+    }
+  }
+}

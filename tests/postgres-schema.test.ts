@@ -1,0 +1,297 @@
+import { readdir, readFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { SqlExecutor } from '@better-compute/core';
+import {
+  baseMigrations,
+  baseSchemaVersion,
+  baseTables,
+  computeNowMode,
+  restoreSystemClock,
+  setSimClock,
+  useSimClock,
+} from '@better-compute/postgres';
+import { storeConformanceCases } from '@better-compute/postgres/conformance';
+import { pglite } from '@better-compute/postgres/pglite';
+import { checkSqlNow, definesComputeNow } from '../scripts/check-sql-now.mjs';
+
+// The base schema on PGlite (PostgreSQL 18 in WebAssembly), which every dev and unit run uses.
+
+const laterTables = [
+  'instances',
+  'join_requests',
+  'workflows',
+  'workflow_steps',
+  'images',
+  'image_locations',
+  'profiles',
+  'provider_accounts',
+  'sealed_secrets',
+  'webhooks',
+];
+
+let db: SqlExecutor;
+
+beforeAll(async () => {
+  db = pglite();
+});
+afterAll(async () => {
+  await db.close();
+});
+
+async function constraints(table: string) {
+  const { rows } = await db.query<{ type: string; definition: string }>(
+    `SELECT contype::text AS type, pg_get_constraintdef(oid) AS definition FROM pg_constraint
+     WHERE conrelid = $1::regclass ORDER BY conname`,
+    [table],
+  );
+  return rows;
+}
+
+async function indexDefinition(name: string): Promise<string | undefined> {
+  const { rows } = await db.query<{ definition: string }>(
+    'SELECT indexdef AS definition FROM pg_indexes WHERE indexname = $1',
+    [name],
+  );
+  return rows[0]?.definition;
+}
+
+describe('migrate', () => {
+  it('applies the base schema on a fresh database, then skips it', async () => {
+    const names = baseMigrations.map((migration) => migration.name);
+    expect(names).toEqual(['core/0001_clock', 'core/0002_base']);
+    expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
+    expect(await db.migrate()).toEqual({ applied: [], skipped: names });
+    const { rows } = await db.query('SELECT version FROM compute_schema_version');
+    expect(rows).toEqual([{ version: baseSchemaVersion }]);
+  });
+
+  it('records applied_at on compute_now()', async () => {
+    const { rows } = await db.query<{ applied_at: Date }>(
+      'SELECT applied_at FROM compute_migrations ORDER BY name',
+    );
+    expect(rows).toHaveLength(2);
+    for (const row of rows)
+      expect(Math.abs(row.applied_at.getTime() - Date.now())).toBeLessThan(600_000);
+  });
+
+  it('rejects malformed, out-of-order and core-owned module migrations before running any', async () => {
+    await expect(
+      db.migrate([{ name: 'bad name' as never, sql: 'SELECT 1' }]),
+    ).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+    await expect(
+      db.migrate([
+        { name: 'mod/0002_b', sql: 'SELECT 1' },
+        { name: 'mod/0001_a', sql: 'SELECT 1' },
+      ]),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    await expect(db.migrate([{ name: 'core/0003_x', sql: 'SELECT 1' }])).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+    const { rows } = await db.query("SELECT name FROM compute_migrations WHERE name LIKE 'mod/%'");
+    expect(rows).toEqual([]);
+  });
+
+  it('cannot run inside a transaction', async () => {
+    await expect(db.transaction(() => db.migrate())).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+  });
+});
+
+describe('base schema', () => {
+  it('creates every v0.1 table and none of the later ones', async () => {
+    const { rows } = await db.query<{ name: string }>(
+      `SELECT table_name::text AS name FROM information_schema.tables
+       WHERE table_schema = 'public' ORDER BY table_name`,
+    );
+    const names = rows.map((row) => row.name);
+    expect(names.sort()).toEqual(
+      [...baseTables, 'compute_migrations', 'compute_schema_version'].sort(),
+    );
+    for (const table of laterTables) expect(names).not.toContain(table);
+  });
+
+  it('installs btree_gist and defines compute_now()', async () => {
+    const extension = await db.query("SELECT 1 FROM pg_extension WHERE extname = 'btree_gist'");
+    expect(extension.rowCount).toBe(1);
+    const fn = await db.query<{ volatility: string; type: string }>(
+      `SELECT provolatile::text AS volatility, prorettype::regtype::text AS type FROM pg_proc
+       WHERE proname = 'compute_now'`,
+    );
+    expect(fn.rows).toEqual([{ volatility: 's', type: 'timestamp with time zone' }]);
+  });
+
+  it('guards device_bookings with EXCLUDE USING gist and a non-empty range', async () => {
+    expect(await constraints('device_bookings')).toEqual(
+      expect.arrayContaining([
+        { type: 'x', definition: 'EXCLUDE USING gist (device_id WITH =, during WITH &&)' },
+        { type: 'c', definition: 'CHECK ((NOT isempty(during)))' },
+      ]),
+    );
+  });
+
+  it('backs the guarded counters with CHECKs', async () => {
+    expect(await constraints('node_resources')).toEqual(
+      expect.arrayContaining([
+        {
+          type: 'c',
+          definition:
+            'CHECK (((allocated >= 0) AND ((allocated)::numeric <= floor(((allocatable)::numeric * ratio)))))',
+        },
+      ]),
+    );
+    expect(await constraints('quota_usage')).toEqual(
+      expect.arrayContaining([
+        { type: 'c', definition: 'CHECK (((used >= 0) AND (used <= max)))' },
+      ]),
+    );
+  });
+
+  it('scopes reservation idempotency keys to (tenant, owner identity)', async () => {
+    expect(await constraints('reservations')).toEqual(
+      expect.arrayContaining([
+        { type: 'u', definition: 'UNIQUE (tenant_id, owner_identity_id, idempotency_key)' },
+      ]),
+    );
+  });
+
+  it('keeps per-node command sequences and keys unique', async () => {
+    expect(await constraints('commands')).toEqual(
+      expect.arrayContaining([
+        { type: 'u', definition: 'UNIQUE (node_id, seq)' },
+        { type: 'u', definition: 'UNIQUE (node_id, idempotency_key)' },
+      ]),
+    );
+  });
+
+  it('creates the partial indexes of §8.3', async () => {
+    expect(await indexDefinition('iam_inbox_pending')).toBe(
+      'CREATE INDEX iam_inbox_pending ON public.iam_inbox USING btree (tenant_id, sequence) WHERE (processed_at IS NULL)',
+    );
+    expect(await indexDefinition('nodes_hardware_key')).toBe(
+      'CREATE UNIQUE INDEX nodes_hardware_key ON public.nodes USING btree (hardware_key) WHERE hardware_key_trusted',
+    );
+  });
+
+  it('stamps outbox rows with the writing transaction id', async () => {
+    const { rows } = await db.query<{ type: string; default: string }>(
+      `SELECT format_type(a.atttypid, a.atttypmod) AS type, pg_get_expr(d.adbin, d.adrelid) AS default
+       FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+       WHERE a.attrelid = 'outbox'::regclass AND a.attname = 'txid'`,
+    );
+    expect(rows).toEqual([{ type: 'xid8', default: 'pg_current_xact_id()' }]);
+  });
+
+  it('defaults timestamps to compute_now(), never the bare server clock', async () => {
+    const { rows } = await db.query<{ definition: string }>(
+      `SELECT pg_get_expr(d.adbin, d.adrelid) AS definition FROM pg_attrdef d
+       JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+       JOIN pg_class c ON c.oid = d.adrelid
+       WHERE c.relnamespace = 'public'::regnamespace
+         AND format_type(a.atttypid, a.atttypmod) = 'timestamp with time zone'`,
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(row.definition).toBe('compute_now()');
+  });
+});
+
+describe('compute_now()', () => {
+  it('reads the server clock until the sim clock is used', async () => {
+    expect(await computeNowMode(db)).toBe('system');
+    const { rows } = await db.query<{ now: Date }>('SELECT compute_now() AS now');
+    expect(Math.abs(rows[0]!.now.getTime() - Date.now())).toBeLessThan(600_000);
+  });
+
+  it('follows the sim clock and returns to the system clock', async () => {
+    const start = Date.UTC(2010, 5, 1, 12);
+    await useSimClock(db, start);
+    try {
+      expect(await computeNowMode(db)).toBe('sim');
+      const read = async () =>
+        (await db.query<{ now: Date }>('SELECT compute_now() AS now')).rows[0]!.now.getTime();
+      expect(await read()).toBe(start);
+      await setSimClock(db, start + 1_500);
+      expect(await read()).toBe(start + 1_500);
+      await setSimClock(db, start + 1_500);
+      await expect(setSimClock(db, start)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      await expect(setSimClock(db, -1)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      // Inside one transaction the clock moves with each statement.
+      await db.transaction(async (tx) => {
+        await setSimClock(tx, start + 60_000);
+        expect(await read()).toBe(start + 60_000);
+      });
+    } finally {
+      await restoreSystemClock(db);
+    }
+    expect(await computeNowMode(db)).toBe('system');
+  });
+
+  it('refuses setSimClock before useSimClock', async () => {
+    const fresh = pglite();
+    try {
+      await fresh.migrate();
+      await expect(setSimClock(fresh, 1_000)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      expect(await computeNowMode(fresh)).toBe('system');
+    } finally {
+      await fresh.close();
+    }
+  });
+
+  it('reports a missing compute_now() before migration', async () => {
+    const fresh = pglite();
+    try {
+      expect(await computeNowMode(fresh)).toBe('missing');
+    } finally {
+      await fresh.close();
+    }
+  });
+});
+
+describe('check-sql-now', () => {
+  it('exempts only the migration that defines compute_now(), and the package passes it', async () => {
+    const root = fileURLToPath(new URL('../packages/postgres/src/', import.meta.url));
+    const files = [];
+    for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
+      const file = join(entry.parentPath, entry.name);
+      files.push({
+        path: `packages/postgres/src/${relative(root, file).replaceAll('\\', '/')}`,
+        source: await readFile(file, 'utf8'),
+      });
+    }
+    const definers = files.filter((file) => definesComputeNow(file.path, file.source));
+    expect(definers.map((file) => file.path)).toEqual([
+      'packages/postgres/src/migrations/0001_clock.ts',
+    ]);
+    expect(checkSqlNow(files)).toEqual([]);
+  });
+});
+
+describe('store conformance on PGlite (one shared database)', () => {
+  const cases = storeConformanceCases();
+  it('marks the concurrency cases postgresOnly', () => {
+    const concurrent = cases.filter((test) => test.postgresOnly);
+    expect(concurrent.length).toBeGreaterThanOrEqual(6);
+    expect(concurrent.every((test) => test.name.startsWith('concurrency:'))).toBe(true);
+  });
+  for (const test of cases.filter((entry) => !entry.postgresOnly))
+    it(test.name, async () => {
+      await test.run(db);
+    });
+});
+
+describe('store conformance on PGlite (a fresh database per case)', () => {
+  for (const test of storeConformanceCases().filter((entry) => !entry.postgresOnly))
+    it(test.name, async () => {
+      const fresh = pglite();
+      try {
+        await test.run(fresh);
+      } finally {
+        await fresh.close();
+      }
+    });
+});

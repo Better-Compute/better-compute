@@ -1,0 +1,42 @@
+{
+  "hello": {
+    "nodeId": "node_01J8Z3Q4X5Y6Z7A8B9C0D1E2F3",
+    "bootId": "3f1c2a9e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+    "journalId": "jrn_01J8Z3Q4X5Y6Z7A8B9C0D1E2F4",
+    "role": "AGENT_ROLE_NODE",
+    "daemonVersion": "0.1.0",
+    "protoMin": 1,
+    "protoMax": 1,
+    "capabilities": ["cdi", "nvml"],
+    "drivers": [
+      {
+        "id": "nvidia",
+        "version": "0.1.0",
+        "kinds": ["config"],
+        "runsOn": "RUNS_ON_NODE",
+        "configSchemaJson": "{\"type\":\"object\"}"
+      }
+    ],
+    "lastEpoch": "6",
+    "appliedGeneration": "3",
+    "unackedResults": [
+      {
+        "commandId": "cmd_01J8Z3R0000000000000000001",
+        "state": "COMMAND_STATE_SUCCEEDED",
+        "result": "CAEQAhoJNTgwLjY1LjA2Ig0KCW52bWwuaW5pdBABIg0KCWdwdS5jb3VudBABKkMKKEdQVS00YzFmMmUzZC0wYTFiLTRjNWQtOGU5Zi0wYTFiMmMzZDRlNWYQARoVChFlY2MudW5jb3JyZWN0YWJsZRABKkMKKEdQVS05ZThkN2M2Yi01YTRmLTRlM2QtMmMxYi0wYTlmOGU3ZDZjNWIQARoVChFlY2MudW5jb3JyZWN0YWJsZRAB",
+        "bootId": "3f1c2a9e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+        "nodeSig": {
+          "kid": "lJ3xk0kS2k3m5n6p7q8r9s0t1u2v3w4x5y6z7a8b9c0",
+          "sig": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWg=="
+        }
+      }
+    ],
+    "lastEventSeq": "42",
+    "inventoryHashes": {
+      "cpu": "Tt+gk5939sCSrjjL7G4Y22hVzzIGkLE4MoxuG+HYtGA=",
+      "gpus": "Q7OwFZswnitOrp3oC4Tg7SKzZZvpJIIrz+NlWNr6Fx0=",
+      "system": "hr9/MHDvRBjCEpxsmoe0hgYvZRvbfJbYNo62np2DMFQ="
+    },
+    "appliedSpecHash": "OnmPF3Z8UABpzzFpx8SvCsXQKLFZpoKtVinzsFQtpBM="
+  }
+}

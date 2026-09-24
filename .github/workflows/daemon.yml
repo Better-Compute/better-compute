@@ -1,0 +1,47 @@
+name: daemon
+# The Go daemon `bcd` (PLAN.md §6). Logic builds and tests use the fake-hardware tags on every OS;
+# the default (NVML, cgo) build is vetted on Linux, the only release target. Release artifacts come
+# from goreleaser in release.yml (v0.1); here `goreleaser check` only validates daemon/.goreleaser.yaml.
+on:
+  push:
+    branches: [main]
+    paths: ['daemon/**', 'proto/**', '.github/workflows/daemon.yml']
+  pull_request:
+    paths: ['daemon/**', 'proto/**', '.github/workflows/daemon.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: daemon-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+jobs:
+  go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+      - name: go vet (fake hardware)
+        run: go vet -tags nonvml,fakehw ./...
+      - name: go vet (NVML build)
+        if: runner.os == 'Linux'
+        run: go vet ./...
+      - name: go test
+        run: go test -tags nonvml,fakehw ./...
+      - name: goreleaser check
+        if: runner.os == 'Linux'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
+          workdir: daemon

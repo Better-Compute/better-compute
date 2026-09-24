@@ -1,0 +1,771 @@
+// The daemon ↔ control-plane protocol (PLAN.md §7): join, renew, the bidi Session stream and its
+// frames, desired state (NodeSpec) and tunnels.
+//
+// Stability: FROZEN at the end of P0. Changes are additive only (`buf breaking`, FILE). Messages and
+// fields marked (v0.2)…(v0.5) are part of the frozen shape but unused until that phase.
+//
+// Transport (§7.1): the daemon dials gw.<region>:443 through an L4 TLS-passthrough load balancer.
+// Join is server-authenticated TLS pinned to the gateway serving CA; every other RPC is mTLS with
+// the node certificate. The gateway relays; it holds no CA or signing keys (P14): Join, Renew and
+// SecretRequest are forwarded to the api's JoinService / secret broker, which verify node proofs
+// themselves.
+//
+// Session lifecycle (§7.2):
+//   1. The first AgentFrame is Hello. The gateway checks the chain, revocation and role, and that
+//      the certificate SAN equals Hello.node_id, then bumps node_sessions.session_epoch in one tx.
+//   2. The first ServerFrame is Welcome{epoch}. Then, if applied_generation < generation, a full
+//      DesiredState, then a replay of the node's non-terminal commands in seq order.
+//   3. The daemon replays unacked results (Hello.unacked_results) and events above
+//      Welcome.acked_event_seq; the control plane deduplicates and Acks.
+//
+// Epoch fencing: routing and liveness writes (dispatch marks, last_seen, disconnect) carry
+// `AND session_epoch = $myEpoch`, so a zombie gateway's writes fail. Results, events and status are
+// facts: they are accepted from any epoch, deduplicated by command_id and (node_id, journal_id,
+// seq), and observed_generation only moves forward (GREATEST).
+//
+// Errors outside frames use gRPC status codes: UNAUTHENTICATED (bad or revoked certificate),
+// PERMISSION_DENIED (role or SAN mismatch), RESOURCE_EXHAUSTED (handshake token bucket, retry with
+// jitter), ABORTED (superseded by a newer session of the same node).
+syntax = "proto3";
+
+package bettercompute.agent.v1;
+
+import "bettercompute/common/v1/common.proto";
+import "bettercompute/site/v1/site.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1;agentv1";
+
+// The gateway-facing service every bcd mode (node, site, ramdisk) talks to.
+service AgentGateway {
+  // Server-authenticated TLS (serving CA pinned). Forwarded to the api JoinService; the gateway
+  // cannot read the sealed token or forge the signed response.
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // mTLS, at ~60% of the certificate lifetime. Verified by the api JoinService, not the gateway.
+  rpc Renew(RenewRequest) returns (RenewResponse);
+  // mTLS. One live session per node; a newer session supersedes an older one (ABORTED).
+  rpc Session(stream AgentFrame) returns (stream ServerFrame);
+  // (v0.3) mTLS. Opened by the daemon after it verified an OpenTunnel ticket.
+  rpc Tunnel(stream TunnelFrame) returns (stream TunnelFrame);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Join and renew (§3.3, §6)
+
+message JoinRequest {
+  // UTF-8 compact JWE of the join token ("bcjt_<id>.<secret>") to the pinned JoinService
+  // encryption key. The token is read from BCD_JOIN_TOKEN or stdin only and never stored.
+  bytes sealed_token = 1;
+  // DER PKCS#10 CSR for a fresh P-256 key (TPM-resident when available).
+  bytes csr = 2;
+  HardwareClaims claims = 3;
+  // Attestor that verifies this join: "join-token" (v0.1); "x509pop", "provisioned", "discovery"
+  // (v0.2); "cloud-iid" (v0.3); "tpm" (v0.5). Empty means "join-token".
+  string attestor = 4;
+  // Attestor-specific evidence (v0.2+), e.g. a site agent's SignedDiscoveryAssertion.
+  bytes attestation = 5;
+  string daemon_version = 6;
+  // The role the agent runs as. The token decides what is allowed; a mismatch is rejected.
+  bettercompute.common.v1.AgentRole role = 7;
+}
+
+// What the daemon reports about its hardware at join. JoinService derives `hardware_key` =
+// sha256(product_uuid ‖ product_serial ‖ sorted permanent MACs ‖ sorted GPU UUIDs) after dropping
+// placeholder values, and enforces the token's `expect` binding and reclaim rules.
+message HardwareClaims {
+  // /sys/class/dmi/id/product_uuid, lowercase.
+  string product_uuid = 1;
+  // /sys/class/dmi/id/product_serial.
+  string product_serial = 2;
+  string board_serial = 3;
+  string chassis_serial = 4;
+  string sys_vendor = 5;
+  string product_name = 6;
+  // Permanent MAC addresses of physical NICs, lowercase colon form.
+  repeated string permanent_macs = 7;
+  repeated string gpu_uuids = 8;
+  // BMC MAC when readable in-band.
+  string bmc_mac = 9;
+  string hostname = 10;
+  string boot_id = 11;
+}
+
+message JoinResponse {
+  // Serialized JoinResponseBody.
+  bytes body = 1;
+  // Pinned JoinService signing key. Purpose "join-response", parts [body].
+  bettercompute.common.v1.Signature sig = 2;
+}
+
+message JoinResponseBody {
+  string node_id = 1;
+  // DER certificates, leaf first. The leaf has URI SAN spiffe://<td>/site/<site>/node/<node_id>
+  // and a role OID; no tenant.
+  repeated bytes cert_chain = 2;
+  // Command/spec signing trust (empty roots in v0.1).
+  bettercompute.common.v1.TrustBundle trust = 3;
+  // SHA-256 of JoinRequest.csr: the daemon rejects a response that is not for its own CSR.
+  bytes csr_sha256 = 4;
+  string trust_domain = 5;
+  string site_id = 6;
+  bettercompute.common.v1.AgentRole role = 7;
+  // Server time at issue, for a first clock-offset estimate.
+  google.protobuf.Timestamp issued_at = 8;
+}
+
+message RenewRequest {
+  // DER PKCS#10 CSR (a new key, or the current one).
+  bytes csr = 1;
+  // The current certificate chain, leaf first.
+  repeated bytes chain = 2;
+  google.protobuf.Timestamp client_time = 3;
+  // Proof of possession by the CURRENT node key. Purpose "renew-pop", parts
+  // [sha256(csr), node_id, client_time]. Accepted within ±60 s of server time; 120 s replay cache.
+  bytes pop_sig = 4;
+}
+
+message RenewResponse {
+  // DER certificates, leaf first.
+  repeated bytes cert_chain = 1;
+  google.protobuf.Timestamp not_after = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Session frames (§7.7)
+
+message AgentFrame {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    CommandUpdate update = 3;
+    EventBatch events = 4;
+    StatusReport status = 5;
+    InventorySection inventory = 6;
+    SpecRequest spec_request = 7;
+    SecretRequest secret_request = 8;
+  }
+}
+
+message ServerFrame {
+  oneof msg {
+    Welcome welcome = 1;
+    Command command = 2;
+    Cancel cancel = 3;
+    DesiredState desired = 4;
+    Ack ack = 5;
+    OpenTunnel open_tunnel = 6;
+    Drain drain = 7;
+    RevocationNotice revoked = 8;
+    SecretResponse secret = 9;
+  }
+}
+
+// The first frame of every session. Kept small for reconnect storms: inventory travels as hashes.
+message Hello {
+  // Must equal the node id in the certificate SAN.
+  string node_id = 1;
+  string boot_id = 2;
+  // The journal's id. A change (journal lost: ramdisk reboot, reinstall, corruption) makes the
+  // control plane fail in-flight commands with retry_safe=false ("journal-lost") instead of
+  // replaying them.
+  string journal_id = 3;
+  bettercompute.common.v1.AgentRole role = 4;
+  string daemon_version = 5;
+  // Supported protocol range (PROTOCOL_VERSION in @better-compute/protocol). Below the server's
+  // minimum the session is restricted to daemon.upgrade (Welcome.upgrade_required).
+  uint32 proto_min = 6;
+  uint32 proto_max = 7;
+  repeated string capabilities = 8;
+  repeated bettercompute.common.v1.DriverManifest drivers = 9;
+  // The last session epoch this daemon saw (0 if none); diagnostics only.
+  uint64 last_epoch = 10;
+  // The newest NodeSpec generation the daemon holds (converged or not).
+  uint64 applied_generation = 11;
+  // Terminal results not yet acked; the control plane dedupes by command_id.
+  repeated CommandUpdate unacked_results = 12;
+  // Commands the journal holds as running; the control plane does not re-send them.
+  repeated string running_command_ids = 13;
+  // The highest event seq written in this journal.
+  uint64 last_event_seq = 14;
+  // Inventory section name → SHA-256 of its InventorySection.content. The control plane asks for
+  // sections whose hash differs (Welcome.request_sections).
+  map<string, bytes> inventory_hashes = 15;
+  // DesiredStateBody.spec_hash of the applied generation, echoed so the control plane can detect a
+  // divergent spec and resend a full one.
+  bytes applied_spec_hash = 16;
+}
+
+message Welcome {
+  // node_sessions.session_epoch after this Hello's bump.
+  uint64 epoch = 1;
+  string session_id = 2;
+  string gateway_id = 3;
+  // The negotiated version: the highest version inside both ranges.
+  uint32 protocol_version = 4;
+  // Heartbeat period (10 000 ms by default). Three missed heartbeats close the session.
+  uint32 heartbeat_interval_ms = 5;
+  // Liveness lease TTL (40 000 ms by default).
+  uint32 lease_ttl_ms = 6;
+  // Per-lane in-flight limits the gateway keeps outstanding (control 8, provision 4, bulk 2).
+  repeated LaneCredits credits = 7;
+  // Cumulative ack for Hello.journal_id; the daemon resends events with a higher seq.
+  uint64 acked_event_seq = 8;
+  // Inventory sections to send now (hash mismatch or never seen).
+  repeated string request_sections = 9;
+  // Server time (compute_now()). The daemon keeps the offset to its own clock and evaluates
+  // not_after and not_before in server time.
+  google.protobuf.Timestamp server_time = 10;
+  // Newer signing trust, if any. Only accepted when signed by the pinned JoinService key and newer
+  // than the bundle the daemon holds.
+  bettercompute.common.v1.SignedTrustBundle trust = 11;
+  // The daemon is below the server's proto_min: only daemon.upgrade is accepted (v0.4).
+  bool upgrade_required = 12;
+  repeated string capabilities = 13;
+}
+
+message LaneCredits {
+  bettercompute.common.v1.Lane lane = 1;
+  uint32 credits = 2;
+}
+
+message Heartbeat {
+  // Free credits per lane right now; the gateway resynchronises its counters from them.
+  repeated LaneCredits credits = 1;
+  NodeLoad load = 2;
+  // Every 10th heartbeat: the same map as Hello.inventory_hashes; empty otherwise.
+  map<string, bytes> inventory_hashes = 3;
+  uint64 applied_generation = 4;
+}
+
+// Coarse load for admission and dashboards. Telemetry proper never uses the session (P8).
+message NodeLoad {
+  // 1-minute load average.
+  double load_average_1m = 1;
+  uint64 memory_available_bytes = 2;
+  // Commands currently running across lanes.
+  uint32 running_commands = 3;
+  // Unacked events in the journal.
+  uint32 pending_events = 4;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commands (§7.3, §7.4, §6 "Command semantics")
+
+// A one-shot action. Delivery is at-least-once; the daemon's journal makes it at-most-once in
+// effect. The control plane stores `body` and `signature` verbatim and resends the same bytes.
+message Command {
+  // Serialized CommandBody.
+  bytes body = 1;
+  // Worker signing key. Purpose "command", parts [body]. Optional in v0.1; required for destructive
+  // kinds from v0.2 and for all kinds from v0.4 (the daemon's own kind table decides, never a flag
+  // an unsigned body could carry).
+  bettercompute.common.v1.Signature signature = 2;
+  // Delivery attempt (1-based). Outside the signature: informational only.
+  uint32 attempt = 3;
+}
+
+message CommandBody {
+  // ULID; the journal's dedupe key.
+  string id = 1;
+  // Must equal the session's node id; anything else is rejected UNSUPPORTED.
+  string node_id = 2;
+  // Per-node monotonic sequence (nodes.next_cmd_seq); resume replays in seq order.
+  uint64 seq = 3;
+  // Registered kind, e.g. "diag.nvml". Unknown or role-disallowed kinds → REJECTED/UNSUPPORTED.
+  string kind = 4;
+  // The kind's request message (commands.proto), e.g. bettercompute.agent.v1.DiagNvmlRequest.
+  google.protobuf.Any payload = 5;
+  bettercompute.common.v1.Lane lane = 6;
+  // Server time after which the command must not start. Checked before accepting (REJECTED/
+  // EXPIRED); the CommandSweeper expires undelivered commands at the same instant.
+  google.protobuf.Timestamp not_after = 7;
+  // The NodeSpec generation the command presupposes. If the daemon's applied generation is lower
+  // it sends SpecRequest and defers; still lower at not_after → REJECTED/STALE_GENERATION. 0 = none.
+  uint64 min_generation = 8;
+  // Safe to execute again when the journal shows `accepted` but not `running` after a crash.
+  // Otherwise that case reports FAILED{"interrupted"} for the controller to decide.
+  bool retry_safe = 9;
+  // UNIQUE(node_id, idempotency_key); workflow steps use "wf:<id>:<stepId>".
+  string idempotency_key = 10;
+  // W3C trace context, propagated api → worker → gateway → daemon → driver.
+  string traceparent = 11;
+  // The side effect ends this daemon process (node.reboot, boot.kexec, daemon.upgrade). The journal
+  // fsyncs running{boot_id} right before it; after restart with another boot_id (or on rejoin
+  // with another role) it completes as SUCCEEDED{rebooted}. Never replayed.
+  bool self_terminating = 12;
+  // The result is a "this node says" statement: CommandUpdate.node_sig is required (v0.2) and the
+  // worker verifies it against node_certs before any state transition.
+  bool attested = 13;
+  // (v0.2) The workflow step this command executes; SecretRequest binds secrets to it.
+  string workflow_id = 14;
+  string step_id = 15;
+}
+
+// Progress and outcome of one command. Terminal updates are journaled until acked and replayed in
+// Hello.unacked_results after a reconnect.
+message CommandUpdate {
+  string command_id = 1;
+  // One of ACKED, RUNNING, SUCCEEDED, FAILED, REJECTED, CANCELLED.
+  bettercompute.common.v1.CommandState state = 2;
+  // The kind's serialized result message (commands.proto), when there is one.
+  bytes result = 3;
+  // The boot the daemon was in when it produced this update.
+  string boot_id = 4;
+  // Node key, for attested kinds (v0.2). Purpose "command-update", parts
+  // [command_id, uint32_be(state), sha256(result)].
+  bettercompute.common.v1.Signature node_sig = 5;
+  // Set when state is REJECTED.
+  bettercompute.common.v1.CommandRejectReason reject_reason = 6;
+  // Set when state is FAILED.
+  CommandError error = 7;
+  // A self-terminating command completed by the reboot/exec it caused.
+  bool rebooted = 8;
+}
+
+message CommandError {
+  // Stable lowercase code: "interrupted" (accepted, not retry-safe, daemon restarted),
+  // "invalid-payload", "internal", or a kind- or driver-specific code.
+  string code = 1;
+  string message = 2;
+}
+
+// Stop a command between actions. Never hides a completed side effect: the daemon reports the real
+// outcome, or CANCELLED if nothing ran.
+message Cancel {
+  string command_id = 1;
+  string reason = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Desired state (§7.3, §6 converger)
+
+// Generation-numbered desired state. Signed like commands; the daemon stores the last full spec,
+// its hash and signature in the journal and enforces it while offline.
+message DesiredState {
+  // Serialized DesiredStateBody.
+  bytes body = 1;
+  // Worker signing key. Purpose "desired-state", parts [body]. Optional in v0.1; required when the
+  // spec changes `access` (v0.2) and always from v0.4.
+  bettercompute.common.v1.Signature signature = 2;
+}
+
+message DesiredStateBody {
+  string node_id = 1;
+  // Monotonic. A generation not greater than the applied one is ignored.
+  uint64 generation = 2;
+  // 0 for a full spec. For a patch: the generation it applies to; a daemon at any other generation
+  // discards the patch and sends SpecRequest{PATCH_BASE_MISMATCH}.
+  uint64 base_generation = 3;
+  // Opaque id of the full spec at `generation` (SHA-256 over the control plane's canonical
+  // encoding). The daemon never recomputes it; it echoes it as applied_spec_hash.
+  bytes spec_hash = 4;
+  oneof spec {
+    NodeSpec full = 5;
+    // Section-level patch: every section that is SET replaces that section wholesale (an empty
+    // section message clears it); unset sections keep their current value.
+    NodeSpec patch = 6;
+  }
+  string traceparent = 7;
+}
+
+// What the node should look like. The converger runs one idempotent plan(desired, observed) +
+// apply per section; observed_generation advances only when every section converged or failed
+// terminally. A section a daemon does not know arrives as an unknown field: the daemon reports
+// condition "SectionUnsupported" (reason = the field number) and converges the rest.
+message NodeSpec {
+  HostSection host = 1;
+  DevicesSection devices = 2;
+  // (v0.3)
+  InstancesSection instances = 3;
+  // (v0.3) Empty in v0.1.
+  AccessSection access = 4;
+  TelemetrySection telemetry = 5;
+  // (v0.4)
+  DaemonSection daemon = 6;
+  // (v0.2, site agents only) DRAFT: its content is defined in site/v1, which is not yet frozen.
+  bettercompute.site.v1.SiteSpec site = 7;
+}
+
+// Host configuration units (profile hostConfig, v0.2): nvidia-driver, container-toolkit,
+// mig-layout, fabric-manager, sysctl, … Converged continuously so drift is corrected.
+message HostSection {
+  repeated ConfigUnit units = 1;
+}
+
+message ConfigUnit {
+  // The config driver id, e.g. "nvidia-driver".
+  string unit = 1;
+  // Canonical JSON (RFC 8785) validated against the unit's manifest by the control plane.
+  string config_json = 2;
+}
+
+// Device assignments (§3.4 step 9). The daemon rejects overlapping assignments, writes the CDI spec
+// /etc/cdi/bcd-<allocation_id>.json, an env file and device ownership, then reports a node-signed
+// AllocationBound; removing an assignment releases it (AllocationReleased). The daemon never drops
+// an assignment on its own, not even while disconnected (P6).
+message DevicesSection {
+  repeated DeviceAssignment assignments = 1;
+}
+
+message DeviceAssignment {
+  string allocation_id = 1;
+  string reservation_id = 2;
+  Binding binding = 3;
+  repeated AssignedDevice devices = 4;
+  // (v0.3) Set when binding is BINDING_INSTANCE.
+  string instance_id = 5;
+  // Extra "KEY=VALUE" lines for the allocation's env file.
+  repeated string env = 6;
+}
+
+message AssignedDevice {
+  // Atom id: GPU UUID, "<gpuUuid>/gi<g>/ci<c>" (v0.5), "<gpuUuid>/s<k>" (v0.5), disk WWN, …
+  string id = 1;
+  // Device class: "gpu", "gpu.mig", "gpu.slot", "nic.vf", "disk".
+  string device_class = 2;
+}
+
+// How an allocation is consumed (§10.5).
+enum Binding {
+  BINDING_UNSPECIFIED = 0;
+  // CDI hold, consumed by an operator-run workload manager on the node (v0.1).
+  BINDING_HOLD = 1;
+  // Passed to a VPS instance (v0.3).
+  BINDING_INSTANCE = 2;
+  // The whole node, for a tenant deploy (v0.5).
+  BINDING_NODE = 3;
+}
+
+// (v0.3) VPS instances on this host; the daemon converges each toward desired_state.
+message InstancesSection {
+  repeated InstanceSpec instances = 1;
+}
+
+message InstanceSpec {
+  string instance_id = 1;
+  InstanceDesiredState desired_state = 2;
+  // Runtime driver id, e.g. "libvirt-kvm", "cloud-hypervisor".
+  string runtime = 3;
+  string allocation_id = 4;
+  uint32 vcpu = 5;
+  uint64 memory_bytes = 6;
+  uint64 disk_bytes = 7;
+  ImageRef image = 8;
+  // Secret ref of the NoCloud user-data, fetched with SecretRequest{allocation_id}.
+  string user_data_ref = 9;
+  // GPU atoms passed through with VFIO (never overcommitted).
+  repeated string gpu_device_ids = 10;
+  repeated InstanceNic nics = 11;
+}
+
+enum InstanceDesiredState {
+  INSTANCE_DESIRED_STATE_UNSPECIFIED = 0;
+  INSTANCE_DESIRED_STATE_RUNNING = 1;
+  INSTANCE_DESIRED_STATE_STOPPED = 2;
+  INSTANCE_DESIRED_STATE_DELETED = 3;
+}
+
+// A content-addressed image the daemon may fetch and cache.
+message ImageRef {
+  // Catalog reference, e.g. "ubuntu-24.04-cloud@2026.09".
+  string ref = 1;
+  string url = 2;
+  bytes sha256 = 3;
+  // "raw" or "qcow2".
+  string format = 4;
+  // "" or "zstd".
+  string compression = 5;
+}
+
+message InstanceNic {
+  // Bridge or network name on the host.
+  string network = 1;
+  string mac = 2;
+  // Addresses assigned by IPAM, CIDR form.
+  repeated string addresses = 3;
+}
+
+// (v0.3) Interactive access material. Empty in v0.1.
+message AccessSection {
+  // JWKS (JSON) the daemon verifies exec tickets against (§7.6).
+  string exec_ticket_jwks_json = 1;
+  // OpenSSH-format public keys of the compute SSH CA trusted for break-glass certificates.
+  repeated string ssh_ca_public_keys = 2;
+  // Principals such certificates may use.
+  repeated string ssh_principals = 3;
+}
+
+// Where bcd sends its own telemetry (OTLP). Never the session or Postgres (P8).
+message TelemetrySection {
+  // Empty disables export.
+  string otlp_endpoint = 1;
+  uint32 export_interval_ms = 2;
+  // Extra "key=value" resource attributes.
+  repeated string resource_attributes = 3;
+  // Secret ref of the exporter's auth headers, fetched with SecretRequest.
+  string headers_ref = 4;
+}
+
+// (v0.4) Self-update target; the Rollout controller sets it within the disruption budget.
+message DaemonSection {
+  string version = 1;
+  string url = 2;
+  bytes sha256 = 3;
+  // Detached release signature over the artifact.
+  bytes signature = 4;
+}
+
+// Ask for a full DesiredState.
+message SpecRequest {
+  uint64 have_generation = 1;
+  SpecRequestReason reason = 2;
+}
+
+enum SpecRequestReason {
+  SPEC_REQUEST_REASON_UNSPECIFIED = 0;
+  // A patch's base_generation is not the applied generation.
+  SPEC_REQUEST_REASON_PATCH_BASE_MISMATCH = 1;
+  // A command's min_generation is above the applied generation.
+  SPEC_REQUEST_REASON_MIN_GENERATION = 2;
+  // The journal holds no usable spec (new journal, corruption, failed signature check).
+  SPEC_REQUEST_REASON_NO_SPEC = 3;
+}
+
+// Convergence state, coalesced latest-wins.
+message StatusReport {
+  // Every section converged or failed terminally at this generation. Never regresses on the
+  // control plane (GREATEST).
+  uint64 observed_generation = 1;
+  // The newest generation held (converging or converged).
+  uint64 applied_generation = 2;
+  bytes applied_spec_hash = 3;
+  repeated SectionStatus sections = 4;
+  // The node's full current condition set as seen by the daemon (health, drift, section errors).
+  repeated Condition conditions = 5;
+}
+
+message SectionStatus {
+  // NodeSpec section name: "host", "devices", "instances", "access", "telemetry", "daemon", "site".
+  string section = 1;
+  SectionState state = 2;
+  // The generation this status refers to.
+  uint64 generation = 3;
+  string reason = 4;
+  string message = 5;
+}
+
+enum SectionState {
+  SECTION_STATE_UNSPECIFIED = 0;
+  SECTION_STATE_CONVERGED = 1;
+  SECTION_STATE_PROGRESSING = 2;
+  // Failed terminally at this generation (e.g. an overlapping assignment).
+  SECTION_STATE_FAILED = 3;
+  SECTION_STATE_UNSUPPORTED = 4;
+}
+
+// A Kubernetes-style condition (PLAN.md §10.1).
+message Condition {
+  // e.g. "SectionUnsupported", "DriverMismatch", "Xid79" (v0.2).
+  string type = 1;
+  ConditionStatus status = 2;
+  string reason = 3;
+  string message = 4;
+  // When set, the condition concerns one device (atom id).
+  string device_id = 5;
+  // How long ago the daemon saw the last transition, on its monotonic clock. The control plane
+  // derives `since` from compute_now() (P9: agents report ages, not timestamps).
+  uint64 age_ms = 6;
+}
+
+enum ConditionStatus {
+  CONDITION_STATUS_UNSPECIFIED = 0;
+  CONDITION_STATUS_TRUE = 1;
+  CONDITION_STATUS_FALSE = 2;
+  CONDITION_STATUS_UNKNOWN = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inventory (§10.1)
+
+// One inventory section, sent when Welcome.request_sections asks for it, when inventory.refresh
+// runs, or when a re-collection changes its hash.
+message InventorySection {
+  // Section name (INVENTORY_SECTIONS): "system", "cpu", "memory", "disks", "nics", "gpus", "bmc",
+  // "os". It selects the message type of `content`.
+  string section = 1;
+  // SHA-256 of `content`. The control plane verifies it and compares it with the hash stored
+  // with the last accepted section; it never re-encodes to compare.
+  bytes sha256 = 2;
+  // Binary encoding of the canonicalized section message from inventory.proto (e.g. GpusSection):
+  // arrays sorted by their stable key, no volatile values.
+  bytes content = 3;
+  // Daemon clock, corrected by the Welcome offset; advisory.
+  google.protobuf.Timestamp collected_at = 4;
+  // NodeInventory schema version of `content` (1).
+  uint32 schema_version = 5;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Events (§7.4 "Events")
+
+// Journaled events, sent in seq order. Results and transitions are never dropped; metric-like
+// events are dropped oldest-first when the journal is full.
+message EventBatch {
+  // The journal the seqs belong to (Hello.journal_id).
+  string journal_id = 1;
+  repeated Event events = 2;
+}
+
+message Event {
+  // Per journal_id, strictly increasing from 1. Cumulatively acked (Ack.event_seq); deduplicated
+  // on (node_id, journal_id, seq).
+  uint64 seq = 1;
+  // Daemon clock, corrected by the Welcome offset; advisory.
+  google.protobuf.Timestamp observed_at = 2;
+  oneof body {
+    AttestedReport attested = 10;
+    AllocationFailed allocation_failed = 11;
+  }
+}
+
+// A node-signed statement about allocations (§6 "Attested kinds").
+message AttestedReport {
+  // Serialized AttestedReportBody.
+  bytes body = 1;
+  // Node key. Purpose "attested-report", parts [body]. Optional in v0.1; required from v0.2, when
+  // workers verify it against node_certs before any state transition.
+  bettercompute.common.v1.Signature node_sig = 2;
+}
+
+message AttestedReportBody {
+  // The reporting node (must equal the session's node id).
+  string node_id = 1;
+  string boot_id = 2;
+  oneof report {
+    AllocationBound allocation_bound = 10;
+    AllocationReleased allocation_released = 11;
+  }
+}
+
+// The assignment is materialized: CDI spec, env file and device ownership are in place.
+message AllocationBound {
+  string allocation_id = 1;
+  // The NodeSpec generation that carried the assignment.
+  uint64 generation = 2;
+  repeated string device_ids = 3;
+  // Fully qualified CDI device names, e.g. "bcd.dev/gpu=GPU-…".
+  repeated string cdi_devices = 4;
+  // e.g. "/etc/cdi/bcd-<allocation_id>.json".
+  string cdi_spec_path = 5;
+  string env_file = 6;
+}
+
+// The assignment is gone: CDI spec and env file removed, ownership restored.
+message AllocationReleased {
+  string allocation_id = 1;
+  uint64 generation = 2;
+  repeated string device_ids = 3;
+}
+
+// The daemon refused or failed to materialize an assignment (e.g. overlap with a live one).
+message AllocationFailed {
+  string allocation_id = 1;
+  uint64 generation = 2;
+  // Stable lowercase code, e.g. "overlap", "device-missing", "cdi-write-failed".
+  string reason = 3;
+  string message = 4;
+}
+
+// Cumulative acknowledgement of durably stored events and results.
+message Ack {
+  string journal_id = 1;
+  // Every event with seq <= event_seq in journal_id is stored.
+  uint64 event_seq = 2;
+  // Terminal CommandUpdates stored; the journal may stop replaying them.
+  repeated string command_ids = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Secrets (§6 "Secrets")
+
+// Fetch one secret for current work. Forwarded to the api secret broker, which checks node_sig and
+// that the ref is bound to the agent's current step or allocation.
+message SecretRequest {
+  // "secret://…", "vault://…", "env://…".
+  string ref = 1;
+  string workflow_id = 2;
+  string step_id = 3;
+  string allocation_id = 4;
+  // Fresh ephemeral P-256 public key, uncompressed SEC1 point (65 bytes). Used once.
+  bytes epk = 5;
+  // Node key. Purpose "secret-request", parts
+  // [request_id, ref, workflow_id, step_id, allocation_id, epk].
+  bettercompute.common.v1.Signature node_sig = 6;
+  // Correlates the SecretResponse.
+  string request_id = 7;
+}
+
+message SecretResponse {
+  string ref = 1;
+  // Compact JWE (ECDH-ES+A256KW / A256GCM) to SecretRequest.epk. Gateways only see ciphertext.
+  string jwe = 2;
+  string request_id = 3;
+  // Set instead of jwe on refusal: "not-found", "not-bound", "access-denied", "unavailable".
+  string error = 4;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Session control
+
+// Reconnect elsewhere (rolling deploys, rebalancing). The daemon closes the session and redials
+// after the delay, keeping its journal.
+message Drain {
+  // rand(0, 60 s) by default.
+  uint32 reconnect_after_ms = 1;
+  string reason = 2;
+}
+
+// This agent's certificate was revoked; the gateway closes the session right after sending it.
+// The daemon stops using the certificate and does not redial with it.
+message RevocationNotice {
+  string reason = 1;
+  // Serial numbers of the revoked certificates.
+  repeated bytes serials = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tunnels (v0.3, §7.6)
+
+// Ask the daemon to open a Tunnel stream. The daemon re-verifies the ticket against the
+// AccessSection JWKS and its jti set before opening it.
+message OpenTunnel {
+  string tunnel_id = 1;
+  // Exec ticket: ES256 JWT, 60 s, single-use jti, aud "node:<id>", sid, op.
+  string ticket = 2;
+}
+
+message TunnelFrame {
+  string tunnel_id = 1;
+  // 0 = stdin/stdout or the byte stream, 1 = stderr.
+  uint32 channel = 2;
+  oneof body {
+    // The daemon's first frame on the stream.
+    TunnelOpened opened = 10;
+    bytes data = 11;
+    TerminalSize resize = 12;
+    TunnelClosed closed = 13;
+  }
+}
+
+message TunnelOpened {}
+
+message TerminalSize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message TunnelClosed {
+  int32 exit_code = 1;
+  string reason = 2;
+}

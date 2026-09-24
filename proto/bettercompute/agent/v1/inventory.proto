@@ -1,0 +1,390 @@
+// NodeInventory v1 (PLAN.md §10.1; docs/research/prior-art.md §4).
+//
+// Stability: FROZEN with agent/v1. Changes are additive only.
+//
+// Inventory travels as sections (InventorySection in session.proto). Each section message below is
+// canonicalized before encoding: repeated fields are sorted by their stable key (NUMA and GPU
+// index, disk name, NIC MAC, peer UUID, link number), and volatile readings (temperatures, power
+// draw, clocks, utilization) are never part of inventory; they are telemetry (P8). The section hash
+// is SHA-256 over those exact bytes. No section contains a map, so the encoding is deterministic.
+//
+// Derived values are not reported here: gpuProduct (normalized NVML name, e.g. "H100-SXM5-80GB"),
+// gpuModel (family, e.g. "H100", via gpu-models.json), labels and conditions come from the
+// control plane's inventory module.
+syntax = "proto3";
+
+package bettercompute.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1;agentv1";
+
+// An assembled snapshot: what the control plane stores (append-only) and what an inspect driver
+// returns. Never hashed as a whole.
+message NodeInventory {
+  // 1 for this schema.
+  uint32 schema_version = 1;
+  google.protobuf.Timestamp collected_at = 2;
+  // Section name → SHA-256 of that section's canonical encoding.
+  map<string, bytes> section_hashes = 3;
+  SystemSection system = 10;
+  CpuSection cpu = 11;
+  MemorySection memory = 12;
+  DisksSection disks = 13;
+  NicsSection nics = 14;
+  GpusSection gpus = 15;
+  BmcSection bmc = 16;
+  OsSection os = 17;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "system": /sys/class/dmi/id, dmidecode
+
+message SystemSection {
+  string vendor = 1;
+  string product = 2;
+  string serial = 3;
+  // Lowercase.
+  string product_uuid = 4;
+  string board_vendor = 5;
+  string board_product = 6;
+  string board_serial = 7;
+  string chassis_serial = 8;
+  string bios_vendor = 9;
+  string bios_version = 10;
+  BootMode boot_mode = 11;
+  // Absent when unknown.
+  optional bool secure_boot = 12;
+  // Absent when no TPM is present.
+  Tpm tpm = 13;
+}
+
+enum BootMode {
+  BOOT_MODE_UNSPECIFIED = 0;
+  BOOT_MODE_UEFI = 1;
+  BOOT_MODE_BIOS = 2;
+}
+
+message Tpm {
+  // e.g. "2.0".
+  string version = 1;
+  string manufacturer = 2;
+  string ek_cert_issuer = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "cpu": /proc/cpuinfo, /sys/devices/system/node
+
+message CpuSection {
+  string vendor = 1;
+  string model = 2;
+  // "x86_64", "aarch64".
+  string architecture = 3;
+  uint32 sockets = 4;
+  uint32 cores = 5;
+  uint32 threads = 6;
+  // Sorted, e.g. "amx_tile", "avx512f".
+  repeated string flags = 7;
+  // Sorted by id.
+  repeated NumaNode numa_nodes = 8;
+}
+
+message NumaNode {
+  uint32 id = 1;
+  // Kernel cpulist form, e.g. "0-31,64-95".
+  string cpus = 2;
+  uint64 memory_bytes = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "memory": /proc/meminfo, /sys/kernel/mm/hugepages, EDAC, dmidecode -t 17
+
+message MemorySection {
+  uint64 total_bytes = 1;
+  // Sorted by page size.
+  repeated HugepagePool hugepages = 2;
+  // Sorted by slot; empty when dmidecode is unavailable.
+  repeated Dimm dimms = 3;
+  // Absent when EDAC is unavailable.
+  EdacCounters edac = 4;
+}
+
+message HugepagePool {
+  // 2097152 (2Mi) or 1073741824 (1Gi).
+  uint64 page_size_bytes = 1;
+  uint64 total = 2;
+}
+
+message Dimm {
+  string slot = 1;
+  uint64 size_bytes = 2;
+  uint32 speed_mts = 3;
+  // e.g. "DDR5".
+  string type = 4;
+  bool ecc = 5;
+  string manufacturer = 6;
+  string part_number = 7;
+  string serial = 8;
+}
+
+message EdacCounters {
+  uint64 correctable = 1;
+  uint64 uncorrectable = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "disks": /sys/block, udev, nvme, smartctl
+
+message DisksSection {
+  // Sorted by name.
+  repeated Disk disks = 1;
+}
+
+message Disk {
+  // Kernel name, e.g. "nvme0n1".
+  string name = 1;
+  string model = 2;
+  string serial = 3;
+  // Stable device id when available.
+  string wwn = 4;
+  uint64 size_bytes = 5;
+  bool rotational = 6;
+  DiskTransport transport = 7;
+  // Absent when SMART is unavailable.
+  SmartStatus smart = 8;
+  bool removable = 9;
+}
+
+enum DiskTransport {
+  DISK_TRANSPORT_UNSPECIFIED = 0;
+  DISK_TRANSPORT_NVME = 1;
+  DISK_TRANSPORT_SATA = 2;
+  DISK_TRANSPORT_SAS = 3;
+  DISK_TRANSPORT_VIRTIO = 4;
+  DISK_TRANSPORT_USB = 5;
+}
+
+message SmartStatus {
+  bool healthy = 1;
+  optional uint32 wear_percent = 2;
+  optional uint64 media_errors = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "nics": netlink, /sys/class/net, /sys/class/infiniband
+
+message NicsSection {
+  // Physical NICs only, sorted by MAC.
+  repeated Nic nics = 1;
+}
+
+message Nic {
+  string name = 1;
+  // Permanent MAC, lowercase colon form.
+  string mac = 2;
+  string driver = 3;
+  string firmware = 4;
+  uint32 speed_mbps = 5;
+  // e.g. "0000:17:00.0".
+  string pci_address = 6;
+  // Absent when the device reports no NUMA affinity.
+  optional uint32 numa_node = 7;
+  uint32 sriov_total_vfs = 8;
+  RdmaType rdma = 9;
+  LinkState link = 10;
+  uint32 mtu = 11;
+}
+
+enum RdmaType {
+  RDMA_TYPE_UNSPECIFIED = 0;
+  RDMA_TYPE_NONE = 1;
+  RDMA_TYPE_INFINIBAND = 2;
+  RDMA_TYPE_ROCE = 3;
+}
+
+enum LinkState {
+  LINK_STATE_UNSPECIFIED = 0;
+  LINK_STATE_UP = 1;
+  LINK_STATE_DOWN = 2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "gpus": NVML (go-nvml)
+
+message GpusSection {
+  // Kernel driver version, e.g. "580.65.06" (node-wide).
+  string driver_version = 1;
+  // e.g. "13.0".
+  string cuda_driver_version = 2;
+  string nvml_version = 3;
+  // Sorted by index.
+  repeated Gpu gpus = 4;
+}
+
+message Gpu {
+  uint32 index = 1;
+  // "GPU-…".
+  string uuid = 2;
+  // e.g. "00000000:18:00.0".
+  string pci_bus_id = 3;
+  // Raw NVML name, e.g. "NVIDIA H100 80GB HBM3".
+  string name = 4;
+  // e.g. "hopper", "blackwell".
+  string architecture = 5;
+  uint64 vram_bytes = 6;
+  string serial = 7;
+  string vbios_version = 8;
+  string board_part_number = 9;
+  optional uint32 numa_node = 10;
+  uint32 power_limit_mw = 11;
+  bool persistence_mode = 12;
+  // e.g. "default", "exclusive-process".
+  string compute_mode = 13;
+  uint32 cuda_compute_capability_major = 14;
+  uint32 cuda_compute_capability_minor = 15;
+  GpuMig mig = 16;
+  // Sorted by link.
+  repeated NvlinkLink nvlinks = 17;
+  // Topology matrix row for this GPU: one entry per other GPU, sorted by peer_uuid.
+  repeated GpuPeerLink topology = 18;
+  // Absent unless the GPU is part of a multi-node NVLink domain (e.g. GB200 NVL72).
+  GpuFabric fabric = 19;
+  GpuEcc ecc = 20;
+  // Absent on GPUs without row remapping.
+  GpuRowRemap row_remap = 21;
+}
+
+message GpuMig {
+  bool capable = 1;
+  MigMode current = 2;
+  // Set when a mode change waits for a GPU reset.
+  MigMode pending = 3;
+  // GPU instance profiles, sorted by id.
+  repeated MigProfile profiles = 4;
+  // Current GPU/compute instances, sorted by (gi_id, ci_id).
+  repeated MigInstance instances = 5;
+}
+
+enum MigMode {
+  MIG_MODE_UNSPECIFIED = 0;
+  MIG_MODE_DISABLED = 1;
+  MIG_MODE_ENABLED = 2;
+}
+
+message MigProfile {
+  // NVML GPU instance profile id.
+  uint32 id = 1;
+  // e.g. "1g.10gb".
+  string name = 2;
+  uint32 max_instances = 3;
+  uint64 memory_bytes = 4;
+}
+
+message MigInstance {
+  uint32 gi_id = 1;
+  uint32 ci_id = 2;
+  string profile = 3;
+  // "MIG-…".
+  string uuid = 4;
+}
+
+message NvlinkLink {
+  uint32 link = 1;
+  LinkState state = 2;
+  // A GPU UUID, or "nvswitch:<pci bus id>" behind NVSwitch.
+  string peer = 3;
+  uint32 version = 4;
+}
+
+// One cell of the nvidia-smi topo -m matrix.
+message GpuPeerLink {
+  string peer_uuid = 1;
+  GpuLinkType link = 2;
+  // Number of NVLinks for GPU_LINK_TYPE_NV (the "NV<n>" figure); 0 otherwise.
+  uint32 nvlinks = 3;
+}
+
+// Best to worst: NV > PIX > PXB > PHB > NODE > SYS (PLAN.md §10.3 topology scorer).
+enum GpuLinkType {
+  GPU_LINK_TYPE_UNSPECIFIED = 0;
+  // Connected by NVLink (directly or through NVSwitch).
+  GPU_LINK_TYPE_NV = 1;
+  // At most one PCIe bridge.
+  GPU_LINK_TYPE_PIX = 2;
+  // Multiple PCIe bridges, no host bridge.
+  GPU_LINK_TYPE_PXB = 3;
+  // A PCIe host bridge.
+  GPU_LINK_TYPE_PHB = 4;
+  // Across host bridges within one NUMA node.
+  GPU_LINK_TYPE_NODE = 5;
+  // Across NUMA nodes (SMP interconnect).
+  GPU_LINK_TYPE_SYS = 6;
+}
+
+// MNNVL / IMEX domain membership.
+message GpuFabric {
+  string cluster_uuid = 1;
+  uint32 clique_id = 2;
+}
+
+message GpuEcc {
+  bool enabled = 1;
+  // Set when a mode change waits for a reboot.
+  optional bool pending_enabled = 2;
+  // Since the last driver load.
+  EccCounts volatile_counts = 3;
+  // Lifetime.
+  EccCounts aggregate_counts = 4;
+}
+
+message EccCounts {
+  // Single-bit (SBE).
+  uint64 correctable = 1;
+  // Double-bit (DBE).
+  uint64 uncorrectable = 2;
+}
+
+message GpuRowRemap {
+  uint32 correctable = 1;
+  uint32 uncorrectable = 2;
+  // A remap waits for a GPU reset (XID 63).
+  bool pending = 3;
+  // Remapping failed (XID 64): RMA.
+  bool failure = 4;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "bmc": ipmitool in-band, Redfish host interface
+
+message BmcSection {
+  string ip = 1;
+  string mac = 2;
+  string vendor = 3;
+  string firmware_version = 4;
+  bool redfish = 5;
+  bool ipmi = 6;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "os"
+
+message OsSection {
+  // os-release ID, e.g. "ubuntu".
+  string distro = 1;
+  // os-release VERSION_ID, e.g. "24.04".
+  string distro_version = 2;
+  // uname -r.
+  string kernel = 3;
+  CgroupVersion cgroup = 4;
+  bool kvm = 5;
+  bool iommu = 6;
+  // Sorted, e.g. "containerd", "docker", "libvirt".
+  repeated string runtimes = 7;
+  string hostname = 8;
+}
+
+enum CgroupVersion {
+  CGROUP_VERSION_UNSPECIFIED = 0;
+  CGROUP_VERSION_V1 = 1;
+  CGROUP_VERSION_V2 = 2;
+}

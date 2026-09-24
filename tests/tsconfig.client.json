@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "baseUrl": "..",
+    "paths": {
+      "@better-compute/core": ["packages/core/src/index.ts"],
+      "@better-compute/protocol": ["packages/protocol/src/index.ts"],
+      "@better-compute/inventory": ["packages/inventory/src/index.ts"],
+      "@better-compute/server": ["packages/server/src/index.ts"],
+      "@better-compute/client": ["packages/client/src/index.ts"]
+    }
+  },
+  "files": ["client-types.test.ts"],
+  "include": []
+}

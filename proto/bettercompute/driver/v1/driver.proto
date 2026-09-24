@@ -1,0 +1,138 @@
+// bcx: the out-of-process driver protocol (PLAN.md §5.5), served by plugins to both bcd and the
+// control plane (externalDriver, remoteDriver).
+//
+// Stability: DRAFT / UNSTABLE until v0.5. Excluded from `buf breaking` (buf.yaml).
+//
+// Handshake (go-plugin style): the host execs the plugin with a magic cookie and a socket
+// directory; the plugin prints `bcx|1|unix|<socket>|grpc|<cert>` on stdout; the host dials the
+// socket with auto-mTLS. Plugins are sha256-pinned and run under their own uid with seccomp and
+// cgroup limits.
+syntax = "proto3";
+
+package bettercompute.driver.v1;
+
+import "bettercompute/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/better-compute/better-compute/daemon/gen/bettercompute/driver/v1;driverv1";
+
+service DriverPlugin {
+  // The drivers this plugin serves.
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  // Validate a driver config against the driver's manifest and live checks.
+  rpc Validate(ValidateRequest) returns (ValidateResponse);
+  // Run one operation; streams progress, then exactly one result or error.
+  rpc Invoke(InvokeRequest) returns (stream InvokeResponse);
+  // Duplex byte stream for consoles and similar (first request frame is `open`).
+  rpc Stream(stream StreamRequest) returns (stream StreamResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message DescribeRequest {}
+
+message DescribeResponse {
+  repeated bettercompute.common.v1.DriverManifest drivers = 1;
+  string plugin_version = 2;
+  // bcx protocol version (1).
+  uint32 protocol_version = 3;
+}
+
+message ValidateRequest {
+  string driver_id = 1;
+  string kind = 2;
+  // Driver config, canonical JSON.
+  string config_json = 3;
+  // Declared secret fields only.
+  repeated SecretValue secrets = 4;
+}
+
+message ValidateResponse {
+  bool valid = 1;
+  repeated ValidationIssue issues = 2;
+}
+
+message ValidationIssue {
+  // JSON pointer into the config.
+  string path = 1;
+  string message = 2;
+}
+
+// One secret field value, delivered only to the plugin that declared it.
+message SecretValue {
+  // The config field name declared with field.secret().
+  string field = 1;
+  bytes value = 2;
+}
+
+message InvokeRequest {
+  string driver_id = 1;
+  string kind = 2;
+  string operation = 3;
+  // Driver config, canonical JSON.
+  string config_json = 4;
+  // Operation arguments, canonical JSON.
+  string args_json = 5;
+  repeated SecretValue secrets = 6;
+  string idempotency_key = 7;
+  google.protobuf.Timestamp deadline = 8;
+  // W3C trace context.
+  string traceparent = 9;
+}
+
+message InvokeResponse {
+  oneof msg {
+    Progress progress = 1;
+    // The operation's result, canonical JSON. Terminal.
+    string result_json = 2;
+    DriverError error = 3;
+  }
+}
+
+message Progress {
+  // 0-100, or 0 when unknown.
+  uint32 percent = 1;
+  string phase = 2;
+  string message = 3;
+}
+
+message DriverError {
+  // Stable lowercase code, e.g. "unsupported", "invalid-config", "timeout", "unreachable".
+  string code = 1;
+  string message = 2;
+  // The host may retry the operation (only for retry-safe operations).
+  bool retryable = 3;
+}
+
+message StreamRequest {
+  oneof msg {
+    // First frame: what to open, with the same fields as an Invoke.
+    InvokeRequest open = 1;
+    bytes data = 2;
+    StreamClose close = 3;
+  }
+}
+
+message StreamResponse {
+  oneof msg {
+    bytes data = 1;
+    DriverError error = 2;
+    StreamClose close = 3;
+  }
+}
+
+message StreamClose {
+  string reason = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  HealthStatus status = 1;
+  string message = 2;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_SERVING = 1;
+  HEALTH_STATUS_NOT_SERVING = 2;
+}

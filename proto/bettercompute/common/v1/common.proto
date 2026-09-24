@@ -1,0 +1,153 @@
+// Shared types for every better-compute wire contract (PLAN.md §7).
+//
+// Stability: FROZEN with agent/v1 at the end of P0. Changes are additive only (`buf breaking`, FILE).
+//
+// Identifiers are plain strings:
+//   - node ids, command ids, allocation ids and journal ids are server- or daemon-generated ULIDs,
+//     optionally with a short type prefix; receivers treat them as opaque;
+//   - `boot_id` is the kernel boot id (/proc/sys/kernel/random/boot_id), so it changes on every boot;
+//   - device ids are stable hardware ids: GPU UUIDs ("GPU-…"), MIG atoms "<gpuUuid>/gi<g>/ci<c>",
+//     disk WWNs, permanent MAC addresses.
+//
+// Hashes are raw 32-byte SHA-256 digests (`bytes`), never hex strings.
+//
+// Signatures (see Signature) are ES256 over a domain-separated signing input:
+//
+//   input = "bettercompute.v1/" ‖ purpose ‖ 0x00 ‖ part_1 ‖ … ‖ part_n
+//   part  = uint32_be(len(bytes)) ‖ bytes
+//
+// Each signed field documents its purpose and parts. Signed envelopes (`bytes body` + Signature)
+// sign the exact body bytes as their single part, so no canonical re-encoding is ever needed: the
+// verifier checks the bytes it received, then decodes them. Strings are UTF-8, integers are
+// big-endian of the stated width, a Timestamp is int64_be(seconds) ‖ int32_be(nanos).
+syntax = "proto3";
+
+package bettercompute.common.v1;
+
+option go_package = "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1;commonv1";
+
+// An ES256 signature (ECDSA P-256 with SHA-256).
+message Signature {
+  // Identifies the signing key. For node keys: base64url (no padding) of SHA-256 over the key's
+  // SubjectPublicKeyInfo DER. For control-plane keys: the key's certificate subject key id as
+  // published in the trust bundle.
+  string kid = 1;
+  // The raw 64-byte r ‖ s form (IEEE P1363 / JWS), not ASN.1 DER.
+  bytes sig = 2;
+  // Optional DER X.509 certificates, leaf first, chaining the key to a trust root the verifier
+  // already holds (worker signing keys chain to a TrustBundle root). Empty when the verifier knows
+  // the key by `kid` (node keys are looked up in node_certs).
+  repeated bytes chain = 3;
+}
+
+// The command/spec signing trust the daemon accepts (PLAN.md §13). Delivered inside the signed
+// JoinResponseBody, and refreshed through Welcome as a SignedTrustBundle. Rotation: new roots are
+// added first; the old ones are dropped only after every daemon acknowledged the new version.
+message TrustBundle {
+  // Monotonic. A daemon ignores a bundle whose version is not greater than the one it holds.
+  uint64 version = 1;
+  // DER X.509 roots that certify the short-lived (24 h) worker keys signing Command and
+  // DesiredState bodies (v0.2). Empty in v0.1: signatures are optional there.
+  repeated bytes command_signing_roots = 2;
+}
+
+// A TrustBundle signed by the pinned JoinService signing key, so a gateway cannot inject roots.
+// Signing purpose "trust-bundle", parts [body].
+message SignedTrustBundle {
+  // Serialized TrustBundle.
+  bytes body = 1;
+  Signature signature = 2;
+}
+
+// What a daemon-side driver (built into bcd or served over bcx) offers (PLAN.md §5.4, §5.5).
+// Advertised in Hello.drivers and returned by bcx DriverPlugin.Describe; the control plane merges
+// it into its registry as a remote driver scoped to the advertising agents.
+message DriverManifest {
+  // Driver id, e.g. "redfish", "ipmi", "libvirt-kvm", "nvidia".
+  string id = 1;
+  // Semantic version of the driver implementation.
+  string version = 2;
+  // Driver kinds it implements, e.g. "power", "management", "runtime", "config".
+  repeated string kinds = 3;
+  RunsOn runs_on = 4;
+  // JSON Schema 2020-12 of the driver's config (manifest().jsonSchema() on the TS side).
+  string config_schema_json = 5;
+  // Free-form capability flags, e.g. "virtual-media", "uefi-http".
+  repeated string capabilities = 6;
+  // Operations that are safe to repeat after an interruption, as "<kind>.<operation>".
+  repeated string retry_safe_operations = 7;
+}
+
+// Where a step or driver runs (PLAN.md §5.1 `RunsOn`).
+enum RunsOn {
+  RUNS_ON_UNSPECIFIED = 0;
+  RUNS_ON_CONTROL_PLANE = 1;
+  RUNS_ON_SITE = 2;
+  RUNS_ON_NODE = 3;
+  RUNS_ON_RAMDISK = 4;
+}
+
+// The role carried by an agent's certificate (role OID) and declared in Hello (PLAN.md §6). Not
+// the node's scheduling role (`nodes.role`: unassigned, host, dedicated, site).
+enum AgentRole {
+  AGENT_ROLE_UNSPECIFIED = 0;
+  // `bcd node`: every server; 24 h certificate.
+  AGENT_ROLE_NODE = 1;
+  // `bcd site`: DHCP proxy, iPXE, image cache, BMC access (v0.2); 24 h certificate.
+  AGENT_ROLE_SITE = 2;
+  // `bcd ramdisk`: PXE commissioning (v0.2); restricted certificate, at most 2 h.
+  AGENT_ROLE_RAMDISK = 3;
+}
+
+// Command lanes (PLAN.md §6, §7.5). Each lane has its own daemon worker pool and credit budget.
+enum Lane {
+  LANE_UNSPECIFIED = 0;
+  // Short, latency-sensitive work: diagnostics, inventory, reboots, resets. Default credits 8.
+  LANE_CONTROL = 1;
+  // Provisioning steps: wipe, deploy, kexec (v0.2). Default credits 4.
+  LANE_PROVISION = 2;
+  // Large transfers and slow jobs: log collection, image pre-warm. Default credits 2.
+  LANE_BULK = 3;
+}
+
+// The command lifecycle (PLAN.md §7.4). The control plane stores every state; a daemon reports only
+// ACKED, RUNNING, SUCCEEDED, FAILED, REJECTED and CANCELLED in CommandUpdate.
+//
+//   pending → dispatched(epoch) → acked → running → succeeded | failed | rejected
+//   pending → expired (CommandSweeper, past not_after);   any non-terminal → cancelled
+enum CommandState {
+  COMMAND_STATE_UNSPECIFIED = 0;
+  // Stored, not yet sent. A BUSY rejection returns a command here with a backoff.
+  COMMAND_STATE_PENDING = 1;
+  // Sent on the session with the given epoch.
+  COMMAND_STATE_DISPATCHED = 2;
+  // The daemon journaled it as `accepted` (fsynced before any side effect).
+  COMMAND_STATE_ACKED = 3;
+  // The side effect has started.
+  COMMAND_STATE_RUNNING = 4;
+  COMMAND_STATE_SUCCEEDED = 5;
+  // Terminal failure; CommandUpdate.error says why (e.g. "interrupted").
+  COMMAND_STATE_FAILED = 6;
+  // Refused before any side effect; CommandUpdate.reject_reason says why.
+  COMMAND_STATE_REJECTED = 7;
+  // Never delivered before not_after (control plane only).
+  COMMAND_STATE_EXPIRED = 8;
+  // Stopped by Cancel between actions. A completed side effect is reported as its real outcome.
+  COMMAND_STATE_CANCELLED = 9;
+}
+
+// Why a daemon refused a command before any side effect (PLAN.md §6 "Checks before accepting").
+enum CommandRejectReason {
+  COMMAND_REJECT_REASON_UNSPECIFIED = 0;
+  // Unknown kind, or a kind this agent role may not run.
+  COMMAND_REJECT_REASON_UNSUPPORTED = 1;
+  // Missing, unknown-kid or invalid signature on a kind that requires one (destructive, v0.2).
+  COMMAND_REJECT_REASON_BAD_SIGNATURE = 2;
+  // Past not_after (server time, via the Welcome offset).
+  COMMAND_REJECT_REASON_EXPIRED = 3;
+  // min_generation still not applied at not_after.
+  COMMAND_REJECT_REASON_STALE_GENERATION = 4;
+  // No free credit on the command's lane. NOT terminal: the control plane puts the command back to
+  // pending with not_before = compute_now() + backoff (1 s → 30 s).
+  COMMAND_REJECT_REASON_BUSY = 5;
+}

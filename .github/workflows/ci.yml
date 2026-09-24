@@ -1,0 +1,139 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # typecheck (tsc -b builds dist), vitest, check-deps, check-sql-now, umbrella --check, validate-packages
+      - run: pnpm check
+      # scripts/proto-gen.mjs --check: buf lint and committed generated code is current
+      - run: pnpm proto:check
+      # buf breaking against the committed proto/baseline.binpb (PLAN.md §16 P0 exit)
+      - if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: node scripts/proto-gen.mjs --breaking
+      - run: pnpm pack:all
+      - run: pnpm check:packed-types
+      # a fresh consumer installs every tarball with the vendored better-iam and imports the umbrella
+      - run: pnpm test:packed
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: better-compute-ci
+          POSTGRES_DB: better_compute_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      BETTER_COMPUTE_POSTGRES_URL: postgres://postgres:better-compute-ci@localhost:5432/better_compute_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:postgres
+  # Publishes to npm after a green push to main whose umbrella version is not on npm yet.
+  # Bump the version with `node scripts/release-version.mjs X.Y.Z` to cut a release.
+  #
+  # TODO(better-iam on npm): better-compute must not publish while it depends on the vendored better-iam
+  # tarballs (PLAN.md §12.10): a published package would pin @better-iam/* 0.1.0 builds that npm does not
+  # have. The gate below skips publishing while pnpm-workspace.yaml still overrides better-iam to
+  # vendor/better-iam or @better-iam/server is not on npm. Once better-iam publishes, drop vendor/ and the
+  # overrides (scripts/sync-better-iam.mjs), and this job starts publishing.
+  publish:
+    needs: [test, postgres]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: npm
+    concurrency:
+      group: publish
+      cancel-in-progress: false
+    permissions:
+      contents: write # tag + GitHub release
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - name: Decide whether to publish
+        id: version
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version=$(node -p "require('./packages/better-compute/package.json').version")
+          iam_range=$(node -p "require('./packages/better-compute/package.json').peerDependencies['@better-iam/server']")
+          if [[ "$version" == *-* ]]; then tag=next; else tag=latest; fi
+          publish=false
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN secret is not set; skipping npm publish."
+          elif grep -q 'file:vendor/better-iam/' pnpm-workspace.yaml; then
+            echo "::notice::better-iam still resolves from vendor/better-iam; better-compute does not publish until those overrides are gone."
+          elif [ -z "$(npm view "@better-iam/server@$iam_range" version 2>/dev/null || true)" ]; then
+            echo "::notice::@better-iam/server@$iam_range is not on npm yet; skipping npm publish."
+          elif npm view "better-compute@$version" version >/dev/null 2>&1; then
+            echo "better-compute@$version is already on npm; nothing to publish."
+          else
+            publish=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+      - if: steps.version.outputs.publish == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.version.outputs.publish == 'true'
+        run: pnpm build
+      - name: Publish to npm
+        if: steps.version.outputs.publish == 'true'
+        # pnpm skips packages whose version is already published, so a rerun finishes a partial release.
+        run: pnpm publish -r --access public --provenance --no-git-checks --tag ${{ steps.version.outputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
+      - name: Tag and create GitHub release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then exit 0; fi
+          prerelease=""
+          if [[ "$VERSION" == *-* ]]; then prerelease="--prerelease"; fi
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes $prerelease

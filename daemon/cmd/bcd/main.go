@@ -1,0 +1,239 @@
+// Command bcd is the better-compute daemon: one binary whose modes run on every server (node), per
+// datacenter (site), inside the PXE ramdisk (ramdisk) and on test hosts (sim), plus the local
+// commands join, status, doctor and version (PLAN.md §6).
+//
+// This is the P0 skeleton: version and doctor work, and every other command parses its flags and
+// then exits 2 with the phase it arrives in. The release version is set at link time:
+//
+//	go build -ldflags "-X main.version=0.1.0" ./cmd/bcd
+package main
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"runtime"
+	"runtime/debug"
+
+	"github.com/better-compute/better-compute/daemon/internal/config"
+	"github.com/better-compute/better-compute/daemon/internal/inventory"
+	"github.com/better-compute/better-compute/daemon/internal/nvml"
+)
+
+// version is overridden with -ldflags "-X main.version=<version>".
+var version = "0.0.0-dev"
+
+// Exit codes, as in the better-compute CLI: 0 success, 1 failure, 2 usage error or not implemented.
+const (
+	exitOK      = 0
+	exitFailure = 1
+	exitUsage   = 2
+)
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+type command struct {
+	name    string
+	summary string
+	flags   func(fs *flag.FlagSet)
+	run     func(fs *flag.FlagSet, stdout, stderr io.Writer) int
+}
+
+func commands() []command {
+	withConfig := func(fs *flag.FlagSet) {
+		fs.String("config", config.DefaultPath, "configuration file written by the install script")
+	}
+	noFlags := func(*flag.FlagSet) {}
+	return []command{
+		{name: "node", summary: "run the node agent: session, journal, inventory, convergence, commands", flags: withConfig, run: notYet("v0.1")},
+		{name: "site", summary: "run the site agent: proxy DHCP, iPXE, image cache, BMC", flags: withConfig, run: notYet("v0.2")},
+		{name: "ramdisk", summary: "run inside the PXE ramdisk: inspect, diag, wipe, image stream, kexec", flags: noFlags, run: notYet("v0.2")},
+		{name: "sim", summary: "run simulated daemons on fakehw against a gateway", flags: simFlags, run: notYet("v0.4")},
+		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN or stdin", flags: withConfig, run: notYet("v0.1")},
+		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: notYet("v0.1")},
+		{name: "doctor", summary: "check this host: configuration, NVML, hardware backend", flags: withConfig, run: runDoctor},
+		{name: "version", summary: "print the version", flags: noFlags, run: runVersion},
+	}
+}
+
+func simFlags(fs *flag.FlagSet) {
+	fs.Int("nodes", 1, "number of simulated daemons")
+	fs.Uint64("seed", 1, "fakehw seed of the first daemon; daemon i uses seed+i")
+	fs.String("config", "", "configuration file with the gateway URL and pins")
+}
+
+func statusFlags(fs *flag.FlagSet) {
+	fs.String("socket", config.DefaultSocketPath, "the node agent's root-only unix socket")
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		usage(stderr)
+		return exitUsage
+	}
+	name := args[0]
+	switch name {
+	case "help", "-h", "-help", "--help":
+		usage(stdout)
+		return exitOK
+	case "-version", "--version":
+		name = "version"
+	}
+	for _, c := range commands() {
+		if c.name != name {
+			continue
+		}
+		fs := flag.NewFlagSet(c.name, flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		c.flags(fs)
+		fs.Usage = func() {
+			fmt.Fprintf(stderr, "bcd %s - %s\n\nUsage\n  bcd %s [flags]\n\nFlags\n", c.name, c.summary, c.name)
+			fs.PrintDefaults()
+		}
+		if err := fs.Parse(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return exitOK
+			}
+			return exitUsage
+		}
+		if fs.NArg() > 0 {
+			// Never echo arguments: a join token pasted into argv must not reach logs.
+			fmt.Fprintf(stderr, "bcd %s: takes no positional arguments\n", c.name)
+			if c.name == "join" {
+				fmt.Fprintln(stderr, "bcd join reads the join token from BCD_JOIN_TOKEN or stdin, never from arguments")
+			}
+			return exitUsage
+		}
+		return c.run(fs, stdout, stderr)
+	}
+	if isCommandName(name) {
+		fmt.Fprintf(stderr, "bcd: unknown command %q\n\n", name)
+	} else {
+		fmt.Fprint(stderr, "bcd: unknown command\n\n")
+	}
+	usage(stderr)
+	return exitUsage
+}
+
+func usage(w io.Writer) {
+	fmt.Fprintf(w, "bcd %s - the better-compute daemon\n\nUsage\n  bcd <command> [flags]\n  bcd <command> -h    flags of one command\n\nCommands\n", version)
+	for _, c := range commands() {
+		fmt.Fprintf(w, "  %-8s %s\n", c.name, c.summary)
+	}
+	fmt.Fprint(w, "\nExit codes: 0 success, 1 failure, 2 usage error or not implemented yet.\n")
+}
+
+// isCommandName reports whether s looks like a command name, and not like a secret pasted in the
+// wrong place, so that it is safe to echo.
+func isCommandName(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < 'a' || c > 'z') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// notYet is the run function of a command the skeleton does not implement: it mirrors
+// ComputeError('NOT_IMPLEMENTED', '<feature> arrives in <phase>') and exits 2.
+func notYet(phase string) func(*flag.FlagSet, io.Writer, io.Writer) int {
+	return func(fs *flag.FlagSet, _, stderr io.Writer) int {
+		fmt.Fprintf(stderr, "bcd: NOT_IMPLEMENTED: bcd %s arrives in %s (this build is the P0 skeleton)\n", fs.Name(), phase)
+		return exitUsage
+	}
+}
+
+func runVersion(_ *flag.FlagSet, stdout, _ io.Writer) int {
+	fmt.Fprintf(stdout, "bcd %s %s/%s %s%s\n", version, runtime.GOOS, runtime.GOARCH, runtime.Version(), buildTags())
+	return exitOK
+}
+
+// buildTags returns " tags=<tags>" when the binary was built with -tags.
+func buildTags() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, s := range info.Settings {
+		if s.Key == "-tags" && s.Value != "" {
+			return " tags=" + s.Value
+		}
+	}
+	return ""
+}
+
+// runDoctor checks what the skeleton can check: the configuration file, NVML and the hardware
+// backend. IOMMU, KVM, clock and reachability checks arrive in v0.1 (PLAN.md §14).
+func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
+	file := fs.Lookup("config").Value.String()
+	failed := false
+	report := func(status, check, detail string) {
+		if status == "fail" {
+			failed = true
+		}
+		fmt.Fprintf(stdout, "%-4s  %-8s  %s\n", status, check, detail)
+	}
+
+	if cfg, err := config.Load(file); err != nil {
+		report("fail", "config", err.Error())
+	} else {
+		report("ok", "config", fmt.Sprintf("%s: gateway %s, site %s", file, cfg.GatewayURL, cfg.Site))
+		if warning := permissionWarning(file); warning != "" {
+			report("warn", "config", warning)
+		}
+	}
+
+	if info, err := nvml.Probe(); err == nil {
+		report("ok", "nvml", fmt.Sprintf("driver %s, %d GPUs", info.DriverVersion, info.DeviceCount))
+	} else if errors.Is(err, nvml.ErrNotBuilt) {
+		report("warn", "nvml", err.Error())
+	} else {
+		report("fail", "nvml", err.Error())
+	}
+
+	if inv, err := collectInventory(); err != nil {
+		report("warn", "hardware", hardwareBackend+": "+err.Error())
+	} else if hashes, err := inventory.SectionHashes(inv); err != nil {
+		report("fail", "hardware", hardwareBackend+": "+err.Error())
+	} else {
+		gpus := 0
+		if inv.Gpus != nil {
+			gpus = len(inv.Gpus.Gpus)
+		}
+		report("ok", "hardware", fmt.Sprintf("%s: %d GPUs, %d inventory sections hashed", hardwareBackend, gpus, len(hashes)))
+	}
+
+	report("skip", "host", "IOMMU, KVM, clock and gateway reachability checks arrive in v0.1")
+	if failed {
+		return exitFailure
+	}
+	return exitOK
+}
+
+// permissionWarning flags a configuration file that others can read or write; the install script
+// writes it with mode 0600. Windows has no such mode bits.
+func permissionWarning(file string) string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	st, err := os.Stat(file)
+	if err != nil {
+		return ""
+	}
+	if perm := uint32(st.Mode().Perm()); perm&0o077 != 0 {
+		return fmt.Sprintf("%s has mode %04o; the install script writes 0600", file, perm)
+	}
+	return ""
+}
+
+// errNotImplemented mirrors ComputeError('NOT_IMPLEMENTED', '<feature> arrives in <phase>').
+func errNotImplemented(feature, phase string) error {
+	return fmt.Errorf("NOT_IMPLEMENTED: %s arrives in %s", feature, phase)
+}

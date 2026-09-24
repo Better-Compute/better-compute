@@ -1,0 +1,52 @@
+[
+  {
+    "name": "hello",
+    "type": "bettercompute.agent.v1.AgentFrame",
+    "description": "AgentFrame.hello after a reconnect, with a replayed result and inventory hashes"
+  },
+  {
+    "name": "welcome",
+    "type": "bettercompute.agent.v1.ServerFrame",
+    "description": "ServerFrame.welcome with default liveness settings and a signed trust bundle"
+  },
+  {
+    "name": "command-body",
+    "type": "bettercompute.agent.v1.CommandBody",
+    "description": "CommandBody for diag.nvml (the signed bytes inside Command.body)"
+  },
+  {
+    "name": "command",
+    "type": "bettercompute.agent.v1.ServerFrame",
+    "description": "ServerFrame.command carrying the command-body vector, unsigned (v0.1)"
+  },
+  {
+    "name": "desired-state-body",
+    "type": "bettercompute.agent.v1.DesiredStateBody",
+    "description": "DesiredStateBody: a full NodeSpec with one CDI hold of two GPUs"
+  },
+  {
+    "name": "desired-state",
+    "type": "bettercompute.agent.v1.ServerFrame",
+    "description": "ServerFrame.desired carrying the desired-state-body vector, signed"
+  },
+  {
+    "name": "diag-nvml-result",
+    "type": "bettercompute.agent.v1.DiagNvmlResult",
+    "description": "DiagNvmlResult (the bytes inside CommandUpdate.result)"
+  },
+  {
+    "name": "command-update",
+    "type": "bettercompute.agent.v1.AgentFrame",
+    "description": "AgentFrame.update: diag.nvml succeeded, node-signed"
+  },
+  {
+    "name": "attested-report-body",
+    "type": "bettercompute.agent.v1.AttestedReportBody",
+    "description": "AttestedReportBody: AllocationBound for the two-GPU hold"
+  },
+  {
+    "name": "event-batch",
+    "type": "bettercompute.agent.v1.AgentFrame",
+    "description": "AgentFrame.events: an attested AllocationBound and an AllocationFailed"
+  }
+]

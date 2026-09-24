@@ -1,0 +1,27 @@
+# Code generation for the wire contracts. Run `node scripts/proto-gen.mjs` from the repository root;
+# plugin paths are relative to it. Generated code is committed (TS here, Go under daemon/gen).
+# Only local plugins: a remote BSR plugin would upload our protos.
+version: v2
+clean: true
+inputs:
+  - directory: proto
+plugins:
+  # TypeScript for @better-compute/protocol. Invoked through node explicitly so it works on Windows,
+  # where buf cannot execute the extensionless bin shim.
+  - local: ['node', 'node_modules/@bufbuild/protoc-gen-es/bin/protoc-gen-es']
+    out: packages/protocol/src/gen
+    opt:
+      - target=ts
+      - import_extension=js
+  # Go for daemon/ (PLAN.md D1). Enable once Go is installed, with the plugins built locally:
+  #   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  #   go install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest
+  # The go_package options map every package to daemon/gen/bettercompute/<area>/v1.
+  # - local: protoc-gen-go
+  #   out: daemon/gen
+  #   opt:
+  #     - paths=source_relative
+  # - local: protoc-gen-connect-go
+  #   out: daemon/gen
+  #   opt:
+  #     - paths=source_relative
