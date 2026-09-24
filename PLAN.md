@@ -508,7 +508,7 @@ Tests live in `tests/extensions/`, starting in the noted phase:
 - go-nvml is believed to ship `pkg/nvml/mock` with a `dgxa100` mock **(verify P0)**. If it does, `fakehw` wraps it.
 - Minimal `go.mod`, `govulncheck`, `-trimpath`, SBOM.
 
-**Release artifacts (v0.1).** goreleaser produces `bcd_<ver>_linux_{amd64,arm64}.tar.gz` plus `.sha256`, and a cosign signature once the release pipeline exists. The `api` serves them at `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` from `BlobStore` or a local directory.
+**Release artifacts (v0.1).** goreleaser produces `bcd_<ver>_linux_{amd64,arm64}.tar.gz` plus `.sha256` for people, and the **bare binaries** `bcd_<ver>_linux_{amd64,arm64}` for machines. An offline-signed release manifest (`@better-compute/pki` `signReleaseManifest`, SigningPurpose `release-manifest`, `better-compute release sign`) lists every artifact with platform, size and sha256. The `api` serves the bare binary at `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` from `BlobStore` or a local directory. The install script bakes in the digests of a manifest verified against the release pins (`daemon install-script --release-manifest --release-pins`), and v0.4 self-update verifies the manifest itself (signatures/threshold → product → sequence ≥ floor → not expired → size + sha256).
 
 | Mode | Where | Does | Cert role |
 |---|---|---|---|

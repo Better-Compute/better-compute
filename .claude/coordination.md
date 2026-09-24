@@ -214,6 +214,8 @@ Rules for v0.1:
 - Provision renderers for W5a ([060790] 9b29615, 7716e93): `provisionModule({ userData: { controlPlaneUrl, bcdUrl,
   bcdSha256 } })`; step context needs `ctx.pki` (PkiPort.issueJoinToken) and `ctx.secrets`. provision's nodeSpec
   returns `{ host: { config } }`; the engine calls `ctx.desired.invalidate` on hostConfig workflow success.
+- 9cadaa9: optional `EventPublisher.publishMany` / `WorkQueue.enqueueMany` (set-based, same coalescing). W5a runtime
+  must implement both (INSERT … SELECT FROM unnest). Gateway group commit (24544d7): 1k ack p99 2.0 s → 0.65 s.
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also

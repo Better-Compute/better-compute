@@ -38,6 +38,12 @@ archives:
     files:
       - LICENSE
       - README.md
+  # The bare binary as well: the offline-signed release manifest lists it, the install script and
+  # self-update verify and install exactly this file, and GET {basePath}/downloads/bcd/{version}/linux-{arch}
+  # serves it (PLAN.md §6 Release artifacts).
+  - id: bcd-binary
+    formats: [binary]
+    name_template: "bcd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   # One <archive>.sha256 per archive, next to it.
