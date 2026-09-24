@@ -272,10 +272,10 @@ describe('serveGateway over h2c', () => {
     expect((await renew.status).code).toBe(GrpcCode.UNAUTHENTICATED);
   });
 
-  it('answers UNIMPLEMENTED for Tunnel and unknown methods', async () => {
-    const tunnel = call(client, 'Tunnel', { 'x-test-node': 'n' });
-    tunnel.stream.end();
-    expect((await tunnel.status).code).toBe(GrpcCode.UNIMPLEMENTED);
+  it('requires an identity for Tunnel, and answers UNIMPLEMENTED for unknown methods', async () => {
+    const anonymous = call(client, 'Tunnel');
+    anonymous.stream.end();
+    expect((await anonymous.status).code).toBe(GrpcCode.UNAUTHENTICATED);
     const unknown = call(client, 'Nope');
     unknown.stream.end();
     expect(await unknown.status).toMatchObject({ code: GrpcCode.UNIMPLEMENTED });

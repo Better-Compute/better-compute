@@ -52,6 +52,14 @@ import {
   type StoredCommand,
 } from './store.js';
 import { TokenBucket } from './token-bucket.js';
+import {
+  createTunnelRegistry,
+  type TunnelEndpoint,
+  type TunnelHandle,
+  type TunnelInfo,
+  type TunnelOptions,
+  type TunnelStreamHandle,
+} from './tunnels.js';
 
 /** Who is on the other end of a stream, from its mTLS certificate (§7.2). */
 export interface PeerIdentity {
@@ -149,6 +157,8 @@ export interface GatewayOptions {
    * gets a RevocationNotice and is closed at once (§16: within 5 s of the revocation).
    */
   revocations?: RevocationFeed;
+  /** Interactive tunnels (v0.3, §7.6): how exec tickets are verified and re-authorized. */
+  tunnels?: TunnelOptions;
   /** For `Drain.reconnect_after_ms`; default `Math.random`. */
   random?: () => number;
 }
@@ -210,6 +220,16 @@ export interface Gateway {
   sessions(): GatewaySessionInfo[];
   /** What `GET /v1/health` reports. */
   status(): GatewayStatus;
+  /**
+   * Opens a tunnel to a node connected here, for a caller holding an exec ticket (v0.3, §7.6).
+   * Resolves when the node's Tunnel stream is up.
+   */
+  openTunnel(request: { ticket: string; nodeId: string; caller: TunnelEndpoint }): Promise<TunnelHandle>;
+  /** A daemon's `Tunnel` stream (its certificate identity is `peer`). */
+  acceptTunnel(peer: PeerIdentity, node: TunnelEndpoint): TunnelStreamHandle;
+  /** Closes matching tunnels (e.g. `delegation:revoke` by subject); returns how many. */
+  closeTunnels(filter: { tunnelId?: string; nodeId?: string; subject?: string }, reason: string): number;
+  tunnels(): (TunnelInfo & { state: string })[];
   readonly jobs: Readonly<{
     dispatch: GatewayJob;
     liveness: GatewayJob;
@@ -321,6 +341,18 @@ export function createGateway(options: GatewayOptions): Gateway {
     inventory: options.inventory,
     reports: options.reports,
     fence: () => lease,
+  });
+
+  const tunnelRegistry = createTunnelRegistry({
+    clock,
+    log,
+    options: options.tunnels,
+    sendOpen(nodeId, tunnelId, ticket) {
+      const session = sessions.get(nodeId);
+      if (!session || session.closed || session.upgradeRequired) return false;
+      session.sink.send(frame({ case: 'openTunnel', value: { tunnelId, ticket } }));
+      return true;
+    },
   });
 
   const backoffMs = (session: Session, commandId: string) => {
@@ -709,7 +741,7 @@ export function createGateway(options: GatewayOptions): Gateway {
 
     liveness: job(async () => {
       const now = clock.now();
-      let handled = 0;
+      let handled = await tunnelRegistry.sweep();
       for (const session of [...sessions.values()])
         if (session.peer.notAfter !== undefined && now > session.peer.notAfter) {
           await terminate(
@@ -841,6 +873,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       stopping = true;
       unsubscribe?.();
       for (const timer of timers.splice(0)) clearInterval(timer);
+      tunnelRegistry.closeWhere({}, 'gateway-stopped');
       for (const session of [...sessions.values()])
         await terminate(session, new GrpcError(GrpcCode.UNAVAILABLE, 'gateway stopping'), true, 'gateway-stopped');
       if (lease) {
@@ -855,9 +888,26 @@ export function createGateway(options: GatewayOptions): Gateway {
       unsubscribe?.();
       for (const timer of timers.splice(0)) clearInterval(timer);
       lease = undefined;
+      tunnelRegistry.closeWhere({}, 'gateway-crashed');
       for (const session of sessions.values()) session.closed = true;
       sessions.clear();
     },
+
+    openTunnel(request) {
+      if (!started || stopping) return Promise.reject(new ComputeError('INVALID_STATE', 'gateway is not ready'));
+      return tunnelRegistry.open(request);
+    },
+
+    acceptTunnel(peer, node) {
+      if (!started || stopping) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is not ready');
+      if (peer.serial && options.revocations?.has(peer.serial))
+        throw new GrpcError(GrpcCode.UNAUTHENTICATED, 'certificate revoked');
+      return tunnelRegistry.accept(peer, node);
+    },
+
+    closeTunnels: (filter, reason) => tunnelRegistry.closeWhere(filter, reason),
+
+    tunnels: () => tunnelRegistry.list(),
 
     open(peer, sink) {
       if (!started || stopping || !lease) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is not ready');
@@ -964,6 +1014,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     },
 
     async revoke(nodeId, notice) {
+      tunnelRegistry.closeWhere({ nodeId }, 'revoked');
       const session = sessions.get(nodeId);
       if (!session || session.closed) return false;
       session.sink.send(

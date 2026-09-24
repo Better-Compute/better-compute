@@ -18,11 +18,13 @@ import {
   JoinResponseSchema,
   RenewRequestSchema,
   RenewResponseSchema,
+  TunnelFrameSchema,
   decodeAgentFrame,
   encodeServerFrame,
   MAX_FRAME_BYTES,
 } from '@better-compute/protocol';
 import type { Gateway, PeerIdentity, SessionHandle, SessionSink } from './gateway.js';
+import type { TunnelStreamHandle } from './tunnels.js';
 import {
   frameMessage,
   grpcResponseHeaders,
@@ -116,8 +118,10 @@ function openResponse(stream: ServerHttp2Stream) {
     });
   });
   return {
-    write(bytes: Uint8Array) {
-      if (!finished && !stream.destroyed) stream.write(frameMessage(bytes));
+    /** False when the stream's write buffer is full ('drain' follows). */
+    write(bytes: Uint8Array): boolean {
+      if (finished || stream.destroyed) return true;
+      return stream.write(frameMessage(bytes));
     },
     finish(error?: GrpcError) {
       if (finished || stream.destroyed) return;
@@ -220,6 +224,45 @@ function session(stream: ServerHttp2Stream, gateway: Gateway, peer: PeerIdentity
   stream.on('error', () => end('stream-error'));
 }
 
+/** A `Tunnel` stream from a daemon (v0.3): length-prefixed TunnelFrames both ways, relayed by the core. */
+function tunnel(stream: ServerHttp2Stream, gateway: Gateway, peer: PeerIdentity): void {
+  const out = openResponse(stream);
+  let handle: TunnelStreamHandle;
+  try {
+    handle = gateway.acceptTunnel(peer, {
+      send: (frame) => out.write(toBinary(TunnelFrameSchema, frame)),
+      onDrain: (callback) => void stream.once('drain', callback),
+      pause: () => stream.pause(),
+      resume: () => stream.resume(),
+      close: (error) => out.finish(error),
+    });
+  } catch (error) {
+    out.finish(toGrpcError(error));
+    stream.resume();
+    return;
+  }
+  const decoder = new MessageDecoder(MAX_FRAME_BYTES);
+  let ended = false;
+  const end = (reason: string) => {
+    if (ended) return;
+    ended = true;
+    handle.end(reason);
+    out.finish();
+  };
+  stream.on('data', (chunk: Uint8Array) => {
+    if (ended) return;
+    try {
+      for (const bytes of decoder.push(chunk)) handle.receive(fromBinary(TunnelFrameSchema, bytes));
+    } catch (error) {
+      out.finish(toGrpcError(error));
+      end('protocol-error');
+    }
+  });
+  stream.on('end', () => end('node-closed'));
+  stream.on('close', () => end('node-closed'));
+  stream.on('error', () => end('node-error'));
+}
+
 /**
  * Serves `gateway` as the gRPC `AgentGateway` service on HTTP/2 (§7.1). `Join` needs no client
  * certificate; `Renew` and `Session` need one that `authenticate` accepts. `Tunnel` answers
@@ -299,10 +342,16 @@ export async function serveGateway(
         session(stream, gateway, peer);
         return;
       }
-      case 'Tunnel':
-        respondStatus(stream, new GrpcError(GrpcCode.UNIMPLEMENTED, 'tunnels arrive in v0.3'));
-        stream.resume();
+      case 'Tunnel': {
+        const peer = identify();
+        if (!peer) {
+          respondStatus(stream, new GrpcError(GrpcCode.UNAUTHENTICATED, 'a valid node certificate is required'));
+          stream.resume();
+          return;
+        }
+        tunnel(stream, gateway, peer);
         return;
+      }
       default:
         respondStatus(stream, new GrpcError(GrpcCode.UNIMPLEMENTED, `unknown method ${path}`));
         stream.resume();

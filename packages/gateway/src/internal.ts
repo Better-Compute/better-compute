@@ -1,14 +1,29 @@
-import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http';
-import { createServer as createHttpsServer, request as httpsRequest, type ServerOptions } from 'node:https';
+import {
+  connect,
+  constants,
+  createSecureServer,
+  createServer,
+  type ClientHttp2Session,
+  type Http2SecureServer,
+  type Http2Server,
+  type Http2Session,
+  type IncomingHttpHeaders,
+  type SecureServerOptions,
+  type ServerHttp2Stream,
+} from 'node:http2';
 import type { AddressInfo } from 'node:net';
 import type { TLSSocket } from 'node:tls';
-import { ComputeError, type Notifier, type SqlTx } from '@better-compute/core';
+import { fromBinary, toBinary } from '@bufbuild/protobuf';
+import { ComputeError, isComputeError, type Notifier, type SqlTx } from '@better-compute/core';
+import { MAX_FRAME_BYTES, TunnelFrameSchema, type TunnelFrame } from '@better-compute/protocol';
 import type { Gateway, GatewayStatus } from './gateway.js';
+import { frameMessage, MessageDecoder } from './grpc.js';
+import type { TunnelHandle, TunnelInfo } from './tunnels.js';
 
-// The gateway's internal control API on `gateways.internal_url` (PLAN.md §8.1), called by api and
-// worker processes over the internal CA's mTLS. Every call is an accelerator: dispatch polls every
-// second, specs re-push on the sweep, revocations arrive through the RevocationFeed and
-// cancellations from the database, so correctness never depends on this API being reachable.
+// The gateway's internal control API on `gateways.internal_url` (PLAN.md §8.1), HTTP/2 only, called
+// by api and worker processes over the internal CA's mTLS. Every call but tunnels is an
+// accelerator: dispatch polls every second, specs re-push on the sweep, revocations arrive through
+// the RevocationFeed and cancellations from the database, so correctness never depends on it.
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -29,18 +44,20 @@ async function body(request: Request): Promise<Record<string, unknown> | undefin
 const stringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === 'string');
 
+const routes = ['/v1/health', '/v1/poke', '/v1/revoke', '/v1/drain', '/v1/tunnels/close'];
+
 /**
- * The control API as a fetch handler:
+ * The control API as a fetch handler (everything but the tunnel stream):
  * - `GET /v1/health` → `GatewayStatus`;
- * - `POST /v1/poke {nodeIds?}` → 202 (dispatch + spec push now);
+ * - `POST /v1/poke {nodeIds?}` → 202 (dispatch + spec check now);
  * - `POST /v1/revoke {nodeId, reason, serials?: hex[]}` → `{ revoked }`;
- * - `POST /v1/drain {reason?}` → 202.
+ * - `POST /v1/drain {reason?}` → 202;
+ * - `POST /v1/tunnels/close {tunnelId? nodeId? subject?, reason}` → `{ closed }` (e.g. `delegation:revoke`).
  */
 export function internalHandler(gateway: Gateway): (request: Request) => Promise<Response> {
   return async (request) => {
     const path = new URL(request.url).pathname;
-    const route = `${request.method} ${path}`;
-    switch (route) {
+    switch (`${request.method} ${path}`) {
       case 'GET /v1/health':
         return json(200, gateway.status());
       case 'POST /v1/poke': {
@@ -72,8 +89,17 @@ export function internalHandler(gateway: Gateway): (request: Request) => Promise
         await gateway.drain({ reason: input.reason as string | undefined });
         return json(202, { accepted: true });
       }
+      case 'POST /v1/tunnels/close': {
+        const input = await body(request);
+        const filter: { tunnelId?: string; nodeId?: string; subject?: string } = {};
+        for (const key of ['tunnelId', 'nodeId', 'subject'] as const)
+          if (typeof input?.[key] === 'string') filter[key] = input[key] as string;
+        if (!input || typeof input.reason !== 'string' || !Object.keys(filter).length)
+          return invalid('tunnels/close takes { tunnelId? nodeId? subject? (at least one), reason }');
+        return json(200, { closed: gateway.closeTunnels(filter, input.reason) });
+      }
       default:
-        return ['/v1/health', '/v1/poke', '/v1/revoke', '/v1/drain'].includes(path)
+        return routes.includes(path) || path === '/v1/tunnels'
           ? json(405, { error: { code: 'METHOD_NOT_ALLOWED', message: `${request.method} ${path}` } })
           : json(404, { error: { code: 'NOT_FOUND', message: path } });
     }
@@ -84,59 +110,147 @@ export interface ServeInternalOptions {
   port?: number;
   host?: string;
   /** Internal-CA mTLS: `key`/`cert` for this gateway, `ca` = the internal CA. */
-  tls?: ServerOptions;
-  /** Plain HTTP on loopback, for tests only. */
+  tls?: SecureServerOptions;
+  /** Cleartext HTTP/2 on loopback, for tests only. */
   insecure?: boolean;
 }
 
 export interface ServedInternal {
-  server: Server;
+  server: Http2Server | Http2SecureServer;
   port: number;
   close(): Promise<void>;
 }
 
-async function toRequest(req: IncomingMessage, origin: string): Promise<Request> {
+async function readAll(stream: ServerHttp2Stream, limit: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req as AsyncIterable<Buffer>) {
+  for await (const chunk of stream as AsyncIterable<Buffer>) {
     size += chunk.length;
-    if (size > 64 * 1024) throw new ComputeError('PAYLOAD_TOO_LARGE', 'control requests are small');
+    if (size > limit) throw new ComputeError('PAYLOAD_TOO_LARGE', 'control requests are small');
     chunks.push(chunk);
   }
-  const method = req.method ?? 'GET';
-  return new Request(new URL(req.url ?? '/', origin), {
-    method,
-    headers: { 'content-type': String(req.headers['content-type'] ?? 'application/json') },
-    body: method === 'GET' || method === 'HEAD' ? undefined : Buffer.concat(chunks),
+  return Buffer.concat(chunks);
+}
+
+/** The duplex behind `POST /v1/tunnels`: the api's side of one tunnel. */
+function tunnelStream(stream: ServerHttp2Stream, headers: IncomingHttpHeaders, gateway: Gateway): void {
+  const ticket = headers['x-bc-ticket'];
+  const nodeId = headers['x-bc-node'];
+  const refuse = (status: number, code: string, message: string) => {
+    if (stream.destroyed || stream.headersSent) return stream.close(constants.NGHTTP2_CANCEL);
+    stream.respond({ ':status': status, 'content-type': 'application/json' });
+    stream.end(JSON.stringify({ error: { code, message } }));
+  };
+  if (typeof ticket !== 'string' || typeof nodeId !== 'string')
+    return refuse(400, 'INVALID_INPUT', 'x-bc-ticket and x-bc-node are required');
+
+  let handle: TunnelHandle | undefined;
+  const early: TunnelFrame[] = [];
+  const decoder = new MessageDecoder(MAX_FRAME_BYTES);
+  let ended = false;
+  stream.on('data', (chunk: Uint8Array) => {
+    if (ended) return;
+    try {
+      for (const bytes of decoder.push(chunk)) {
+        const frame = fromBinary(TunnelFrameSchema, bytes);
+        if (handle) handle.receive(frame);
+        else early.push(frame);
+      }
+    } catch {
+      ended = true;
+      handle?.end('protocol-error');
+      stream.close(constants.NGHTTP2_PROTOCOL_ERROR);
+    }
   });
+  const end = (reason: string) => {
+    if (ended) return;
+    ended = true;
+    handle?.end(reason);
+  };
+  stream.on('end', () => end('caller-closed'));
+  stream.on('close', () => end('caller-closed'));
+  stream.on('error', () => end('caller-error'));
+
+  gateway
+    .openTunnel({
+      ticket,
+      nodeId,
+      caller: {
+        send: (frame) => (stream.destroyed || !stream.headersSent ? true : stream.write(frameMessage(toBinary(TunnelFrameSchema, frame)))),
+        onDrain: (callback) => void stream.once('drain', callback),
+        pause: () => stream.pause(),
+        resume: () => stream.resume(),
+        close: () => {
+          if (!stream.destroyed && stream.headersSent) stream.end();
+        },
+      },
+    })
+    .then(
+      (opened) => {
+        if (stream.destroyed) {
+          opened.end('caller-gone');
+          return;
+        }
+        stream.respond({
+          ':status': 200,
+          'content-type': 'application/x-bc-tunnel+proto',
+          'x-bc-tunnel': opened.info.id,
+        });
+        handle = opened;
+        for (const frame of early.splice(0)) opened.receive(frame);
+        if (ended) opened.end('caller-closed');
+      },
+      (error: unknown) => {
+        const code = isComputeError(error) ? error.code : 'INTERNAL_ERROR';
+        const status = isComputeError(error) ? error.status : 500;
+        refuse(status, code, isComputeError(error) ? error.message : 'internal error');
+      },
+    );
 }
 
 /**
- * Serves `internalHandler` over HTTPS with required client certificates (the internal CA). Only
- * callers whose chain verifies against `tls.ca` get past the handshake.
+ * Serves the control API over HTTP/2 with required internal-CA client certificates. Only callers
+ * whose chain verifies against `tls.ca` get past the handshake.
  */
 export async function serveInternal(gateway: Gateway, options: ServeInternalOptions): Promise<ServedInternal> {
   if (!options.tls && !options.insecure)
     throw new ComputeError('INVALID_CONFIG', 'serveInternal needs tls (internal CA), or insecure for tests');
   const handle = internalHandler(gateway);
-  const listener = async (req: IncomingMessage, res: import('node:http').ServerResponse) => {
-    if (options.tls && !(req.socket as TLSSocket).authorized) {
-      res.writeHead(401).end();
+  const server = options.tls
+    ? createSecureServer({ ...options.tls, requestCert: true, rejectUnauthorized: true })
+    : createServer();
+  const sessions = new Set<Http2Session>();
+  server.on('session', (session: Http2Session) => {
+    sessions.add(session);
+    session.on('close', () => sessions.delete(session));
+  });
+  server.on('stream', (stream: ServerHttp2Stream, headers: IncomingHttpHeaders) => {
+    stream.on('error', () => {});
+    if (options.tls && !(stream.session?.socket as TLSSocket | undefined)?.authorized) {
+      stream.respond({ ':status': 401 }, { endStream: true });
       return;
     }
-    try {
-      const response = await handle(await toRequest(req, 'http://gateway.internal'));
-      res.writeHead(response.status, Object.fromEntries(response.headers));
-      res.end(Buffer.from(await response.arrayBuffer()));
-    } catch (error) {
-      const status = error instanceof ComputeError ? error.status : 500;
-      res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: { code: error instanceof ComputeError ? error.code : 'INTERNAL_ERROR' } }));
-    }
-  };
-  const server: Server = options.tls
-    ? createHttpsServer({ ...options.tls, requestCert: true, rejectUnauthorized: true }, listener)
-    : createHttpServer(listener);
+    const method = String(headers[':method'] ?? 'GET');
+    const path = String(headers[':path'] ?? '/');
+    if (method === 'POST' && path === '/v1/tunnels') return tunnelStream(stream, headers, gateway);
+    void (async () => {
+      try {
+        const payload = method === 'GET' || method === 'HEAD' ? undefined : await readAll(stream, 64 * 1024);
+        const response = await handle(
+          new Request(new URL(path, 'http://gateway.internal'), {
+            method,
+            body: payload?.length ? payload.toString('utf8') : undefined,
+          }),
+        );
+        stream.respond({ ':status': response.status, 'content-type': 'application/json' });
+        stream.end(Buffer.from(await response.arrayBuffer()));
+      } catch (error) {
+        if (stream.headersSent || stream.destroyed) return;
+        stream.respond({ ':status': isComputeError(error) ? error.status : 500, 'content-type': 'application/json' });
+        stream.end(JSON.stringify({ error: { code: isComputeError(error) ? error.code : 'INTERNAL_ERROR' } }));
+      }
+    })();
+  });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(options.port ?? 0, options.host ?? '127.0.0.1', () => {
@@ -149,14 +263,14 @@ export async function serveInternal(gateway: Gateway, options: ServeInternalOpti
     port: (server.address() as AddressInfo).port,
     close: () =>
       new Promise<void>((resolve) => {
-        server.closeAllConnections?.();
         server.close(() => resolve());
+        for (const session of sessions) session.destroy();
       }),
   };
 }
 
 export interface ControlClientOptions {
-  /** The gateway's `internal_url`, e.g. `https://gw-1.internal:9443`. */
+  /** The gateway's `internal_url`, e.g. `https://gw-1.internal:9443` (`http://` = h2c, tests only). */
   baseUrl: string;
   /** Client key/cert from the internal CA and the internal CA as `ca`. */
   tls?: {
@@ -169,60 +283,171 @@ export interface ControlClientOptions {
   timeoutMs?: number;
 }
 
+/** The api's side of an open tunnel. */
+export interface ClientTunnel {
+  readonly id: string;
+  /** Frames from the node, until the tunnel ends. */
+  readonly frames: AsyncIterable<TunnelFrame>;
+  /** False when the write buffer is full: wait for `drained()`. */
+  send(frame: TunnelFrame): boolean;
+  drained(): Promise<void>;
+  close(): void;
+}
+
 export interface GatewayControlClient {
   health(): Promise<GatewayStatus>;
   poke(nodeIds?: string[]): Promise<void>;
   revoke(nodeId: string, notice: { reason: string; serials?: string[] }): Promise<boolean>;
   drain(reason?: string): Promise<void>;
+  /** Opens a tunnel through this gateway (§7.6); rejects with the refusal the gateway sent. */
+  openTunnel(request: { ticket: string; nodeId: string }): Promise<ClientTunnel>;
+  closeTunnels(filter: { tunnelId?: string; nodeId?: string; subject?: string }, reason: string): Promise<number>;
+  close(): void;
 }
 
-/** A client for one gateway's control API (node:http/https: no fetch dispatcher needed for mTLS). */
+/** A client for one gateway's control API over one HTTP/2 connection. */
 export function gatewayControlClient(options: ControlClientOptions): GatewayControlClient {
-  const base = new URL(options.baseUrl);
+  const timeoutMs = options.timeoutMs ?? 2_000;
+  let session: ClientHttp2Session | undefined;
+  const connection = () => {
+    if (session && !session.closed && !session.destroyed) return session;
+    session = connect(options.baseUrl, options.baseUrl.startsWith('https:') ? { ...options.tls } : {});
+    session.on('error', () => {});
+    session.unref();
+    return session;
+  };
+
   const call = (method: string, path: string, payload?: unknown) =>
     new Promise<{ status: number; body: any }>((resolve, reject) => {
-      const send = base.protocol === 'https:' ? httpsRequest : httpRequest;
-      const data = payload === undefined ? undefined : Buffer.from(JSON.stringify(payload));
-      const req = send(
-        new URL(path, base),
-        {
-          method,
-          headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {},
-          timeout: options.timeoutMs ?? 2_000,
-          ...(base.protocol === 'https:' ? options.tls : {}),
-        },
-        (res) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const text = Buffer.concat(chunks).toString('utf8');
-            let parsed: unknown;
-            try {
-              parsed = text ? JSON.parse(text) : undefined;
-            } catch {
-              parsed = text;
-            }
-            resolve({ status: res.statusCode ?? 0, body: parsed });
-          });
-        },
-      );
-      req.on('timeout', () => req.destroy(new ComputeError('INTERNAL_ERROR', `gateway ${base.host} timed out`)));
-      req.on('error', reject);
-      req.end(data);
+      let req;
+      try {
+        req = connection().request({ ':method': method, ':path': path, 'content-type': 'application/json' });
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      const timer = setTimeout(() => {
+        req.close(constants.NGHTTP2_CANCEL);
+        reject(new ComputeError('INTERNAL_ERROR', `gateway ${options.baseUrl} timed out`));
+      }, timeoutMs);
+      let status = 0;
+      const chunks: Buffer[] = [];
+      req.on('response', (headers) => (status = Number(headers[':status'])));
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      const noResponse = () => {
+        clearTimeout(timer);
+        if (!status) reject(new ComputeError('INTERNAL_ERROR', `gateway ${options.baseUrl} closed without answering`));
+      };
+      req.on('close', noResponse);
+      req.on('end', () => {
+        clearTimeout(timer);
+        if (!status) return noResponse();
+        const text = Buffer.concat(chunks).toString('utf8');
+        let parsed: unknown;
+        try {
+          parsed = text ? JSON.parse(text) : undefined;
+        } catch {
+          parsed = text;
+        }
+        resolve({ status, body: parsed });
+      });
+      req.on('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      req.end(payload === undefined ? undefined : JSON.stringify(payload));
     });
   const ok = async (method: string, path: string, payload?: unknown) => {
     const response = await call(method, path, payload);
     if (response.status >= 400)
-      throw new ComputeError('INTERNAL_ERROR', `gateway ${base.host} answered ${response.status}`, undefined, {
+      throw new ComputeError('INTERNAL_ERROR', `gateway ${options.baseUrl} answered ${response.status}`, undefined, {
         body: response.body,
       });
     return response.body;
   };
+
   return {
     health: () => ok('GET', '/v1/health'),
     poke: async (nodeIds) => void (await ok('POST', '/v1/poke', nodeIds ? { nodeIds } : {})),
     revoke: async (nodeId, notice) => Boolean((await ok('POST', '/v1/revoke', { nodeId, ...notice })).revoked),
     drain: async (reason) => void (await ok('POST', '/v1/drain', reason ? { reason } : {})),
+    closeTunnels: async (filter, reason) => Number((await ok('POST', '/v1/tunnels/close', { ...filter, reason })).closed),
+    close: () => session?.close(),
+
+    openTunnel(request) {
+      return new Promise<ClientTunnel>((resolve, reject) => {
+        const stream = connection().request({
+          ':method': 'POST',
+          ':path': '/v1/tunnels',
+          'content-type': 'application/x-bc-tunnel+proto',
+          'x-bc-ticket': request.ticket,
+          'x-bc-node': request.nodeId,
+        });
+        const queue: TunnelFrame[] = [];
+        const waiters: ((result: IteratorResult<TunnelFrame>) => void)[] = [];
+        let done = false;
+        const finish = () => {
+          done = true;
+          for (const waiter of waiters.splice(0)) waiter({ value: undefined, done: true });
+        };
+        const decoder = new MessageDecoder(MAX_FRAME_BYTES);
+        stream.on('response', (headers) => {
+          const status = Number(headers[':status']);
+          if (status !== 200) {
+            const chunks: Buffer[] = [];
+            stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+            stream.on('end', () => {
+              let detail: { error?: { code?: string; message?: string } } = {};
+              try {
+                detail = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              } catch {
+                // no body
+              }
+              const code = detail.error?.code;
+              reject(
+                new ComputeError(
+                  code && /^[A-Z_]+$/.test(code) ? (code as never) : 'INTERNAL_ERROR',
+                  detail.error?.message ?? `tunnel refused (${status})`,
+                ),
+              );
+            });
+            return;
+          }
+          stream.on('data', (chunk: Uint8Array) => {
+            for (const bytes of decoder.push(chunk)) {
+              const frame = fromBinary(TunnelFrameSchema, bytes);
+              const waiter = waiters.shift();
+              if (waiter) waiter({ value: frame, done: false });
+              else queue.push(frame);
+            }
+          });
+          stream.on('end', finish);
+          stream.on('close', finish);
+          resolve({
+            id: String(headers['x-bc-tunnel'] ?? ''),
+            frames: {
+              [Symbol.asyncIterator]: () => ({
+                next: () =>
+                  queue.length
+                    ? Promise.resolve({ value: queue.shift()!, done: false })
+                    : done
+                      ? Promise.resolve({ value: undefined, done: true })
+                      : new Promise((next) => waiters.push(next)),
+              }),
+            },
+            send: (frame) => (stream.destroyed ? false : stream.write(frameMessage(toBinary(TunnelFrameSchema, frame)))),
+            drained: () => new Promise<void>((next) => stream.once('drain', () => next())),
+            close: () => {
+              if (!stream.destroyed) stream.end();
+            },
+          });
+        });
+        stream.on('error', (error) => {
+          finish();
+          reject(error);
+        });
+      });
+    },
   };
 }
 
@@ -251,6 +476,7 @@ export function gatewayNotifier(options: GatewayNotifierOptions): Notifier {
   async function clientFor(gatewayId: string): Promise<GatewayControlClient | undefined> {
     const cached = clients.get(gatewayId);
     if (cached && cached.until > now()) return cached.client;
+    cached?.client.close();
     const { rows } = await options.sql.query<{ internal_url: string }>(
       'SELECT internal_url FROM gateways WHERE id = $1',
       [gatewayId],
@@ -290,6 +516,7 @@ export function gatewayNotifier(options: GatewayNotifierOptions): Notifier {
         }
         await client.poke(nodeIds);
       } catch (error) {
+        clients.get(gatewayId)?.client.close();
         clients.delete(gatewayId);
         options.onError?.(channel, error);
       }
@@ -304,7 +531,10 @@ export function gatewayNotifier(options: GatewayNotifierOptions): Notifier {
     },
     async close() {
       listeners.clear();
+      for (const { client } of clients.values()) client.close();
       clients.clear();
     },
   };
 }
+
+export type { TunnelInfo };

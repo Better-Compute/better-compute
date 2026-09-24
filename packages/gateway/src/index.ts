@@ -72,3 +72,12 @@ export type {
   UpdatesResult,
 } from './store.js';
 export { TokenBucket } from './token-bucket.js';
+export { createTunnelRegistry } from './tunnels.js';
+export type {
+  TunnelEndpoint,
+  TunnelHandle,
+  TunnelInfo,
+  TunnelOptions,
+  TunnelRegistry,
+  TunnelStreamHandle,
+} from './tunnels.js';
