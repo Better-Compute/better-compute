@@ -115,10 +115,21 @@ export interface CreateAccountInput {
   provider: string;
   name: string;
   config: unknown;
+  /**
+   * Makes the account id deterministic (`draftId('pacct', tenant, caller, key)`): a retry returns
+   * the account, a different request under the key is `CONFLICT` (FleetConfig computes ids up front).
+   */
+  idempotencyKey?: string;
 }
 
 export function parseCreateAccount(raw: unknown): CreateAccountInput {
-  const input = object(raw, ['tenantId', 'provider', 'name', 'config']);
+  const input = object(raw, ['tenantId', 'provider', 'name', 'config', 'idempotencyKey']);
+  if (
+    input.idempotencyKey !== undefined &&
+    (typeof input.idempotencyKey !== 'string' ||
+      !/^[A-Za-z0-9._~:/+=-]{1,128}$/.test(input.idempotencyKey))
+  )
+    throw new ComputeError('INVALID_INPUT', 'idempotencyKey is invalid');
   if (typeof input.provider !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(input.provider))
     throw new ComputeError('INVALID_INPUT', 'provider must be a provider id');
   return {
@@ -126,8 +137,19 @@ export function parseCreateAccount(raw: unknown): CreateAccountInput {
     provider: input.provider,
     name: name(input.name),
     config: input.config ?? {},
+    ...(input.idempotencyKey !== undefined
+      ? { idempotencyKey: input.idempotencyKey as string }
+      : {}),
   };
 }
+
+/** Whether a stored account was created by this request (config may change through `update`). */
+export function sameAccountRequest(account: ProviderAccount, input: CreateAccountInput): boolean {
+  return account.provider === input.provider && account.name === input.name;
+}
+
+const keyReused = () =>
+  new ComputeError('CONFLICT', 'This idempotency key was used for a different request');
 
 export function providerOf(
   providers: ReadonlyMap<string, ProviderDefinition>,
@@ -145,16 +167,29 @@ export async function createAccount(
   tx: SqlTx,
   providers: ReadonlyMap<string, ProviderDefinition>,
   input: CreateAccountInput,
+  /** The derived id of a keyed request; a fresh id otherwise. */
+  accountId: string = newId('pacct'),
 ): Promise<ProviderAccount> {
+  if (input.idempotencyKey !== undefined) {
+    const existing = await readAccount(tx, accountId, input.tenantId);
+    if (existing) {
+      if (!sameAccountRequest(existing, input)) throw keyReused();
+      return existing;
+    }
+  }
   const provider = providerOf(providers, input.provider);
   const config = await validateConfig(provider, input.config);
   assertNoInlineSecrets(config);
-  const accountId = newId('pacct');
   const { rowCount } = await tx.query(
     `INSERT INTO provider_accounts (id, tenant_id, provider, name, config, version)
-     VALUES ($1, $2, $3, $4, $5::jsonb, 1) ON CONFLICT (tenant_id, name) DO NOTHING`,
+     VALUES ($1, $2, $3, $4, $5::jsonb, 1) ON CONFLICT DO NOTHING`,
     [accountId, input.tenantId, provider.id, input.name, JSON.stringify(config)],
   );
+  if (rowCount === 0 && input.idempotencyKey !== undefined) {
+    // A concurrent request with the same key committed first.
+    const winner = await readAccount(tx, accountId, input.tenantId);
+    if (winner && sameAccountRequest(winner, input)) return winner;
+  }
   if (rowCount === 0)
     throw new ComputeError('CONFLICT', `Provider account ${input.name} already exists`);
   return (await readAccount(tx, accountId))!;

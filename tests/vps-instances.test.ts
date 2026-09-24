@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   apiMethod,
   ComputeError,
+  draftId,
   field,
   manifest,
   manualClock,
@@ -921,5 +922,28 @@ describe('instance metering (§12.7)', () => {
     ]);
     await runUsage();
     expect((await db.query(`SELECT 1 FROM usage_windows`)).rows).toHaveLength(6);
+  });
+});
+
+describe('keyed providerAccounts.create (FleetConfig ids)', () => {
+  it('derives the id from the key, replays, and refuses a reused key', async () => {
+    const input = {
+      tenantId: 'root',
+      provider: 'fake-cloud',
+      name: 'fleet-main',
+      config: { token: 'env://FAKE_TOKEN' },
+      idempotencyKey: 'fleet:root:account:main',
+    };
+    const expected = await draftId('pacct', 'root', 'usr_root', 'fleet:root:account:main');
+    const first = (await call('providerAccounts', 'create', input, root)) as { id: string };
+    expect(first.id).toBe(expected);
+    const again = (await call('providerAccounts', 'create', input, root)) as { id: string };
+    expect(again.id).toBe(expected);
+    await expect(
+      call('providerAccounts', 'create', { ...input, name: 'other-name' }, root),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(
+      call('providerAccounts', 'create', { ...input, idempotencyKey: undefined }, root),
+    ).rejects.toMatchObject({ code: 'CONFLICT' }); // the name is taken
   });
 });

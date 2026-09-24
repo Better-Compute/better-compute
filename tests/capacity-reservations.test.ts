@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   apiMethod,
   ComputeError,
+  draftId,
   manualClock,
   type AuthzAttributes,
   type AuthzRow,
@@ -1096,5 +1097,37 @@ describe('reservations.list scope', () => {
     ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     });
+  });
+});
+
+describe('keyed pools.create (FleetConfig ids)', () => {
+  const root = { ...caller, tenantId: 'root', identityId: 'usr_root' };
+  const body = (extra: Record<string, unknown> = {}) => ({
+    tenantId: 'root',
+    siteId: 'site_01jz00000000000000000000aa',
+    class: 'metal-host',
+    gpuModel: 'H100',
+    idempotencyKey: 'fleet:root:pool:h100-a',
+    ...extra,
+  });
+
+  it('derives the id from the key, replays, and refuses a reused key', async () => {
+    const expected = await draftId('pool', 'root', 'usr_root', 'fleet:root:pool:h100-a');
+    const first = (await call('pools', 'create', body(), { who: root })) as { id: string };
+    expect(first.id).toBe(expected);
+    const again = (await call('pools', 'create', body({ gpuModel: 'H200' }), { who: root })) as {
+      id: string;
+    };
+    expect(again.id).toBe(expected); // gpuModel is updatable, so not part of the request identity
+    await expect(
+      call('pools', 'create', body({ class: 'vps-host' }), { who: root }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    const other = (await call('pools', 'create', body({ idempotencyKey: undefined }), {
+      who: root,
+    })) as { id: string };
+    expect(other.id).not.toBe(expected);
+    await expect(
+      call('pools', 'create', body({ idempotencyKey: 'bad key' }), { who: root }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });

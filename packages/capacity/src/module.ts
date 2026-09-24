@@ -2,6 +2,7 @@ import {
   ComputeError,
   defineMethod,
   defineModule,
+  draftId,
   isId,
   newId,
   reservationStates,
@@ -178,12 +179,25 @@ async function ownedPool(
 ): Promise<Pool & { archived: boolean }> {
   const { rows } = await tx.query<RawPoolRow>(
     `SELECT id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version,
-            archived_at IS NOT NULL AS archived
+            provider_account_id, archived_at IS NOT NULL AS archived
        FROM pools WHERE id = $1 AND owner_tenant_id = $2${lock ? ' FOR UPDATE' : ''}`,
     [poolId, tenantId],
   );
   if (!rows[0]) throw new ComputeError('NOT_FOUND', `Pool ${poolId} not found`);
   return { ...toPool(rows[0]), archived: rows[0].archived === true };
+}
+
+async function findOwnedPool(
+  tx: SqlTx,
+  tenantId: string,
+  poolId: string,
+): Promise<(Pool & { archived: boolean }) | undefined> {
+  try {
+    return await ownedPool(tx, tenantId, poolId);
+  } catch (error) {
+    if (error instanceof ComputeError && error.code === 'NOT_FOUND') return undefined;
+    throw error;
+  }
 }
 
 async function poolAuthzRow(tx: SqlTx, pool: Pool, tenantId: string) {
@@ -222,7 +236,16 @@ export interface CreatePoolInput {
   ownerQuota: Record<string, number>;
   /** `class: 'provider'` pools: the provider account (vps) that backs them; `agent` is then `none`. */
   providerAccountId?: string;
+  /**
+   * Makes the pool id deterministic (`draftId('pool', tenant, caller, key)`), as `sites.create` does:
+   * a retry returns the pool, a different request under the key is `CONFLICT`. FleetConfig computes
+   * the id up front so a plan can offer and size a pool it has not created yet.
+   */
+  idempotencyKey?: string;
 }
+
+/** Idempotency keys (the server's `sites.create` grammar). */
+const idempotencyKeyPattern = /^[A-Za-z0-9._~:/+=-]{1,128}$/;
 
 export function parseCreatePool(raw: unknown): CreatePoolInput {
   const input = object(raw, [
@@ -235,7 +258,13 @@ export function parseCreatePool(raw: unknown): CreatePoolInput {
     'policy',
     'ownerQuota',
     'providerAccountId',
+    'idempotencyKey',
   ]);
+  if (
+    input.idempotencyKey !== undefined &&
+    (typeof input.idempotencyKey !== 'string' || !idempotencyKeyPattern.test(input.idempotencyKey))
+  )
+    fail('idempotencyKey is invalid');
   if (input.class === 'provider') {
     if (input.providerAccountId === undefined) fail('A provider pool needs providerAccountId');
     if (input.agent !== undefined && input.agent !== 'none')
@@ -275,8 +304,31 @@ export function parseCreatePool(raw: unknown): CreatePoolInput {
   if (input.gpuModel !== undefined) result.gpuModel = input.gpuModel as string;
   if (input.providerAccountId !== undefined)
     result.providerAccountId = id(input.providerAccountId, 'pacct', 'providerAccountId');
+  if (input.idempotencyKey !== undefined) result.idempotencyKey = input.idempotencyKey as string;
   return result;
 }
+
+/** The pool id `pools.create` uses: derived from the key when one is given. */
+async function createdPoolId(context: MethodContext, input: CreatePoolInput): Promise<string> {
+  if (input.idempotencyKey === undefined) return newId('pool');
+  const caller = context.caller;
+  if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  return draftId('pool', input.tenantId, caller.identityId, input.idempotencyKey);
+}
+
+/** Whether a stored pool was created by this request (the fields `pools.update` never changes). */
+function samePoolRequest(pool: Pool, input: CreatePoolInput): boolean {
+  return (
+    pool.siteId === input.siteId &&
+    pool.class === input.class &&
+    pool.sharing === input.sharing &&
+    pool.agent === input.agent &&
+    (pool.providerAccountId ?? null) === (input.providerAccountId ?? null)
+  );
+}
+
+const keyReused = () =>
+  new ComputeError('CONFLICT', 'This idempotency key was used for a different request');
 
 export interface OfferPoolInput {
   tenantId: string;
@@ -586,8 +638,31 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
       kind: 'mutation',
       resource: tenantResource,
       validate: parseCreatePool,
+      // With an idempotency key, a finished request replays without a second decision (§3.4 step 4).
+      admission: {
+        async prepare(context, input, tx) {
+          const decide = { status: 'decide' as const, resource: tenantResource(input) };
+          if (input.idempotencyKey === undefined) return decide;
+          const existing = await findOwnedPool(
+            tx,
+            input.tenantId,
+            await createdPoolId(context, input),
+          );
+          if (!existing) return decide;
+          if (!samePoolRequest(existing, input)) throw keyReused();
+          return { status: 'replay', result: existing };
+        },
+      },
       handler: async (context, input) => {
         const tx = context.sql;
+        const poolId = await createdPoolId(context, input);
+        if (input.idempotencyKey !== undefined) {
+          const existing = await findOwnedPool(tx, input.tenantId, poolId);
+          if (existing) {
+            if (!samePoolRequest(existing, input)) throw keyReused();
+            return existing;
+          }
+        }
         const site = await tx.query<{ owner_tenant_id: string }>(
           `SELECT owner_tenant_id FROM sites WHERE id = $1`,
           [input.siteId],
@@ -595,7 +670,7 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
         if (site.rows[0]?.owner_tenant_id !== input.tenantId)
           throw new ComputeError('NOT_FOUND', `Site ${input.siteId} not found`);
         const pool: Pool = {
-          id: newId('pool'),
+          id: poolId,
           ownerTenantId: input.tenantId,
           siteId: input.siteId,
           class: input.class,
@@ -606,10 +681,11 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
         };
         if (input.gpuModel !== undefined) pool.gpuModel = input.gpuModel;
         if (input.providerAccountId !== undefined) pool.providerAccountId = input.providerAccountId;
-        await tx.query(
+        const inserted = await tx.query(
           `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy,
                               provider_account_id, version)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 1)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 1)
+           ON CONFLICT (id) DO NOTHING`,
           [
             pool.id,
             pool.ownerTenantId,
@@ -622,6 +698,12 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
             pool.providerAccountId ?? null,
           ],
         );
+        if (inserted.rowCount === 0) {
+          // A concurrent request with the same key committed first.
+          const winner = await findOwnedPool(tx, input.tenantId, pool.id);
+          if (!winner || !samePoolRequest(winner, input)) throw keyReused();
+          return winner;
+        }
         for (const [resource, max] of Object.entries(input.ownerQuota))
           await setQuota(tx, input.tenantId, pool.id, resource, max);
         await rebuildPoolRollup(tx, pool);

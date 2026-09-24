@@ -2,6 +2,8 @@ import {
   ComputeError,
   defineMethod,
   defineModule,
+  draftId,
+  newId,
   type ComputeModule,
   type Instance,
   type MethodDefinition,
@@ -18,6 +20,7 @@ import {
   parseCreateAccount,
   ProviderClients,
   readAccount,
+  sameAccountRequest,
   updateAccount,
   type CreateAccountInput,
   type ProviderAccount,
@@ -156,6 +159,15 @@ function parseOfferQuery(raw: unknown): OfferQuery {
   return query;
 }
 
+/** The id `providerAccounts.create` uses: derived from the key when one is given. */
+async function accountIdOf(
+  context: ModuleContext & { caller?: { identityId: string } },
+  input: CreateAccountInput,
+): Promise<string> {
+  if (input.idempotencyKey === undefined) return newId('pacct');
+  if (!context.caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  return draftId('pacct', input.tenantId, context.caller.identityId, input.idempotencyKey);
+}
 const noSecrets: SecretResolver = {
   resolve: async () => {
     throw new ComputeError(
@@ -325,8 +337,32 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         resource: tenantResource,
         validate: parseCreateAccount,
+        // With an idempotency key, a finished request replays without a second decision.
+        admission: {
+          async prepare(context, input, tx) {
+            const decide = { status: 'decide' as const, resource: tenantResource(input) };
+            if (input.idempotencyKey === undefined) return decide;
+            const existing = await readAccount(
+              tx,
+              await accountIdOf(context, input),
+              input.tenantId,
+            );
+            if (!existing) return decide;
+            if (!sameAccountRequest(existing, input))
+              throw new ComputeError(
+                'CONFLICT',
+                'This idempotency key was used for a different request',
+              );
+            return { status: 'replay', result: existing };
+          },
+        },
         handler: async (context, input) => {
-          const account = await createAccount(context.sql, providers, input);
+          const account = await createAccount(
+            context.sql,
+            providers,
+            input,
+            await accountIdOf(context, input),
+          );
           await context.authz.upsert(context.sql, {
             type: 'provider-account',
             id: account.id,
