@@ -47,6 +47,9 @@
       "path": "./packages/rollout"
     },
     {
+      "path": "./packages/console-kit"
+    },
+    {
       "path": "./packages/observability"
     },
     {
