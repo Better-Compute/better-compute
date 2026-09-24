@@ -148,4 +148,15 @@ CREATE TABLE image_locations (
 CREATE INDEX image_locations_site ON image_locations (site_id, state, last_used_at);
 `,
   },
+  {
+    name: 'provision/0003_workflow_owner',
+    sql: `
+-- The module that started a workflow (e.g. metal): its reconciler is queued, under the workflow's
+-- key, whenever the workflow finishes. And the profile document as it was when the workflow
+-- started, so steps read the pinned version (image, user data, role) even for shipped profiles.
+ALTER TABLE workflows
+  ADD COLUMN owner text,
+  ADD COLUMN profile_document jsonb;
+`,
+  },
 ]);

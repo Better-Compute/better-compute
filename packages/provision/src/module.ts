@@ -29,6 +29,11 @@ export interface ProvisionOptions {
   profiles?: readonly ProfileDocument[];
   /** Leave out the built-in steps. */
   builtinSteps?: false;
+  /**
+   * Modules whose steps (`extensions` of kind `step`) and `profiles` the engine should know, e.g.
+   * `provisionModule({ modules: [metalModule] })`.
+   */
+  modules?: readonly Pick<ComputeModule, 'extensions' | 'profiles'>[];
 }
 
 /** The provision module, plus the `WorkflowEngine` the host puts on `ModuleContext.workflows`. */
@@ -50,8 +55,15 @@ export interface ProvisionModule extends ComputeModule<'provision', ProvisionApi
  * ```
  */
 export function provisionModule(options: ProvisionOptions = {}): ProvisionModule {
-  const steps = stepRegistry([...(options.builtinSteps === false ? [] : builtinSteps), ...(options.steps ?? [])]);
-  const moduleProfiles = [...(options.profiles ?? [])];
+  const fromModules = (options.modules ?? []).flatMap((module) =>
+    (module.extensions ?? []).filter((extension): extension is StepDefinition => extension.extension === 'step'),
+  );
+  const steps = stepRegistry([
+    ...(options.builtinSteps === false ? [] : builtinSteps),
+    ...fromModules,
+    ...(options.steps ?? []),
+  ]);
+  const moduleProfiles = [...(options.modules ?? []).flatMap((module) => module.profiles ?? []), ...(options.profiles ?? [])];
   const engineOptions: EngineOptions = { steps, profiles: profileSource(moduleProfiles) };
 
   const reconciler: Reconciler = {

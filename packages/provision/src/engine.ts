@@ -68,6 +68,7 @@ export interface WorkflowRow {
   step_id: string | null;
   error: Json | null;
   work_key: string;
+  owner: string | null;
   version: number;
 }
 
@@ -224,6 +225,11 @@ export interface StartWorkflowInput {
   profileVersion: number;
   nodeId?: string;
   instanceId?: string;
+  /**
+   * The module that owns the workflow: when it finishes, work of kind `owner` is queued under the
+   * workflow's key (the node id), so the owner's reconciler reacts without polling.
+   */
+  owner?: string;
 }
 
 /**
@@ -252,9 +258,20 @@ export async function startWorkflow(
   const id = newId('wf');
   const workKey = input.nodeId ?? id;
   const inserted = await tx.query(
-    `INSERT INTO workflows (id, tenant_id, node_id, instance_id, profile_id, profile_version, state, work_key)
-     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7) ON CONFLICT DO NOTHING`,
-    [id, input.tenantId, input.nodeId ?? null, input.instanceId ?? null, input.profileId, input.profileVersion, workKey],
+    `INSERT INTO workflows (id, tenant_id, node_id, instance_id, profile_id, profile_version, state, work_key, owner,
+       profile_document)
+     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9::jsonb) ON CONFLICT DO NOTHING`,
+    [
+      id,
+      input.tenantId,
+      input.nodeId ?? null,
+      input.instanceId ?? null,
+      input.profileId,
+      input.profileVersion,
+      workKey,
+      input.owner ?? null,
+      JSON.stringify(profile),
+    ],
   );
   if (inserted.rowCount === 0)
     throw new ComputeError(
@@ -334,6 +351,7 @@ export async function abortWorkflow(
       error: { code: 'CANCELLED', message: options.reason ?? 'aborted' },
     });
     await publish(context, tx, workflow, 'workflow.cancelled');
+    await notifyOwner(context, tx, workflow);
     return;
   }
   if (workflow.state === 'paused') await setWorkflow(tx, workflow, { state: assertWorkflowVerb('paused', 'resume') });
@@ -507,6 +525,12 @@ async function finish(context: EngineContext, tx: SqlTx, workflow: WorkflowRow):
   const state = assertWorkflowVerb(workflow.state, verb);
   await setWorkflow(tx, workflow, { state, outcome: null, stepId: null });
   await publish(context, tx, workflow, `workflow.${state}`, workflow.error ? { error: workflow.error } : {});
+  await notifyOwner(context, tx, workflow);
+}
+
+/** Queues the owning module's reconciler under the workflow's key. */
+async function notifyOwner(context: EngineContext, tx: SqlTx, workflow: WorkflowRow): Promise<void> {
+  if (workflow.owner) await context.work.enqueue(tx, workflow.owner, workflow.work_key);
 }
 
 async function startAgentStep(
@@ -515,25 +539,43 @@ async function startAgentStep(
   workflow: WorkflowRow,
   step: StepRow,
 ): Promise<Transition> {
-  if (!workflow.node_id) {
+  if (step.state === 'pending') {
     await setStep(tx, step, assertStepVerb(step.state, 'start'), { start: true });
+    await setWorkflow(tx, workflow, { stepId: step.id });
+  }
+  if (!workflow.node_id) {
     await failStep(context, tx, workflow, step, { code: 'INVALID_STATE', message: `step runs on ${step.runs_on} but the workflow has no node` });
     return { kind: 'continue' };
+  }
+  const { rows } = await tx.query<{ deadline: Date; now: Date }>(
+    'SELECT deadline, compute_now() AS now FROM workflow_steps WHERE workflow_id = $1 AND id = $2',
+    [workflow.id, step.id],
+  );
+  const deadline = rows[0]!.deadline.getTime();
+  const now = rows[0]!.now.getTime();
+  // Site steps go to the site's agent (the boot-lease holder first); the rest to the node itself.
+  const target = step.runs_on === 'site' ? await siteAgentFor(tx, workflow.node_id) : workflow.node_id;
+  if (!target) {
+    if (now >= deadline) {
+      await failStep(context, tx, workflow, step, { code: 'NO_SITE_AGENT', message: "no connected site agent serves the node's site" });
+      return { kind: 'continue' };
+    }
+    return { kind: 'wait', wakeAt: Math.min(deadline, now + 5_000) };
   }
   const session = await tx.query<{ boot_id: string | null; role: string | null }>(
     'SELECT boot_id, role FROM node_sessions WHERE node_id = $1',
     [workflow.node_id],
   );
-  await setStep(tx, step, assertStepVerb(step.state, 'start'), { start: true });
-  const { rows } = await tx.query<{ deadline: Date }>(
-    'SELECT deadline FROM workflow_steps WHERE workflow_id = $1 AND id = $2',
-    [workflow.id, step.id],
-  );
-  const deadline = rows[0]!.deadline.getTime();
   const command = await context.commands.enqueue(tx, {
-    nodeId: workflow.node_id,
+    nodeId: target,
     kind: step.command_kind ?? step.action,
-    payload: { workflowId: workflow.id, stepId: step.id, attempt: step.attempt, args: step.args } as Json,
+    payload: {
+      workflowId: workflow.id,
+      stepId: step.id,
+      attempt: step.attempt,
+      ...(target !== workflow.node_id ? { targetNodeId: workflow.node_id } : {}),
+      args: step.args,
+    } as Json,
     idempotencyKey: commandKey(step),
     notAfter: deadline,
   });
@@ -542,9 +584,27 @@ async function startAgentStep(
     sent_boot_id: session.rows[0]?.boot_id ?? null,
     sent_role: session.rows[0]?.role ?? null,
   });
-  await setWorkflow(tx, workflow, { stepId: step.id });
   await publish(context, tx, workflow, 'workflow.step.started', { stepId: step.id, action: step.action, commandId: command.id });
-  return { kind: 'wait', wakeAt: Math.min(deadline, (await sqlNow(tx)) + workflowPollMs) };
+  return { kind: 'wait', wakeAt: Math.min(deadline, now + workflowPollMs) };
+}
+
+/**
+ * The site agent that runs `site` steps for a node: a connected agent with role `site` in the
+ * node's site, the holder of the `site:<id>:boot` lease first (§8.5). Undefined when none is up.
+ */
+export async function siteAgentFor(tx: SqlTx, nodeId: string): Promise<string | undefined> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT agent.id FROM nodes target
+       JOIN nodes agent ON agent.site_id = target.site_id AND agent.role = 'site'
+       JOIN node_sessions s ON s.node_id = agent.id
+       LEFT JOIN leases l ON l.name = 'site:' || target.site_id || ':boot' AND l.owner = agent.id
+         AND l.expires_at > compute_now()
+      WHERE target.id = $1 AND s.connected_at IS NOT NULL
+        AND (s.disconnected_at IS NULL OR s.connected_at > s.disconnected_at)
+      ORDER BY (l.name IS NOT NULL) DESC, agent.id LIMIT 1`,
+    [nodeId],
+  );
+  return rows[0]?.id;
 }
 
 async function settleWaiting(
@@ -629,9 +689,9 @@ async function transition(context: EngineContext, tx: SqlTx, workflowId: string)
       }
       return { kind: 'run', step: inFlight, workflow, deadline };
     }
-    // An agent step marked running whose command was never recorded (a crash between the two
-    // writes cannot happen: both are one transaction), so this is a stale row: send it again.
-    return startAgentStepAgain(context, tx, workflow, inFlight);
+    // An agent step that started but has no command yet: it is waiting for a site agent to come
+    // up (or its deadline).
+    return startAgentStep(context, tx, workflow, inFlight);
   }
   if (workflow.state === 'paused') return { kind: 'done' };
   const next = nextStep(workflow, steps);
@@ -660,17 +720,6 @@ async function transition(context: EngineContext, tx: SqlTx, workflowId: string)
     [workflow.id, next.id],
   );
   return { kind: 'run', step: { ...next, deadline: rows[0]!.deadline }, workflow, deadline: rows[0]!.deadline.getTime() };
-}
-
-async function startAgentStepAgain(
-  context: EngineContext,
-  tx: SqlTx,
-  workflow: WorkflowRow,
-  step: StepRow,
-): Promise<Transition> {
-  await tx.query(`UPDATE workflow_steps SET state = 'pending' WHERE workflow_id = $1 AND id = $2`, [workflow.id, step.id]);
-  step.state = 'pending';
-  return startAgentStep(context, tx, workflow, step);
 }
 
 export interface AdvanceOptions extends EngineOptions {

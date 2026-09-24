@@ -17,6 +17,7 @@ export {
   reconcileWorkflows,
   resumeWorkflow,
   retryWorkflow,
+  siteAgentFor,
   startWorkflow,
   stepNotReady,
   workflowPollMs,
@@ -32,6 +33,7 @@ export { builtinSteps, waitAgentJoined, waitGenerationObserved } from './builtin
 export { builtinProfileTenant, createProfile, deleteProfile, profileSource, updateProfile } from './profiles.js';
 export { provisionMigrations } from './migrations.js';
 export * from './images.js';
+export * from './command-step.js';
 export type * from './api.js';
 export { provisionApi } from './api.js';
 

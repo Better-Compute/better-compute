@@ -33,6 +33,7 @@ import {
 // The workflow engine on PGlite (PLAN.md §11.2), driven transition by transition with the sim clock.
 
 const START = Date.UTC(2026, 8, 1);
+const SITE_AGENT = 'node_site0000000000000000000000';
 let db: SqlExecutor;
 let now = START;
 
@@ -163,6 +164,17 @@ beforeAll(async () => {
   await db.migrate(provisionMigrations);
   await useSimClock(db, START);
   await db.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_a', 'ten_a', 'shared', 'eu', 1)`);
+  // The site agent that runs `on: site` steps.
+  await db.query(
+    `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+       trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+     VALUES ($1, 'site_a', NULL, 'ten_a', 'site', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 0, 0, 1)`,
+    [SITE_AGENT],
+  );
+  await db.query(
+    `INSERT INTO node_sessions (node_id, session_epoch, boot_id, role, connected_at) VALUES ($1, 1, 'site-boot', 'site', compute_now())`,
+    [SITE_AGENT],
+  );
 });
 afterAll(() => db.close());
 beforeEach(async () => {
@@ -468,11 +480,55 @@ describe('operator verbs', () => {
   });
 });
 
+describe('routing and owners', () => {
+  it('sends site steps to the site agent, naming the target node', async () => {
+    profile({ id: 'site-route', steps: [{ use: 'power.setPower', on: 'site' }] });
+    const { id } = await start('site-route');
+    await advance(id);
+    const [step] = await steps(id);
+    const command = await db.query<{ node_id: string; body: Uint8Array }>('SELECT node_id, body FROM commands WHERE id = $1', [step!.command_id]);
+    expect(command.rows[0]!.node_id).toBe(SITE_AGENT);
+    expect(JSON.parse(new TextDecoder().decode(command.rows[0]!.body))).toMatchObject({ targetNodeId: node });
+  });
+
+  it('waits for a site agent, and fails with NO_SITE_AGENT at the deadline', async () => {
+    await db.query(`UPDATE node_sessions SET disconnected_at = compute_now() + interval '1 second' WHERE node_id = $1`, [SITE_AGENT]);
+    try {
+      profile({ id: 'no-agent', steps: [{ use: 'power.setPower', on: 'site', timeout: '1m' }] });
+      const { id } = await start('no-agent');
+      const first = await advance(id);
+      expect(first.done).toBe(false);
+      expect((await steps(id))[0]).toMatchObject({ state: 'running', command_id: null });
+      await tick(61_000);
+      expect((await advance(id)).done).toBe(true);
+      expect(await workflow(id)).toMatchObject({ state: 'failed', error: { code: 'NO_SITE_AGENT' } });
+    } finally {
+      await db.query(`UPDATE node_sessions SET disconnected_at = NULL, connected_at = compute_now() WHERE node_id = $1`, [SITE_AGENT]);
+    }
+  });
+
+  it('queues the owning module when a workflow finishes, and snapshots the profile', async () => {
+    profile({ id: 'owned', steps: [{ use: 'test.record' }] });
+    const { id } = await db.transaction((tx) =>
+      startWorkflow(context(), options, tx, { tenantId: 'ten_a', profileId: 'owned', profileVersion: 1, nodeId: node, owner: 'metal' }),
+    );
+    wakes.length = 0;
+    expect((await advance(id)).done).toBe(true);
+    expect(wakes).toContainEqual({ key: `metal:${node}` });
+    const snapshot = await db.query<{ profile_document: { id: string } }>('SELECT profile_document FROM workflows WHERE id = $1', [id]);
+    expect(snapshot.rows[0]!.profile_document.id).toBe('owned');
+  });
+});
+
 describe('provisionModule', () => {
   it('registers migrations, the reconciler, built-in steps and the engine', async () => {
     const module = provisionModule({ steps: [record], profiles: [defineProfile({ id: 'shipped', version: 1, target: 'metal', steps: [{ use: 'test.record' }] })] });
     expect(module.name).toBe('provision');
-    expect(module.migrations!.map((m) => m.name)).toEqual(['provision/0001_workflows', 'provision/0002_images']);
+    expect(module.migrations!.map((m) => m.name)).toEqual([
+      'provision/0001_workflows',
+      'provision/0002_images',
+      'provision/0003_workflow_owner',
+    ]);
     expect(module.reconcilers!.map((r) => [r.name, r.shardBy])).toEqual([['workflow', 'node']]);
     expect(module.engineOptions.steps.get('wait.agentJoined')).toBeDefined();
     expect(() => provisionModule({ steps: [record, record] })).toThrow(/registered twice/);
