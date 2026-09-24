@@ -15,6 +15,12 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
+import { create } from '@bufbuild/protobuf';
+import {
+  InstanceObservedState,
+  InstanceStatusSchema,
+  StatusReportSchema,
+} from '@better-compute/protocol';
 import { useSimClock, setSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
@@ -25,6 +31,7 @@ import {
 } from '@better-compute/capacity';
 import {
   defineProvider,
+  instanceStatusHandler,
   instanceWork,
   reportInstances,
   setIpPool,
@@ -567,6 +574,77 @@ describe('hosted instances', () => {
     ]);
     expect(result.orphans).toEqual([created.id, 'inst_leaked'].sort());
     expect((await get(created.id)).state).toBe('provisioning');
+  });
+
+  it('ingests StatusReport.instances through the gateway status handler', async () => {
+    const created = (await call('instances', 'create', createHosted())) as View;
+    const node = created.nodeId!;
+    const published: { type: string; data: unknown }[] = [];
+    const logged: string[] = [];
+    const events = {
+      async publish(_tx: SqlTx, event: { type: string; data: unknown }) {
+        published.push({ type: event.type, data: event.data });
+      },
+    };
+    const handler = instanceStatusHandler({ events } as never);
+    const context = { nodeId: node, tenantId: 'root', work: moduleContext(db).work };
+    const status = (
+      instances: { instanceId: string; state: InstanceObservedState; addresses?: string[] }[],
+      instancesComplete: boolean,
+    ) =>
+      create(StatusReportSchema, {
+        instances: instances.map((instance) => create(InstanceStatusSchema, instance)),
+        instancesComplete,
+      });
+    const result = await db.transaction((tx) =>
+      handler(
+        tx,
+        context,
+        status(
+          [
+            {
+              instanceId: created.id,
+              state: InstanceObservedState.RUNNING,
+              addresses: ['fe80::2'],
+            },
+            { instanceId: 'inst_leak', state: InstanceObservedState.RUNNING },
+            { instanceId: 'inst_unknown', state: InstanceObservedState.UNSPECIFIED },
+          ],
+          true,
+        ),
+      ),
+    );
+    expect(result).toEqual({ updated: 1, orphans: ['inst_leak'] });
+    expect(published).toEqual([
+      { type: 'instance.orphaned', data: { nodeId: node, instanceIds: ['inst_leak'] } },
+    ]);
+    await reconcile(created.id);
+    expect(await get(created.id)).toMatchObject({
+      state: 'running',
+      addresses: expect.arrayContaining(['fe80::2']),
+    });
+
+    // An empty partial report changes nothing; an empty complete one marks it absent.
+    expect(await db.transaction((tx) => handler(tx, context, status([], false)))).toEqual({
+      updated: 0,
+      orphans: [],
+    });
+    expect(
+      await db.transaction((tx) =>
+        instanceStatusHandler({ log: (line) => logged.push(line) })(tx, context, status([], true)),
+      ),
+    ).toEqual({ updated: 1, orphans: [] });
+    expect(logged).toEqual([]);
+    expect(
+      await db.transaction((tx) =>
+        instanceStatusHandler({ log: (line) => logged.push(line) })(
+          tx,
+          context,
+          status([{ instanceId: 'inst_leak', state: InstanceObservedState.STOPPED }], false),
+        ),
+      ),
+    ).toEqual({ updated: 0, orphans: ['inst_leak'] });
+    expect(logged).toEqual([expect.stringContaining('inst_leak')]);
   });
 
   it('waits while nothing fits, then fails on quota', async () => {
