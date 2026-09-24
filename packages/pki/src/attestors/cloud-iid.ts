@@ -13,8 +13,8 @@ import {
   type HardwareClaims,
   type SqlTx,
 } from '@better-compute/core';
-import { base64url, fromBase64url } from '../keys.js';
-import { csrSha256Of, refuser, type AttestorBaseOptions } from './common.js';
+import { base64url, fromBase64url, sha256 } from '../keys.js';
+import { csrSha256Of, refuser, useOnce, type AttestorBaseOptions } from './common.js';
 
 /**
  * The `cloud-iid` attestor (v0.3, PLAN.md §3.6): a platform-owned cloud VM (a `vps-host` or
@@ -29,8 +29,9 @@ import { csrSha256Of, refuser, type AttestorBaseOptions } from './common.js';
  *
  * Replay: a GCP identity token's audience carries the CSR hash (`<audience>#<b64url sha256(csr)>`),
  * so a captured token is useless with another key. An AWS document cannot be bound, so it is
- * accepted only within `maxAgeMs` of the instance's `pendingTime` (first boot); `resolve` should
- * also admit an instance only once.
+ * accepted only within `maxAgeMs` of the instance's `pendingTime` (first boot). Either way, the
+ * attestor admits each (provider, account, instance) once (`attestation_uses`); later re-joins of
+ * that machine go through x509pop.
  */
 
 export interface CloudIidEvidence {
@@ -123,6 +124,11 @@ export function cloudIidAttestor(options: CloudIidAttestorOptions): AttestorVeri
       });
       if (!result) return refuse('unknown-instance');
       if (result.role !== context.role) return refuse('role');
+      // One join per instance, ever: an AWS document is readable by anything on the VM and not
+      // CSR-bound, and even a bound GCP token must not mint a second node. A known instance that
+      // lost its certificate re-joins with x509pop.
+      const subject = sha256(`${identity.provider}\0${identity.accountId}\0${identity.instanceId}`);
+      if (!(await useOnce(context.tx, 'cloud-iid', subject))) return refuse('instance-reused');
       return result;
     },
   });

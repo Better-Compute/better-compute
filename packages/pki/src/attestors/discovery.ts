@@ -12,6 +12,7 @@ import {
 } from '@better-compute/core';
 import { signingInput, site } from '@better-compute/protocol';
 import { normalizeClaim, type JoinClaims } from '../claims.js';
+import { sha256 } from '../keys.js';
 import { nodeCertsLookup, signNodeStatement, verifyNodeStatement } from '../node-signatures.js';
 import {
   checkSingleUseToken,
@@ -19,6 +20,7 @@ import {
   refuser,
   spendToken,
   tokenOf,
+  useOnce,
   type AttestorBaseOptions,
 } from './common.js';
 
@@ -304,6 +306,12 @@ export function discoveryAttestor(options: DiscoveryAttestorOptions = {}): Attes
       );
       const ids = { tokenId: record.id, nodeId: assertion.siteAgentNodeId };
       if (!record.siteId || record.siteId !== assertion.siteId) return refuse('site-mismatch', ids);
+      // A token minted for one machine (the iPXE script's) only goes with that machine's assertion.
+      if (
+        record.expect?.mac &&
+        normalizeClaim.mac(record.expect.mac) !== normalizeClaim.mac(assertion.mac)
+      )
+        return refuse('token-mac-mismatch', ids);
 
       // The vouching agent: a site agent of that site, holding the site's boot lease at this epoch.
       const { rows } = await context.tx.query<AgentRow>(
@@ -403,6 +411,9 @@ export function discoveryAttestor(options: DiscoveryAttestorOptions = {}): Attes
           };
         }
       }
+      // A signed assertion admits one join, whatever token comes with it.
+      if (!(await useOnce(context.tx, 'discovery', sha256(signed.body), notAfter)))
+        return refuse('assertion-reused', ids);
       await spendToken(context.tx, record.id, refuse);
       return {
         tenantId: record.tenantId,

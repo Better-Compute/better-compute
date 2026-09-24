@@ -638,6 +638,32 @@ describe('discovery', () => {
     });
   });
 
+  it('uses a signed assertion once, and binds a per-machine token to its MAC', async () => {
+    const hook = refusals();
+    const attestor = discoveryAttestor(hook);
+    const captured = assertion({ mac: '3c:ec:ef:10:20:30', issuedAt: now - 30_000 });
+    const first = await insertToken('discovery', { pool_id: null });
+    await expect(attest(attestor, first.token, captured)).resolves.toMatchObject({ role: 'ramdisk' });
+    const second = await insertToken('discovery', { pool_id: null });
+    await expect(attest(attestor, second.token, captured)).rejects.toMatchObject(denied);
+    // The refused join rolled back: the second token is still unspent.
+    const { rows } = await db.query<{ uses_left: number }>(
+      'SELECT uses_left FROM join_tokens WHERE id = $1',
+      [second.id],
+    );
+    expect(rows[0]!.uses_left).toBe(1);
+
+    const twoNics = { ...claims, macs: ['3c:ec:ef:10:20:30', '3c:ec:ef:10:20:31'] };
+    const forOtherNic = await insertToken('discovery', {
+      pool_id: null,
+      expect: JSON.stringify({ mac: '3c:ec:ef:10:20:31' }),
+    });
+    await expect(
+      attest(attestor, forOtherNic.token, assertion({ issuedAt: now - 20_000 }), { claims: twoNics }),
+    ).rejects.toMatchObject(denied);
+    expect(hook.reasons).toEqual(['assertion-reused', 'token-mac-mismatch']);
+  });
+
   it('refuses once the vouching agent lost the boot lease', async () => {
     const hook = refusals();
     await db.query(`UPDATE leases SET owner = 'node_someone_else' WHERE name = $1`, [
@@ -812,6 +838,31 @@ describe('cloud-iid', () => {
       'unknown-instance',
       'unknown-provider',
     ]);
+  });
+
+  it('admits each instance once, even with a fresh, correctly bound token', async () => {
+    const hook = refusals();
+    const attestor = cloudIidAttestor({
+      ...hook,
+      providers: [gcpInstanceIdentity({ audience, jwks: staticJwks(jwks) })],
+      resolve,
+    });
+    const instance = { ...gcpClaims().google.compute_engine, instance_id: '7770001' };
+    const tokenFor = (forCsr: Uint8Array) =>
+      jwt(gcpClaims({ aud: cloudIidAudience(audience, sha256(forCsr)), google: { compute_engine: instance } }));
+    await expect(attest(attestor, { provider: 'gcp', document: tokenFor(csr) })).resolves.toMatchObject({
+      tenantId: tenant,
+    });
+    const other = createCsr(generateP256KeyPair().privateKey);
+    await expect(
+      db.transaction((tx) =>
+        attestor.verify(
+          { attestor: 'cloud-iid', payload: createCloudIidEvidence({ provider: 'gcp', document: tokenFor(other) }) },
+          context(tx, { csrSha256: sha256(other) }),
+        ),
+      ),
+    ).rejects.toMatchObject(denied);
+    expect(hook.reasons).toEqual(['instance-reused']);
   });
 
   it('fetches the JWKS through the injected fetch, caches it and refetches for a new kid', async () => {

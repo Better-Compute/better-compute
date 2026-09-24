@@ -112,6 +112,25 @@ export async function spendToken(
   if (updated.rowCount !== 1) refuse('exhausted', { tokenId });
 }
 
+/**
+ * Records that `subject` (a SHA-256 of what must be used once: a cloud instance identity, a signed
+ * discovery assertion) admitted a join; false when it already did (`attestation_uses`). Call it
+ * only on the final round: a deferral commits the transaction.
+ */
+export async function useOnce(
+  tx: SqlTx,
+  attestor: string,
+  subject: Uint8Array,
+  expiresAt?: number,
+): Promise<boolean> {
+  const inserted = await tx.query(
+    `INSERT INTO attestation_uses (attestor, subject, expires_at) VALUES ($1, $2, $3)
+     ON CONFLICT DO NOTHING`,
+    [attestor, subject, expiresAt === undefined ? null : new Date(expiresAt)],
+  );
+  return inserted.rowCount === 1;
+}
+
 /** `spendSingleUseToken` without the spend: locks the row and runs every check. */
 export async function checkSingleUseToken(
   tx: SqlTx,
