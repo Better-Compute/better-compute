@@ -489,6 +489,7 @@ group('fleet', 'fleet', [
   ['export', 'read', 'fleet:admin', 'fleet', 'v0.2'],
   ['plan', 'read', 'fleet:admin', 'fleet', 'v0.2'],
   ['apply', 'mutation', 'fleet:admin', 'fleet', 'v0.2'],
+  ['status', 'read', 'fleet:admin', 'fleet', 'v0.2'],
 ]);
 
 /**
