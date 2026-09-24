@@ -1,6 +1,7 @@
 import {
   ComputeError,
   draftId,
+  isComputeError,
   isId,
   parseDuration,
   reservationStateTable,
@@ -540,8 +541,23 @@ export async function prepareCreate(
       { reservationId: existing.id },
     );
   if (existing?.state === 'denied') throw new ComputeError('ACCESS_DENIED', 'Access denied');
-  if (existing && existing.state !== 'draft')
-    return { status: 'replay', result: await reservationView(tx, existing) };
+  // §3.4 step 7: the agent retries with the same key after a human approved; the approval is keyed
+  // by (action, type, id), so the retry is decided afresh on the same draft.
+  let draft = existing;
+  if (draft?.state === 'awaiting-confirmation') {
+    const expiresAt = confirmationExpiry(draft);
+    // A retry after the deadline finds the request expired (terminal): it replays as such.
+    if (expiresAt !== undefined && expiresAt <= context.clock.now())
+      return {
+        status: 'replay',
+        result: await reservationView(tx, await move(tx, draft, 'expire')),
+      };
+    draft = await move(tx, draft, 'retry', {
+      conditions: withoutCondition(draft.conditions, 'ConfirmationRequired'),
+    });
+  }
+  if (draft && draft.state !== 'draft')
+    return { status: 'replay', result: await reservationView(tx, draft) };
 
   const pool = await visiblePool(tx, input.tenantId, input.poolId);
   if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
@@ -579,17 +595,64 @@ export async function prepareCreate(
   return { status: 'decide', resource: { type: 'reservation', id } };
 }
 
-/** `reservations.create` after a refusal: the draft becomes `denied` (GC after 24 h). */
+/** How long a delegated request may wait for a human (§3.4 step 7: ≤30 min). */
+export const maxConfirmationMs = 30 * 60_000;
+
+/** The confirmation deadline recorded on an awaiting-confirmation reservation. */
+export function confirmationExpiry(row: Pick<ReservationRow, 'conditions'>): number | undefined {
+  const condition = row.conditions.find((entry) => entry.type === 'ConfirmationRequired');
+  const expiresAt = Number(condition?.message);
+  return Number.isFinite(expiresAt) ? expiresAt : undefined;
+}
+
+/**
+ * `reservations.create` after a refusal. A delegated deny that IAM turned into a confirmation
+ * request (`CONFIRMATION_REQUIRED`, §3.4 step 7) parks the draft in `awaiting-confirmation`, with
+ * the confirmation id and its deadline (≤30 min) in the `ConfirmationRequired` condition, and wakes
+ * the lifecycle at the deadline. Any other refusal makes the draft `denied` (GC after 24 h).
+ */
 export async function denyCreate(
   context: MethodContext,
   input: CreateReservationInput,
   tx: SqlTx,
+  error?: unknown,
 ): Promise<void> {
   const caller = context.caller;
   if (!caller) return;
   const id = await draftId('rsv', input.tenantId, caller.identityId, input.idempotencyKey);
   const row = await readReservation(tx, input.tenantId, id, { lock: true });
-  if (row?.state === 'draft') await move(tx, row, 'deny');
+  if (row?.state !== 'draft') return;
+  const details = isComputeError(error, 'CONFIRMATION_REQUIRED') ? error.details : undefined;
+  const confirmationId = details?.confirmationId;
+  if (typeof confirmationId !== 'string' || confirmationId === '') {
+    await move(tx, row, 'deny');
+    return;
+  }
+  const now = context.clock.now();
+  const requested = Number(details?.expiresAt);
+  const expiresAt = Math.min(
+    Number.isFinite(requested) && requested > now ? requested : now + maxConfirmationMs,
+    now + maxConfirmationMs,
+  );
+  const awaiting = await move(tx, row, 'awaitConfirmation', {
+    conditions: withCondition(
+      row.conditions,
+      {
+        type: 'ConfirmationRequired',
+        status: 'true',
+        reason: confirmationId,
+        message: String(expiresAt),
+      },
+      now,
+    ),
+  });
+  await context.work.enqueue(tx, reservationWork, id, { notBefore: expiresAt });
+  await context.events.publish(tx, {
+    type: 'reservation.awaiting-confirmation',
+    tenantId: awaiting.tenantId,
+    subject: `reservation/${id}`,
+    data: { state: awaiting.state, poolId: awaiting.poolId, confirmationId, expiresAt },
+  });
 }
 
 function placementRequest(row: ReservationRow, during: TimeRange) {
@@ -1089,6 +1152,15 @@ export async function reconcileReservation(
   const row = await readReservationById(tx, id, true);
   if (!row || reservationStateTable.terminal.includes(row.state)) return undefined;
   const now = deps.clock.now();
+
+  if (row.state === 'awaiting-confirmation') {
+    const expiresAt = confirmationExpiry(row) ?? now;
+    if (expiresAt > now) return expiresAt;
+    const expired = await move(tx, row, 'expire');
+    await publish(deps, tx, expired, 'reservation.expired', { reason: 'confirmation expired' });
+    return undefined;
+  }
+  if (row.state === 'draft') return undefined;
 
   if (row.state === 'pending') {
     const { rows } = await tx.query<{ created_ms: number }>(

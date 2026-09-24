@@ -120,7 +120,7 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
   group: G,
   method: M,
   raw: unknown,
-  options: { deny?: boolean; who?: Caller } = {},
+  options: { deny?: boolean | ComputeError; who?: Caller } = {},
 ): Promise<unknown> {
   const definition = (api[group] as Record<string, CapacityApi[G][M]>)[
     method as string
@@ -146,12 +146,15 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
     );
     if (plan.status === 'replay') return plan.result;
     if (options.deny) {
+      const refusal =
+        options.deny instanceof ComputeError
+          ? options.deny
+          : new ComputeError('ACCESS_DENIED', 'Access denied');
       await db.transaction(
         (tx) =>
-          definition.admission!.denied?.(context(tx), input, tx, new Error('denied')) ??
-          Promise.resolve(),
+          definition.admission!.denied?.(context(tx), input, tx, refusal) ?? Promise.resolve(),
       );
-      throw new ComputeError('ACCESS_DENIED', 'Access denied');
+      throw refusal;
     }
   }
   return db.transaction((tx) => definition.handler(context(tx), input));
@@ -857,5 +860,91 @@ describe('node reports', () => {
     expect(
       await db.transaction((tx) => markAllocationReleased(tx, work, second!.allocationId)),
     ).toBe(false);
+  });
+});
+
+describe('delegated confirmation (§3.4 step 7)', () => {
+  const agent = {
+    ...caller,
+    sessionKind: 'delegated' as const,
+    agentId: 'agt_1',
+    delegationId: 'dlg_1',
+  };
+  const confirmation = (expiresAt?: number) =>
+    new ComputeError('CONFIRMATION_REQUIRED', 'A human must confirm', 403, {
+      confirmationId: 'cnf_1',
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+      action: 'compute:reservations:create',
+      resource: { type: 'compute-reservation', id: 'x' },
+    });
+
+  it('parks the draft, then re-decides the same id when the agent retries after approval', async () => {
+    await expect(
+      call('reservations', 'create', create(), {
+        who: agent,
+        deny: confirmation(T0 + 10 * 60_000),
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONFIRMATION_REQUIRED',
+      details: { confirmationId: 'cnf_1' },
+    });
+    const { rows } = await db.query<{ id: string; state: string }>(
+      `SELECT id, state FROM reservations`,
+    );
+    expect(rows).toMatchObject([{ state: 'awaiting-confirmation' }]);
+    expect(recorded.work.at(-1)).toEqual({
+      kind: reservationWork,
+      key: rows[0]!.id,
+      notBefore: T0 + 10 * 60_000,
+    });
+    expect(recorded.events).toEqual(
+      ['reservation.awaiting-confirmation'].map((type) => expect.objectContaining({ type })),
+    );
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(0);
+
+    await advance(5 * 60_000);
+    const placed = (await call('reservations', 'create', create(), { who: agent })) as Rsv;
+    expect(placed).toMatchObject({ id: rows[0]!.id, state: 'placed' });
+    expect(placed.conditions).toEqual([]);
+  });
+
+  it('clamps the deadline to 30 minutes and expires unconfirmed requests', async () => {
+    await expect(
+      call('reservations', 'create', create(), { who: agent, deny: confirmation(T0 + 5 * HOUR) }),
+    ).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' });
+    const id = (await db.query<{ id: string }>(`SELECT id FROM reservations`)).rows[0]!.id;
+    expect(recorded.work.at(-1)!.notBefore).toBe(T0 + 30 * 60_000);
+    await reconcile(id);
+    expect(
+      (await db.query<{ state: string }>(`SELECT state FROM reservations`)).rows[0]!.state,
+    ).toBe('awaiting-confirmation');
+    await advance(30 * 60_000);
+    await reconcile(id);
+    expect(
+      (await db.query<{ state: string }>(`SELECT state FROM reservations`)).rows[0]!.state,
+    ).toBe('expired');
+    const replay = (await call('reservations', 'create', create(), { who: agent })) as Rsv;
+    expect(replay.state).toBe('expired');
+  });
+
+  it('expires on a late retry even before the reconciler ran, and denies plain refusals', async () => {
+    await expect(
+      call('reservations', 'create', create(), { who: agent, deny: confirmation() }),
+    ).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' });
+    await advance(31 * 60_000);
+    expect(((await call('reservations', 'create', create(), { who: agent })) as Rsv).state).toBe(
+      'expired',
+    );
+
+    await expect(
+      call('reservations', 'create', create({ idempotencyKey: 'k2' }), {
+        who: agent,
+        deny: new ComputeError('CONFIRMATION_REQUIRED', 'no id', 403, {}),
+      }),
+    ).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' });
+    const { rows } = await db.query<{ state: string }>(
+      `SELECT state FROM reservations WHERE idempotency_key = 'k2'`,
+    );
+    expect(rows).toEqual([{ state: 'denied' }]);
   });
 });

@@ -747,7 +747,7 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
       validate: parseCreateReservation,
       admission: {
         prepare: (context, input, tx) => prepareCreate(context, input, tx),
-        denied: (context, input, tx) => denyCreate(context, input, tx),
+        denied: (context, input, tx, error) => denyCreate(context, input, tx, error),
       },
       handler: (context, input) => completeCreate(deps(context), context, input),
     }),
