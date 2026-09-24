@@ -78,6 +78,19 @@ export interface RealtimeHarness {
     timeoutMs?: number;
   }): Promise<DispatchResult>;
   /**
+   * Steady load: `ratePerSecond` commands of `kind` (default inventory.refresh, 500 ms of fake work),
+   * spread round-robin over the fleet in `tickMs` batches for `durationMs`, then drained. Times each from
+   * its enqueue commit to acknowledgement and completion (the v0.4 "command p99 < 1.5 s" measure).
+   */
+  load(options?: {
+    kind?: CommandKind;
+    payload?: CommandPayload<CommandKind>;
+    ratePerSecond?: number;
+    durationMs?: number;
+    tickMs?: number;
+    drainMs?: number;
+  }): Promise<LoadResult>;
+  /**
    * A reconnect storm (PLAN.md §15 scale risk 3): drops the sessions of a `fraction` of the fleet at once
    * (`disconnect`: the network resets and the daemons redial with backoff; `crash`: the processes die and
    * start again, recovering their journals) and times each node until the gateway holds a new session.
@@ -88,6 +101,12 @@ export interface RealtimeHarness {
     timeoutMs?: number;
   }): Promise<StormResult>;
   close(): Promise<void>;
+}
+
+export interface LoadResult extends DispatchResult {
+  enqueued: number;
+  offeredPerSecond: number;
+  completedPerSecond: number;
 }
 
 export interface StormResult {
@@ -227,8 +246,125 @@ export async function createRealtimeHarness(
       if (await check()) return;
       if (Date.now() > deadline)
         throw new ComputeError('INTERNAL_ERROR', `Timed out waiting for ${what}`);
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      await sleep(pollMs);
     }
+  };
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** Enqueues one command per target (repeats allowed) in one transaction; all share its commit time. */
+  const enqueue = async (
+    targets: readonly string[],
+    kind: CommandKind,
+    given?: CommandPayload<CommandKind>,
+  ): Promise<[string[], number]> => {
+    const spec = commandKinds[kind];
+    // The kind's payload with its defaults unless the caller brings one (diag.nvml: every visible GPU).
+    const payload = packCommandPayload(kind, given ?? create(spec.payload as never));
+    const ids: string[] = [];
+    const notAfter = Date.now() + 3_600_000;
+    await db.transaction(async (tx) => {
+      for (const nodeId of targets) {
+        const id = newId('cmd');
+        const { rows } = await tx.query<{ seq: string }>(
+          'UPDATE nodes SET next_cmd_seq = next_cmd_seq + 1 WHERE id = $1 RETURNING (next_cmd_seq - 1)::text AS seq',
+          [nodeId],
+        );
+        const seq = Number(rows[0]!.seq);
+        const body = encodeMessage(
+          CommandBodySchema,
+          create(CommandBodySchema, {
+            id,
+            nodeId,
+            seq: BigInt(seq),
+            kind,
+            lane: spec.lane,
+            notAfter: timestampFromMs(notAfter),
+            retrySafe: spec.retrySafe,
+            selfTerminating: spec.selfTerminating,
+            idempotencyKey: id,
+            payload,
+          }),
+        );
+        await tx.query(
+          `INSERT INTO commands (id, node_id, seq, kind, body, state, not_after, retry_safe, self_terminating,
+             attested, idempotency_key)
+           VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $1)`,
+          [
+            id,
+            nodeId,
+            seq,
+            kind,
+            Buffer.from(body),
+            new Date(notAfter),
+            spec.retrySafe,
+            spec.selfTerminating,
+            spec.attested,
+          ],
+        );
+        ids.push(id);
+      }
+    });
+    return [ids, Date.now()];
+  };
+
+  /** Follows commands from their enqueue commit to acknowledgement and a terminal state. */
+  const track = (kind: CommandKind) => {
+    const enqueuedAt = new Map<string, number>();
+    const acked = new Map<string, number>();
+    const done = new Map<string, { at: number; state: string; reason?: string }>();
+    let lastDoneAt = 0;
+    return {
+      add(ids: string[], at: number) {
+        for (const id of ids) enqueuedAt.set(id, at);
+      },
+      size: () => enqueuedAt.size,
+      open: () => enqueuedAt.size - done.size,
+      lastDoneAt: () => lastDoneAt,
+      /** Reads the open commands' states once; returns how many are still open. */
+      async poll(): Promise<number> {
+        const open = [...enqueuedAt.keys()].filter((id) => !done.has(id));
+        if (!open.length) return 0;
+        const { rows } = await db.query<{ id: string; state: string; reason: string | null }>(
+          'SELECT id, state, reason FROM commands WHERE id = ANY($1::text[])',
+          [open],
+        );
+        const now = Date.now();
+        for (const row of rows) {
+          const since = (now - enqueuedAt.get(row.id)!) / 1000;
+          if (!acked.has(row.id) && row.state !== 'pending' && row.state !== 'dispatched') {
+            acked.set(row.id, now);
+            histograms.ack.observe({ kind }, since);
+          }
+          if (terminalStates.has(row.state)) {
+            done.set(row.id, {
+              at: now,
+              state: row.state,
+              ...(row.reason ? { reason: row.reason } : {}),
+            });
+            histograms.done.observe({ kind }, since);
+            lastDoneAt = now;
+          }
+        }
+        return enqueuedAt.size - done.size;
+      },
+      result(): DispatchResult {
+        return {
+          firstUpdate: summarize([...acked].map(([id, at]) => at - enqueuedAt.get(id)!)),
+          terminal: summarize([...done].map(([id, { at }]) => at - enqueuedAt.get(id)!)),
+          failed: [...enqueuedAt.keys()]
+            .filter((id) => done.get(id)?.state !== 'succeeded')
+            .map((id) => {
+              const finished = done.get(id);
+              return {
+                id,
+                state: finished?.state ?? 'unfinished',
+                ...(finished?.reason ? { reason: finished.reason } : {}),
+              };
+            }),
+        };
+      },
+    };
   };
 
   return {
@@ -257,110 +393,71 @@ export async function createRealtimeHarness(
     },
     async dispatch(dispatchOptions = {}) {
       const kind = dispatchOptions.kind ?? 'diag.nvml';
-      const perNode = dispatchOptions.perNode ?? 1;
-      const spec = commandKinds[kind];
-      // The kind's payload with its defaults unless the caller brings one (diag.nvml: every visible GPU).
-      const payload = packCommandPayload(
-        kind,
-        dispatchOptions.payload ?? create(spec.payload as never),
-      );
+      const targets = Array.from({ length: dispatchOptions.perNode ?? 1 }, () => nodeIds).flat();
       // Every command commits in one transaction, so each is timed from the same commit rather than from a
       // position in a long enqueue loop (1k sequential commits would add seconds to the early ones).
-      const ids: string[] = [];
-      const notAfter = Date.now() + 3_600_000;
-      await db.transaction(async (tx) => {
-        for (let round = 0; round < perNode; round++)
-          for (const nodeId of nodeIds) {
-            const id = newId('cmd');
-            const { rows } = await tx.query<{ seq: string }>(
-              'UPDATE nodes SET next_cmd_seq = next_cmd_seq + 1 WHERE id = $1 RETURNING (next_cmd_seq - 1)::text AS seq',
-              [nodeId],
-            );
-            const seq = Number(rows[0]!.seq);
-            const body = encodeMessage(
-              CommandBodySchema,
-              create(CommandBodySchema, {
-                id,
-                nodeId,
-                seq: BigInt(seq),
-                kind,
-                lane: spec.lane,
-                notAfter: timestampFromMs(notAfter),
-                retrySafe: spec.retrySafe,
-                selfTerminating: spec.selfTerminating,
-                idempotencyKey: id,
-                payload,
-              }),
-            );
-            await tx.query(
-              `INSERT INTO commands (id, node_id, seq, kind, body, state, not_after, retry_safe, self_terminating,
-                 attested, idempotency_key)
-               VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $1)`,
-              [
-                id,
-                nodeId,
-                seq,
-                kind,
-                Buffer.from(body),
-                new Date(notAfter),
-                spec.retrySafe,
-                spec.selfTerminating,
-                spec.attested,
-              ],
-            );
-            ids.push(id);
-          }
-      });
-      const committedAt = Date.now();
-      const enqueuedAt = new Map(ids.map((id) => [id, committedAt]));
+      const tracker = track(kind);
+      tracker.add(...(await enqueue(targets, kind, dispatchOptions.payload)));
       gateway.poke(nodeIds);
-
-      const acked = new Map<string, number>();
-      const done = new Map<string, { at: number; state: string; reason?: string }>();
       try {
         await waitFor(
-          async () => {
-            const open = ids.filter((id) => !done.has(id));
-            const { rows } = await db.query<{ id: string; state: string; reason: string | null }>(
-              'SELECT id, state, reason FROM commands WHERE id = ANY($1::text[])',
-              [open],
-            );
-            const now = Date.now();
-            for (const row of rows) {
-              if (!acked.has(row.id) && row.state !== 'pending' && row.state !== 'dispatched') {
-                acked.set(row.id, now);
-                histograms.ack.observe({ kind }, (now - enqueuedAt.get(row.id)!) / 1000);
-              }
-              if (terminalStates.has(row.state)) {
-                done.set(row.id, {
-                  at: now,
-                  state: row.state,
-                  ...(row.reason ? { reason: row.reason } : {}),
-                });
-                histograms.done.observe({ kind }, (now - enqueuedAt.get(row.id)!) / 1000);
-              }
-            }
-            return done.size === ids.length;
-          },
+          async () => (await tracker.poll()) === 0,
           dispatchOptions.timeoutMs ?? 60_000,
           `${kind} commands to finish`,
         );
       } catch {
         // Report what did not finish instead of throwing away the measurements.
       }
+      return tracker.result();
+    },
+    async load(loadOptions = {}) {
+      const kind = loadOptions.kind ?? 'inventory.refresh';
+      const rate = loadOptions.ratePerSecond ?? 100;
+      const durationMs = loadOptions.durationMs ?? 10_000;
+      const tickMs = loadOptions.tickMs ?? 100;
+      const tracker = track(kind);
+      let cursor = 0;
+      let owed = 0;
+      let polling = true;
+      // Poll alongside the offered load, so acknowledgements are timed while commands keep arriving.
+      const poller = (async () => {
+        while (polling) {
+          await tracker.poll();
+          await sleep(pollMs);
+        }
+      })();
+      const started = Date.now();
+      for (let tick = 1; Date.now() - started < durationMs; tick++) {
+        owed += (rate * tickMs) / 1000;
+        const count = Math.floor(owed);
+        owed -= count;
+        if (count > 0) {
+          const targets = Array.from({ length: count }, () => nodeIds[cursor++ % nodeIds.length]!);
+          tracker.add(...(await enqueue(targets, kind, loadOptions.payload)));
+          gateway.poke([...new Set(targets)]);
+        }
+        await sleep(Math.max(0, started + tick * tickMs - Date.now()));
+      }
+      const offeredMs = Date.now() - started;
+      try {
+        await waitFor(
+          () => tracker.open() === 0,
+          loadOptions.drainMs ?? 60_000,
+          `${kind} load to drain`,
+        );
+      } catch {
+        // Report what did not finish.
+      } finally {
+        polling = false;
+        await poller;
+      }
+      await tracker.poll();
+      const result = tracker.result();
       return {
-        firstUpdate: summarize([...acked].map(([id, at]) => at - enqueuedAt.get(id)!)),
-        terminal: summarize([...done].map(([id, { at }]) => at - enqueuedAt.get(id)!)),
-        failed: ids
-          .filter((id) => done.get(id)?.state !== 'succeeded')
-          .map((id) => {
-            const finished = done.get(id);
-            return {
-              id,
-              state: finished?.state ?? 'unfinished',
-              ...(finished?.reason ? { reason: finished.reason } : {}),
-            };
-          }),
+        ...result,
+        enqueued: tracker.size(),
+        offeredPerSecond: tracker.size() / (offeredMs / 1000),
+        completedPerSecond: result.terminal.count / ((tracker.lastDoneAt() - started) / 1000 || 1),
       };
     },
     async storm(stormOptions = {}) {

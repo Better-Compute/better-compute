@@ -63,6 +63,19 @@ describe('real-time harness', () => {
     expect(result.terminal.count).toBe(10);
   }, 60_000);
 
+  it('holds a steady load and drains it', async () => {
+    harness = await createRealtimeHarness({ nodes: 10 });
+    await harness.connectAll(20_000);
+    const result = await harness.load({ ratePerSecond: 50, durationMs: 2_000, drainMs: 20_000 });
+    expect(result.failed).toEqual([]);
+    expect(result.enqueued).toBeGreaterThanOrEqual(90);
+    expect(result.enqueued).toBeLessThanOrEqual(110);
+    expect(result.firstUpdate.count).toBe(result.enqueued);
+    expect(result.terminal.count).toBe(result.enqueued);
+    expect(result.offeredPerSecond).toBeGreaterThan(40);
+    expect(result.firstUpdate.p99).toBeLessThan(2_000);
+  }, 60_000);
+
   it('rides out a reconnect storm: every dropped or crashed daemon gets a new session', async () => {
     harness = await createRealtimeHarness({ nodes: 20 });
     await harness.connectAll(20_000);

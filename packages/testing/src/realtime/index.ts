@@ -4,6 +4,7 @@ export { createRealtimeHarness, summarize } from './harness.js';
 export type {
   DispatchResult,
   LatencySummary,
+  LoadResult,
   RealtimeHarness,
   RealtimeHarnessOptions,
   StormResult,

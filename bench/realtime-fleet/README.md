@@ -31,3 +31,16 @@ The poll interval does not move ack, so the ~1.7 s median comes from the gateway
 | 2000 | 47.0 s | 1.61 s | 1.83 s | 4.25 s | 19.6 s | 28.1 s |
 
 Batched CommandUpdate ingestion more than halved ack p99 at 1k, and ack now grows sub-linearly with the fleet. Handshakes are the next bottleneck. A storm (`BENCH_RT_STORM`, default 1: every session drops at once and the daemons redial with backoff) costs about what the initial connect does, roughly 10–20 ms per handshake serialized on PGlite, so time to reconnect grows faster than the fleet. Admission control and jitter (§15 scale risk 3) keep that time bounded but don't shorten it.
+
+## Steady state (G5: command p99 < 1.5 s with polling only)
+
+`harness.load()` offers `BENCH_RT_LOAD_RATE` commands/s of `inventory.refresh` (500 ms of fake work), spread round-robin over the fleet in 100 ms batches for `BENCH_RT_LOAD_MS`, then drains. The load runs after the burst and before the storm, so the two never overlap. Measured on 1k nodes, PGlite, one process, 20 s per rate:
+
+| offered | completed | ack p50 | ack p99 | terminal p99 |
+| ------- | --------- | ------- | ------- | ------------ |
+| 25/s | 24.4/s | 58 ms | 94 ms | 597 ms |
+| 50/s | 48.7/s | 59 ms | 114 ms | 636 ms |
+| 100/s | 96.0/s | 245 ms | 378 ms | 1.48 s |
+| 117/s (200/s asked; saturated) | 111.7/s | 1.04 s | 1.88 s | 2.45 s |
+
+Below saturation the ack p99 sits well inside G5. The single PGlite, which also carries the harness's enqueues and polls, saturates at about 115 commands/s end to end. There the queue grows and p99 leaves the SLO, so the default rate is 100/s. The v0.4 claim at 10k nodes needs Postgres and daemons in another process.
