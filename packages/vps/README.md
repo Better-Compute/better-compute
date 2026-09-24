@@ -1,63 +1,91 @@
 # @better-compute/vps
 
-VPS instances for better-compute: VMs on platform hosts through runtime drivers, and machines from
-external providers (PLAN.md §3.6). It depends on `@better-compute/core`,
-`@better-compute/protocol` and `@better-compute/provision`.
+VPS for better-compute (PLAN.md §3.6). The package holds:
 
-**Status: P0 stub.**
+- `vps()`, the module behind the `instances`, `flavors` and `providerAccounts` API groups;
+- `defineProvider`;
+- the `runtime` driver kind;
+- pool IPAM;
+- the seams the gateway and node specs use.
 
-- `defineProvider` is implemented.
-- The `runtime` driver kind is a frozen contract type.
-- `vps()` throws `NOT_IMPLEMENTED` ("VPS arrives in v0.3").
-- Arriving in v0.3: instance lifecycle, flavors, IPAM, the `instances`, `flavors` and
-  `providerAccounts` API groups, and `providerConformance`.
+It depends on `@better-compute/core`, `protocol`, `provision` and `capacity`. The application
+injects it, and the server never imports it.
+
+**Status: v0.3 control plane.** Hosted instances, provider instances, flavors, provider accounts
+and IPAM work, and so do the daemon report and node-spec seams. The Hetzner provider ships
+separately.
 
 ```ts
-import { field, manifest } from 'better-compute/core';
-import { defineProvider, vps } from 'better-compute/vps'; // also merges the runtime driver kind
+import { vps } from 'better-compute/vps';
+import { hetznerCloud } from '@better-compute/provider-hetzner';
 
-export const acmeCloud = defineProvider({
-  id: 'acme-cloud',
-  version: '1.0.0',
-  provides: ['vps'],
-  config: manifest({ token: field.secret().describe('API token') }),
-  create: (config, context) => createAcmeClient(config, context), // returns a ProviderImpl
+betterCompute({
+  modules: [vps({ runtimes: ['libvirt-kvm'], providers: [hetznerCloud], images })],
 });
-
-const modules = [vps({ runtimes: ['libvirt-kvm'] })]; // NOT_IMPLEMENTED until v0.3
 ```
 
-## `defineProvider`
+## Instances
 
-`defineProvider(provider)` returns a frozen `ProviderDefinition` stamped with
-`extension: 'provider'`.
+`instances.create({ tenantId, poolId, flavor, imageId, sshKeys, userData?, desiredState?, idempotencyKey })`
+follows the reservation admission pattern:
 
-- The definition is code. Each provider account is data, validated by `config`.
-- The definition is checked up front:
-  - the id and version must be well formed;
-  - `provides` is `metal`, `vps` or both;
-  - `config` must be a Standard Schema;
-  - `create` must be a function;
-  - unknown fields are rejected.
-- Errors are `ComputeError('INVALID_CONFIG')`, with `details.path` naming the field.
+- **Transaction 1** looks up the idempotency key per tenant and caller identity. The same request
+  replays. A different request under the same key is `CONFLICT`.
+- It checks that the pool is visible, the flavor exists and the image resolves. Compute checks
+  image visibility itself.
+- It then writes the deterministic draft (`draftId('inst', …)`) and its authz row, with
+  attributes `vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified` and `projectId`.
+- **After a refusal**, the draft is deleted, so a retry is decided afresh.
+- **Transaction 2** admits the draft and schedules it.
+  - A hosted pool places at once through `ctx.capacity` and returns `QUOTA_EXCEEDED` to the
+    caller when quota runs out.
+  - A provider pool charges quota now and creates the machine from the reconciler.
 
-## The `runtime` driver kind
+Later operations change only `desiredState`: `start`, `stop` and `delete`. The API never calls a
+runtime. `resize` works on stopped hosted instances whose GPU count stays the same. It moves the
+scalar claims in place on the node, quota first. `list` defaults to `scope: 'mine'`.
 
-Importing this package merges the `runtime` kind into `DriverKinds` of `@better-compute/core`.
+### Hosted pools (`class: 'vps-host'`, `agent: 'bcd'`)
 
-A `RuntimeDriver` has these members:
+- **Placement.** The instance claims vCPU (× overcommit), memory, disk and whole GPUs for VFIO
+  through capacity. It then leases an IPv4 address from the pool's range (`setIpPool`).
+- **Node spec.** `nodeSpec` gives the host `NodeSpec.instances`: image, flavor, cloud-init with the
+  tenant's keys, GPU atoms, and `desiredState: 'deleted'` while the instance is deleting.
+- **Reports.** The gateway calls `reportInstances(tx, work, nodeId, reports, { complete })`. Only
+  instances placed on that node are touched. A complete list marks missing instances `absent`.
+  Instances the runtime holds that no row places there come back as `orphans`, which are leaks.
+- **The `vps.instances` reconciler** turns reports into transitions:
+  provisioning → starting → running ⇄ stopped, `error` on a runtime error, and deleted once the
+  runtime drops the instance. Deletion releases the booking, the IP and the quota.
+- **Lost hosts.** An instance on a `lost` node becomes `lost`. It recovers if the node comes back
+  and reports it. With `policy.recreateOnHostLoss` it is re-placed on another node.
 
-- `traits`: isolation `vm`, `microvm` or `container`; whether it is multi-tenant; GPU passthrough;
-  and the image formats it boots.
-- `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, and an optional `console(id)`.
+### Provider pools (`class: 'provider'`, `agent: 'none'`)
 
-The daemon's `instances` converger calls them. The API only changes `desiredState`.
+There is no `nodes` row. The reconciler drives the account's `ProviderImpl`:
 
-## Re-exports
+- `create`, with `idempotencyKey` = the instance id, so a retry never makes a second machine;
+- polling `get`, then `power`, then `delete`;
+- network calls always run outside database transactions, between a planning transaction and a
+  version-guarded apply.
 
-These contracts are declared in `@better-compute/core` and re-exported here as types:
-`ProviderDefinition`, `ProviderInput`, `ProviderImpl`, `ProviderContext`, `CallContext`, `Offer`,
-`OfferQuery`, `ExternalMachine`, `RescueAccess`, `ImageRef`, `Flavor`, `Instance`, `InstanceSpec`,
-`InstanceState` and `InstanceDesiredState`.
+Provider errors become a `ProviderError` condition and are retried. A machine that vanishes marks
+the instance `lost`. User data carries only the tenant's keys or the tenant's own cloud-init. No
+join token ever goes into tenant-readable user data.
 
-License: Apache-2.0.
+## Flavors and provider accounts
+
+- **Flavors** are per pool. The pool's owner manages them, and offered tenants can list them.
+  - A provider pool's flavor names its provider `offerId`.
+  - Deleting a flavor still in use archives it instead.
+- **Provider accounts** are rows validated by their provider's manifest.
+  - Credentials must be `SecretRef`s (`secret://`, `vault://` or `env://`), never raw values.
+  - Clients are built on demand and cached per account version.
+  - `offers` lists the provider's offers.
+  - An account that a pool or a live instance uses cannot be deleted.
+
+## Providers
+
+`defineProvider({ id, version, provides, config, create })` declares an external capacity
+provider. Its shapes are checked up front (`INVALID_CONFIG`), and the definition is returned
+frozen, with `extension: 'provider'`.

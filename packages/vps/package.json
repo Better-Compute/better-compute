@@ -48,6 +48,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@better-compute/capacity": "workspace:*",
     "@better-compute/core": "workspace:*",
     "@better-compute/protocol": "workspace:*",
     "@better-compute/provision": "workspace:*"

@@ -90,10 +90,14 @@ describe('the subpaths of umbrella.json', () => {
 });
 
 describe('the four named subpaths', () => {
+  it('better-compute/vps: vps() builds the vps module', async () => {
+    const { vps } = (await import('better-compute/vps')) as typeof import('@better-compute/vps');
+    expect(vps().name).toBe('vps');
+  });
+
   it.each([
     ['better-compute/metal', 'metal', 'bare-metal provisioning', 'v0.2'],
     ['better-compute/provision', 'provisionModule', 'workflow engine', 'v0.2'],
-    ['better-compute/vps', 'vps', 'VPS', 'v0.3'],
   ])(
     '%s: %s() throws NOT_IMPLEMENTED naming its phase',
     async (specifier, name, feature, phase) => {

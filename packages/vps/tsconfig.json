@@ -16,6 +16,9 @@
     },
     {
       "path": "../provision"
+    },
+    {
+      "path": "../capacity"
     }
   ]
 }

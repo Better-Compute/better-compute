@@ -36,8 +36,6 @@ describe('module factories of the P0 stubs', () => {
     ['metal()', () => metal(), 'bare-metal provisioning', 'v0.2'],
     ['metal(options)', () => metal({ hardwareProfiles: {} }), 'bare-metal provisioning', 'v0.2'],
     ['provisionModule()', () => provisionModule(), 'workflow engine', 'v0.2'],
-    ['vps()', () => vps(), 'VPS', 'v0.3'],
-    ['vps(options)', () => vps({ runtimes: ['libvirt-kvm'] }), 'VPS', 'v0.3'],
   ] as const)('%s throws NOT_IMPLEMENTED naming its phase', (_label, create, feature, phase) => {
     const error = notImplemented(create);
     expect(error.message).toBe(`${feature} arrives in ${phase}`);
@@ -48,7 +46,13 @@ describe('module factories of the P0 stubs', () => {
   it('declare the modules they will return', () => {
     expectTypeOf(metal).returns.toEqualTypeOf<ComputeModule<'metal'>>();
     expectTypeOf(provisionModule).returns.toEqualTypeOf<ComputeModule<'provision'>>();
-    expectTypeOf(vps).returns.toEqualTypeOf<ComputeModule<'vps'>>();
+  });
+
+  // The VPS control plane landed in v0.3 (tests/vps-*.test.ts).
+  it('vps() returns the vps module', () => {
+    const module = vps({ runtimes: ['libvirt-kvm'] });
+    expect(module.name).toBe('vps');
+    expectTypeOf(module).toExtend<ComputeModule<'vps'>>();
   });
 });
 

@@ -1,11 +1,18 @@
 /**
- * VPS for better-compute (PLAN.md §3.6): `defineProvider`, which is implemented, the `runtime`
- * driver kind merged into `DriverKinds` of `@better-compute/core` by importing this package, and
- * `vps()`, whose instance lifecycle arrives in v0.3. The provider, flavor and instance contracts are
- * declared in `@better-compute/core` and re-exported here.
+ * VPS for better-compute (PLAN.md §3.6): `vps()`, the module behind the `instances`, `flavors` and
+ * `providerAccounts` groups; `defineProvider`; the `runtime` driver kind merged into `DriverKinds`
+ * of `@better-compute/core` by importing this package; pool IPAM; and the seams the gateway and the
+ * node spec use (`reportInstances`, `instanceSpecs`). The provider, flavor and instance contracts
+ * are declared in `@better-compute/core` and re-exported here.
  */
 export { defineProvider } from './provider.js';
-export { vps, type VpsOptions } from './module.js';
+export { vps, type VpsApi, type VpsOptions, type ProviderAccountView } from './module.js';
+export * from './migrations.js';
+export * from './instances.js';
+export * from './lifecycle.js';
+export * from './flavors.js';
+export * from './accounts.js';
+export * from './ipam.js';
 export type {
   RuntimeDriver,
   RuntimeInstanceStatus,

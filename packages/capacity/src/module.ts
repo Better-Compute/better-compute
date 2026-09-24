@@ -155,7 +155,7 @@ export interface TenantPool extends Pool {
 async function tenantPools(tx: SqlTx, tenantId: string, poolId?: string): Promise<TenantPool[]> {
   const { rows } = await tx.query<RawPoolRow>(
     `SELECT p.id, p.owner_tenant_id, p.site_id, p.class, p.gpu_model, p.sharing, p.agent, p.policy,
-            p.version
+            p.provider_account_id, p.version
        FROM pools p WHERE ${visibleWhere} AND ($2::text IS NULL OR p.id = $2) ORDER BY p.id`,
     [tenantId, poolId ?? null],
   );
@@ -211,6 +211,8 @@ export interface CreatePoolInput {
   agent: PoolAgent;
   policy: PoolPolicy;
   ownerQuota: Record<string, number>;
+  /** `class: 'provider'` pools: the provider account (vps) that backs them; `agent` is then `none`. */
+  providerAccountId?: string;
 }
 
 export function parseCreatePool(raw: unknown): CreatePoolInput {
@@ -223,14 +225,21 @@ export function parseCreatePool(raw: unknown): CreatePoolInput {
     'agent',
     'policy',
     'ownerQuota',
+    'providerAccountId',
   ]);
+  if (input.class === 'provider') {
+    if (input.providerAccountId === undefined) fail('A provider pool needs providerAccountId');
+    if (input.agent !== undefined && input.agent !== 'none')
+      fail("A provider pool's machines are reached through the provider: agent must be none");
+  } else if (input.providerAccountId !== undefined)
+    fail('Only provider pools take providerAccountId');
   if (!poolClasses.includes(input.class as PoolClass))
     fail(`class must be one of ${poolClasses.join(', ')}`);
   const sharing = (input.sharing ?? 'exclusive') as SharingMode;
   if (!sharingModes.includes(sharing)) fail(`sharing must be one of ${sharingModes.join(', ')}`);
   if (sharing !== 'exclusive')
     throw new ComputeError('UNSUPPORTED', 'Shared GPU pools (mig, timeslice, mps) arrive in v0.5');
-  const agent = (input.agent ?? 'bcd') as PoolAgent;
+  const agent = (input.agent ?? (input.class === 'provider' ? 'none' : 'bcd')) as PoolAgent;
   if (agent !== 'bcd' && agent !== 'none') fail('agent must be bcd or none');
   if (
     input.gpuModel !== undefined &&
@@ -255,6 +264,8 @@ export function parseCreatePool(raw: unknown): CreatePoolInput {
         : quotaMap(input.ownerQuota, 'ownerQuota'),
   };
   if (input.gpuModel !== undefined) result.gpuModel = input.gpuModel as string;
+  if (input.providerAccountId !== undefined)
+    result.providerAccountId = id(input.providerAccountId, 'pacct', 'providerAccountId');
   return result;
 }
 
@@ -511,9 +522,11 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
           version: 1,
         };
         if (input.gpuModel !== undefined) pool.gpuModel = input.gpuModel;
+        if (input.providerAccountId !== undefined) pool.providerAccountId = input.providerAccountId;
         await tx.query(
-          `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 1)`,
+          `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy,
+                              provider_account_id, version)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 1)`,
           [
             pool.id,
             pool.ownerTenantId,
@@ -523,6 +536,7 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
             pool.sharing,
             pool.agent,
             JSON.stringify(pool.policy),
+            pool.providerAccountId ?? null,
           ],
         );
         for (const [resource, max] of Object.entries(input.ownerQuota))

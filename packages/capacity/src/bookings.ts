@@ -137,6 +137,74 @@ export async function releaseAllocation(tx: SqlTx, allocationId: string): Promis
   return true;
 }
 
+export type ResizeOutcome =
+  | { status: 'resized'; resources: Record<string, number> }
+  /** `resource` does not fit on the allocation's node; nothing changed. */
+  | { status: 'conflict'; resource: string };
+
+/**
+ * Changes an allocation's scalar claims in place (instance resize): growth takes the guarded
+ * `allocated + Δ <= floor(allocatable × ratio)` update on its node, shrinkage returns room.
+ * All-or-nothing. Quota deltas are the caller's, charged before and refunded after (lock order).
+ */
+export async function resizeAllocation(
+  tx: SqlTx,
+  allocationId: string,
+  resources: Readonly<Record<string, number>>,
+): Promise<ResizeOutcome> {
+  const allocation = await readAllocation(tx, allocationId, { lock: true });
+  if (!allocation) throw new ComputeError('NOT_FOUND', `Allocation ${allocationId} not found`);
+  if (allocation.released)
+    throw new ComputeError('INVALID_STATE', `Allocation ${allocationId} is released`);
+  for (const [resource, amount] of Object.entries(resources))
+    if (!Number.isSafeInteger(amount) || amount < 0)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Resource ${resource} must be a non-negative integer`,
+      );
+  const names = [
+    ...new Set([...Object.keys(allocation.resources), ...Object.keys(resources)]),
+  ].sort();
+  const savepoint = `capacity_resize_${++savepoints}`;
+  await tx.query(`SAVEPOINT ${savepoint}`);
+  try {
+    for (const resource of names) {
+      const delta = (resources[resource] ?? 0) - (allocation.resources[resource] ?? 0);
+      if (delta > 0) {
+        const claimed = await tx.query(
+          `UPDATE node_resources SET allocated = allocated + $3
+            WHERE node_id = $1 AND resource = $2 AND allocated + $3 <= floor(allocatable * ratio)
+            RETURNING allocated`,
+          [allocation.nodeId, resource, delta],
+        );
+        if (claimed.rows.length === 0) {
+          await tx.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          await tx.query(`RELEASE SAVEPOINT ${savepoint}`);
+          return { status: 'conflict', resource };
+        }
+      } else if (delta < 0)
+        await tx.query(
+          `UPDATE node_resources SET allocated = GREATEST(0, allocated - $3)
+            WHERE node_id = $1 AND resource = $2`,
+          [allocation.nodeId, resource, -delta],
+        );
+    }
+    const next = Object.fromEntries(
+      Object.entries(resources).filter(([, amount]) => amount > 0),
+    ) as Record<string, number>;
+    await tx.query(
+      `UPDATE allocations SET resources = $2::jsonb, version = version + 1 WHERE id = $1`,
+      [allocationId, JSON.stringify(next)],
+    );
+    await tx.query(`RELEASE SAVEPOINT ${savepoint}`);
+    return { status: 'resized', resources: next };
+  } catch (error) {
+    await tx.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+    await tx.query(`RELEASE SAVEPOINT ${savepoint}`);
+    throw error;
+  }
+}
+
 export type ExtendOutcome =
   | { status: 'extended'; during: TimeRange }
   /** Another booking starts at `availableUntil`: the latest end this allocation can reach. */
