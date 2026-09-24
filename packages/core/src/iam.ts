@@ -113,7 +113,7 @@ export interface IamPort {
   requestConfirmation(
     credential: Credential,
     decision: Decision & { reason: string },
-  ): Promise<{ confirmationId: string } | 'not-held-back'>;
+  ): Promise<{ confirmationId: string; expiresAt?: number } | 'not-held-back'>;
   billingCheck(input: SpendCheckInput): Promise<SpendCheck>;
   /** Records usage with poison isolation: one result per event, in order. */
   recordUsage(events: UsageEvent[]): Promise<UsageResult[]>;

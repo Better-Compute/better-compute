@@ -864,8 +864,14 @@ export interface MethodAdmission<I, O> {
    * `CONFLICT`. Never calls IAM.
    */
   prepare(context: MethodContext, input: I, tx: SqlTx): Promise<AdmissionPlan<O>>;
-  /** Transaction 2 after a refusal: mark the draft denied / clear pending changes. */
+  /**
+   * Transaction 2 after a refusal: mark the draft denied / clear pending changes. For a delegated
+   * session whose delegation holds the action back, `error` is `CONFIRMATION_REQUIRED` (details
+   * `{ confirmationId, expiresAt, action, resource }`): keep the draft `awaiting-confirmation`.
+   */
   denied?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
+  /** A short human description of the request, shown to the person asked to confirm it (§3.4 step 7). */
+  describe?(input: I): string;
 }
 
 export function defineMethod<I, O>(method: MethodDefinition<I, O>): MethodDefinition<I, O> {
