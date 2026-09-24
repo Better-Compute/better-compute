@@ -22,6 +22,7 @@ import { stepRegistry } from './expand.js';
 import { provisionMigrations } from './migrations.js';
 import { profileSource } from './profiles.js';
 import { userDataStep, type UserDataOptions } from './renderers.js';
+import { builtinConfigUnits, provisionNodeSpec, type ConfigUnitDefinition } from './config-units.js';
 import {
   defaultRemediationPolicy,
   healthWorkKind,
@@ -48,8 +49,10 @@ export interface ProvisionOptions {
    * on by default. `false` leaves it out; an object tunes the budget and the circuit breaker.
    */
   remediation?: false | Partial<RemediationPolicy>;
-  /** User data rendering (`userData.render`): templates and where the installed bcd joins. */
+  /** User data rendering (`userdata.render`): templates and where the installed bcd joins. */
   userData?: UserDataOptions;
+  /** Config units besides the built-ins (nvidia-driver, container-toolkit, mig-layout, fabric-manager, sysctl). */
+  configUnits?: readonly ConfigUnitDefinition[];
 }
 
 /** The provision module, plus the `WorkflowEngine` the host puts on `ModuleContext.workflows`. */
@@ -101,6 +104,7 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
     migrations: [...provisionMigrations],
     extensions: steps.list(),
     profiles: moduleProfiles,
+    nodeSpec: provisionNodeSpec([...builtinConfigUnits, ...(options.configUnits ?? [])]),
     reconcilers: remediation
       ? [
           reconciler,

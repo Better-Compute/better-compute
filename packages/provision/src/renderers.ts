@@ -52,9 +52,50 @@ runcmd:
   - [/usr/local/bin/bcd, join, --server, {{controlPlaneUrl}}, --node-id, {{nodeId}}, --token-file, /etc/bcd/join-token]
 `;
 
+/**
+ * The built-in Ignition (spec 3.4) config: the token as a 0600 file, bcd downloaded with its
+ * sha256 verified by Ignition, and a oneshot unit that joins. Built as JSON, so values cannot
+ * change its structure.
+ */
+export const bcdHostIgnition: UserDataTemplate = (v) =>
+  JSON.stringify({
+    ignition: { version: '3.4.0' },
+    storage: {
+      files: [
+        { path: '/etc/bcd/join-token', mode: 0o600, contents: { source: `data:,${encodeURIComponent(v.joinToken!)}` } },
+        {
+          path: '/usr/local/bin/bcd',
+          mode: 0o755,
+          contents: { source: v.bcdUrl, verification: { hash: `sha256-${v.bcdSha256}` } },
+        },
+        { path: '/etc/hostname', mode: 0o644, contents: { source: `data:,${encodeURIComponent(v.hostname!)}` } },
+      ],
+    },
+    systemd: {
+      units: [
+        {
+          name: 'bcd-join.service',
+          enabled: true,
+          contents: [
+            '[Unit]',
+            'Description=Join better-compute',
+            'After=network-online.target',
+            'Wants=network-online.target',
+            '[Service]',
+            'Type=oneshot',
+            `ExecStart=/usr/local/bin/bcd join --server ${v.controlPlaneUrl} --node-id ${v.nodeId} --token-file /etc/bcd/join-token`,
+            '[Install]',
+            'WantedBy=multi-user.target',
+          ].join('\n'),
+        },
+      ],
+    },
+  });
+
 /** Templates `provisionModule` knows unless told otherwise. */
 export const builtinUserDataTemplates: Readonly<Record<string, UserDataTemplate>> = Object.freeze({
   'bcd-host.yaml.hbs': bcdHostCloudInit,
+  'bcd-host.ign': bcdHostIgnition,
 });
 
 export interface UserDataOptions {

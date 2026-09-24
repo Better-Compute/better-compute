@@ -532,6 +532,11 @@ async function finish(context: EngineContext, tx: SqlTx, workflow: WorkflowRow):
   const state = assertWorkflowVerb(workflow.state, verb);
   await setWorkflow(tx, workflow, { state, outcome: null, stepId: null });
   await publish(context, tx, workflow, `workflow.${state}`, workflow.error ? { error: workflow.error } : {});
+  // A profile's hostConfig becomes the node's desired state once the workflow succeeded (§11.2).
+  if (state === 'succeeded' && workflow.node_id && context.desired) {
+    const { rows } = await tx.query<{ has: boolean }>(`SELECT profile_document ? 'hostConfig' AS has FROM workflows WHERE id = $1`, [workflow.id]);
+    if (rows[0]?.has) await context.desired.invalidate(tx, workflow.node_id);
+  }
   await notifyOwner(context, tx, workflow);
 }
 
