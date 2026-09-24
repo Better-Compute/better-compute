@@ -46,6 +46,7 @@ const umbrella = [
   'iam',
   'events',
   'fleet',
+  'rollout',
   'audit',
   'observability',
   'server',
