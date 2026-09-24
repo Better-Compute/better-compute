@@ -18,6 +18,7 @@ import {
   readImage,
   registerImage,
   type CatalogImage,
+  type ImageSignatureVerifier,
   type ImageKind,
   type RegisterImageInput,
 } from './images.js';
@@ -231,7 +232,10 @@ async function readWorkflow(context: ModuleContext, input: WorkflowRefInput): Pr
 // --- The groups ------------------------------------------------------------------------------------
 
 /** The `profiles` and `workflows` groups over one engine configuration. */
-export function provisionApi(context: ModuleContext, options: EngineOptions & { moduleProfiles: readonly ProfileDocument[] }): ProvisionApi {
+export function provisionApi(
+  context: ModuleContext,
+  options: EngineOptions & { moduleProfiles: readonly ProfileDocument[]; imageVerifier?: ImageSignatureVerifier },
+): ProvisionApi {
   const profiles = profileSource(options.moduleProfiles);
   const findProfile = async (input: ProfileRefInput) => {
     const found = await profiles.find(context.sql, input.tenantId, input.profileId, input.profileVersion);
@@ -290,7 +294,7 @@ export function provisionApi(context: ModuleContext, options: EngineOptions & { 
           return out;
         },
         handler: (ctx, input) =>
-          ctx.sql.transaction((tx) => registerImage(tx, ctx.authz, input.tenantId, rootTenant(), input)),
+          ctx.sql.transaction((tx) => registerImage(tx, ctx.authz, input.tenantId, rootTenant(), input, options.imageVerifier)),
       }),
       get: defineMethod<ImageRefInput, CatalogImage>({
         action: 'compute:images:read',

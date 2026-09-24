@@ -20,6 +20,7 @@ import {
 } from './engine.js';
 import { stepRegistry } from './expand.js';
 import { provisionMigrations } from './migrations.js';
+import type { ImageSignatureVerifier } from './images.js';
 import { profileSource } from './profiles.js';
 import { userDataStep, type UserDataOptions } from './renderers.js';
 import { builtinConfigUnits, provisionNodeSpec, type ConfigUnitDefinition } from './config-units.js';
@@ -53,6 +54,8 @@ export interface ProvisionOptions {
   userData?: UserDataOptions;
   /** Config units besides the built-ins (nvidia-driver, container-toolkit, mig-layout, fabric-manager, sysctl). */
   configUnits?: readonly ConfigUnitDefinition[];
+  /** How `images.register` checks signatures (default: Ed25519/P-256 keys in `image_signers`). */
+  imageVerifier?: ImageSignatureVerifier;
 }
 
 /** The provision module, plus the `WorkflowEngine` the host puts on `ModuleContext.workflows`. */
@@ -118,7 +121,8 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
           },
         ]
       : [reconciler],
-    api: (context: ModuleContext) => provisionApi(context, { ...engineOptions, moduleProfiles }),
+    api: (context: ModuleContext) =>
+      provisionApi(context, { ...engineOptions, moduleProfiles, ...(options.imageVerifier ? { imageVerifier: options.imageVerifier } : {}) }),
   });
 
   return Object.freeze({

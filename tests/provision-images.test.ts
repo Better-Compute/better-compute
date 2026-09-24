@@ -135,6 +135,29 @@ describe('register', () => {
   });
 });
 
+describe('a pluggable verifier', () => {
+  it('lets a deployment swap the allowlist check (Sigstore, a KMS) without touching the catalog', async () => {
+    const seen: string[] = [];
+    const custom = provisionModule({
+      imageVerifier: async (_tx, input) => {
+        seen.push(`${input.signerId}:${input.tenants.join(',')}`);
+        return input.signerId === 'sigstore' ? { tenantId: 'root' } : undefined;
+      },
+    }).api!(context);
+    const register = (input: unknown) =>
+      (custom.images.register as unknown as { validate(i: unknown): unknown; handler(c: MethodContext, i: unknown): Promise<any> }).handler(
+        context,
+        custom.images.register.validate(input),
+      );
+    const ok = await register({ tenantId: 'ten_v', ...image('keyless@1'), signature: 'AAAA', signerId: 'sigstore' });
+    expect(ok.verified).toBe(true);
+    await expect(register({ tenantId: 'ten_v', ...image('keyless@2'), signature: 'AAAA', signerId: 'nobody' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(seen).toEqual(['sigstore:ten_v,root', 'nobody:ten_v,root']);
+  });
+});
+
 describe('get, list, promote', () => {
   it('promotes only verified images, and then every tenant sees them', async () => {
     const unsigned = await call('register', { tenantId: 'ten_a', ...image('private-only@1') });

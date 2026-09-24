@@ -120,6 +120,20 @@ export async function revokeImageSigner(tx: SqlTx, tenantId: string, id: string)
   if (result.rowCount === 0) throw new ComputeError('NOT_FOUND', `Signer ${id} does not exist`);
 }
 
+/**
+ * Decides whether `signature` over `data` comes from `signerId` on the allowlist of one of
+ * `tenants`, and returns that tenant. Swap it for Sigstore/cosign or a KMS without touching the
+ * catalog: `provisionModule({ imageVerifier })`.
+ */
+export type ImageSignatureVerifier = (
+  tx: SqlTx,
+  input: { tenants: readonly string[]; signerId: string; data: Uint8Array; signature: Uint8Array },
+) => Promise<{ tenantId: string } | undefined>;
+
+/** The default verifier: Ed25519 or ECDSA P-256 keys in `image_signers`, checked offline. */
+export const allowlistImageVerifier: ImageSignatureVerifier = (tx, input) =>
+  verifySignature(tx, input.tenants, input.signerId, input.data, input.signature);
+
 /** Checks a signature against the named signer of `tenantId` or of the platform (`rootTenantId`). */
 async function verifySignature(
   tx: SqlTx,
@@ -156,6 +170,7 @@ export async function registerImage(
   tenantId: string,
   rootTenantId: string,
   input: RegisterImageInput,
+  verifier: ImageSignatureVerifier = allowlistImageVerifier,
 ): Promise<CatalogImage> {
   if (!refPattern.test(input.ref)) throw new ComputeError('INVALID_INPUT', 'ref must be name@version');
   const sha256 = input.sha256.toLowerCase();
@@ -168,13 +183,12 @@ export async function registerImage(
   if (input.signature !== undefined || input.signerId !== undefined) {
     if (!input.signature || !input.signerId) throw new ComputeError('INVALID_INPUT', 'signature and signerId go together');
     signature = Uint8Array.from(Buffer.from(input.signature, 'base64'));
-    const signer = await verifySignature(
-      tx,
-      kind === 'ramdisk' ? [rootTenantId] : [...new Set([tenantId, rootTenantId])],
-      input.signerId,
-      imageSigningInput({ ...input, kind, sha256 }),
+    const signer = await verifier(tx, {
+      tenants: kind === 'ramdisk' ? [rootTenantId] : [...new Set([tenantId, rootTenantId])],
+      signerId: input.signerId,
+      data: imageSigningInput({ ...input, kind, sha256 }),
       signature,
-    );
+    });
     if (!signer) throw new ComputeError('INVALID_INPUT', `The signature does not verify against signer ${input.signerId}`);
     verified = true;
     signerTenant = signer.tenantId;
