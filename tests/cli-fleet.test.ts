@@ -99,13 +99,13 @@ describe('fleet commands', () => {
     expect(result.stdout).not.toContain('sites/create');
   });
 
-  it('plan exits CHANGES_PENDING with --fail-on-changes, and PLAN_BLOCKED on a blocked plan', async () => {
+  it('plan exits FLEET_DRIFTED with --fail-on-drift, and PLAN_BLOCKED on a blocked plan', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fleet-'));
     const file = join(dir, 'fleet.json');
     await writeFile(file, JSON.stringify(document));
-    const pending = await run(['fleet', 'plan', file, '--fail-on-changes'], () => ok(planOf()));
-    expect(pending).toMatchObject({ ok: false, code: 'CHANGES_PENDING' });
-    const clean = await run(['fleet', 'plan', file, '--fail-on-changes'], () =>
+    const pending = await run(['fleet', 'plan', file, '--fail-on-drift'], () => ok(planOf()));
+    expect(pending).toMatchObject({ ok: false, code: 'FLEET_DRIFTED' });
+    const clean = await run(['fleet', 'plan', file, '--fail-on-drift'], () =>
       ok(planOf({ calls: [], summary: { create: 0, update: 0, delete: 0, unchanged: 3 } })),
     );
     expect(clean.ok).toBe(true);

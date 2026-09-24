@@ -116,21 +116,21 @@ export const fleetCommands = [
     group: 'Fleet',
     summary: 'Show what applying a FleetConfig document would change (fleet.plan)',
     description:
-      "fleet plan diffs the document against the tenant's current objects and prints each change: + create, ~ update (with the fields), - delete (only with --prune), and BLOCKED for changes the platform cannot make (a site's region, a pool's class or site, dangling names). It changes nothing. The printed planHash, passed to fleet apply --plan-hash, applies exactly this plan. With --fail-on-changes it exits CHANGES_PENDING when anything would change, for drift checks in CI; a blocked plan always exits PLAN_BLOCKED.",
+      "fleet plan diffs the document against the tenant's current objects and prints each change: + create, ~ update (with the fields), - delete (only with --prune), and BLOCKED for changes the platform cannot make (a site's region, a pool's class or site, dangling names). It changes nothing. The printed planHash, passed to fleet apply --plan-hash, applies exactly this plan. With --fail-on-drift it exits FLEET_DRIFTED when anything would change, for drift checks in CI; a blocked plan always exits PLAN_BLOCKED.",
     target: 'token',
     args: fileArg,
     flags: {
       tenant: tenantFlag,
       prune: pruneFlag,
-      'fail-on-changes': {
+      'fail-on-drift': {
         type: 'boolean',
-        description: 'Exit CHANGES_PENDING when the plan is not empty',
+        description: 'Exit FLEET_DRIFTED when the plan is not empty',
       },
       calls: { type: 'boolean', description: 'Also print the API calls apply would make' },
     },
     examples: [
       'better-compute fleet plan fleet.json',
-      'better-compute fleet plan fleet.json --prune --fail-on-changes',
+      'better-compute fleet plan fleet.json --prune --fail-on-drift',
     ],
     async run(context) {
       const { flags, args, api, note } = context;
@@ -153,9 +153,9 @@ export const fleetCommands = [
           'Fix the BLOCKED lines in the document (or create new objects instead of changing fixed fields).',
         );
       }
-      if (flags['fail-on-changes'] && calls.length) {
+      if (flags['fail-on-drift'] && calls.length) {
         context.print(result);
-        throw new CliError('CHANGES_PENDING', `${calls.length} call(s) would change the fleet`);
+        throw new CliError('FLEET_DRIFTED', `${calls.length} call(s) would change the fleet`);
       }
       return result;
     },
