@@ -43,6 +43,7 @@ const umbrella = [
   'vps',
   'iam',
   'events',
+  'fleet',
   'audit',
   'observability',
   'server',

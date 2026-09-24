@@ -105,24 +105,19 @@ describe('the four named subpaths', () => {
     expect(provisionModule().name).toBe('provision');
   });
 
-  it('better-compute/inventory: inventoryModule answers NOT_IMPLEMENTED naming each phase', async () => {
+  it('better-compute/inventory: inventoryModule serves the inventory group', async () => {
     const { inventoryModule } = (await load(
       'better-compute/inventory',
     )) as typeof import('@better-compute/inventory');
     expect(inventoryModule.name).toBe('inventory');
+    // Behaviour is covered in tests/inventory-*.test.ts; here only the subpath and the §9.2 shape.
     const api = inventoryModule.api!({} as ModuleContext);
-    const input = { tenantId: 'tenant-acme', nodeId: newId('node') };
-    // inventory.get landed in v0.1 (tests/inventory-store.test.ts).
-    for (const [method, phase] of [
-      ['history', 'v0.2'],
-      ['diff', 'v0.2'],
-    ] as const) {
+    for (const method of ['get', 'history', 'diff'] as const) {
       const definition = api.inventory[method];
-      const error = await notImplemented(() =>
-        definition.handler({} as MethodContext, definition.validate(input)),
-      );
-      expect(error.message).toBe(`inventory.${method} arrives in ${phase}`);
-      expect(error.details).toEqual({ feature: `inventory.${method}`, phase });
+      expect(definition.action, method).toBe('compute:nodes:read');
+      expect(definition.kind, method).toBe('read');
+      const input = definition.validate({ tenantId: 'tenant-acme', nodeId: newId('node') });
+      expect(definition.resource(input)).toMatchObject({ type: 'node' });
     }
   });
 });

@@ -187,6 +187,10 @@ Rules for v0.1:
   IamPort once), `createObserver({onSpan, metrics}).span(...)`, traceparent helpers. check/invoke matching = path +
   canonical JSON of the raw input (sorted keys), multiset (one invoke per check), grants expire with the call.
   [1f44fd] next: real-time harness (`packages/testing/src/realtime/**`, `tests/realtime/**` — exception to W5b).
+- Real-time harness ([1f44fd] df8ff63): `createRealtimeHarness({nodes, postgresUrl?, sharedConnection?, services?})`
+  → `connectAll()`, `dispatch({kind, perNode})` (p50/p90/p99 ack + terminal); `createH2cClient` (Session/Join over
+  h2c, `x-bc-test-node`). 1k run: `tests/bench/realtime-fleet.bench.ts` (bench:scale). Needs a fresh gateway dist
+  (`tsc -b packages/gateway`). W5a: pass your GatewayServices as `services` for join-to-adopted/place-to-active.
 - Tunnels (v0.3, [17cfb9]) api half for W5a: `tunnels.open` authorizes (`instances:exec` / `nodes:console`), issues an
   exec ticket (pki `createExecTicketIssuer`, sid = tunnel id), returns the ticket; host GET `/tunnels/{ticket}`
   relays to `gatewayControlClient.openTunnel({ ticket, nodeId, target })` → `{ send, frames, close }` on the owning
@@ -198,6 +202,11 @@ Rules for v0.1:
   reconciler. W5a's final commit also swaps the NOT_IMPLEMENTED probes (server-operation, server-http, client,
   umbrella-subpaths use `inventory.history`) for an `acme.notYet` plugin method in tests/support/server.ts, so
   [060790] can land inventory.history/diff right after.
+- 44ed79e (for W5a check/invoke): methods with a replay-only `admission` (no `denied` hook: sites/pools/
+  providerAccounts create) ARE allowed — `check` runs `admission.prepare` in its own short tx (`decide` → one
+  iam.require on the returned resource; `replay` → grant); `invoke` re-runs `prepare` in the caller's tx (replay →
+  return stored result) and sets `ctx.admission`. Methods whose admission has `denied` stay UNSUPPORTED. New core
+  error code `CONFIG_DRIFT` (409). [9ec62d] fleet committed 9ccff66; next: CLI `fleet export|plan|apply`.
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also
@@ -270,4 +279,8 @@ Rules for v0.1:
   `tests/metal-*.test.ts`: the metal group (§9.2 v0.2 rows), verbs validated against core's metal state table and
   run as workflows via `ctx.workflows`, built-in commission/deploy/release/retire profiles + steps, site/ramdisk
   command kinds, driver bindings inherited from the pool hardware profile. Proto additions go to [56cfd7].
+- (Feature expansion [9ec62d], v0.2 FleetConfig, 2026-09-24, asked by [56cfd7]) new package `packages/fleet/**`
+  (`fleetModule()`: fleet.export/plan/apply, composite apply via check/invoke, `fleet/0001_names`), CLI
+  `packages/cli/src/commands/fleet.ts`, `tests/{fleet-config,cli-fleet}.test.ts`. Committed 9ccff66, 05e6265.
+  Hosts register `fleetModule()` next to capacity + vps; apply needs W5a check/invoke with replay-only admissions.
 - (Feature expansion [9ec62d], v0.4 audit primitives, 2026-09-24; split with [1f44fd] per [56cfd7]) pure crypto only in `packages/pki/src/audit.ts`: RFC 6962 hashing, inclusion + consistency proofs, `signCheckpoint`/`verifyCheckpoint` ('audit-checkpoint'), the bundle's audit signing key; CLI `audit verify|prove|checkpoint` calling `@better-compute/audit`. No table in pki (`packages/audit` owns it).
