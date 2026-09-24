@@ -1,4 +1,5 @@
 export * from './actions.js';
+export * from './admin.js';
 export * from './charts.js';
 export * from './detail.js';
 export * from './events.js';
