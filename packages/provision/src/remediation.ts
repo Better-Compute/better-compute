@@ -127,8 +127,9 @@ export async function reconcileHealth(
   policy: RemediationPolicy = defaultRemediationPolicy,
 ): Promise<HealthOutcome> {
   const outcome = await context.sql.transaction(async (tx): Promise<HealthOutcome> => {
-    const nodes = await tx.query<{ pool_id: string | null; owner_tenant_id: string; now: Date }>(
-      'SELECT pool_id, owner_tenant_id, compute_now() AS now FROM nodes WHERE id = $1 FOR UPDATE',
+    const nodes = await tx.query<{ pool_id: string | null; owner_tenant_id: string; now: Date; budget: number | null }>(
+      `SELECT n.pool_id, n.owner_tenant_id, compute_now() AS now, (p.policy->>'disruptionBudget')::float8 AS budget
+         FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id WHERE n.id = $1 FOR UPDATE OF n`,
       [nodeId],
     );
     const node = nodes.rows[0];
@@ -184,7 +185,9 @@ export async function reconcileHealth(
       [node.pool_id, nodeId, healthWorkKind, healthConditions, policy.breakerWindowMs],
     );
     const stats = pool.rows[0]!;
-    const allowed = Math.max(1, Math.floor(stats.nodes * policy.disruptionBudget));
+    // The pool's own `policy.disruptionBudget` wins over the module default (§10.1).
+    const budget = node.budget !== null && node.budget >= 0 && node.budget <= 1 ? node.budget : policy.disruptionBudget;
+    const allowed = Math.max(1, Math.floor(stats.nodes * budget));
     if (stats.remediating >= allowed) return { action: 'waiting', reason: 'budget' };
     if (stats.nodes > 1 && stats.unhealthy / stats.nodes > policy.breakerThreshold) {
       await publish(context, tx, node.owner_tenant_id, nodeId, 'pool.remediation.paused', {

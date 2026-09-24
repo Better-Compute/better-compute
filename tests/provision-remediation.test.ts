@@ -155,6 +155,18 @@ describe('remediation', () => {
     expect((await reconcileHealth(context, b!)).action).toBe('started');
   });
 
+  it("honours the pool's own disruption budget", async () => {
+    const nodes = await pool('p_budget_policy', 20);
+    await db.query(`UPDATE pools SET policy = '{"disruptionBudget": 0.1}' WHERE id = 'p_budget_policy'`); // 2 of 20
+    for (const nodeId of nodes.slice(0, 3)) await xid(nodeId, 48);
+    await xid(nodes[0]!, 79);
+    await xid(nodes[1]!, 79);
+    // The breaker counts Xid48 too; lift those to test the budget alone.
+    await db.query(`UPDATE node_conditions SET status = 'false' WHERE type = 'Xid48' AND node_id = ANY($1)`, [nodes]);
+    expect((await reconcileHealth(context, nodes[0]!)).action).toBe('started');
+    expect((await reconcileHealth(context, nodes[1]!)).action).toBe('started');
+  });
+
   it('opens the circuit breaker when more than 10% of a pool turns unhealthy within 10 minutes', async () => {
     const nodes = await pool('p_breaker', 20);
     // One unhealthy node of 20 (5%): remediate it.
