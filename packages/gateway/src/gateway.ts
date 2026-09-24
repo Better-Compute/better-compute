@@ -322,6 +322,8 @@ export function createGateway(options: GatewayOptions): Gateway {
   const credits: LaneCreditLimits = { control: 8, provision: 4, bulk: 2, ...options.credits };
   const handshakes = new TokenBucket(options.handshakesPerSecond ?? 200, clock);
   const maxPendingHellos = options.maxPendingHellos ?? 64;
+  /** Sessions' update frames per group-commit transaction. */
+  const maxUpdateBatch = 500;
   let pendingHellos = 0;
 
   let lease: LeaseToken | undefined;
@@ -576,10 +578,53 @@ export function createGateway(options: GatewayOptions): Gateway {
       await store.inventoryHashes(session.nodeId, session.bootId, heartbeat.inventoryHashes);
   }
 
+  /**
+   * Group commit of CommandUpdates: every session's updates that arrive in the same I/O turn share
+   * one transaction (one per frame serializes a large fleet on the store). A session still awaits
+   * its own entry before its next frame, so per-session order is kept.
+   */
+  const updateBatch: {
+    session: Session;
+    updates: CommandUpdate[];
+    resolve: (result: Awaited<ReturnType<typeof store.updates>>) => void;
+    reject: (error: unknown) => void;
+  }[] = [];
+  let updateFlush: ReturnType<typeof setImmediate> | undefined;
+
+  function flushUpdates() {
+    updateFlush = undefined;
+    const batch = updateBatch.splice(0, maxUpdateBatch);
+    if (updateBatch.length) updateFlush = setImmediate(flushUpdates);
+    void store
+      .updatesBatch(
+        batch.map((entry) => ({
+          nodeId: entry.session.nodeId,
+          tenantId: entry.session.tenantId,
+          updates: entry.updates,
+          busyBackoffMs: (commandId: string) => backoffMs(entry.session, commandId),
+        })),
+      )
+      .then(
+        (results) => {
+          results.forEach((result, index) => {
+            const entry = batch[index]!;
+            if (result instanceof Error) entry.reject(result);
+            else entry.resolve(result);
+          });
+        },
+        (error: unknown) => batch.forEach((entry) => entry.reject(error)),
+      );
+  }
+
+  function applyUpdatesBatched(session: Session, updates: CommandUpdate[]) {
+    return new Promise<Awaited<ReturnType<typeof store.updates>>>((resolve, reject) => {
+      updateBatch.push({ session, updates, resolve, reject });
+      updateFlush ??= setImmediate(flushUpdates);
+    });
+  }
+
   async function onUpdates(session: Session, updates: CommandUpdate[]) {
-    const result = await store.updates(session.nodeId, session.tenantId, updates, (commandId) =>
-      backoffMs(session, commandId),
-    );
+    const result = await applyUpdatesBatched(session, updates);
     for (const update of updates) if (isTerminalUpdate(update)) release(session, update.commandId);
     for (const commandId of result.busy) release(session, commandId);
     for (const settled of result.settled) session.busyCount.delete(settled.id);

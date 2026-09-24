@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { create, toBinary } from '@bufbuild/protobuf';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { GrpcCode } from '@better-compute/gateway';
+import { GrpcCode, sqlEventPublisher } from '@better-compute/gateway';
 import {
   AgentRole,
   CommandBodySchema,
@@ -701,5 +701,73 @@ describe('body guard and admission', () => {
     await f.db.query(`UPDATE leases SET owner = 'usurper', epoch = epoch + 1, expires_at = compute_now() + interval '1 hour'`);
     const { stream } = await f.connect(node);
     expect(stream.closed?.error).toMatchObject({ code: GrpcCode.UNAVAILABLE, message: 'gateway fenced; reconnect' });
+  });
+});
+describe('group commit', () => {
+  it('applies many sessions’ updates in one transaction and acks each after it commits', async () => {
+    const nodes = await Promise.all(Array.from({ length: 12 }, () => f.addNode()));
+    const ids = await Promise.all(nodes.map((node) => f.enqueue(node)));
+    const sessions = await Promise.all(nodes.map((node) => f.connect(node)));
+    await f.gateway.jobs.dispatch.tick();
+    let transactions = 0;
+    const real = f.db.transaction.bind(f.db);
+    (f.db as { transaction: typeof real }).transaction = (fn, options) => {
+      transactions++;
+      return real(fn, options);
+    };
+    await Promise.all(
+      sessions.map(({ handle }, index) =>
+        handle.receive(update(ids[index]!, CommandState.SUCCEEDED, { result: new Uint8Array([index]) })),
+      ),
+    );
+    (f.db as { transaction: typeof real }).transaction = real;
+    expect(transactions).toBe(1);
+    for (const [index, { stream }] of sessions.entries()) {
+      expect(stream.of('ack').at(-1)!.commandIds).toEqual([ids[index]]);
+      const row = await f.command(ids[index]!);
+      expect(row.state).toBe('succeeded');
+      expect([...(row.result as Uint8Array)]).toEqual([index]);
+    }
+  });
+
+  it('keeps ACKED → RUNNING → SUCCEEDED of one command in order within a batch, and dedupes repeats', async () => {
+    const node = await f.addNode();
+    const id = await f.enqueue(node);
+    const { stream, handle } = await f.connect(node);
+    await f.gateway.jobs.dispatch.tick();
+    await Promise.all([
+      handle.receive(update(id, CommandState.ACKED)),
+      handle.receive(update(id, CommandState.RUNNING)),
+      handle.receive(update(id, CommandState.SUCCEEDED)),
+      handle.receive(update(id, CommandState.SUCCEEDED)),
+    ]);
+    expect((await f.command(id)).state).toBe('succeeded');
+    expect(stream.of('ack').flatMap((ack) => ack.commandIds)).toEqual([id, id]);
+    expect(await f.outbox('command.settled')).toHaveLength(1);
+  });
+
+  it('isolates a poison frame: its session fails, the rest of the batch commits', async () => {
+    let poison = '';
+    await f.close();
+    f = await gatewayFixture({
+      events: {
+        publish(tx, event) {
+          if ((event.data as { commandId?: string }).commandId === poison) throw new Error('poison');
+          return sqlEventPublisher.publish(tx, event);
+        },
+      },
+    });
+    const nodes = await Promise.all(Array.from({ length: 4 }, () => f.addNode()));
+    const ids = await Promise.all(nodes.map((node) => f.enqueue(node)));
+    const sessions = await Promise.all(nodes.map((node) => f.connect(node)));
+    await f.gateway.jobs.dispatch.tick();
+    poison = ids[2]!;
+    await Promise.all(sessions.map(({ handle }, index) => handle.receive(update(ids[index]!, CommandState.SUCCEEDED))));
+    expect(sessions[2]!.stream.closed?.error?.code).toBe(GrpcCode.UNAVAILABLE);
+    expect((await f.command(ids[2]!)).state).toBe('dispatched');
+    for (const index of [0, 1, 3]) {
+      expect(sessions[index]!.stream.closed).toBeUndefined();
+      expect((await f.command(ids[index]!)).state).toBe('succeeded');
+    }
   });
 });

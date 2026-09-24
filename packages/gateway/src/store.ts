@@ -345,6 +345,98 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     });
   }
 
+  interface UpdateEntry {
+    nodeId: string;
+    tenantId: string;
+    updates: readonly CommandUpdate[];
+    busyBackoffMs: (commandId: string) => number;
+  }
+
+  /**
+   * Applies CommandUpdates of many nodes set-wise (§7.2 "results are facts"): one locking read of
+   * every command involved (id order, so concurrent flushes never deadlock), the state table in
+   * memory in frame order, then one UPDATE for transitions and one for BUSY returns. Each update is
+   * scoped to its reporting node: a node can never move another node's command.
+   */
+  async function applyUpdatesBulk(tx: SqlTx, entries: readonly UpdateEntry[]): Promise<UpdatesResult[]> {
+    const results = entries.map((): UpdatesResult => ({ settled: [], ackCommandIds: [], busy: [] }));
+    const ids = [...new Set(entries.flatMap((entry) => entry.updates.map((update) => update.commandId)))].sort();
+    const rows = new Map<string, { nodeId: string; state: CommandState; kind: string }>();
+    if (ids.length) {
+      const read = await tx.query<{ id: string; node_id: string; state: CommandState; kind: string }>(
+        'SELECT id, node_id, state, kind FROM commands WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE',
+        [ids],
+      );
+      for (const row of read.rows) rows.set(row.id, { nodeId: row.node_id, state: row.state, kind: row.kind });
+    }
+    // Final write per command after every update of the batch, in order.
+    const writes = new Map<string, { state: CommandState; reason: string | null; result: Uint8Array | null }>();
+    const busy = new Map<string, number>();
+    const settledEvents: { entry: number; settled: SettledCommand }[] = [];
+    entries.forEach((entry, index) => {
+      for (const update of entry.updates) {
+        const row = rows.get(update.commandId);
+        const verb = verbOf(update);
+        if (row && row.nodeId === entry.nodeId && verb && canTransition(commandStateTable, row.state, verb)) {
+          const to = commandStateTable.transitions[row.state][verb] as CommandState;
+          row.state = to;
+          if (verb === 'busy') {
+            busy.set(update.commandId, entry.busyBackoffMs(update.commandId) / 1000);
+            writes.delete(update.commandId);
+            results[index]!.busy.push(update.commandId);
+          } else {
+            busy.delete(update.commandId);
+            const reason = reasonOf(update);
+            // The result is stored with the terminal state; owners read it from the row.
+            const result = commandTerminalStates.has(to) && update.result.byteLength ? update.result : null;
+            writes.set(update.commandId, { state: to, reason, result });
+            if (commandTerminalStates.has(to)) {
+              const settled: SettledCommand = { id: update.commandId, kind: row.kind, state: to };
+              if (reason) settled.reason = reason;
+              results[index]!.settled.push(settled);
+              settledEvents.push({ entry: index, settled });
+            }
+          }
+        }
+        // Stored now, stored before, or unknown to this node: either way the journal can drop it.
+        if (isTerminalUpdate(update)) results[index]!.ackCommandIds.push(update.commandId);
+      }
+    });
+    if (writes.size) {
+      const list = [...writes];
+      await tx.query(
+        `UPDATE commands c SET state = v.state, reason = v.reason,
+           result = COALESCE(decode(v.result, 'hex'), c.result), updated_at = compute_now()
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS v(id, state, reason, result)
+         WHERE c.id = v.id`,
+        [
+          list.map(([id]) => id),
+          list.map(([, write]) => write.state),
+          list.map(([, write]) => write.reason),
+          list.map(([, write]) => (write.result ? Buffer.from(write.result).toString('hex') : null)),
+        ],
+      );
+    }
+    if (busy.size) {
+      const list = [...busy];
+      await tx.query(
+        `UPDATE commands c SET state = 'pending', session_epoch = NULL, updated_at = compute_now(),
+           not_before = compute_now() + make_interval(secs => v.secs)
+         FROM unnest($1::text[], $2::float8[]) AS v(id, secs)
+         WHERE c.id = v.id`,
+        [list.map(([id]) => id), list.map(([, secs]) => secs)],
+      );
+    }
+    for (const { entry, settled } of settledEvents)
+      await settle(tx, entries[entry]!.nodeId, entries[entry]!.tenantId, settled);
+    const wake = new Set<string>();
+    entries.forEach((entry, index) => {
+      if (results[index]!.settled.length || results[index]!.busy.length) wake.add(entry.nodeId);
+    });
+    for (const nodeId of wake) await work.enqueue(tx, 'node', nodeId);
+    return results;
+  }
+
   async function applyUpdates(
     tx: SqlTx,
     nodeId: string,
@@ -352,49 +444,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     updates: readonly CommandUpdate[],
     busyBackoffMs: (commandId: string) => number,
   ): Promise<UpdatesResult> {
-    const result: UpdatesResult = { settled: [], ackCommandIds: [], busy: [] };
-    for (const update of updates) {
-      const terminal = isTerminalUpdate(update);
-      const verb = verbOf(update);
-      // Scoped to the reporting node: a node can never settle another node's command.
-      const { rows } = await tx.query<{ state: CommandState; kind: string }>(
-        'SELECT state, kind FROM commands WHERE id = $1 AND node_id = $2 FOR UPDATE',
-        [update.commandId, nodeId],
-      );
-      const row = rows[0];
-      if (row && verb && canTransition(commandStateTable, row.state, verb)) {
-        const to = commandStateTable.transitions[row.state][verb] as CommandState;
-        if (verb === 'busy') {
-          await tx.query(
-            `UPDATE commands SET state = 'pending', session_epoch = NULL, updated_at = compute_now(),
-               not_before = compute_now() + make_interval(secs => $2::float8)
-             WHERE id = $1`,
-            [update.commandId, busyBackoffMs(update.commandId) / 1000],
-          );
-          result.busy.push(update.commandId);
-        } else {
-          const reason = reasonOf(update);
-          // The result is stored with the terminal state; owners read it from the row.
-          const stored = commandTerminalStates.has(to) && update.result.byteLength ? update.result : null;
-          await tx.query(
-            `UPDATE commands SET state = $2, reason = $3, result = COALESCE($4, result),
-               updated_at = compute_now()
-             WHERE id = $1`,
-            [update.commandId, to, reason, stored && Buffer.from(stored)],
-          );
-          if (commandTerminalStates.has(to)) {
-            const settled: SettledCommand = { id: update.commandId, kind: row.kind, state: to };
-            if (reason) settled.reason = reason;
-            result.settled.push(settled);
-            await settle(tx, nodeId, tenantId, settled);
-          }
-        }
-      }
-      // Stored now, stored before, or unknown to this node: either way the journal can drop it.
-      if (terminal) result.ackCommandIds.push(update.commandId);
-    }
-    if (result.settled.length || result.busy.length) await work.enqueue(tx, 'node', nodeId);
-    return result;
+    return (await applyUpdatesBulk(tx, [{ nodeId, tenantId, updates, busyBackoffMs }]))[0]!;
   }
 
   return {
@@ -701,6 +751,33 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       busyBackoffMs: (commandId: string) => number,
     ): Promise<UpdatesResult> {
       return db.transaction((tx) => applyUpdates(tx, nodeId, tenantId, updates, busyBackoffMs));
+    },
+
+    /**
+     * Group commit: many sessions' updates in one transaction (one per frame serializes a large
+     * fleet on the store). Results come back in input order. When the batch fails, each entry is
+     * retried alone so one bad frame cannot fail the others; a failed entry's slot is its error.
+     */
+    async updatesBatch(
+      entries: readonly {
+        nodeId: string;
+        tenantId: string;
+        updates: readonly CommandUpdate[];
+        busyBackoffMs: (commandId: string) => number;
+      }[],
+    ): Promise<(UpdatesResult | Error)[]> {
+      try {
+        return await db.transaction((tx) => applyUpdatesBulk(tx, entries));
+      } catch {
+        const results: (UpdatesResult | Error)[] = [];
+        for (const entry of entries)
+          results.push(
+            await db
+              .transaction((tx) => applyUpdates(tx, entry.nodeId, entry.tenantId, entry.updates, entry.busyBackoffMs))
+              .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error)))),
+          );
+        return results;
+      }
     },
 
     /**
