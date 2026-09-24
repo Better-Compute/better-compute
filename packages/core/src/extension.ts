@@ -656,6 +656,10 @@ export interface RegistryView {
 export interface EnqueueCommand<P = unknown> {
   nodeId: string;
   kind: string;
+  /**
+   * The kind's payload message: its proto3 JSON form, a protobuf-es message of the kind's payload type,
+   * or its encoded bytes; `undefined` for kinds with an empty payload. Routing data never goes here.
+   */
   payload: P;
   /** Unique per node; workflow steps use `wf:<id>:<stepId>`. */
   idempotencyKey: string;
@@ -823,6 +827,23 @@ export interface ModuleContext {
   secrets?: SecretBroker;
   /** v0.2. */
   pki?: PkiPort;
+  /**
+   * Runs `hook` after the outermost open transaction commits (never on rollback); outside a transaction it
+   * runs on the next macrotask. For best-effort side effects only: pokes, in-memory projection updates.
+   */
+  afterCommit?(hook: () => void | Promise<void>): void;
+  /** The envelope's caches, for invalidation from IAM events (the IAM bridge's inbox handlers). */
+  caches?: ComputeCaches;
+}
+
+/** Invalidation handles of the envelope's authentication and read-decision caches (§3.4, §9.2). */
+export interface ComputeCaches {
+  /** Drops cached authentications of an identity (offboarded, suspended, sessions revoked). */
+  dropIdentity(identityId: string): void;
+  /** Drops one cached session. */
+  dropSession(sessionId: string): void;
+  /** Drops every cached read decision (policy, role, binding or relationship change). */
+  dropDecisions(): void;
 }
 
 /** Per-call context of an API method. */
@@ -928,6 +949,8 @@ export type ApiGroups = Record<string, Record<string, MethodDefinition>>;
 export interface ReconcileContext extends ModuleContext {
   /** The shard this worker owns for the key, for sharded reconcilers. */
   shard?: number;
+  /** The lease the run holds (`shard:<n>` or `singleton:<name>`); transactions via `ctx.sql` are fenced by it. */
+  lease?: Lease;
   signal: AbortSignal;
 }
 
