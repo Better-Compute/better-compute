@@ -35,6 +35,9 @@
       "path": "./packages/events"
     },
     {
+      "path": "./packages/audit"
+    },
+    {
       "path": "./packages/postgres"
     },
     {
