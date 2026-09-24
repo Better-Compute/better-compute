@@ -199,6 +199,7 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
     ): Promise<PlacementOutcome> {
       assertPlacementRequest(request);
       const pool = await lockPool(tx, request.poolId);
+      if (pool.archived) return { status: 'pending', reason: 'the pool is archived' };
       if (context.admission)
         for (const plugin of context.plugins) await plugin.admit?.(request, context.admission);
 

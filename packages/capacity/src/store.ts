@@ -33,9 +33,12 @@ export interface PoolRow {
   agent: string;
   policy: PoolPolicy;
   version: number;
+  /** Archived pools take no new work (`pools.archive`). */
+  archived: boolean;
 }
 
-const poolColumns = `id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version`;
+const poolColumns = `id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version,
+  archived_at IS NOT NULL AS archived`;
 
 interface RawPool {
   id: string;
@@ -47,6 +50,7 @@ interface RawPool {
   agent: string;
   policy: PoolPolicy | string;
   version: string | number;
+  archived: boolean;
 }
 
 function toPool(row: RawPool): PoolRow {
@@ -59,6 +63,7 @@ function toPool(row: RawPool): PoolRow {
     agent: row.agent,
     policy: typeof row.policy === 'string' ? (JSON.parse(row.policy) as PoolPolicy) : row.policy,
     version: Number(row.version),
+    archived: row.archived === true,
   };
   if (row.gpu_model !== null) pool.gpuModel = row.gpu_model;
   return pool;

@@ -543,3 +543,13 @@ describe('rollups and eligibility SQL', () => {
     expect(fromTs).toEqual(['n4', 'n7']);
   });
 });
+
+describe('archived pools', () => {
+  it('take no new placements', async () => {
+    await addNode('node_a', { gpus: 1 });
+    await db.query(`UPDATE pools SET archived_at = compute_now() WHERE id = 'pool_1'`);
+    expect(await place(request(1))).toEqual({ status: 'pending', reason: 'the pool is archived' });
+    expect(await bookings()).toEqual([]);
+    await db.query(`UPDATE pools SET archived_at = NULL WHERE id = 'pool_1'`);
+  });
+});

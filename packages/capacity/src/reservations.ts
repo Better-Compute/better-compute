@@ -437,7 +437,8 @@ export async function visiblePool(
     `SELECT p.id, p.owner_tenant_id, p.gpu_model, s.region, p.policy
        FROM pools p JOIN sites s ON s.id = p.site_id
       WHERE p.id = $1 AND (p.owner_tenant_id = $2
-            OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))`,
+            OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))
+        AND p.archived_at IS NULL`,
     [poolId, tenantId],
   );
   const row = rows[0];

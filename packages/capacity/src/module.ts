@@ -4,7 +4,6 @@ import {
   defineModule,
   isId,
   newId,
-  notImplemented,
   reservationStates,
   type CapacityPort,
   type ComputeModule,
@@ -12,7 +11,6 @@ import {
   type MethodContext,
   type MethodDefinition,
   type ModuleContext,
-  type Phase,
   type Pool,
   type PoolAgent,
   type PoolClass,
@@ -126,6 +124,7 @@ interface RawPoolRow {
   policy: PoolPolicy | string;
   provider_account_id?: string | null;
   version: string | number;
+  archived?: boolean;
 }
 
 function toPool(row: RawPoolRow): Pool {
@@ -150,32 +149,41 @@ const visibleWhere = `(p.owner_tenant_id = $1
 /** A pool as one tenant sees it: the pool, whether it owns it, and its own quota rows. */
 export interface TenantPool extends Pool {
   owned: boolean;
+  /** Archived pools take no new work; only their owner still sees them. */
+  archived: boolean;
   quotas: QuotaRow[];
 }
 
 async function tenantPools(tx: SqlTx, tenantId: string, poolId?: string): Promise<TenantPool[]> {
   const { rows } = await tx.query<RawPoolRow>(
     `SELECT p.id, p.owner_tenant_id, p.site_id, p.class, p.gpu_model, p.sharing, p.agent, p.policy,
-            p.provider_account_id, p.version
-       FROM pools p WHERE ${visibleWhere} AND ($2::text IS NULL OR p.id = $2) ORDER BY p.id`,
+            p.provider_account_id, p.version, p.archived_at IS NOT NULL AS archived
+       FROM pools p WHERE ${visibleWhere} AND (p.archived_at IS NULL OR p.owner_tenant_id = $1) AND ($2::text IS NULL OR p.id = $2) ORDER BY p.id`,
     [tenantId, poolId ?? null],
   );
   const quotas = await readQuotas(tx, tenantId, poolId);
   return rows.map((row) => ({
     ...toPool(row),
     owned: row.owner_tenant_id === tenantId,
+    archived: row.archived === true,
     quotas: quotas.filter((quota) => quota.poolId === row.id),
   }));
 }
 
-async function ownedPool(tx: SqlTx, tenantId: string, poolId: string, lock = false): Promise<Pool> {
+async function ownedPool(
+  tx: SqlTx,
+  tenantId: string,
+  poolId: string,
+  lock = false,
+): Promise<Pool & { archived: boolean }> {
   const { rows } = await tx.query<RawPoolRow>(
-    `SELECT id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version
+    `SELECT id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version,
+            archived_at IS NOT NULL AS archived
        FROM pools WHERE id = $1 AND owner_tenant_id = $2${lock ? ' FOR UPDATE' : ''}`,
     [poolId, tenantId],
   );
   if (!rows[0]) throw new ComputeError('NOT_FOUND', `Pool ${poolId} not found`);
-  return toPool(rows[0]);
+  return { ...toPool(rows[0]), archived: rows[0].archived === true };
 }
 
 async function poolAuthzRow(tx: SqlTx, pool: Pool, tenantId: string) {
@@ -512,25 +520,6 @@ function reservationResource<I extends { reservationId: string }>(input: I) {
   return { type: 'reservation', id: input.reservationId };
 }
 
-function later<I>(
-  name: string,
-  phase: Phase,
-  action: `compute:${string}`,
-  kind: 'read' | 'mutation',
-  resource: (input: I) => { type: string; id: string },
-  validate: (raw: unknown) => I,
-): MethodDefinition<I, never> {
-  return defineMethod<I, never>({
-    action,
-    kind,
-    resource,
-    validate,
-    handler: async () => {
-      throw notImplemented(name, phase);
-    },
-  });
-}
-
 // --- Module ------------------------------------------------------------------------------------
 
 export interface CapacityModuleOptions extends PlacementOptions {
@@ -665,6 +654,7 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
       handler: async (context, input) => {
         const tx = context.sql;
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
+        if (pool.archived) throw new ComputeError('INVALID_STATE', `Pool ${pool.id} is archived`);
         await assertOfferable(tx, pool, input.toTenantId);
         await tx.query(
           `INSERT INTO pool_offers (pool_id, tenant_id, include_descendants, priority)
@@ -755,14 +745,40 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
         return next;
       },
     }),
-    archive: later(
-      'pools.archive',
-      'v0.2',
-      'compute:pools:manage',
-      'mutation',
-      poolResource,
-      parsePool,
-    ),
+    // Archiving withdraws a pool from every tenant it was offered to and stops new work; live
+    // reservations and instances keep their bookings until they end (quota max drops to used).
+    archive: defineMethod({
+      action: 'compute:pools:manage',
+      kind: 'mutation',
+      resource: poolResource,
+      validate: parsePool,
+      handler: async (context, input) => {
+        const tx = context.sql;
+        const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
+        if (pool.archived) return pool;
+        const offers = await tx.query<{ tenant_id: string }>(
+          `DELETE FROM pool_offers WHERE pool_id = $1 RETURNING tenant_id`,
+          [pool.id],
+        );
+        for (const { tenant_id: viewer } of offers.rows) {
+          if (viewer === pool.ownerTenantId) continue;
+          for (const quota of await readQuotas(tx, viewer, pool.id))
+            await setQuota(tx, viewer, pool.id, quota.resource, 0);
+          await context.authz.remove(tx, { type: 'pool', id: pool.id, tenantId: viewer });
+        }
+        await tx.query(
+          `UPDATE pools SET archived_at = compute_now(), version = version + 1 WHERE id = $1`,
+          [pool.id],
+        );
+        await context.events.publish(tx, {
+          type: 'pool.archived',
+          tenantId: input.tenantId,
+          subject: `pool/${pool.id}`,
+          data: { unoffered: offers.rows.map((row) => row.tenant_id) },
+        });
+        return { ...pool, archived: true, version: pool.version + 1 };
+      },
+    }),
   };
 
   const capacity: CapacityApi['capacity'] = {

@@ -509,7 +509,8 @@ async function visibleVpsPool(
   }>(
     `SELECT p.id, p.class, p.agent, p.provider_account_id FROM pools p
       WHERE p.id = $1 AND (p.owner_tenant_id = $2
-            OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))`,
+            OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))
+        AND p.archived_at IS NULL`,
     [poolId, tenantId],
   );
   const row = rows[0];

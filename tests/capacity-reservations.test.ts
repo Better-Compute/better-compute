@@ -759,9 +759,75 @@ describe('pools, capacity and quotas', () => {
       items: { resource: string }[];
     };
     expect(quotas.items.map((row) => row.resource)).toEqual(['gpu']);
+  });
+
+  it('archives a pool: unoffered everywhere, no new work, live bookings run out', async () => {
+    const live = (await call('reservations', 'create', create())) as Rsv;
+    await db.query(`UPDATE nodes SET cordoned = true`);
+    const waiting = (await call(
+      'reservations',
+      'create',
+      create({ idempotencyKey: 'waiting', devices: [{ class: 'gpu', count: 1 }] }),
+    )) as Rsv;
+    expect(waiting.state).toBe('pending');
+    await db.query(`UPDATE nodes SET cordoned = false`);
+    recorded.removed = [];
+
+    const archived = (await call(
+      'pools',
+      'archive',
+      { tenantId: 'root', poolId },
+      { who: root },
+    )) as {
+      archived: boolean;
+      version: number;
+    };
+    expect(archived).toMatchObject({ archived: true });
+    expect(recorded.removed).toEqual([{ type: 'pool', id: poolId, tenantId: 'acme' }]);
+    expect(recorded.events.at(-1)).toMatchObject({
+      type: 'pool.archived',
+      data: { unoffered: ['acme'] },
+    });
+    // Quota max drops to what live work holds: 2 (placed) + 1 (pending, D9).
+    expect((await readQuotas(db, 'acme', poolId))[0]).toMatchObject({ max: 3, used: 3 });
+
+    expect(
+      ((await call('pools', 'list', { tenantId: 'acme' })) as { items: unknown[] }).items,
+    ).toEqual([]);
+    const own = (await call('pools', 'get', { tenantId: 'root', poolId }, { who: root })) as {
+      archived: boolean;
+    };
+    expect(own.archived).toBe(true);
     await expect(
-      call('pools', 'archive', { tenantId: 'root', poolId }, { who: root }),
-    ).rejects.toMatchObject({ code: 'NOT_IMPLEMENTED', details: { phase: 'v0.2' } });
+      call('reservations', 'create', create({ idempotencyKey: 'new' })),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      call(
+        'pools',
+        'offer',
+        { tenantId: 'root', poolId, toTenantId: 'acme', quota: { gpu: 1 } },
+        { who: root },
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect(
+      (
+        (await call('pools', 'archive', { tenantId: 'root', poolId }, { who: root })) as {
+          archived: boolean;
+        }
+      ).archived,
+    ).toBe(true);
+
+    // The placed reservation keeps its booking; the pending one fails at its next retry.
+    expect(
+      ((await call('reservations', 'get', { tenantId: 'acme', reservationId: live.id })) as Rsv)
+        .state,
+    ).toBe('placed');
+    await reconcile(waiting.id);
+    const failed = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: waiting.id,
+    })) as Rsv;
+    expect(failed).toMatchObject({ state: 'failed', conditions: [{ reason: 'PoolGone' }] });
   });
 
   it('draws a booking timeline in buckets', async () => {
