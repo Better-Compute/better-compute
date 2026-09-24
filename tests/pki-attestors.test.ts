@@ -8,6 +8,7 @@ import {
   base64url,
   cloudIidAttestor,
   cloudIidAudience,
+  commandKindAllowed,
   createCloudIidEvidence,
   createCsr,
   createNodeCa,
@@ -534,6 +535,22 @@ describe('discovery', () => {
         agentId,
       ]);
     }
+  });
+});
+
+describe('commandKindAllowed', () => {
+  it('matches exact kinds and prefix globs; null is unrestricted, [] allows nothing', () => {
+    expect(commandKindAllowed('wipe', discoveryAllowedKinds)).toBe(true);
+    expect(commandKindAllowed('diag.dcgm', discoveryAllowedKinds)).toBe(true);
+    expect(commandKindAllowed('deploy.image', discoveryAllowedKinds)).toBe(true);
+    expect(commandKindAllowed('deploy', discoveryAllowedKinds)).toBe(false);
+    expect(commandKindAllowed('diagnose', discoveryAllowedKinds)).toBe(false);
+    expect(commandKindAllowed('boot.kexec', discoveryAllowedKinds)).toBe(true);
+    expect(commandKindAllowed('boot.prepareRamdisk', discoveryAllowedKinds)).toBe(false);
+    expect(commandKindAllowed('exec.run', discoveryAllowedKinds)).toBe(false);
+    expect(commandKindAllowed('exec.run', null)).toBe(true);
+    expect(commandKindAllowed('exec.run', [])).toBe(false);
+    expect(commandKindAllowed('x', ['.*'])).toBe(false);
   });
 });
 

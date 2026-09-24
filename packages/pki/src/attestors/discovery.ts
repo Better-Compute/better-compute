@@ -33,6 +33,25 @@ export const discoveryAllowedKinds: readonly string[] = Object.freeze([
   'deploy.*',
   'boot.kexec',
 ]);
+/**
+ * Whether a restricted certificate (`node_certs.allowed_kinds`, from `AttestationResult.allowedKinds`)
+ * allows a command kind: an exact kind, or `prefix.*` for every kind under `prefix.` (never `prefix`
+ * itself). `null`/`undefined` means unrestricted; an empty list allows nothing. Gateway dispatch
+ * and `CommandQueue.enqueue` share this so the two checks cannot disagree.
+ */
+export function commandKindAllowed(
+  kind: string,
+  allowed: readonly string[] | null | undefined,
+): boolean {
+  if (allowed === null || allowed === undefined) return true;
+  for (const entry of allowed) {
+    if (entry === kind) return true;
+    if (entry.endsWith('.*') && entry.length > 2 && kind.startsWith(entry.slice(0, -1)))
+      return true;
+  }
+  return false;
+}
+
 /** An assertion is valid at most this long after it was issued, whatever its `not_after` says. */
 export const discoveryAssertionMaxAgeMs = 15 * 60_000;
 
