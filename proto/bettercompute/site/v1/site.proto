@@ -52,6 +52,14 @@ enum BootArch {
   BOOT_ARCH_X86_64_EFI_HTTP = 4;
 }
 
+// boot.cleanUp: drops the machine's proxy-DHCP entries and iPXE script (workflow cleanup).
+message BootCleanUpRequest {
+  string node_id = 1;
+  // PXE MACs whose entries to drop; empty drops every entry of the node.
+  repeated string macs = 2;
+  string workflow_id = 3;
+}
+
 // The parameters iPXE sends when chainloading (${mac}, ${uuid}, ${buildarch}, ${platform}, …).
 // The site agent matches them against its entries; an unknown machine becomes a discovery event.
 message IpxeScriptRequest {

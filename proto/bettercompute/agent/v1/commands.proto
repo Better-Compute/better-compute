@@ -132,3 +132,124 @@ message GpuResetOutcome {
   bool healthy = 3;
   string message = 4;
 }
+
+// ---------------------------------------------------------------------------------------------
+// v0.2 ramdisk kinds (PLAN.md Â§3.5, Â§11.1). Added additively to the frozen agent/v1.
+
+// diag.dcgm: lane provision, retry-safe, attested. Commissioning (level 2) and acceptance (level 1).
+message DiagDcgmRequest {
+  // dcgmi diag -r level: 1 (seconds), 2 (~2 min), 3 (~15 min), 4 (long).
+  uint32 level = 1;
+  // GPUs to test; empty tests every GPU.
+  repeated string gpu_uuids = 2;
+}
+
+message DiagDcgmResult {
+  bool passed = 1;
+  uint32 level = 2;
+  // Node-level tests, e.g. "dcgm.deployment", "pcie.bandwidth".
+  repeated DiagnosticCheck tests = 3;
+  // Per-GPU tests, sorted by uuid.
+  repeated GpuDiagnostic gpus = 4;
+}
+
+// wipe: lane provision, NOT retry-safe, attested, destructive (signed from v0.2). The Â§11.1
+// invariant "ready only after a verified wipe" rests on this result's node signature.
+message WipeRequest {
+  WipeMode mode = 1;
+  // Disks to wipe, by WWN or serial; empty wipes every non-removable disk.
+  repeated string disks = 2;
+}
+
+enum WipeMode {
+  WIPE_MODE_UNSPECIFIED = 0;
+  // Partition tables, signatures and the first/last MiB of every disk.
+  WIPE_MODE_QUICK = 1;
+  // ATA secure erase / NVMe format with user-data erase.
+  WIPE_MODE_SECURE_ERASE = 2;
+  // Rotate the self-encrypting drive's media key.
+  WIPE_MODE_CRYPTO_ERASE = 3;
+}
+
+message WipeResult {
+  WipeMode mode = 1;
+  // Sorted by id.
+  repeated DiskWipe disks = 2;
+}
+
+message DiskWipe {
+  // WWN, or the serial when the disk has no WWN.
+  string id = 1;
+  // How the disk was wiped, e.g. "nvme-format", "ata-secure-erase", "blkdiscard", "crypto-erase".
+  string method = 2;
+  // A read-back check confirmed the result.
+  bool verified = 3;
+  string message = 4;
+}
+
+// deploy.image: lane provision, NOT retry-safe, attested, destructive. Streams the image from
+// the site cache (HTTP range reads) through decompression straight to the root disk, checking the
+// SHA-256 inline (Â§3.5 step 4).
+message DeployImageRequest {
+  // HTTPS URL, normally the site agent's image cache.
+  string url = 1;
+  // SHA-256 of the image as stored (before decompression).
+  bytes sha256 = 2;
+  ImageFormat format = 3;
+  ImageCompression compression = 4;
+  RootDiskHint root_disk = 5;
+  // Secret ref of the rendered user data (it embeds a single-use `provisioned` join token); the
+  // agent fetches it with SecretRequest, never in the command.
+  string user_data_ref = 6;
+  // "cloud-init", "ignition" or "talos".
+  string user_data_kind = 7;
+  // Write for UEFI boot (EFI system partition) rather than legacy BIOS.
+  bool uefi = 8;
+}
+
+enum ImageFormat {
+  IMAGE_FORMAT_UNSPECIFIED = 0;
+  IMAGE_FORMAT_RAW = 1;
+  IMAGE_FORMAT_QCOW2 = 2;
+}
+
+enum ImageCompression {
+  IMAGE_COMPRESSION_UNSPECIFIED = 0;
+  IMAGE_COMPRESSION_NONE = 1;
+  IMAGE_COMPRESSION_ZSTD = 2;
+  IMAGE_COMPRESSION_GZIP = 3;
+}
+
+// The disk to install to; the first non-empty field wins, and a hint matching no disk fails the step.
+message RootDiskHint {
+  string wwn = 1;
+  string serial = 2;
+  // e.g. "/dev/nvme0n1"; last resort, device names are not stable.
+  string device = 3;
+  // Smallest disk at least this big.
+  uint64 min_size_bytes = 4;
+}
+
+message DeployImageResult {
+  uint64 written_bytes = 1;
+  // SHA-256 verified while streaming (equals the request's).
+  bytes sha256 = 2;
+  // WWN or serial of the disk written.
+  string root_disk = 3;
+  uint32 duration_ms = 4;
+}
+
+// boot.kexec: lane control, retry-safe, self-terminating. Boots the installed OS from the ramdisk
+// without firmware POST; completes when the agent rejoins with a new boot_id and role `node`.
+message KexecRequest {
+  // Kernel and initrd paths on the installed root filesystem; empty means the distribution defaults.
+  string kernel_path = 1;
+  string initrd_path = 2;
+  // Appended to the installed kernel command line.
+  repeated string kernel_cmdline = 3;
+}
+
+message KexecResult {
+  // The ramdisk boot that ran the command; the rejoining agent reports the new one.
+  string previous_boot_id = 1;
+}

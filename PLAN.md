@@ -549,12 +549,16 @@ A lost journal (ramdisk reboot, reinstall, bbolt corruption) starts a new `journ
   - `running` → re-attach;
   - `accepted` but not running (after a crash) → re-execute if `retry_safe`, else report `FAILED{interrupted}` for the controller to decide. `wipe`, `deploy.*`, `firmware.*` and `gpu.reset` are not retry-safe.
 - **Self-terminating kinds** (`node.reboot`, `boot.kexec`, `daemon.upgrade`): on restart, a `running` entry whose `boot_id` differs from the current boot reports `succeeded{rebooted:true}`. The server also completes these commands on rejoin (§7.2), so they are never replayed.
-- **Checks before accepting:**
-  - `EXPIRED` past `not_after` (using the server-time offset from `Welcome`);
-  - `min_generation` > applied → request the spec, defer until `not_after`, then `STALE_GENERATION`;
-  - `UNSUPPORTED` for unknown or role-disallowed kinds;
-  - `BUSY` without credits (the server re-queues the command, §7.4);
-  - `BAD_SIGNATURE` for unsigned destructive kinds (v0.2).
+- **Checks before accepting**, in this order (the Go dispatcher and the TS `FakeDaemon` agree on it):
+  1. `UNSUPPORTED` when the body names another node, or for an unknown or role-disallowed kind;
+  2. `min_generation` > applied → request the spec, defer until `not_after`, then `STALE_GENERATION`;
+  3. `EXPIRED` past `not_after` (using the server-time offset from `Welcome`). `not_after` is mandatory: a command
+     without one is `EXPIRED`, so the control plane always sets it;
+  4. `BUSY` without credits (the server re-queues the command, §7.4);
+  5. `BAD_SIGNATURE` for unsigned destructive kinds (v0.2).
+
+  Terminal rejections are journaled, so a duplicate delivery or a `Hello` resend returns the same answer; `BUSY` is
+  not journaled.
 - **Attested kinds** (`wipe`, `deploy.*`, `gpu.reset`, `firmware.*`, `diag.*`) and allocation reports (`AllocationBound`, `AllocationReleased`) are signed with the node key from v0.2. Workers verify them against `node_certs` before any state transition.
 
 **Secrets.** Commands carry `secretRef`s, never values. The agent fetches each ref with `SecretRequest{ref, workflow_id, step_id | allocation_id, epk, node_sig}`, where `epk` is a fresh P-256 key and `node_sig` covers the whole request. The gateway forwards it to `api`, which:

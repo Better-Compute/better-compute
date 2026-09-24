@@ -10,15 +10,15 @@
 // @generated from file bettercompute/agent/v1/commands.proto (package bettercompute.agent.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file bettercompute/agent/v1/commands.proto.
  */
 export const file_bettercompute_agent_v1_commands: GenFile = /*@__PURE__*/
-  fileDesc("CiViZXR0ZXJjb21wdXRlL2FnZW50L3YxL2NvbW1hbmRzLnByb3RvEhZiZXR0ZXJjb21wdXRlLmFnZW50LnYxIkAKD0RpYWdOdm1sUmVxdWVzdBIRCglncHVfdXVpZHMYASADKAkSGgoSZXhwZWN0ZWRfZ3B1X2NvdW50GAIgASgNIrkBCg5EaWFnTnZtbFJlc3VsdBIOCgZwYXNzZWQYASABKAgSEQoJZ3B1X2NvdW50GAIgASgNEhYKDmRyaXZlcl92ZXJzaW9uGAMgASgJEjcKBmNoZWNrcxgEIAMoCzInLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuRGlhZ25vc3RpY0NoZWNrEjMKBGdwdXMYBSADKAsyJS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdURpYWdub3N0aWMiZgoNR3B1RGlhZ25vc3RpYxIMCgR1dWlkGAEgASgJEg4KBnBhc3NlZBgCIAEoCBI3CgZjaGVja3MYAyADKAsyJy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkRpYWdub3N0aWNDaGVjayJACg9EaWFnbm9zdGljQ2hlY2sSDAoEbmFtZRgBIAEoCRIOCgZwYXNzZWQYAiABKAgSDwoHbWVzc2FnZRgDIAEoCSI7ChdJbnZlbnRvcnlSZWZyZXNoUmVxdWVzdBIQCghzZWN0aW9ucxgBIAMoCRIOCgZyZXNjYW4YAiABKAgiqQEKFkludmVudG9yeVJlZnJlc2hSZXN1bHQSWQoOc2VjdGlvbl9oYXNoZXMYASADKAsyQS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkludmVudG9yeVJlZnJlc2hSZXN1bHQuU2VjdGlvbkhhc2hlc0VudHJ5GjQKElNlY3Rpb25IYXNoZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAw6AjgBIrgBChJMb2dzQ29sbGVjdFJlcXVlc3QSEgoKdXBsb2FkX3VybBgBIAEoCRI6Cg51cGxvYWRfaGVhZGVycxgCIAMoCzIiLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuSHR0cEhlYWRlchINCgV1bml0cxgDIAMoCRIYChBsb29rYmFja19zZWNvbmRzGAQgASgNEhEKCW1heF9ieXRlcxgFIAEoBBIWCg5zdXBwb3J0X2J1bmRsZRgGIAEoCCIpCgpIdHRwSGVhZGVyEgwKBG5hbWUYASABKAkSDQoFdmFsdWUYAiABKAkiZAoRTG9nc0NvbGxlY3RSZXN1bHQSFgoOdXBsb2FkZWRfYnl0ZXMYASABKAQSDgoGc2hhMjU2GAIgASgMEhEKCXRydW5jYXRlZBgDIAEoCBIUCgxjb250ZW50X3R5cGUYBCABKAkiNQoRTm9kZVJlYm9vdFJlcXVlc3QSDgoGcmVhc29uGAEgASgJEhAKCGRlbGF5X21zGAIgASgNIiwKEE5vZGVSZWJvb3RSZXN1bHQSGAoQcHJldmlvdXNfYm9vdF9pZBgBIAEoCSIkCg9HcHVSZXNldFJlcXVlc3QSEQoJZ3B1X3V1aWRzGAEgAygJIkcKDkdwdVJlc2V0UmVzdWx0EjUKBGdwdXMYASADKAsyJy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdVJlc2V0T3V0Y29tZSJQCg9HcHVSZXNldE91dGNvbWUSDAoEdXVpZBgBIAEoCRINCgVyZXNldBgCIAEoCBIPCgdoZWFsdGh5GAMgASgIEg8KB21lc3NhZ2UYBCABKAlCVFpSZ2l0aHViLmNvbS9iZXR0ZXItY29tcHV0ZS9iZXR0ZXItY29tcHV0ZS9kYWVtb24vZ2VuL2JldHRlcmNvbXB1dGUvYWdlbnQvdjE7YWdlbnR2MWIGcHJvdG8z");
+  fileDesc("CiViZXR0ZXJjb21wdXRlL2FnZW50L3YxL2NvbW1hbmRzLnByb3RvEhZiZXR0ZXJjb21wdXRlLmFnZW50LnYxIkAKD0RpYWdOdm1sUmVxdWVzdBIRCglncHVfdXVpZHMYASADKAkSGgoSZXhwZWN0ZWRfZ3B1X2NvdW50GAIgASgNIrkBCg5EaWFnTnZtbFJlc3VsdBIOCgZwYXNzZWQYASABKAgSEQoJZ3B1X2NvdW50GAIgASgNEhYKDmRyaXZlcl92ZXJzaW9uGAMgASgJEjcKBmNoZWNrcxgEIAMoCzInLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuRGlhZ25vc3RpY0NoZWNrEjMKBGdwdXMYBSADKAsyJS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdURpYWdub3N0aWMiZgoNR3B1RGlhZ25vc3RpYxIMCgR1dWlkGAEgASgJEg4KBnBhc3NlZBgCIAEoCBI3CgZjaGVja3MYAyADKAsyJy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkRpYWdub3N0aWNDaGVjayJACg9EaWFnbm9zdGljQ2hlY2sSDAoEbmFtZRgBIAEoCRIOCgZwYXNzZWQYAiABKAgSDwoHbWVzc2FnZRgDIAEoCSI7ChdJbnZlbnRvcnlSZWZyZXNoUmVxdWVzdBIQCghzZWN0aW9ucxgBIAMoCRIOCgZyZXNjYW4YAiABKAgiqQEKFkludmVudG9yeVJlZnJlc2hSZXN1bHQSWQoOc2VjdGlvbl9oYXNoZXMYASADKAsyQS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkludmVudG9yeVJlZnJlc2hSZXN1bHQuU2VjdGlvbkhhc2hlc0VudHJ5GjQKElNlY3Rpb25IYXNoZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAw6AjgBIrgBChJMb2dzQ29sbGVjdFJlcXVlc3QSEgoKdXBsb2FkX3VybBgBIAEoCRI6Cg51cGxvYWRfaGVhZGVycxgCIAMoCzIiLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuSHR0cEhlYWRlchINCgV1bml0cxgDIAMoCRIYChBsb29rYmFja19zZWNvbmRzGAQgASgNEhEKCW1heF9ieXRlcxgFIAEoBBIWCg5zdXBwb3J0X2J1bmRsZRgGIAEoCCIpCgpIdHRwSGVhZGVyEgwKBG5hbWUYASABKAkSDQoFdmFsdWUYAiABKAkiZAoRTG9nc0NvbGxlY3RSZXN1bHQSFgoOdXBsb2FkZWRfYnl0ZXMYASABKAQSDgoGc2hhMjU2GAIgASgMEhEKCXRydW5jYXRlZBgDIAEoCBIUCgxjb250ZW50X3R5cGUYBCABKAkiNQoRTm9kZVJlYm9vdFJlcXVlc3QSDgoGcmVhc29uGAEgASgJEhAKCGRlbGF5X21zGAIgASgNIiwKEE5vZGVSZWJvb3RSZXN1bHQSGAoQcHJldmlvdXNfYm9vdF9pZBgBIAEoCSIkCg9HcHVSZXNldFJlcXVlc3QSEQoJZ3B1X3V1aWRzGAEgAygJIkcKDkdwdVJlc2V0UmVzdWx0EjUKBGdwdXMYASADKAsyJy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdVJlc2V0T3V0Y29tZSJQCg9HcHVSZXNldE91dGNvbWUSDAoEdXVpZBgBIAEoCRINCgVyZXNldBgCIAEoCBIPCgdoZWFsdGh5GAMgASgIEg8KB21lc3NhZ2UYBCABKAkiMwoPRGlhZ0RjZ21SZXF1ZXN0Eg0KBWxldmVsGAEgASgNEhEKCWdwdV91dWlkcxgCIAMoCSKcAQoORGlhZ0RjZ21SZXN1bHQSDgoGcGFzc2VkGAEgASgIEg0KBWxldmVsGAIgASgNEjYKBXRlc3RzGAMgAygLMicuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5EaWFnbm9zdGljQ2hlY2sSMwoEZ3B1cxgEIAMoCzIlLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuR3B1RGlhZ25vc3RpYyJMCgtXaXBlUmVxdWVzdBIuCgRtb2RlGAEgASgOMiAuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5XaXBlTW9kZRINCgVkaXNrcxgCIAMoCSJtCgpXaXBlUmVzdWx0Ei4KBG1vZGUYASABKA4yIC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLldpcGVNb2RlEi8KBWRpc2tzGAIgAygLMiAuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5EaXNrV2lwZSJJCghEaXNrV2lwZRIKCgJpZBgBIAEoCRIOCgZtZXRob2QYAiABKAkSEAoIdmVyaWZpZWQYAyABKAgSDwoHbWVzc2FnZRgEIAEoCSKbAgoSRGVwbG95SW1hZ2VSZXF1ZXN0EgsKA3VybBgBIAEoCRIOCgZzaGEyNTYYAiABKAwSMwoGZm9ybWF0GAMgASgOMiMuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5JbWFnZUZvcm1hdBI9Cgtjb21wcmVzc2lvbhgEIAEoDjIoLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuSW1hZ2VDb21wcmVzc2lvbhI3Cglyb290X2Rpc2sYBSABKAsyJC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLlJvb3REaXNrSGludBIVCg11c2VyX2RhdGFfcmVmGAYgASgJEhYKDnVzZXJfZGF0YV9raW5kGAcgASgJEgwKBHVlZmkYCCABKAgiUwoMUm9vdERpc2tIaW50EgsKA3d3bhgBIAEoCRIOCgZzZXJpYWwYAiABKAkSDgoGZGV2aWNlGAMgASgJEhYKDm1pbl9zaXplX2J5dGVzGAQgASgEImIKEURlcGxveUltYWdlUmVzdWx0EhUKDXdyaXR0ZW5fYnl0ZXMYASABKAQSDgoGc2hhMjU2GAIgASgMEhEKCXJvb3RfZGlzaxgDIAEoCRITCgtkdXJhdGlvbl9tcxgEIAEoDSJQCgxLZXhlY1JlcXVlc3QSEwoLa2VybmVsX3BhdGgYASABKAkSEwoLaW5pdHJkX3BhdGgYAiABKAkSFgoOa2VybmVsX2NtZGxpbmUYAyADKAkiJwoLS2V4ZWNSZXN1bHQSGAoQcHJldmlvdXNfYm9vdF9pZBgBIAEoCSpyCghXaXBlTW9kZRIZChVXSVBFX01PREVfVU5TUEVDSUZJRUQQABITCg9XSVBFX01PREVfUVVJQ0sQARIaChZXSVBFX01PREVfU0VDVVJFX0VSQVNFEAISGgoWV0lQRV9NT0RFX0NSWVBUT19FUkFTRRADKlkKC0ltYWdlRm9ybWF0EhwKGElNQUdFX0ZPUk1BVF9VTlNQRUNJRklFRBAAEhQKEElNQUdFX0ZPUk1BVF9SQVcQARIWChJJTUFHRV9GT1JNQVRfUUNPVzIQAiqJAQoQSW1hZ2VDb21wcmVzc2lvbhIhCh1JTUFHRV9DT01QUkVTU0lPTl9VTlNQRUNJRklFRBAAEhoKFklNQUdFX0NPTVBSRVNTSU9OX05PTkUQARIaChZJTUFHRV9DT01QUkVTU0lPTl9aU1REEAISGgoWSU1BR0VfQ09NUFJFU1NJT05fR1pJUBADQlRaUmdpdGh1Yi5jb20vYmV0dGVyLWNvbXB1dGUvYmV0dGVyLWNvbXB1dGUvZGFlbW9uL2dlbi9iZXR0ZXJjb21wdXRlL2FnZW50L3YxO2FnZW50djFiBnByb3RvMw");
 
 /**
  * @generated from message bettercompute.agent.v1.DiagNvmlRequest
@@ -418,4 +418,445 @@ export type GpuResetOutcome = Message<"bettercompute.agent.v1.GpuResetOutcome"> 
  */
 export const GpuResetOutcomeSchema: GenMessage<GpuResetOutcome> = /*@__PURE__*/
   messageDesc(file_bettercompute_agent_v1_commands, 13);
+
+/**
+ * diag.dcgm: lane provision, retry-safe, attested. Commissioning (level 2) and acceptance (level 1).
+ *
+ * @generated from message bettercompute.agent.v1.DiagDcgmRequest
+ */
+export type DiagDcgmRequest = Message<"bettercompute.agent.v1.DiagDcgmRequest"> & {
+  /**
+   * dcgmi diag -r level: 1 (seconds), 2 (~2 min), 3 (~15 min), 4 (long).
+   *
+   * @generated from field: uint32 level = 1;
+   */
+  level: number;
+
+  /**
+   * GPUs to test; empty tests every GPU.
+   *
+   * @generated from field: repeated string gpu_uuids = 2;
+   */
+  gpuUuids: string[];
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.DiagDcgmRequest.
+ * Use `create(DiagDcgmRequestSchema)` to create a new message.
+ */
+export const DiagDcgmRequestSchema: GenMessage<DiagDcgmRequest> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 14);
+
+/**
+ * @generated from message bettercompute.agent.v1.DiagDcgmResult
+ */
+export type DiagDcgmResult = Message<"bettercompute.agent.v1.DiagDcgmResult"> & {
+  /**
+   * @generated from field: bool passed = 1;
+   */
+  passed: boolean;
+
+  /**
+   * @generated from field: uint32 level = 2;
+   */
+  level: number;
+
+  /**
+   * Node-level tests, e.g. "dcgm.deployment", "pcie.bandwidth".
+   *
+   * @generated from field: repeated bettercompute.agent.v1.DiagnosticCheck tests = 3;
+   */
+  tests: DiagnosticCheck[];
+
+  /**
+   * Per-GPU tests, sorted by uuid.
+   *
+   * @generated from field: repeated bettercompute.agent.v1.GpuDiagnostic gpus = 4;
+   */
+  gpus: GpuDiagnostic[];
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.DiagDcgmResult.
+ * Use `create(DiagDcgmResultSchema)` to create a new message.
+ */
+export const DiagDcgmResultSchema: GenMessage<DiagDcgmResult> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 15);
+
+/**
+ * wipe: lane provision, NOT retry-safe, attested, destructive (signed from v0.2). The Â§11.1
+ * invariant "ready only after a verified wipe" rests on this result's node signature.
+ *
+ * @generated from message bettercompute.agent.v1.WipeRequest
+ */
+export type WipeRequest = Message<"bettercompute.agent.v1.WipeRequest"> & {
+  /**
+   * @generated from field: bettercompute.agent.v1.WipeMode mode = 1;
+   */
+  mode: WipeMode;
+
+  /**
+   * Disks to wipe, by WWN or serial; empty wipes every non-removable disk.
+   *
+   * @generated from field: repeated string disks = 2;
+   */
+  disks: string[];
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.WipeRequest.
+ * Use `create(WipeRequestSchema)` to create a new message.
+ */
+export const WipeRequestSchema: GenMessage<WipeRequest> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 16);
+
+/**
+ * @generated from message bettercompute.agent.v1.WipeResult
+ */
+export type WipeResult = Message<"bettercompute.agent.v1.WipeResult"> & {
+  /**
+   * @generated from field: bettercompute.agent.v1.WipeMode mode = 1;
+   */
+  mode: WipeMode;
+
+  /**
+   * Sorted by id.
+   *
+   * @generated from field: repeated bettercompute.agent.v1.DiskWipe disks = 2;
+   */
+  disks: DiskWipe[];
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.WipeResult.
+ * Use `create(WipeResultSchema)` to create a new message.
+ */
+export const WipeResultSchema: GenMessage<WipeResult> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 17);
+
+/**
+ * @generated from message bettercompute.agent.v1.DiskWipe
+ */
+export type DiskWipe = Message<"bettercompute.agent.v1.DiskWipe"> & {
+  /**
+   * WWN, or the serial when the disk has no WWN.
+   *
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * How the disk was wiped, e.g. "nvme-format", "ata-secure-erase", "blkdiscard", "crypto-erase".
+   *
+   * @generated from field: string method = 2;
+   */
+  method: string;
+
+  /**
+   * A read-back check confirmed the result.
+   *
+   * @generated from field: bool verified = 3;
+   */
+  verified: boolean;
+
+  /**
+   * @generated from field: string message = 4;
+   */
+  message: string;
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.DiskWipe.
+ * Use `create(DiskWipeSchema)` to create a new message.
+ */
+export const DiskWipeSchema: GenMessage<DiskWipe> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 18);
+
+/**
+ * deploy.image: lane provision, NOT retry-safe, attested, destructive. Streams the image from
+ * the site cache (HTTP range reads) through decompression straight to the root disk, checking the
+ * SHA-256 inline (Â§3.5 step 4).
+ *
+ * @generated from message bettercompute.agent.v1.DeployImageRequest
+ */
+export type DeployImageRequest = Message<"bettercompute.agent.v1.DeployImageRequest"> & {
+  /**
+   * HTTPS URL, normally the site agent's image cache.
+   *
+   * @generated from field: string url = 1;
+   */
+  url: string;
+
+  /**
+   * SHA-256 of the image as stored (before decompression).
+   *
+   * @generated from field: bytes sha256 = 2;
+   */
+  sha256: Uint8Array;
+
+  /**
+   * @generated from field: bettercompute.agent.v1.ImageFormat format = 3;
+   */
+  format: ImageFormat;
+
+  /**
+   * @generated from field: bettercompute.agent.v1.ImageCompression compression = 4;
+   */
+  compression: ImageCompression;
+
+  /**
+   * @generated from field: bettercompute.agent.v1.RootDiskHint root_disk = 5;
+   */
+  rootDisk?: RootDiskHint | undefined;
+
+  /**
+   * Secret ref of the rendered user data (it embeds a single-use `provisioned` join token); the
+   * agent fetches it with SecretRequest, never in the command.
+   *
+   * @generated from field: string user_data_ref = 6;
+   */
+  userDataRef: string;
+
+  /**
+   * "cloud-init", "ignition" or "talos".
+   *
+   * @generated from field: string user_data_kind = 7;
+   */
+  userDataKind: string;
+
+  /**
+   * Write for UEFI boot (EFI system partition) rather than legacy BIOS.
+   *
+   * @generated from field: bool uefi = 8;
+   */
+  uefi: boolean;
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.DeployImageRequest.
+ * Use `create(DeployImageRequestSchema)` to create a new message.
+ */
+export const DeployImageRequestSchema: GenMessage<DeployImageRequest> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 19);
+
+/**
+ * The disk to install to; the first non-empty field wins, and a hint matching no disk fails the step.
+ *
+ * @generated from message bettercompute.agent.v1.RootDiskHint
+ */
+export type RootDiskHint = Message<"bettercompute.agent.v1.RootDiskHint"> & {
+  /**
+   * @generated from field: string wwn = 1;
+   */
+  wwn: string;
+
+  /**
+   * @generated from field: string serial = 2;
+   */
+  serial: string;
+
+  /**
+   * e.g. "/dev/nvme0n1"; last resort, device names are not stable.
+   *
+   * @generated from field: string device = 3;
+   */
+  device: string;
+
+  /**
+   * Smallest disk at least this big.
+   *
+   * @generated from field: uint64 min_size_bytes = 4;
+   */
+  minSizeBytes: bigint;
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.RootDiskHint.
+ * Use `create(RootDiskHintSchema)` to create a new message.
+ */
+export const RootDiskHintSchema: GenMessage<RootDiskHint> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 20);
+
+/**
+ * @generated from message bettercompute.agent.v1.DeployImageResult
+ */
+export type DeployImageResult = Message<"bettercompute.agent.v1.DeployImageResult"> & {
+  /**
+   * @generated from field: uint64 written_bytes = 1;
+   */
+  writtenBytes: bigint;
+
+  /**
+   * SHA-256 verified while streaming (equals the request's).
+   *
+   * @generated from field: bytes sha256 = 2;
+   */
+  sha256: Uint8Array;
+
+  /**
+   * WWN or serial of the disk written.
+   *
+   * @generated from field: string root_disk = 3;
+   */
+  rootDisk: string;
+
+  /**
+   * @generated from field: uint32 duration_ms = 4;
+   */
+  durationMs: number;
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.DeployImageResult.
+ * Use `create(DeployImageResultSchema)` to create a new message.
+ */
+export const DeployImageResultSchema: GenMessage<DeployImageResult> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 21);
+
+/**
+ * boot.kexec: lane control, retry-safe, self-terminating. Boots the installed OS from the ramdisk
+ * without firmware POST; completes when the agent rejoins with a new boot_id and role `node`.
+ *
+ * @generated from message bettercompute.agent.v1.KexecRequest
+ */
+export type KexecRequest = Message<"bettercompute.agent.v1.KexecRequest"> & {
+  /**
+   * Kernel and initrd paths on the installed root filesystem; empty means the distribution defaults.
+   *
+   * @generated from field: string kernel_path = 1;
+   */
+  kernelPath: string;
+
+  /**
+   * @generated from field: string initrd_path = 2;
+   */
+  initrdPath: string;
+
+  /**
+   * Appended to the installed kernel command line.
+   *
+   * @generated from field: repeated string kernel_cmdline = 3;
+   */
+  kernelCmdline: string[];
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.KexecRequest.
+ * Use `create(KexecRequestSchema)` to create a new message.
+ */
+export const KexecRequestSchema: GenMessage<KexecRequest> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 22);
+
+/**
+ * @generated from message bettercompute.agent.v1.KexecResult
+ */
+export type KexecResult = Message<"bettercompute.agent.v1.KexecResult"> & {
+  /**
+   * The ramdisk boot that ran the command; the rejoining agent reports the new one.
+   *
+   * @generated from field: string previous_boot_id = 1;
+   */
+  previousBootId: string;
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.KexecResult.
+ * Use `create(KexecResultSchema)` to create a new message.
+ */
+export const KexecResultSchema: GenMessage<KexecResult> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_commands, 23);
+
+/**
+ * @generated from enum bettercompute.agent.v1.WipeMode
+ */
+export enum WipeMode {
+  /**
+   * @generated from enum value: WIPE_MODE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Partition tables, signatures and the first/last MiB of every disk.
+   *
+   * @generated from enum value: WIPE_MODE_QUICK = 1;
+   */
+  QUICK = 1,
+
+  /**
+   * ATA secure erase / NVMe format with user-data erase.
+   *
+   * @generated from enum value: WIPE_MODE_SECURE_ERASE = 2;
+   */
+  SECURE_ERASE = 2,
+
+  /**
+   * Rotate the self-encrypting drive's media key.
+   *
+   * @generated from enum value: WIPE_MODE_CRYPTO_ERASE = 3;
+   */
+  CRYPTO_ERASE = 3,
+}
+
+/**
+ * Describes the enum bettercompute.agent.v1.WipeMode.
+ */
+export const WipeModeSchema: GenEnum<WipeMode> = /*@__PURE__*/
+  enumDesc(file_bettercompute_agent_v1_commands, 0);
+
+/**
+ * @generated from enum bettercompute.agent.v1.ImageFormat
+ */
+export enum ImageFormat {
+  /**
+   * @generated from enum value: IMAGE_FORMAT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: IMAGE_FORMAT_RAW = 1;
+   */
+  RAW = 1,
+
+  /**
+   * @generated from enum value: IMAGE_FORMAT_QCOW2 = 2;
+   */
+  QCOW2 = 2,
+}
+
+/**
+ * Describes the enum bettercompute.agent.v1.ImageFormat.
+ */
+export const ImageFormatSchema: GenEnum<ImageFormat> = /*@__PURE__*/
+  enumDesc(file_bettercompute_agent_v1_commands, 1);
+
+/**
+ * @generated from enum bettercompute.agent.v1.ImageCompression
+ */
+export enum ImageCompression {
+  /**
+   * @generated from enum value: IMAGE_COMPRESSION_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: IMAGE_COMPRESSION_NONE = 1;
+   */
+  NONE = 1,
+
+  /**
+   * @generated from enum value: IMAGE_COMPRESSION_ZSTD = 2;
+   */
+  ZSTD = 2,
+
+  /**
+   * @generated from enum value: IMAGE_COMPRESSION_GZIP = 3;
+   */
+  GZIP = 3,
+}
+
+/**
+ * Describes the enum bettercompute.agent.v1.ImageCompression.
+ */
+export const ImageCompressionSchema: GenEnum<ImageCompression> = /*@__PURE__*/
+  enumDesc(file_bettercompute_agent_v1_commands, 2);
 

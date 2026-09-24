@@ -133,6 +133,31 @@ Rules for v0.1:
   broker `openSecretRequest`/`sealSecretResponse`/`refuseSecretRequest`; `createCommandSigningAuthority` +
   `signCommand`/`signDesiredState` (verify on daemon); `verifyAttestedUpdate`/`verifyAttestedReport` in workers.
   Next for [9ec62d]: v0.3 access crypto (exec tickets, SSH user-cert CA) in pki, then new `packages/mcp`.
+- Provision engine for W5a ([060790]: 86061c0; `core/0004_command_cancel` 1d9d5bf): `ModuleContext.workflows =
+  provision.workflowEngine({ work, events, commands })`; reconciler `workflow` (shardBy node; key nodeId or
+  workflowId). Runtime wake-ups: when a command whose `idempotency_key` starts with `wf:` settles →
+  `work.enqueue(tx, 'workflow', node_id)`; on Hello with a new boot_id/role → same (await 'rejoin'). Module migrations
+  `provision/0001_workflows` (profiles, workflows, workflow_steps are module-owned). Next for [060790]: metal()
+  control plane (§11.1 verbs, `metal` group) on the engine.
+- VPS for W5a ([38c2f9]: 8cdeffb, 4246008 delegated confirmation in capacity): gateway instance status reports call
+  `reportInstances(tx, ctx.work, nodeId, reports, { complete })` from @better-compute/vps (returns `{updated, orphans}`
+  for leak alerts); `vps()` nodeSpec contributes `instances`. New package `provider-hetzner` (outside the umbrella,
+  injectable `fetch`, in-memory Hetzner emulator; `providerConformanceCases()` exported from vps).
+- More W5a wiring from [38c2f9] (74cb0ce, 9ee6889): periodic reconcilers `capacity.rollup` (5m), `capacity.usage`
+  (5m, writes usage_windows for the IAM usage sink), `vps.usage` (5m); edge-enqueued kinds `capacity.reservations`,
+  `vps.instances`; gateway report hooks `markAllocationBound/Failed/Released` (capacity) and `reportInstances` (vps).
+  A lost binding keeps `bound_at` (billing = reserved time) and shows as Degraded/BindingLost.
+- W5b committed (dd99f10): `createFleetSim` (+ `GatewayPort` in packages/testing/src/sim/port.ts: `accept(conn,
+  {nodeId, role})`, `tick(now)`, `kill(reason)`, `facts()`), `FrameConn` (structural: send, onFrame (async ok),
+  onClose, close, abort, ping), `FakeDaemon`, invariant checkers. [17cfb9]'s `attachFrameConn` plugs in as a
+  GatewayPort; gateway timers must use the sim scheduler. CPU-only fake nodes send no `gpus` section ([060790]:
+  treat as never reported).
+- W1 (Go daemon) TODO list from W5b's parity review — the TS FakeDaemon already behaves this way; bcd must match:
+  acceptance order per PLAN §6 (node/kind → min_generation → EXPIRED → BUSY → BAD_SIGNATURE; missing not_after =
+  EXPIRED); SUCCEEDED{rebooted} fills `NodeRebootResult.previous_boot_id`; journal outcome `cancelled` (CANCELLED
+  when nothing ran); results record the producing `boot_id`; terminal rejections journaled; journal-full → BUSY
+  (never drop results); `Sweep` must also expire accepted/running entries never redelivered (TTL); `site` section
+  reported only when set; Hello advertises drivers (e.g. `nvidia`).
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also
@@ -178,7 +203,16 @@ Rules for v0.1:
   rootTenantId, expectSessionJwts })` → `Finding[]`. For W5a: `bridge.modules[0]`, `bridge.setHandlers(...)`,
   `bridge.embedded(iam, { rootTenantId, runIamJobs: true })`. Also owns `tests/bench/iam-lane.bench.ts` and
   `bench/iam-lane/**` (the §16 IAM-lane gate; committed 6a8bfca; needs root devDep `@better-iam/adapter-postgres`).
+- (Feature expansion [1f44fd], v0.3 events, assigned by [56cfd7] 2026-09-24) new package `packages/events/**`
+  (`@better-compute/events`: `eventsModule()` with the §9.2 `webhooks` group, the webhook EventSink with signed
+  delivery/retries/dead letters/redeliver, the SSE `handleWatch`), new `tests/events-*.test.ts`. Module-owned tables
+  via `events/0001_*`. One-line inserts for `events` in root `tsconfig.json`, `vitest.config.ts`, `umbrella.json`.
 - (Feature expansion [060790], v0.2 provision workflow engine, 2026-09-24, offered by [56cfd7]) `packages/provision/**`
   (workflow engine §11.2, profiles §11.4, `provisionModule()` with the Workflow reconciler, core `WorkflowEngine`,
   profiles/workflows API groups), `tests/provision-*.test.ts`, and the workflows/workflow_steps migration. Builds on
-  core `ctx.commands/work/events/authz`; not touching server, core, metal, gateway.
+  core `ctx.commands/work/events/authz`; not touching server, core, metal, gateway. Committed 86061c0 (engine),
+  4c4fb37 (image catalog + images group, `provision/0002_images`).
+- (Feature expansion [060790], v0.2 metal control plane, 2026-09-24, assigned by [56cfd7]) `packages/metal/**`,
+  `tests/metal-*.test.ts`: the metal group (§9.2 v0.2 rows), verbs validated against core's metal state table and
+  run as workflows via `ctx.workflows`, built-in commission/deploy/release/retire profiles + steps, site/ramdisk
+  command kinds, driver bindings inherited from the pool hardware profile. Proto additions go to [56cfd7].

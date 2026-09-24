@@ -21,7 +21,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bettercompute/site/v1/site.proto.
  */
 export const file_bettercompute_site_v1_site: GenFile = /*@__PURE__*/
-  fileDesc("CiBiZXR0ZXJjb21wdXRlL3NpdGUvdjEvc2l0ZS5wcm90bxIVYmV0dGVyY29tcHV0ZS5zaXRlLnYxIj8KCFNpdGVTcGVjEjMKBGJvb3QYASABKAsyJS5iZXR0ZXJjb21wdXRlLnNpdGUudjEuQm9vdExlYXNlU3RhdGUiPwoOQm9vdExlYXNlU3RhdGUSDgoGYWN0aXZlGAEgASgIEg0KBWVwb2NoGAIgASgEEg4KBnR0bF9tcxgDIAEoDSLSAQoOUHJveHlEaGNwRW50cnkSCwoDbWFjGAEgASgJEhQKDHByb2R1Y3RfdXVpZBgCIAEoCRItCgRhcmNoGAMgASgOMh8uYmV0dGVyY29tcHV0ZS5zaXRlLnYxLkJvb3RBcmNoEhEKCWJvb3RfZmlsZRgEIAEoCRIXCg9pcHhlX3NjcmlwdF91cmwYBSABKAkSEwoLd29ya2Zsb3dfaWQYBiABKAkSLQoJbm90X2FmdGVyGAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJ+ChFJcHhlU2NyaXB0UmVxdWVzdBILCgNtYWMYASABKAkSDAoEdXVpZBgCIAEoCRIKCgJpcBgDIAEoCRIRCglidWlsZGFyY2gYBCABKAkSEAoIcGxhdGZvcm0YBSABKAkSDgoGc2VyaWFsGAYgASgJEg0KBWFzc2V0GAcgASgJIksKCklweGVTY3JpcHQSDgoGc2NyaXB0GAEgASgJEi0KCW5vdF9hZnRlchgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAijgEKE0JtY09wZXJhdGlvblJlcXVlc3QSDgoGZHJpdmVyGAEgASgJEg8KB2FkZHJlc3MYAiABKAkSFwoPY3JlZGVudGlhbHNfcmVmGAMgASgJEhEKCW9wZXJhdGlvbhgEIAEoCRIRCglhcmdzX2pzb24YBSABKAkSFwoPdGxzX3Nwa2lfc2hhMjU2GAYgASgMIloKEkJtY09wZXJhdGlvblJlc3VsdBIKCgJvaxgBIAEoCBITCgtyZXN1bHRfanNvbhgCIAEoCRISCgplcnJvcl9jb2RlGAMgASgJEg8KB21lc3NhZ2UYBCABKAkiWQoYU2lnbmVkRGlzY292ZXJ5QXNzZXJ0aW9uEgwKBGJvZHkYASABKAwSLwoDc2lnGAIgASgLMiIuYmV0dGVyY29tcHV0ZS5jb21tb24udjEuU2lnbmF0dXJlIv0BChJEaXNjb3ZlcnlBc3NlcnRpb24SDwoHc2l0ZV9pZBgBIAEoCRIaChJzaXRlX2FnZW50X25vZGVfaWQYAiABKAkSGAoQYm9vdF9sZWFzZV9lcG9jaBgDIAEoBBILCgNtYWMYBCABKAkSCgoCaXAYBSABKAkSFAoMcHJvZHVjdF91dWlkGAYgASgJEhMKC3dvcmtmbG93X2lkGAcgASgJEi0KCWlzc3VlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLQoJbm90X2FmdGVyGAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCqLAQoIQm9vdEFyY2gSGQoVQk9PVF9BUkNIX1VOU1BFQ0lGSUVEEAASEgoOQk9PVF9BUkNIX0JJT1MQARIYChRCT09UX0FSQ0hfWDg2XzY0X0VGSRACEhcKE0JPT1RfQVJDSF9BUk02NF9FRkkQAxIdChlCT09UX0FSQ0hfWDg2XzY0X0VGSV9IVFRQEARCUlpQZ2l0aHViLmNvbS9iZXR0ZXItY29tcHV0ZS9iZXR0ZXItY29tcHV0ZS9kYWVtb24vZ2VuL2JldHRlcmNvbXB1dGUvc2l0ZS92MTtzaXRldjFiBnByb3RvMw", [file_bettercompute_common_v1_common, file_google_protobuf_timestamp]);
+  fileDesc("CiBiZXR0ZXJjb21wdXRlL3NpdGUvdjEvc2l0ZS5wcm90bxIVYmV0dGVyY29tcHV0ZS5zaXRlLnYxIj8KCFNpdGVTcGVjEjMKBGJvb3QYASABKAsyJS5iZXR0ZXJjb21wdXRlLnNpdGUudjEuQm9vdExlYXNlU3RhdGUiPwoOQm9vdExlYXNlU3RhdGUSDgoGYWN0aXZlGAEgASgIEg0KBWVwb2NoGAIgASgEEg4KBnR0bF9tcxgDIAEoDSLSAQoOUHJveHlEaGNwRW50cnkSCwoDbWFjGAEgASgJEhQKDHByb2R1Y3RfdXVpZBgCIAEoCRItCgRhcmNoGAMgASgOMh8uYmV0dGVyY29tcHV0ZS5zaXRlLnYxLkJvb3RBcmNoEhEKCWJvb3RfZmlsZRgEIAEoCRIXCg9pcHhlX3NjcmlwdF91cmwYBSABKAkSEwoLd29ya2Zsb3dfaWQYBiABKAkSLQoJbm90X2FmdGVyGAcgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJIChJCb290Q2xlYW5VcFJlcXVlc3QSDwoHbm9kZV9pZBgBIAEoCRIMCgRtYWNzGAIgAygJEhMKC3dvcmtmbG93X2lkGAMgASgJIn4KEUlweGVTY3JpcHRSZXF1ZXN0EgsKA21hYxgBIAEoCRIMCgR1dWlkGAIgASgJEgoKAmlwGAMgASgJEhEKCWJ1aWxkYXJjaBgEIAEoCRIQCghwbGF0Zm9ybRgFIAEoCRIOCgZzZXJpYWwYBiABKAkSDQoFYXNzZXQYByABKAkiSwoKSXB4ZVNjcmlwdBIOCgZzY3JpcHQYASABKAkSLQoJbm90X2FmdGVyGAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCKOAQoTQm1jT3BlcmF0aW9uUmVxdWVzdBIOCgZkcml2ZXIYASABKAkSDwoHYWRkcmVzcxgCIAEoCRIXCg9jcmVkZW50aWFsc19yZWYYAyABKAkSEQoJb3BlcmF0aW9uGAQgASgJEhEKCWFyZ3NfanNvbhgFIAEoCRIXCg90bHNfc3BraV9zaGEyNTYYBiABKAwiWgoSQm1jT3BlcmF0aW9uUmVzdWx0EgoKAm9rGAEgASgIEhMKC3Jlc3VsdF9qc29uGAIgASgJEhIKCmVycm9yX2NvZGUYAyABKAkSDwoHbWVzc2FnZRgEIAEoCSJZChhTaWduZWREaXNjb3ZlcnlBc3NlcnRpb24SDAoEYm9keRgBIAEoDBIvCgNzaWcYAiABKAsyIi5iZXR0ZXJjb21wdXRlLmNvbW1vbi52MS5TaWduYXR1cmUi/QEKEkRpc2NvdmVyeUFzc2VydGlvbhIPCgdzaXRlX2lkGAEgASgJEhoKEnNpdGVfYWdlbnRfbm9kZV9pZBgCIAEoCRIYChBib290X2xlYXNlX2Vwb2NoGAMgASgEEgsKA21hYxgEIAEoCRIKCgJpcBgFIAEoCRIUCgxwcm9kdWN0X3V1aWQYBiABKAkSEwoLd29ya2Zsb3dfaWQYByABKAkSLQoJaXNzdWVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBItCglub3RfYWZ0ZXIYCSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wKosBCghCb290QXJjaBIZChVCT09UX0FSQ0hfVU5TUEVDSUZJRUQQABISCg5CT09UX0FSQ0hfQklPUxABEhgKFEJPT1RfQVJDSF9YODZfNjRfRUZJEAISFwoTQk9PVF9BUkNIX0FSTTY0X0VGSRADEh0KGUJPT1RfQVJDSF9YODZfNjRfRUZJX0hUVFAQBEJSWlBnaXRodWIuY29tL2JldHRlci1jb21wdXRlL2JldHRlci1jb21wdXRlL2RhZW1vbi9nZW4vYmV0dGVyY29tcHV0ZS9zaXRlL3YxO3NpdGV2MWIGcHJvdG8z", [file_bettercompute_common_v1_common, file_google_protobuf_timestamp]);
 
 /**
  * The `site` section of a site agent's NodeSpec.
@@ -134,6 +134,37 @@ export const ProxyDhcpEntrySchema: GenMessage<ProxyDhcpEntry> = /*@__PURE__*/
   messageDesc(file_bettercompute_site_v1_site, 2);
 
 /**
+ * boot.cleanUp: drops the machine's proxy-DHCP entries and iPXE script (workflow cleanup).
+ *
+ * @generated from message bettercompute.site.v1.BootCleanUpRequest
+ */
+export type BootCleanUpRequest = Message<"bettercompute.site.v1.BootCleanUpRequest"> & {
+  /**
+   * @generated from field: string node_id = 1;
+   */
+  nodeId: string;
+
+  /**
+   * PXE MACs whose entries to drop; empty drops every entry of the node.
+   *
+   * @generated from field: repeated string macs = 2;
+   */
+  macs: string[];
+
+  /**
+   * @generated from field: string workflow_id = 3;
+   */
+  workflowId: string;
+};
+
+/**
+ * Describes the message bettercompute.site.v1.BootCleanUpRequest.
+ * Use `create(BootCleanUpRequestSchema)` to create a new message.
+ */
+export const BootCleanUpRequestSchema: GenMessage<BootCleanUpRequest> = /*@__PURE__*/
+  messageDesc(file_bettercompute_site_v1_site, 3);
+
+/**
  * The parameters iPXE sends when chainloading (${mac}, ${uuid}, ${buildarch}, ${platform}, …).
  * The site agent matches them against its entries; an unknown machine becomes a discovery event.
  *
@@ -185,7 +216,7 @@ export type IpxeScriptRequest = Message<"bettercompute.site.v1.IpxeScriptRequest
  * Use `create(IpxeScriptRequestSchema)` to create a new message.
  */
 export const IpxeScriptRequestSchema: GenMessage<IpxeScriptRequest> = /*@__PURE__*/
-  messageDesc(file_bettercompute_site_v1_site, 3);
+  messageDesc(file_bettercompute_site_v1_site, 4);
 
 /**
  * @generated from message bettercompute.site.v1.IpxeScript
@@ -209,7 +240,7 @@ export type IpxeScript = Message<"bettercompute.site.v1.IpxeScript"> & {
  * Use `create(IpxeScriptSchema)` to create a new message.
  */
 export const IpxeScriptSchema: GenMessage<IpxeScript> = /*@__PURE__*/
-  messageDesc(file_bettercompute_site_v1_site, 4);
+  messageDesc(file_bettercompute_site_v1_site, 5);
 
 /**
  * A BMC operation run by a site agent through bmclib (steps with runsOn: site).
@@ -266,7 +297,7 @@ export type BmcOperationRequest = Message<"bettercompute.site.v1.BmcOperationReq
  * Use `create(BmcOperationRequestSchema)` to create a new message.
  */
 export const BmcOperationRequestSchema: GenMessage<BmcOperationRequest> = /*@__PURE__*/
-  messageDesc(file_bettercompute_site_v1_site, 5);
+  messageDesc(file_bettercompute_site_v1_site, 6);
 
 /**
  * @generated from message bettercompute.site.v1.BmcOperationResult
@@ -300,7 +331,7 @@ export type BmcOperationResult = Message<"bettercompute.site.v1.BmcOperationResu
  * Use `create(BmcOperationResultSchema)` to create a new message.
  */
 export const BmcOperationResultSchema: GenMessage<BmcOperationResult> = /*@__PURE__*/
-  messageDesc(file_bettercompute_site_v1_site, 6);
+  messageDesc(file_bettercompute_site_v1_site, 7);
 
 /**
  * A site agent's statement that a PXE-booted machine asked for a boot from this MAC/IP. It vouches
@@ -328,7 +359,7 @@ export type SignedDiscoveryAssertion = Message<"bettercompute.site.v1.SignedDisc
  * Use `create(SignedDiscoveryAssertionSchema)` to create a new message.
  */
 export const SignedDiscoveryAssertionSchema: GenMessage<SignedDiscoveryAssertion> = /*@__PURE__*/
-  messageDesc(file_bettercompute_site_v1_site, 7);
+  messageDesc(file_bettercompute_site_v1_site, 8);
 
 /**
  * @generated from message bettercompute.site.v1.DiscoveryAssertion
@@ -389,7 +420,7 @@ export type DiscoveryAssertion = Message<"bettercompute.site.v1.DiscoveryAsserti
  * Use `create(DiscoveryAssertionSchema)` to create a new message.
  */
 export const DiscoveryAssertionSchema: GenMessage<DiscoveryAssertion> = /*@__PURE__*/
-  messageDesc(file_bettercompute_site_v1_site, 8);
+  messageDesc(file_bettercompute_site_v1_site, 9);
 
 /**
  * @generated from enum bettercompute.site.v1.BootArch
