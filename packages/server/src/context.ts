@@ -1,5 +1,6 @@
 import {
   notImplemented,
+  type AuthzWriter,
   type CapacityPort,
   type CommandQueue,
   type DesiredState,
@@ -8,6 +9,7 @@ import {
   type LeaseProvider,
   type ModuleContext,
   type RegistryView,
+  type WorkQueue,
 } from '@better-compute/core';
 import type { ResolvedOptions } from './options.js';
 
@@ -32,6 +34,12 @@ const capacity: CapacityPort = {
 };
 const inventory: InventoryPort = { get: later('Inventory storage') };
 const events: EventPublisher = { publish: later('The event outbox') };
+const work: WorkQueue = { enqueue: later('The work queue') };
+const authz: AuthzWriter = {
+  upsert: later('The authz projection'),
+  remove: later('The authz projection'),
+  setPending: later('The authz projection'),
+};
 
 /** The context every module's `api()` and every method handler builds on. */
 export function createModuleContext(
@@ -49,6 +57,8 @@ export function createModuleContext(
     capacity,
     inventory,
     events,
+    work,
+    authz,
     log: options.log,
   });
 }

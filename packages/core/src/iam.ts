@@ -96,6 +96,11 @@ export interface IamCapabilities {
 }
 
 export interface IamPort {
+  /**
+   * The IAM root tenant (platform). When set, `betterCompute({ rootTenantId })` may be omitted;
+   * when both are set they must agree.
+   */
+  readonly rootTenantId?: string;
   /** Embedded: `iam.authenticate` (1 lock acquisition, may write `lastSeenAt`); cached 30 s by the caller. */
   authenticate(credential: Credential): Promise<Caller>;
   /** Mutations: `ACCESS_DENIED` unless allowed; never cached; authenticate + decide = 2 acquisitions. */

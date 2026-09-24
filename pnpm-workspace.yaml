@@ -10,6 +10,9 @@ allowBuilds:
   esbuild: true
   '@bufbuild/buf': false
 
+# Several sessions share this tree: `pnpm exec`/`pnpm run` must never start an install on their own.
+verifyDepsBeforeRun: false
+
 # better-iam is not published yet: every package, including transitive ones, resolves to a vendored tarball.
 overrides:
   better-iam: file:vendor/better-iam/better-iam-0.1.0.tgz

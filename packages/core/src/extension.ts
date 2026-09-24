@@ -713,6 +713,48 @@ export interface EventPublisher {
   publish(tx: SqlTx, event: Omit<ComputeEvent, 'id' | 'time' | 'sequence'>): Promise<void>;
 }
 
+/**
+ * The coalescing work queue (§8.4): enqueue in the state-change transaction; a key re-dirtied while a
+ * reconciler runs survives (`gen`). `kind` is a reconciler name (`inventory`, `nodespec`, …).
+ */
+export interface WorkQueue {
+  enqueue(tx: SqlTx, kind: string, key: string, options?: { notBefore?: number }): Promise<void>;
+}
+
+/** Attribute values IAM policies can read (better-iam attributes are string | number | boolean). */
+export type AuthzAttributes = Record<string, string | number | boolean>;
+
+/**
+ * One row of the authz projection (§12.4): how a compute resource looks to IAM *in one tenant's view*.
+ * `type` is the unprefixed kind (`pool`, `reservation`, …); the IAM bridge adds the configured prefix.
+ */
+export interface AuthzRow {
+  type: string;
+  id: string;
+  /** The tenant in whose view the row exists (a platform pool has one row per offered tenant). */
+  tenantId: string;
+  attributes: AuthzAttributes;
+  parentType?: string;
+  parentId?: string;
+  ownerId?: string;
+}
+
+/**
+ * Writes `authz_projection` and its change feed `authz_changes` in the caller's transaction, so the
+ * IAM resolver (memory-resident, tailing the feed) sees exactly what compute committed.
+ */
+export interface AuthzWriter {
+  upsert(tx: SqlTx, row: AuthzRow): Promise<void>;
+  /** Removes the row from one tenant's view, or from every view when `tenantId` is omitted. */
+  remove(tx: SqlTx, ref: { type: string; id: string; tenantId?: string }): Promise<void>;
+  /** In-flight `extend`/`renew` changes decided before they apply (§10.5); `null` clears them. */
+  setPending(
+    tx: SqlTx,
+    ref: { type: string; id: string; tenantId: string },
+    pending: AuthzAttributes | null,
+  ): Promise<void>;
+}
+
 /** Queues usage windows for the usage sink, in the caller's transaction. */
 export interface UsageRecorder {
   record(tx: SqlTx, events: readonly UsageEvent[]): Promise<void>;
@@ -750,6 +792,10 @@ export interface ModuleContext {
   capacity: CapacityPort;
   inventory: InventoryPort;
   events: EventPublisher;
+  /** Enqueues reconciler work in the caller's transaction. */
+  work: WorkQueue;
+  /** Maintains the IAM authz projection in the caller's transaction. */
+  authz: AuthzWriter;
   log: Logger;
   /** v0.2 (provision). */
   workflows?: WorkflowEngine;
@@ -794,6 +840,32 @@ export interface MethodDefinition<I = any, O = any> {
   /** Must reject unknown and invalid fields before the handler runs. */
   validate(input: unknown): I;
   handler(context: MethodContext, input: I): Promise<O>;
+  /**
+   * Request-as-resource admission (§3.4 steps 4-5) for creates and for `extend`/`renew`. When set,
+   * the envelope runs `prepare` in its own transaction after the tenant pre-check and before the IAM
+   * decision, decides on the resource `prepare` returns, then runs `handler` in a second transaction
+   * (allowed) or `denied` (refused).
+   */
+  admission?: MethodAdmission<I, O>;
+}
+
+/** What `MethodAdmission.prepare` decided about the request. */
+export type AdmissionPlan<O> =
+  /** Decide on `resource` (the draft id derives from tenant, identity and idempotency key). */
+  | { status: 'decide'; resource: MethodResource }
+  /** Idempotent replay of a finished request by the same identity: return `result` without a decision. */
+  | { status: 'replay'; result: O };
+
+export interface MethodAdmission<I, O> {
+  /**
+   * Transaction 1: looks up the idempotency key (scoped to tenant + caller identity), writes or
+   * reuses the draft row and its authz projection row (so the resolver sees the request's
+   * attributes), and returns what to decide on. A different request under the same key must throw
+   * `CONFLICT`. Never calls IAM.
+   */
+  prepare(context: MethodContext, input: I, tx: SqlTx): Promise<AdmissionPlan<O>>;
+  /** Transaction 2 after a refusal: mark the draft denied / clear pending changes. */
+  denied?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
 }
 
 export function defineMethod<I, O>(method: MethodDefinition<I, O>): MethodDefinition<I, O> {
