@@ -9,6 +9,9 @@
   ],
   "references": [
     {
+      "path": "../capacity"
+    },
+    {
       "path": "../cli"
     },
     {
@@ -18,10 +21,19 @@
       "path": "../core"
     },
     {
+      "path": "../gateway"
+    },
+    {
+      "path": "../iam"
+    },
+    {
       "path": "../inventory"
     },
     {
       "path": "../metal"
+    },
+    {
+      "path": "../pki"
     },
     {
       "path": "../postgres"

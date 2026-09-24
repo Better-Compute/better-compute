@@ -54,6 +54,10 @@
       "types": "./dist/inventory.d.ts",
       "import": "./dist/inventory.js"
     },
+    "./capacity": {
+      "types": "./dist/capacity.d.ts",
+      "import": "./dist/capacity.js"
+    },
     "./provision": {
       "types": "./dist/provision.d.ts",
       "import": "./dist/provision.js"
@@ -66,9 +70,25 @@
       "types": "./dist/vps.d.ts",
       "import": "./dist/vps.js"
     },
+    "./iam": {
+      "types": "./dist/iam.d.ts",
+      "import": "./dist/iam.js"
+    },
+    "./iam/plugin": {
+      "types": "./dist/iam-plugin.d.ts",
+      "import": "./dist/iam-plugin.js"
+    },
     "./server": {
       "types": "./dist/server.d.ts",
       "import": "./dist/server.js"
+    },
+    "./gateway": {
+      "types": "./dist/gateway.d.ts",
+      "import": "./dist/gateway.js"
+    },
+    "./pki": {
+      "types": "./dist/pki.d.ts",
+      "import": "./dist/pki.js"
     },
     "./postgres": {
       "types": "./dist/postgres.d.ts",
@@ -96,11 +116,15 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@better-compute/capacity": "workspace:*",
     "@better-compute/cli": "workspace:*",
     "@better-compute/client": "workspace:*",
     "@better-compute/core": "workspace:*",
+    "@better-compute/gateway": "workspace:*",
+    "@better-compute/iam": "workspace:*",
     "@better-compute/inventory": "workspace:*",
     "@better-compute/metal": "workspace:*",
+    "@better-compute/pki": "workspace:*",
     "@better-compute/postgres": "workspace:*",
     "@better-compute/protocol": "workspace:*",
     "@better-compute/provision": "workspace:*",

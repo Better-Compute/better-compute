@@ -29,6 +29,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
+    "@better-iam/adapter-postgres": "0.1.0",
     "@better-iam/adapter-sqlite": "0.1.0",
     "@better-iam/cli": "0.1.0",
     "@better-iam/client": "0.1.0",

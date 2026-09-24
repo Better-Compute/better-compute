@@ -36,6 +36,7 @@ const umbrella = [
   'iam',
   'server',
   'gateway',
+  'pki',
   'postgres',
   'pglite',
   'client',

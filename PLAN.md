@@ -526,6 +526,8 @@ Tests live in `tests/extensions/`, starting in the noted phase:
 
 `config.toml` holds only the gateway URL, the site, the gateway serving-CA SPKI pin, and the JoinService signing and encryption key pins. The token is consumed at join and never written to disk.
 
+The pins alone cannot seal a token, so the install script also writes the JoinService encryption public key to `/etc/bcd/join-encryption.jwk` (0644, public). `bcd join` loads it and refuses to use it unless its SPKI hash equals `join_encryption_key_pin`. As a fallback (a missing or rotated file), `GET {basePath}/.well-known/better-compute` also serves `joinEncryptionJwk` and the join signing certificate; bcd accepts them only when they match the pins, so the fetch needs no trust in the transport.
+
 **Internals.** Each lane has a fixed worker pool (`control:4, provision:2, bulk:1`) with per-resource mutexes, not Daytona's unbounded goroutine per job [DAY §2].
 
 The converger runs sections `host · devices · instances · access · telemetry · daemon`, each an idempotent `plan(desired, observed)` + `apply`. `access` is empty in v0.1; from v0.3 it holds the SSH CA principals and the exec-ticket JWKS. `observedGeneration` advances only when every section has converged or failed terminally.
