@@ -104,6 +104,32 @@ the ±60 s window, and a 120 s replay cache. The cache is keyed by the signed st
 signature bytes, so the second valid ECDSA form `(r, n − s)` cannot be replayed. Agents sign with
 `signRenewPop`.
 
+## Attestors beyond `join-token` (v0.2, v0.3)
+
+Each one is a core `AttestorVerifier`. Pass them to `createJoinService({ attestors })`; they run
+inside the join transaction, and every refusal looks the same to the agent (`ACCESS_DENIED`). The
+reason goes only to `onRefusal`, for audit.
+
+| Attestor                                      | Evidence                                                                                                         | Admits                                                                                                                                  | Result                                           |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `x509popAttestor()`                           | JSON: the last cert chain + a proof by its key, under purpose `x509pop` over [sha256(csr), node_id, client_time] | `node`, `site` whose cert is still a `node_certs` row of the current identity generation, unrevoked, and at most 7 days past `notAfter` | the node itself (reclaim in place)               |
+| `provisionedAttestor({ resolveTarget? })`     | sealed single-use `provisioned` token                                                                            | `node` claiming a product UUID that matches the token's `expect` or the resolved target                                                 | the target node, if one resolves                 |
+| `discoveryAttestor({ resolveWorkflowNode? })` | sealed single-use `discovery` token + `SignedDiscoveryAssertion` (site/v1)                                       | `ramdisk` whose MAC/UUID the site agent saw. The signer must hold `site:<id>:boot` at the asserted epoch                                | cert ≤ 2 h, `allowedKinds` = commissioning kinds |
+| `cloudIidAttestor({ providers, resolve })`    | JSON `{provider, document, signature?}`                                                                          | whatever the host's `resolve` maps the verified instance to                                                                             | from `resolve`                                   |
+
+`cloud-iid` providers:
+
+- `gcpInstanceIdentity({ audience, fetch | jwks })`: the agent requests an identity token with
+  `aud = cloudIidAudience(audience, sha256(csr))` and `format=full`, so the token is bound to its CSR.
+- `awsInstanceIdentity({ certificates })`: the document and its `signature` are checked with the
+  region's AWS certificate, which the host supplies (none are bundled). A document can't be bound to
+  a CSR, so it is accepted only near `pendingTime`, and `resolve` should admit each instance only once.
+- `oidcInstanceIdentity(...)`: any issuer that signs JWTs into a JWKS.
+
+Agent side: `createX509popEvidence` / `x509popProducer`, `signDiscoveryAssertion` (for the site
+agent), `createCloudIidEvidence`. Tests: `tests/pki-attestors*.test.ts`, which include runs through
+the real JoinService.
+
 ## Bundles, CLI, agent side
 
 - `createPkiBundle({ trustDomain })` creates the whole set. `exportPkiBundle(bundle, { secret })`
