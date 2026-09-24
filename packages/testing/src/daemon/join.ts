@@ -6,6 +6,7 @@ import {
   generateP256KeyPair,
   openJoinResponse,
   sealJoinToken,
+  sha256,
   type SignerTrust,
 } from '@better-compute/pki';
 import {
@@ -57,11 +58,19 @@ export interface AgentJoinResult {
 export async function runAgentJoin(options: AgentJoinOptions): Promise<AgentJoinResult> {
   const privateKey = options.privateKey ?? generateP256KeyPair().privateKey;
   const csr = createCsr(privateKey);
+  const csrSha256 = sha256(csr);
   const maxRounds = options.maxRounds ?? 20;
   let challenge: Uint8Array | undefined;
   for (let round = 1; round <= maxRounds; round++) {
     const attestation = options.attestor
-      ? (await options.attestor.produce({ claims: {}, ...(challenge ? { challenge } : {}) })).payload
+      ? (
+          await options.attestor.produce({
+            claims: {},
+            // Attestors that bind to the request (x509pop, tpm) get sha256(csr).
+            nonce: csrSha256,
+            ...(challenge ? { challenge } : {}),
+          })
+        ).payload
       : undefined;
     const request = create(JoinRequestSchema, {
       csr,
