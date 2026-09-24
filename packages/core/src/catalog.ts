@@ -245,7 +245,9 @@ export type ApiModule =
   | 'metal'
   | 'vps'
   /** `@better-compute/events` (webhooks); an injected module like provision. */
-  | 'events';
+  | 'events'
+  /** `@better-compute/fleet` (FleetConfig as code); an injected module. */
+  | 'fleet';
 
 export interface ApiTarget {
   action: ComputeAction;
@@ -483,7 +485,7 @@ group('providerAccounts', 'vps', [
 group('tunnels', 'server', [
   ['open', 'mutation', 'instances:exec', 'instance', 'v0.3', { or: [['nodes:console', 'node']] }],
 ]);
-group('fleet', 'server', [
+group('fleet', 'fleet', [
   ['export', 'read', 'fleet:admin', 'fleet', 'v0.2'],
   ['plan', 'read', 'fleet:admin', 'fleet', 'v0.2'],
   ['apply', 'mutation', 'fleet:admin', 'fleet', 'v0.2'],

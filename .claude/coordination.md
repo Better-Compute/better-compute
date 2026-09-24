@@ -158,6 +158,21 @@ Rules for v0.1:
   when nothing ran); results record the producing `boot_id`; terminal rejections journaled; journal-full → BUSY
   (never drop results); `Sweep` must also expire accepted/running entries never redelivered (TTL); `site` section
   reported only when set; Hello advertises drivers (e.g. `nvidia`).
+- 25fcd9c: webhooks rows in core apiSurface are module 'events' (injected `@better-compute/events`, 812ed34:
+  eventsModule, handleWatch SSE). W5a: server's `events.list` copies the outbox reader (txid_text alias, qualified
+  ORDER BY), never imports events; mount `handleWatch` from the host (GET /watch), not from server.
+- AUDIT CHECKPOINTS split (orchestrator, resolving a double claim): [1f44fd] owns `packages/audit` (module, table
+  `audit/0001_checkpoints`, hourly reconciler, xmin/txid cursor over `audit_events` — needs an additive
+  `audit_events.txid`/`seq` column from [060790]); [9ec62d] owns the pure crypto in `pki/src/audit.ts` (RFC 6962,
+  proofs, checkpoint sign/verify under SigningPurpose 'audit-checkpoint', 5862fb4) and CLI `audit verify|prove|
+  checkpoint`; no `pki/0002` migration. One Merkle implementation (pki), one table (audit).
+- Metal for W5a ([060790] e64b4fc; migrations core/0005_audit_commit_order, core/0006_pool_archive): register
+  `provisionModule({ modules: [bareMetal] })` + `metal()`; `ctx.workflows = provision.workflowEngine(ctx)`;
+  `ctx.secrets` (pki `localSealedSecretStore`) for inline BMC creds; run reconcilers `metal` and `workflow`.
+  COMMAND PAYLOAD RULE (orchestrator decision): `CommandQueue.enqueue({ payload })` takes the proto3 JSON form of the
+  kind's declared payload message (`CommandKindSpec.payload` descriptor); the runtime encodes it with protobuf-es
+  `fromJson` + `Any.pack` into `CommandBody.payload` and rejects invalid JSON with INVALID_CONFIG. Routing data
+  (target node) goes in `EnqueueCommand.nodeId`, never in the payload.
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also
@@ -207,6 +222,16 @@ Rules for v0.1:
   (`@better-compute/events`: `eventsModule()` with the §9.2 `webhooks` group, the webhook EventSink with signed
   delivery/retries/dead letters/redeliver, the SSE `handleWatch`), new `tests/events-*.test.ts`. Module-owned tables
   via `events/0001_*`. One-line inserts for `events` in root `tsconfig.json`, `vitest.config.ts`, `umbrella.json`.
+  Committed 812ed34.
+- (Feature expansion [1f44fd], v0.4 Merkle audit checkpoints §13, 2026-09-24) new package `packages/audit/**`
+  (`@better-compute/audit`: `auditModule()` with hourly signed per-tenant Merkle checkpoints over `audit_events`
+  (read-only), migration `audit/0001_checkpoints`, inclusion proofs, `verifyAuditCheckpoints` for `better-compute
+  audit verify`), new `tests/audit-*.test.ts`. One-line inserts for `audit` in root `tsconfig.json`,
+  `vitest.config.ts`, `umbrella.json`. Committed 7efc6f2 (crypto from pki c355faf).
+- (Feature expansion [1f44fd], §14 metrics, 2026-09-24) new package `packages/observability/**`
+  (`@better-compute/observability`: bounded Prometheus registry (maxSeries, no tenant labels), the §14 standard
+  `better_compute_*` series, `meteredIamPort`, DB backlog gauges, `/metrics` handler), new
+  `tests/observability-*.test.ts`. No core changes; registry inserts for `observability`.
 - (Feature expansion [060790], v0.2 provision workflow engine, 2026-09-24, offered by [56cfd7]) `packages/provision/**`
   (workflow engine §11.2, profiles §11.4, `provisionModule()` with the Workflow reconciler, core `WorkflowEngine`,
   profiles/workflows API groups), `tests/provision-*.test.ts`, and the workflows/workflow_steps migration. Builds on
@@ -216,3 +241,4 @@ Rules for v0.1:
   `tests/metal-*.test.ts`: the metal group (§9.2 v0.2 rows), verbs validated against core's metal state table and
   run as workflows via `ctx.workflows`, built-in commission/deploy/release/retire profiles + steps, site/ramdisk
   command kinds, driver bindings inherited from the pool hardware profile. Proto additions go to [56cfd7].
+- (Feature expansion [9ec62d], v0.4 audit primitives, 2026-09-24; split with [1f44fd] per [56cfd7]) pure crypto only in `packages/pki/src/audit.ts`: RFC 6962 hashing, inclusion + consistency proofs, `signCheckpoint`/`verifyCheckpoint` ('audit-checkpoint'), the bundle's audit signing key; CLI `audit verify|prove|checkpoint` calling `@better-compute/audit`. No table in pki (`packages/audit` owns it).
