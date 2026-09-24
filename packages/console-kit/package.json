@@ -38,6 +38,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react-entry.d.ts",
+      "import": "./dist/react-entry.js"
     }
   },
   "sideEffects": false,
@@ -47,5 +51,19 @@
   "dependencies": {
     "@better-compute/client": "workspace:*",
     "@better-compute/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   }
 }
