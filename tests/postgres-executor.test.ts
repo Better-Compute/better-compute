@@ -142,6 +142,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0006_pool_archive',
       'core/0007_device_health',
       'core/0008_session_versions',
+      'core/0009_runtime',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });
