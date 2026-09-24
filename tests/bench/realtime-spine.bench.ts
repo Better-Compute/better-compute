@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { cpus, totalmem } from 'node:os';
 import { afterAll, describe, expect, it } from 'vitest';
-import { createRealtimeFleet, type RealtimeFleet } from '@better-compute/testing';
+import { createRealtimeFleet, probeLeases, type RealtimeFleet } from '@better-compute/testing';
 
 // The §16 v0.1 acceptance run: "place-to-active p99 < 2 s with 1k FakeDaemons in the real-time harness". The whole
 // spine on the wall clock: a real control plane with its workers, a real gateway, and FakeDaemons that Join with
@@ -47,6 +47,9 @@ describe('realtime-spine', () => {
   it(`joins ${nodes} FakeDaemons to adopted and times place-to-active`, async () => {
     fleet = await createRealtimeFleet({ joinConcurrency, ...(postgresUrl ? { postgresUrl } : {}) });
     const joined = await fleet.join(nodes, { timeoutMs: 30 * 60_000 });
+    // Lease renewals while placements run: the probe of the runtime's renewal under load (finding: at saturation
+    // singleton:capacity.reservations lapsed and its runs failed with 'Lease … is no longer held').
+    const probe = probeLeases(fleet.database, { intervalMs: 100 });
     const placed = await fleet.place(reservations, {
       ratePerSecond: rate,
       concurrency: placeConcurrency,
@@ -56,6 +59,7 @@ describe('realtime-spine', () => {
       burst > 0
         ? await fleet.place(burst, { concurrency: placeConcurrency, timeoutMs: 30 * 60_000 })
         : undefined;
+    const leases = await probe.stop();
     const result = {
       suite: 'realtime-spine',
       commit: commit(),
@@ -94,6 +98,13 @@ describe('realtime-spine', () => {
             },
           }
         : {}),
+      leases: {
+        renewals: leases.renewals,
+        gapMs: leases.gapMs,
+        minHeadroomMs: leases.minHeadroomMs,
+        lapses: leases.lapses,
+        takeovers: leases.takeovers.length,
+      },
       gate: {
         placeToActiveP99Ms: 2_000,
         met:
@@ -108,7 +119,13 @@ describe('realtime-spine', () => {
     );
     console.log(
       JSON.stringify(
-        { join: result.join, place: result.place, burst: result.burst, gate: result.gate },
+        {
+          join: result.join,
+          place: result.place,
+          burst: result.burst,
+          leases: result.leases,
+          gate: result.gate,
+        },
         null,
         2,
       ),

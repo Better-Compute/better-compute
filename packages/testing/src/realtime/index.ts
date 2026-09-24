@@ -11,3 +11,5 @@ export type {
 } from './harness.js';
 export { createRealtimeFleet } from './fleet.js';
 export type { JoinResult, PlaceResult, RealtimeFleet, RealtimeFleetOptions } from './fleet.js';
+export { probeLeases } from './leases.js';
+export type { LeaseProbe, LeaseProbeOptions, LeaseProbeResult, LeaseTakeover } from './leases.js';
