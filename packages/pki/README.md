@@ -300,6 +300,12 @@ part)*`, SHA-256.
   - Plaintext: the token's UTF-8.
   - Load the key from `/etc/bcd/join-encryption.jwk`, else `/.well-known/better-compute`, and use
     it only if it matches `join_encryption_key_pin`.
+- **Attestors (v0.2+).** `tests/pki-attestors-vectors.test.ts` pins the exact bytes for the
+  `x509pop` signing input (purpose `x509pop` over [sha256(csr), node_id, int64 s ‖ int32 ns]), a
+  `DiscoveryAssertion` body and its `discovery-assertion` signing input, the tpm quote nonce
+  `sha256(secret ‖ sha256(csr))`, TPML_PCR_SELECTION and PCR digest encodings, the GCP audience
+  `<audience>#<b64url sha256(csr)>`, and the allowed-kinds matcher. bcd must reproduce them. KDFa is
+  covered by go-tpm's own vectors (`tests/pki-attestors-tpm2.test.ts`).
 - **JoinResponse check.** In order:
   1. the signature under the pinned key;
   2. `csr_sha256` equals SHA-256 of the CSR you sent;
