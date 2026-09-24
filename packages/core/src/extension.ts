@@ -889,6 +889,11 @@ export interface Reconciler {
   shardBy: 'node' | 'pool' | 'none';
   /** Level-triggered: `SYNC_AGAIN` re-queues the key. */
   run(context: ReconcileContext, key: string): Promise<'DONE' | 'SYNC_AGAIN'>;
+  /**
+   * Keys the runtime also enqueues on a fixed period (a `work_queue` row with `not_before`), besides
+   * edge-triggered enqueues: e.g. `iam.reconcile` → `[{ key: 'identities', every: '5m' }]`.
+   */
+  periodic?: readonly { key: string; every: Duration }[];
 }
 
 /** A CLI command a module adds (built with the CLI's `defineCommand`). */
@@ -916,6 +921,14 @@ export interface ComputeModule<Name extends string = string, A extends ApiGroups
   commands?: CliCommandSpec[];
   profiles?: ProfileDocument[];
   selfCheck?(context: ModuleContext): Promise<Finding[]>;
+  /**
+   * Awaited by `initialize()` in every process mode, after migrations and before the process serves
+   * (e.g. the IAM bridge loads its authz projection and binds its inbox). Modules start in
+   * registration order.
+   */
+  start?(context: ModuleContext): Promise<void>;
+  /** Awaited by `stop()`, in reverse registration order. */
+  stop?(): Promise<void>;
 }
 
 /** Declares a module; the name and API types are kept literal for `betterCompute<M, P>()`. */

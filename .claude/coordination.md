@@ -36,7 +36,7 @@ owner before touching their files. Ask [56cfd7] for anything marked "orchestrato
 | W2b Gateway (§7: gRPC `Session` over HTTP/2 mTLS, liveness batching, dispatch-by-join, resume rules, BUSY, forwarding Join/Renew/Secret to `GatewayServices`) | [17cfb9] (offered) | new `packages/gateway/**`, `tests/gateway-*.test.ts` |
 | W4 IAM bridge (§12: plugin + inbox, projection + resolver, `embedded()` IamPort, usage sink, flag cache, IamReconcile) | [1f44fd] (offered) | new `packages/iam/**`, `tests/iam-bridge-*.test.ts` (`tests/iam-contract.test.ts` is the reference, read-only) |
 | W5a Server runtime + envelope + API groups + JoinService (§3.3-3.4, §8, §9.2 v0.1 rows) and additive `core` contract changes | orchestrator [56cfd7] | `packages/server/**`, `packages/core/**`, `tests/{server,core}-*.test.ts` |
-| W5b Testing kit: `FakeDaemon`, deterministic fleet-sim, real-time harness, `computeFixture` with embedded IAM | [82e975] (offered) | `packages/testing/**`, `tests/{testing,sim,realtime}*` |
+| W5b Testing kit: `FakeDaemon`, deterministic fleet-sim, real-time harness, `computeFixture` with embedded IAM | orchestrator [56cfd7] ([82e975] declined: it works on better-iam) | `packages/testing/**`, `tests/{testing,sim,realtime}*` |
 | W5c CLI (`dev`, `serve`, `iam setup`, `pki issue-gateway`, `daemon install-script`) | unassigned; starts after W5a lands `ModuleContext` runtime | `packages/cli/**`, `tests/cli-*.test.ts` |
 | W1 Go daemon | blocked: Go is not installed (user decision pending) | `daemon/**` |
 

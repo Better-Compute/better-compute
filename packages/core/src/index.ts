@@ -10,3 +10,4 @@ export * from './extension.js';
 export * from './sql.js';
 export * from './iam.js';
 export * from './catalog.js';
+export * from './shard.js';
