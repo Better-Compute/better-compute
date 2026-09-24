@@ -1,3 +1,9 @@
+export { createControlPlaneSim, controlPlaneFacts } from './control-plane.js';
+export type {
+  ControlPlaneFacts,
+  ControlPlaneSim,
+  ControlPlaneSimOptions,
+} from './control-plane.js';
 export { createFleetSim } from './fleet-sim.js';
 export type {
   ChaosOptions,
