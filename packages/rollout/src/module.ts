@@ -318,7 +318,9 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
         });
         return 'DONE';
       }
-      await context.sql.transaction((tx) => advanceRollout(context, tx, key));
+      await context.sql.transaction((tx) =>
+        advanceRollout(context, tx, key, { downloadsUrl: options.downloadsUrl }),
+      );
       return 'DONE';
     },
   };

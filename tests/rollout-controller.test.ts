@@ -34,6 +34,13 @@ let db: SqlExecutor;
 let now = T0;
 let events: string[] = [];
 let invalidated: string[] = [];
+interface EnqueuedCommand {
+  nodeId: string;
+  kind: string;
+  payload: { version: string; url: string; sha256: string };
+  idempotencyKey: string;
+}
+let commands: EnqueuedCommand[] = [];
 const key = createReleaseSigningKey();
 const downloadsUrl = 'https://compute.test/api/compute/downloads';
 const module = rolloutModule({ release: { pins: [spkiPin(key.publicKey)] }, downloadsUrl });
@@ -74,6 +81,12 @@ function context(sql: SqlExecutor): ModuleContext {
       },
     },
     work: { async enqueue() {} },
+    commands: {
+      async enqueue(_tx: SqlTx, command: EnqueuedCommand) {
+        commands.push(command);
+        return { id: `cmd_${commands.length}`, seq: commands.length };
+      },
+    },
   } as unknown as ModuleContext;
 }
 
@@ -159,6 +172,7 @@ beforeEach(async () => {
   await useSimClock(db, T0);
   events = [];
   invalidated = [];
+  commands = [];
   await db.query(
     `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_01jz00000000000000000000aa', 'root', 'shared', 'eu', 1)`,
   );
@@ -338,6 +352,42 @@ describe('rollouts', () => {
     // The skipped node, and any node that joins the pool later, converge on the pool default.
     expect((await spec(nodeId(1, 9), pools[1]))?.version).toBe('1.1.0');
     expect(await spec('node_01jz00000000000000000000zz', pools[0])).toBeUndefined();
+  });
+
+  it('sends daemon.upgrade to daemons restricted to upgrades (below proto_min)', async () => {
+    const rollout = await call<Rollout>('rollouts', 'create', {
+      tenantId: 'root',
+      version: '1.1.0',
+      poolIds: [pools[0]],
+      waves: [100],
+    });
+    // A server whose minimum rose to 2 (the default is PROTOCOL_VERSION.min); node 3 speaks 1.
+    await db.query(`UPDATE node_sessions SET proto_max = 2`);
+    await db.query(`UPDATE node_sessions SET proto_max = 1 WHERE node_id = $1`, [nodeId(0, 3)]);
+    // Budget 0.2 of 10: two at a time; advance until node 3 starts.
+    let started: string[] = [];
+    for (let round = 0; round < 6 && !started.includes(nodeId(0, 3)); round++) {
+      const outcome = (await db.transaction((tx) =>
+        advanceRollout(context(db), tx, rollout.id, { downloadsUrl, protoMin: 2 }),
+      ))!;
+      started = [...started, ...outcome.started];
+      await report(outcome.started, '1.1.0');
+    }
+    expect(started).toContain(nodeId(0, 3));
+    expect(commands).toEqual([
+      {
+        nodeId: nodeId(0, 3),
+        kind: 'daemon.upgrade',
+        payload: {
+          version: '1.1.0',
+          url: `${downloadsUrl}/bcd/1.1.0/linux-amd64`,
+          sha256: expect.any(String),
+        },
+        idempotencyKey: `rollout:${rollout.id}:${nodeId(0, 3)}`,
+        notAfter: expect.any(Number),
+      },
+    ]);
+    expect(Buffer.from(commands[0]!.payload.sha256, 'base64')).toHaveLength(32);
   });
 
   it('pauses and resumes by hand; refuses unknown versions', async () => {

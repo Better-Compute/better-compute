@@ -8,6 +8,7 @@ import {
   type NodeRecord,
   type SqlTx,
 } from '@better-compute/core';
+import { PROTOCOL_VERSION } from '@better-compute/protocol';
 import {
   releaseBinaries,
   verifyReleaseManifest,
@@ -631,9 +632,14 @@ async function poolLoads(tx: SqlTx, poolIds: readonly string[]): Promise<Map<str
  * advances waves, and starts pending nodes of the current wave within each pool's budget.
  */
 export async function advanceRollout(
-  context: Pick<ModuleContext, 'events' | 'desired'>,
+  context: Pick<ModuleContext, 'events' | 'desired'> & Partial<Pick<ModuleContext, 'commands'>>,
   tx: SqlTx,
   rolloutId: string,
+  /**
+   * With `downloadsUrl`, daemons restricted to upgrades (`proto_max` below `protoMin`, default the
+   * server's `PROTOCOL_VERSION.min`) also get a `daemon.upgrade` command.
+   */
+  options: { downloadsUrl?: string; protoMin?: number } = {},
 ): Promise<AdvanceOutcome | undefined> {
   const { rows } = await tx.query<RolloutRow & { now: Date }>(
     'SELECT r.*, compute_now() AS now FROM rollouts r WHERE r.id = $1 FOR UPDATE',
@@ -817,9 +823,73 @@ export async function advanceRollout(
     );
     if (load) load.disrupted += 1;
     await context.desired.invalidate(tx, node.node_id);
+    if (options.downloadsUrl && context.commands)
+      await nudgeRestricted(
+        { commands: context.commands },
+        tx,
+        {
+          nodeId: node.node_id,
+          rolloutId: row.id,
+          version: row.version,
+          now,
+          timeoutMs,
+          protoMin: options.protoMin ?? PROTOCOL_VERSION.min,
+        },
+        options.downloadsUrl,
+      );
     outcome.started.push(node.node_id);
   }
   return outcome;
+}
+
+/**
+ * A daemon below the server's `proto_min` gets `Welcome.upgrade_required` and accepts only
+ * `daemon.upgrade` (§7.6), so it would never apply `NodeSpec.daemon`: send it the same target as a
+ * command. Known from `node_sessions.proto_max` (core/0008); unknown means "not restricted".
+ */
+async function nudgeRestricted(
+  context: Pick<ModuleContext, 'commands'>,
+  tx: SqlTx,
+  input: {
+    nodeId: string;
+    rolloutId: string;
+    version: string;
+    now: number;
+    timeoutMs: number;
+    protoMin: number;
+  },
+  downloadsUrl: string,
+): Promise<boolean> {
+  const column = await tx.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = 'node_sessions' AND column_name = 'proto_max'`,
+  );
+  if (!column.rows.length) return false;
+  const { rows } = await tx.query<{ proto_max: number | null; arch: string | null }>(
+    `SELECT s.proto_max,
+            (SELECT l.value FROM node_labels l WHERE l.node_id = s.node_id AND l.key = 'cpu.arch') AS arch
+       FROM node_sessions s WHERE s.node_id = $1`,
+    [input.nodeId],
+  );
+  const session = rows[0];
+  if (!session || session.proto_max === null || session.proto_max >= input.protoMin) return false;
+  const platform = platformOf({
+    labels: session.arch ? [{ key: 'cpu.arch', value: session.arch, source: 'inventory' }] : [],
+  } as unknown as Pick<NodeRecord, 'labels'>);
+  const binary = platform ? (await readRelease(tx, input.version))?.binaries[platform] : undefined;
+  if (!platform || !binary) return false;
+  await context.commands.enqueue(tx, {
+    nodeId: input.nodeId,
+    kind: 'daemon.upgrade',
+    // proto3 JSON of DaemonSection: bytes as base64.
+    payload: {
+      version: input.version,
+      url: `${downloadsUrl.replace(/\/+$/, '')}/bcd/${input.version}/${platform}`,
+      sha256: Buffer.from(binary.sha256, 'hex').toString('base64'),
+    },
+    idempotencyKey: `rollout:${input.rolloutId}:${input.nodeId}`,
+    notAfter: input.now + input.timeoutMs,
+  });
+  return true;
 }
 
 // --- NodeSpec ------------------------------------------------------------------------------------
