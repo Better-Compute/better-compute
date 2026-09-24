@@ -4,9 +4,21 @@ Hardware inventory for better-compute: GPU naming, node condition types, and `in
 the always-on built-in module that the server registers before any injected module. It depends on
 `@better-compute/core` and `@better-compute/protocol`.
 
-**Status: v0.1.** GPU naming, section verification, diffs, devices and atoms, labels, the hardware
-key, the v0.1 conditions, the Inventory reconciler and `inventory.get` work. `inventory.history`
-and `inventory.diff` reject with `NOT_IMPLEMENTED` naming v0.2.
+**Status: v0.2.** Everything below works:
+
+- GPU naming, section verification, diffs, devices and atoms, labels, the hardware key, and the
+  conditions;
+- the Inventory reconciler;
+- `inventory.get`, `inventory.history` (snapshots newest first, paged by snapshot id) and
+  `inventory.diff` (any two snapshots by id or hash; by default the latest against the one before);
+- Health (§10.1): `xidPolicies` and `recordXid` (48 quarantines the GPU; 79 and 95 make the node
+  NoSchedule for a reboot; 63 and 64 cover row remaps). Inventory findings (a failed or pending row
+  remap, uncorrectable ECC, a degraded NVLink) are applied on every inventory. Device quarantines
+  live in `device_health`: the atom leaves placement and the node does not. Remediation runs in
+  provision (`health` work);
+- v0.5 fractional atoms: `gpu.slot` atoms `<uuid>/s<k>` for `timeslice`/`mps` pools (from
+  `policy.sharing.replicas`); MIG `gpu.mig` atoms; `partitionPending` freezes a GPU during a MIG
+  mode change; `gpuAtomFamily` feeds the capacity atom rule.
 
 ## From Hello to devices (PLAN.md §10.1)
 

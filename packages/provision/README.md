@@ -9,7 +9,21 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
 - Implemented: `defineStep`, `defineProfile`, `provisionModule()` (the workflow engine, its
   tables, the Workflow reconciler), `ctx.workflows`, the image catalog, and the `profiles`,
   `workflows` and `images` API groups.
-- Still to come: config units and renderers.
+- Also implemented:
+  - **Health remediation.** The `health` reconciler runs `remediate-reboot` (XID 79/95) and
+    `remediate-gpu-reset` (pending row remap) once the node has drained. It stays within the pool's
+    `policy.disruptionBudget` (default 5%) and pauses a pool when more than 10% of its nodes turn
+    unhealthy within 10 minutes (the circuit breaker). A failed, cancelled or exhausted remediation
+    puts the node in maintenance.
+  - **User data renderers** (`userdata.render`). They render cloud-init (`bcd-host.yaml.hbs`) or
+    Ignition (`bcd-host.ign`), embedding a single-use `provisioned` join token minted through
+    `ctx.pki`. The document is stored through `ctx.secrets`, and the deploy carries only its
+    `userDataRef`. Template values must be single lines, so a value can never inject lines.
+  - **Config units.** `nvidia-driver`, `container-toolkit`, `mig-layout`, `fabric-manager` and
+    `sysctl`, each validated by a manifest. `when:` is checked against the node's labels, and
+    `mig-layout` can take `from: 'pool'`. They are served as the NodeSpec `host` section from the
+    last succeeded workflow's `hostConfig`, and the engine invalidates desired state when such a
+    workflow succeeds.
 
 ## Image catalog (PLAN.md §11.5)
 
