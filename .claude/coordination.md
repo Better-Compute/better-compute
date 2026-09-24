@@ -182,6 +182,17 @@ Rules for v0.1:
   `ctx.commands.enqueue` and add bookings/allocations to the sim facts (I1/I8). `poke(nodeIds?)` = dispatch + targeted
   spec check only — never a full spec sweep per poke. [17cfb9] next: v0.3 tunnels (may additively extend
   `packages/testing/src/daemon/**` for tunnel handling; journal rules untouched).
+- Observability for W5a ([1f44fd] cbed794): `createMetrics({maxSeries})`, `standardMetrics(registry)`,
+  `metricsHandler({registry, bearerToken, timingSafeEqual})` (GET /metrics), `meteredIamPort(port, metrics)` (wrap the
+  IamPort once), `createObserver({onSpan, metrics}).span(...)`, traceparent helpers. check/invoke matching = path +
+  canonical JSON of the raw input (sorted keys), multiset (one invoke per check), grants expire with the call.
+  [1f44fd] next: real-time harness (`packages/testing/src/realtime/**`, `tests/realtime/**` — exception to W5b).
+- Tunnels (v0.3, [17cfb9]) api half for W5a: `tunnels.open` authorizes (`instances:exec` / `nodes:console`), issues an
+  exec ticket (pki `createExecTicketIssuer`, sid = tunnel id), returns the ticket; host GET `/tunnels/{ticket}`
+  relays to `gatewayControlClient.openTunnel({ ticket, nodeId, target })` → `{ send, frames, close }` on the owning
+  gateway (`node_sessions.gateway_id`). `createGateway({ tickets: { jwks, issuer?, jtiCache? } })` gets the issuer's
+  JWKS; host supplies `reauthorize(tunnel)` (60 s) and calls POST `/v1/tunnels/close {subject|tunnelId|nodeId}` on
+  revocation events. The daemon ALWAYS re-verifies the ticket (P14); the gateway check is defence in depth.
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also
@@ -211,6 +222,10 @@ Rules for v0.1:
   `tsconfig.json`, `vitest.config.ts`, `umbrella.json`. Dropped my earlier server-runtime claim (W5a owns it).
   Landed inside 6a8bfca (index race). Next: the §16 gateway gate bench, `tests/bench/gateway-streams.bench.ts` +
   `bench/gateway-streams/**`.
+- ([17cfb9], v0.3 tunnels gateway side §7.6, assigned by [56cfd7] 2026-09-24) `packages/gateway/src/tunnels.ts`
+  + gateway/http2/internal edits (Tunnel RPC, OpenTunnel, POST /v1/tunnels h2 duplex + /v1/tunnels/close,
+  `gatewayControlClient.openTunnel`), `tests/gateway-tunnels.test.ts`. May add tunnel handling to
+  `packages/testing/src/daemon/**` additively (journal untouched).
 - (Feature expansion [060790], v0.1 W3b inventory + store, 2026-09-24) accepts. `packages/inventory/**` (section
   verification + snapshot digest, diffs, labels, devices/atoms from inventory, hardware_key, v0.1 conditions,
   Inventory/Health reconcile logic), `packages/postgres/**` (sole writer of `migrations/0003+`; send column requests

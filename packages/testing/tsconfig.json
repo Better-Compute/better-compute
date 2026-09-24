@@ -19,6 +19,12 @@
     },
     {
       "path": "../postgres"
+    },
+    {
+      "path": "../gateway"
+    },
+    {
+      "path": "../observability"
     }
   ]
 }
