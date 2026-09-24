@@ -90,6 +90,10 @@
       "types": "./dist/audit.d.ts",
       "import": "./dist/audit.js"
     },
+    "./observability": {
+      "types": "./dist/observability.d.ts",
+      "import": "./dist/observability.js"
+    },
     "./server": {
       "types": "./dist/server.d.ts",
       "import": "./dist/server.js"
@@ -143,6 +147,7 @@
     "@better-compute/inventory": "workspace:*",
     "@better-compute/mcp": "workspace:*",
     "@better-compute/metal": "workspace:*",
+    "@better-compute/observability": "workspace:*",
     "@better-compute/pki": "workspace:*",
     "@better-compute/postgres": "workspace:*",
     "@better-compute/protocol": "workspace:*",

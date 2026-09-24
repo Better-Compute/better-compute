@@ -173,6 +173,15 @@ Rules for v0.1:
   kind's declared payload message (`CommandKindSpec.payload` descriptor); the runtime encodes it with protobuf-es
   `fromJson` + `Any.pack` into `CommandBody.payload` and rejects invalid JSON with INVALID_CONFIG. Routing data
   (target node) goes in `EnqueueCommand.nodeId`, never in the payload.
+- COMPOSITE METHODS (33170fd, for [9ec62d]'s fleet.apply): W5a envelope must implement `MethodDefinition.transaction:
+  'manual'` (handler runs with no tx; envelope writes the audit row after success) and `MethodContext.check(path,
+  input)` (tenant pre-check + validate + one iam.require, refused inside an open tx and for admission methods →
+  UNSUPPORTED) / `invoke(tx, path, input)` (runs validate + handler in `tx` only for calls `check` allowed in the same
+  method call, keyed by path + canonical input hash; else ACCESS_DENIED).
+- Gateway sim (b3bfa30) + storm fixes (41c88fc): W5a must swap the fleet-gateway port's raw SQL enqueue for
+  `ctx.commands.enqueue` and add bookings/allocations to the sim facts (I1/I8). `poke(nodeIds?)` = dispatch + targeted
+  spec check only — never a full spec sweep per poke. [17cfb9] next: v0.3 tunnels (may additively extend
+  `packages/testing/src/daemon/**` for tunnel handling; journal rules untouched).
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also
