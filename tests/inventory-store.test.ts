@@ -311,6 +311,37 @@ describe('shared pools', () => {
   });
 });
 
+describe('inventory.history and inventory.diff', () => {
+  it('pages snapshots newest first and diffs the latest two by default, or any two by id or hash', async () => {
+    const context = { sql: db } as never;
+    const api = inventoryModule.api!(context);
+    const call = <M extends 'history' | 'diff'>(method: M, input: unknown) =>
+      (api.inventory[method] as { validate(i: unknown): any; handler(c: never, i: unknown): Promise<any> }).handler(
+        context,
+        api.inventory[method].validate(input),
+      );
+    // Validation checks real node ids.
+    node = `node_${String(++seq).padStart(26, '0')}`;
+    await db.transaction((tx) => addNode(tx, node));
+    for (const count of [8, 7, 8]) {
+      await report(node, { gpus: encoded.gpus(count) });
+      await applyInventory(db, node);
+    }
+    const first = await call('history', { tenantId: 'ten_root', nodeId: node, limit: 2 });
+    expect(first.items.map((s: { sections: { gpus: { gpus: unknown[] } } }) => s.sections.gpus.gpus.length)).toEqual([8, 7]);
+    const rest = await call('history', { tenantId: 'ten_root', nodeId: node, limit: 2, cursor: first.cursor });
+    expect(rest.items).toHaveLength(1);
+    expect(rest.cursor).toBeUndefined();
+
+    const latest = await call('diff', { tenantId: 'ten_root', nodeId: node });
+    expect(latest.changes.map((c: { type: string; deviceId: string }) => [c.type, c.deviceId])).toEqual([['gpu.added', `GPU-${node}-7`]]);
+    const byHash = await call('diff', { tenantId: 'ten_root', nodeId: node, from: rest.items[0].hash, to: first.items[1].hash });
+    expect(byHash.changes.map((c: { type: string }) => c.type)).toEqual(['gpu.missing']);
+    await expect(call('diff', { tenantId: 'ten_root', nodeId: node, from: 'f'.repeat(64) })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(call('history', { tenantId: 'ten_other', nodeId: node })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(() => api.inventory.history.validate({ tenantId: 'ten_root', nodeId: node, limit: 500 })).toThrow();
+  });
+});
 
 describe('inventoryModule wiring', () => {
   it('registers the inventory reconciler, sharded by node', () => {
