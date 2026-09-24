@@ -475,6 +475,8 @@ export function createGateway(options: GatewayOptions): Gateway {
           runningCommandIds: hello.runningCommandIds,
           unackedResults: hello.unackedResults,
           inventoryHashes: hello.inventoryHashes,
+          daemonVersion: hello.daemonVersion,
+          protoMax: hello.protoMax,
         },
         { liveWindowMs: sessionLeaseTtlMs },
       )

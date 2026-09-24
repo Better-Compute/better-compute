@@ -38,6 +38,7 @@ export { AGENT_GATEWAY_SERVICE, serveGateway, spiffeAuthenticate } from './http2
 export { attachFrameConn, closeReason } from './frames.js';
 export type { FrameEndpoint } from './frames.js';
 export { certificateAuthenticate, peerChain } from './identity.js';
+export { xidStatusHandler } from './health.js';
 export { gatewayControlClient, gatewayNotifier, internalHandler, serveInternal } from './internal.js';
 export type {
   ControlClientOptions,

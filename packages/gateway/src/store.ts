@@ -78,6 +78,9 @@ export interface HelloInput {
   unackedResults: readonly CommandUpdate[];
   /** `Hello.inventory_hashes`: section name → SHA-256 of its content. */
   inventoryHashes: Readonly<Record<string, Uint8Array>>;
+  /** `Hello.daemon_version` / `proto_max`, stored on the session row for Rollout (v0.4). */
+  daemonVersion?: string;
+  protoMax?: number;
 }
 
 export interface HelloResult {
@@ -174,6 +177,15 @@ export interface ReportHandlers {
   allocationBound?(tx: SqlTx, context: ReportContext, report: AllocationBound): Promise<unknown>;
   allocationReleased?(tx: SqlTx, context: ReportContext, report: AllocationReleased): Promise<unknown>;
   allocationFailed?(tx: SqlTx, context: ReportContext, report: AllocationFailed): Promise<unknown>;
+  /**
+   * The node's coalesced StatusReport (latest wins, so it carries the full condition set): e.g.
+   * conditions `Xid<n>` with a `device_id` → inventory's `recordXid` (§10.1 health).
+   */
+  status?(
+    tx: SqlTx,
+    context: { nodeId: string; tenantId: string; work: WorkQueue },
+    report: StatusReport,
+  ): Promise<unknown>;
 }
 
 export const inventoryStore: InventoryIngest = {
@@ -655,7 +667,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
 
         const bumped = await tx.query<{ session_epoch: number; acked_event_seq: number }>(
           `UPDATE node_sessions SET gateway_id = $2, session_id = $3, session_epoch = session_epoch + 1,
-             boot_id = $4, journal_id = $5, role = $6,
+             boot_id = $4, journal_id = $5, role = $6, daemon_version = $7, proto_max = $8,
              acked_event_seq = CASE WHEN journal_id IS DISTINCT FROM $5 THEN 0 ELSE acked_event_seq END,
              connected_at = compute_now(), last_seen = compute_now(), disconnected_at = NULL
            WHERE node_id = $1
@@ -667,6 +679,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             input.bootId,
             input.journalId,
             input.role,
+            // What Rollout (v0.4) reads to see a self-update finish; empty/0 means unknown.
+            input.daemonVersion || null,
+            input.protoMax && input.protoMax > 0 ? input.protoMax : null,
           ],
         );
         const epoch = Number(bumped.rows[0]!.session_epoch);
@@ -956,6 +971,23 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           },
         });
         await work.enqueue(tx, 'node', nodeId);
+        if (reports.status) {
+          // Health (XID conditions, section failures) is the host's; a failing handler must not
+          // hold back observed_generation, so it runs under a savepoint and is published on failure.
+          await tx.query('SAVEPOINT gateway_status');
+          try {
+            await reports.status(tx, { nodeId, tenantId, work }, report);
+            await tx.query('RELEASE SAVEPOINT gateway_status');
+          } catch (error) {
+            await tx.query('ROLLBACK TO SAVEPOINT gateway_status');
+            await events.publish(tx, {
+              type: 'node.report-failed',
+              tenantId,
+              subject: `node/${nodeId}`,
+              data: { nodeId, report: 'status', error: error instanceof Error ? error.message : String(error) },
+            });
+          }
+        }
       });
     },
 
