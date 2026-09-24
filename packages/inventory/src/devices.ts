@@ -1,4 +1,4 @@
-import type { Device, DeviceAttributes } from '@better-compute/core';
+import type { Device, DeviceAttributes, SharingMode, SqlTx } from '@better-compute/core';
 import { GpuLinkType, MigMode, type Gpu, type GpusSection } from '@better-compute/protocol';
 import { normalizeGpuProduct } from './gpu-models.js';
 
@@ -60,14 +60,39 @@ export function gpuAttributes(gpu: Gpu, section?: Pick<GpusSection, 'driverVersi
   return attributes;
 }
 
+/** How a pool shares its GPUs (§10.6): `timeslice` and `mps` split each GPU into slots. */
+export interface GpuSharing {
+  mode: SharingMode;
+  /** Slots per GPU for `timeslice` and `mps` (defaults: 4 and 10). */
+  replicas?: number;
+}
+export const defaultSlotsPerGpu: Readonly<Record<'timeslice' | 'mps', number>> = Object.freeze({ timeslice: 4, mps: 10 });
+/** MPS divides a GPU into 100 units; each slot holds an equal share. */
+export const mpsUnitsPerGpu = 100;
+
+/** The device id of a time-slice or MPS slot. */
+export function slotDeviceId(gpuUuid: string, slot: number): string {
+  return `${gpuUuid}/s${slot}`;
+}
+
+/** Whether a GPU's MIG mode is about to change: its atoms are frozen until the change completes. */
+export function isPartitionPending(gpu: Gpu): boolean {
+  const mig = gpu.mig;
+  return !!mig && mig.pending !== MigMode.UNSPECIFIED && mig.pending !== mig.current;
+}
+
 /**
- * Every device a node's GPU section implies, parents before children, sorted by GPU index.
- * - A GPU without MIG is one `gpu` atom.
- * - A GPU in MIG mode is a non-bookable `gpu` parent plus one `gpu.mig` atom per instance.
+ * Every device a node's GPU section implies, parents before children, sorted by GPU index. The
+ * atom rule (§10.4): only atoms are booked, and a partitioned parent is never bookable.
+ * - A GPU in MIG mode is a `gpu` parent plus one `gpu.mig` atom per instance.
+ * - Otherwise, in a `timeslice` or `mps` pool, a `gpu` parent plus `gpu.slot` atoms `<uuid>/s<k>`.
+ * - Otherwise the GPU itself is the one `gpu` atom.
+ * - A GPU whose MIG mode is changing (`pending` ≠ `current`) has every atom unbookable, with
+ *   `partitionPending: true`, so nothing new lands while it repartitions.
  * - A GPU with an inventory fault is still listed, with `healthy: false`, so its bookings stay
  *   visible; a GPU without a UUID is skipped (it has no stable id).
  */
-export function devicesFromGpus(nodeId: string, section: GpusSection | undefined): Device[] {
+export function devicesFromGpus(nodeId: string, section: GpusSection | undefined, sharing?: GpuSharing): Device[] {
   if (!section) return [];
   const devices: Device[] = [];
   const seen = new Set<string>();
@@ -78,7 +103,29 @@ export function devicesFromGpus(nodeId: string, section: GpusSection | undefined
     const healthy = gpuInventoryFault(gpu) === undefined;
     const attributes = gpuAttributes(gpu, section);
     const mig = isMigEnabled(gpu);
-    devices.push({ id: gpu.uuid, nodeId, class: 'gpu', bookable: !mig, healthy, attributes });
+    const pending = isPartitionPending(gpu);
+    if (pending) attributes.partitionPending = true;
+    const slotted = !mig && (sharing?.mode === 'timeslice' || sharing?.mode === 'mps');
+    devices.push({ id: gpu.uuid, nodeId, class: 'gpu', bookable: !mig && !slotted && !pending, healthy, attributes });
+    if (slotted) {
+      const mode = sharing!.mode as 'timeslice' | 'mps';
+      const slots = Math.max(1, Math.min(64, Math.floor(sharing!.replicas ?? defaultSlotsPerGpu[mode])));
+      for (let k = 0; k < slots; k++) {
+        const child: DeviceAttributes = {
+          gpuProduct: attributes.gpuProduct!,
+          gpuModel: attributes.gpuModel!,
+          sharing: mode,
+          slot: k,
+          slots,
+          vramGiB: attributes.vramGiB!,
+        };
+        if (mode === 'mps') child.mpsUnits = Math.floor(mpsUnitsPerGpu / slots);
+        if (attributes.numaNode !== undefined) child.numaNode = attributes.numaNode;
+        if (pending) child.partitionPending = true;
+        devices.push({ id: slotDeviceId(gpu.uuid, k), nodeId, parentId: gpu.uuid, class: 'gpu.slot', bookable: !pending, healthy, attributes: child });
+      }
+      continue;
+    }
     if (!mig) continue;
     const instances = [...(gpu.mig?.instances ?? [])].sort(
       (a, b) => a.giId - b.giId || a.ciId - b.ciId,
@@ -96,10 +143,30 @@ export function devicesFromGpus(nodeId: string, section: GpusSection | undefined
       };
       if (instance.uuid) child.migUuid = instance.uuid;
       if (attributes.numaNode !== undefined) child.numaNode = attributes.numaNode;
-      devices.push({ id, nodeId, parentId: gpu.uuid, class: 'gpu.mig', bookable: true, healthy, attributes: child });
+      if (pending) child.partitionPending = true;
+      devices.push({ id, nodeId, parentId: gpu.uuid, class: 'gpu.mig', bookable: !pending, healthy, attributes: child });
     }
   }
   return devices;
+}
+
+/**
+ * A GPU's whole atom family: the parent and every MIG instance or slot of it. The atom rule
+ * (§10.4) books all of them, parent included, for a mode or layout change, so the change commits
+ * only when nothing of the GPU is booked.
+ */
+export async function gpuAtomFamily(tx: SqlTx, gpuUuid: string): Promise<string[]> {
+  const { rows } = await tx.query<{ id: string }>('SELECT id FROM devices WHERE id = $1 OR parent_id = $1 ORDER BY (id = $1) DESC, id', [
+    gpuUuid,
+  ]);
+  return rows.map((row) => row.id);
+}
+
+/** The sharing policy of a pool row (`pools.sharing`, `policy.sharing.replicas`). */
+export function poolSharing(sharing: string | null | undefined, policy: unknown): GpuSharing | undefined {
+  if (sharing !== 'timeslice' && sharing !== 'mps' && sharing !== 'mig' && sharing !== 'exclusive') return undefined;
+  const replicas = (policy as { sharing?: { replicas?: unknown } } | null)?.sharing?.replicas;
+  return typeof replicas === 'number' && Number.isFinite(replicas) ? { mode: sharing, replicas } : { mode: sharing };
 }
 
 /** A GPU-to-GPU link class, best first (NVML topology levels). */

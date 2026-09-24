@@ -9,7 +9,7 @@ import {
   type WorkQueue,
 } from '@better-compute/core';
 import { INVENTORY_SECTIONS, type InventorySectionName } from '@better-compute/protocol';
-import { devicesFromGpus, planDevices, type StoredDevice } from './devices.js';
+import { devicesFromGpus, planDevices, poolSharing, type GpuSharing, type StoredDevice } from './devices.js';
 import { diffInventory } from './diff.js';
 import { hardwareKey } from './hardware-key.js';
 import { applyInventoryHealth, healthWorkKind, inventoryHealthFindings, type HealthFinding } from './health.js';
@@ -43,7 +43,7 @@ export const inventoryWorkKind = 'inventory';
 export const inventoryOwnedConditions = ['GpuCountMismatch', 'GpuModelUnknown', 'DuplicateIdentity'] as const;
 
 /** Device classes inventory derives; other classes (VFs, disks, slots) belong to other writers. */
-const derivedClasses = ['gpu', 'gpu.mig'];
+const derivedClasses = ['gpu', 'gpu.mig', 'gpu.slot'];
 
 const nodeNotFound = (nodeId: string) => new ComputeError('NOT_FOUND', `Node ${nodeId} does not exist`);
 
@@ -159,6 +159,7 @@ interface NodeRow {
   hardware_key_trusted: boolean;
   gpu_model: string | null;
   policy: Record<string, unknown> | null;
+  sharing: string | null;
 }
 
 function expectationFor(node: NodeRow, override?: InventoryExpectation): InventoryExpectation {
@@ -182,7 +183,7 @@ export async function applyInventory(
   return sql.transaction(async (tx) => {
     const nodes = await tx.query<NodeRow>(
       `SELECT n.id, n.owner_tenant_id, n.pool_id, n.no_schedule_reasons, n.hardware_key,
-              n.hardware_key_trusted, p.gpu_model, p.policy
+              n.hardware_key_trusted, p.gpu_model, p.policy, p.sharing
          FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id
         WHERE n.id = $1 FOR UPDATE OF n`,
       [nodeId],
@@ -238,7 +239,7 @@ export async function applyInventory(
     const health = inventoryHealthFindings(sections.gpus);
     const healthReasons = await applyInventoryHealth(tx, nodeId, health, node.no_schedule_reasons);
     if (options.work && health.some((finding) => finding.noSchedule)) await options.work.enqueue(tx, healthWorkKind, nodeId);
-    const devices = await applyDevices(tx, nodeId, sections);
+    const devices = await applyDevices(tx, nodeId, sections, poolSharing(node.sharing, node.policy));
     await applyLabels(tx, nodeId, sections);
 
     // Hardware key: trusted keys are unique. A second node with the same trusted key is a
@@ -332,7 +333,7 @@ export async function applyInventory(
   });
 }
 
-async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySections) {
+async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySections, sharing: GpuSharing | undefined) {
   const stored = await tx.query<{
     id: string;
     parent_id: string | null;
@@ -363,7 +364,7 @@ async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySectio
     'SELECT DISTINCT device_id FROM device_health WHERE node_id = $1',
     [nodeId],
   );
-  const plan = planDevices(current, devicesFromGpus(nodeId, sections.gpus), {
+  const plan = planDevices(current, devicesFromGpus(nodeId, sections.gpus, sharing), {
     bookedDeviceIds: new Set(booked.rows.map((row) => row.device_id)),
     unhealthy: new Set(quarantined.rows.map((row) => row.device_id)),
   });
@@ -415,6 +416,81 @@ async function applyLabels(tx: SqlTx, nodeId: string, sections: InventorySection
        WHERE node_labels.source = 'inventory' AND node_labels.value <> EXCLUDED.value`,
       [nodeId, label.key, label.value],
     );
+}
+
+interface SnapshotRow {
+  id: string;
+  sha256: Uint8Array;
+  sections: Record<string, Json>;
+  collected_at: Date;
+}
+const toSnapshot = (nodeId: string, row: SnapshotRow): InventorySnapshot => ({
+  nodeId,
+  hash: normalizeHash(new Uint8Array(row.sha256)) ?? '',
+  sections: row.sections,
+  collectedAt: row.collected_at.getTime(),
+});
+
+/** `inventory.history`: a node's snapshots, newest first; `cursor` is the last snapshot id seen. */
+export async function inventoryHistory(
+  tx: SqlTx,
+  nodeId: string,
+  page: { limit: number; cursor?: string },
+): Promise<{ items: InventorySnapshot[]; cursor?: string }> {
+  const { rows } = await tx.query<SnapshotRow>(
+    `SELECT id, sha256, sections, collected_at FROM inventory_snapshots
+      WHERE node_id = $1 AND ($2::text IS NULL OR id < $2) ORDER BY id DESC LIMIT $3`,
+    [nodeId, page.cursor ?? null, page.limit + 1],
+  );
+  const items = rows.slice(0, page.limit);
+  return rows.length > page.limit
+    ? { items: items.map((row) => toSnapshot(nodeId, row)), cursor: items.at(-1)!.id }
+    : { items: items.map((row) => toSnapshot(nodeId, row)) };
+}
+
+async function snapshotByRef(tx: SqlTx, nodeId: string, ref: string): Promise<SnapshotRow> {
+  const { rows } = await tx.query<SnapshotRow>(
+    `SELECT id, sha256, sections, collected_at FROM inventory_snapshots
+      WHERE node_id = $1 AND (id = $2 OR encode(sha256, 'hex') = $2) ORDER BY id DESC LIMIT 1`,
+    [nodeId, ref],
+  );
+  if (!rows[0]) throw new ComputeError('NOT_FOUND', `Node ${nodeId} has no snapshot ${ref}`);
+  return rows[0];
+}
+
+/**
+ * `inventory.diff`: the changes between two snapshots (ids or hashes). Without `to`, the latest;
+ * without `from`, the snapshot before `to`. A node with a single snapshot diffs against nothing.
+ */
+export async function inventoryDiff(
+  tx: SqlTx,
+  nodeId: string,
+  refs: { from?: string; to?: string } = {},
+): Promise<{ nodeId: string; from: string; to: string; changes: ReturnType<typeof diffInventory> }> {
+  const to = refs.to
+    ? await snapshotByRef(tx, nodeId, refs.to)
+    : (
+        await tx.query<SnapshotRow>(
+          'SELECT id, sha256, sections, collected_at FROM inventory_snapshots WHERE node_id = $1 ORDER BY id DESC LIMIT 1',
+          [nodeId],
+        )
+      ).rows[0];
+  if (!to) throw new ComputeError('NOT_FOUND', `Node ${nodeId} has no inventory yet`);
+  const from = refs.from
+    ? await snapshotByRef(tx, nodeId, refs.from)
+    : (
+        await tx.query<SnapshotRow>(
+          'SELECT id, sha256, sections, collected_at FROM inventory_snapshots WHERE node_id = $1 AND id < $2 ORDER BY id DESC LIMIT 1',
+          [nodeId, to.id],
+        )
+      ).rows[0];
+  const hash = (row: SnapshotRow) => normalizeHash(new Uint8Array(row.sha256)) ?? '';
+  return {
+    nodeId,
+    from: from ? hash(from) : '',
+    to: hash(to),
+    changes: from ? diffInventory(from.sections as unknown as InventorySections, to.sections as unknown as InventorySections) : [],
+  };
 }
 
 /** The latest snapshot of a node (`inventory.get`), or undefined before its first inventory. */

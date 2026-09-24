@@ -18,6 +18,9 @@ import {
   devicesFromGpus,
   diffInventory,
   gpuLinks,
+  isPartitionPending,
+  poolSharing,
+  slotDeviceId,
   hardwareKey,
   hardwareKeyFromClaims,
   inventoryConditions,
@@ -109,6 +112,54 @@ describe('devicesFromGpus', () => {
       ['GPU-0000', true],
       ['GPU-0001', false],
     ]);
+  });
+});
+
+describe('fractional GPUs (§10.6)', () => {
+  it('splits each GPU of a timeslice pool into slot atoms under an unbookable parent', () => {
+    const devices = devicesFromGpus('n', board(2), { mode: 'timeslice', replicas: 3 });
+    expect(devices.map((d) => [d.id, d.class, d.bookable, d.parentId ?? null])).toEqual([
+      ['GPU-0000', 'gpu', false, null],
+      ['GPU-0000/s0', 'gpu.slot', true, 'GPU-0000'],
+      ['GPU-0000/s1', 'gpu.slot', true, 'GPU-0000'],
+      ['GPU-0000/s2', 'gpu.slot', true, 'GPU-0000'],
+      ['GPU-0001', 'gpu', false, null],
+      ['GPU-0001/s0', 'gpu.slot', true, 'GPU-0001'],
+      ['GPU-0001/s1', 'gpu.slot', true, 'GPU-0001'],
+      ['GPU-0001/s2', 'gpu.slot', true, 'GPU-0001'],
+    ]);
+    expect(devices[1]!.attributes).toMatchObject({ sharing: 'timeslice', slot: 0, slots: 3, gpuModel: 'H100' });
+  });
+
+  it('gives MPS slots an equal share of 100 units, with defaults when the pool names no count', () => {
+    const devices = devicesFromGpus('n', board(1), { mode: 'mps' });
+    expect(devices.filter((d) => d.class === 'gpu.slot')).toHaveLength(10);
+    expect(devices[1]!.attributes).toMatchObject({ sharing: 'mps', mpsUnits: 10 });
+    expect(devicesFromGpus('n', board(1), { mode: 'timeslice' }).filter((d) => d.class === 'gpu.slot')).toHaveLength(4);
+    expect(devicesFromGpus('n', board(1), { mode: 'exclusive' })).toHaveLength(1);
+  });
+
+  it('freezes every atom of a GPU whose MIG mode is changing', () => {
+    const section = board(1);
+    section.gpus[0]!.mig = {
+      $typeName: 'bettercompute.agent.v1.GpuMig',
+      capable: true,
+      current: MigMode.DISABLED,
+      pending: MigMode.ENABLED,
+      profiles: [],
+      instances: [],
+    };
+    const [gpu] = devicesFromGpus('n', section, { mode: 'timeslice', replicas: 2 });
+    expect(gpu).toMatchObject({ bookable: false, attributes: { partitionPending: true } });
+    expect(devicesFromGpus('n', section, { mode: 'timeslice', replicas: 2 }).every((d) => !d.bookable)).toBe(true);
+    expect(isPartitionPending(section.gpus[0]!)).toBe(true);
+  });
+
+  it('reads the sharing policy from a pool row', () => {
+    expect(poolSharing('timeslice', { sharing: { replicas: 8 } })).toEqual({ mode: 'timeslice', replicas: 8 });
+    expect(poolSharing('mps', {})).toEqual({ mode: 'mps' });
+    expect(poolSharing(null, {})).toBeUndefined();
+    expect(slotDeviceId('GPU-a', 3)).toBe('GPU-a/s3');
   });
 });
 

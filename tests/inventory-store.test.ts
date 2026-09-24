@@ -13,6 +13,7 @@ import {
 } from '@better-compute/protocol';
 import {
   applyInventory,
+  gpuAtomFamily,
   ingestInventorySection,
   inventoryModule,
   inventoryReconciler,
@@ -284,6 +285,32 @@ describe('report → pull → apply', () => {
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });
+
+describe('shared pools', () => {
+  it("derives slot atoms from the pool's sharing policy and books the whole family on a change", async () => {
+    await db.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version)
+       VALUES ('pool_ts', 'ten_root', 'site_a', 'metal-host', 'H100', 'timeslice', 'bcd', '{"sharing":{"replicas":2}}', 1)
+       ON CONFLICT DO NOTHING`,
+    );
+    await db.transaction((tx) => addNode(tx, `${node}-ts`, 'pool_ts'));
+    const shared = `${node}-ts`;
+    const content = toBinary(GpusSectionSchema, create(GpusSectionSchema, { gpus: [gpu(0)] }));
+    await report(shared, { gpus: content });
+    await applyInventory(db, shared);
+    const devices = await db.query<{ id: string; class: string; bookable: boolean }>(
+      'SELECT id, class, bookable FROM devices WHERE node_id = $1 ORDER BY id',
+      [shared],
+    );
+    expect(devices.rows.map((d) => [d.class, d.bookable])).toEqual([
+      ['gpu', false],
+      ['gpu.slot', true],
+      ['gpu.slot', true],
+    ]);
+    expect(await gpuAtomFamily(db, `GPU-${node}-0`)).toEqual([`GPU-${node}-0`, `GPU-${node}-0/s0`, `GPU-${node}-0/s1`]);
+  });
+});
+
 
 describe('inventoryModule wiring', () => {
   it('registers the inventory reconciler, sharded by node', () => {
