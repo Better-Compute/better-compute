@@ -16,6 +16,8 @@ import {
 import type { InventoryNodeInput } from '@better-compute/inventory';
 import {
   betterCompute,
+  type NodeChangeInput,
+  type NodeInfo,
   type NoInput,
   type SelfCheckReport,
   type ServerInfo,
@@ -40,7 +42,9 @@ const stub = <I, O>(action: `compute:${string}`, kind: 'read' | 'mutation') =>
 const ops = defineModule({
   name: 'ops',
   api: () => ({
-    nodes: { cordon: stub<NodeInput, { cordoned: true }>('compute:nodes:cordon', 'mutation') },
+    workflows: {
+      abort: stub<NodeInput, { aborted: true }>('compute:workflows:manage', 'mutation'),
+    },
   }),
 });
 const acme = definePlugin({
@@ -91,10 +95,16 @@ describe('client inference', () => {
   });
 
   it('adds injected modules groups and plugins under plugins[id]', () => {
-    expectTypeOf(client.nodes.cordon).parameters.toEqualTypeOf<
+    expectTypeOf(client.workflows.abort).parameters.toEqualTypeOf<
       [input: NodeInput, options?: ComputeCallOptions]
     >();
-    expectTypeOf(client.nodes.cordon).returns.resolves.toEqualTypeOf<{ cordoned: true }>();
+    expectTypeOf(client.workflows.abort).returns.resolves.toEqualTypeOf<{ aborted: true }>();
+    // The server's own groups are core: every client has them.
+    expectTypeOf(bareClient.nodes.cordon).parameters.toEqualTypeOf<
+      [input: NodeChangeInput, options?: ComputeCallOptions]
+    >();
+    expectTypeOf(bareClient.nodes.cordon).returns.resolves.toEqualTypeOf<NodeInfo>();
+    expectTypeOf(bareClient.projects.list).toBeCallableWith({ tenantId: 't' });
     expectTypeOf(client.plugins.acme.widgets.poke).parameters.toEqualTypeOf<
       [input: WidgetInput, options?: ComputeCallOptions]
     >();
@@ -130,7 +140,9 @@ describe('client inference', () => {
       // @ts-expect-error a server without plugins has none
       void bareClient.plugins.acme;
       // @ts-expect-error nor the ops module's group
-      void bareClient.nodes;
+      void bareClient.workflows;
+      // @ts-expect-error inputs are exact: cordon names its node
+      void bareClient.nodes.cordon({ tenantId: 't' });
       // @ts-expect-error the client supplies the credential; version takes no input
       void client.system.version({ token: 'biam_ses_0123456789abcdef' });
       // @ts-expect-error inventory.get needs its input

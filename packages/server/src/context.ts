@@ -1,64 +1,32 @@
-import {
-  notImplemented,
-  type AuthzWriter,
-  type CapacityPort,
-  type CommandQueue,
-  type DesiredState,
-  type EventPublisher,
-  type InventoryPort,
-  type LeaseProvider,
-  type ModuleContext,
-  type RegistryView,
-  type WorkQueue,
-} from '@better-compute/core';
+import type { ModuleContext, RegistryView } from '@better-compute/core';
 import type { ResolvedOptions } from './options.js';
+import type { RuntimePorts } from './runtime/index.js';
 
-// The ports a module reaches through its context. P0 has the store, the clock, IAM and the
-// registry; the runtimes behind the others land in v0.1 and answer NOT_IMPLEMENTED until then.
+// The ports a module reaches through its context (PLAN.md §5.4). The store (with after-commit
+// hooks), the clock, IAM and the registry come from the options; leases, the work queue, desired
+// state, commands, events and the authz projection from the worker runtime (./runtime). Capacity
+// and inventory are backed by the built-in modules (the capacity module's quota + inline placer,
+// the latest inventory snapshot); `options.ports` overrides them.
 
-const later = (feature: string) => () => Promise.reject(notImplemented(feature, 'v0.1'));
-
-const leases: LeaseProvider = {
-  acquire: later('Leases'),
-  release: later('Leases'),
-  fence: later('Leases'),
-};
-const commands: CommandQueue = {
-  enqueue: later('The command queue'),
-  cancel: later('The command queue'),
-};
-const desired: DesiredState = { invalidate: later('Desired state') };
-const capacity: CapacityPort = {
-  reserve: later('The capacity module'),
-  release: later('The capacity module'),
-};
-const inventory: InventoryPort = { get: later('Inventory storage') };
-const events: EventPublisher = { publish: later('The event outbox') };
-const work: WorkQueue = { enqueue: later('The work queue') };
-const authz: AuthzWriter = {
-  upsert: later('The authz projection'),
-  remove: later('The authz projection'),
-  setPending: later('The authz projection'),
-};
-
-/** The context every module's `api()` and every method handler builds on. */
+/** The context every module's `api()`, reconciler and method handler builds on. */
 export function createModuleContext(
   options: ResolvedOptions,
   registry: RegistryView,
+  ports: RuntimePorts,
 ): ModuleContext {
   return Object.freeze({
     sql: options.database,
     clock: options.clock,
-    leases,
     iam: options.iam,
     registry,
-    commands,
-    desired,
-    capacity,
-    inventory,
-    events,
-    work,
-    authz,
     log: options.log,
+    leases: ports.leases,
+    work: ports.work,
+    desired: ports.desired,
+    commands: ports.commands,
+    events: ports.events,
+    authz: ports.authz,
+    capacity: ports.capacity,
+    inventory: ports.inventory,
   });
 }

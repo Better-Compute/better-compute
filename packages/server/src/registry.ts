@@ -50,7 +50,10 @@ export interface RegistryProblem {
 
 /** The module host's view of everything registered (PLAN.md §5.1). Immutable once built. */
 export interface Registry extends RegistryView {
-  /** Module and plugin names in registration order; the built-in `inventory` comes first. */
+  /**
+   * Module and plugin names in registration order; the built-ins (`node-controllers`, `inventory`,
+   * `capacity`) come first.
+   */
   readonly modules: readonly string[];
   /** Plugin ids in registration order. */
   readonly plugins: readonly string[];
@@ -64,6 +67,7 @@ export interface Registry extends RegistryView {
   readonly migrations: readonly Migration[];
   /** Extensions from the options and every module, unique by `kind:id@version`. */
   readonly extensions: readonly Extension[];
+  /** The server's built-in command kinds, then every module's. */
   readonly commandKinds: readonly CommandKindSpec[];
   /** Methods that are uncatalogued, disagree with §9.2, or (outside plugins) are not in §9.2. */
   problems(): RegistryProblem[];
@@ -72,7 +76,12 @@ export interface Registry extends RegistryView {
 export interface RegistryInput {
   /** The server's own groups (`system`). */
   core: ApiGroups;
-  /** The built-in modules first (`inventory`), then the injected ones, in order. */
+  /**
+   * The command kinds the server itself knows (the protocol's built-in v0.1 kinds), registered
+   * before any module's: a module that registers one of them again is `INVALID_CONFIG`.
+   */
+  commandKinds?: readonly CommandKindSpec[];
+  /** The built-in modules first (node controllers, `inventory`, `capacity`), then the injected ones. */
   modules: readonly ComputeModule[];
   plugins: readonly ComputePlugin[];
   /** Extensions from the options: drivers, providers, attestors, scheduler plugins, sinks. */
@@ -95,8 +104,11 @@ const reservedSegments = new Set([
   '__proto__',
   'plugins',
 ]);
-/** `core` owns the store's base migrations; `server` the system group; `capacity` arrives in v0.1. */
-const reservedNames = new Set(['core', 'server', 'capacity', 'plugins']);
+/**
+ * `core` owns the store's base migrations; `server` the server's own groups. `capacity` is not
+ * reserved: the built-in capacity module registers under it, and a second one is "registered twice".
+ */
+const reservedNames = new Set(['core', 'server', 'plugins']);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -118,6 +130,15 @@ function checkMethod(path: string, value: unknown): MethodDefinition {
     throw invalid(`${path}: a public method has action null`);
   if (kind !== 'public' && (typeof action !== 'string' || !actionPattern.test(action)))
     throw invalid(`${path}: ${String(action)} is not a compute:<area>:<verb> action`);
+  const { admission } = value;
+  if (admission !== undefined) {
+    // Request-as-resource admission (§3.4 steps 4-6) decides with `require`: mutations only.
+    if (kind !== 'mutation') throw invalid(`${path}: only mutations take an admission`);
+    if (!isRecord(admission) || typeof admission.prepare !== 'function')
+      throw invalid(`${path}: admission.prepare must be a function`);
+    if (admission.denied !== undefined && typeof admission.denied !== 'function')
+      throw invalid(`${path}: admission.denied must be a function`);
+  }
   return value as unknown as MethodDefinition;
 }
 
@@ -262,6 +283,7 @@ export function createRegistry(input: RegistryInput): Registry {
   }
 
   for (const extension of input.extensions) addExtension(extension, 'options');
+  for (const spec of input.commandKinds ?? []) commandKinds.set(spec.kind, spec);
   addGroups('server', undefined, input.core);
   for (const module of input.modules) {
     if (!isRecord(module)) throw invalid('modules must be built with defineModule');

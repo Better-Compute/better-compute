@@ -7,37 +7,58 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   ComputeError,
   newId,
-  notImplemented,
+  type AuthzAttributes,
+  type AuthzRow,
   type ComputeModule,
   type ComputePlugin,
   type Credential,
   type ModuleContext,
 } from '@better-compute/core';
+import { capacityModule } from '@better-compute/capacity';
 import { inventoryModule } from '@better-compute/inventory';
-import type {
-  JoinRequest,
-  JoinResponse,
-  RenewRequest,
-  RenewResponse,
-  SecretRequest,
-  SecretResponse,
-} from '@better-compute/protocol';
-import type { ComputeApi } from './api.js';
+import { coreGroups, type ComputeApi, type ComputeCaches } from './api.js';
 import { createModuleContext } from './context.js';
 import { createHttp } from './http.js';
+import { createGatewayServices, type GatewayServices } from './join/index.js';
+import { createNodesModule } from './nodes-module.js';
 import { createOperations } from './operations.js';
 import { resolveOptions, workerRoles, type ComputeOptions, type WorkerRole } from './options.js';
 import { createRegistry, type Registry } from './registry.js';
+import {
+  builtinCommandKinds,
+  createRuntime,
+  type EventSubscriptions,
+  type Job,
+} from './runtime/index.js';
 import { createSelfCheck, type SelfCheckReport } from './self-check.js';
-import { systemApi } from './system.js';
 import { serverInfo } from './version.js';
 
-export type { ApiMethod, CallableApi, ComputeApi, CoreApi, CoreGroups, PluginsApi } from './api.js';
+export type * from './api.js';
 export { configOptions, defineConfig } from './define.js';
 export type { ComputeConfigContext, ComputeConfigFactory } from './define.js';
 export { maxBodyBytes } from './http.js';
 export { workerRoles } from './options.js';
-export type { ComputeOptions, WorkerRole } from './options.js';
+export type { ComputeOptions, IamJob, WorkerOptions, WorkerRole } from './options.js';
+export {
+  anchoredClock,
+  assignShards,
+  builtinCommandKinds,
+  builtinJobNames,
+  clockSkewThresholdMs,
+  commandOwner,
+  eventPattern,
+  isAnchoredClock,
+  leaseNames,
+  pokeMessage,
+  shardOwner,
+} from './runtime/index.js';
+export type {
+  AnchoredClock,
+  EventHandler,
+  EventSubscriptions,
+  GatewayPokes,
+  Job,
+} from './runtime/index.js';
 export type {
   RegisteredMethod,
   Registry,
@@ -49,37 +70,20 @@ export { validateNoInput } from './system.js';
 export type { CallerIdentity, NoInput, SystemApi, WhoAmI } from './system.js';
 export { serverVersion } from './version.js';
 export type { ServerInfo } from './version.js';
+export * from './join/index.js';
+export * from './controllers/index.js';
+export * from './nodes-module.js';
 
-/** One deterministic step of a background job; returns how many items it processed. */
-export interface Job {
-  tick(): Promise<number>;
+/** One `authz_projection` row as the resolver reads it (PLAN.md §12.4). */
+export interface AuthzProjectionRow extends AuthzRow {
+  /** In-flight `extend` values the resolver reports instead of the stored ones. */
+  pending?: AuthzAttributes;
 }
 
 /**
- * What `createGateway` (v0.1) consumes from the API process: JoinService, certificate renewal with
- * proof of possession, and the secret broker (v0.2). DRAFT until v0.1; every method answers
- * `NOT_IMPLEMENTED` in P0.
+ * The authorization projection as the store holds it: one primary-key read (`type` with or
+ * without the IAM prefix). The IAM bridge keeps the memory-resident copy its resolver reads.
  */
-export interface GatewayServices {
-  join(request: JoinRequest): Promise<JoinResponse>;
-  renew(request: RenewRequest): Promise<RenewResponse>;
-  secret(request: SecretRequest): Promise<SecretResponse>;
-}
-
-/** One `authz_projection` row as the resolver reads it (PLAN.md §12.4). */
-export interface AuthzProjectionRow {
-  type: string;
-  id: string;
-  tenantId: string;
-  attributes: Record<string, string | number | boolean>;
-  parentType?: string;
-  parentId?: string;
-  ownerId?: string;
-  /** In-flight `extend` values the resolver reports instead of the stored ones. */
-  pending?: Record<string, string | number | boolean>;
-}
-
-/** The memory-resident authorization projection behind the IAM resolver. Arrives in v0.1. */
 export interface AuthzProjection {
   get(type: string, id: string, tenantId: string): Promise<AuthzProjectionRow | undefined>;
 }
@@ -102,20 +106,43 @@ export interface BetterCompute<
   handler(request: Request): Promise<Response>;
   /** The Node.js transport: `createServer(compute.nodeHandler)`. */
   nodeHandler(req: IncomingMessage, res: ServerResponse): Promise<void>;
-  /** Consumed by `createGateway` (dependency inversion); v0.1. */
+  /**
+   * Consumed by `createGateway` (dependency inversion): JoinService's `join` and `renew` (keys from
+   * `pki.join`), and the secret broker (v0.2).
+   */
   gatewayServices: GatewayServices;
   /**
-   * Checks the method → action registry against the merged catalog and §9.2 (`INVALID_CONFIG`), then
-   * migrates the store: its base schema, then every module's and plugin's migrations. Idempotent.
+   * Checks the method → action registry against the merged catalog and §9.2 (`INVALID_CONFIG`),
+   * migrates the store (its base schema, then every module's and plugin's migrations), anchors the
+   * default clock, then awaits each module's `start()` in registration order. Idempotent.
    */
   initialize(): Promise<void>;
-  /** Starts the worker roles (all by default). P0 has no worker runtimes yet: it only validates. */
+  /**
+   * Runs the worker roles (all by default) on timers under their leases: `controllers`
+   * (reconcilers over the shards this worker holds, the CommandSweeper), `sinks` (OutboxDispatch),
+   * `iam` (`iamJobs`); `scheduler` arrives in v0.4. Also tails the outbox for `events.subscribe`.
+   * Calling it again adds roles.
+   */
   start(options?: { roles?: WorkerRole[] }): Promise<void>;
+  /** Stops the loops, releases leases, leaves the worker table, then stops modules in reverse. */
   stop(): Promise<void>;
-  /** Deterministic stepping of background jobs in tests; empty in P0. */
+  /**
+   * One deterministic pass per call, without timers (tests and the simulator): each reconciler by
+   * name, `command-sweeper`, `outbox-dispatch`, `event-subscribers` and `iam:<name>`.
+   */
   jobs: Readonly<Record<string, Job>>;
+  /** In-process subscribers of committed events (`reservation.*`, `*`), fed by the outbox tail. */
+  events: EventSubscriptions;
+  /**
+   * The module context the runtime serves (store, clock, leases, work queue, commands, events,
+   * authz, …): hosts pass its ports on, e.g. `createGateway({ work: compute.context.work, events:
+   * compute.context.events })`.
+   */
+  context: ModuleContext;
   registry: Registry;
-  /** The authorization projection (v0.1). */
+  /** Drops cached authentications and read decisions; the IAM bridge calls it on inbox events. */
+  caches: ComputeCaches;
+  /** The authorization projection: one primary-key read (the IAM bridge keeps the memory copy). */
   authz: AuthzProjection;
   /** Reports configuration and storage problems; only reads. */
   selfCheck(): Promise<SelfCheckReport>;
@@ -124,12 +151,14 @@ export interface BetterCompute<
 
 /**
  * Builds the control plane. Synchronous and side-effect free, like `betterIam()`: it validates the
- * options (`INVALID_CONFIG`), registers `system`, the built-in `inventory` module, then `modules`
- * and `plugins`, and touches neither the store nor IAM until called.
+ * options (`INVALID_CONFIG`), registers `system` and the server's own groups, the built-in node
+ * controllers, the always-on `inventory` and `capacity` modules, then `modules` and `plugins`, and
+ * touches neither the store nor IAM until called.
  *
  * ```ts
- * const compute = betterCompute({ database: postgres({ url }), secret, baseURL, rootTenantId,
- *   iam: bridge.embedded(iam, { rootTenantId }), modules: [metal()], plugins: [acme()] });
+ * const compute = betterCompute({ database: postgres({ url }), secret, baseURL,
+ *   iam: bridge.embedded(iam, { rootTenantId }), modules: [metal()], plugins: [acme()],
+ *   pki: { join: pkiJoinCrypto({ trustDomain, nodeCa, signingKey, encryptionKey }) } });
  * await compute.initialize();
  * ```
  */
@@ -138,16 +167,28 @@ export function betterCompute<
   const P extends readonly ComputePlugin[] = [],
 >(options: ComputeOptions<M, P>): BetterCompute<M, P> {
   const resolved = resolveOptions(options);
-  const modules: readonly ComputeModule[] = [inventoryModule, ...(options.modules ?? [])];
+  const runtime = createRuntime(resolved);
+  // The built-ins first: the node controllers, then the two always-on modules (P10's exception).
+  const modules: readonly ComputeModule[] = [
+    createNodesModule({
+      modules: () => hosted,
+      // A new spec generation wakes the node's gateway to push DesiredState (best effort).
+      specChanged: (tx, nodeId) => runtime.pokes.pokeNodes(tx, [nodeId]),
+    }),
+    inventoryModule,
+    capacityModule(resolved.capacity),
+    ...(options.modules ?? []),
+  ];
   const plugins: readonly ComputePlugin[] = [...(options.plugins ?? [])];
   let context: ModuleContext | undefined;
   let selfCheck: (() => Promise<SelfCheckReport>) | undefined;
 
   const registry = createRegistry({
-    core: systemApi({
+    core: coreGroups(resolved, {
       info: () => serverInfo(resolved.basePath),
       selfCheck: () => selfCheck!(),
     }),
+    commandKinds: builtinCommandKinds,
     modules,
     plugins,
     extensions: [
@@ -159,13 +200,16 @@ export function betterCompute<
       ...(options.sinks?.events ?? []),
       ...(options.sinks?.audit ?? []),
     ],
-    context: (view) => (context = createModuleContext(resolved, view)),
+    context: (view) => (context = createModuleContext(resolved, view, runtime.ports(view))),
   });
   const moduleContext = context!;
+  const hosted: readonly ComputeModule[] = [...modules, ...plugins];
+  runtime.bind({ context: moduleContext, registry, modules: hosted });
   selfCheck = createSelfCheck({
     database: resolved.database,
     registry,
-    modules: [...modules, ...plugins],
+    // The runtime reports like a module: ClockSkew.
+    modules: [...hosted, { name: 'runtime', selfCheck: async () => runtime.findings() }],
     context: moduleContext,
   });
   const operations = createOperations(resolved, moduleContext);
@@ -189,6 +233,24 @@ export function betterCompute<
 
   let initializing: Promise<void> | undefined;
   let initialized = false;
+  /** Modules whose `start()` ran, in order; `stop()` stops them in reverse. */
+  const started: ComputeModule[] = [];
+  const stopModules = async () => {
+    const failures: unknown[] = [];
+    while (started.length) {
+      const module = started.pop()!;
+      try {
+        await module.stop?.();
+      } catch (error) {
+        failures.push(error);
+        resolved.log.error(`Module ${module.name} failed to stop`, {
+          module: module.name,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return failures;
+  };
   const initialize = (): Promise<void> =>
     (initializing ??= (async () => {
       const fatal = registry.problems().filter((problem) => problem.kind !== 'undeclared');
@@ -200,6 +262,17 @@ export function betterCompute<
           { problems: fatal },
         );
       await resolved.database.migrate(registry.migrations);
+      await runtime.initialize();
+      try {
+        for (const module of hosted) {
+          if (typeof module.start !== 'function') continue;
+          await module.start(moduleContext);
+          started.push(module);
+        }
+      } catch (error) {
+        await stopModules();
+        throw error;
+      }
       initialized = true;
     })().catch((error: unknown) => {
       initializing = undefined;
@@ -210,10 +283,15 @@ export function betterCompute<
     api: Object.freeze(api) as ComputeApi<M, P>,
     handler: http.handler,
     nodeHandler: http.nodeHandler,
-    gatewayServices: Object.freeze({
-      join: () => Promise.reject(notImplemented('JoinService', 'v0.1')),
-      renew: () => Promise.reject(notImplemented('Certificate renewal', 'v0.1')),
-      secret: () => Promise.reject(notImplemented('The secret broker', 'v0.2')),
+    gatewayServices: createGatewayServices({
+      database: resolved.database,
+      clock: resolved.clock,
+      work: moduleContext.work,
+      events: moduleContext.events,
+      ...(resolved.join ? { pki: { join: resolved.join } } : {}),
+      attestors: registry.extensions,
+      authz: moduleContext.authz,
+      log: resolved.log,
     }),
     initialize,
     async start(startOptions = {}) {
@@ -224,12 +302,24 @@ export function betterCompute<
       )
         throw new ComputeError('INVALID_CONFIG', `roles must be among ${workerRoles.join(', ')}`);
       if (!initialized) throw new ComputeError('INVALID_STATE', 'Call initialize() before start()');
+      await runtime.start(roles as WorkerRole[]);
     },
-    async stop() {},
-    jobs: Object.freeze({}),
+    async stop() {
+      await runtime.stop();
+      const failures = await stopModules();
+      if (initialized) {
+        initialized = false;
+        initializing = undefined;
+      }
+      if (failures.length) throw failures[0];
+    },
+    jobs: runtime.jobs,
+    events: runtime.events,
+    context: moduleContext,
     registry,
+    caches: operations.caches,
     authz: Object.freeze({
-      get: () => Promise.reject(notImplemented('The authz projection', 'v0.1')),
+      get: (type: string, id: string, tenantId: string) => runtime.authzRow(type, id, tenantId),
     }),
     selfCheck,
     endpoint: Object.freeze({

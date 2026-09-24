@@ -1,7 +1,13 @@
 import { createServer, request as nodeRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ComputeError, defineMethod, definePlugin, type SqlExecutor } from '@better-compute/core';
+import {
+  ComputeError,
+  defineMethod,
+  definePlugin,
+  notImplemented,
+  type SqlExecutor,
+} from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
 import { betterCompute, maxBodyBytes, serverVersion } from '@better-compute/server';
 import { fakeIam } from './support/fake-iam.js';
@@ -28,6 +34,16 @@ const oops = definePlugin({
         validate: (input) => input as { tenantId: string },
         async handler() {
           throw new ComputeError('INTERNAL_ERROR', 'pool exhausted at db-7.internal');
+        },
+      }),
+      /** A method of a later phase: NOT_IMPLEMENTED (501) names the phase. */
+      later: defineMethod<{ tenantId: string }, never>({
+        action: 'compute:oops:read',
+        kind: 'read',
+        resource: (input) => ({ type: 'tenant', id: input.tenantId }),
+        validate: (input) => input as { tenantId: string },
+        async handler() {
+          throw notImplemented('oops.things.later', 'v0.2');
         },
       }),
     },
@@ -118,7 +134,7 @@ describe('the envelope', () => {
       [post('inventory/get', input, bearer(OUTSIDER)), 403, 'ACCESS_DENIED'],
       [post('inventory/get', { tenantId: ACME }, bearer(USER)), 400, 'INVALID_INPUT'],
       [post('inventory/get', input, bearer(USER)), 404, 'NOT_FOUND'],
-      [post('inventory/history', input, bearer(USER)), 501, 'NOT_IMPLEMENTED'],
+      [post('plugins/oops/things/later', { tenantId: ACME }, bearer(USER)), 501, 'NOT_IMPLEMENTED'],
       [post('inventory/get', input, bearer('token-nobody-0123456789')), 401, 'UNAUTHENTICATED'],
     ];
     for (const [pending, status, code] of cases) {
@@ -131,10 +147,12 @@ describe('the envelope', () => {
       );
       expect(result.headers.get('cache-control')).toBe('no-store');
     }
-    expect((await post('inventory/history', input, bearer(USER))).json!.error).toEqual({
+    expect(
+      (await post('plugins/oops/things/later', { tenantId: ACME }, bearer(USER))).json!.error,
+    ).toEqual({
       code: 'NOT_IMPLEMENTED',
-      message: 'inventory.history arrives in v0.2',
-      details: { feature: 'inventory.history', phase: 'v0.2' },
+      message: 'oops.things.later arrives in v0.2',
+      details: { feature: 'oops.things.later', phase: 'v0.2' },
     });
   });
 

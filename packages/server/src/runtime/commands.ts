@@ -1,0 +1,510 @@
+import {
+  ComputeError,
+  newId,
+  parseDuration,
+  type AgentRole,
+  type CommandKindSpec,
+  type CommandQueue,
+  type EnqueueCommand,
+  type EventPublisher,
+  type Lane,
+  type Notifier,
+  type RegistryView,
+  type SqlTx,
+  type WorkQueue,
+} from '@better-compute/core';
+import {
+  AgentRole as WireRole,
+  CommandBodySchema,
+  commandKinds as wireKinds,
+  encodeMessage,
+  Lane as WireLane,
+  MAX_COMMAND_BODY_BYTES,
+  type CommandBody,
+} from '@better-compute/protocol';
+import type { CommitHook } from './commit-hooks.js';
+
+// The durable command queue (PLAN.md §7.4, §8.5) and the CommandSweeper. Enqueue runs in the
+// caller's transaction: `seq` comes from `nodes.next_cmd_seq` (the value before the increment), the
+// row starts `pending`, and an idempotency key already used on the node returns that command. The
+// body is the encoded `CommandBody` the gateway sends as is (and a signature will cover from
+// v0.2). After commit, the node's gateway is poked through the notifier (`gw:<gatewayId>`), best
+// effort: gateways also poll every second.
+
+/** The v0.1 kinds the server knows without a module registering them (timeouts are policy). */
+const builtinTimeouts: Readonly<Record<keyof typeof wireKinds, `${number}${'s' | 'm'}`>> = {
+  'diag.nvml': '2m',
+  'inventory.refresh': '2m',
+  'logs.collect': '15m',
+  // Self-terminating: the timeout covers the rejoin window.
+  'node.reboot': '15m',
+  'gpu.reset': '5m',
+};
+
+const wireLanes: Readonly<Record<number, Lane>> = {
+  [WireLane.CONTROL]: 'control',
+  [WireLane.PROVISION]: 'provision',
+  [WireLane.BULK]: 'bulk',
+};
+const wireRoles: Readonly<Record<number, AgentRole>> = {
+  [WireRole.NODE]: 'node',
+  [WireRole.SITE]: 'site',
+  [WireRole.RAMDISK]: 'ramdisk',
+};
+const laneValues: Readonly<Record<Lane, WireLane>> = {
+  control: WireLane.CONTROL,
+  provision: WireLane.PROVISION,
+  bulk: WireLane.BULK,
+};
+
+/** The built-in v0.1 command kinds as registry specs (protocol flags, server timeouts). */
+export const builtinCommandKinds: readonly CommandKindSpec[] = Object.freeze(
+  Object.entries(wireKinds).map(([kind, wire]) =>
+    Object.freeze({
+      kind,
+      lane: wireLanes[wire.lane] ?? 'control',
+      retrySafe: wire.retrySafe,
+      selfTerminating: wire.selfTerminating,
+      attested: wire.attested,
+      destructive: wire.destructive,
+      timeout: builtinTimeouts[kind as keyof typeof wireKinds],
+      roles: wire.roles.map((role) => wireRoles[role]!).filter(Boolean),
+      payload: wire.payload,
+    } satisfies CommandKindSpec),
+  ),
+);
+const builtinByKind = new Map(builtinCommandKinds.map((spec) => [spec.kind, spec]));
+
+/** A kind's spec: the registry's, else the built-in one. Unknown kinds are `INVALID_CONFIG`. */
+export function commandKindSpec(registry: RegistryView, kind: string): CommandKindSpec {
+  const spec = registry.commandKind(kind) ?? builtinByKind.get(kind);
+  if (!spec)
+    throw new ComputeError('INVALID_CONFIG', `Command kind ${kind} is not registered`, undefined, {
+      kind,
+    });
+  return spec;
+}
+
+type Descriptor = Parameters<typeof encodeMessage>[0];
+type AnyMessage = NonNullable<CommandBody['payload']>;
+type Timestamp = NonNullable<CommandBody['notAfter']>;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The encoded payload message: a message of the kind's payload type (`$typeName` must match), its
+ * encoded bytes, or nothing (`undefined`, `null`, `{}`) for the type's default message.
+ */
+function encodePayload(spec: CommandKindSpec, payload: unknown): Uint8Array {
+  const typeName = spec.payload?.typeName;
+  if (payload === undefined || payload === null) return new Uint8Array(0);
+  if (payload instanceof Uint8Array) {
+    if (payload.byteLength > MAX_COMMAND_BODY_BYTES)
+      throw new ComputeError('INVALID_INPUT', `A ${spec.kind} payload is too large`);
+    return payload;
+  }
+  if (isRecord(payload) && typeof payload.$typeName === 'string') {
+    if (payload.$typeName !== typeName)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `${spec.kind} takes ${typeName}, not ${payload.$typeName}`,
+      );
+    if (!Array.isArray((spec.payload as { fields?: unknown }).fields))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `Command kind ${spec.kind} has no protobuf descriptor to encode its payload with`,
+      );
+    try {
+      return encodeMessage(spec.payload as Descriptor, payload as never, MAX_COMMAND_BODY_BYTES);
+    } catch (error) {
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `The ${spec.kind} payload cannot be encoded: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (isRecord(payload) && Object.keys(payload).length === 0) return new Uint8Array(0);
+  throw new ComputeError(
+    'INVALID_INPUT',
+    `${spec.kind} takes a ${typeName} message (create(Schema, init)), its encoded bytes, or nothing`,
+  );
+}
+
+function timestamp(ms: number): Timestamp {
+  const seconds = Math.floor(ms / 1000);
+  return {
+    $typeName: 'google.protobuf.Timestamp',
+    seconds: BigInt(seconds),
+    nanos: (ms - seconds * 1000) * 1_000_000,
+  };
+}
+
+/** `wf:<workflowId>:<stepId>` keys carry the step the command executes. */
+const workflowKey = /^wf:([^:]+):([^:]+)/;
+
+export function encodeCommandBody(input: {
+  id: string;
+  nodeId: string;
+  seq: number;
+  spec: CommandKindSpec;
+  payload: Uint8Array;
+  notAfter: number;
+  minGeneration?: number;
+  idempotencyKey: string;
+  traceparent?: string;
+}): Uint8Array {
+  const { spec } = input;
+  const step = workflowKey.exec(input.idempotencyKey);
+  const payload: AnyMessage = {
+    $typeName: 'google.protobuf.Any',
+    typeUrl: `type.googleapis.com/${spec.payload.typeName}`,
+    value: input.payload,
+  };
+  const body: CommandBody = {
+    $typeName: 'bettercompute.agent.v1.CommandBody',
+    id: input.id,
+    nodeId: input.nodeId,
+    seq: BigInt(input.seq),
+    kind: spec.kind,
+    payload,
+    lane: laneValues[spec.lane] ?? WireLane.CONTROL,
+    notAfter: timestamp(input.notAfter),
+    minGeneration: BigInt(input.minGeneration ?? 0),
+    retrySafe: spec.retrySafe,
+    idempotencyKey: input.idempotencyKey,
+    traceparent: input.traceparent ?? '',
+    selfTerminating: spec.selfTerminating ?? false,
+    attested: spec.attested ?? false,
+    workflowId: step?.[1] ?? '',
+    stepId: step?.[2] ?? '',
+  };
+  try {
+    return encodeMessage(CommandBodySchema, body, MAX_COMMAND_BODY_BYTES);
+  } catch (error) {
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `The command cannot be encoded: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+const keyPattern = /^[\x21-\x7e]{1,256}$/;
+const traceparentPattern = /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
+
+function checkCommand(command: EnqueueCommand): void {
+  if (!isRecord(command)) throw new ComputeError('INVALID_INPUT', 'enqueue() takes a command');
+  if (typeof command.nodeId !== 'string' || !command.nodeId)
+    throw new ComputeError('INVALID_INPUT', 'A command needs a nodeId');
+  if (typeof command.kind !== 'string' || !command.kind)
+    throw new ComputeError('INVALID_INPUT', 'A command needs a kind');
+  if (typeof command.idempotencyKey !== 'string' || !keyPattern.test(command.idempotencyKey))
+    throw new ComputeError(
+      'INVALID_INPUT',
+      'A command idempotency key is 1-256 printable ASCII characters without spaces',
+    );
+  const time = (value: unknown) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  if (!time(command.notAfter))
+    throw new ComputeError('INVALID_INPUT', 'notAfter is epoch milliseconds');
+  if (command.notBefore !== undefined) {
+    if (!time(command.notBefore))
+      throw new ComputeError('INVALID_INPUT', 'notBefore is epoch milliseconds');
+    if (command.notBefore >= command.notAfter)
+      throw new ComputeError('INVALID_INPUT', 'notBefore must come before notAfter');
+  }
+  if (
+    command.minGeneration !== undefined &&
+    (!Number.isSafeInteger(command.minGeneration) || command.minGeneration < 0)
+  )
+    throw new ComputeError('INVALID_INPUT', 'minGeneration is a non-negative integer');
+  if (command.traceparent !== undefined && !traceparentPattern.test(command.traceparent))
+    throw new ComputeError('INVALID_INPUT', 'traceparent must be a W3C trace context');
+}
+
+/**
+ * The message of a gateway poke (`gw:<gatewayId>`): `{"nodeIds": [...]}`, which the gateway's
+ * notifier turns into `gateway.poke(nodeIds)`: dispatch now and a spec check for those nodes.
+ */
+export const pokeMessage = (nodeIds: readonly string[]): string =>
+  JSON.stringify({ nodeIds: [...nodeIds] });
+
+/** Best-effort wake-ups of the gateways that hold nodes' sessions, published after commit. */
+export interface GatewayPokes {
+  /** Pokes `gw:<gatewayId>` for `nodeId` after the current transaction commits. */
+  poke(gatewayId: string | null | undefined, nodeId: string): void;
+  /** Looks up the nodes' gateways in `tx` and pokes each after commit. */
+  pokeNodes(tx: SqlTx, nodeIds: readonly string[]): Promise<void>;
+}
+
+export function gatewayPokes(
+  notifier: Notifier | undefined,
+  afterCommit: (hook: CommitHook) => void,
+): GatewayPokes {
+  const poke = (gatewayId: string | null | undefined, nodeId: string) => {
+    if (!notifier || !gatewayId) return;
+    afterCommit(() => notifier.publish(`gw:${gatewayId}`, pokeMessage([nodeId])));
+  };
+  return {
+    poke,
+    async pokeNodes(tx, nodeIds) {
+      if (!notifier || !nodeIds.length) return;
+      const { rows } = await tx.query<{ node_id: string; gateway_id: string }>(
+        `SELECT node_id, gateway_id FROM node_sessions
+          WHERE node_id = ANY($1::text[]) AND gateway_id IS NOT NULL`,
+        [[...nodeIds]],
+      );
+      const byGateway = new Map<string, string[]>();
+      for (const row of rows)
+        byGateway.set(row.gateway_id, [...(byGateway.get(row.gateway_id) ?? []), row.node_id]);
+      for (const [gatewayId, ids] of byGateway)
+        afterCommit(() => notifier.publish(`gw:${gatewayId}`, pokeMessage(ids)));
+    },
+  };
+}
+
+export interface CommandQueueInput {
+  registry: RegistryView;
+  notifier?: Notifier;
+  afterCommit(hook: CommitHook): void;
+}
+
+/** `ctx.commands`. */
+export function createCommandQueue(input: CommandQueueInput): CommandQueue {
+  const { registry } = input;
+  const { poke } = gatewayPokes(input.notifier, input.afterCommit);
+
+  const existing = async (tx: SqlTx, nodeId: string, key: string) =>
+    (
+      await tx.query<{ id: string; seq: number | bigint; kind: string }>(
+        'SELECT id, seq, kind FROM commands WHERE node_id = $1 AND idempotency_key = $2',
+        [nodeId, key],
+      )
+    ).rows[0];
+
+  const replay = (row: { id: string; seq: number | bigint; kind: string }, kind: string) => {
+    if (row.kind !== kind)
+      throw new ComputeError(
+        'CONFLICT',
+        'The idempotency key is already used on this node by another kind of command',
+      );
+    return { id: row.id, seq: Number(row.seq) };
+  };
+
+  return Object.freeze({
+    async enqueue(tx: SqlTx, command: EnqueueCommand) {
+      checkCommand(command);
+      const spec = commandKindSpec(registry, command.kind);
+      const found = await existing(tx, command.nodeId, command.idempotencyKey);
+      if (found) return replay(found, command.kind);
+      const payload = encodePayload(spec, command.payload);
+
+      const bumped = await tx.query<{ seq: number | bigint; gateway_id: string | null }>(
+        `UPDATE nodes n SET next_cmd_seq = n.next_cmd_seq + 1 WHERE n.id = $1
+         RETURNING n.next_cmd_seq - 1 AS seq,
+           (SELECT s.gateway_id FROM node_sessions s WHERE s.node_id = n.id) AS gateway_id`,
+        [command.nodeId],
+      );
+      const node = bumped.rows[0];
+      if (!node) throw new ComputeError('NOT_FOUND', `Node ${command.nodeId} does not exist`);
+      const seq = Number(node.seq);
+      const id = newId('cmd');
+      const body = encodeCommandBody({
+        id,
+        nodeId: command.nodeId,
+        seq,
+        spec,
+        payload,
+        notAfter: command.notAfter,
+        ...(command.minGeneration !== undefined ? { minGeneration: command.minGeneration } : {}),
+        idempotencyKey: command.idempotencyKey,
+        ...(command.traceparent !== undefined ? { traceparent: command.traceparent } : {}),
+      });
+      const inserted = await tx.query<{ id: string; seq: number | bigint }>(
+        `INSERT INTO commands (id, node_id, seq, kind, body, state, not_before, not_after,
+           min_generation, retry_safe, self_terminating, attested, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, 'pending', COALESCE($6::timestamptz, compute_now()), $7, $8,
+           $9, $10, $11, $12)
+         ON CONFLICT (node_id, idempotency_key) DO NOTHING
+         RETURNING id, seq`,
+        [
+          id,
+          command.nodeId,
+          seq,
+          spec.kind,
+          body,
+          command.notBefore === undefined ? null : new Date(command.notBefore),
+          new Date(command.notAfter),
+          command.minGeneration ?? null,
+          spec.retrySafe,
+          spec.selfTerminating ?? false,
+          spec.attested ?? false,
+          command.idempotencyKey,
+        ],
+      );
+      if (!inserted.rows[0]) {
+        // A concurrent enqueue with the same key committed first (its seq is the one that counts).
+        const winner = await existing(tx, command.nodeId, command.idempotencyKey);
+        if (!winner) throw new ComputeError('CONFLICT', 'The command changed meanwhile; retry');
+        return replay(winner, command.kind);
+      }
+      poke(node.gateway_id, command.nodeId);
+      return { id, seq };
+    },
+
+    /**
+     * `pending` → `cancelled` at once. In flight (`dispatched`, `acked`, `running`), the row keeps
+     * its state and gets `cancel_requested_at` (core/0004): the gateway re-sends `Cancel{id,
+     * reason}` until the daemon reports a terminal state (a completed side effect stays visible,
+     * §7.4). Terminal commands are left alone.
+     */
+    async cancel(tx: SqlTx, commandId: string) {
+      if (typeof commandId !== 'string' || !commandId)
+        throw new ComputeError('INVALID_INPUT', 'cancel() takes a command id');
+      const { rows } = await tx.query<{
+        state: string;
+        node_id: string;
+        gateway_id: string | null;
+      }>(
+        `UPDATE commands c SET
+           state = CASE WHEN c.state = 'pending' THEN 'cancelled' ELSE c.state END,
+           reason = CASE WHEN c.state = 'pending' THEN 'cancelled' ELSE c.reason END,
+           cancel_requested_at = CASE WHEN c.state = 'pending' THEN c.cancel_requested_at
+             ELSE COALESCE(c.cancel_requested_at, compute_now()) END,
+           cancel_reason = CASE WHEN c.state = 'pending' THEN c.cancel_reason
+             ELSE COALESCE(c.cancel_reason, 'cancelled') END,
+           updated_at = compute_now()
+         WHERE c.id = $1 AND c.state IN ('pending', 'dispatched', 'acked', 'running')
+         RETURNING c.state, c.node_id,
+           (SELECT s.gateway_id FROM node_sessions s WHERE s.node_id = c.node_id) AS gateway_id`,
+        [commandId],
+      );
+      const row = rows[0];
+      if (row) {
+        if (row.state !== 'cancelled') poke(row.gateway_id, row.node_id);
+        return;
+      }
+      const found = await tx.query('SELECT 1 FROM commands WHERE id = $1', [commandId]);
+      if (!found.rowCount)
+        throw new ComputeError('NOT_FOUND', `Command ${commandId} does not exist`);
+    },
+  } satisfies CommandQueue);
+}
+
+// --- CommandSweeper ------------------------------------------------------------------------------
+
+/** For kinds no longer registered: how long past `not_after` an in-flight command may run. */
+export const defaultCommandTimeoutMs = 15 * 60_000;
+
+/**
+ * Past `not_after`, `pending` → `expired`; past `not_after` + the kind's timeout, `dispatched`,
+ * `acked` and `running` → `failed('timeout')` (for self-terminating kinds the timeout covers the
+ * rejoin window). One batch of each per pass, oldest first.
+ */
+const sweepCommands = `WITH expired AS (
+    UPDATE commands SET state = 'expired', reason = 'not_after', updated_at = compute_now()
+     WHERE id IN (SELECT id FROM commands
+                   WHERE state = 'pending' AND not_after <= compute_now()
+                   ORDER BY not_after, id LIMIT $4 FOR UPDATE SKIP LOCKED)
+    RETURNING id, node_id, kind, state, reason, idempotency_key),
+  timed_out AS (
+    UPDATE commands SET state = 'failed', reason = 'timeout', updated_at = compute_now()
+     WHERE id IN (SELECT c.id FROM commands c
+                   WHERE c.state IN ('dispatched', 'acked', 'running') AND c.not_after <= compute_now()
+                     AND c.not_after + make_interval(secs => COALESCE(
+                           (SELECT k.timeout_s FROM unnest($1::text[], $2::float8[]) AS k(kind, timeout_s)
+                             WHERE k.kind = c.kind), $3::float8)) <= compute_now()
+                   ORDER BY c.not_after, c.id LIMIT $4 FOR UPDATE SKIP LOCKED)
+    RETURNING id, node_id, kind, state, reason, idempotency_key)
+  SELECT s.*, n.owner_tenant_id FROM (SELECT * FROM expired UNION ALL SELECT * FROM timed_out) s
+    LEFT JOIN nodes n ON n.id = s.node_id
+   ORDER BY s.id`;
+
+export interface SweptCommand {
+  id: string;
+  nodeId: string;
+  kind: string;
+  state: 'expired' | 'failed';
+  reason: string;
+  idempotencyKey: string;
+}
+
+/** The work item that owns a command, besides its node: `wf:<id>:…` → `workflow/<id>`. */
+export function commandOwner(
+  idempotencyKey: string,
+  registered: (kind: string) => boolean,
+): { kind: string; key: string } | undefined {
+  const [prefix, key] = idempotencyKey.split(':');
+  if (!prefix || !key) return undefined;
+  const kind = prefix === 'wf' ? 'workflow' : prefix;
+  return registered(kind) && kind !== 'node' ? { kind, key } : undefined;
+}
+
+export interface SweepInput {
+  kinds: readonly CommandKindSpec[];
+  batchSize: number;
+  work: WorkQueue;
+  events: EventPublisher;
+  /** Whether a reconciler of this name is registered. */
+  registered(kind: string): boolean;
+}
+
+/**
+ * One CommandSweeper pass in `tx` (fenced by the caller). Each transition wakes the node's
+ * controller (`work_queue('node', nodeId)`, as the gateway does when a command settles), the
+ * reconciler named by the idempotency key's prefix when one is registered (`wf:` → `workflow`,
+ * `<reconciler>:<key>:…`), and publishes `command.settled` in the node owner's tenant.
+ */
+export async function sweepCommandsOnce(tx: SqlTx, input: SweepInput): Promise<SweptCommand[]> {
+  const kinds = input.kinds.map((spec) => spec.kind);
+  const timeouts = input.kinds.map((spec) => {
+    try {
+      return parseDuration(spec.timeout) / 1000;
+    } catch {
+      return defaultCommandTimeoutMs / 1000;
+    }
+  });
+  const { rows } = await tx.query<{
+    id: string;
+    node_id: string;
+    kind: string;
+    state: 'expired' | 'failed';
+    reason: string;
+    idempotency_key: string;
+    owner_tenant_id: string | null;
+  }>(sweepCommands, [kinds, timeouts, defaultCommandTimeoutMs / 1000, input.batchSize]);
+  const swept: SweptCommand[] = [];
+  const woken = new Set<string>();
+  const wake = async (kind: string, key: string) => {
+    if (woken.has(`${kind}\u0000${key}`)) return;
+    woken.add(`${kind}\u0000${key}`);
+    await input.work.enqueue(tx, kind, key);
+  };
+  for (const row of rows) {
+    swept.push({
+      id: row.id,
+      nodeId: row.node_id,
+      kind: row.kind,
+      state: row.state,
+      reason: row.reason,
+      idempotencyKey: row.idempotency_key,
+    });
+    await wake('node', row.node_id);
+    const owner = commandOwner(row.idempotency_key, input.registered);
+    if (owner) await wake(owner.kind, owner.key);
+    if (row.owner_tenant_id)
+      await input.events.publish(tx, {
+        type: 'command.settled',
+        tenantId: row.owner_tenant_id,
+        subject: `command/${row.id}`,
+        data: {
+          commandId: row.id,
+          nodeId: row.node_id,
+          kind: row.kind,
+          state: row.state,
+          reason: row.reason,
+        },
+      });
+  }
+  return swept;
+}

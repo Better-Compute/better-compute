@@ -144,13 +144,15 @@ describe('createComputeClient()', () => {
 
   it('raises ComputeClientError with the code, status, details and request id', async () => {
     const { client: api } = client({ token: USER });
-    const error = await failure(api.inventory.history({ tenantId: ACME, nodeId: NODE_ID }));
+    const error = await failure(
+      api.plugins.acme.widgets.fail({ tenantId: ACME, widgetId: 'w-client-error' }),
+    );
     expect(error).toMatchObject({
       name: 'ComputeClientError',
-      code: 'NOT_IMPLEMENTED',
-      message: 'inventory.history arrives in v0.2',
-      status: 501,
-      details: { feature: 'inventory.history', phase: 'v0.2' },
+      code: 'CONFLICT',
+      message: 'Widget changed meanwhile',
+      status: 409,
+      details: { widgetId: 'w-client-error' },
       requestId: expect.stringMatching(/^req_/),
     });
   });
@@ -166,6 +168,8 @@ describe('createComputeClient()', () => {
     expect(onUnauthenticated).toHaveBeenCalledWith(error);
     const denied = client({ token: USER, onUnauthenticated });
     iam.deny({ action: 'compute:nodes:read' });
+    // An earlier test's allow is cached for 10 s; the IAM bridge drops it on the policy event.
+    compute.caches.dropDecisions();
     expect(
       (await failure(denied.client.inventory.get({ tenantId: ACME, nodeId: NODE_ID }))).code,
     ).toBe('ACCESS_DENIED');

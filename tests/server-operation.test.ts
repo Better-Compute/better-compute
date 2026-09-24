@@ -15,7 +15,12 @@ import {
 } from '@better-compute/core';
 import { restoreSystemClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
-import { betterCompute, serverVersion, validateNoInput } from '@better-compute/server';
+import {
+  betterCompute,
+  builtinCommandKinds,
+  serverVersion,
+  validateNoInput,
+} from '@better-compute/server';
 import { fakeIam } from './support/fake-iam.js';
 import {
   ACME,
@@ -109,6 +114,59 @@ const read = (
   });
 const onNode = (input: Record<string, string>) => ({ type: 'node', id: input.nodeId ?? 'n' });
 
+/** The server's own v0.1 groups (module `server` in §9.2), registered right after `system`. */
+const serverPaths = [
+  'projects/create',
+  'projects/get',
+  'projects/list',
+  'sites/list',
+  'sites/get',
+  'sites/create',
+  'joinTokens/create',
+  'joinTokens/list',
+  'joinTokens/revoke',
+  'nodes/list',
+  'nodes/get',
+  'nodes/events',
+  'nodes/cordon',
+  'nodes/uncordon',
+  'nodes/drain',
+  'nodes/label',
+  'nodes/taint',
+  'nodes/adopt',
+  'nodes/revokeIdentity',
+  'commands/run',
+  'commands/get',
+  'commands/list',
+  'usage/list',
+  'events/list',
+];
+
+/** The built-in capacity module's groups (§9.2 module `capacity`), right after `inventory`. */
+const capacityPaths = [
+  'pools/list',
+  'pools/get',
+  'pools/create',
+  'pools/capacity',
+  'pools/offer',
+  'pools/unoffer',
+  'pools/update',
+  'pools/archive',
+  'capacity/summary',
+  'capacity/byPool',
+  'capacity/preview',
+  'capacity/timeline',
+  'reservations/create',
+  'reservations/get',
+  'reservations/list',
+  'reservations/release',
+  'reservations/cancel',
+  'reservations/extend',
+  'reservations/renew',
+  'quotas/get',
+  'quotas/set',
+];
+
 describe('betterCompute()', () => {
   it('is synchronous and side-effect free', () => {
     const { compute, database, iam } = setup();
@@ -117,7 +175,10 @@ describe('betterCompute()', () => {
       [
         'api',
         'authz',
+        'caches',
+        'context',
         'endpoint',
+        'events',
         'gatewayServices',
         'handler',
         'initialize',
@@ -133,28 +194,43 @@ describe('betterCompute()', () => {
     expect(iam.calls).toEqual([]);
   });
 
-  it('registers system, then the built-in inventory module, then modules and plugins', () => {
+  it('registers system, then the built-in node controllers, inventory and capacity, then modules and plugins', () => {
     const extras = defineModule({
       name: 'extras',
-      api: () => ({ nodes: { cordon: read('compute:nodes:cordon', onNode, 'mutation') } }),
+      api: () => ({
+        workflows: { abort: read('compute:workflows:manage', onNode, 'mutation') },
+      }),
     });
     const { compute } = setupWith({ modules: [extras] });
-    expect(compute.registry.modules).toEqual(['inventory', 'extras', 'acme']);
+    expect(compute.registry.modules).toEqual([
+      'node-controllers',
+      'inventory',
+      'capacity',
+      'extras',
+      'acme',
+    ]);
     expect(compute.registry.plugins).toEqual(['acme']);
     expect(compute.registry.methods.map((method) => method.path)).toEqual([
       'system/whoami',
       'system/version',
       'system/selfCheck',
+      ...serverPaths,
       'inventory/get',
       'inventory/history',
       'inventory/diff',
-      'nodes/cordon',
+      ...capacityPaths,
+      'workflows/abort',
       'plugins/acme/widgets/poke',
       'plugins/acme/widgets/fail',
       'plugins/acme/widgets/get',
       'plugins/acme/widgets/limited',
       'plugins/acme/widgets/crash',
     ]);
+    expect(compute.registry.method('nodes/cordon')).toMatchObject({
+      module: 'server',
+      action: 'compute:nodes:cordon',
+      kind: 'mutation',
+    });
     const get = compute.registry.method('inventory/get')!;
     expect(get).toMatchObject({ module: 'inventory', action: 'compute:nodes:read', kind: 'read' });
     expect(get.row).toMatchObject({ group: 'inventory', method: 'get', resource: 'node' });
@@ -166,16 +242,40 @@ describe('betterCompute()', () => {
     expect(compute.registry.method('plugins/acme/widgets/poke')!.row).toBeUndefined();
     expect(compute.registry.actions.has('compute:acme:poke')).toBe(true);
     expect(compute.registry.actions.has('compute:reservations:create')).toBe(true);
-    expect(compute.registry.migrations.map((migration) => migration.name)).toEqual([
-      'acme/0001_widgets',
-    ]);
+    // The built-in capacity module's migrations come first, then the plugin's.
+    const migrations = compute.registry.migrations.map((migration) => migration.name);
+    expect(migrations[0]).toBe('capacity/0001_device_links');
+    expect(migrations.at(-1)).toBe('acme/0001_widgets');
+    expect(migrations.slice(0, -1).every((name) => name.startsWith('capacity/'))).toBe(true);
     expect(compute.registry.hasModule('inventory')).toBe(true);
+    expect(compute.registry.hasModule('capacity')).toBe(true);
     expect(compute.registry.hasModule('metal')).toBe(false);
+    // The protocol's built-in command kinds are the server's own.
+    expect(compute.registry.commandKind('diag.nvml')).toMatchObject({
+      kind: 'diag.nvml',
+      timeout: '2m',
+      attested: true,
+    });
   });
 
   it('builds compute.api from the registry: groups, then plugins by id', async () => {
     const { compute } = setup();
-    expect(Object.keys(compute.api).sort()).toEqual(['inventory', 'plugins', 'system']);
+    expect(Object.keys(compute.api).sort()).toEqual([
+      'capacity',
+      'commands',
+      'events',
+      'inventory',
+      'joinTokens',
+      'nodes',
+      'plugins',
+      'pools',
+      'projects',
+      'quotas',
+      'reservations',
+      'sites',
+      'system',
+      'usage',
+    ]);
     expect(Object.keys(compute.api.plugins)).toEqual(['acme']);
     expect(Object.keys(compute.api.plugins.acme.widgets)).toEqual([
       'poke',
@@ -282,8 +382,23 @@ describe('betterCompute()', () => {
       /a public method has action null/,
     );
     configError(
-      base({ modules: [defineModule({ name: 'needy', requires: ['capacity'] })] }),
-      /needy requires module capacity/,
+      base({ modules: [defineModule({ name: 'needy', requires: ['metal'] })] }),
+      /needy requires module metal/,
+    );
+    configError(
+      base({ modules: [defineModule({ name: 'capacity' })] }),
+      /Module capacity is registered twice/,
+    );
+    configError(
+      base({
+        modules: [
+          defineModule({
+            name: 'nvml-again',
+            commandKinds: [{ ...builtinCommandKinds[0]! }],
+          }),
+        ],
+      }),
+      /Command kind diag.nvml is registered twice/,
     );
     configError(
       base({
@@ -340,6 +455,16 @@ describe('betterCompute()', () => {
     configError(() => betterCompute({ ...good, basePath: '/api/compute/' }), /basePath/);
     configError(() => betterCompute({ ...good, basePath: 'api' }), /basePath/);
     configError(() => betterCompute({ ...good, rootTenantId: '' }), /rootTenantId/);
+    // The root tenant may come from the IAM port instead (IamPort.rootTenantId); both must agree.
+    const { rootTenantId: _root, ...withoutRoot } = good;
+    configError(() => betterCompute(withoutRoot), /rootTenantId/);
+    expect(() =>
+      betterCompute({ ...withoutRoot, iam: { ...iam, rootTenantId: ROOT } }),
+    ).not.toThrow();
+    configError(
+      () => betterCompute({ ...good, iam: { ...iam, rootTenantId: 'tenant-elsewhere' } }),
+      /name different tenants/,
+    );
     configError(() => betterCompute({ ...good, typePrefix: 'Bad_' }), /prefix/);
     configError(
       () => betterCompute({ ...good, acceptIamCookie: 'yes' as never }),
@@ -377,23 +502,24 @@ describe('initialize()', () => {
   });
 
   it('fails when a method disagrees with its §9.2 row on action, kind or resource', async () => {
+    // workflows.abort (v0.2, module provision) is not registered by the server itself.
     const cases: [MethodDefinition, RegExp][] = [
       [read('compute:nodes:read', onNode, 'mutation'), /declares compute:nodes:read \(mutation\)/],
       [
-        read('compute:nodes:cordon', onNode, 'read'),
-        /\(read\); §9.2 says compute:nodes:cordon \(mutation\)/,
+        read('compute:workflows:manage', onNode, 'read'),
+        /\(read\); §9.2 says compute:workflows:manage \(mutation\)/,
       ],
       [
         read(
-          'compute:nodes:cordon',
+          'compute:workflows:manage',
           (input) => ({ type: 'pool', id: input.poolId ?? 'p' }),
           'mutation',
         ),
-        /nodes\/cordon decides on pool; §9.2 says node/,
+        /workflows\/abort decides on pool; §9.2 says node/,
       ],
     ];
     for (const [method, pattern] of cases) {
-      const wrong = defineModule({ name: 'wrong', api: () => ({ nodes: { cordon: method } }) });
+      const wrong = defineModule({ name: 'wrong', api: () => ({ workflows: { abort: method } }) });
       const { compute, database } = setupWith({ modules: [wrong] });
       const error = await failure(() => compute.initialize());
       expect(error.code).toBe('INVALID_CONFIG');
@@ -406,14 +532,12 @@ describe('initialize()', () => {
     const module = defineModule({
       name: 'extras',
       api: () => ({
-        nodes: {
-          cordon: read('compute:nodes:cordon', onNode, 'mutation'),
-          // Alternatives count: sites.create decides on fleet or tenant.
-        },
-        sites: {
-          create: read(
-            'compute:sites:manage',
-            (input) => ({ type: 'tenant', id: input.tenantId ?? 't' }),
+        workflows: { abort: read('compute:workflows:manage', onNode, 'mutation') },
+        // Alternatives count: images.register decides on tenant or fleet.
+        images: {
+          register: read(
+            'compute:images:publish',
+            (input) => ({ type: 'fleet', id: input.tenantId ?? 'global' }),
             'mutation',
           ),
         },
@@ -505,7 +629,8 @@ describe('the operation envelope', () => {
       expect(error.code).toBe('ACCESS_DENIED');
       expect(error.status).toBe(403);
     }
-    expect(iam.calls.map((call) => call.method)).toEqual(['authenticate', 'authenticate']);
+    // One authentication: the second call finds it in the 30 s cache.
+    expect(iam.calls.map((call) => call.method)).toEqual(['authenticate']);
     expect(database.log).toEqual([]);
 
     // Identical to IAM's own denial inside the tenant: nothing tells the two apart.
@@ -521,10 +646,10 @@ describe('the operation envelope', () => {
   it('lets root callers through the pre-check for IAM to decide in the target tenant', async () => {
     const { compute, iam } = setup();
     iam.allow({ token: ADMIN });
-    const error = await failure(() => compute.api.inventory.history({ token: ADMIN }, input));
-    expect(error.code).toBe('NOT_IMPLEMENTED');
-    expect(error.message).toBe('inventory.history arrives in v0.2');
-    expect(error.status).toBe(501);
+    // Allowed, the handler runs: the node has no inventory in this store.
+    const error = await failure(() => compute.api.inventory.get({ token: ADMIN }, input));
+    expect(error.code).toBe('NOT_FOUND');
+    expect(error.status).toBe(404);
     expect(iam.calls.map((call) => call.method)).toEqual(['authenticate', 'authorize']);
     expect(iam.calls[1]!.decision).toEqual({
       tenantId: ACME,
@@ -810,7 +935,7 @@ describe('selfCheck()', () => {
 });
 
 describe('lifecycle and later-phase placeholders', () => {
-  it('starts only after initialize(), with known roles; P0 has no jobs', async () => {
+  it('starts only after initialize(), with known roles; jobs are the runtime passes', async () => {
     const { compute } = setup();
     expect((await failure(() => compute.start())).code).toBe('INVALID_STATE');
     await compute.initialize();
@@ -820,20 +945,29 @@ describe('lifecycle and later-phase placeholders', () => {
     await compute.start({ roles: ['controllers', 'iam'] });
     await compute.start();
     await compute.stop();
-    expect(compute.jobs).toEqual({});
+    // Every reconciler by name, plus the runtime's own singleton passes (tests/server-runtime-*).
+    expect(Object.keys(compute.jobs)).toEqual(
+      expect.arrayContaining([
+        'inventory',
+        'command-sweeper',
+        'outbox-dispatch',
+        'event-subscribers',
+      ]),
+    );
   });
 
   it('answers NOT_IMPLEMENTED for gateway services and the authz projection', async () => {
     const { compute } = setup();
-    expect((await failure(() => compute.gatewayServices.join({} as never))).message).toBe(
-      'JoinService arrives in v0.1',
+    // JoinService is wired (tests/server-join); without pki.join it refuses as misconfigured.
+    expect((await failure(() => compute.gatewayServices.join({} as never))).code).toBe(
+      'INVALID_CONFIG',
     );
     expect((await failure(() => compute.gatewayServices.secret({} as never))).message).toBe(
       'The secret broker arrives in v0.2',
     );
-    expect((await failure(() => compute.authz.get('compute-pool', 'p', ACME))).code).toBe(
-      'NOT_IMPLEMENTED',
-    );
+    // The authz projection reads authz_projection by primary key (tests/server-runtime-authz).
+    await compute.initialize();
+    expect(await compute.authz.get('compute-pool', 'p', ACME)).toBeUndefined();
   });
 
   it('describes its endpoint and version', () => {

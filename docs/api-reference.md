@@ -27,22 +27,22 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `projects` (server)
 
-| Method             | Kind     | Authorization                                      | Phase | Status  |
-| ------------------ | -------- | -------------------------------------------------- | ----- | ------- |
-| `projects.create`  | mutation | `compute:projects:manage` @ `compute-tenant`       | v0.1  | planned |
-| `projects.get`     | read     | `compute:projects:read` @ `compute-project`        | v0.1  | planned |
-| `projects.list`    | read     | `compute:projects:read` @ `compute-tenant` + items | v0.1  | planned |
-| `projects.archive` | mutation | `compute:projects:manage` @ `compute-project`      | v0.2  | planned |
+| Method             | Kind     | Authorization                                      | Phase | Status     |
+| ------------------ | -------- | -------------------------------------------------- | ----- | ---------- |
+| `projects.create`  | mutation | `compute:projects:manage` @ `compute-tenant`       | v0.1  | registered |
+| `projects.get`     | read     | `compute:projects:read` @ `compute-project`        | v0.1  | registered |
+| `projects.list`    | read     | `compute:projects:read` @ `compute-tenant` + items | v0.1  | registered |
+| `projects.archive` | mutation | `compute:projects:manage` @ `compute-project`      | v0.2  | planned    |
 
 ### `sites` (server)
 
-| Method         | Kind     | Authorization                                                                         | Phase | Status  |
-| -------------- | -------- | ------------------------------------------------------------------------------------- | ----- | ------- |
-| `sites.list`   | read     | `compute:sites:read` @ `compute-tenant` + items                                       | v0.1  | planned |
-| `sites.get`    | read     | `compute:sites:read` @ `compute-site`                                                 | v0.1  | planned |
-| `sites.create` | mutation | `compute:sites:manage` @ `compute-fleet` or `compute:sites:manage` @ `compute-tenant` | v0.1  | planned |
-| `sites.update` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned |
-| `sites.delete` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned |
+| Method         | Kind     | Authorization                                                                         | Phase | Status     |
+| -------------- | -------- | ------------------------------------------------------------------------------------- | ----- | ---------- |
+| `sites.list`   | read     | `compute:sites:read` @ `compute-tenant` + items                                       | v0.1  | registered |
+| `sites.get`    | read     | `compute:sites:read` @ `compute-site`                                                 | v0.1  | registered |
+| `sites.create` | mutation | `compute:sites:manage` @ `compute-fleet` or `compute:sites:manage` @ `compute-tenant` | v0.1  | registered |
+| `sites.update` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned    |
+| `sites.delete` | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned    |
 
 ### `siteTokens` (server)
 
@@ -53,24 +53,24 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `pools` (capacity)
 
-| Method           | Kind     | Authorization                                                                         | Phase | Status  |
-| ---------------- | -------- | ------------------------------------------------------------------------------------- | ----- | ------- |
-| `pools.list`     | read     | `compute:pools:read` @ `compute-tenant` + items                                       | v0.1  | planned |
-| `pools.get`      | read     | `compute:pools:read` @ `compute-pool`                                                 | v0.1  | planned |
-| `pools.create`   | mutation | `compute:pools:create` @ `compute-fleet` or `compute:pools:create` @ `compute-tenant` | v0.1  | planned |
-| `pools.capacity` | read     | `compute:capacity:read` @ `compute-pool`                                              | v0.1  | planned |
-| `pools.offer`    | mutation | `compute:pools:share` @ `compute-pool`                                                | v0.1  | planned |
-| `pools.unoffer`  | mutation | `compute:pools:share` @ `compute-pool`                                                | v0.1  | planned |
-| `pools.update`   | mutation | `compute:pools:manage` @ `compute-pool`                                               | v0.2  | planned |
-| `pools.archive`  | mutation | `compute:pools:manage` @ `compute-pool`                                               | v0.2  | planned |
+| Method           | Kind     | Authorization                                                                         | Phase | Status     |
+| ---------------- | -------- | ------------------------------------------------------------------------------------- | ----- | ---------- |
+| `pools.list`     | read     | `compute:pools:read` @ `compute-tenant` + items                                       | v0.1  | registered |
+| `pools.get`      | read     | `compute:pools:read` @ `compute-pool`                                                 | v0.1  | registered |
+| `pools.create`   | mutation | `compute:pools:create` @ `compute-fleet` or `compute:pools:create` @ `compute-tenant` | v0.1  | registered |
+| `pools.capacity` | read     | `compute:capacity:read` @ `compute-pool`                                              | v0.1  | registered |
+| `pools.offer`    | mutation | `compute:pools:share` @ `compute-pool`                                                | v0.1  | registered |
+| `pools.unoffer`  | mutation | `compute:pools:share` @ `compute-pool`                                                | v0.1  | registered |
+| `pools.update`   | mutation | `compute:pools:manage` @ `compute-pool`                                               | v0.2  | registered |
+| `pools.archive`  | mutation | `compute:pools:manage` @ `compute-pool`                                               | v0.2  | registered |
 
 ### `joinTokens` (server)
 
-| Method              | Kind     | Authorization                                 | Phase | Status  |
-| ------------------- | -------- | --------------------------------------------- | ----- | ------- |
-| `joinTokens.create` | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.1  | planned |
-| `joinTokens.list`   | read     | `compute:join-tokens:read` @ `compute-pool`   | v0.1  | planned |
-| `joinTokens.revoke` | mutation | `compute:join-tokens:revoke` @ `compute-pool` | v0.1  | planned |
+| Method              | Kind     | Authorization                                 | Phase | Status     |
+| ------------------- | -------- | --------------------------------------------- | ----- | ---------- |
+| `joinTokens.create` | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.1  | registered |
+| `joinTokens.list`   | read     | `compute:join-tokens:read` @ `compute-pool`   | v0.1  | registered |
+| `joinTokens.revoke` | mutation | `compute:join-tokens:revoke` @ `compute-pool` | v0.1  | registered |
 
 ### `joinRequests` (server)
 
@@ -82,20 +82,20 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `nodes` (server)
 
-| Method                 | Kind     | Authorization                                    | Phase | Status  |
-| ---------------------- | -------- | ------------------------------------------------ | ----- | ------- |
-| `nodes.list`           | read     | `compute:nodes:read` @ `compute-tenant` + items  | v0.1  | planned |
-| `nodes.get`            | read     | `compute:nodes:read` @ `compute-node`            | v0.1  | planned |
-| `nodes.events`         | read     | `compute:nodes:read` @ `compute-node`            | v0.1  | planned |
-| `nodes.cordon`         | mutation | `compute:nodes:cordon` @ `compute-node`          | v0.1  | planned |
-| `nodes.uncordon`       | mutation | `compute:nodes:cordon` @ `compute-node`          | v0.1  | planned |
-| `nodes.drain`          | mutation | `compute:nodes:drain` @ `compute-node`           | v0.1  | planned |
-| `nodes.label`          | mutation | `compute:nodes:update` @ `compute-node`          | v0.1  | planned |
-| `nodes.taint`          | mutation | `compute:nodes:update` @ `compute-node`          | v0.1  | planned |
-| `nodes.adopt`          | mutation | `compute:nodes:provision` @ `compute-node`       | v0.1  | planned |
-| `nodes.revokeIdentity` | mutation | `compute:nodes:revoke-identity` @ `compute-node` | v0.1  | planned |
-| `nodes.delete`         | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | planned |
-| `nodes.issueSshCert`   | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned |
+| Method                 | Kind     | Authorization                                    | Phase | Status     |
+| ---------------------- | -------- | ------------------------------------------------ | ----- | ---------- |
+| `nodes.list`           | read     | `compute:nodes:read` @ `compute-tenant` + items  | v0.1  | registered |
+| `nodes.get`            | read     | `compute:nodes:read` @ `compute-node`            | v0.1  | registered |
+| `nodes.events`         | read     | `compute:nodes:read` @ `compute-node`            | v0.1  | registered |
+| `nodes.cordon`         | mutation | `compute:nodes:cordon` @ `compute-node`          | v0.1  | registered |
+| `nodes.uncordon`       | mutation | `compute:nodes:cordon` @ `compute-node`          | v0.1  | registered |
+| `nodes.drain`          | mutation | `compute:nodes:drain` @ `compute-node`           | v0.1  | registered |
+| `nodes.label`          | mutation | `compute:nodes:update` @ `compute-node`          | v0.1  | registered |
+| `nodes.taint`          | mutation | `compute:nodes:update` @ `compute-node`          | v0.1  | registered |
+| `nodes.adopt`          | mutation | `compute:nodes:provision` @ `compute-node`       | v0.1  | registered |
+| `nodes.revokeIdentity` | mutation | `compute:nodes:revoke-identity` @ `compute-node` | v0.1  | registered |
+| `nodes.delete`         | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | planned    |
+| `nodes.issueSshCert`   | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned    |
 
 ### `inventory` (inventory)
 
@@ -107,55 +107,55 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `capacity` (capacity)
 
-| Method              | Kind | Authorization                              | Phase | Status  |
-| ------------------- | ---- | ------------------------------------------ | ----- | ------- |
-| `capacity.summary`  | read | `compute:capacity:read` @ `compute-tenant` | v0.1  | planned |
-| `capacity.byPool`   | read | `compute:capacity:read` @ `compute-pool`   | v0.2  | planned |
-| `capacity.preview`  | read | `compute:capacity:read` @ `compute-pool`   | v0.2  | planned |
-| `capacity.timeline` | read | `compute:capacity:read` @ `compute-pool`   | v0.2  | planned |
+| Method              | Kind | Authorization                              | Phase | Status     |
+| ------------------- | ---- | ------------------------------------------ | ----- | ---------- |
+| `capacity.summary`  | read | `compute:capacity:read` @ `compute-tenant` | v0.1  | registered |
+| `capacity.byPool`   | read | `compute:capacity:read` @ `compute-pool`   | v0.2  | registered |
+| `capacity.preview`  | read | `compute:capacity:read` @ `compute-pool`   | v0.2  | registered |
+| `capacity.timeline` | read | `compute:capacity:read` @ `compute-pool`   | v0.2  | registered |
 
 ### `reservations` (capacity)
 
-| Method                 | Kind     | Authorization                                          | Phase | Status  |
-| ---------------------- | -------- | ------------------------------------------------------ | ----- | ------- |
-| `reservations.create`  | mutation | `compute:reservations:create` @ `compute-reservation`  | v0.1  | planned |
-| `reservations.get`     | read     | `compute:reservations:read` @ `compute-reservation`    | v0.1  | planned |
-| `reservations.list`    | read     | `compute:reservations:read` @ `compute-tenant` + items | v0.1  | planned |
-| `reservations.release` | mutation | `compute:reservations:release` @ `compute-reservation` | v0.1  | planned |
-| `reservations.cancel`  | mutation | `compute:reservations:release` @ `compute-reservation` | v0.2  | planned |
-| `reservations.extend`  | mutation | `compute:reservations:extend` @ `compute-reservation`  | v0.1  | planned |
-| `reservations.renew`   | mutation | `compute:reservations:extend` @ `compute-reservation`  | v0.1  | planned |
+| Method                 | Kind     | Authorization                                          | Phase | Status     |
+| ---------------------- | -------- | ------------------------------------------------------ | ----- | ---------- |
+| `reservations.create`  | mutation | `compute:reservations:create` @ `compute-reservation`  | v0.1  | registered |
+| `reservations.get`     | read     | `compute:reservations:read` @ `compute-reservation`    | v0.1  | registered |
+| `reservations.list`    | read     | `compute:reservations:read` @ `compute-tenant` + items | v0.1  | registered |
+| `reservations.release` | mutation | `compute:reservations:release` @ `compute-reservation` | v0.1  | registered |
+| `reservations.cancel`  | mutation | `compute:reservations:release` @ `compute-reservation` | v0.2  | registered |
+| `reservations.extend`  | mutation | `compute:reservations:extend` @ `compute-reservation`  | v0.1  | registered |
+| `reservations.renew`   | mutation | `compute:reservations:extend` @ `compute-reservation`  | v0.1  | registered |
 
 ### `quotas` (capacity)
 
-| Method       | Kind     | Authorization                             | Phase | Status  |
-| ------------ | -------- | ----------------------------------------- | ----- | ------- |
-| `quotas.get` | read     | `compute:quotas:read` @ `compute-tenant`  | v0.1  | planned |
-| `quotas.set` | mutation | `compute:quotas:manage` @ `compute-fleet` | v0.2  | planned |
+| Method       | Kind     | Authorization                             | Phase | Status     |
+| ------------ | -------- | ----------------------------------------- | ----- | ---------- |
+| `quotas.get` | read     | `compute:quotas:read` @ `compute-tenant`  | v0.1  | registered |
+| `quotas.set` | mutation | `compute:quotas:manage` @ `compute-fleet` | v0.2  | registered |
 
 ### `commands` (server)
 
-| Method            | Kind     | Authorization                         | Phase | Status  |
-| ----------------- | -------- | ------------------------------------- | ----- | ------- |
-| `commands.run`    | mutation | `compute:nodes:exec` @ `compute-node` | v0.1  | planned |
-| `commands.get`    | read     | `compute:nodes:read` @ `compute-node` | v0.1  | planned |
-| `commands.list`   | read     | `compute:nodes:read` @ `compute-node` | v0.1  | planned |
-| `commands.cancel` | mutation | `compute:nodes:exec` @ `compute-node` | v0.2  | planned |
+| Method            | Kind     | Authorization                         | Phase | Status     |
+| ----------------- | -------- | ------------------------------------- | ----- | ---------- |
+| `commands.run`    | mutation | `compute:nodes:exec` @ `compute-node` | v0.1  | registered |
+| `commands.get`    | read     | `compute:nodes:read` @ `compute-node` | v0.1  | registered |
+| `commands.list`   | read     | `compute:nodes:read` @ `compute-node` | v0.1  | registered |
+| `commands.cancel` | mutation | `compute:nodes:exec` @ `compute-node` | v0.2  | planned    |
 
 ### `usage` (server)
 
-| Method         | Kind | Authorization                                                                       | Phase | Status  |
-| -------------- | ---- | ----------------------------------------------------------------------------------- | ----- | ------- |
-| `usage.list`   | read | `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project` | v0.1  | planned |
-| `usage.export` | read | `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project` | v0.2  | planned |
+| Method         | Kind | Authorization                                                                       | Phase | Status     |
+| -------------- | ---- | ----------------------------------------------------------------------------------- | ----- | ---------- |
+| `usage.list`   | read | `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project` | v0.1  | registered |
+| `usage.export` | read | `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project` | v0.2  | planned    |
 
 ### `events` (server)
 
-| Method        | Kind | Authorization                            | Phase | Status  |
-| ------------- | ---- | ---------------------------------------- | ----- | ------- |
-| `events.list` | read | `compute:events:read` @ `compute-tenant` | v0.1  | planned |
+| Method        | Kind | Authorization                            | Phase | Status     |
+| ------------- | ---- | ---------------------------------------- | ----- | ---------- |
+| `events.list` | read | `compute:events:read` @ `compute-tenant` | v0.1  | registered |
 
-### `webhooks` (server)
+### `webhooks` (events)
 
 | Method                  | Kind     | Authorization                                | Phase | Status  |
 | ----------------------- | -------- | -------------------------------------------- | ----- | ------- |
@@ -166,6 +166,8 @@ Every call is authenticated (except public methods), refused before any database
 | `webhooks.rotateSecret` | mutation | `compute:webhooks:manage` @ `compute-tenant` | v0.3  | planned |
 | `webhooks.delete`       | mutation | `compute:webhooks:manage` @ `compute-tenant` | v0.3  | planned |
 | `webhooks.ping`         | mutation | `compute:webhooks:manage` @ `compute-tenant` | v0.3  | planned |
+| `webhooks.deliveries`   | read     | `compute:webhooks:manage` @ `compute-tenant` | v0.3  | planned |
+| `webhooks.redeliver`    | mutation | `compute:webhooks:manage` @ `compute-tenant` | v0.3  | planned |
 
 ### `drivers` (server)
 
@@ -264,13 +266,14 @@ Every call is authenticated (except public methods), refused before any database
 | -------------- | -------- | ----------------------------------------------------------------------------------------- | ----- | ------- |
 | `tunnels.open` | mutation | `compute:instances:exec` @ `compute-instance` or `compute:nodes:console` @ `compute-node` | v0.3  | planned |
 
-### `fleet` (server)
+### `fleet` (fleet)
 
 | Method         | Kind     | Authorization                           | Phase | Status  |
 | -------------- | -------- | --------------------------------------- | ----- | ------- |
 | `fleet.export` | read     | `compute:fleet:admin` @ `compute-fleet` | v0.2  | planned |
 | `fleet.plan`   | read     | `compute:fleet:admin` @ `compute-fleet` | v0.2  | planned |
 | `fleet.apply`  | mutation | `compute:fleet:admin` @ `compute-fleet` | v0.2  | planned |
+| `fleet.status` | read     | `compute:fleet:admin` @ `compute-fleet` | v0.2  | planned |
 
 ## Errors
 
@@ -299,3 +302,4 @@ Every call is authenticated (except public methods), refused before any database
 | `PAYLOAD_TOO_LARGE`     | 413         |
 | `INTERNAL_ERROR`        | 500         |
 | `MISSING_DEPENDENCY`    | 500         |
+| `CONFIG_DRIFT`          | 409         |
