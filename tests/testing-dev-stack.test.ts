@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createDevStack, DEV_ROOT_TOKEN, type DevStack } from '@better-compute/testing';
+import {
+  attachDevFleet,
+  createDevJoinKeys,
+  createDevStack,
+  DEV_ROOT_TOKEN,
+  type DevStack,
+} from '@better-compute/testing';
 
 // The `better-compute dev` stack in one process (PLAN.md §14 "Dev", §3.3): simulated machines join through
 // the gateway's Join RPC with sealed tokens, open Session streams, pass diag.nvml, and are adopted by the real
@@ -71,6 +77,19 @@ describe('createDevStack', () => {
     expect(active.binding.cdiDevices).toHaveLength(4);
     // The bound node's daemon wrote the allocation's CDI spec and env file.
     expect(stack.daemons.get(active.binding.nodeId)!.files.size).toBeGreaterThan(0);
+  });
+
+  it('attaches a fleet only with insecureHeaderAuth: true', async () => {
+    stack = await createDevStack();
+    await expect(
+      attachDevFleet({
+        compute: stack.compute,
+        database: stack.database,
+        keys: createDevJoinKeys(),
+        root: stack.root,
+        rootTenantId: stack.rootTenantId,
+      } as unknown as Parameters<typeof attachDevFleet>[0]),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
   });
 
   it('serves the root token over the HTTP handler', async () => {

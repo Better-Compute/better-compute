@@ -144,8 +144,18 @@ export type { AgentFrameValue, DaemonHarness, DaemonHarnessOptions } from './dae
 
 export * from './sim/index.js';
 export * from './realtime/index.js';
-export { createDevStack, DEV_ROOT_TOKEN } from './dev/stack.js';
+export {
+  attachDevFleet,
+  createDevJoinKeys,
+  createDevStack,
+  DEV_ROOT_TOKEN,
+  devFleetNotifier,
+} from './dev/stack.js';
 export type {
+  DevFleet,
+  DevFleetNotifier,
+  DevFleetOptions,
+  DevJoinKeys,
   DevJoinOptions,
   DevPool,
   DevStack,

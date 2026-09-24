@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { workerRoles, type WorkerRole } from '@better-compute/server';
 import { configFromEnv, createDeployment, type AnyCompute, type Deployment } from '../config.js';
+import { prepareDevSim, simVariants, type SimVariant } from '../dev-sim.js';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
 
@@ -22,6 +23,12 @@ export interface RunServerOptions {
   migrate: boolean;
   signal: AbortSignal;
   note(message: string): void;
+  /** After migrations, before the workers start (binding a store-backed IAM projection). */
+  afterMigrate?(): Promise<void>;
+  /** Once the workers run and the API listens (attaching a dev fleet). */
+  started?(running: RunningServer): Promise<void>;
+  /** On the stop signal, before the listener and the workers stop. */
+  stopping?(): Promise<void>;
 }
 
 export interface RunningServer {
@@ -55,8 +62,10 @@ export async function runServer(
   options: RunServerOptions,
 ): Promise<RunningServer> {
   if (options.migrate) await compute.initialize();
+  await options.afterMigrate?.();
   const running: RunningServer = { roles: options.roles };
   let server: Server | undefined;
+  let stopping = false;
   try {
     if (options.roles.length) await compute.start({ roles: [...options.roles] });
     if (options.api !== false) {
@@ -72,13 +81,18 @@ export async function runServer(
       options.note(`better-compute listening on ${running.url}${compute.endpoint.basePath}`);
     }
     if (options.roles.length) options.note(`Workers running: ${options.roles.join(', ')}`);
+    await options.started?.(running);
     if (!options.signal.aborted)
       await new Promise<void>((resolve) =>
         options.signal.addEventListener('abort', () => resolve(), { once: true }),
       );
     options.note('Stopping…');
+    stopping = true;
+    await options.stopping?.();
     return running;
   } finally {
+    // A failed start still releases what `started` attached.
+    if (!stopping) await options.stopping?.().catch(() => undefined);
     if (server) await closeServer(server);
     await compute.stop();
   }
@@ -189,7 +203,7 @@ export const serveCommands = [
     group: 'Setup',
     summary: 'Run a local development server with no setup',
     description:
-      'dev runs the API and every worker role on 127.0.0.1. With a configuration file (or BETTER_COMPUTE_DATABASE_URL) it uses that deployment; without one it keeps PGlite in --data (default .better-compute/dev-db; --memory for a throwaway database) and a generated deployment secret in .better-compute/dev-secret (owner-only), so repeated runs keep their data. It always migrates first. Without IAM configured only public methods answer; see better-compute iam setup.',
+      'dev runs the API and every worker role on 127.0.0.1. With a configuration file (or BETTER_COMPUTE_DATABASE_URL) it uses that deployment; without one it keeps PGlite in --data (default .better-compute/dev-db; --memory for a throwaway database) and a generated deployment secret in .better-compute/dev-secret (owner-only), so repeated runs keep their data. It always migrates first. Without IAM configured only public methods answer; see better-compute iam setup. --sim N adds a gateway on loopback cleartext HTTP/2 (sessions authenticate by a header; local development only) and N simulated machines that join the way bcd does: a join token sealed to throwaway dev JoinService keys, the Join RPC, a Session stream, diag.nvml acceptance and adoption by the real runtime. Without configured IAM, --sim starts an embedded in-memory better-iam and prints its root token; with configured IAM it acts as BETTER_COMPUTE_TOKEN, which must be a root administrator.',
     target: 'none',
     output: 'text',
     flags: {
@@ -213,8 +227,34 @@ export const serveCommands = [
         env: 'BETTER_COMPUTE_CONFIG',
         description: 'The configuration file (default: discovered)',
       },
+      sim: {
+        type: 'integer',
+        value: 'N',
+        min: 0,
+        max: 1000,
+        description:
+          'Join N simulated machines (FakeDaemons) through a loopback dev gateway (needs @better-compute/testing)',
+      },
+      'sim-variant': {
+        type: 'string',
+        value: 'VARIANT',
+        default: 'hgx-h100',
+        description: `Hardware of the simulated machines: ${simVariants.join(', ')}`,
+      },
     },
-    examples: ['better-compute dev', 'better-compute dev --memory --port 0'],
+    validate(flags) {
+      const variant = flags['sim-variant'];
+      if (variant !== undefined && !(simVariants as readonly string[]).includes(variant))
+        throw usageError(
+          `--sim-variant ${JSON.stringify(variant)} is not one of ${simVariants.join(', ')}`,
+        );
+    },
+    examples: [
+      'better-compute dev',
+      'better-compute dev --memory --port 0',
+      'better-compute dev --memory --sim 8',
+      'better-compute dev --sim 4 --sim-variant l40s',
+    ],
     async run({ flags, io, env, path, note, configPath, deployment }) {
       const port = flags.port ?? 3000;
       const host = flags.host ?? '127.0.0.1';
@@ -241,6 +281,17 @@ export const serveCommands = [
         local = chosen = createDeployment(options, database);
         note(`Development database: ${database} (secret in ${secretFile})`);
       }
+      const count = flags.sim ?? 0;
+      const sim = count
+        ? await prepareDevSim(chosen.options, {
+            count,
+            variant: (flags['sim-variant'] ?? 'hgx-h100') as SimVariant,
+            env,
+            note,
+          })
+        : undefined;
+      // The same store and options plus the dev join keys: one control plane, not a second stack.
+      if (sim) chosen = createDeployment(sim.options, chosen.source);
       const stop = stopSignal(io.signal);
       try {
         const running = await runServer(chosen.compute, {
@@ -250,10 +301,18 @@ export const serveCommands = [
           migrate: true,
           signal: stop.signal,
           note,
+          ...(sim
+            ? {
+                afterMigrate: () => sim.afterMigrate(),
+                started: () => sim.started(chosen.compute),
+                stopping: () => sim.stopping(),
+              }
+            : {}),
         });
         return `Stopped ${running.url}.`;
       } finally {
         stop.dispose();
+        await sim?.close();
         await local?.close().catch(() => undefined);
       }
     },

@@ -99,6 +99,51 @@ describe('serve and dev', () => {
     expect(await readFile(secretFile, 'utf8')).toBe(secret);
   });
 
+  it(
+    'dev --sim joins simulated machines through a loopback gateway',
+    { timeout: 120_000 },
+    async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'bc-dev-sim-'));
+      const server = await start(['dev', '--memory', '--port', '0', '--sim', '2'], {}, cwd);
+      const noted = async (pattern: RegExp) => {
+        for (let i = 0; i < 1200; i++) {
+          const line = server.notes.find((note) => pattern.test(note));
+          if (line) return line;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error(`no note matching ${pattern}: ${server.notes.join('\n')}`);
+      };
+      expect(await noted(/Dev gateway \(h2c.*\): http:\/\/127\.0\.0\.1:\d+$/)).toBeTruthy();
+      const token = /root token \(dev only\): (\S+)/.exec(await noted(/root token/))![1]!;
+      const tenantId = /root tenant (\S+);/.exec(await noted(/root tenant/))![1]!;
+      await noted(/2 simulated node\(s\) adopted/);
+      const response = await fetch(`${server.url}/nodes/list`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          'x-better-compute': '1',
+        },
+        body: JSON.stringify({ tenantId }),
+      });
+      expect(response.status).toBe(200);
+      const { data } = (await response.json()) as { data: { items: { provisionState: string }[] } };
+      expect(data.items.map((node) => node.provisionState)).toEqual(['adopted', 'adopted']);
+      await server.stop();
+    },
+  );
+
+  it('dev refuses an unknown --sim-variant', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'bc-dev-sim-'));
+    await expect(
+      createCli().run(['dev', '--memory', '--sim', '1', '--sim-variant', 'tpu'], {
+        out() {},
+        env: {},
+        cwd,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
   it('refuses bad roles before loading anything', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'bc-serve-'));
     await expect(
