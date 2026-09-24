@@ -283,17 +283,36 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     },
   });
 
-  /** Mounts an ISO (an https URL, usually the site cache) through the BMC's virtual media. */
+  /**
+   * Mounts an ISO (an https URL, usually the site cache) through the BMC's virtual media: a fixed
+   * `url`, or `fromStep`, the `url` an earlier step of the workflow returned (a per-node ISO a
+   * plugin rendered, §5.6 walkthrough 1).
+   */
   const mediaInsert = defineStep({
     id: 'media.insert',
     runsOn: 'control-plane',
     relays: ['site'],
     timeout: '5m',
     retrySafe: true,
-    input: manifest({ url: field.string({ pattern: '^https://', maxLength: 2048 }) }),
+    input: manifest({
+      url: field.string({ pattern: '^https://', maxLength: 2048 }).optional(),
+      fromStep: field.string({ maxLength: 128 }).optional(),
+    }),
     async run(input, context) {
-      await bmc(context, 'bmc.boot', 'virtual-media.insert', { url: input.url });
-      return { inserted: input.url };
+      let url = input.url;
+      if (!url && input.fromStep) {
+        const { rows } = await context.sql.query<{ result: { url?: unknown } | null }>(
+          `SELECT result FROM workflow_steps WHERE workflow_id = $1 AND action = $2 AND state = 'succeeded'
+            ORDER BY index DESC LIMIT 1`,
+          [context.workflowId, input.fromStep],
+        );
+        const found = rows[0]?.result?.url;
+        if (typeof found === 'string' && /^https:\/\/\S{1,2040}$/.test(found)) url = found;
+        else throw new ComputeError('INVALID_STATE', `media.insert: step ${input.fromStep} returned no https url`);
+      }
+      if (!url) throw new ComputeError('INVALID_INPUT', 'media.insert needs url or fromStep');
+      await bmc(context, 'bmc.boot', 'virtual-media.insert', { url });
+      return { inserted: url };
     },
   });
   const mediaEject = defineStep({
