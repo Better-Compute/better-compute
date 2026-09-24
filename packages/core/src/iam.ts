@@ -109,6 +109,16 @@ export interface IamPort {
   authorize(credential: Credential, decision: Decision): Promise<boolean>;
   /** Chunks of ≤ 50; any batch error throws, never "all false" (P11). */
   authorizeMany(credential: Credential, tenantId: string, checks: Check[]): Promise<boolean[]>;
+  /**
+   * Re-decides for a session recorded earlier (`Caller.sessionId`), when the caller presents no
+   * credential again: long-lived streams such as tunnels, re-authorized every 60 s (§7.6). False
+   * once the session is revoked or expired, or the identity lost the permission. Optional: hosts
+   * without it must supply their own check.
+   */
+  authorizeSession?(
+    session: { identityId: string; sessionId: string },
+    decision: Decision,
+  ): Promise<boolean>;
   /** Delegated confirmation (v0.3); `'not-held-back'` when the action is not confirm-listed. */
   requestConfirmation(
     credential: Credential,
