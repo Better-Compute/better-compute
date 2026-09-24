@@ -1,0 +1,81 @@
+{
+  "suite": "realtime-fleet",
+  "commit": "c3ee60e",
+  "date": "2026-09-24T16:56:53.667Z",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores     ",
+    "memoryGiB": 255
+  },
+  "node": "v25.6.0",
+  "database": "pglite",
+  "config": {
+    "nodes": 2000,
+    "perNode": 1,
+    "sharedConnection": false,
+    "pollMs": 50,
+    "stormFraction": 1,
+    "loadRate": 200,
+    "loadMs": 30000
+  },
+  "connect": {
+    "elapsedMs": 31821
+  },
+  "ack": {
+    "count": 2000,
+    "p50": 1633,
+    "p90": 1763,
+    "p99": 1763,
+    "max": 1763
+  },
+  "terminal": {
+    "count": 2000,
+    "p50": 3538,
+    "p90": 3809,
+    "p99": 3809,
+    "max": 3809
+  },
+  "failed": 0,
+  "failures": [],
+  "load": {
+    "kind": "inventory.refresh",
+    "enqueued": 3580,
+    "offeredPerSecond": 118.77509040841379,
+    "completedPerSecond": 103.97606807818536,
+    "ack": {
+      "count": 3580,
+      "p50": 2914,
+      "p90": 3861,
+      "p99": 4101,
+      "max": 4302
+    },
+    "terminal": {
+      "count": 3580,
+      "p50": 4853,
+      "p90": 5460,
+      "p99": 5801,
+      "max": 6203
+    },
+    "failed": 0
+  },
+  "storm": {
+    "nodes": 2000,
+    "reconnect": {
+      "count": 2000,
+      "p50": 12524,
+      "p90": 16876,
+      "p99": 17678,
+      "max": 17918
+    },
+    "elapsedMs": 17919,
+    "missing": 0
+  },
+  "gate": {
+    "ackP99Ms": 2000,
+    "met": true,
+    "steadyAckP99Ms": 1500,
+    "steadyMet": false,
+    "placeToActive": "pending W5a"
+  }
+}
