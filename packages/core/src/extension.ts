@@ -317,6 +317,12 @@ export interface AttestationResult {
   certTtlSeconds?: number;
   /** Restricts the command kinds the certificate allows. */
   allowedKinds?: readonly string[];
+  /**
+   * A stable hardware identity the attestor proved (tpm: sha256 of the EK public key). JoinService
+   * binds it to the node after issuing (`node_bindings`, one node per `(attestor, subject)`); on a
+   * later join the attestor finds the node by it and returns `nodeId`.
+   */
+  bind?: Uint8Array;
 }
 
 /**
