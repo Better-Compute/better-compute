@@ -4,12 +4,63 @@ Provisioning for better-compute: workflow steps, profiles, and the workflow engi
 profile into persisted steps for one node or instance (PLAN.md §11.2). It depends on
 `@better-compute/core`, `@better-compute/protocol` and `@better-compute/inventory`.
 
-**Status: P0 stub.**
+**Status: v0.2 workflow engine.**
 
-- `defineStep` and `defineProfile` are implemented.
-- `provisionModule()` throws `NOT_IMPLEMENTED` ("workflow engine arrives in v0.2").
-- Arriving in v0.2: the workflow engine, the `profiles`, `images` and `workflows` API groups,
-  config units, renderers and the image catalog.
+- Implemented: `defineStep`, `defineProfile`, `provisionModule()` (the workflow engine, its
+  tables, the Workflow reconciler), `ctx.workflows`, and the `profiles` and `workflows` API
+  groups.
+- Still to come: the `images` group, config units, renderers and the image catalog.
+
+## The workflow engine (PLAN.md §11.2)
+
+```ts
+import { provisionModule } from 'better-compute/provision';
+
+const provision = provisionModule({ steps: [dcgm, renderIso], profiles: [ubuntuGpuHost] });
+// The host sets ModuleContext.workflows = provision.workflowEngine(context); modules then start
+// workflows in their own transaction:
+await context.workflows!.start(tx, { tenantId, profileId: 'ubuntu-24.04-gpu-host', profileVersion: 1, nodeId });
+```
+
+- **Expansion.** `start` pins the profile version, expands it (`expandProfile`) and persists the
+  workflow with every step. Each `use:` resolves to a registered step or, when the profile says
+  `on:`, to a driver operation `<concern>.<operation>` sent as a `driver.invoke` command.
+  `fallback:` is used when `use:` does not resolve. Acceptance steps follow the main steps, and
+  on-failure and cleanup steps are their own rows. A profile version is immutable once used.
+- **Persistence.** The `provision/0001_workflows` migration creates `profiles`, `workflows` and
+  `workflow_steps`. Partial unique indexes allow one active workflow and one in-flight step per
+  node, so the worker that next owns the node's shard resumes a crashed workflow.
+- **Execution.** The `workflow` reconciler (sharded by node) runs one transition per transaction,
+  with the workflow row locked.
+  - A `control-plane` step runs in the worker between two transactions, with idempotency key
+    `wf:<id>:<stepId>`. A crash re-runs it. It may throw `stepNotReady(ms)` to be run again later.
+  - Every other step is exactly one command. Its key is `wf:<id>:<stepId>`, then `#<attempt>` for
+    retries.
+  - An `await: 'rejoin'` step completes when the agent is back with a new `boot_id` or role. Its
+    command's own fate is ignored, and only its timeout fails it.
+- **Options.**
+  - `timeout` cancels the command and fails the step.
+  - `retries` re-runs the step with the next attempt.
+  - `onFailure` takes one of: `fail` (the default: the rest of the main phase is cancelled,
+    cleanup runs, and the workflow ends `failed`), `rescue` (the same, with `error.rescue`),
+    `continue`, or a step that runs before the workflow fails.
+  - `when:` is a small expression over the node's labels, e.g. `nvswitch && gpu.model=H100` or
+    `!mig.capable`. A false one skips the step.
+- **Verbs.**
+  - `abortWorkflow` cancels the in-flight command and pending steps, runs cleanup, and ends
+    `cancelled`.
+  - `pauseWorkflow` lets the in-flight step finish but starts nothing new, and `resumeWorkflow`
+    continues.
+  - `retryWorkflow` re-arms a failed workflow from a step with the next attempt numbers.
+- **Events.** It emits `workflow.created|started|succeeded|failed|cancelled|paused|resumed|retried`
+  and `workflow.step.started|succeeded|failed|retrying|skipped`.
+- **Built-in steps.** `wait.agentJoined` (optionally for a `role`) and `wait.generationObserved`.
+
+API (§9.2, v0.2 rows):
+
+- `profiles.create|get|validate|render|list|update|delete`. `validate` lists every unresolved
+  `use:` and rejected `with:`, and `render` returns the expanded steps.
+- `workflows.get|list|abort|retry`. These are decided on the node.
 
 ```ts
 import { field, manifest } from 'better-compute/core';

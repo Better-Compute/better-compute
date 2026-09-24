@@ -35,7 +35,6 @@ describe('module factories of the P0 stubs', () => {
   it.each([
     ['metal()', () => metal(), 'bare-metal provisioning', 'v0.2'],
     ['metal(options)', () => metal({ hardwareProfiles: {} }), 'bare-metal provisioning', 'v0.2'],
-    ['provisionModule()', () => provisionModule(), 'workflow engine', 'v0.2'],
   ] as const)('%s throws NOT_IMPLEMENTED naming its phase', (_label, create, feature, phase) => {
     const error = notImplemented(create);
     expect(error.message).toBe(`${feature} arrives in ${phase}`);
@@ -45,7 +44,6 @@ describe('module factories of the P0 stubs', () => {
 
   it('declare the modules they will return', () => {
     expectTypeOf(metal).returns.toEqualTypeOf<ComputeModule<'metal'>>();
-    expectTypeOf(provisionModule).returns.toEqualTypeOf<ComputeModule<'provision'>>();
   });
 
   // The VPS control plane landed in v0.3 (tests/vps-*.test.ts).
@@ -53,6 +51,13 @@ describe('module factories of the P0 stubs', () => {
     const module = vps({ runtimes: ['libvirt-kvm'] });
     expect(module.name).toBe('vps');
     expectTypeOf(module).toExtend<ComputeModule<'vps'>>();
+  });
+
+  // The workflow engine landed ahead of the rest of v0.2 (tests/provision-*.test.ts).
+  it('provisionModule() returns the provision module', () => {
+    const module = provisionModule();
+    expect(module.name).toBe('provision');
+    expectTypeOf(module).toExtend<ComputeModule<'provision'>>();
   });
 });
 

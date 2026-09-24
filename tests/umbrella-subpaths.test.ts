@@ -90,14 +90,8 @@ describe('the subpaths of umbrella.json', () => {
 });
 
 describe('the four named subpaths', () => {
-  it('better-compute/vps: vps() builds the vps module', async () => {
-    const { vps } = (await import('better-compute/vps')) as typeof import('@better-compute/vps');
-    expect(vps().name).toBe('vps');
-  });
-
   it.each([
     ['better-compute/metal', 'metal', 'bare-metal provisioning', 'v0.2'],
-    ['better-compute/provision', 'provisionModule', 'workflow engine', 'v0.2'],
   ])(
     '%s: %s() throws NOT_IMPLEMENTED naming its phase',
     async (specifier, name, feature, phase) => {
@@ -109,6 +103,16 @@ describe('the four named subpaths', () => {
       expect(error.details).toEqual({ feature, phase });
     },
   );
+
+  it('better-compute/vps: vps() builds the vps module', async () => {
+    const { vps } = (await load('better-compute/vps')) as typeof import('@better-compute/vps');
+    expect(vps().name).toBe('vps');
+  });
+
+  it('better-compute/provision: provisionModule() builds the provision module', async () => {
+    const { provisionModule } = (await load('better-compute/provision')) as typeof import('@better-compute/provision');
+    expect(provisionModule().name).toBe('provision');
+  });
 
   it('better-compute/inventory: inventoryModule answers NOT_IMPLEMENTED naming each phase', async () => {
     const { inventoryModule } = (await load(

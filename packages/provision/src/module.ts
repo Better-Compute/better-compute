@@ -1,12 +1,83 @@
-import { notImplemented, type ComputeModule } from '@better-compute/core';
+import {
+  defineModule,
+  type ComputeModule,
+  type ModuleContext,
+  type ProfileDocument,
+  type ReconcileContext,
+  type Reconciler,
+  type StepDefinition,
+  type WorkflowEngine,
+} from '@better-compute/core';
+import { provisionApi, type ProvisionApi } from './api.js';
+import { builtinSteps } from './builtin-steps.js';
+import {
+  abortWorkflow,
+  reconcileWorkflows,
+  startWorkflow,
+  workflowWorkKind,
+  type EngineContext,
+  type EngineOptions,
+} from './engine.js';
+import { stepRegistry } from './expand.js';
+import { provisionMigrations } from './migrations.js';
+import { profileSource } from './profiles.js';
+
+export interface ProvisionOptions {
+  /** Steps profiles may `use`, besides the built-ins (`wait.agentJoined`, `wait.generationObserved`). */
+  steps?: readonly StepDefinition[];
+  /** Profiles every tenant can start, besides stored ones (read-only; `profiles.list` shows them). */
+  profiles?: readonly ProfileDocument[];
+  /** Leave out the built-in steps. */
+  builtinSteps?: false;
+}
+
+/** The provision module, plus the `WorkflowEngine` the host puts on `ModuleContext.workflows`. */
+export interface ProvisionModule extends ComputeModule<'provision', ProvisionApi> {
+  /** The engine behind `ctx.workflows` (`start` in the caller's transaction, `abort`). */
+  workflowEngine(context: Pick<ModuleContext, 'work' | 'events' | 'commands'>): WorkflowEngine;
+  /** What the engine resolves steps and profiles with. */
+  readonly engineOptions: EngineOptions;
+}
 
 /**
- * The provision module: the workflow engine, the `profiles`, `images` and `workflows` groups,
- * config units, renderers and the image catalog (§11.2, §11.5). Injected by the application; the
- * server never imports it.
+ * The provision module (PLAN.md §11.2): the workflow engine and its tables, the Workflow
+ * reconciler (sharded by node), and the `profiles` and `workflows` API groups. Injected by the
+ * application; the server never imports it.
  *
- * @throws `NOT_IMPLEMENTED` until v0.2.
+ * ```ts
+ * const provision = provisionModule({ steps: [renderAutoinstallIso], profiles: [ubuntuGpuHost] });
+ * const compute = betterCompute({ modules: [provision, metal()], ... });
+ * ```
  */
-export function provisionModule(): ComputeModule<'provision'> {
-  throw notImplemented('workflow engine', 'v0.2');
+export function provisionModule(options: ProvisionOptions = {}): ProvisionModule {
+  const steps = stepRegistry([...(options.builtinSteps === false ? [] : builtinSteps), ...(options.steps ?? [])]);
+  const moduleProfiles = [...(options.profiles ?? [])];
+  const engineOptions: EngineOptions = { steps, profiles: profileSource(moduleProfiles) };
+
+  const reconciler: Reconciler = {
+    name: workflowWorkKind,
+    shardBy: 'node',
+    run: (context: ReconcileContext, key: string) =>
+      reconcileWorkflows(context, { ...engineOptions, signal: context.signal, stepContext: context }, key),
+  };
+
+  const module = defineModule({
+    name: 'provision',
+    migrations: [...provisionMigrations],
+    extensions: steps.list(),
+    profiles: moduleProfiles,
+    reconcilers: [reconciler],
+    api: (context: ModuleContext) => provisionApi(context, { ...engineOptions, moduleProfiles }),
+  });
+
+  return Object.freeze({
+    ...module,
+    engineOptions,
+    workflowEngine(context: EngineContext): WorkflowEngine {
+      return {
+        start: (tx, input) => startWorkflow(context, engineOptions, tx, input),
+        abort: (tx, workflowId) => abortWorkflow(context, tx, workflowId),
+      };
+    },
+  }) as ProvisionModule;
 }
