@@ -53,6 +53,10 @@ const allowed = await permissions.can(release);
   - A debounced `capacity.preview` shows whether the request would fit now.
   - One idempotency key per attempt, kept across retries and confirmations, so it never books twice. `reset()` starts a new attempt.
 
+- **Instance form** (`createInstanceForm`):
+  - Choosing a pool loads its flavors.
+  - Validation mirrors vps `instances.create`: size name, image, OpenSSH keys and 32 KiB of user data.
+  - One idempotency key per attempt, kept through confirmations.
 - **Admin views**:
   - `createRolloutView` / `rolloutProgress` show a rollout wave by wave: counts, failures with their errors, and whether pause, resume or abort applies now.
   - `createFleetDriftView` / `fleetDriftView` group the fleet's drift from its applied FleetConfig by object kind.
