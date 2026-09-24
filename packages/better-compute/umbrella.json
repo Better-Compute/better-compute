@@ -4,6 +4,7 @@
     "./core": "@better-compute/core",
     "./protocol": "@better-compute/protocol",
     "./inventory": "@better-compute/inventory",
+    "./capacity": "@better-compute/capacity",
     "./provision": "@better-compute/provision",
     "./metal": "@better-compute/metal",
     "./vps": "@better-compute/vps",
