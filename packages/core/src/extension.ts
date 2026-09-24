@@ -711,6 +711,11 @@ export interface InventoryPort {
 /** Publishes events through the outbox, in the caller's transaction. */
 export interface EventPublisher {
   publish(tx: SqlTx, event: Omit<ComputeEvent, 'id' | 'time' | 'sequence'>): Promise<void>;
+  /** Set-based publish of several events in one statement; callers fall back to `publish` when absent. */
+  publishMany?(
+    tx: SqlTx,
+    events: readonly Omit<ComputeEvent, 'id' | 'time' | 'sequence'>[],
+  ): Promise<void>;
 }
 
 /**
@@ -719,6 +724,16 @@ export interface EventPublisher {
  */
 export interface WorkQueue {
   enqueue(tx: SqlTx, kind: string, key: string, options?: { notBefore?: number }): Promise<void>;
+  /**
+   * Set-based enqueue of several keys of one kind in one statement (same coalescing as `enqueue`);
+   * callers fall back to `enqueue` when absent.
+   */
+  enqueueMany?(
+    tx: SqlTx,
+    kind: string,
+    keys: readonly string[],
+    options?: { notBefore?: number },
+  ): Promise<void>;
 }
 
 /** Attribute values IAM policies can read (better-iam attributes are string | number | boolean). */
