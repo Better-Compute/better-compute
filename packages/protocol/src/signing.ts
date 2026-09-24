@@ -29,7 +29,12 @@ export type SigningPurpose =
   /** Audit signing key; parts [canonical checkpoint body]. */
   | 'audit-checkpoint'
   /** Offline release signing key; parts [canonical release manifest body]. */
-  | 'release-manifest';
+  | 'release-manifest'
+  /**
+   * Node key of a possibly expired certificate (≤ 7 days, §6), re-joining via the x509pop attestor; parts
+   * [sha256(csr), node_id, client_time]. Separate from 'renew-pop' so a relayed Renew can't be replayed as a join.
+   */
+  | 'x509pop';
 
 const PREFIX = 'bettercompute.v1/';
 const utf8 = new TextEncoder();

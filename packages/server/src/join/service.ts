@@ -269,12 +269,13 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       });
     }
     const now = clock.now();
-    // Token-based attestors get the opened token; others their own evidence (v0.2+).
+    // `join-token` gets the opened token as its payload; every other attestor its own evidence
+    // (`JoinRequest.attestation`) plus the opened token, when there is one, as `evidence.token`.
     let payload = request.attestation ?? new Uint8Array(0);
+    let openedToken: string | undefined;
     if (request.sealedToken?.length) {
-      let token: string;
       try {
-        token = await crypto.openSealedToken(request.sealedToken, request.csr, now);
+        openedToken = await crypto.openSealedToken(request.sealedToken, request.csr, now);
       } catch (error) {
         log?.warn('join refused', {
           reason: 'sealed-token',
@@ -282,15 +283,15 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         });
         throw deny('token');
       }
-      payload = new TextEncoder().encode(token);
+      if (attestorId === 'join-token') payload = new TextEncoder().encode(openedToken);
     } else if (attestorId === 'join-token') throw deny('token');
 
     const key = claimedHardwareKey(request.claims);
     const revoked: string[] = [];
     const response = await database.transaction(async (tx) => {
       const result: AttestationResult = await attestor.verify(
-        { attestor: attestorId, payload },
-        { tx, clock, claims: coreClaims(request.claims), role },
+        { attestor: attestorId, payload, ...(openedToken ? { token: openedToken } : {}) },
+        { tx, clock, claims: coreClaims(request.claims), role, csrSha256: csr.sha256 },
       );
       if (result.role !== role) throw deny('role');
 

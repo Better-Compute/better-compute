@@ -286,13 +286,18 @@ export interface HardwareClaims {
 /** Evidence an agent presents at `Join`, produced by the attestor of the same id. */
 export interface AttestationEvidence {
   attestor: string;
+  /** `join-token`: the token bytes; every other attestor: `JoinRequest.attestation`. */
   payload: Uint8Array;
+  /** The opened sealed join token, whenever the request carried one (`provisioned`, `discovery` need it). */
+  token?: string;
 }
 
 export interface AttestationContext {
   tx: SqlTx;
   clock: Clock;
   claims: HardwareClaims;
+  /** SHA-256 of `JoinRequest.csr`; attestors that sign over the request (x509pop, cloud-iid) bind to it. */
+  csrSha256?: Uint8Array;
   /** The role the agent asks for. */
   role: AgentRole;
 }
