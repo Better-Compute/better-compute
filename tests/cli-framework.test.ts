@@ -149,6 +149,7 @@ describe('help and the manifest', () => {
       'version',
       'serve',
       'dev',
+      'sim',
       'api',
       'reserve',
       'release',
