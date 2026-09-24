@@ -1,0 +1,1399 @@
+import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
+import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
+import {
+  AccessSectionSchema,
+  AgentFrameSchema,
+  AgentRole,
+  AttestedReportBodySchema,
+  Binding,
+  CommandErrorSchema,
+  CommandRejectReason,
+  CommandState,
+  CommandUpdateSchema,
+  ConditionStatus,
+  DaemonSectionSchema,
+  DesiredStateBodySchema,
+  DevicesSectionSchema,
+  EventSchema,
+  HeartbeatSchema,
+  HostSectionSchema,
+  InstancesSectionSchema,
+  Lane,
+  NodeRebootResultSchema,
+  NodeSpecSchema,
+  PROTOCOL_VERSION,
+  SectionState,
+  SignatureSchema,
+  SpecRequestReason,
+  TelemetrySectionSchema,
+  encodeCommandResult,
+  site,
+  unwrapCommand,
+  unwrapDesiredState,
+  wrapAttestedReport,
+  type AgentFrame,
+  type AttestedReport,
+  type Cancel,
+  type Command,
+  type CommandBody,
+  type CommandUpdate,
+  type ConditionSchema,
+  type DesiredState,
+  type DevicesSection,
+  type DriverManifestSchema,
+  type Event,
+  type HelloSchema,
+  type NodeSpec,
+  type ProtocolRange,
+  type SectionStatusSchema,
+  type ServerFrame,
+  type StatusReportSchema,
+  type Welcome,
+} from '@better-compute/protocol';
+import type { EventLog, LogValue } from '../event-log.js';
+import { encodeInventorySections, fakeHardware, type EncodedSection, type FakeHardware } from '../fake-hw.js';
+import type { AgentConn, CloseInfo } from '../frame-conn.js';
+import { createRng, type Rng } from '../rng.js';
+import type { Scheduler, Timer } from '../scheduler.js';
+import type { DaemonFact, FactSink } from './facts.js';
+import {
+  COMMAND_TTL_MS,
+  JournalError,
+  MemoryJournal,
+  accept,
+  ackResult,
+  complete,
+  markRunning,
+  recordRejection,
+  recover,
+  resolve,
+  sweep,
+  type Delivery,
+  type EventClass,
+  type JournalCommand,
+  type JournalResult,
+  type RuleHooks,
+  type Runtime,
+} from './journal.js';
+import {
+  DEFAULT_CREDITS,
+  DEFAULT_WORKERS,
+  defaultFakeKinds,
+  type FakeDaemonKnobs,
+  type FakeKind,
+  type FakeKindContext,
+} from './kinds.js';
+
+/** Lifecycle of a fake node's daemon process. */
+export type FakeDaemonState = 'stopped' | 'running' | 'rebooting';
+
+export interface FakeDaemonOptions {
+  /** Must equal the node id in the certificate (the gateway checks Hello.node_id against it). */
+  nodeId: string;
+  scheduler: Scheduler;
+  /** Seeds ids (boot, journal, incarnation) and reconnect jitter (default: seeded from nodeId). */
+  rng?: Rng;
+  role?: AgentRole;
+  /** The node's hardware (default: `fakeHardware({ seed: nodeId })`, an HGX H100). */
+  hardware?: FakeHardware;
+  /** Opens a Session stream to the gateway; `undefined` means unreachable. Without it, call `connect()`. */
+  dial?: () => AgentConn | undefined;
+  daemonVersion?: string;
+  capabilities?: readonly string[];
+  drivers?: readonly MessageInitShape<typeof DriverManifestSchema>[];
+  protocol?: ProtocolRange;
+  /** The daemon's clock minus the server's (the Welcome offset corrects for it). */
+  clockSkewMs?: number;
+  /** Kinds this daemon runs, merged over the v0.1 defaults; `null` removes one. */
+  kinds?: Record<string, FakeKind | null>;
+  /** Worker pool per lane (default control 4, provision 2, bulk 1). */
+  workers?: Partial<Record<Lane, number>>;
+  /** Journal caps (default 64 MiB / 10k events). */
+  journal?: { maxEvents?: number; maxBytes?: number };
+  knobs?: Partial<FakeDaemonKnobs>;
+  /** How long a reboot keeps the node down (default 60 s). */
+  rebootDurationMs?: number;
+  /** Reconnect backoff with full jitter (default 1 s → 60 s). */
+  backoff?: { minMs: number; maxMs: number };
+  /** HTTP/2 PING period and timeout (default 20 s each). */
+  pingIntervalMs?: number;
+  pingTimeoutMs?: number;
+  /** A session without Welcome after this long is dropped (default 30 s). */
+  welcomeTimeoutMs?: number;
+  /** Retry period of a section that is still progressing (default 30 s). */
+  convergeRetryMs?: number;
+  /** Where uploads (logs.collect) land (default: `daemon.uploads`). */
+  objectStore?: Map<string, Uint8Array>;
+  facts?: FactSink;
+  log?: EventLog;
+}
+
+interface Session {
+  readonly conn: AgentConn;
+  welcomed: boolean;
+  epoch: number;
+  credits: Map<Lane, number>;
+  heartbeatIntervalMs: number;
+  heartbeats: number;
+  upgradeRequired: boolean;
+  reconnectAfterMs: number | undefined;
+  readonly timers: Timer[];
+}
+
+interface Exec {
+  readonly id: string;
+  readonly body: CommandBody;
+  readonly kind: FakeKind;
+  readonly lane: Lane;
+  phase: 'queued' | 'delay' | 'running';
+  timer: Timer | undefined;
+  cancelRequested: boolean;
+}
+
+interface Process {
+  readonly incarnation: string;
+  readonly timers: Set<Timer>;
+  readonly execs: Map<string, Exec>;
+  readonly queues: Map<Lane, Exec[]>;
+  readonly busyWorkers: Map<Lane, number>;
+  readonly creditsInUse: Map<Lane, number>;
+  readonly deferred: Map<string, { body: CommandBody; timer: Timer | undefined }>;
+  readonly overflow: { class: EventClass; kind: string; payload: Uint8Array }[];
+  readonly failedAllocations: Map<string, number>;
+  session: Session | undefined;
+  reconnectTimer: Timer | undefined;
+  reconnectAttempt: number;
+  offsetMs: number;
+  spec: NodeSpec | undefined;
+  observedGeneration: number;
+  lastStatus: MessageInitShape<typeof StatusReportSchema> | undefined;
+  collected: { sections: EncodedSection[]; at: number };
+  convergeTimer: Timer | undefined;
+}
+
+const LANES = [Lane.CONTROL, Lane.PROVISION, Lane.BULK] as const;
+const SECTION_ORDER = ['host', 'devices', 'instances', 'access', 'telemetry', 'daemon'] as const;
+const SECTION_FIELD: Record<string, number> = {
+  host: 1,
+  devices: 2,
+  instances: 3,
+  access: 4,
+  telemetry: 5,
+  daemon: 6,
+  site: 7,
+};
+const SECTION_SCHEMA = {
+  host: HostSectionSchema,
+  devices: DevicesSectionSchema,
+  instances: InstancesSectionSchema,
+  access: AccessSectionSchema,
+  telemetry: TelemetrySectionSchema,
+  daemon: DaemonSectionSchema,
+  site: site.SiteSpecSchema,
+} as const;
+const REJECT_REASONS: Record<string, CommandRejectReason> = {
+  UNSUPPORTED: CommandRejectReason.UNSUPPORTED,
+  BAD_SIGNATURE: CommandRejectReason.BAD_SIGNATURE,
+  EXPIRED: CommandRejectReason.EXPIRED,
+  STALE_GENERATION: CommandRejectReason.STALE_GENERATION,
+  BUSY: CommandRejectReason.BUSY,
+};
+const OUTCOME_STATE = {
+  succeeded: CommandState.SUCCEEDED,
+  failed: CommandState.FAILED,
+  rejected: CommandState.REJECTED,
+  cancelled: CommandState.CANCELLED,
+} as const;
+const EVENT_BATCH = 64;
+const CDI_DIR = '/etc/cdi/';
+const ENV_DIR = '/run/bcd/allocations/';
+
+/** Where the CDI hold of an allocation lives. */
+export const cdiSpecPath = (allocationId: string): string => `${CDI_DIR}bcd-${allocationId}.json`;
+/** Where the env file of an allocation lives (tmpfs: gone after a reboot, rewritten by the converger). */
+export const envFilePath = (allocationId: string): string => `${ENV_DIR}${allocationId}.env`;
+
+/** The precheck verdict (Go: dispatch.Verdict). */
+export type Verdict = { reject: string } | { defer: true } | { accept: true };
+
+const rejectionCode = (reason: string | undefined): CommandRejectReason =>
+  REJECT_REASONS[reason ?? ''] ?? CommandRejectReason.UNSPECIFIED;
+
+/**
+ * The daemon side of PLAN.md §7 in TypeScript, for tests and the fleet simulator. It mirrors the Go
+ * skeleton (daemon/internal/{journal,dispatch,session,converge}): the journal and its command rules,
+ * the acceptance checks in Go's `Precheck` order, lanes with credits and worker pools, Hello from the
+ * journal, heartbeats, reconnect with full-jitter backoff, desired state (full and patch) with a real
+ * devices converger (CDI holds as an in-memory file map) and the v0.1 command kinds.
+ *
+ * Everything runs on the given `Scheduler`; with a `SimScheduler` and a seeded `rng` it is
+ * deterministic. A crash keeps the journal and the files (the disk); a reboot also changes boot_id and
+ * clears /run; a journal loss starts a new journal_id.
+ */
+export class FakeDaemon {
+  readonly nodeId: string;
+  readonly role: AgentRole;
+  readonly daemonVersion: string;
+  readonly knobs: FakeDaemonKnobs;
+  /** logs.collect uploads, by URL (unless `objectStore` was given). */
+  readonly uploads: Map<string, Uint8Array>;
+  /** Side effects started per command id, over the node's whole life (survives crashes). */
+  readonly executions = new Map<string, number>();
+
+  private readonly scheduler: Scheduler;
+  private readonly rng: Rng;
+  private readonly options: FakeDaemonOptions;
+  private readonly kinds: Map<string, FakeKind>;
+  private readonly fs = new Map<string, string>();
+  private hw: FakeHardware;
+  private journalValue: MemoryJournal;
+  private bootIdValue: string;
+  private stateValue: FakeDaemonState = 'stopped';
+  private revokedValue = false;
+  private proc: Process | undefined;
+  private rebootTimer: Timer | undefined;
+  private readonly hooks: RuleHooks = {
+    rebootedPayload: (entry) =>
+      entry.kind === 'node.reboot'
+        ? encodeCommandResult('node.reboot', create(NodeRebootResultSchema, { previousBootId: entry.bootId ?? '' }))
+        : undefined,
+  };
+
+  constructor(options: FakeDaemonOptions) {
+    if (!options.nodeId) throw new TypeError('FakeDaemon needs a nodeId');
+    this.options = options;
+    this.nodeId = options.nodeId;
+    this.role = options.role ?? AgentRole.NODE;
+    this.daemonVersion = options.daemonVersion ?? '0.1.0';
+    this.scheduler = options.scheduler;
+    this.rng = options.rng ?? createRng(`fake-daemon/${options.nodeId}`);
+    this.hw = options.hardware ?? fakeHardware({ seed: options.nodeId });
+    this.uploads = options.objectStore ?? new Map();
+    this.knobs = { diag: {}, logs: {}, cdiWriteFailures: 0, ...options.knobs };
+    this.kinds = new Map(Object.entries(defaultFakeKinds));
+    for (const [name, kind] of Object.entries(options.kinds ?? {}))
+      if (kind === null) this.kinds.delete(name);
+      else this.kinds.set(name, kind);
+    this.bootIdValue = this.rng.uuid();
+    this.journalValue = this.newJournal();
+  }
+
+  // ---- observation ------------------------------------------------------------------------------
+
+  get state(): FakeDaemonState {
+    return this.stateValue;
+  }
+  /** The certificate was revoked: the daemon does not redial. */
+  get revoked(): boolean {
+    return this.revokedValue;
+  }
+  get bootId(): string {
+    return this.bootIdValue;
+  }
+  get incarnation(): string | undefined {
+    return this.proc?.incarnation;
+  }
+  get journal(): MemoryJournal {
+    return this.journalValue;
+  }
+  get journalId(): string {
+    return this.journalValue.meta().journalId;
+  }
+  get hardware(): FakeHardware {
+    return this.hw;
+  }
+  /** The node's files that the daemon manages (CDI specs, env files). */
+  get files(): ReadonlyMap<string, string> {
+    return this.fs;
+  }
+  get connected(): boolean {
+    return this.proc?.session !== undefined && !this.proc.session.conn.closed;
+  }
+  get welcomed(): boolean {
+    return this.proc?.session?.welcomed === true;
+  }
+  /** The epoch of the last Welcome (journal meta last_epoch). */
+  get epoch(): number {
+    return this.journalValue.meta().lastEpoch;
+  }
+  get appliedGeneration(): number {
+    return this.journalValue.meta().appliedGeneration;
+  }
+  get observedGeneration(): number {
+    return this.proc?.observedGeneration ?? 0;
+  }
+  /** The spec the daemon enforces (decoded from the journal). */
+  get spec(): NodeSpec | undefined {
+    return this.proc?.spec;
+  }
+  /** Commands waiting for a newer spec (min_generation). */
+  get deferred(): string[] {
+    return [...(this.proc?.deferred.keys() ?? [])];
+  }
+  /** Credits held per lane. */
+  creditsInUse(lane: Lane): number {
+    return this.proc?.creditsInUse.get(lane) ?? 0;
+  }
+  /** Allocation ids with a CDI hold on disk, sorted. */
+  boundAllocations(): string[] {
+    return [...this.observedAllocations().keys()].sort();
+  }
+  /** Device ids held by a CDI hold. */
+  assignedDevices(): Set<string> {
+    const out = new Set<string>();
+    for (const hold of this.observedAllocations().values()) for (const id of hold.deviceIds) out.add(id);
+    return out;
+  }
+  /** Server time as the daemon sees it (local clock + Welcome offset). */
+  serverNow(): number {
+    return this.localNow() + (this.proc?.offsetMs ?? 0);
+  }
+
+  // ---- lifecycle --------------------------------------------------------------------------------
+
+  /**
+   * Starts a daemon process: new incarnation, journal recovery (SUCCEEDED{rebooted} and
+   * FAILED{interrupted}), TTL sweep, inventory collection, the journaled spec enforced, then dial.
+   */
+  start(): void {
+    if (this.stateValue === 'running') throw new Error(`${this.nodeId} is already running`);
+    this.rebootTimer?.cancel();
+    this.rebootTimer = undefined;
+    const proc: Process = {
+      incarnation: `inc_${this.rng.hex(16)}`,
+      timers: new Set(),
+      execs: new Map(),
+      queues: new Map(LANES.map((lane) => [lane, []])),
+      busyWorkers: new Map(),
+      creditsInUse: new Map(),
+      deferred: new Map(),
+      overflow: [],
+      failedAllocations: new Map(),
+      session: undefined,
+      reconnectTimer: undefined,
+      reconnectAttempt: 0,
+      offsetMs: 0,
+      spec: undefined,
+      observedGeneration: 0,
+      lastStatus: undefined,
+      collected: { sections: [], at: 0 },
+      convergeTimer: undefined,
+    };
+    this.proc = proc;
+    this.stateValue = 'running';
+    this.log('process.start', { boot: this.bootIdValue, incarnation: proc.incarnation, journal: this.journalId });
+    this.fact({ type: 'process.started', at: this.scheduler.now(), nodeId: this.nodeId, bootId: this.bootIdValue, incarnation: proc.incarnation, reason: 'start' });
+
+    const rt = this.runtime();
+    for (const entry of recover(this.journalValue, rt, this.hooks)) {
+      this.log('command.recovered', { id: entry.id, outcome: entry.result?.outcome, reason: entry.result?.reason ?? null, rebooted: entry.result?.rebooted === true });
+      if (entry.result?.rebooted)
+        this.fact({ type: 'execution.ended', ...this.identity(entry), outcome: 'succeeded', rebooted: true });
+    }
+    sweep(this.journalValue, this.localNow(), COMMAND_TTL_MS);
+    this.collect(true);
+    const spec = this.journalValue.spec();
+    if (spec) {
+      const body = fromBinary(DesiredStateBodySchema, spec.body);
+      proc.spec = body.spec.case === 'full' ? body.spec.value : create(NodeSpecSchema);
+      this.converge('start');
+    }
+    this.every(60 * 60 * 1000, () => sweep(this.journalValue, this.localNow(), COMMAND_TTL_MS));
+    if (this.options.dial && !this.revokedValue) this.dialNow();
+  }
+
+  /** The daemon process dies. The journal and the files stay; everything in memory is lost. */
+  crash(reason = 'crash'): void {
+    if (this.stateValue === 'rebooting') {
+      this.rebootTimer?.cancel();
+      this.rebootTimer = undefined;
+      this.stateValue = 'stopped';
+      return;
+    }
+    const proc = this.proc;
+    if (!proc) return;
+    this.log('process.crash', { reason });
+    this.fact({ type: 'process.stopped', at: this.scheduler.now(), nodeId: this.nodeId, bootId: this.bootIdValue, incarnation: proc.incarnation, reason });
+    this.proc = undefined;
+    this.stateValue = 'stopped';
+    for (const timer of proc.timers) timer.cancel();
+    proc.timers.clear();
+    // A dead process's sockets close: the gateway sees a reset after one latency.
+    proc.session?.conn.abort(reason);
+  }
+
+  /** `start()` after a crash. */
+  restart(): void {
+    this.start();
+  }
+
+  /**
+   * Reboots the node: the process dies, boot_id changes, /run is cleared, and the daemon starts
+   * again after `durationMs` (default `rebootDurationMs`). With `loseJournal`, the journal is lost
+   * too (a ramdisk reboot or a reinstall).
+   */
+  reboot(options: { durationMs?: number; loseJournal?: boolean; reason?: string } = {}): void {
+    this.crash(options.reason ?? 'reboot');
+    this.bootIdValue = this.rng.uuid();
+    for (const path of [...this.fs.keys()]) if (path.startsWith('/run/')) this.fs.delete(path);
+    if (options.loseJournal) this.loseJournal();
+    this.stateValue = 'rebooting';
+    this.log('node.reboot', { boot: this.bootIdValue });
+    this.rebootTimer = this.scheduler.after(options.durationMs ?? this.options.rebootDurationMs ?? 60_000, () => {
+      this.rebootTimer = undefined;
+      if (this.stateValue !== 'rebooting') return;
+      this.stateValue = 'stopped';
+      this.start();
+    });
+  }
+
+  /** Replaces the journal with an empty one (new journal_id). The daemon must not be running. */
+  loseJournal(): void {
+    if (this.stateValue === 'running') throw new Error('loseJournal() needs a stopped daemon: crash() first');
+    const oldJournalId = this.journalId;
+    this.journalValue = this.newJournal();
+    this.log('journal.lost', { old: oldJournalId, journal: this.journalId });
+    this.fact({ type: 'journal.lost', at: this.scheduler.now(), nodeId: this.nodeId, oldJournalId, newJournalId: this.journalId });
+  }
+
+  /** Swaps the hardware (e.g. a GPU falls off the bus); picked up by the next rescan or start. */
+  setHardware(hardware: FakeHardware): void {
+    this.hw = hardware;
+  }
+
+  /** Opens a session on `conn`: sends Hello from the journal and waits for Welcome. */
+  connect(conn: AgentConn): void {
+    const proc = this.requireProcess();
+    if (proc.session) proc.session.conn.abort('replaced');
+    proc.reconnectTimer?.cancel();
+    proc.reconnectTimer = undefined;
+    const session: Session = {
+      conn,
+      welcomed: false,
+      epoch: 0,
+      credits: new Map(),
+      heartbeatIntervalMs: 10_000,
+      heartbeats: 0,
+      upgradeRequired: false,
+      reconnectAfterMs: undefined,
+      timers: [],
+    };
+    proc.session = session;
+    conn.onFrame((frame) => this.onServerFrame(session, frame));
+    conn.onClose((info) => this.onSessionClosed(session, info));
+    this.log('session.open', { conn: conn.id });
+    conn.send(create(AgentFrameSchema, { msg: { case: 'hello', value: this.hello() } }));
+    session.timers.push(
+      this.later(this.options.welcomeTimeoutMs ?? 30_000, () => {
+        if (proc.session === session && !session.welcomed) this.dropSession(session, 'welcome-timeout');
+      }),
+    );
+    const pingEvery = this.options.pingIntervalMs ?? 20_000;
+    const ping = () => {
+      if (proc.session !== session || conn.closed) return;
+      conn.ping(this.options.pingTimeoutMs ?? 20_000, (alive) => {
+        if (!alive && proc.session === session && !conn.closed) this.dropSession(session, 'ping-timeout');
+      });
+      session.timers.push(this.later(pingEvery, ping));
+    };
+    session.timers.push(this.later(pingEvery, ping));
+  }
+
+  /** Resets the current session (the daemon redials when it has `dial`). */
+  disconnect(reason = 'disconnect'): void {
+    const session = this.proc?.session;
+    if (session) this.dropSession(session, reason);
+  }
+
+  /** Journals a metric-like event (droppable when the journal is full). Sim-only: v1 Events carry no metric body. */
+  emitMetric(kind = 'metric.sample'): void {
+    this.requireProcess();
+    this.emitEvent('metric', kind, { case: undefined });
+  }
+
+  /** Runs the converger once over the enforced spec. */
+  converge(cause = 'manual'): void {
+    const proc = this.proc;
+    if (!proc) return;
+    proc.convergeTimer?.cancel();
+    proc.convergeTimer = undefined;
+    const spec = proc.spec;
+    const generation = this.appliedGeneration;
+    if (!spec) return;
+    const sections: MessageInitShape<typeof SectionStatusSchema>[] = [];
+    const conditions: MessageInitShape<typeof ConditionSchema>[] = [];
+    let progressing = false;
+    const unsupported = (section: string, no: number) => {
+      sections.push({ section, state: SectionState.UNSUPPORTED, generation: BigInt(generation), reason: 'SectionUnsupported' });
+      conditions.push({ type: 'SectionUnsupported', status: ConditionStatus.TRUE, reason: String(no), message: `section ${section} is not supported by bcd ${this.daemonVersion}` });
+    };
+    const trivial = (name: keyof typeof SECTION_SCHEMA, value: unknown) => {
+      if (value === undefined || toBinary(SECTION_SCHEMA[name] as never, value as never).byteLength === 0)
+        sections.push({ section: name, state: SectionState.CONVERGED, generation: BigInt(generation) });
+      else unsupported(name, SECTION_FIELD[name]!);
+    };
+    for (const name of SECTION_ORDER) {
+      if (name === 'devices') {
+        const report = this.convergeDevices(spec.devices, generation);
+        if (report.state === SectionState.PROGRESSING) progressing = true;
+        sections.push({ section: 'devices', generation: BigInt(generation), ...report });
+      } else if (name === 'telemetry') {
+        // Recorded as the OTLP target; nothing to materialize in the fake.
+        sections.push({ section: 'telemetry', state: SectionState.CONVERGED, generation: BigInt(generation) });
+      } else trivial(name, spec[name]);
+    }
+    if (spec.site !== undefined) trivial('site', spec.site);
+    const unknown = [...new Set((spec.$unknown ?? []).map((field) => field.no))].sort((a, b) => a - b);
+    for (const no of unknown) unsupported(String(no), no);
+    if (!progressing && generation > proc.observedGeneration) proc.observedGeneration = generation;
+    proc.lastStatus = {
+      observedGeneration: BigInt(proc.observedGeneration),
+      appliedGeneration: BigInt(generation),
+      appliedSpecHash: this.journalValue.spec()?.hash ?? new Uint8Array(),
+      sections,
+      conditions,
+    };
+    this.log('converge', { cause, generation, observed: proc.observedGeneration, progressing });
+    this.sendStatus();
+    if (progressing)
+      proc.convergeTimer = this.later(this.options.convergeRetryMs ?? 30_000, () => this.converge('retry'));
+  }
+
+  // ---- session ----------------------------------------------------------------------------------
+
+  private hello(): MessageInitShape<typeof HelloSchema> {
+    const proc = this.requireProcess();
+    const meta = this.journalValue.meta();
+    if (meta.nodeId && meta.nodeId !== this.nodeId)
+      throw new Error(`the journal belongs to node ${meta.nodeId}, not ${this.nodeId}`);
+    const unacked: CommandUpdate[] = [];
+    const running: string[] = [];
+    for (const entry of this.journalValue.commands()) {
+      if (entry.state === 'done' && !entry.resultAcked) unacked.push(this.updateOf(entry.id, entry.result!));
+      else if (entry.state !== 'done' && entry.incarnation === proc.incarnation) running.push(entry.id);
+    }
+    const range = this.options.protocol ?? PROTOCOL_VERSION;
+    return {
+      nodeId: this.nodeId,
+      bootId: this.bootIdValue,
+      journalId: meta.journalId,
+      role: this.role,
+      daemonVersion: this.daemonVersion,
+      protoMin: range.min,
+      protoMax: range.max,
+      capabilities: [...(this.options.capabilities ?? (this.hw.gpuUuids.length > 0 ? ['cdi', 'nvml'] : []))],
+      drivers: [
+        ...(this.options.drivers ??
+          (this.hw.gpuUuids.length > 0
+            ? [{ id: 'nvidia', version: this.daemonVersion, kinds: ['config'], configSchemaJson: '{"type":"object"}' }]
+            : [])),
+      ],
+      lastEpoch: BigInt(meta.lastEpoch),
+      appliedGeneration: BigInt(meta.appliedGeneration),
+      unackedResults: unacked,
+      runningCommandIds: running,
+      lastEventSeq: BigInt(meta.eventSeq),
+      inventoryHashes: Object.fromEntries(proc.collected.sections.map((s) => [s.name, s.sha256])),
+      appliedSpecHash: this.journalValue.spec()?.hash ?? new Uint8Array(),
+    };
+  }
+
+  private dialNow(): void {
+    const proc = this.proc;
+    if (!proc || proc.session || this.revokedValue || !this.options.dial) return;
+    proc.reconnectTimer = undefined;
+    const conn = this.options.dial();
+    if (!conn) {
+      this.log('session.dial-failed', { attempt: proc.reconnectAttempt });
+      this.scheduleReconnect();
+      return;
+    }
+    this.connect(conn);
+  }
+
+  private scheduleReconnect(delayMs?: number): void {
+    const proc = this.proc;
+    if (!proc || !this.options.dial || this.revokedValue || proc.reconnectTimer) return;
+    let delay = delayMs;
+    if (delay === undefined) {
+      const { minMs, maxMs } = this.options.backoff ?? { minMs: 1_000, maxMs: 60_000 };
+      let ceiling = minMs;
+      for (let i = 0; i < proc.reconnectAttempt && ceiling < maxMs; i++) ceiling *= 2;
+      ceiling = Math.min(ceiling, maxMs);
+      delay = ceiling <= 0 ? 0 : Math.floor(this.rng.next() * (ceiling + 1));
+      proc.reconnectAttempt++;
+    }
+    this.log('session.redial', { in: delay });
+    proc.reconnectTimer = this.later(delay, () => this.dialNow());
+  }
+
+  private dropSession(session: Session, reason: string): void {
+    this.log('session.drop', { reason });
+    session.conn.abort(reason);
+  }
+
+  private onSessionClosed(session: Session, info: CloseInfo): void {
+    const proc = this.proc;
+    for (const timer of session.timers) timer.cancel();
+    if (!proc || proc.session !== session) return;
+    proc.session = undefined;
+    this.log('session.closed', { reason: info.reason, by: info.by });
+    this.scheduleReconnect(session.reconnectAfterMs);
+  }
+
+  private send(session: Session | undefined, msg: AgentFrame['msg']): boolean {
+    if (!session || !session.welcomed || session.conn.closed) return false;
+    return session.conn.send(create(AgentFrameSchema, { msg }));
+  }
+
+  private onServerFrame(session: Session, frame: ServerFrame): void {
+    const proc = this.proc;
+    if (!proc || proc.session !== session) return;
+    const msg = frame.msg;
+    if (msg.case === 'welcome') return this.onWelcome(session, msg.value);
+    if (!session.welcomed) {
+      this.dropSession(session, `protocol: ${msg.case ?? 'empty frame'} before Welcome`);
+      return;
+    }
+    switch (msg.case) {
+      case 'command':
+        return this.onCommand(session, msg.value);
+      case 'cancel':
+        return this.onCancel(session, msg.value);
+      case 'desired':
+        return this.onDesired(session, msg.value);
+      case 'ack': {
+        // Go: session.ApplyAck.
+        const meta = this.journalValue.meta();
+        if (msg.value.journalId === meta.journalId) this.journalValue.ackEvents(Number(msg.value.eventSeq));
+        for (const id of msg.value.commandIds) {
+          const entry = this.journalValue.command(id);
+          if (!entry || entry.state !== 'done' || entry.resultAcked) continue;
+          ackResult(this.journalValue, id);
+        }
+        this.retryOverflow();
+        return;
+      }
+      case 'drain':
+        this.log('session.drain', { after: msg.value.reconnectAfterMs });
+        session.reconnectAfterMs = msg.value.reconnectAfterMs;
+        session.conn.close('drain');
+        return;
+      case 'revoked':
+        this.log('session.revoked', { reason: msg.value.reason });
+        this.revokedValue = true;
+        session.conn.close('revoked');
+        return;
+      default:
+        this.log('frame.ignored', { case: msg.case ?? null });
+    }
+  }
+
+  private onWelcome(session: Session, welcome: Welcome): void {
+    const proc = this.requireProcess();
+    if (session.welcomed) {
+      this.log('frame.ignored', { case: 'welcome', why: 'duplicate' });
+      return;
+    }
+    session.welcomed = true;
+    session.epoch = Number(welcome.epoch);
+    // Go: session.ApplyWelcome.
+    const meta = this.journalValue.meta();
+    this.journalValue.saveMeta({ ...meta, lastEpoch: session.epoch });
+    this.journalValue.ackEvents(Number(welcome.ackedEventSeq));
+    if (welcome.serverTime) proc.offsetMs = timestampMs(welcome.serverTime) - this.localNow();
+    for (const lane of LANES) session.credits.set(lane, DEFAULT_CREDITS[lane]);
+    for (const credit of welcome.credits) session.credits.set(credit.lane, credit.credits);
+    session.heartbeatIntervalMs = welcome.heartbeatIntervalMs > 0 ? welcome.heartbeatIntervalMs : 10_000;
+    session.upgradeRequired = welcome.upgradeRequired;
+    proc.reconnectAttempt = 0;
+    this.log('session.welcome', { epoch: session.epoch, acked: Number(welcome.ackedEventSeq), sections: welcome.requestSections });
+    const wanted = new Set(welcome.requestSections);
+    this.sendInventory(proc.collected.sections.filter((s) => wanted.has(s.name)));
+    this.sendUnackedEvents(session);
+    this.sendStatus();
+    const beat = () => {
+      if (proc.session !== session || session.conn.closed) return;
+      this.heartbeat(session);
+      session.timers.push(this.later(session.heartbeatIntervalMs, beat));
+    };
+    session.timers.push(this.later(session.heartbeatIntervalMs, beat));
+  }
+
+  private heartbeat(session: Session): void {
+    const proc = this.requireProcess();
+    session.heartbeats++;
+    let running = 0;
+    for (const count of proc.busyWorkers.values()) running += count;
+    const memory = this.hw.inventory.memory?.totalBytes ?? 0n;
+    this.send(session, {
+      case: 'heartbeat',
+      value: create(HeartbeatSchema, {
+        credits: LANES.map((lane) => ({
+          lane,
+          credits: Math.max(0, (session.credits.get(lane) ?? 0) - (proc.creditsInUse.get(lane) ?? 0)),
+        })),
+        load: {
+          loadAverage1m: running * 0.5,
+          memoryAvailableBytes: memory / 2n,
+          runningCommands: running,
+          pendingEvents: this.journalValue.eventStats().count,
+        },
+        // Every 10th heartbeat carries the inventory hashes (PLAN.md §10.1).
+        inventoryHashes:
+          session.heartbeats % 10 === 0
+            ? Object.fromEntries(proc.collected.sections.map((s) => [s.name, s.sha256]))
+            : {},
+        appliedGeneration: BigInt(this.appliedGeneration),
+      }),
+    });
+  }
+
+  // ---- commands ---------------------------------------------------------------------------------
+
+  private onCommand(session: Session, command: Command): void {
+    let body: CommandBody;
+    try {
+      body = unwrapCommand(command);
+    } catch (error) {
+      this.log('command.undecodable', { error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    if (!body.id) {
+      this.log('command.undecodable', { error: 'missing id' });
+      return;
+    }
+    const delivery = this.deliveryOf(body);
+    const decision = resolve(this.journalValue, delivery, this.runtime(), this.hooks);
+    this.log('command.deliver', { id: body.id, kind: body.kind, attempt: command.attempt, action: decision.action });
+    switch (decision.action) {
+      case 'resend':
+      case 'report':
+        this.sendResult(session, body.id, decision.result!);
+        return;
+      case 'reattach':
+        return;
+      case 'execute':
+      case 'reexecute':
+        this.admit(body, false);
+    }
+  }
+
+  /** Go: dispatch.Precheck, in its order. */
+  precheck(body: CommandBody, deferred: boolean): Verdict {
+    if (body.nodeId !== this.nodeId) return { reject: 'UNSUPPORTED' };
+    if (this.proc?.session?.upgradeRequired && body.kind !== 'daemon.upgrade') return { reject: 'UNSUPPORTED' };
+    const kind = this.kinds.get(body.kind);
+    if (!kind || !kind.roles.includes(this.role)) return { reject: 'UNSUPPORTED' };
+    const notAfter = body.notAfter ? timestampMs(body.notAfter) : 0;
+    const pastDeadline = !(this.serverNow() < notAfter);
+    if (Number(body.minGeneration) > this.appliedGeneration) {
+      if (!pastDeadline) return { defer: true };
+      if (deferred) return { reject: 'STALE_GENERATION' };
+    }
+    if (pastDeadline) return { reject: 'EXPIRED' };
+    return { accept: true };
+  }
+
+  private admit(body: CommandBody, deferred: boolean): void {
+    const proc = this.requireProcess();
+    const session = proc.session;
+    const known = proc.deferred.get(body.id);
+    if (known && !deferred) return; // a duplicate of a command already waiting for its spec
+    const verdict = this.precheck(body, deferred);
+    const delivery = this.deliveryOf(body);
+    if ('defer' in verdict) {
+      if (known) return;
+      const notAfter = body.notAfter ? timestampMs(body.notAfter) : 0;
+      const timer = this.later(Math.max(0, notAfter - this.serverNow()), () => {
+        if (proc.deferred.has(body.id)) this.admit(body, true);
+      });
+      proc.deferred.set(body.id, { body, timer });
+      this.log('command.defer', { id: body.id, min: Number(body.minGeneration), applied: this.appliedGeneration });
+      this.send(session, {
+        case: 'specRequest',
+        value: { haveGeneration: BigInt(this.appliedGeneration), reason: SpecRequestReason.MIN_GENERATION },
+      } as AgentFrame['msg']);
+      return;
+    }
+    if (known) {
+      known.timer?.cancel();
+      proc.deferred.delete(body.id);
+    }
+    if ('reject' in verdict) {
+      const result = recordRejection(this.journalValue, delivery, verdict.reject, this.runtime(), this.bootIdValue);
+      this.log('command.reject', { id: body.id, reason: verdict.reject });
+      this.sendResult(session, body.id, result);
+      return;
+    }
+    const kind = this.kinds.get(body.kind)!;
+    const lane = kind.lane;
+    const limit = session?.credits.get(lane) ?? DEFAULT_CREDITS[lane];
+    const inUse = proc.creditsInUse.get(lane) ?? 0;
+    if (inUse >= limit || proc.overflow.length > 0) {
+      this.log('command.busy', { id: body.id, lane, inUse, limit, journalFull: proc.overflow.length > 0 });
+      this.send(session, {
+        case: 'update',
+        value: { commandId: body.id, state: CommandState.REJECTED, rejectReason: CommandRejectReason.BUSY, bootId: this.bootIdValue },
+      } as AgentFrame['msg']);
+      return;
+    }
+    accept(this.journalValue, delivery, this.runtime());
+    proc.creditsInUse.set(lane, inUse + 1);
+    this.fact({ type: 'command.accepted', ...this.identityOf(body) });
+    this.log('command.accept', { id: body.id, kind: body.kind, lane });
+    this.sendUpdate(body.id, CommandState.ACKED);
+    const exec: Exec = { id: body.id, body, kind, lane, phase: 'queued', timer: undefined, cancelRequested: false };
+    proc.execs.set(body.id, exec);
+    proc.queues.get(lane)!.push(exec);
+    this.pump(lane);
+  }
+
+  private pump(lane: Lane): void {
+    const proc = this.requireProcess();
+    const queue = proc.queues.get(lane)!;
+    const workers = this.options.workers?.[lane] ?? DEFAULT_WORKERS[lane];
+    while (queue.length > 0 && (proc.busyWorkers.get(lane) ?? 0) < workers) {
+      const exec = queue.shift()!;
+      proc.busyWorkers.set(lane, (proc.busyWorkers.get(lane) ?? 0) + 1);
+      this.startExec(exec);
+    }
+  }
+
+  private startExec(exec: Exec): void {
+    const duration =
+      typeof exec.kind.durationMs === 'function' ? exec.kind.durationMs(exec.body) : (exec.kind.durationMs ?? 1_000);
+    if (exec.kind.effect === 'reboot') {
+      // Self-terminating: running{boot_id} is journaled immediately before the side effect.
+      exec.phase = 'delay';
+      exec.timer = this.later(duration, () => {
+        exec.phase = 'running';
+        this.run(exec);
+        this.reboot({ reason: `node.reboot ${exec.id}` });
+      });
+      return;
+    }
+    exec.phase = 'running';
+    this.run(exec);
+    exec.timer = this.later(duration, () => this.finishExec(exec));
+  }
+
+  /** Journals running{boot_id} and records the side effect's start. */
+  private run(exec: Exec): void {
+    markRunning(this.journalValue, exec.id, this.runtime());
+    this.executions.set(exec.id, (this.executions.get(exec.id) ?? 0) + 1);
+    this.fact({ type: 'execution.started', ...this.identityOf(exec.body) });
+    this.log('command.run', { id: exec.id, kind: exec.body.kind });
+    this.sendUpdate(exec.id, CommandState.RUNNING);
+  }
+
+  private finishExec(exec: Exec): void {
+    const proc = this.requireProcess();
+    const outcome = exec.kind.run?.(this.kindContext(exec.body)) ?? { outcome: 'succeeded' as const };
+    const result: JournalResult =
+      outcome.outcome === 'succeeded'
+        ? { outcome: 'succeeded', bootId: this.bootIdValue }
+        : { outcome: 'failed', reason: outcome.code, bootId: this.bootIdValue };
+    if (outcome.outcome === 'failed' && outcome.message) result.message = outcome.message;
+    if (outcome.result) result.payload = outcome.result;
+    complete(this.journalValue, exec.id, result, this.localNow());
+    this.fact({ type: 'execution.ended', ...this.identityOf(exec.body), outcome: result.outcome, rebooted: false });
+    this.log('command.done', { id: exec.id, outcome: result.outcome, reason: result.reason ?? null, cancelRequested: exec.cancelRequested });
+    this.release(exec);
+    this.sendResult(proc.session, exec.id, result);
+    this.pump(exec.lane);
+  }
+
+  private release(exec: Exec): void {
+    const proc = this.requireProcess();
+    proc.execs.delete(exec.id);
+    proc.creditsInUse.set(exec.lane, Math.max(0, (proc.creditsInUse.get(exec.lane) ?? 0) - 1));
+    if (exec.phase !== 'queued')
+      proc.busyWorkers.set(exec.lane, Math.max(0, (proc.busyWorkers.get(exec.lane) ?? 0) - 1));
+  }
+
+  private onCancel(session: Session, cancel: Cancel): void {
+    const proc = this.requireProcess();
+    const id = cancel.commandId;
+    const exec = proc.execs.get(id);
+    const cancelled = (): JournalResult => ({ outcome: 'cancelled', reason: cancel.reason || 'cancelled', bootId: this.bootIdValue });
+    if (exec) {
+      if (exec.phase === 'running') {
+        // The side effect started: its real outcome is reported (never hidden).
+        exec.cancelRequested = true;
+        this.log('command.cancel', { id, effect: 'too-late' });
+        return;
+      }
+      if (exec.phase === 'queued') {
+        const queue = proc.queues.get(exec.lane)!;
+        queue.splice(queue.indexOf(exec), 1);
+      }
+      exec.timer?.cancel();
+      const result = cancelled();
+      complete(this.journalValue, id, result, this.localNow());
+      this.log('command.cancel', { id, effect: 'cancelled' });
+      this.release(exec);
+      this.sendResult(session, id, result);
+      this.pump(exec.lane);
+      return;
+    }
+    const waiting = proc.deferred.get(id);
+    if (waiting) {
+      waiting.timer?.cancel();
+      proc.deferred.delete(id);
+      const result = cancelled();
+      this.journalValue.putCommand({
+        ...this.deliveryOf(waiting.body),
+        state: 'done',
+        incarnation: proc.incarnation,
+        result,
+        resultAcked: false,
+        updatedAt: this.localNow(),
+      });
+      this.log('command.cancel', { id, effect: 'cancelled-deferred' });
+      this.sendResult(session, id, result);
+      return;
+    }
+    this.log('command.cancel', { id, effect: 'unknown' });
+  }
+
+  /** A journaled result as the CommandUpdate that reports (or replays) it. */
+  private updateOf(id: string, result: JournalResult): CommandUpdate {
+    const update = create(CommandUpdateSchema, {
+      commandId: id,
+      state: OUTCOME_STATE[result.outcome],
+      result: result.payload ?? new Uint8Array(),
+      bootId: result.bootId ?? this.bootIdValue,
+      rebooted: result.rebooted === true,
+    });
+    if (result.outcome === 'rejected') update.rejectReason = rejectionCode(result.reason);
+    if (result.outcome === 'failed')
+      update.error = create(CommandErrorSchema, { code: result.reason ?? 'internal', message: result.message ?? '' });
+    return update;
+  }
+
+  private sendResult(session: Session | undefined, id: string, result: JournalResult): void {
+    this.send(session, { case: 'update', value: this.updateOf(id, result) } as AgentFrame['msg']);
+  }
+
+  private sendUpdate(id: string, state: CommandState): void {
+    this.send(this.proc?.session, {
+      case: 'update',
+      value: { commandId: id, state, bootId: this.bootIdValue },
+    } as AgentFrame['msg']);
+  }
+
+  // ---- desired state ----------------------------------------------------------------------------
+
+  private onDesired(session: Session, desired: DesiredState): void {
+    const proc = this.requireProcess();
+    let body;
+    try {
+      body = unwrapDesiredState(desired);
+    } catch (error) {
+      this.log('spec.undecodable', { error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    if (body.nodeId !== this.nodeId) {
+      this.log('spec.ignored', { why: 'node-id', nodeId: body.nodeId });
+      return;
+    }
+    const generation = Number(body.generation);
+    const applied = this.appliedGeneration;
+    if (generation <= applied) {
+      this.log('spec.ignored', { why: 'stale', generation, applied });
+      return;
+    }
+    let spec: NodeSpec;
+    if (body.spec.case === 'patch') {
+      if (Number(body.baseGeneration) !== applied || !proc.spec) {
+        this.log('spec.patch-mismatch', { base: Number(body.baseGeneration), applied });
+        this.send(session, {
+          case: 'specRequest',
+          value: { haveGeneration: BigInt(applied), reason: SpecRequestReason.PATCH_BASE_MISMATCH },
+        } as AgentFrame['msg']);
+        return;
+      }
+      spec = mergeSpec(proc.spec, body.spec.value);
+    } else spec = body.spec.case === 'full' ? body.spec.value : create(NodeSpecSchema);
+    const full = create(DesiredStateBodySchema, {
+      nodeId: body.nodeId,
+      generation: body.generation,
+      baseGeneration: 0n,
+      specHash: body.specHash,
+      spec: { case: 'full', value: spec },
+      traceparent: body.traceparent,
+    });
+    this.journalValue.saveSpec({
+      generation,
+      hash: body.specHash,
+      body: toBinary(DesiredStateBodySchema, full),
+      signature: desired.signature ? toBinary(SignatureSchema, desired.signature) : new Uint8Array(),
+    });
+    this.journalValue.saveMeta({ ...this.journalValue.meta(), appliedGeneration: generation });
+    proc.spec = spec;
+    this.log('spec.apply', { generation, patch: body.spec.case === 'patch' });
+    this.converge('spec');
+    for (const { body: waiting } of [...proc.deferred.values()]) this.admit(waiting, true);
+  }
+
+  private observedAllocations(): Map<string, { deviceIds: string[]; generation: number; reservationId: string }> {
+    const out = new Map<string, { deviceIds: string[]; generation: number; reservationId: string }>();
+    for (const [path, text] of this.fs) {
+      if (!path.startsWith(CDI_DIR)) continue;
+      const spec = JSON.parse(text) as {
+        annotations: Record<string, string>;
+        devices: { name: string }[];
+      };
+      const id = spec.annotations['bcd.dev/allocation-id'];
+      if (!id) continue;
+      out.set(id, {
+        deviceIds: spec.devices.map((d) => d.name),
+        generation: Number(spec.annotations['bcd.dev/generation'] ?? 0),
+        reservationId: spec.annotations['bcd.dev/reservation-id'] ?? '',
+      });
+    }
+    return out;
+  }
+
+  /**
+   * The devices converger: releases holds no longer desired, keeps the ones still desired (rewriting
+   * a missing env file), and binds new ones in spec order unless a device is missing or already
+   * held (overlap → AllocationFailed, section FAILED). It never drops a hold on its own (P6).
+   */
+  private convergeDevices(
+    section: DevicesSection | undefined,
+    generation: number,
+  ): { state: SectionState; reason?: string; message?: string } {
+    const proc = this.requireProcess();
+    const desired = section?.assignments ?? [];
+    const observed = this.observedAllocations();
+    const wantedIds = new Set(desired.map((a) => a.allocationId));
+    for (const [allocationId, hold] of [...observed].sort(([a], [b]) => (a < b ? -1 : 1))) {
+      if (wantedIds.has(allocationId)) continue;
+      this.fs.delete(cdiSpecPath(allocationId));
+      this.fs.delete(envFilePath(allocationId));
+      observed.delete(allocationId);
+      this.log('alloc.released', { allocation: allocationId, generation });
+      this.fact({ type: 'allocation.unbound', at: this.scheduler.now(), nodeId: this.nodeId, allocationId, deviceIds: hold.deviceIds, generation });
+      this.emitEvent('transition', 'allocation.released', {
+        case: 'attested',
+        value: this.attested({ case: 'allocationReleased', value: { allocationId, generation: BigInt(generation), deviceIds: hold.deviceIds } }),
+      });
+    }
+    const claimed = new Map<string, string>();
+    for (const a of desired) {
+      const hold = observed.get(a.allocationId);
+      if (hold) for (const id of hold.deviceIds) claimed.set(id, a.allocationId);
+    }
+    const gpus = new Set(this.hw.gpuUuids);
+    const failures: string[] = [];
+    let progressing = false;
+    const fail = (allocationId: string, reason: string, message: string) => {
+      failures.push(`${allocationId}: ${reason}`);
+      if (proc.failedAllocations.get(allocationId) === generation) return;
+      proc.failedAllocations.set(allocationId, generation);
+      this.log('alloc.failed', { allocation: allocationId, reason, generation });
+      this.emitEvent('transition', 'allocation.failed', {
+        case: 'allocationFailed',
+        value: { allocationId, generation: BigInt(generation), reason, message },
+      });
+    };
+    for (const assignment of desired) {
+      const allocationId = assignment.allocationId;
+      const ids = assignment.devices.map((d) => d.id);
+      const hold = observed.get(allocationId);
+      if (hold) {
+        if (!this.fs.has(envFilePath(allocationId))) this.fs.set(envFilePath(allocationId), envFile(assignment));
+        continue;
+      }
+      if (assignment.binding !== Binding.HOLD) {
+        fail(allocationId, 'unsupported-binding', `binding ${Binding[assignment.binding]} is not supported in v0.1`);
+        continue;
+      }
+      const foreign = assignment.devices.find((d) => d.deviceClass !== '' && d.deviceClass !== 'gpu');
+      if (foreign) {
+        fail(allocationId, 'unsupported-device', `device class ${foreign.deviceClass} cannot be held`);
+        continue;
+      }
+      const missing = ids.filter((id) => !gpus.has(id));
+      if (missing.length > 0) {
+        fail(allocationId, 'device-missing', `${missing.join(', ')} not present`);
+        continue;
+      }
+      const overlap = ids.find((id) => claimed.has(id) && claimed.get(id) !== allocationId);
+      if (overlap !== undefined || new Set(ids).size !== ids.length) {
+        fail(
+          allocationId,
+          'overlap',
+          overlap !== undefined ? `${overlap} is assigned to ${claimed.get(overlap)}` : 'a device is listed twice',
+        );
+        continue;
+      }
+      if (this.knobs.cdiWriteFailures > 0) {
+        this.knobs.cdiWriteFailures--;
+        progressing = true;
+        this.log('alloc.cdi-write-failed', { allocation: allocationId });
+        continue;
+      }
+      this.fs.set(cdiSpecPath(allocationId), cdiSpec(assignment, generation));
+      this.fs.set(envFilePath(allocationId), envFile(assignment));
+      for (const id of ids) claimed.set(id, allocationId);
+      proc.failedAllocations.delete(allocationId);
+      this.log('alloc.bound', { allocation: allocationId, generation, devices: ids.length });
+      this.fact({ type: 'allocation.bound', at: this.scheduler.now(), nodeId: this.nodeId, allocationId, deviceIds: ids, generation });
+      this.emitEvent('transition', 'allocation.bound', {
+        case: 'attested',
+        value: this.attested({
+          case: 'allocationBound',
+          value: {
+            allocationId,
+            generation: BigInt(generation),
+            deviceIds: ids,
+            cdiDevices: ids.map((id) => `bcd.dev/gpu=${id}`),
+            cdiSpecPath: cdiSpecPath(allocationId),
+            envFile: envFilePath(allocationId),
+          },
+        }),
+      });
+    }
+    if (progressing) return { state: SectionState.PROGRESSING, reason: 'CdiWriteFailed', message: 'retrying' };
+    if (failures.length > 0) return { state: SectionState.FAILED, reason: 'AllocationFailed', message: failures.join('; ') };
+    return { state: SectionState.CONVERGED };
+  }
+
+  /** An AttestedReport for an allocation (node_sig unset: optional in v0.1). */
+  private attested(report: MessageInitShape<typeof AttestedReportBodySchema>['report']): AttestedReport {
+    return wrapAttestedReport(
+      create(AttestedReportBodySchema, { nodeId: this.nodeId, bootId: this.bootIdValue, report }),
+    );
+  }
+
+  // ---- events, status, inventory ----------------------------------------------------------------
+
+  private emitEvent(cls: EventClass, kind: string, body: MessageInitShape<typeof EventSchema>['body']): void {
+    const proc = this.requireProcess();
+    const payload = toBinary(
+      EventSchema,
+      create(EventSchema, { observedAt: timestampFromMs(Math.floor(this.serverNow())), body }),
+    );
+    if (proc.overflow.length > 0 && cls !== 'metric') {
+      proc.overflow.push({ class: cls, kind, payload });
+      return;
+    }
+    try {
+      const event = this.journalValue.appendEvent({ class: cls, kind, payload });
+      this.sendEvents(proc.session, [event]);
+    } catch (error) {
+      if (!(error instanceof JournalError) || error.code !== 'FULL') throw error;
+      if (cls === 'metric') {
+        this.log('event.dropped', { kind });
+        return;
+      }
+      proc.overflow.push({ class: cls, kind, payload });
+      this.log('event.overflow', { kind, pending: proc.overflow.length });
+    }
+  }
+
+  private retryOverflow(): void {
+    const proc = this.requireProcess();
+    while (proc.overflow.length > 0) {
+      const next = proc.overflow[0]!;
+      try {
+        const event = this.journalValue.appendEvent(next);
+        proc.overflow.shift();
+        this.sendEvents(proc.session, [event]);
+      } catch (error) {
+        if (error instanceof JournalError && error.code === 'FULL') return;
+        throw error;
+      }
+    }
+  }
+
+  private sendUnackedEvents(session: Session): void {
+    this.sendEvents(session, this.journalValue.unackedEvents());
+  }
+
+  private sendEvents(session: Session | undefined, events: readonly { seq: number; payload: Uint8Array }[]): void {
+    if (!session?.welcomed || events.length === 0) return;
+    const journalId = this.journalId;
+    for (let i = 0; i < events.length; i += EVENT_BATCH) {
+      const batch: Event[] = events.slice(i, i + EVENT_BATCH).map((e) => {
+        const event = fromBinary(EventSchema, e.payload);
+        event.seq = BigInt(e.seq);
+        return event;
+      });
+      this.send(session, { case: 'events', value: { journalId, events: batch } } as AgentFrame['msg']);
+    }
+  }
+
+  private sendStatus(): void {
+    const proc = this.proc;
+    if (!proc?.lastStatus) return;
+    this.send(proc.session, { case: 'status', value: proc.lastStatus } as AgentFrame['msg']);
+  }
+
+  private collect(rescan: boolean): EncodedSection[] {
+    const proc = this.requireProcess();
+    if (rescan || proc.collected.sections.length === 0)
+      proc.collected = { sections: encodeInventorySections(this.hw.inventory), at: this.localNow() };
+    return proc.collected.sections;
+  }
+
+  private sendInventory(sections: readonly EncodedSection[]): void {
+    const proc = this.requireProcess();
+    for (const s of sections)
+      this.send(proc.session, {
+        case: 'inventory',
+        value: {
+          section: s.name,
+          sha256: s.sha256,
+          content: s.content,
+          collectedAt: timestampFromMs(Math.floor(proc.collected.at + proc.offsetMs)),
+          schemaVersion: 1,
+        },
+      } as AgentFrame['msg']);
+  }
+
+  private kindContext(body: CommandBody): FakeKindContext {
+    return {
+      nodeId: this.nodeId,
+      bootId: this.bootIdValue,
+      daemonVersion: this.daemonVersion,
+      hardware: this.hw,
+      knobs: this.knobs,
+      body,
+      now: () => this.serverNow(),
+      collectInventory: (rescan) => this.collect(rescan),
+      sendInventory: (sections) => this.sendInventory(sections),
+      assignedDevices: () => this.assignedDevices(),
+      upload: (url, bytes) => this.uploads.set(url, bytes),
+    };
+  }
+
+  // ---- helpers ----------------------------------------------------------------------------------
+
+  private newJournal(): MemoryJournal {
+    return new MemoryJournal(this.nodeId, {
+      ...this.options.journal,
+      newJournalId: () => `jrn_${this.rng.hex(16)}`,
+    });
+  }
+
+  private localNow(): number {
+    return this.scheduler.now() + (this.options.clockSkewMs ?? 0);
+  }
+
+  private runtime(): Runtime {
+    return { bootId: this.bootIdValue, incarnation: this.requireProcess().incarnation, now: this.localNow() };
+  }
+
+  private deliveryOf(body: CommandBody): Delivery {
+    return { id: body.id, kind: body.kind, retrySafe: body.retrySafe, selfTerminating: body.selfTerminating };
+  }
+
+  private identityOf(body: CommandBody) {
+    return {
+      at: this.scheduler.now(),
+      nodeId: this.nodeId,
+      commandId: body.id,
+      kind: body.kind,
+      retrySafe: body.retrySafe,
+      selfTerminating: body.selfTerminating,
+      journalId: this.journalId,
+      incarnation: this.requireProcess().incarnation,
+      bootId: this.bootIdValue,
+    };
+  }
+
+  private identity(entry: JournalCommand) {
+    return {
+      at: this.scheduler.now(),
+      nodeId: this.nodeId,
+      commandId: entry.id,
+      kind: entry.kind,
+      retrySafe: entry.retrySafe,
+      selfTerminating: entry.selfTerminating,
+      journalId: this.journalId,
+      incarnation: entry.incarnation,
+      bootId: entry.bootId ?? this.bootIdValue,
+    };
+  }
+
+  private requireProcess(): Process {
+    if (!this.proc) throw new Error(`${this.nodeId}: the daemon is not running`);
+    return this.proc;
+  }
+
+  /** A timer owned by the current process: cancelled on crash, and inert if the process changed. */
+  private later(ms: number, fn: () => void): Timer {
+    const proc = this.requireProcess();
+    const timer = this.scheduler.after(ms, () => {
+      proc.timers.delete(timer);
+      if (this.proc !== proc) return;
+      fn();
+    });
+    proc.timers.add(timer);
+    return timer;
+  }
+
+  private every(ms: number, fn: () => void): void {
+    const tick = () => {
+      fn();
+      this.later(ms, tick);
+    };
+    this.later(ms, tick);
+  }
+
+  private fact(fact: DaemonFact): void {
+    this.options.facts?.record(fact);
+  }
+
+  private log(event: string, data?: Record<string, LogValue>): void {
+    this.options.log?.add(this.nodeId, event, data);
+  }
+}
+
+/** Section-level patch: every section SET in `patch` replaces the current one wholesale. */
+export function mergeSpec(current: NodeSpec, patch: NodeSpec): NodeSpec {
+  const merged = create(NodeSpecSchema);
+  for (const field of NodeSpecSchema.fields) {
+    const key = field.localName as keyof NodeSpec;
+    const value = (patch[key] ?? current[key]) as never;
+    if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+  }
+  const patched = new Set((patch.$unknown ?? []).map((f) => f.no));
+  const unknown = [...(current.$unknown ?? []).filter((f) => !patched.has(f.no)), ...(patch.$unknown ?? [])];
+  if (unknown.length > 0) merged.$unknown = unknown;
+  return merged;
+}
+
+function cdiSpec(
+  assignment: { allocationId: string; reservationId: string; devices: { id: string }[] },
+  generation: number,
+): string {
+  return JSON.stringify({
+    cdiVersion: '0.6.0',
+    kind: 'bcd.dev/gpu',
+    annotations: {
+      'bcd.dev/allocation-id': assignment.allocationId,
+      'bcd.dev/reservation-id': assignment.reservationId,
+      'bcd.dev/generation': String(generation),
+    },
+    devices: assignment.devices.map((d) => ({
+      name: d.id,
+      containerEdits: { env: [`NVIDIA_VISIBLE_DEVICES=${d.id}`] },
+    })),
+    containerEdits: { env: [`BCD_ALLOCATION_ID=${assignment.allocationId}`] },
+  });
+}
+
+function envFile(assignment: { allocationId: string; reservationId: string; devices: { id: string }[]; env: string[] }): string {
+  return [
+    `BCD_ALLOCATION_ID=${assignment.allocationId}`,
+    `BCD_RESERVATION_ID=${assignment.reservationId}`,
+    `NVIDIA_VISIBLE_DEVICES=${assignment.devices.map((d) => d.id).join(',')}`,
+    ...assignment.env,
+    '',
+  ].join('\n');
+}

@@ -1,0 +1,236 @@
+import { describe, expect, it } from 'vitest';
+import {
+  ALLOWED_RELEASE_REASONS,
+  assertInvariants,
+  atomMilliseconds,
+  checkI1,
+  checkI2,
+  checkI5,
+  checkI8,
+  type ExecutionFact,
+} from '@better-compute/testing';
+
+// The fleet invariants of PLAN.md §15 as pure functions over collected facts.
+
+describe('I1: no overlapping bookings or node-reported assignments', () => {
+  it('accepts back-to-back bookings and flags overlapping ones per device', () => {
+    const ok = [
+      { allocationId: 'a', deviceId: 'GPU-1', start: 0, end: 10 },
+      { allocationId: 'b', deviceId: 'GPU-1', start: 10, end: 20 },
+      { allocationId: 'c', deviceId: 'GPU-2', start: 5, end: Infinity },
+    ];
+    expect(checkI1({ bookings: ok })).toEqual([]);
+    const bad = [
+      ...ok,
+      { allocationId: 'd', deviceId: 'GPU-1', start: 15, end: 16 },
+      { allocationId: 'e', deviceId: 'GPU-2', start: 100, end: 101 },
+    ];
+    expect(checkI1({ bookings: bad }).map((v) => v.subject)).toEqual(['d', 'e']);
+    // An empty range overlaps nothing.
+    expect(
+      checkI1({ bookings: [...ok, { allocationId: 'z', deviceId: 'GPU-1', start: 5, end: 5 }] }),
+    ).toEqual([]);
+  });
+
+  it('flags a node holding one device for two allocations, and bindings without a booking', () => {
+    const bookings = [
+      { allocationId: 'a', deviceId: 'GPU-1', start: 0, end: 10 },
+      { allocationId: 'b', deviceId: 'GPU-1', start: 10, end: 20 },
+    ];
+    const clean = [
+      { nodeId: 'n', allocationId: 'a', deviceIds: ['GPU-1'], from: 1, to: 12 },
+      { nodeId: 'm', allocationId: 'b', deviceIds: ['GPU-1'], from: 11 },
+    ];
+    // Different nodes' GPU-1s are different devices; late release on the node is not an overlap in itself.
+    expect(checkI1({ bookings, bindings: clean })).toEqual([]);
+    const overlapping = [
+      ...clean,
+      { nodeId: 'n', allocationId: 'b', deviceIds: ['GPU-1'], from: 11 },
+    ];
+    expect(checkI1({ bindings: overlapping })).toEqual([
+      expect.objectContaining({
+        invariant: 'I1',
+        subject: 'b',
+        message: expect.stringMatching(/bound to a and b/),
+      }),
+    ]);
+    const stray = [{ nodeId: 'n', allocationId: 'a', deviceIds: ['GPU-1', 'GPU-9'], from: 1 }];
+    expect(checkI1({ bookings, bindings: stray })[0]?.message).toMatch(/GPU-9 .* no booking/);
+  });
+});
+
+const fact = (over: Partial<ExecutionFact>): ExecutionFact => ({
+  phase: 'started',
+  at: 0,
+  nodeId: 'n',
+  commandId: 'cmd',
+  kind: 'gpu.reset',
+  retrySafe: false,
+  selfTerminating: false,
+  journalId: 'j1',
+  incarnation: 'i1',
+  bootId: 'b1',
+  ...over,
+});
+
+describe('I2: at most one execution per command', () => {
+  it('allows one execution of a non-retry-safe command and flags a second', () => {
+    const once = [fact({ phase: 'accepted' }), fact({ at: 1 }), fact({ phase: 'ended', at: 2 })];
+    expect(checkI2({ executions: once })).toEqual([]);
+    const twice = [...once, fact({ at: 5, incarnation: 'i2' })];
+    expect(checkI2({ executions: twice })[0]?.message).toMatch(/not retry-safe\) started 2 times/);
+    const reboot = [
+      fact({ kind: 'node.reboot', retrySafe: true, selfTerminating: true }),
+      fact({ at: 9, retrySafe: true, selfTerminating: true, incarnation: 'i2' }),
+    ];
+    expect(checkI2({ executions: reboot })[0]?.message).toMatch(/self-terminating/);
+  });
+
+  it('lets a retry-safe command re-run only after a crash interrupted it', () => {
+    const retry = (over: Partial<ExecutionFact>) =>
+      fact({ retrySafe: true, kind: 'diag.nvml', ...over });
+    const interrupted = [
+      retry({ at: 1 }),
+      retry({ at: 5, incarnation: 'i2' }),
+      retry({ phase: 'ended', at: 6, incarnation: 'i2' }),
+    ];
+    expect(checkI2({ executions: interrupted })).toEqual([]);
+    const sameProcess = [retry({ at: 1 }), retry({ at: 2 })];
+    expect(checkI2({ executions: sameProcess })[0]?.message).toMatch(/twice in daemon process i1/);
+    const afterEnd = [
+      retry({ at: 1 }),
+      retry({ phase: 'ended', at: 2 }),
+      retry({ at: 3, incarnation: 'i2' }),
+    ];
+    expect(checkI2({ executions: afterEnd })[0]?.message).toMatch(/ran again .* after it ended/);
+    // A new journal may run a retry-safe command again (the journal that knew it is gone).
+    const newJournal = [
+      retry({ at: 1 }),
+      retry({ phase: 'ended', at: 2 }),
+      retry({ at: 3, incarnation: 'i2', journalId: 'j2' }),
+    ];
+    expect(checkI2({ executions: newJournal })).toEqual([]);
+  });
+
+  it('after a journal loss, a non-retry-safe command in flight must not replay nor end succeeded', () => {
+    const loss = { nodeId: 'n', at: 10, oldJournalId: 'j1', newJournalId: 'j2' };
+    const accepted = fact({ phase: 'accepted', at: 1 });
+    expect(
+      checkI2({
+        executions: [accepted],
+        journalLosses: [loss],
+        outcomes: [{ commandId: 'cmd', nodeId: 'n', state: 'failed', errorCode: 'journal-lost' }],
+      }),
+    ).toEqual([]);
+    const replayed = [accepted, fact({ at: 20, journalId: 'j2', incarnation: 'i2' })];
+    expect(checkI2({ executions: replayed, journalLosses: [loss] })[0]?.message).toMatch(
+      /replayed in j2/,
+    );
+    const lied = checkI2({
+      executions: [accepted],
+      journalLosses: [loss],
+      outcomes: [{ commandId: 'cmd', nodeId: 'n', state: 'succeeded' }],
+    });
+    expect(lied[0]?.message).toMatch(/recorded it succeeded/);
+    // Ended before the loss: nothing was in flight.
+    expect(
+      checkI2({
+        executions: [accepted, fact({ phase: 'ended', at: 5 })],
+        journalLosses: [loss],
+        outcomes: [{ commandId: 'cmd', nodeId: 'n', state: 'succeeded' }],
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('I5: no allocation released only because a node disconnected', () => {
+  it('accepts the allowed causes whatever the connectivity, and names connectivity-driven releases', () => {
+    expect(ALLOWED_RELEASE_REASONS).toEqual([
+      'ends-at',
+      'release',
+      'cancel',
+      'lease-lapse',
+      'bind-failed',
+    ]);
+    const connectivity = [
+      { nodeId: 'n', at: 0, state: 'connected' as const },
+      { nodeId: 'n', at: 10, state: 'disconnected' as const },
+      { nodeId: 'n', at: 70, state: 'unreachable' as const },
+    ];
+    expect(
+      checkI5({
+        releases: [{ allocationId: 'a', nodeId: 'n', at: 80, reason: 'ends-at' }],
+        connectivity,
+      }),
+    ).toEqual([]);
+    const violations = checkI5({
+      releases: [
+        { allocationId: 'a', nodeId: 'n', at: 10, reason: 'node-disconnected' },
+        { allocationId: 'b', nodeId: 'n', at: 80, reason: 'reaped' },
+        { allocationId: 'c', nodeId: 'n', at: 5, reason: 'mystery' },
+      ],
+      connectivity,
+    });
+    expect(violations.map((v) => v.message)).toEqual([
+      'a was released (node-disconnected) while node n was disconnected',
+      'b was released (reaped) while node n was unreachable',
+      'c was released for a cause that is not allowed: mystery',
+    ]);
+  });
+});
+
+describe('I8: billing conservation', () => {
+  const allocations = [
+    { allocationId: 'a', start: 0, end: 100, atoms: 2 },
+    { allocationId: 'b', start: 50, atoms: 1 },
+  ];
+  const usage = [
+    { key: 'a:0', allocationId: 'a', start: 0, end: 60, atoms: 2 },
+    { key: 'a:60', allocationId: 'a', start: 60, end: 100, atoms: 2 },
+    { key: 'b:50', allocationId: 'b', start: 50, end: 90, atoms: 1 },
+  ];
+
+  it('holds when windows tile each booking exactly', () => {
+    expect(atomMilliseconds(usage)).toBe(240);
+    expect(checkI8({ allocations, usage })).toEqual([]);
+    expect(checkI8({ allocations, usage, flushedUpTo: 90 })).toEqual([]);
+    expect(checkI8({ allocations, usage, flushedUpTo: 95 })[0]?.message).toMatch(
+      /b billed 40 atom-ms but booked 45/,
+    );
+  });
+
+  it('flags duplicate keys, gaps, overlaps and usage for unknown allocations', () => {
+    const messages = checkI8({
+      allocations,
+      usage: [
+        ...usage.slice(0, 2),
+        { key: 'a:0', allocationId: 'a', start: 0, end: 60, atoms: 2 },
+        { key: 'x:0', allocationId: 'x', start: 0, end: 1, atoms: 1 },
+      ],
+    }).map((v) => v.message);
+    expect(messages).toEqual([
+      'duplicate usage key a:0',
+      'usage recorded for unknown allocation x',
+      expect.stringMatching(/usage window a:0 .* overlaps or leaves booking/),
+      'a billed 320 atom-ms but booked 200 atom-ms up to 100',
+    ]);
+    const gap = checkI8({ allocations: [allocations[0]!], usage: [usage[0]!] });
+    expect(gap.map((v) => v.message)).toEqual([
+      'a billed 120 atom-ms but booked 200 atom-ms up to 100',
+    ]);
+  });
+});
+
+describe('assertInvariants', () => {
+  it('throws one error listing the violations, and nothing when there are none', () => {
+    expect(() => assertInvariants([])).not.toThrow();
+    const many = Array.from({ length: 25 }, (_, i) => ({
+      invariant: 'I2' as const,
+      subject: `c${i}`,
+      message: 'twice',
+    }));
+    expect(() => assertInvariants(many)).toThrow(
+      /25 invariant violation\(s\):\nI2 c0: twice[\s\S]*and 5 more/,
+    );
+  });
+});

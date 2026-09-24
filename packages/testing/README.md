@@ -1,11 +1,13 @@
 # @better-compute/testing
 
 The testing kit for better-compute: a control-plane fixture, the sim clock and a scripted IAM
-port. Tests run against PGlite, so no database server is needed.
+port, plus the daemon side of the agent protocol in TypeScript and a deterministic fleet
+simulator. Tests run against PGlite, so no database server is needed.
 
-**Status: P0 shell.** `computeFixture()`, `closeFixtures()` and `fakeIam()` work. The fleet
-simulator (`@better-compute/testing/fleet-sim`), `FakeDaemon`, the invariant checker and the
-conformance runners arrive in v0.1 (PLAN.md §15).
+**Status: v0.1 in progress.** `computeFixture()`, `closeFixtures()` and `fakeIam()` work (P0).
+`FakeDaemon`, `FrameConn` links with fault injection, fake hardware, `createFleetSim()` with the
+in-memory `GatewayStub`, and the invariant checkers I1, I2, I5 and I8 work (W5b). Embedded
+better-iam in the fixture and the real-time harness come next (PLAN.md §15).
 
 It needs the optional peer `@electric-sql/pglite` as a devDependency. Without it,
 `computeFixture()` fails with `MISSING_DEPENDENCY`.
@@ -94,10 +96,94 @@ paths" spy.
 - **The rest.** `billingCheck` allows, `recordUsage` records every event, `featureEnabled` is
   false, and `requestConfirmation` answers `'not-held-back'`.
 
+## Deterministic plumbing
+
+- `createSimScheduler({ start })`: a manual clock plus a timer heap. Tasks run in (time,
+  insertion) order, one at a time; a task that returns a promise is awaited before the next one,
+  so an async (DB-backed) participant stays deterministic if it uses the scheduler for its timers.
+  `onTime(hook)` moves another clock along (for example `fixture.clock.set`, which moves
+  `compute_now()`). `createRealtimeScheduler()` is the `setTimeout` version for the real-time
+  harness.
+- `createRng(seed)`: seeded `sfc32`; `fork(label)` derives an independent stream without consuming
+  the parent's, so adding a node never shifts another node's draws.
+- `EventLog`: every notable action as `<t> <source> <event> k=v…` lines, with a running SHA-256
+  (`digest()`) for reproducibility checks.
+
+## `FrameConn` and links
+
+`FrameConn<Out, In>` is the transport-agnostic shape of one Session stream end: `send`, `onFrame`
+(buffered until set; async handlers are awaited in order), `onClose`, `close` (graceful: frames in
+flight still arrive), `abort` (reset) and `ping` (HTTP/2 PING). `createAgentLink()` builds a daemon
+end (`FrameConn<AgentFrame, ServerFrame>`) and a gateway end over an in-memory link whose frames
+cross as protobuf bytes (`encodeAgentFrame` / `encodeServerFrame`, bounded by `MAX_FRAME_BYTES`).
+`createFramePair()` is the generic version (structured clones).
+
+Faults, per direction and drawn from the link's seeded RNG: latency and jitter (whole milliseconds,
+order kept: head-of-line blocking), `drop` (`silent`, or `reset`, which breaks the stream as gRPC
+would), `duplicate`, `reorder` within a window. Controls: `stall(dir, ms)`, `partition(ms?)` /
+`heal()` (like TCP over a broken network: nothing crosses, pings time out, held frames arrive after
+the heal unless an end closed), `halfOpen(deadSide)` (the dead end sees a close, the live end never
+learns), `reset()`, `dropNext`, `duplicateNext` and `intercept(dir, fn)` for targeted faults.
+
+## `FakeDaemon`
+
+The daemon side of PLAN.md §6–§7, mirroring the Go skeleton in `daemon/internal/{journal,dispatch,
+session,converge,fakehw}`:
+
+- **Journal** (`MemoryJournal` and the rules `resolve`, `accept`, `markRunning`, `complete`,
+  `ackResult`, `recover`, `sweep`): `accepted` before any side effect; `running{boot_id}` right
+  before a self-terminating side effect; done + result with a 7-day TTL; unacked events with the
+  metric-drop policy and the 64 MiB / 10k caps. A crash keeps the journal and the files; a reboot
+  also changes `boot_id` and clears `/run`; `loseJournal()` starts a new `journal_id`.
+- **Duplicate delivery:** done → resend the stored result; running → re-attach; accepted but not
+  running after a crash → re-execute if `retry_safe`, else `FAILED{interrupted}`; self-terminating
+  and running across a reboot → `SUCCEEDED{rebooted}` with `NodeRebootResult.previous_boot_id`.
+- **Acceptance checks** in Go's `dispatch.Precheck` order: another node's command or an unknown or
+  role-disallowed kind → `UNSUPPORTED`; `min_generation` above the applied spec → `SpecRequest`
+  and defer until `not_after`, then `STALE_GENERATION`; past `not_after` (server time via the
+  Welcome offset; a missing one counts as past) → `EXPIRED`; no free lane credit, or a journal
+  full of unacked transitions → `BUSY` (not journaled). Terminal rejections are journaled.
+- **Session:** Hello from the journal; Welcome (epoch, offset, credits, requested sections,
+  unacked events); heartbeats with free credits (hashes on every 10th); PING liveness; full-jitter
+  reconnect (1 s → 60 s); `Drain`; `RevocationNotice`; `Cancel`.
+- **Desired state:** full specs and section patches against `base_generation` (`SpecRequest` on a
+  mismatch). The devices converger writes `/etc/cdi/bcd-<alloc>.json` and
+  `/run/bcd/allocations/<alloc>.env` in an in-memory file map, reports `AllocationBound` /
+  `AllocationReleased` (attested reports, unsigned in v0.1) and `AllocationFailed{overlap |
+device-missing | …}`, never drops a hold on its own, and enforces the journaled spec offline.
+  Sections without a converger converge when empty and are `UNSUPPORTED` (with a
+  `SectionUnsupported` condition) otherwise, as are unknown fields.
+- **Kinds:** `diag.nvml`, `inventory.refresh`, `logs.collect`, `node.reboot` (knobs in
+  `daemon.knobs`), and the opt-in `fakeGpuReset` (not retry-safe).
+- **Fake hardware:** `fakeHardware({ seed, variant })` — `hgx-h100` (field for field the Go
+  `fakehw`, same seed → same section hashes), `hgx-h100-gpu-missing`, `l40s`, `cpu`.
+  `encodeInventorySections()` reproduces the Go goldens byte for byte.
+
+`createDaemonHarness()` wires one daemon to scripted servers (`ScriptedServer`) on a sim
+scheduler, with builders for command bodies and specs.
+
+## `createFleetSim()`
+
+N FakeDaemons, one fresh link per dial with the configured faults, a seeded chaos schedule
+(crashes, reboots, journal loss, partitions, isolation, half-open links, resets, stalls, gateway
+kills) and a pluggable `GatewayPort` (`accept(conn, peer)`, `tick(now)`, `kill()`, `facts()`).
+The default port is `GatewayStub`, a minimal in-memory control plane: the §7.2 Hello transaction
+(epoch bump, self-terminating and journal-lost rules), Welcome, desired state, dispatch with
+credits and BUSY back-off, result and event ingestion with dedupe and Acks, liveness (unreachable
+releases nothing), the command sweeper, bookings under an exclusion check and usage flushes.
+**The gateway session core of `@better-compute/gateway` replaces the stub** through the same
+port; the stub is not a reference for the server.
+
+`sim.invariants()` runs the pure checkers over the collected facts: **I1** (bookings and
+node-reported CDI holds never overlap), **I2** (at most one execution per command; after a
+journal loss, in-flight non-retry-safe commands fail instead of replaying), **I5** (no release
+caused by connectivity) and **I8** (usage windows tile booking duration × atoms, no duplicate
+keys). The same seed always yields the same event log (`sim.digest()`).
+
 ## Later
 
 - **v0.1:** embedded better-iam on its in-memory SQLite adapter (through the IAM bridge) as the
-  fixture's IAM, loaded by dynamic import like PGlite. Also the deterministic fleet simulator
-  with seeded RNG and `compute.jobs.*.tick()`, `FakeDaemon` over an in-memory `FrameConn`, the
-  invariant checker (I1–I8) and conformance runners.
+  fixture's IAM, loaded by dynamic import like PGlite; the fleet sim on the real gateway core,
+  PGlite and `compute.jobs.*.tick()`; the real-time harness (`tests/realtime/`); conformance
+  runners.
 - **v0.4:** the scale scenarios of PLAN.md §15.

@@ -48,9 +48,10 @@
   },
   "dependencies": {
     "@better-compute/core": "workspace:*",
+    "@better-compute/postgres": "workspace:*",
     "@better-compute/protocol": "workspace:*",
     "@better-compute/server": "workspace:*",
-    "@better-compute/postgres": "workspace:*"
+    "@bufbuild/protobuf": "^2.15.0"
   },
   "peerDependencies": {
     "@better-iam/core": "^0.1.0",
