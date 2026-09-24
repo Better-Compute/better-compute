@@ -106,7 +106,7 @@ export const inventoryReconciler: Reconciler = Object.freeze({
   shardBy: 'node' as const,
   async run(context: ReconcileContext, nodeId: string): Promise<'DONE' | 'SYNC_AGAIN'> {
     try {
-      await applyInventory(context.sql, nodeId, { events: context.events });
+      await applyInventory(context.sql, nodeId, { events: context.events, work: context.work });
     } catch (error) {
       // A node deleted after its work was queued has nothing left to reconcile.
       if (error instanceof ComputeError && error.code === 'NOT_FOUND') return 'DONE';

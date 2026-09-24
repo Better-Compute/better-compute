@@ -123,8 +123,11 @@ describe('profiles', () => {
     const page = await call('profiles', 'list', { tenantId: 'ten_a', limit: 2 });
     expect(page.items.map((p: { id: string; document: { version: number } }) => `${p.id}@${p.document.version}`)).toEqual(['gpu-host@1', 'gpu-host@2']);
     const rest = await call('profiles', 'list', { tenantId: 'ten_a', limit: 2, cursor: page.cursor });
-    expect(rest.items.map((p: { id: string }) => p.id)).toEqual(['shipped-adopt']);
-    expect(rest.cursor).toBeUndefined();
+    // The remediation profiles ship with provision; shipped profiles are read-only for everyone.
+    expect(rest.items.map((p: { id: string }) => p.id)).toEqual(['remediate-gpu-reset', 'remediate-reboot']);
+    const last = await call('profiles', 'list', { tenantId: 'ten_a', limit: 2, cursor: rest.cursor });
+    expect(last.items.map((p: { id: string }) => p.id)).toEqual(['shipped-adopt']);
+    expect(last.cursor).toBeUndefined();
   });
 
   it('rejects invalid documents as INVALID_INPUT', async () => {

@@ -21,6 +21,14 @@ import {
 import { stepRegistry } from './expand.js';
 import { provisionMigrations } from './migrations.js';
 import { profileSource } from './profiles.js';
+import {
+  defaultRemediationPolicy,
+  healthWorkKind,
+  reconcileHealth,
+  remediationProfiles,
+  remediationSteps,
+  type RemediationPolicy,
+} from './remediation.js';
 
 export interface ProvisionOptions {
   /** Steps profiles may `use`, besides the built-ins (`wait.agentJoined`, `wait.generationObserved`). */
@@ -34,6 +42,11 @@ export interface ProvisionOptions {
    * `provisionModule({ modules: [metalModule] })`.
    */
   modules?: readonly Pick<ComputeModule, 'extensions' | 'profiles'>[];
+  /**
+   * Health remediation (§10.1): the `health` reconciler with its reboot and GPU-reset workflows,
+   * on by default. `false` leaves it out; an object tunes the budget and the circuit breaker.
+   */
+  remediation?: false | Partial<RemediationPolicy>;
 }
 
 /** The provision module, plus the `WorkflowEngine` the host puts on `ModuleContext.workflows`. */
@@ -58,12 +71,18 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
   const fromModules = (options.modules ?? []).flatMap((module) =>
     (module.extensions ?? []).filter((extension): extension is StepDefinition => extension.extension === 'step'),
   );
+  const remediation = options.remediation === false ? undefined : { ...defaultRemediationPolicy, ...options.remediation };
   const steps = stepRegistry([
     ...(options.builtinSteps === false ? [] : builtinSteps),
+    ...(remediation ? remediationSteps : []),
     ...fromModules,
     ...(options.steps ?? []),
   ]);
-  const moduleProfiles = [...(options.modules ?? []).flatMap((module) => module.profiles ?? []), ...(options.profiles ?? [])];
+  const moduleProfiles = [
+    ...(remediation ? remediationProfiles : []),
+    ...(options.modules ?? []).flatMap((module) => module.profiles ?? []),
+    ...(options.profiles ?? []),
+  ];
   const engineOptions: EngineOptions = { steps, profiles: profileSource(moduleProfiles) };
 
   const reconciler: Reconciler = {
@@ -78,7 +97,19 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
     migrations: [...provisionMigrations],
     extensions: steps.list(),
     profiles: moduleProfiles,
-    reconcilers: [reconciler],
+    reconcilers: remediation
+      ? [
+          reconciler,
+          {
+            name: healthWorkKind,
+            shardBy: 'node' as const,
+            async run(context: ReconcileContext, nodeId: string) {
+              await reconcileHealth(context, nodeId, remediation);
+              return 'DONE' as const;
+            },
+          },
+        ]
+      : [reconciler],
     api: (context: ModuleContext) => provisionApi(context, { ...engineOptions, moduleProfiles }),
   });
 

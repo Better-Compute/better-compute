@@ -8,6 +8,12 @@ import { mergeNoScheduleReasons } from './labels.js';
 // and, for node-level faults, a NoSchedule reason plus a remediation the health reconciler runs
 // within the pool's disruption budget.
 
+/**
+ * The work kind (and reconciler name) of remediation, keyed by node id. Inventory and XID ingest
+ * queue it when a node-level fault appears; the provision module's health reconciler runs it.
+ */
+export const healthWorkKind = 'health';
+
 /** What a fault asks for. */
 export type HealthAction =
   /** Take the one GPU out of placement (`healthy = false`). */

@@ -12,7 +12,7 @@ import { INVENTORY_SECTIONS, type InventorySectionName } from '@better-compute/p
 import { devicesFromGpus, planDevices, type StoredDevice } from './devices.js';
 import { diffInventory } from './diff.js';
 import { hardwareKey } from './hardware-key.js';
-import { applyInventoryHealth, inventoryHealthFindings, type HealthFinding } from './health.js';
+import { applyInventoryHealth, healthWorkKind, inventoryHealthFindings, type HealthFinding } from './health.js';
 import {
   inventoryConditions,
   inventoryLabels,
@@ -144,6 +144,8 @@ export type ApplyInventoryResult =
 export interface ApplyInventoryOptions {
   /** Publishes `node.inventory.changed` and one `node.<change>` event per diff entry. */
   events?: EventPublisher;
+  /** Queues remediation (`health` work) when a finding blocks the node. */
+  work?: WorkQueue;
   /** Overrides what the pool implies (`pools.gpu_model`, `policy.expect.gpuCount`). */
   expect?: InventoryExpectation;
 }
@@ -235,6 +237,7 @@ export async function applyInventory(
     // Health first, so the device plan already sees this inventory's quarantines.
     const health = inventoryHealthFindings(sections.gpus);
     const healthReasons = await applyInventoryHealth(tx, nodeId, health, node.no_schedule_reasons);
+    if (options.work && health.some((finding) => finding.noSchedule)) await options.work.enqueue(tx, healthWorkKind, nodeId);
     const devices = await applyDevices(tx, nodeId, sections);
     await applyLabels(tx, nodeId, sections);
 

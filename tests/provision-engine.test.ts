@@ -550,7 +550,10 @@ describe('provisionModule', () => {
       'provision/0002_images',
       'provision/0003_workflow_owner',
     ]);
-    expect(module.reconcilers!.map((r) => [r.name, r.shardBy])).toEqual([['workflow', 'node']]);
+    expect(module.reconcilers!.map((r) => [r.name, r.shardBy])).toEqual([
+      ['workflow', 'node'],
+      ['health', 'node'],
+    ]);
     expect(module.engineOptions.steps.get('wait.agentJoined')).toBeDefined();
     expect(() => provisionModule({ steps: [record, record] })).toThrow(/registered twice/);
 
