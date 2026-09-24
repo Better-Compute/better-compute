@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { type SqlExecutor } from '@better-compute/core';
+import { apiMethod, type SqlExecutor } from '@better-compute/core';
 import {
   configTemplate,
   createCli,
@@ -136,15 +136,30 @@ describe('environment-only deployments on PGlite', () => {
   });
 
   it('lists every route with its access and IAM action', async () => {
-    const rows = await json(['api', '--list', '--format', 'json'], { env: memoryEnv });
-    expect(rows.map((row: { method: string }) => row.method)).toEqual([
-      'inventory.diff',
-      'inventory.get',
-      'inventory.history',
-      'system.selfCheck',
-      'system.version',
-      'system.whoami',
-    ]);
+    const rows: { method: string; access: string; action: string; http: string }[] = await json(
+      ['api', '--list', '--format', 'json'],
+      { env: memoryEnv },
+    );
+    // Derived from the normative table, so a module adding methods never breaks this test: every
+    // listed route is a §9.2 row with that row's action, sorted, and the system group is complete.
+    const names = rows.map((row) => row.method);
+    expect(names).toEqual([...names].sort());
+    for (const row of rows) {
+      const [group, method] = row.method.split('.') as [string, string];
+      const surface = apiMethod(group, method);
+      expect(surface, row.method).toBeDefined();
+      expect(row.action, row.method).toBe(surface!.action ?? '');
+      expect(row.access, row.method).toBe(surface!.action ? 'token' : 'public');
+      expect(row.http).toBe(`POST /api/compute/${group}/${method}`);
+    }
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'system.selfCheck',
+        'system.version',
+        'system.whoami',
+        'inventory.get',
+      ]),
+    );
     expect(rows).toContainEqual({
       method: 'system.version',
       access: 'public',
