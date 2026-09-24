@@ -572,6 +572,31 @@ message StatusReport {
   repeated SectionStatus sections = 4;
   // The node's full current condition set as seen by the daemon (health, drift, section errors).
   repeated Condition conditions = 5;
+  // (v0.3) What the host runtimes hold: every VM or container they know, managed or not, so the
+  // control plane can move instances by what actually runs and find leaks (an instance no live row
+  // places here). Latest-wins with the rest of the report.
+  repeated InstanceStatus instances = 6;
+  // (v0.3) `instances` is the runtimes' whole inventory: a placed instance missing from it is absent.
+  bool instances_complete = 7;
+}
+
+// (v0.3) One instance as a host runtime reports it.
+message InstanceStatus {
+  // The InstanceSpec.instance_id, or the runtime's own name for an object bcd did not create.
+  string instance_id = 1;
+  InstanceObservedState state = 2;
+  // Addresses the guest holds, CIDR form (guest agent or DHCP leases).
+  repeated string addresses = 3;
+  string message = 4;
+  // Runtime driver id, e.g. "libvirt-kvm".
+  string runtime = 5;
+}
+
+enum InstanceObservedState {
+  INSTANCE_OBSERVED_STATE_UNSPECIFIED = 0;
+  INSTANCE_OBSERVED_STATE_RUNNING = 1;
+  INSTANCE_OBSERVED_STATE_STOPPED = 2;
+  INSTANCE_OBSERVED_STATE_ERROR = 3;
 }
 
 message SectionStatus {
