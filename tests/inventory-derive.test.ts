@@ -213,6 +213,12 @@ describe('labels and conditions', () => {
     expect(inventoryConditions({ gpus: odd })[1]).toMatchObject({ type: 'GpuModelUnknown', status: 'true' });
   });
 
+  it('reports GpuCountMismatch unknown, not true, when a node never sent a gpus section', () => {
+    const conditions = inventoryConditions({ os: create(OsSectionSchema, { distro: 'ubuntu' }) }, { gpuCount: 8 });
+    expect(conditions[0]).toMatchObject({ type: 'GpuCountMismatch', status: 'unknown', noSchedule: false });
+    expect(inventoryConditions({ gpus: board(0) }, { gpuCount: 8 })[0]).toMatchObject({ status: 'true' });
+  });
+
   it('rewrites only the condition entries it owns in no_schedule_reasons', () => {
     const current = ['GpuModelUnknown', 'unreachable', 'unhealthy.gpu/GPU-1'];
     const next = mergeNoScheduleReasons(current, ['GpuCountMismatch', 'GpuModelUnknown'], [

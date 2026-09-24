@@ -107,18 +107,22 @@ export function inventoryConditions(
   const conditions: InventoryCondition[] = [];
 
   let mismatch: string | undefined;
-  if (expect.gpuCount !== undefined && gpus.length !== expect.gpuCount)
+  if (sections.gpus === undefined)
+    // A node that never reported a gpus section (a CPU-only host) is not a node with zero GPUs.
+    conditions.push({ type: 'GpuCountMismatch', status: 'unknown', reason: 'NotReported', noSchedule: false });
+  else if (expect.gpuCount !== undefined && gpus.length !== expect.gpuCount)
     mismatch = `expected ${expect.gpuCount} GPUs, found ${gpus.length}`;
   else if (expect.gpuModel !== undefined) {
     const wrong = names.filter((n) => n.gpuModel !== 'other' && n.gpuModel !== expect.gpuModel);
     if (wrong.length > 0)
       mismatch = `expected ${expect.gpuModel} GPUs, found ${[...new Set(wrong.map((n) => n.gpuModel))].join(', ')}`;
   }
-  conditions.push(
-    mismatch
-      ? { type: 'GpuCountMismatch', status: 'true', reason: 'InventoryMismatch', message: mismatch, noSchedule: true }
-      : { type: 'GpuCountMismatch', status: 'false', noSchedule: false },
-  );
+  if (sections.gpus !== undefined)
+    conditions.push(
+      mismatch
+        ? { type: 'GpuCountMismatch', status: 'true', reason: 'InventoryMismatch', message: mismatch, noSchedule: true }
+        : { type: 'GpuCountMismatch', status: 'false', noSchedule: false },
+    );
 
   const unknown = [...new Set(names.filter((n) => n.gpuModel === 'other').map((n) => n.name))];
   conditions.push(
