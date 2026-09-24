@@ -8,4 +8,4 @@ export { sqlState } from './executor.js';
 export { baseMigrations, baseSchemaVersion, baseTables } from './migrations/index.js';
 export { computeNowMode, restoreSystemClock, setSimClock, useSimClock } from './clock.js';
 export { kyselyDialect } from './kysely.js';
-export { loadCursor, pruneBehindCursors, saveCursor, type CursorStream, type PruneOptions } from './retention.js';
+export { loadCursor, pruneAttestationUses, pruneBehindCursors, saveCursor, type CursorStream, type PruneOptions } from './retention.js';

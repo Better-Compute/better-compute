@@ -60,3 +60,20 @@ export async function pruneBehindCursors(tx: SqlTx, stream: CursorStream, option
   );
   return result.rowCount ?? 0;
 }
+
+/**
+ * Deletes up to `batch` `attestation_uses` rows whose `expires_at` passed (core/0011): evidence that
+ * can no longer be presented needs no replay guard. Rows without an expiry stay. Returns how many went.
+ */
+export async function pruneAttestationUses(tx: SqlTx, options: { batch?: number } = {}): Promise<number> {
+  const batch = options.batch ?? 5000;
+  if (!Number.isSafeInteger(batch) || batch < 1) throw new ComputeError('INVALID_INPUT', 'batch must be positive');
+  const result = await tx.query(
+    `DELETE FROM attestation_uses WHERE (attestor, subject) IN (
+       SELECT attestor, subject FROM attestation_uses
+        WHERE expires_at IS NOT NULL AND expires_at <= compute_now()
+        ORDER BY expires_at LIMIT $1)`,
+    [batch],
+  );
+  return result.rowCount ?? 0;
+}

@@ -9,9 +9,10 @@ import { deviceHealthMigration, deviceHealthTables } from './0007_device_health.
 import { sessionVersionsMigration } from './0008_session_versions.js';
 import { runtimeMigration, runtimeTables } from './0009_runtime.js';
 import { v02ServerMigration, v02ServerTables } from './0010_v02_server.js';
+import { v02SecurityMigration, v02SecurityTables } from './0011_v02_security.js';
 
 /** Every table the base schema creates, in creation order. */
-export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables, ...v02ServerTables]);
+export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables, ...v02ServerTables, ...v02SecurityTables]);
 
 /**
  * The adapter-owned base schema, owner `core`, applied before any module migration. Append-only:
@@ -28,6 +29,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   sessionVersionsMigration,
   runtimeMigration,
   v02ServerMigration,
+  v02SecurityMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

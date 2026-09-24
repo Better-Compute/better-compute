@@ -44,7 +44,8 @@ CREATE TABLE join_requests (
   consumed_at timestamptz,
   version bigint NOT NULL DEFAULT 1,
   CHECK (hardware_key IS NOT NULL OR mac IS NOT NULL),
-  CHECK ((state IN ('pending', 'expired')) = (decided_at IS NULL)),
+  -- Pending is undecided; approved, rejected and consumed were decided; expired may be either.
+  CHECK (state = 'expired' OR (state = 'pending') = (decided_at IS NULL)),
   CHECK ((state = 'consumed') = (consumed_at IS NOT NULL))
 );
 CREATE UNIQUE INDEX join_requests_pending_key ON join_requests (tenant_id, hardware_key)

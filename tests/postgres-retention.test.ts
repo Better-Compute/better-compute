@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SqlExecutor } from '@better-compute/core';
-import { loadCursor, pruneBehindCursors, saveCursor, setSimClock, useSimClock } from '@better-compute/postgres';
+import { loadCursor, pruneAttestationUses, pruneBehindCursors, saveCursor, setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 
 // core/0009_runtime: durable cursors and retention behind every cursor of a stream (PLAN.md §8.4).
@@ -74,5 +74,27 @@ describe('pruneBehindCursors', () => {
       `SELECT indexname FROM pg_indexes WHERE indexname IN ('outbox_tenant_cursor', 'usage_windows_tenant', 'join_tokens_tenant_pool') ORDER BY 1`,
     );
     expect(indexes.map((i) => i.indexname)).toEqual(['join_tokens_tenant_pool', 'outbox_tenant_cursor', 'usage_windows_tenant']);
+  });
+});
+
+describe('pruneAttestationUses (core/0011)', () => {
+  const subject = (n: number) => new Uint8Array(32).fill(n);
+  it('admits evidence once, and drops only expired rows', async () => {
+    const use = (attestor: string, n: number, expiresInSeconds: number | null) =>
+      db.query(
+        `INSERT INTO attestation_uses (attestor, subject, expires_at)
+         VALUES ($1, $2, CASE WHEN $3::int IS NULL THEN NULL ELSE compute_now() + make_interval(secs => $3::int) END)
+         ON CONFLICT DO NOTHING`,
+        [attestor, subject(n), expiresInSeconds],
+      );
+    expect((await use('discovery', 1, 60)).rowCount).toBe(1);
+    expect((await use('discovery', 1, 60)).rowCount).toBe(0); // a replay is refused
+    expect((await use('cloud-iid', 1, null)).rowCount).toBe(1); // another attestor's namespace
+    await use('discovery', 2, 3600);
+    await setSimClock(db, START + 5 * 3600_000 + 120_000); // two minutes after the uses above
+    expect(await pruneAttestationUses(db)).toBe(1);
+    const { rows: left } = await db.query<{ attestor: string }>('SELECT attestor FROM attestation_uses ORDER BY attestor');
+    expect(left.map((row) => row.attestor)).toEqual(['cloud-iid', 'discovery']);
+    await expect(db.query(`INSERT INTO attestation_uses (attestor, subject) VALUES ('x', '\\x00')`)).rejects.toThrow();
   });
 });
