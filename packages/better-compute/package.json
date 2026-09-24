@@ -82,6 +82,10 @@
       "types": "./dist/iam-testing.d.ts",
       "import": "./dist/iam-testing.js"
     },
+    "./events": {
+      "types": "./dist/events.d.ts",
+      "import": "./dist/events.js"
+    },
     "./server": {
       "types": "./dist/server.d.ts",
       "import": "./dist/server.js"
@@ -110,6 +114,10 @@
       "types": "./dist/cli.d.ts",
       "import": "./dist/cli.js"
     },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js"
+    },
     "./testing": {
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js"
@@ -124,9 +132,11 @@
     "@better-compute/cli": "workspace:*",
     "@better-compute/client": "workspace:*",
     "@better-compute/core": "workspace:*",
+    "@better-compute/events": "workspace:*",
     "@better-compute/gateway": "workspace:*",
     "@better-compute/iam": "workspace:*",
     "@better-compute/inventory": "workspace:*",
+    "@better-compute/mcp": "workspace:*",
     "@better-compute/metal": "workspace:*",
     "@better-compute/pki": "workspace:*",
     "@better-compute/postgres": "workspace:*",

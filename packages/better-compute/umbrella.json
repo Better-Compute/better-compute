@@ -19,6 +19,7 @@
     "./pglite": "@better-compute/postgres/pglite",
     "./client": "@better-compute/client",
     "./cli": "@better-compute/cli",
+    "./mcp": "@better-compute/mcp",
     "./testing": "@better-compute/testing"
   },
   "bin": {

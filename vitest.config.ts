@@ -47,6 +47,7 @@ const umbrella = [
   'pglite',
   'client',
   'cli',
+  'mcp',
   'testing',
 ];
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');

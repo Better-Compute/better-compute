@@ -51,6 +51,9 @@ importers:
       '@better-iam/core':
         specifier: file:vendor/better-iam/better-iam-core-0.1.0.tgz
         version: file:vendor/better-iam/better-iam-core-0.1.0.tgz
+      '@better-iam/mcp':
+        specifier: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
+        version: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
       '@better-iam/server':
         specifier: file:vendor/better-iam/better-iam-server-0.1.0.tgz
         version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
@@ -105,6 +108,9 @@ importers:
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+      '@better-compute/events':
+        specifier: workspace:*
+        version: link:../events
       '@better-compute/gateway':
         specifier: workspace:*
         version: link:../gateway
@@ -114,6 +120,9 @@ importers:
       '@better-compute/inventory':
         specifier: workspace:*
         version: link:../inventory
+      '@better-compute/mcp':
+        specifier: workspace:*
+        version: link:../mcp
       '@better-compute/metal':
         specifier: workspace:*
         version: link:../metal
@@ -168,12 +177,21 @@ importers:
 
   packages/cli:
     dependencies:
+      '@better-compute/capacity':
+        specifier: workspace:*
+        version: link:../capacity
       '@better-compute/client':
         specifier: workspace:*
         version: link:../client
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+      '@better-compute/iam':
+        specifier: workspace:*
+        version: link:../iam
+      '@better-compute/inventory':
+        specifier: workspace:*
+        version: link:../inventory
       '@better-compute/pki':
         specifier: workspace:*
         version: link:../pki
@@ -192,6 +210,9 @@ importers:
       '@better-iam/cli':
         specifier: file:../../vendor/better-iam/better-iam-cli-0.1.0.tgz
         version: file:vendor/better-iam/better-iam-cli-0.1.0.tgz
+      '@better-iam/client':
+        specifier: file:../../vendor/better-iam/better-iam-client-0.1.0.tgz
+        version: file:vendor/better-iam/better-iam-client-0.1.0.tgz
       '@better-iam/server':
         specifier: file:../../vendor/better-iam/better-iam-server-0.1.0.tgz
         version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
@@ -206,6 +227,12 @@ importers:
         version: link:../core
 
   packages/core: {}
+
+  packages/events:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/gateway:
     dependencies:
@@ -233,6 +260,9 @@ importers:
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+      '@better-iam/adapter-sqlite':
+        specifier: file:../../vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
+        version: file:vendor/better-iam/better-iam-adapter-sqlite-0.1.0.tgz
       '@better-iam/client':
         specifier: file:../../vendor/better-iam/better-iam-client-0.1.0.tgz
         version: file:vendor/better-iam/better-iam-client-0.1.0.tgz
@@ -251,6 +281,15 @@ importers:
       '@better-compute/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/mcp:
+    dependencies:
+      '@better-compute/client':
+        specifier: workspace:*
+        version: link:../client
+      '@better-iam/mcp':
+        specifier: file:../../vendor/better-iam/better-iam-mcp-0.1.0.tgz
+        version: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz
 
   packages/metal:
     dependencies:
@@ -303,6 +342,15 @@ importers:
       '@bufbuild/protobuf':
         specifier: ^2.15.0
         version: 2.15.0
+
+  packages/provider-hetzner:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../vps
 
   packages/provision:
     dependencies:
@@ -357,12 +405,18 @@ importers:
       '@better-iam/server':
         specifier: file:../../vendor/better-iam/better-iam-server-0.1.0.tgz
         version: file:vendor/better-iam/better-iam-server-0.1.0.tgz
+      '@bufbuild/protobuf':
+        specifier: ^2.15.0
+        version: 2.15.0
       '@electric-sql/pglite':
         specifier: ^0.5.8
         version: 0.5.8
 
   packages/vps:
     dependencies:
+      '@better-compute/capacity':
+        specifier: workspace:*
+        version: link:../capacity
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
@@ -415,6 +469,11 @@ packages:
 
   '@better-iam/core@file:vendor/better-iam/better-iam-core-0.1.0.tgz':
     resolution: {integrity: sha512-5jlmEXto1opxsQtgzJBhEN0SAxiffBapis2J8Sau4FEbYsKkaomIJvcE4r/yphD0gjNx2zI5Q4UJ4Yg5ZOGihg==, tarball: file:vendor/better-iam/better-iam-core-0.1.0.tgz}
+    version: 0.1.0
+    engines: {node: '>=22.12.0'}
+
+  '@better-iam/mcp@file:vendor/better-iam/better-iam-mcp-0.1.0.tgz':
+    resolution: {integrity: sha512-suiaGE3erSFf4Cvvpf3yPg6wFFAgw0Sc81HUmRydj+MLEqBKUYfKeV7Rbn710QY0kGy06yTRryrmaBcPbqddnQ==, tarball: file:vendor/better-iam/better-iam-mcp-0.1.0.tgz}
     version: 0.1.0
     engines: {node: '>=22.12.0'}
 
@@ -1726,6 +1785,10 @@ snapshots:
       '@simplewebauthn/browser': 13.3.0
 
   '@better-iam/core@file:vendor/better-iam/better-iam-core-0.1.0.tgz': {}
+
+  '@better-iam/mcp@file:vendor/better-iam/better-iam-mcp-0.1.0.tgz':
+    dependencies:
+      '@better-iam/core': file:vendor/better-iam/better-iam-core-0.1.0.tgz
 
   '@better-iam/server@file:vendor/better-iam/better-iam-server-0.1.0.tgz':
     dependencies:

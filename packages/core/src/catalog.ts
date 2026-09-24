@@ -237,7 +237,15 @@ export function computeResourceTypes(prefix = 'compute-'): Record<string, Comput
 // ---------------------------------------------------------------------------------------------
 
 export type ApiPhase = 'v0.1' | 'v0.2' | 'v0.3' | 'v0.4' | 'v0.5';
-export type ApiModule = 'server' | 'capacity' | 'inventory' | 'provision' | 'metal' | 'vps';
+export type ApiModule =
+  | 'server'
+  | 'capacity'
+  | 'inventory'
+  | 'provision'
+  | 'metal'
+  | 'vps'
+  /** `@better-compute/events` (webhooks); an injected module like provision. */
+  | 'events';
 
 export interface ApiTarget {
   action: ComputeAction;
@@ -385,7 +393,7 @@ group('usage', 'server', [
   ['export', 'read', 'usage:read', 'tenant', 'v0.2', { or: [['usage:read', 'project']] }],
 ]);
 group('events', 'server', [['list', 'read', 'events:read', 'tenant', 'v0.1']]);
-group('webhooks', 'server', [
+group('webhooks', 'events', [
   ['create', 'mutation', 'webhooks:manage', 'tenant', 'v0.3'],
   ['list', 'read', 'webhooks:manage', 'tenant', 'v0.3'],
   ['get', 'read', 'webhooks:manage', 'tenant', 'v0.3'],
@@ -393,6 +401,8 @@ group('webhooks', 'server', [
   ['rotateSecret', 'mutation', 'webhooks:manage', 'tenant', 'v0.3'],
   ['delete', 'mutation', 'webhooks:manage', 'tenant', 'v0.3'],
   ['ping', 'mutation', 'webhooks:manage', 'tenant', 'v0.3'],
+  ['deliveries', 'read', 'webhooks:manage', 'tenant', 'v0.3'],
+  ['redeliver', 'mutation', 'webhooks:manage', 'tenant', 'v0.3'],
 ]);
 group('drivers', 'server', [['list', 'read', 'drivers:read', 'tenant', 'v0.2']]);
 group('secrets', 'server', [
