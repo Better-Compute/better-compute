@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- v0.2 server groups and schema:
+  - `joinRequests` list/approve/reject: the approval queue behind deferred joins (`discovery`, placeholder DMI). Decisions are idempotent, and an approval admits one join (the retry with the recorded CSR consumes it in the join transaction).
+  - `siteTokens` create/revoke (role `site`), and the SiteBoot lease `site:<id>:boot`: one connected site agent holds it, and the standby is promoted only after it expires, under a new epoch.
+  - `secrets` put/delete: write-only and sealed in the SecretStore, with a version per put. Events and audit rows carry only ref, name and version.
+  - Also: `drivers.list`; `sites.update`/`sites.delete` (tombstoned once referenced); `nodes.delete` (retired or never-adopted nodes only; capacity rows released in lock order, certs revoked, hardware key freed, tombstone).
+  - `core/0010_v02_server`: `join_requests`, `node_certs.allowed_kinds`, `nodes.deleted_at`, `secret_refs`.
+  - `core/0011_v02_security`: `sites.deleted_at`, `attestation_uses` + `pruneAttestationUses`.
+  - PGlite now runs `ANALYZE` after migrations and periodically, so dev and sim plans match Postgres.
 - v0.2/v0.3 metal walkthroughs, chaos and runtime schema:
   - Talos (§5.6 #3): agentless `agent: 'none'` pools run out-of-band profiles. `httpViaSite` reaches a machine's API through its site agent (`site.httpProxy`), and it refuses before sending any command: other hosts, names, plain http off the provisioning network, redirects, oversize responses, and secret headers passed as values.
   - Ubuntu autoinstall (§5.6 #1): a third-party plugin renders a per-node ISO with a single-use `provisioned` token, and `media.insert` takes `fromStep`. The §16 v0.2 acceptance runs in sim form: 20 unattended enroll → ready → deployed → released → ready loops, and every `ready` follows a verified wipe.
