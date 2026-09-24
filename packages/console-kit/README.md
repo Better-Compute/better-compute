@@ -43,6 +43,16 @@ const allowed = await permissions.can(release);
   - `createPermissions` batches checks (50 per call) within one tick and caches answers for 10 s.
   - A failed batch rejects; it never answers "denied".
 
+- **Detail pages** (`createDetail(api, { kind, id, permissions })`) cover a reservation, node, instance or pool. Each §9.2 action on the item is gated twice:
+  - `applicable`: core's state tables allow the item's current state to take that exit. Terminal states allow nothing. Nodes cordon and uncordon by their flag.
+  - `allowed`: IAM's answer.
+  - `run(path)` calls the action and refreshes. A held-back delegated call answers `confirmation-required`.
+- **Charts** (`capacityChart(summary)`) produce stacked per-pool bars for a resource (GPUs by default). The buckets always add up to the total, and there are totals per GPU model and utilization.
+- **Reservation form** (`createReservationForm`):
+  - Validation mirrors the server's `reservations.create` checks.
+  - A debounced `capacity.preview` shows whether the request would fit now.
+  - One idempotency key per attempt, kept across retries and confirmations, so it never books twice. `reset()` starts a new attempt.
+
 ## License
 
 [Apache License 2.0](LICENSE)
