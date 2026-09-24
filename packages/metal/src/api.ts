@@ -18,6 +18,7 @@ import {
 import { siteAgentFor } from '@better-compute/provision';
 import type { HardwareProfile } from './module-types.js';
 import { metalWorkKind } from './reconcile.js';
+import { bmcOperationJson } from './steps.js';
 import { applyProvisionVerb, readMetalNode, resolveDriverBindings, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
 // The `metal` group of PLAN.md §9.2 (v0.2 rows). Every verb checks the move against core's
@@ -383,14 +384,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
             const command = await context.commands.enqueue(tx, {
               nodeId: agent,
               kind: 'bmc.power',
-              payload: {
-                targetNodeId: node.node_id,
-                driver: node.bmc_driver,
-                address: node.bmc_address,
-                credentialsRef: node.bmc_credentials,
-                operation: 'power.setPower',
-                args: { action: input.action },
-              },
+              payload: bmcOperationJson(node, 'power.setPower', { action: input.action }),
               idempotencyKey: `metal:power:${context.requestId}`,
               notAfter: rows[0]!.now.getTime() + 5 * 60_000,
             });

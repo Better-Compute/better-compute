@@ -15,7 +15,14 @@ import {
   type StepState,
   type WorkflowState,
 } from '@better-compute/core';
-import { evaluateWhen, expandProfileOrThrow, type PlannedStep, type StepPhase, type StepRegistry } from './expand.js';
+import {
+  driverInvokeKind,
+  evaluateWhen,
+  expandProfileOrThrow,
+  type PlannedStep,
+  type StepPhase,
+  type StepRegistry,
+} from './expand.js';
 
 // The workflow engine (PLAN.md §11.2).
 //
@@ -569,13 +576,17 @@ async function startAgentStep(
   const command = await context.commands.enqueue(tx, {
     nodeId: target,
     kind: step.command_kind ?? step.action,
-    payload: {
-      workflowId: workflow.id,
-      stepId: step.id,
-      attempt: step.attempt,
-      ...(target !== workflow.node_id ? { targetNodeId: workflow.node_id } : {}),
-      args: step.args,
-    } as Json,
+    // A registered command kind takes its payload message in proto3 JSON: the step's args. Driver
+    // operations (`driver.invoke`) carry the workflow envelope the driver host unpacks.
+    payload: (step.command_kind === driverInvokeKind || !step.command_kind
+      ? {
+          workflowId: workflow.id,
+          stepId: step.id,
+          attempt: step.attempt,
+          ...(target !== workflow.node_id ? { targetNodeId: workflow.node_id } : {}),
+          args: step.args,
+        }
+      : step.args) as Json,
     idempotencyKey: commandKey(step),
     notAfter: deadline,
   });

@@ -63,18 +63,70 @@ async function bmc(
   const outcome = await awaitCommand(context, {
     nodeId: await siteAgent(context, node.node_id),
     kind,
-    payload: {
-      targetNodeId: node.node_id,
-      driver: node.bmc_driver,
-      address: node.bmc_address,
-      credentialsRef: node.bmc_credentials,
-      operation,
-      args,
-      ...(node.bmc_tls_spki_sha256 ? { tlsSpkiSha256: node.bmc_tls_spki_sha256 } : {}),
-    },
+    payload: bmcOperationJson(node, operation, args),
     ...(key ? { key } : {}),
   });
   return decodeResult(outcome);
+}
+
+// Payloads are the proto3 JSON of each kind's message (`metalPayloads`): the runtime packs them.
+
+/** `bettercompute.site.v1.BmcOperationRequest` as proto3 JSON. */
+export function bmcOperationJson(
+  node: Pick<MetalNodeRow, 'bmc_driver' | 'bmc_address' | 'bmc_credentials' | 'bmc_tls_spki_sha256'>,
+  operation: string,
+  args: Record<string, Json>,
+): Json {
+  return {
+    driver: node.bmc_driver,
+    address: node.bmc_address,
+    credentialsRef: node.bmc_credentials ?? '',
+    operation,
+    argsJson: JSON.stringify(args),
+    ...(node.bmc_tls_spki_sha256 ? { tlsSpkiSha256: Buffer.from(node.bmc_tls_spki_sha256, 'hex').toString('base64') } : {}),
+  };
+}
+
+const bootArch = (node: Pick<MetalNodeRow, 'arch' | 'uefi'>) =>
+  node.arch === 'arm64' ? 'BOOT_ARCH_ARM64_EFI' : node.uefi ? 'BOOT_ARCH_X86_64_EFI' : 'BOOT_ARCH_BIOS';
+
+/** One `bettercompute.site.v1.ProxyDhcpEntry` per PXE MAC, as proto3 JSON. */
+export function proxyDhcpEntriesJson(node: MetalNodeRow, workflowId: string, notAfter: Date): Json[] {
+  return node.macs.map((mac) => ({
+    mac,
+    ...(node.product_uuid ? { productUuid: node.product_uuid } : {}),
+    arch: bootArch(node),
+    workflowId,
+    notAfter: notAfter.toISOString(),
+  }));
+}
+
+const wipeModeNames: Readonly<Record<string, string>> = {
+  quick: 'WIPE_MODE_QUICK',
+  'secure-erase': 'WIPE_MODE_SECURE_ERASE',
+  'crypto-erase': 'WIPE_MODE_CRYPTO_ERASE',
+};
+const imageFormatNames: Readonly<Record<string, string>> = { raw: 'IMAGE_FORMAT_RAW', qcow2: 'IMAGE_FORMAT_QCOW2' };
+const compressionNames: Readonly<Record<string, string>> = {
+  none: 'IMAGE_COMPRESSION_NONE',
+  zstd: 'IMAGE_COMPRESSION_ZSTD',
+  gzip: 'IMAGE_COMPRESSION_GZIP',
+};
+
+/** Sends the boot entries (one per MAC) through the site agent. */
+async function prepareBootEntries(context: StepContext, node: MetalNodeRow, keyPrefix?: string): Promise<void> {
+  if (node.macs.length === 0)
+    throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC; inspect it out of band first`);
+  const agent = await siteAgent(context, node.node_id);
+  const { rows } = await context.sql.query<{ not_after: Date }>(`SELECT compute_now() + interval '2 hours' AS not_after`);
+  const entries = proxyDhcpEntriesJson(node, context.workflowId, rows[0]!.not_after);
+  for (const [i, entry] of entries.entries())
+    await awaitCommand(context, {
+      nodeId: agent,
+      kind: 'boot.prepareRamdisk',
+      key: `${keyPrefix ?? 'entry'}-${i}`,
+      payload: entry,
+    });
 }
 
 /** Results travel as canonical JSON (`result_json`) or raw bytes; both come back as JSON here. */
@@ -190,21 +242,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     input: manifest({}),
     async run(_input, context) {
       const node = await metalNode(context);
-      if (node.macs.length === 0)
-        throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC; inspect it out of band first`);
-      const outcome = await awaitCommand(context, {
-        nodeId: await siteAgent(context, node.node_id),
-        kind: 'boot.prepareRamdisk',
-        payload: {
-          targetNodeId: node.node_id,
-          macs: node.macs,
-          ...(node.product_uuid ? { productUuid: node.product_uuid } : {}),
-          arch: node.arch,
-          uefi: node.uefi,
-          workflowId: context.workflowId,
-        },
-      });
-      return decodeResult(outcome);
+      await prepareBootEntries(context, node);
+      return { entries: node.macs.length };
     },
   });
 
@@ -220,7 +259,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       await awaitCommand(context, {
         nodeId: await siteAgent(context, node.node_id),
         kind: 'boot.cleanUp',
-        payload: { targetNodeId: node.node_id, macs: node.macs },
+        payload: { nodeId: node.node_id, macs: node.macs, workflowId: context.workflowId },
       });
       return { cleaned: true };
     },
@@ -241,21 +280,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       if (await ramdiskConnected(context, node.node_id)) return { ramdisk: 'connected' };
       if (node.macs.length === 0)
         throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC; inspect it out of band first`);
-      const agent = await siteAgent(context, node.node_id);
       await bmc(context, 'bmc.boot', 'management.setBootDevice', { device: 'pxe', persistent: false, uefi: node.uefi }, 'boot-device');
-      await awaitCommand(context, {
-        nodeId: agent,
-        kind: 'boot.prepareRamdisk',
-        key: 'boot-entry',
-        payload: {
-          targetNodeId: node.node_id,
-          macs: node.macs,
-          ...(node.product_uuid ? { productUuid: node.product_uuid } : {}),
-          arch: node.arch,
-          uefi: node.uefi,
-          workflowId: context.workflowId,
-        },
-      });
+      await prepareBootEntries(context, node, 'boot-entry');
       await bmc(context, 'bmc.power', 'power.setPower', { action: 'cycle' }, 'power-cycle');
       if (!(await ramdiskConnected(context, node.node_id))) throw stepNotReady(5_000);
       return { ramdisk: 'booted' };
@@ -270,7 +296,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     retrySafe: true,
     input: manifest({}),
     async run(_input, context) {
-      const outcome = await awaitCommand(context, { nodeId: requireNode(context), kind: 'inventory.refresh', payload: {} });
+      const outcome = await awaitCommand(context, { nodeId: requireNode(context), kind: 'inventory.refresh', payload: { rescan: true } });
       return decodeResult(outcome);
     },
   });
@@ -303,7 +329,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       const node = await metalNode(context);
       const mode = input.mode ?? node.release_wipe;
       if (mode === 'none') return { mode, attested: true };
-      const outcome = await awaitCommand(context, { nodeId: node.node_id, kind: 'disk.wipe', payload: { mode } });
+      const outcome = await awaitCommand(context, { nodeId: node.node_id, kind: 'disk.wipe', payload: { mode: wipeModeNames[mode]! } });
       // `ready` follows only a verified wipe (§11.1): the release completes only on attested: true.
       return { ...(decodeResult(outcome) as Record<string, Json>), mode, attested: await verify(context.sql, outcome, context) };
     },
@@ -323,17 +349,19 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       if (!ref) throw new ComputeError('INVALID_INPUT', 'deploy.deploy needs an image: with.image or the profile image');
       const image = await resolveImageRef(context.sql, node.tenant_id, ref);
       if (!image) throw new ComputeError('NOT_FOUND', `Image ${ref} is not in the catalog`);
+      const format = imageFormatNames[pinned?.profile.image?.format ?? image.format];
+      if (!format) throw new ComputeError('INVALID_INPUT', `deploy.deploy cannot write a ${image.format} image to disk`);
+      // User data rendering (a secret ref embedding a `provisioned` token) arrives with renderers.
       const outcome = await awaitCommand(context, {
         nodeId: node.node_id,
         kind: 'deploy.image',
         payload: {
-          imageId: image.id,
           url: image.source,
-          sha256: image.sha256,
-          format: pinned?.profile.image?.format ?? image.format,
-          compression: pinned?.profile.image?.compression ?? image.compression,
+          sha256: Buffer.from(image.sha256, 'hex').toString('base64'),
+          format,
+          compression: compressionNames[pinned?.profile.image?.compression ?? image.compression]!,
           uefi: node.uefi,
-          ...(pinned?.profile.userData ? { userData: pinned.profile.userData as unknown as Json } : {}),
+          ...(pinned?.profile.userData ? { userDataKind: pinned.profile.userData.kind } : {}),
         },
         timeoutMs: 60 * 60_000,
       });

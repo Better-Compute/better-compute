@@ -10,6 +10,8 @@ import {
   type WorkQueue,
 } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
+import { fromJson, type DescMessage } from '@bufbuild/protobuf';
+import { commandKinds, protocolRegistry } from '@better-compute/protocol';
 import {
   defineProfile,
   provisionMigrations,
@@ -138,7 +140,12 @@ async function runAgents(): Promise<number> {
   for (const command of rows) {
     const payload = JSON.parse(new TextDecoder().decode(command.body)) as Record<string, any>;
     seen.push({ kind: command.kind, node: command.node_id, payload });
-    const target = (payload.targetNodeId as string | undefined) ?? command.node_id;
+    // Site commands name the machine by its BMC address; ramdisk commands run on the machine.
+    const args = typeof payload.argsJson === 'string' ? (JSON.parse(payload.argsJson) as Record<string, any>) : {};
+    const byBmc = payload.address
+      ? (await db.query<{ node_id: string }>('SELECT node_id FROM metal_nodes WHERE bmc_address = $1', [payload.address])).rows[0]?.node_id
+      : undefined;
+    const target = byBmc ?? command.node_id;
     let result: unknown = {};
     let state = 'succeeded';
     switch (command.kind) {
@@ -146,7 +153,7 @@ async function runAgents(): Promise<number> {
         result = payload.operation === 'inspect.inspect' ? { macs: ['B8:CE:F6:00:00:01'], productUuid: '4C4C4544-0000-0000-0000-000000000001' } : { power: 'off' };
         break;
       case 'bmc.power':
-        if (['cycle', 'on', 'reset'].includes(payload.args?.action)) await connect(target, 'ramdisk', `ramdisk-${command.id}`);
+        if (['cycle', 'on', 'reset'].includes(args.action)) await connect(target, 'ramdisk', `ramdisk-${command.id}`);
         break;
       case 'diag.dcgm':
         result = { passed: agents.dcgmPasses };
@@ -193,12 +200,13 @@ async function call<M extends keyof MetalApi['metal']>(method: M, input: unknown
   const definition = api.metal[method] as unknown as { validate(i: unknown): unknown; handler(c: MethodContext, i: unknown): Promise<any> };
   return definition.handler(context, definition.validate(input));
 }
+let bmcHost = 20;
 async function enrollReady(): Promise<string> {
   const enrolled = await call('enroll', {
     tenantId: 'root',
     siteId: 'site_a',
     poolId: 'pool_metal',
-    bmc: { address: 'https://10.0.0.10', driver: 'redfish', credentials: { username: 'admin', password: 'hunter2' } },
+    bmc: { address: `https://10.0.0.${++bmcHost}`, driver: 'redfish', credentials: { username: 'admin', password: 'hunter2' } },
   });
   await settle();
   return enrolled.nodeId;
@@ -304,9 +312,9 @@ describe('enroll → ready (§3.5)', () => {
       'boot.cleanUp',
     ]);
     // BMC work goes to the site agent; ramdisk work to the machine.
-    expect(seen.filter((c) => c.kind.startsWith('bmc.')).every((c) => c.node === SITE_AGENT && c.payload.targetNodeId === enrolled.nodeId)).toBe(true);
-    expect(seen.find((c) => c.kind === 'disk.wipe')).toMatchObject({ node: enrolled.nodeId, payload: { mode: 'quick' } });
-    expect(seen.find((c) => c.kind === 'boot.prepareRamdisk')!.payload).toMatchObject({ macs: ['b8:ce:f6:00:00:01'] });
+    expect(seen.filter((c) => c.kind.startsWith('bmc.')).every((c) => c.node === SITE_AGENT && c.payload.address === 'https://10.0.0.10')).toBe(true);
+    expect(seen.find((c) => c.kind === 'disk.wipe')).toMatchObject({ node: enrolled.nodeId, payload: { mode: 'WIPE_MODE_QUICK' } });
+    expect(seen.find((c) => c.kind === 'boot.prepareRamdisk')!.payload).toMatchObject({ mac: 'b8:ce:f6:00:00:01', arch: 'BOOT_ARCH_X86_64_EFI' });
     expect(events.map((e) => e.type)).toEqual(expect.arrayContaining(['node.enrolled', 'node.provision.inspecting', 'node.provision.commissioning', 'node.provision.ready']));
   });
 
@@ -341,8 +349,9 @@ describe('deploy, release, retire', () => {
     expect(await node(id)).toMatchObject({ provision_state: 'deployed', role: 'host' });
     expect(seen.find((c) => c.kind === 'deploy.image')!.payload).toMatchObject({
       url: 'https://images.example.com/ubuntu.raw.zst',
-      sha256: 'ab'.repeat(32),
-      compression: 'zstd',
+      sha256: Buffer.from('ab'.repeat(32), 'hex').toString('base64'),
+      format: 'IMAGE_FORMAT_RAW',
+      compression: 'IMAGE_COMPRESSION_ZSTD',
     });
     expect(seen.find((c) => c.kind === 'boot.kexec')!.node).toBe(id);
     const session = await db.query<{ role: string }>('SELECT role FROM node_sessions WHERE node_id = $1', [id]);
@@ -357,7 +366,7 @@ describe('deploy, release, retire', () => {
     agents.attestWipe = false;
     await call('undeploy', { tenantId: 'root', nodeId: id, wipe: 'secure-erase' });
     await settle();
-    expect(seen.find((c) => c.kind === 'disk.wipe')!.payload).toMatchObject({ mode: 'secure-erase' });
+    expect(seen.find((c) => c.kind === 'disk.wipe')!.payload).toMatchObject({ mode: 'WIPE_MODE_SECURE_ERASE' });
     expect(await node(id)).toMatchObject({ provision_state: 'failed', failed_from: 'releasing', maintenance: true });
     const view = await db.query<{ last_error: { code: string } }>('SELECT last_error FROM metal_nodes WHERE node_id = $1', [id]);
     expect(view.rows[0]!.last_error.code).toBe('UNVERIFIED_WIPE');
@@ -397,7 +406,7 @@ describe('deploy, release, retire', () => {
     await call('retire', { tenantId: 'root', nodeId: id });
     await settle();
     expect((await node(id)).provision_state).toBe('retired');
-    expect(seen.find((c) => c.kind === 'disk.wipe')!.payload).toMatchObject({ mode: 'crypto-erase' });
+    expect(seen.find((c) => c.kind === 'disk.wipe')!.payload).toMatchObject({ mode: 'WIPE_MODE_CRYPTO_ERASE' });
     const row = await db.query<{ bmc_credentials: string | null; revoked: boolean; identity_gen: number }>(
       `SELECT m.bmc_credentials, (SELECT revoked_at IS NOT NULL FROM node_certs WHERE serial = 's-1') AS revoked, n.identity_gen
          FROM metal_nodes m JOIN nodes n ON n.id = m.node_id WHERE m.node_id = $1`,
@@ -427,5 +436,27 @@ describe('verbs', () => {
     await expect(call('power', { tenantId: 'root', nodeId: id, action: 'off' })).rejects.toMatchObject({ code: 'INVALID_STATE' });
     await expect(call('power', { tenantId: 'root', nodeId: id, action: 'force-off' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await settle();
+  });
+});
+
+describe('payloads', () => {
+  it("every command metal sent parses as its kind's payload message in proto3 JSON", async () => {
+    const { rows } = await db.query<{ kind: string; body: Uint8Array }>('SELECT DISTINCT ON (kind) kind, body FROM commands ORDER BY kind, seq');
+    const kinds = new Map<string, string>([
+      ...metalCommandKinds.map((k) => [k.kind, k.payload.typeName] as const),
+      ...Object.entries(commandKinds).map(([kind, spec]) => [kind, spec.payload.typeName] as const),
+    ]);
+    const checked: string[] = [];
+    for (const row of rows) {
+      const typeName = kinds.get(row.kind);
+      expect(typeName, row.kind).toBeDefined();
+      const schema = protocolRegistry.getMessage(typeName!) as DescMessage | undefined;
+      expect(schema, typeName).toBeDefined();
+      expect(() => fromJson(schema!, JSON.parse(new TextDecoder().decode(row.body)))).not.toThrow();
+      checked.push(row.kind);
+    }
+    expect(checked.sort()).toEqual(
+      ['bmc.boot', 'bmc.power', 'bmc.query', 'boot.cleanUp', 'boot.kexec', 'boot.prepareRamdisk', 'deploy.image', 'diag.dcgm', 'disk.wipe', 'inventory.refresh'].sort(),
+    );
   });
 });
