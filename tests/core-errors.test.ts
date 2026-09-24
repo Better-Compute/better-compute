@@ -36,6 +36,7 @@ describe('error codes', () => {
       INTERNAL_ERROR: 500,
       MISSING_DEPENDENCY: 500,
       CONFIG_DRIFT: 409,
+      UNAVAILABLE: 503,
     };
     expect(defaultStatus).toEqual(expected);
     expect([...errorCodes].sort()).toEqual(Object.keys(expected).sort());

@@ -27,6 +27,11 @@ export const errorCodes = [
   'MISSING_DEPENDENCY',
   /** Configuration as code: live state differs from the plan (`fleet.apply`, `--fail-on-drift`). */
   'CONFIG_DRIFT',
+  /**
+   * A dependency the request needs is unreachable for now (the secret store's KMS, a node's
+   * gateway, remote IAM); nothing was changed, retry after `retryAfterMs`.
+   */
+  'UNAVAILABLE',
 ] as const;
 export type ErrorCode = (typeof errorCodes)[number];
 
@@ -59,6 +64,7 @@ export const defaultStatus: Readonly<Record<ErrorCode, number>> = {
   INTERNAL_ERROR: 500,
   MISSING_DEPENDENCY: 500,
   CONFIG_DRIFT: 409,
+  UNAVAILABLE: 503,
 };
 
 /** The `error` member of a failed response: `{ error: { code, message, retryAfterMs?, details? } }`. */

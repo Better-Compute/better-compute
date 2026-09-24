@@ -275,6 +275,24 @@ Every call is authenticated (except public methods), refused before any database
 | `fleet.apply`  | mutation | `compute:fleet:admin` @ `compute-fleet` | v0.2  | planned |
 | `fleet.status` | read     | `compute:fleet:admin` @ `compute-fleet` | v0.2  | planned |
 
+### `releases` (rollout)
+
+| Method              | Kind     | Authorization                           | Phase | Status  |
+| ------------------- | -------- | --------------------------------------- | ----- | ------- |
+| `releases.register` | mutation | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+| `releases.list`     | read     | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+
+### `rollouts` (rollout)
+
+| Method            | Kind     | Authorization                           | Phase | Status  |
+| ----------------- | -------- | --------------------------------------- | ----- | ------- |
+| `rollouts.create` | mutation | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+| `rollouts.list`   | read     | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+| `rollouts.get`    | read     | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+| `rollouts.pause`  | mutation | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+| `rollouts.resume` | mutation | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+| `rollouts.abort`  | mutation | `compute:fleet:admin` @ `compute-fleet` | v0.4  | planned |
+
 ## Errors
 
 | Code                    | HTTP status |
@@ -303,3 +321,4 @@ Every call is authenticated (except public methods), refused before any database
 | `INTERNAL_ERROR`        | 500         |
 | `MISSING_DEPENDENCY`    | 500         |
 | `CONFIG_DRIFT`          | 409         |
+| `UNAVAILABLE`           | 503         |

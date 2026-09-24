@@ -210,6 +210,9 @@ importers:
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+      '@better-compute/gateway':
+        specifier: workspace:*
+        version: link:../gateway
       '@better-compute/iam':
         specifier: workspace:*
         version: link:../iam
