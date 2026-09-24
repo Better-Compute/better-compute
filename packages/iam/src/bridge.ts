@@ -24,13 +24,19 @@ import {
 import { createFlagCache, type FlagCache } from './flags.js';
 import { iamJobReconcilers, type IamJobReconcilerOptions, type IamJobsHost } from './jobs.js';
 import { sqlInbox, type InboxWriter } from './inbox.js';
-import { computeIamPlugin, type ComputeIamPlugin, type ComputeIamPluginOptions } from './plugin.js';
+import {
+  computeIamPlugin,
+  type ComputeIamPlugin,
+  type ComputeIamPluginOptions,
+} from './iam-plugin.js';
 import {
   createAuthzProjection,
   sqlProjectionSource,
   type AuthzProjection,
   type AuthzProjectionOptions,
 } from './projection.js';
+import { pullRemoteInbox } from './host.js';
+import { remoteIam, type RemoteIam, type RemoteIamOptions } from './remote.js';
 import { computeResolver, type ResourceResolver } from './resolver.js';
 import {
   drainIamInbox,
@@ -60,6 +66,12 @@ export interface BridgeEmbeddedOptions extends EmbeddedIamOptions {
   runIamJobs?: boolean | IamJobReconcilerOptions;
 }
 
+export interface BridgeRemoteOptions extends Omit<RemoteIamOptions, 'flags'> {
+  /** An executor on the IAM database, whose `compute_inbox` (`postgresInbox`) the iam module drains. */
+  iamDatabase?: SqlExecutor;
+  inboxTable?: string;
+}
+
 /** The `iam` module: projection and inbox lifecycle, IamInbox, IamReconcile and the usage sink. */
 export type IamModule = ComputeModule<'iam'> & {
   start(context: Pick<ModuleContext, 'sql'>): Promise<void>;
@@ -87,6 +99,11 @@ export interface ComputeIamBridge {
    * module (worker role `iam`): required when compute's processes are the only IAM hosts (§12.1).
    */
   embedded(iam: BridgeIamHost, options?: BridgeEmbeddedOptions): EmbeddedIam;
+  /**
+   * The IamPort over a better-iam deployment compute does not run (v0.4). Its IAM hosts install
+   * `computeIamHost`; with `iamDatabase` the iam module also pulls their `compute_inbox` every second.
+   */
+  remote(options: BridgeRemoteOptions): RemoteIam;
   /** Pass to `betterCompute({ modules })`. */
   readonly modules: readonly [IamModule];
   readonly plugins: readonly ComputeModule[];
@@ -204,7 +221,16 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
     stop: () => bridge.stop(),
   };
 
-  let port: EmbeddedIam | undefined;
+  let port: EmbeddedIam | RemoteIam | undefined;
+  const portTaken = () => {
+    if (port)
+      throw new ComputeError(
+        'INVALID_STATE',
+        'bridge.embedded() or bridge.remote() was already called',
+      );
+  };
+  const successorOf = (tenantId: string, identityId: string) =>
+    sql ? successorLookup(sql)(tenantId, identityId) : Promise.resolve(undefined);
 
   const bridge: ComputeIamBridge = {
     catalog,
@@ -234,8 +260,30 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
         rootTenantId: () => rootTenantId,
         ...(hostFallback ? { hostFallback } : {}),
       }),
+    remote(remoteOptions) {
+      portTaken();
+      const { iamDatabase, inboxTable, ...options } = remoteOptions;
+      rootTenantId = options.rootTenantId;
+      const remote = remoteIam({ ...options, successorOf: options.successorOf ?? successorOf });
+      flags = remote.flags;
+      if (iamDatabase)
+        module.reconcilers!.push(
+          reconciler(
+            'iam.pull',
+            [{ key: 'pull', every: '1s' }],
+            async (store) =>
+              (
+                await pullRemoteInbox(iamDatabase, store, {
+                  ...(inboxTable ? { table: inboxTable } : {}),
+                })
+              ).more,
+          ),
+        );
+      port = remote;
+      return remote;
+    },
     embedded(iam, embeddedOptions = {}) {
-      if (port) throw new ComputeError('INVALID_STATE', 'bridge.embedded() was already called');
+      portTaken();
       host = iam;
       rootTenantId = embeddedOptions.rootTenantId ?? rootTenantId;
       flags =
@@ -267,10 +315,7 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
         ...portOptions,
         ...(rootTenantId === undefined ? {} : { rootTenantId }),
         flags,
-        successorOf:
-          embeddedOptions.successorOf ??
-          ((tenantId, identityId) =>
-            sql ? successorLookup(sql)(tenantId, identityId) : Promise.resolve(undefined)),
+        successorOf: embeddedOptions.successorOf ?? successorOf,
       });
       return port;
     },

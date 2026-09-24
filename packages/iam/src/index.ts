@@ -15,4 +15,5 @@ export * from './jobs.js';
 export * from './setup.js';
 export * from './spy.js';
 export * from './confirmation.js';
+export * from './remote.js';
 export * from './bridge.js';

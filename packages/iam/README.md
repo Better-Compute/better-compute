@@ -44,7 +44,29 @@ await compute.initialize(); // the iam module's start() loads the projection and
 
 Until the projection is loaded, every compute decision is denied and inbox writes spill. `bridge.bind({ sql })` does the same as the module's `start()` for hosts that construct better-iam outside compute.
 
-`@better-compute/iam/plugin` exports only what an IAM host installs: the catalog, the plugin and the inbox writers.
+`@better-compute/iam/plugin` exports only what an IAM host installs: the catalog, the plugin, the inbox writers and `computeIamHost`.
+
+## Remote mode (v0.4)
+
+When the IAM deployment is one compute does not run, every `betterIam()` process on that IAM database installs `computeIamHost`:
+
+```ts
+import { computeIamHost, postgresInbox, replicaProjection } from 'better-compute/iam/plugin';
+import { postgres } from 'better-compute/postgres';
+
+const host = computeIamHost({
+  projection: replicaProjection({ sql: postgres({ url: COMPUTE_READ_REPLICA_URL }) }), // read-only role
+  inbox: postgresInbox({ sql: postgres({ url: IAM_DATABASE_URL }) }), // compute_inbox; the role needs CREATE
+  rootTenantId,
+});
+const iam = betterIam({ ..., plugins: [host.plugin], resolveResource: host.resolveResource });
+await iam.initialize(); // host.plugin.migrate creates compute_inbox
+await host.start(); // loads the projection; until then compute decisions on this host deny
+```
+
+Compute then uses `bridge.remote({ baseURL, serviceToken, rootTenantId, iamDatabase })` as its IamPort. It forwards each caller's credential to better-iam's HTTP API (`sts.getCallerIdentity`, `authorize`, `authorizeMany`, delegated confirmation). It uses the root service account for usage (`billing.recordMany`, ≤100 per call, with the same poison isolation) and for flags (`features.evaluate`). With `iamDatabase`, the iam module's `iam.pull` reconciler moves `compute_inbox` rows into `iam_inbox` every second. Instead of `postgresInbox`, an IAM host can use `httpInbox({ url, secret })`, which posts HMAC-signed batches that `createInboxHandler({ secret, inbox })` verifies on compute's side.
+
+Known limit on better-iam 0.1.0: HTTP `billing.check` checks only the credential's own tenant, so `billingCheck` in remote mode covers the service account's tenant only.
 
 `@better-compute/iam/testing` is for tests only. `createEmbeddedTestIam({ sql?, inbox?, sessionJwts?, runIamJobs? })` starts a real better-iam on in-memory SQLite. It carries compute's plugin, resolver and inbox, and it is bootstrapped with a root administrator (TOTP MFA) and two active organizations (`acme`, `other`). Each organization has an owner credential and `member`, `signIn`, `policy`, `grant` and `share` helpers, and the kit returns the embedded `port`. It needs `@better-iam/server` and `@better-iam/adapter-sqlite`. `spyIamPort(port)` records every IAM call, attributed to the code path that made it (`spy.path('heartbeat', fn)`), for the "zero IAM calls on fleet paths" check.
 

@@ -13,7 +13,7 @@ import type { Credential, SqlExecutor } from '@better-compute/core';
 import { createComputeIamBridge, type ComputeIamBridge } from './bridge.js';
 import type { ComputeCatalogOptions } from './catalog.js';
 import type { EmbeddedIam } from './embedded.js';
-import type { ComputeIamPlugin } from './plugin.js';
+import type { ComputeIamPlugin } from './iam-plugin.js';
 import { memoryInbox, type MemoryInbox } from './inbox.js';
 
 type DeliveryMessage = Parameters<
