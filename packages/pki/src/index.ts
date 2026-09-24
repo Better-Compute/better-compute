@@ -10,6 +10,7 @@
  *   `@better-compute/inventory`'s, so JoinService and the Inventory controller agree on it.)
  * - Signing: ES256 over `@better-compute/protocol`'s `signingInput` framing; compact JWE.
  */
+export * from './agent.js';
 export * from './attestor.js';
 export * from './bundle.js';
 export * from './ca.js';
