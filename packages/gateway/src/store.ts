@@ -53,6 +53,8 @@ export interface StoredCommand {
   lane: Lane;
   /** Delivery attempt (`Command.attempt`), counted per send. */
   attempt: number;
+  /** The body decodes, carries `not_after`, and names this row's command and node. */
+  valid: boolean;
 }
 
 /** A command that reached a terminal state in a gateway transaction. */
@@ -254,10 +256,16 @@ function reasonOf(update: CommandUpdate): string | null {
 function storedCommand(row: Record<string, unknown>): StoredCommand {
   const body = bytesOf(row.body);
   let lane = Lane.CONTROL;
+  let valid = false;
   try {
-    lane = decodeMessage(CommandBodySchema, body).lane || Lane.CONTROL;
+    const decoded = decodeMessage(CommandBodySchema, body);
+    lane = decoded.lane || Lane.CONTROL;
+    // PLAN §6: a command without not_after is EXPIRED on arrival, so one is never sent; nor is a
+    // body naming another command or node than its row.
+    valid =
+      decoded.notAfter !== undefined && decoded.id === String(row.id) && decoded.nodeId === String(row.node_id);
   } catch {
-    // An undecodable body still goes out; the daemon rejects it and the result settles the row.
+    valid = false;
   }
   const signature = row.signature == null ? undefined : bytesOf(row.signature);
   return {
@@ -270,6 +278,7 @@ function storedCommand(row: Record<string, unknown>): StoredCommand {
     state: row.state as CommandState,
     lane,
     attempt: Number(row.attempt ?? 0),
+    valid,
   };
 }
 
@@ -610,6 +619,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         await fence(tx);
         const { rows } = await tx.query(
           `SELECT c.id, c.node_id, c.seq, c.kind, c.body, c.signature, c.state, c.attempt,
+             c.cancel_requested_at IS NOT NULL AS cancel_requested, c.cancel_reason,
              s.session_epoch, n.owner_tenant_id AS tenant_id
            FROM commands c JOIN node_sessions s USING (node_id) JOIN nodes n ON n.id = c.node_id
            WHERE s.gateway_id = $1 AND c.state = 'pending'
@@ -620,9 +630,16 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         );
         if (!rows.length) return [];
         const tenants = new Map(rows.map((row) => [String(row.node_id), String(row.tenant_id)]));
-        const { send: chosen, refuse = [] } = choose(
-          rows.map((row) => ({ ...storedCommand(row), epoch: Number(row.session_epoch) })),
+        // A cancel requested before dispatch wins: the command is cancelled, never sent (§7.4).
+        const requested = rows
+          .filter((row) => row.cancel_requested)
+          .map((row) => ({ command: storedCommand(row), reason: String(row.cancel_reason ?? 'cancelled') }));
+        const { send: chosen, refuse: refused = [] } = choose(
+          rows
+            .filter((row) => !row.cancel_requested)
+            .map((row) => ({ ...storedCommand(row), epoch: Number(row.session_epoch) })),
         );
+        const refuse = [...requested, ...refused];
         for (const { command, reason } of refuse) {
           if (!canTransition(commandStateTable, command.state, 'cancel')) continue;
           await tx.query(
@@ -652,6 +669,28 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           .filter((command) => attempts.has(command.id))
           .map((command) => ({ ...command, state: 'dispatched' as const, attempt: attempts.get(command.id)! }));
       });
+    },
+
+    /**
+     * In-flight commands on this gateway's sessions whose cancel was requested (§7.4 `Cancel`): the
+     * gateway sends `Cancel{id}`; the daemon reports the real outcome or `CANCELLED`.
+     */
+    async cancels(
+      gatewayId: string,
+    ): Promise<{ id: string; nodeId: string; epoch: number; reason: string }[]> {
+      const { rows } = await db.query<{ id: string; node_id: string; session_epoch: number; reason: string | null }>(
+        `SELECT c.id, c.node_id, s.session_epoch, c.cancel_reason AS reason
+         FROM commands c JOIN node_sessions s USING (node_id)
+         WHERE s.gateway_id = $1 AND c.cancel_requested_at IS NOT NULL AND c.state = ANY($2::text[])
+         ORDER BY c.node_id, c.seq`,
+        [gatewayId, inFlight],
+      );
+      return rows.map((row) => ({
+        id: row.id,
+        nodeId: row.node_id,
+        epoch: Number(row.session_epoch),
+        reason: row.reason ?? 'cancelled',
+      }));
     },
 
     /** Results are facts: accepted from any epoch, deduplicated by the state table (§7.2). */

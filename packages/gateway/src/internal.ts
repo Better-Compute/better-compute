@@ -47,7 +47,7 @@ export function internalHandler(gateway: Gateway): (request: Request) => Promise
         const input = await body(request);
         if (!input || (input.nodeIds !== undefined && !stringArray(input.nodeIds)))
           return invalid('poke takes { nodeIds?: string[] }');
-        gateway.poke();
+        gateway.poke(input.nodeIds as string[] | undefined);
         return json(202, { accepted: true });
       }
       case 'POST /v1/revoke': {

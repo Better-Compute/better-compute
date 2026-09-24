@@ -38,7 +38,11 @@ await serveGateway(gateway, {
 | Events (§7.4) | Deduplicated by the cumulative ack of the current journal. Published to the outbox, with attested reports decoded. A report about another node is `security.node-mismatch` and never reaches a handler. Report handlers run under a SAVEPOINT, so a failing one cannot poison the stream. |
 | Liveness (§7.5) | Kept in memory and flushed every 15 s as ages, not timestamps, fenced by epoch. A stale epoch means a zombie stream, which is dropped (`ABORTED`). Three missed heartbeats close a session. So does an expired certificate. |
 | Fencing (§7.8) | The lease renews every 5 s (TTL 20 s). If it's lost, or renewals fail for TTL/2, every stream is dropped. |
-| Admission | Handshake token bucket (200/s), `maxStreams`, drain (`Drain{rand(0, 60 s)}`), revocation push (`RevocationNotice`, then `UNAUTHENTICATED`). |
+| Admission | Handshake token bucket (200/s), `maxStreams`, and `maxPendingHellos` (64). The last one refuses Hellos beyond it with `RESOURCE_EXHAUSTED` so a reconnect storm cannot starve the lease; see `bench/gateway-streams`. Also drain (`Drain{rand(0, 60 s)}`) and revocation push (`RevocationNotice`, then `UNAUTHENTICATED`). |
+| Cancel (§7.4) | A pending command with `cancel_requested_at` is cancelled and never sent. An in-flight one gets `Cancel{id, reason}` once per session, and again after every reconnect, until the daemon settles it. A real outcome wins over a late cancel. |
+| Body guard | A stored body that doesn't decode, lacks `not_after`, or names another command or node is cancelled `invalid-body` instead of sent (PLAN §6: a missing `not_after` is `EXPIRED`). |
+| Control API | `internalHandler` / `serveInternal` (internal-CA mTLS) / `gatewayControlClient` provide `health`, `poke {nodeIds?}`, `revoke` and `drain`. `gatewayNotifier` implements core `Notifier`: `publish('gw:<id>')` pokes that gateway through `gateways.internal_url`. Accelerators only: the loops converge without them. |
+| Frame streams | `attachFrameConn(gateway, peer, conn)` serves a session over an in-memory frame stream (the testing kit's `FrameConn` shape), so the fleet simulator runs real FakeDaemons against a real gateway. |
 | Tenant-controlled (§13) | A `node-tenant` certificate gets no secrets, and destructive kinds are cancelled `tenant-controlled`. |
 
 ## Transport

@@ -125,6 +125,12 @@ export interface GatewayOptions {
   credits?: Partial<LaneCreditLimits>;
   /** Session opens and joins admitted per second (default 200, the §7.2 token bucket). */
   handshakesPerSecond?: number;
+  /**
+   * Hello transactions in flight at once (default 64). Beyond it a Hello is refused
+   * `RESOURCE_EXHAUSTED` (retry with jitter), so a reconnect storm cannot queue enough database work
+   * to starve the gateway's own lease renewal.
+   */
+  maxPendingHellos?: number;
   /** `gateway:<id>` lease TTL (default 20 000 ms), renewed every `leaseRenewMs` (5 000 ms). */
   gatewayLeaseTtlMs?: number;
   leaseRenewMs?: number;
@@ -192,10 +198,10 @@ export interface Gateway {
   /** Pushes a RevocationNotice to the node's session and closes it (§13). */
   revoke(nodeId: string, notice: { reason: string; serials?: Uint8Array[] }): Promise<boolean>;
   /**
-   * Runs dispatch and the spec sweep soon: after an enqueue or a NodeSpec bump commits. An
-   * accelerator only: the 1 s dispatch loop and the spec sweep converge without it.
+   * Runs dispatch soon, and a spec check for `nodeIds` when given: after an enqueue or a NodeSpec
+   * bump commits. An accelerator only: the 1 s dispatch loop and the spec sweep converge without it.
    */
-  poke(): void;
+  poke(nodeIds?: readonly string[]): void;
   sessions(): GatewaySessionInfo[];
   /** What `GET /v1/health` reports. */
   status(): GatewayStatus;
@@ -260,6 +266,8 @@ interface Session {
   /** Command id → lane, for credit release. */
   inFlight: Map<string, Lane>;
   busyCount: Map<string, number>;
+  /** Cancel frames sent on this session (resent on the next session after a reconnect). */
+  cancelsSent: Set<string>;
   pendingStatus?: StatusReport;
   closed: boolean;
 }
@@ -288,6 +296,8 @@ export function createGateway(options: GatewayOptions): Gateway {
   const busyMaxMs = options.busyBackoff?.maxMs ?? 30_000;
   const credits: LaneCreditLimits = { control: 8, provision: 4, bulk: 2, ...options.credits };
   const handshakes = new TokenBucket(options.handshakesPerSecond ?? 200, clock);
+  const maxPendingHellos = options.maxPendingHellos ?? 64;
+  let pendingHellos = 0;
 
   let lease: LeaseToken | undefined;
   let lastLeaseOkMs = 0;
@@ -315,6 +325,7 @@ export function createGateway(options: GatewayOptions): Gateway {
   };
 
   function release(session: Session, commandId: string) {
+    session.cancelsSent.delete(commandId);
     const lane = session.inFlight.get(commandId);
     if (lane === undefined) return;
     session.inFlight.delete(commandId);
@@ -406,6 +417,12 @@ export function createGateway(options: GatewayOptions): Gateway {
       throw new GrpcError(GrpcCode.INVALID_ARGUMENT, 'Hello.boot_id and journal_id are required');
     const version = negotiateProtocolVersion({ min: hello.protoMin, max: hello.protoMax });
 
+    // Admission control (§8.6 reconnect storms): Hello transactions queue on the database; past
+    // `maxPendingHellos` the daemon retries with jitter instead of growing a queue that would starve
+    // this gateway's own lease renewal and fence it.
+    if (pendingHellos >= maxPendingHellos)
+      throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway busy; retry with jitter');
+    pendingHellos++;
     const sessionId = newId('req');
     const result = await store
       .hello(
@@ -425,7 +442,14 @@ export function createGateway(options: GatewayOptions): Gateway {
       .catch((error: unknown) => {
         if (isComputeError(error, 'NOT_FOUND'))
           throw new GrpcError(GrpcCode.PERMISSION_DENIED, 'this node has not joined');
+        if (error instanceof FencedError) {
+          void jobs.lease.tick().catch(() => {});
+          throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway fenced; reconnect');
+        }
         throw error;
+      })
+      .finally(() => {
+        pendingHellos--;
       });
 
     const previous = sessions.get(hello.nodeId);
@@ -452,6 +476,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       lanes,
       inFlight: new Map(),
       busyCount: new Map(),
+      cancelsSent: new Set(),
       closed: false,
     };
     sessions.set(session.nodeId, session);
@@ -598,6 +623,22 @@ export function createGateway(options: GatewayOptions): Gateway {
     );
   }
 
+  /** Sends a full spec to each session whose node moved past what it holds and was sent. */
+  async function pushSpecs(candidates: Session[]): Promise<number> {
+    const open = candidates.filter((session) => !session.closed && !session.upgradeRequired);
+    if (!open.length) return 0;
+    const generations = await store.generations(open.map((session) => session.nodeId));
+    let sent = 0;
+    for (const session of open) {
+      const generation = generations.get(session.nodeId) ?? 0;
+      if (generation > session.sentGeneration && generation > session.appliedGeneration) {
+        sendDesired(session, await store.desired(session.nodeId), generation);
+        sent++;
+      }
+    }
+    return sent;
+  }
+
   function job(run: () => Promise<number>): GatewayJob {
     let running: Promise<number> | undefined;
     return {
@@ -624,6 +665,10 @@ export function createGateway(options: GatewayOptions): Gateway {
             const laneKey = `${command.nodeId}:${command.lane}`;
             if (!session || session.closed || session.upgradeRequired) return false;
             if (session.epoch !== command.epoch || blocked.has(laneKey)) return false;
+            if (!command.valid) {
+              refuse.push({ command, reason: 'invalid-body' });
+              return false;
+            }
             if (session.peer.tenantControlled && isDestructive(command.kind)) {
               refuse.push({ command, reason: 'tenant-controlled' });
               return false;
@@ -645,6 +690,14 @@ export function createGateway(options: GatewayOptions): Gateway {
         const session = sessions.get(command.nodeId);
         // A session that closed after commit leaves the row dispatched: Hello replays it.
         if (session && !session.closed && session.epoch === command.epoch) sendCommand(session, command);
+      }
+      // Cancels requested after dispatch: one Cancel per session, until the daemon settles it.
+      for (const cancel of await store.cancels(id)) {
+        const session = sessions.get(cancel.nodeId);
+        if (!session || session.closed || session.epoch !== cancel.epoch || session.cancelsSent.has(cancel.id))
+          continue;
+        session.cancelsSent.add(cancel.id);
+        session.sink.send(frame({ case: 'cancel', value: { commandId: cancel.id, reason: cancel.reason } }));
       }
       return sent.length;
     }),
@@ -710,20 +763,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       }
     }),
 
-    specs: job(async () => {
-      const open = [...sessions.values()].filter((session) => !session.closed && !session.upgradeRequired);
-      if (!open.length) return 0;
-      const generations = await store.generations(open.map((session) => session.nodeId));
-      let sent = 0;
-      for (const session of open) {
-        const generation = generations.get(session.nodeId) ?? 0;
-        if (generation > session.sentGeneration && generation > session.appliedGeneration) {
-          sendDesired(session, await store.desired(session.nodeId), generation);
-          sent++;
-        }
-      }
-      return sent;
-    }),
+    specs: job(() => pushSpecs([...sessions.values()])),
 
     status: job(async () => {
       let flushed = 0;
@@ -746,6 +786,7 @@ export function createGateway(options: GatewayOptions): Gateway {
   }
 
   let pokeScheduled = false;
+  const pokedSpecs = new Set<string>();
   let unsubscribe: (() => void) | undefined;
 
   const gateway: Gateway = {
@@ -921,13 +962,19 @@ export function createGateway(options: GatewayOptions): Gateway {
       return true;
     },
 
-    poke() {
-      if (options.manual || pokeScheduled || stopping) return;
+    poke(nodeIds) {
+      if (options.manual || stopping) return;
+      for (const nodeId of nodeIds ?? []) pokedSpecs.add(nodeId);
+      if (pokeScheduled) return;
       pokeScheduled = true;
       setImmediate(() => {
         pokeScheduled = false;
         jobs.dispatch.tick().catch((error: unknown) => log.warn('gateway: dispatch failed', { cause: String(error) }));
-        jobs.specs.tick().catch((error: unknown) => log.warn('gateway: spec push failed', { cause: String(error) }));
+        if (!pokedSpecs.size) return;
+        // Only the named nodes: a full sweep per poke would scan every session (the sweep does that).
+        const targets = [...pokedSpecs].flatMap((nodeId) => sessions.get(nodeId) ?? []);
+        pokedSpecs.clear();
+        pushSpecs(targets).catch((error: unknown) => log.warn('gateway: spec push failed', { cause: String(error) }));
       });
     },
 

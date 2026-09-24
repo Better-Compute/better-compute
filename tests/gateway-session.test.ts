@@ -4,10 +4,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GrpcCode } from '@better-compute/gateway';
 import {
   AgentRole,
+  CommandBodySchema,
   CommandRejectReason,
   CommandState,
+  encodeMessage,
   GpusSectionSchema,
   Lane,
+  unwrapCommand,
   unwrapDesiredState,
   wrapAttestedReport,
 } from '@better-compute/protocol';
@@ -592,5 +595,111 @@ describe('admission and control', () => {
     expect(await f.session(node)).toMatchObject({ gateway_id: null });
     const { rows } = await f.db.query(`SELECT owner FROM leases`);
     expect(rows).toEqual([{ owner: null }]);
+  });
+});
+
+describe('cancel', () => {
+  const requestCancel = (id: string, reason = 'user asked') =>
+    f.db.query('UPDATE commands SET cancel_requested_at = compute_now(), cancel_reason = $2 WHERE id = $1', [
+      id,
+      reason,
+    ]);
+
+  it('never sends a pending command whose cancel was requested', async () => {
+    const node = await f.addNode();
+    const id = await f.enqueue(node);
+    const { stream } = await f.connect(node);
+    await requestCancel(id);
+    await f.gateway.jobs.dispatch.tick();
+    expect(stream.commandIds()).toEqual([]);
+    expect(await f.command(id)).toMatchObject({ state: 'cancelled', reason: 'user asked' });
+    expect((await f.outbox('command.settled'))[0]!.payload.data).toMatchObject({ commandId: id, state: 'cancelled' });
+  });
+
+  it('pushes Cancel once per session for in-flight commands, again after a reconnect, until settled', async () => {
+    const node = await f.addNode();
+    const id = await f.enqueue(node);
+    const first = await f.connect(node);
+    await f.gateway.jobs.dispatch.tick();
+    await first.handle.receive(update(id, CommandState.RUNNING));
+    await requestCancel(id, 'operator abort');
+    await f.gateway.jobs.dispatch.tick();
+    await f.gateway.jobs.dispatch.tick();
+    expect(first.stream.of('cancel')).toEqual([expect.objectContaining({ commandId: id, reason: 'operator abort' })]);
+
+    await first.handle.end();
+    const second = await f.connect(node, { runningCommandIds: [id] });
+    await f.gateway.jobs.dispatch.tick();
+    expect(second.stream.of('cancel').map((cancel) => cancel.commandId)).toEqual([id]);
+    await second.handle.receive(update(id, CommandState.CANCELLED));
+    expect((await f.command(id)).state).toBe('cancelled');
+    await f.gateway.jobs.dispatch.tick();
+    expect(second.stream.of('cancel')).toHaveLength(1);
+  });
+
+  it('lets the real outcome win over a late cancel', async () => {
+    const node = await f.addNode();
+    const id = await f.enqueue(node);
+    const { handle } = await f.connect(node);
+    await f.gateway.jobs.dispatch.tick();
+    await requestCancel(id);
+    await handle.receive(update(id, CommandState.SUCCEEDED, { result: new Uint8Array([1]) }));
+    expect((await f.command(id)).state).toBe('succeeded');
+  });
+});
+
+describe('body guard and admission', () => {
+  it('cancels a stored body without not_after (or for another node) instead of sending it', async () => {
+    const node = await f.addNode();
+    const other = await f.addNode();
+    const noDeadline = await f.enqueue(node);
+    const misrouted = await f.enqueue(node);
+    const good = await f.enqueue(node);
+    const body = (id: string, nodeId: string, notAfter: boolean) =>
+      Buffer.from(
+        encodeMessage(
+          CommandBodySchema,
+          create(CommandBodySchema, {
+            id,
+            nodeId,
+            kind: 'diag.nvml',
+            ...(notAfter ? { notAfter: { seconds: BigInt(Math.floor(f.clock.now() / 1000) + 3600) } } : {}),
+          }),
+        ),
+      );
+    await f.db.query('UPDATE commands SET body = $2 WHERE id = $1', [noDeadline, body(noDeadline, node, false)]);
+    await f.db.query('UPDATE commands SET body = $2 WHERE id = $1', [misrouted, body(misrouted, other, true)]);
+    const { stream } = await f.connect(node);
+    await f.gateway.jobs.dispatch.tick();
+    expect(stream.of('command').map((command) => unwrapCommand(command).id)).toEqual([good]);
+    expect(await f.command(noDeadline)).toMatchObject({ state: 'cancelled', reason: 'invalid-body' });
+    expect(await f.command(misrouted)).toMatchObject({ state: 'cancelled', reason: 'invalid-body' });
+  });
+
+  it('refuses Hellos beyond maxPendingHellos with RESOURCE_EXHAUSTED instead of queueing them', async () => {
+    await f.close();
+    f = await gatewayFixture({ maxPendingHellos: 1 });
+    const a = await f.addNode();
+    const b = await f.addNode();
+    const first = new FakeStream();
+    const second = new FakeStream();
+    await Promise.all([
+      f.gateway.open({ nodeId: a }, first).receive(helloFrame(a)),
+      f.gateway.open({ nodeId: b }, second).receive(helloFrame(b)),
+    ]);
+    expect(first.of('welcome')).toHaveLength(1);
+    expect(second.closed?.error).toMatchObject({
+      code: GrpcCode.RESOURCE_EXHAUSTED,
+      message: 'gateway busy; retry with jitter',
+    });
+    const retry = await f.connect(b);
+    expect(retry.stream.of('welcome')).toHaveLength(1);
+  });
+
+  it('turns a fenced Hello into UNAVAILABLE without leaking the lease name', async () => {
+    const node = await f.addNode();
+    await f.db.query(`UPDATE leases SET owner = 'usurper', epoch = epoch + 1, expires_at = compute_now() + interval '1 hour'`);
+    const { stream } = await f.connect(node);
+    expect(stream.closed?.error).toMatchObject({ code: GrpcCode.UNAVAILABLE, message: 'gateway fenced; reconnect' });
   });
 });

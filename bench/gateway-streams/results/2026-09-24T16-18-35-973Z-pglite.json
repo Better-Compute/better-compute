@@ -1,0 +1,77 @@
+{
+  "suite": "gateway-streams",
+  "date": "2026-09-24T16:18:35.973Z",
+  "commit": "df715fd",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores",
+    "memoryBytes": 274182045696
+  },
+  "node": "v25.6.0",
+  "adapter": "pglite",
+  "config": {
+    "sessions": 5000,
+    "durationMs": 60000,
+    "commandsPerSecond": 50,
+    "streamsPerConnection": 100,
+    "heartbeatMs": 10000,
+    "transport": "h2c",
+    "storm": true
+  },
+  "loadGeneratorInProcess": true,
+  "ramp": {
+    "established": 5000,
+    "ms": 25525,
+    "handshakeRetries": 30548
+  },
+  "steady": {
+    "heldSessions": 5000,
+    "unexpectedCloses": 0,
+    "enqueued": 3056,
+    "enqueueErrors": 0,
+    "dispatched": 3000,
+    "dispatchMs": {
+      "p50": 5,
+      "p90": 13,
+      "p99": 32,
+      "max": 101
+    },
+    "rssMiB": {
+      "max": 924,
+      "last": 924
+    },
+    "heapMiB": {
+      "max": 328
+    },
+    "eventLoopDelayMs": {
+      "p99": 28,
+      "max": 89
+    }
+  },
+  "storm": {
+    "reconnected": 5000,
+    "backMs": {
+      "p50": 22359,
+      "p99": 32504,
+      "all": 33185
+    },
+    "replayedDeliveries": 0,
+    "commandStates": {
+      "succeeded": 3056
+    },
+    "notSucceeded": 0
+  },
+  "closeReasons": {
+    "grpc 8: handshake rate exceeded; retry with jitter": 30548,
+    "close 0": 4950,
+    "close 8": 50
+  },
+  "gate": {
+    "sessions": true,
+    "dispatchP99": true,
+    "rss": true,
+    "durationAtLeast30Min": false,
+    "met": false
+  }
+}
