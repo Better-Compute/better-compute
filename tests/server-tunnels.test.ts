@@ -13,7 +13,15 @@ import {
 } from '@better-compute/core';
 import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
-import { createExecTicketIssuer, createReplayCache, verifyExecTicket } from '@better-compute/pki';
+import { generateKeyPairSync } from 'node:crypto';
+import {
+  createExecTicketIssuer,
+  createReplayCache,
+  createSshCertificateAuthority,
+  formatSshPublicKey,
+  parseSshCertificate,
+  verifyExecTicket,
+} from '@better-compute/pki';
 import {
   decodeMessage,
   encodeMessage,
@@ -172,6 +180,96 @@ describe('tunnels.open', () => {
   it('puts the issuer’s JWKS into every node’s access section', async () => {
     const spec = await module.nodeSpec!({} as ModuleContext, {} as NodeRecord);
     expect(spec.access?.execTicketJwks).toEqual(JSON.parse(issuer.jwksJson()));
+  });
+});
+
+describe('nodes.issueSshCert', () => {
+  const ca = createSshCertificateAuthority();
+  const withSsh = tunnelsModule({ issuer, ssh: ca });
+  const sshApi = withSsh.api!({} as ModuleContext) as unknown as {
+    nodes: { issueSshCert: Definition };
+  };
+  const userKey = formatSshPublicKey(generateKeyPairSync('ed25519').publicKey, 'alice@laptop');
+  const issue = async (raw: Record<string, unknown>, caller: Caller = { ...alice, mfa: true }) => {
+    const definition = sshApi.nodes.issueSshCert;
+    const input = definition.validate({
+      tenantId: 'acme',
+      nodeId: NODE,
+      publicKey: userKey,
+      ...raw,
+    });
+    return db.transaction(
+      async (tx) =>
+        (await definition.handler(
+          {
+            sql: within(tx),
+            clock: { now: () => Date.now() },
+            caller,
+            requestId: 'r',
+            events: {
+              async publish(_tx: SqlTx, event: { type: string }) {
+                events.push(event.type);
+              },
+            },
+          } as unknown as MethodContext,
+          input,
+        )) as { certificate: string; principals: string[]; keyId: string; validBefore: number },
+    );
+  };
+
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO authz_projection (type, id, tenant_id, attributes) VALUES ('node', $1, 'acme', '{}')
+       ON CONFLICT DO NOTHING`,
+      [NODE],
+    );
+  });
+
+  it('issues a short, recorded user certificate for an MFA session', async () => {
+    const issued = await issue({ principal: 'ubuntu', ttlSeconds: 600 });
+    const parsed = parseSshCertificate(issued.certificate);
+    expect(parsed).toMatchObject({
+      certType: 'user',
+      principals: ['ubuntu'],
+      keyId: issued.keyId,
+      signatureValid: true,
+    });
+    expect(issued.keyId).toMatch(new RegExp(`^bc:usr_alice:${NODE}:ssh_`));
+    expect(parsed.validBefore - Date.now()).toBeLessThanOrEqual(600_000);
+    expect(formatSshPublicKey(parsed.signatureKey)).toBe(
+      ca.publicKey.split(' ').slice(0, 2).join(' '),
+    );
+    expect(events).toContain('node.ssh-cert.issued');
+    expect((await issue({})).principals).toEqual(['root']);
+  });
+
+  it('refuses without MFA, for unknown nodes, bad keys and long lifetimes; pins the CA', async () => {
+    await expect(issue({}, { ...alice, mfa: false })).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+    });
+    await expect(issue({ nodeId: OFFLINE })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(issue({ publicKey: 'ssh-rsa AAAA nope' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    await expect(issue({ ttlSeconds: 7200 })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(issue({ principal: 'Root!' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const spec = await withSsh.nodeSpec!({} as ModuleContext, {} as NodeRecord);
+    expect(spec.access?.sshCaPublicKeys).toEqual([ca.publicKey]);
+    // Without a CA the method is unavailable.
+    const plain = module.api!({} as ModuleContext) as unknown as {
+      nodes: { issueSshCert: Definition };
+    };
+    const input = plain.nodes.issueSshCert.validate({
+      tenantId: 'acme',
+      nodeId: NODE,
+      publicKey: userKey,
+    });
+    await expect(
+      plain.nodes.issueSshCert.handler(
+        { caller: { ...alice, mfa: true } } as unknown as MethodContext,
+        input,
+      ),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
 });
 

@@ -7,7 +7,12 @@ import {
   type MethodResource,
   type SqlTx,
 } from '@better-compute/core';
-import type { ExecTicketIssuer, TunnelOp } from '@better-compute/pki';
+import {
+  parseSshPublicKey,
+  type ExecTicketIssuer,
+  type SshCertificateAuthority,
+  type TunnelOp,
+} from '@better-compute/pki';
 
 // Tunnels, the API half (PLAN.md §7.6, §13 "Interactive access", v0.3). `tunnels.open` decides the
 // caller (`compute:instances:exec` on the instance; `compute:nodes:console` on a node once the
@@ -20,6 +25,35 @@ import type { ExecTicketIssuer, TunnelOp } from '@better-compute/pki';
 export interface TunnelsOptions {
   /** pki's `createExecTicketIssuer({ issuer })`, shared with the gateway's `tunnels.jwks`. */
   issuer: ExecTicketIssuer;
+  /**
+   * The compute SSH CA (pki `createSshCertificateAuthority`) for break-glass `nodes.issueSshCert`
+   * (§13); its public key goes into every node's `access.sshCaPublicKeys`. Without it the method
+   * is `UNSUPPORTED`.
+   */
+  ssh?: SshCertificateAuthority;
+  /** Require an MFA session for `nodes.issueSshCert` (default true, §13). */
+  sshRequiresMfa?: boolean;
+}
+
+export interface IssueSshCertInput {
+  tenantId: string;
+  nodeId: string;
+  /** The caller's OpenSSH public key line (Ed25519 or ECDSA P-256). */
+  publicKey: string;
+  /** The Unix account (default `root`). */
+  principal?: string;
+  /** At most 3600 (default 900). */
+  ttlSeconds?: number;
+}
+
+export interface IssuedSshCert {
+  nodeId: string;
+  /** The OpenSSH certificate line: save it as `<key>-cert.pub`. */
+  certificate: string;
+  serial: string;
+  keyId: string;
+  principals: string[];
+  validBefore: number;
 }
 
 export interface OpenTunnelInput {
@@ -47,7 +81,42 @@ export interface OpenedTunnel {
 
 export type TunnelsApi = {
   tunnels: { open: MethodDefinition<OpenTunnelInput, OpenedTunnel> };
+  nodes: { issueSshCert: MethodDefinition<IssueSshCertInput, IssuedSshCert> };
 };
+
+export function parseIssueSshCert(raw: unknown): IssueSshCertInput {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+    invalid('input must be an object');
+  const input = raw as Record<string, unknown>;
+  for (const key of Object.keys(input))
+    if (!['tenantId', 'nodeId', 'publicKey', 'principal', 'ttlSeconds'].includes(key))
+      invalid(`${key} is not a known field`);
+  if (typeof input.tenantId !== 'string' || !tenantPattern.test(input.tenantId))
+    invalid('tenantId is invalid');
+  if (typeof input.nodeId !== 'string' || !idPattern('node').test(input.nodeId))
+    invalid('nodeId is invalid');
+  if (typeof input.publicKey !== 'string' || input.publicKey.length > 4096)
+    invalid('publicKey must be an OpenSSH public key line');
+  if (
+    input.principal !== undefined &&
+    (typeof input.principal !== 'string' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(input.principal))
+  )
+    invalid('principal must be a Unix account name');
+  if (
+    input.ttlSeconds !== undefined &&
+    (!Number.isInteger(input.ttlSeconds) ||
+      (input.ttlSeconds as number) < 60 ||
+      (input.ttlSeconds as number) > 3600)
+  )
+    invalid('ttlSeconds must be 60 to 3600');
+  return {
+    tenantId: input.tenantId as string,
+    nodeId: input.nodeId as string,
+    publicKey: input.publicKey as string,
+    ...(input.principal !== undefined ? { principal: input.principal as string } : {}),
+    ...(input.ttlSeconds !== undefined ? { ttlSeconds: input.ttlSeconds as number } : {}),
+  };
+}
 
 const tenantPattern = /^[A-Za-z0-9._:-]{1,128}$/;
 const idPattern = (prefix: string) => new RegExp(`^${prefix}_[0-9a-z]{26,52}$`);
@@ -204,13 +273,86 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
         },
       }),
     },
+    nodes: {
+      // Break-glass shells (§13): a short user certificate from the compute SSH CA, only for an
+      // MFA session that holds `compute:nodes:ssh-root` on the node; every issue is recorded.
+      issueSshCert: defineMethod<IssueSshCertInput, IssuedSshCert>({
+        action: 'compute:nodes:ssh-root',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'node', id: input.nodeId }),
+        validate: parseIssueSshCert,
+        async handler(context, input) {
+          const ca = options.ssh;
+          if (!ca) throw new ComputeError('UNSUPPORTED', 'No compute SSH CA is configured');
+          const caller = context.caller;
+          if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+          if ((options.sshRequiresMfa ?? true) && !caller.mfa)
+            throw new ComputeError(
+              'ACCESS_DENIED',
+              'Break-glass SSH needs an MFA session',
+              undefined,
+              {
+                reason: 'mfa-required',
+              },
+            );
+          try {
+            parseSshPublicKey(input.publicKey);
+          } catch {
+            invalid('publicKey must be an Ed25519 or ECDSA P-256 OpenSSH public key');
+          }
+          const tx = context.sql as SqlTx;
+          const { rows } = await tx.query(
+            `SELECT 1 FROM nodes n
+              WHERE n.id = $1 AND EXISTS (SELECT 1 FROM authz_projection ap
+                WHERE ap.type = 'node' AND ap.id = n.id AND ap.tenant_id = $2)`,
+            [input.nodeId, input.tenantId],
+          );
+          if (!rows[0]) throw new ComputeError('NOT_FOUND', `Node ${input.nodeId} not found`);
+          const principal = input.principal ?? 'root';
+          const keyId = `bc:${caller.identityId}:${input.nodeId}:${newId('ssh')}`;
+          const issued = ca.issueUserCertificate({
+            publicKey: input.publicKey,
+            principals: [principal],
+            keyId,
+            // The CA bounds lifetimes on its own (server) clock, so the TTL counts from it.
+            validBefore: context.clock.now() + (input.ttlSeconds ?? 900) * 1000,
+          });
+          await context.events.publish(tx, {
+            type: 'node.ssh-cert.issued',
+            tenantId: input.tenantId,
+            subject: `node/${input.nodeId}`,
+            data: {
+              keyId,
+              serial: issued.serial.toString(),
+              principals: [principal],
+              identityId: caller.identityId,
+              validBefore: issued.validBefore,
+            },
+          });
+          return {
+            nodeId: input.nodeId,
+            certificate: issued.certificate,
+            serial: issued.serial.toString(),
+            keyId,
+            principals: [principal],
+            validBefore: issued.validBefore,
+          };
+        },
+      }),
+    },
   });
   return {
     name: 'tunnels',
     api,
-    // Every node pins the issuer's JWKS; the daemon verifies each ticket against it (P14).
+    // Every node pins the issuer's JWKS (the daemon verifies each ticket against it, P14) and
+    // trusts the compute SSH CA for break-glass certificates.
     async nodeSpec() {
-      return { access: { execTicketJwks: JSON.parse(options.issuer.jwksJson()) } };
+      return {
+        access: {
+          execTicketJwks: JSON.parse(options.issuer.jwksJson()),
+          ...(options.ssh ? { sshCaPublicKeys: [options.ssh.publicKey] } : {}),
+        },
+      };
     },
   };
 }
