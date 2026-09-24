@@ -4,3 +4,4 @@
  * `metal-host` pools) follows.
  */
 export * from './cloud.js';
+export * from './robot.js';

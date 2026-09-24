@@ -27,6 +27,11 @@ export interface ProviderConformanceSubject {
   context?: Partial<ProviderContext>;
   /** A per-run prefix so concurrent runs never share idempotency keys. */
   prefix?: string;
+  /**
+   * `false` for providers that can act on power but not observe it (Hetzner Robot): the power case
+   * then checks only that the actions succeed.
+   */
+  powerObservable?: boolean;
 }
 
 const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -197,20 +202,23 @@ export function providerConformanceCases(): ConformanceCase<ProviderConformanceS
         const { impl, call, machine } = await create(subject, key(subject, 'power'));
         try {
           if (!impl.power) return;
+          const observable = subject.powerObservable !== false;
           await impl.power(machine.id, 'off', call('off'));
           const off = await impl.get(machine.id, call('get-off'));
           checkMachine(off, 'get after power off');
-          check(
-            off.state === 'stopped' || off.state === 'pending',
-            `power off leaves it stopped, not ${off.state}`,
-          );
+          if (observable)
+            check(
+              off.state === 'stopped' || off.state === 'pending',
+              `power off leaves it stopped, not ${off.state}`,
+            );
           await impl.power(machine.id, 'on', call('on'));
           const on = await impl.get(machine.id, call('get-on'));
           checkMachine(on, 'get after power on');
-          check(
-            on.state === 'running' || on.state === 'pending',
-            `power on leaves it running, not ${on.state}`,
-          );
+          if (observable)
+            check(
+              on.state === 'running' || on.state === 'pending',
+              `power on leaves it running, not ${on.state}`,
+            );
         } finally {
           await cleanUp(impl, call, machine.id);
         }
