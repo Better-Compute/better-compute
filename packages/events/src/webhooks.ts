@@ -381,6 +381,24 @@ export interface FanOutOptions {
   clock?: Clock;
 }
 
+async function anchorCursor(tx: SqlTx, name: string): Promise<void> {
+  const tail = await outboxTail(tx);
+  await tx.query(
+    `INSERT INTO event_cursors (name, txid, seq) VALUES ($1, $2::xid8, $3::bigint)
+     ON CONFLICT (name) DO NOTHING`,
+    [name, tail.txid, tail.seq],
+  );
+}
+
+/**
+ * Anchors a fan-out cursor at the outbox tail if it has none yet (idempotent). `eventsModule` does this when
+ * the control plane starts, so every event committed after that reaches the webhooks created before it, even
+ * when the first fan-out pass runs later; history from before the first start is never replayed.
+ */
+export async function ensureFanOutCursor(sql: SqlExecutor, name = 'webhooks'): Promise<void> {
+  await sql.transaction((tx) => anchorCursor(tx, name));
+}
+
 /**
  * One fan-out pass: reads outbox events after the stored cursor and queues one delivery per matching,
  * active webhook of the event's tenant created before the event, then advances the cursor, in one
@@ -399,12 +417,7 @@ export async function fanOutWebhooks(
       [name],
     );
     if (!rows[0]) {
-      const tail = await outboxTail(tx);
-      await tx.query(
-        `INSERT INTO event_cursors (name, txid, seq) VALUES ($1, $2::xid8, $3::bigint)
-         ON CONFLICT (name) DO NOTHING`,
-        [name, tail.txid, tail.seq],
-      );
+      await anchorCursor(tx, name);
       ({ rows } = await tx.query(
         'SELECT txid::text AS txid_text, seq::text AS seq_text FROM event_cursors WHERE name = $1 FOR UPDATE',
         [name],
@@ -509,67 +522,74 @@ export async function deliverWebhooks(
   let delivered = 0;
   let failed = 0;
   let dead = 0;
-  await Promise.all(
-    claimed.map(async (row) => {
-      if (!row.url || !row.active || !row.secret_sealed) {
-        await sql.query(
-          `UPDATE webhook_deliveries SET state = 'cancelled', last_error = 'webhook paused or deleted'
+  const deliver = async (row: (typeof claimed)[number]): Promise<void> => {
+    if (!row.url || !row.active || !row.secret_sealed) {
+      await sql.query(
+        `UPDATE webhook_deliveries SET state = 'cancelled', last_error = 'webhook paused or deleted'
             WHERE id = $1`,
-          [row.id],
-        );
-        return;
-      }
-      let status: number | undefined;
-      let error: string | undefined;
-      try {
-        await assertPublicDestination(row.url, options, options.resolve);
-        const context = `webhook:${row.webhook_id}`;
-        const signing = [openSecret(row.secret_sealed, secrets, context)];
-        if (row.previous_secret_sealed && row.previous_live)
-          signing.push(openSecret(row.previous_secret_sealed, secrets, context));
-        const timestamp = Math.floor(clock.now() / 1000);
-        const response = await send(row.url, {
-          method: 'POST',
-          redirect: 'error',
-          signal: AbortSignal.timeout(timeoutMs),
-          headers: {
-            'content-type': 'application/json',
-            'user-agent': 'better-compute-webhooks/1',
-            [webhookHeaders.event]: row.event_type,
-            [webhookHeaders.delivery]: row.id,
-            [webhookHeaders.webhook]: row.webhook_id,
-            [webhookHeaders.timestamp]: String(timestamp),
-            [webhookHeaders.signature]: signatureHeader(signing, timestamp, row.body),
-          },
-          body: row.body,
-        });
-        status = response.status;
-        await response.body?.cancel().catch(() => {});
-        if (!response.ok) error = `The endpoint responded with status ${response.status}`;
-      } catch (caught) {
-        error = (caught as Error).message.slice(0, 500);
-      }
-      if (error === undefined) {
-        delivered++;
-        await sql.query(
-          `UPDATE webhook_deliveries SET state = 'delivered', delivered_at = compute_now(),
+        [row.id],
+      );
+      return;
+    }
+    let status: number | undefined;
+    let error: string | undefined;
+    try {
+      await assertPublicDestination(row.url, options, options.resolve);
+      const context = `webhook:${row.webhook_id}`;
+      const signing = [openSecret(row.secret_sealed, secrets, context)];
+      if (row.previous_secret_sealed && row.previous_live)
+        signing.push(openSecret(row.previous_secret_sealed, secrets, context));
+      const timestamp = Math.floor(clock.now() / 1000);
+      const response = await send(row.url, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: {
+          'content-type': 'application/json',
+          'user-agent': 'better-compute-webhooks/1',
+          [webhookHeaders.event]: row.event_type,
+          [webhookHeaders.delivery]: row.id,
+          [webhookHeaders.webhook]: row.webhook_id,
+          [webhookHeaders.timestamp]: String(timestamp),
+          [webhookHeaders.signature]: signatureHeader(signing, timestamp, row.body),
+        },
+        body: row.body,
+      });
+      status = response.status;
+      await response.body?.cancel().catch(() => {});
+      if (!response.ok) error = `The endpoint responded with status ${response.status}`;
+    } catch (caught) {
+      error = (caught as Error).message.slice(0, 500);
+    }
+    if (error === undefined) {
+      delivered++;
+      await sql.query(
+        `UPDATE webhook_deliveries SET state = 'delivered', delivered_at = compute_now(),
                   last_status = $2, last_error = NULL
             WHERE id = $1`,
-          [row.id, status ?? null],
-        );
-        return;
-      }
-      const attempts = Number(row.attempts);
-      const isDead = attempts >= maxAttempts;
-      if (isDead) dead++;
-      else failed++;
-      const delay = backoff[Math.min(attempts - 1, backoff.length - 1)]!;
-      await sql.query(
-        `UPDATE webhook_deliveries SET state = $2, last_status = $3, last_error = $4,
+        [row.id, status ?? null],
+      );
+      return;
+    }
+    const attempts = Number(row.attempts);
+    const isDead = attempts >= maxAttempts;
+    if (isDead) dead++;
+    else failed++;
+    const delay = backoff[Math.min(attempts - 1, backoff.length - 1)]!;
+    await sql.query(
+      `UPDATE webhook_deliveries SET state = $2, last_status = $3, last_error = $4,
                 next_attempt_at = compute_now() + make_interval(secs => $5::int)
           WHERE id = $1`,
-        [row.id, isDead ? 'dead' : 'pending', status ?? null, error, delay],
-      );
+      [row.id, isDead ? 'dead' : 'pending', status ?? null, error, delay],
+    );
+  };
+  // One webhook's deliveries go out one at a time in id order (its events' commit order); webhooks in parallel.
+  const byWebhook = new Map<string, (typeof claimed)[number][]>();
+  for (const row of [...claimed].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
+    byWebhook.set(row.webhook_id, [...(byWebhook.get(row.webhook_id) ?? []), row]);
+  await Promise.all(
+    [...byWebhook.values()].map(async (rows) => {
+      for (const row of rows) await deliver(row);
     }),
   );
   return { attempted: claimed.length, delivered, failed, dead };

@@ -17,6 +17,7 @@ import { eventsMigrations } from './migrations.js';
 import type { UrlPolicy } from './safe-url.js';
 import {
   deliverWebhooks,
+  ensureFanOutCursor,
   fanOutWebhooks,
   webhookStore,
   type DeliverOptions,
@@ -208,5 +209,7 @@ export function eventsModule(options: EventsModuleOptions): ComputeModule<'event
     api,
     reconcilers,
     selfCheck,
+    // Anchor the fan-out cursor now, so events committed before the first fan-out pass are not skipped.
+    start: (context) => ensureFanOutCursor(context.sql),
   });
 }
