@@ -161,6 +161,23 @@ fleetSize)`, then `removeTrustRoot`.
   - `parseSshCertificate` reads and verifies certificates, ssh-keygen's included. Tests round-trip
     both ways with OpenSSH's `ssh-keygen`.
 
+## v0.5 (optional): workload identity
+
+- `createWorkloadIssuer({ issuer, defaultAudience })` issues ES256 OIDC tokens (`typ: JWT`, at most
+  15 min) with `sub: t:<tenantId>:instance:<id>`, `tenant_id`, `instance_id` and a unique `jti`.
+  - `discoveryDocument()` and `jwks()` are served on the public https:443 issuer host.
+  - Rotation has three steps: `addKey()` publishes the new key, `promote(kid)` starts signing with
+    it, and `retire(kid)` drops the old key, but only after its last token expired. A rotation
+    therefore never invalidates an issued token (the U6 lesson).
+- A tenant admin registers the issuer as an OIDC provider in better-iam and creates a
+  `web-identity` trust (`StringLike token.sub "t:<tenant>:*"`). Instances then exchange tokens at
+  `sts/assumeRoleWithWebIdentity`, which the tests do against a real better-iam.
+- `createImdsTokenService({ issuer })` is the IMDSv2-style exchange:
+  - `PUT /latest/api/token` returns a session token bound to the calling instance by an HMAC;
+  - `GET /latest/identity-token` exchanges it for a workload token;
+  - a session token from another instance, a forwarded request (`X-Forwarded-For`) and a `GET` for
+    a session token are all refused.
+
 ## Go parity (for `bcd`, W1)
 
 Everything `bcd` produces or checks must match this package byte for byte. Use only Go's standard
