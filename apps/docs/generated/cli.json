@@ -1,0 +1,1939 @@
+{
+  "name": "better-compute",
+  "version": "0.1.0",
+  "commands": [
+    {
+      "name": "init",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Write a starter configuration file",
+      "description": "init writes a starter better-compute.config.ts (or the JavaScript form when --config names a .mjs or .js file): a configuration factory that uses PGlite in a local .better-compute-pglite directory for development and PostgreSQL when BETTER_COMPUTE_DATABASE_URL is set, reads the secret and base URL from the environment, shows where better-iam plugs in, and exports an empty list of project commands. It never overwrites an existing file.",
+      "usage": "better-compute init [--config better-compute.config.ts]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Where to write the configuration (.ts, .mts, .js or .mjs)",
+          "default": "better-compute.config.ts"
+        }
+      ],
+      "examples": ["better-compute init", "better-compute init --config better-compute.config.mjs"]
+    },
+    {
+      "name": "migrate",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Create or upgrade the database schema and apply module migrations",
+      "description": "migrate runs compute.initialize(): it checks every method's IAM action against the merged catalog and the normative method table (INVALID_CONFIG on a mismatch), then creates or upgrades the compute schema and applies every module's and plugin's migrations. Run it on every deploy before the application starts; it is idempotent.",
+      "usage": "better-compute migrate [--config PATH]",
+      "target": "config",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        }
+      ],
+      "examples": [
+        "better-compute migrate",
+        "BETTER_COMPUTE_DATABASE_URL=pglite:./data better-compute migrate"
+      ]
+    },
+    {
+      "name": "doctor",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Check the database, schema, clock, method registry and IAM wiring",
+      "description": "doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured. It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.",
+      "usage": "better-compute doctor [--strict] [--pki PATH] [--config PATH]",
+      "target": "config",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--strict",
+          "optional": true,
+          "description": "Exit non-zero when any error or warning is found"
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute doctor",
+        "better-compute doctor --strict --query \"findings[].check\""
+      ]
+    },
+    {
+      "name": "version",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Print the better-compute version",
+      "description": "version prints the version of this command line (also --version or -v).",
+      "usage": "better-compute version",
+      "target": "none",
+      "args": [],
+      "flags": [],
+      "examples": []
+    },
+    {
+      "name": "serve",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Run the API and the workers in this process",
+      "description": "serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener; --roles gateway runs the daemon gateway over mTLS from the configuration's host.gateway (all includes it when configured), with the report hooks of the built-in modules and tunnels when the deployment issues exec tickets. Beside the API the listener answers /healthz, /readyz, /.well-known/better-compute (with --pki, the join keys bcd may fall back to) and the host export's own routes (for example GET /watch and GET /metrics). SIGINT or SIGTERM drains the gateway first, then stops the listener and the workers, releasing their leases.",
+      "usage": "better-compute serve [--host HOST] [--port PORT] [--roles ROLES] [--no-migrate] [--pki PATH] [--config PATH]",
+      "target": "config",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--host",
+          "value": "HOST",
+          "optional": true,
+          "description": "The address to listen on",
+          "env": "HOST",
+          "default": "0.0.0.0"
+        },
+        {
+          "flag": "--port",
+          "value": "PORT",
+          "optional": true,
+          "description": "The port to listen on (0 picks a free one)",
+          "env": "PORT",
+          "default": 3000
+        },
+        {
+          "flag": "--roles",
+          "value": "ROLES",
+          "optional": true,
+          "description": "all, or a comma list of api, gateway and controllers, scheduler, sinks, iam",
+          "env": "BETTER_COMPUTE_ROLES",
+          "default": "all"
+        },
+        {
+          "flag": "--no-migrate",
+          "optional": true,
+          "description": "Do not run migrations first"
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "Publish the join keys of this PKI bundle at /.well-known/better-compute (the bcd fallback to its pins)",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        }
+      ],
+      "examples": [
+        "better-compute serve",
+        "better-compute serve --roles api --port 8080",
+        "better-compute serve --roles controllers,sinks,iam --no-migrate",
+        "better-compute serve --roles gateway,controllers"
+      ]
+    },
+    {
+      "name": "dev",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Run a local development server with no setup",
+      "description": "dev runs the API and every worker role on 127.0.0.1. With a configuration file (or BETTER_COMPUTE_DATABASE_URL) it uses that deployment; without one it keeps PGlite in --data (default .better-compute/dev-db; --memory for a throwaway database) and a generated deployment secret in .better-compute/dev-secret (owner-only), so repeated runs keep their data. It always migrates first. Without IAM configured only public methods answer; see better-compute iam setup. --sim N adds a gateway on loopback cleartext HTTP/2 (sessions authenticate by a header; local development only) and N simulated machines that join the way bcd does: a join token sealed to throwaway dev JoinService keys, the Join RPC, a Session stream, diag.nvml acceptance and adoption by the real runtime. Without configured IAM, --sim starts an embedded in-memory better-iam and prints its root token; with configured IAM it acts as BETTER_COMPUTE_TOKEN, which must be a root administrator.",
+      "usage": "better-compute dev [--host HOST] [--port PORT] [--data DIR] [--memory] [--sim N] [--sim-variant VARIANT] [--config PATH]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--host",
+          "value": "HOST",
+          "optional": true,
+          "description": "The address to listen on",
+          "default": "127.0.0.1"
+        },
+        {
+          "flag": "--port",
+          "value": "PORT",
+          "optional": true,
+          "description": "The port to listen on (0 picks a free one)",
+          "env": "PORT",
+          "default": 3000
+        },
+        {
+          "flag": "--data",
+          "value": "DIR",
+          "optional": true,
+          "description": "Where PGlite keeps the development database (no configuration only)",
+          "default": ".better-compute/dev-db"
+        },
+        {
+          "flag": "--memory",
+          "optional": true,
+          "description": "Use a throwaway in-memory database"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "The configuration file (default: discovered)",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--sim",
+          "value": "N",
+          "optional": true,
+          "description": "Join N simulated machines (FakeDaemons) through a loopback dev gateway (needs @better-compute/testing)"
+        },
+        {
+          "flag": "--sim-variant",
+          "value": "VARIANT",
+          "optional": true,
+          "description": "Hardware of the simulated machines: hgx-h100, hgx-h100-gpu-missing, l40s, cpu",
+          "default": "hgx-h100"
+        }
+      ],
+      "examples": [
+        "better-compute dev",
+        "better-compute dev --memory --port 0",
+        "better-compute dev --memory --sim 8",
+        "better-compute dev --sim 4 --sim-variant l40s"
+      ]
+    },
+    {
+      "name": "sim",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Run the deterministic fleet simulator and check its invariants",
+      "description": "sim runs --nodes FakeDaemons on fake hardware against the in-memory gateway stub for --duration of simulated time, with a steady workload (diagnostics, inventory refreshes, log collection, reboots, GPU bookings) and --chaos faults (none, light, heavy: crashes, reboots, journal loss, partitions, half-open links, resets, stalls, gateway kills), then quiesces for --settle and checks invariants I1 (no double booking), I2 (at-most-once side effects), I5 (every command terminal) and I8 (usage). Nothing reads the wall clock: the same --seed prints the same digest. It exits SIM_INVARIANT_VIOLATED when an invariant fails. Needs @better-compute/testing.",
+      "usage": "better-compute sim [--seed SEED] [--nodes N] [--duration DURATION] [--settle DURATION] [--chaos LEVEL] [--log PATH]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--seed",
+          "value": "SEED",
+          "optional": true,
+          "description": "The seed",
+          "default": "sim"
+        },
+        {
+          "flag": "--nodes",
+          "value": "N",
+          "optional": true,
+          "description": "Simulated nodes",
+          "default": 50
+        },
+        {
+          "flag": "--duration",
+          "value": "DURATION",
+          "optional": true,
+          "description": "Simulated time under workload",
+          "default": "10m"
+        },
+        {
+          "flag": "--settle",
+          "value": "DURATION",
+          "optional": true,
+          "description": "Quiet time afterwards (sweeper and replays settle)",
+          "default": "16m"
+        },
+        {
+          "flag": "--chaos",
+          "value": "LEVEL",
+          "optional": true,
+          "description": "none, light or heavy",
+          "default": "light"
+        },
+        {
+          "flag": "--log",
+          "value": "PATH",
+          "optional": true,
+          "description": "Write the event log to a new file"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute sim",
+        "better-compute sim --seed nightly-42 --nodes 500 --duration 1h --chaos heavy"
+      ]
+    },
+    {
+      "name": "api",
+      "aliases": [],
+      "group": "API",
+      "summary": "Call any compute API method as the current token",
+      "description": "api calls any method of the HTTP API (the same routes, envelope and permission checks as POST {basePath}/{group}/{method}) as BETTER_COMPUTE_TOKEN, in process through the configuration or against --url, and prints the result. Public methods (system.version, system.whoami) need no token; system.whoami reports the token when one is set. Build the input with --data (JSON, @file.json, or - for standard input) and key=value items: name=gpu-a sets a string, limit:=10 or labels:='[\"a\",\"b\"]' sets JSON, spec:=@spec.json reads a JSON file, notes=@notes.md reads a text file, resource.type=pool nests, and ids[]=a appends. Plugin methods are plugins.ID.GROUP.METHOD. api --list [GROUP] lists every route with whether it needs a token and the IAM action it is decided on.",
+      "usage": "better-compute api GROUP.METHOD [key=value ...] [--data JSON|@FILE|-] [--list] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "route",
+          "description": "group.method (system.version) or plugins.id.group.method"
+        },
+        {
+          "name": "fields",
+          "description": "key=value, key:=json, key:=@file.json, key=@file.txt",
+          "variadic": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--data",
+          "value": "JSON|@FILE|-",
+          "optional": true,
+          "description": "Request body as JSON, a JSON file, or standard input"
+        },
+        {
+          "flag": "--list",
+          "optional": true,
+          "description": "List routes (optionally of one group) instead of calling one"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute api --list",
+        "better-compute api system.version",
+        "better-compute api system.selfCheck --query \"findings[].check\"",
+        "better-compute api system.whoami --url https://compute.example.com",
+        "better-compute api inventory.get tenantId=tenant-acme nodeId=node_01jz0000000000000000000000",
+        "echo '{\"tenantId\":\"tenant-acme\",\"widgetId\":\"w1\"}' | better-compute api plugins.acme.widgets.get --data -"
+      ]
+    },
+    {
+      "name": "reserve",
+      "aliases": [],
+      "group": "Capacity",
+      "summary": "Reserve GPUs from a pool (reservations.create)",
+      "description": "reserve asks for --gpus whole GPUs from --pool for --for, decided by better-iam as compute:reservations:create on the reservation draft and placed by the pool's placer (PLAN.md §3.4, §10.3). --selector takes the shorthand `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80`; --model and --product add a gpuModel or gpuProduct match. It waits up to --wait seconds for the placement and prints the reservation, whose binding lists the booked GPU UUIDs once active. Every run sends a new idempotency key unless --key is given: repeat the command with the same --key to retry safely.",
+      "usage": "better-compute reserve --tenant ID --pool ID --gpus N --for DURATION [--selector EXPR] [--model MODEL] [--product PRODUCT] [--nvlink] [--project ID] [--start TIME] [--lease SECONDS] [--key KEY] [--wait SECONDS] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": false,
+          "description": "The pool to reserve from (pool_…)"
+        },
+        {
+          "flag": "--gpus",
+          "value": "N",
+          "optional": false,
+          "description": "Whole GPUs to reserve"
+        },
+        {
+          "flag": "--for",
+          "value": "DURATION",
+          "optional": false,
+          "description": "How long: 30m, 8h, 7d"
+        },
+        {
+          "flag": "--selector",
+          "value": "EXPR",
+          "optional": true,
+          "description": "Device selector shorthand, e.g. \"vramGiB >= 80\""
+        },
+        {
+          "flag": "--model",
+          "value": "MODEL",
+          "optional": true,
+          "description": "GPU model family, e.g. H100"
+        },
+        {
+          "flag": "--product",
+          "value": "PRODUCT",
+          "optional": true,
+          "description": "GPU product, e.g. H100-SXM5-80GB"
+        },
+        {
+          "flag": "--nvlink",
+          "optional": true,
+          "description": "All GPUs must share one NVLink domain"
+        },
+        {
+          "flag": "--project",
+          "value": "ID",
+          "optional": true,
+          "description": "Project to account the reservation to (prj_…)"
+        },
+        {
+          "flag": "--start",
+          "value": "TIME",
+          "optional": true,
+          "description": "Start later: ISO 8601 time or +DURATION (default now)"
+        },
+        {
+          "flag": "--lease",
+          "value": "SECONDS",
+          "optional": true,
+          "description": "Renewable lease: released unless renewed within this many seconds"
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key, to retry an earlier request"
+        },
+        {
+          "flag": "--wait",
+          "value": "SECONDS",
+          "optional": true,
+          "description": "How long to wait for the placement",
+          "default": 20
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute reserve --pool pool_01k… --gpus 4 --for 8h",
+        "better-compute reserve --pool pool_01k… --gpus 8 --for 3d --model H100 --nvlink --selector \"vramGiB >= 80\"",
+        "better-compute reserve --pool pool_01k… --gpus 2 --for 1h --start +2h --key nightly-2026-09-24"
+      ]
+    },
+    {
+      "name": "release",
+      "aliases": [],
+      "group": "Capacity",
+      "summary": "Release a reservation early (reservations.release)",
+      "description": "release ends an active or placed reservation now: its bookings are truncated, the GPUs return to the pool and billing stops at the release time. A reservation that has not started yet can be withdrawn with --cancel instead (reservations.cancel).",
+      "usage": "better-compute release RESERVATION --tenant ID [--cancel] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "reservation",
+          "description": "The reservation id (rsv_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--cancel",
+          "optional": true,
+          "description": "Withdraw a reservation that has not started"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute release rsv_01k…", "better-compute release rsv_01k… --cancel"]
+    },
+    {
+      "name": "extend",
+      "aliases": [],
+      "group": "Capacity",
+      "summary": "Extend a reservation (reservations.extend)",
+      "description": "extend moves the end of a reservation later, by --by or to --until. It is admitted like a new reservation: better-iam decides compute:reservations:extend on the total duration after the change, so policy caps also bound extensions, and the booking must still be free. With --renew it instead renews a leased reservation (reservations.renew).",
+      "usage": "better-compute extend RESERVATION --tenant ID [--by DURATION] [--until TIME] [--renew] [--key KEY] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "reservation",
+          "description": "The reservation id (rsv_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--by",
+          "value": "DURATION",
+          "optional": true,
+          "description": "Extend by this much: 30m, 4h, 1d"
+        },
+        {
+          "flag": "--until",
+          "value": "TIME",
+          "optional": true,
+          "description": "Extend to this time: ISO 8601 or +DURATION"
+        },
+        {
+          "flag": "--renew",
+          "optional": true,
+          "description": "Renew the lease of a renewable reservation instead"
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key, to retry an earlier request"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute extend rsv_01k… --by 4h",
+        "better-compute extend rsv_01k… --renew"
+      ]
+    },
+    {
+      "name": "reservations list",
+      "aliases": [],
+      "group": "Capacity",
+      "summary": "List the tenant’s reservations (reservations.list)",
+      "description": "List the tenant’s reservations (reservations.list)",
+      "usage": "better-compute reservations list --tenant ID [--state STATE] [--pool ID] [--limit N] [--cursor ID] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--state",
+          "value": "STATE",
+          "optional": true,
+          "description": "Only this state: active, placed, pending, …"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": true,
+          "description": "Only this pool"
+        },
+        {
+          "flag": "--limit",
+          "value": "N",
+          "optional": true,
+          "description": "Page size"
+        },
+        {
+          "flag": "--cursor",
+          "value": "ID",
+          "optional": true,
+          "description": "Continue after this reservation"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute reservations list --state active",
+        "better-compute reservations list --format json"
+      ]
+    },
+    {
+      "name": "reservations get",
+      "aliases": [],
+      "group": "Capacity",
+      "summary": "Show one reservation, with its binding (reservations.get)",
+      "description": "Show one reservation, with its binding (reservations.get)",
+      "usage": "better-compute reservations get RESERVATION --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "reservation",
+          "description": "The reservation id (rsv_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute reservations get rsv_01k… --query binding"]
+    },
+    {
+      "name": "pools list",
+      "aliases": [],
+      "group": "Capacity",
+      "summary": "List the pools the tenant owns or is offered (pools.list)",
+      "description": "List the pools the tenant owns or is offered (pools.list)",
+      "usage": "better-compute pools list --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pools list"]
+    },
+    {
+      "name": "capacity",
+      "aliases": [],
+      "group": "Capacity",
+      "summary": "Show free and allocated capacity: a summary, or one pool (capacity.summary, capacity.byPool)",
+      "description": "capacity prints what the tenant can see: per pool and per GPU model, total, allocatable, allocated, reserved and available. With --pool it prints that pool's rollup. With --preview and a --gpus request it asks where such a reservation would fit right now (capacity.preview) without booking anything.",
+      "usage": "better-compute capacity --tenant ID [--pool ID] [--preview] [--gpus N] [--for DURATION] [--selector EXPR] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": true,
+          "description": "One pool"
+        },
+        {
+          "flag": "--preview",
+          "optional": true,
+          "description": "Preview a placement (needs --pool, --gpus and --for)"
+        },
+        {
+          "flag": "--gpus",
+          "value": "N",
+          "optional": true,
+          "description": "GPUs for --preview"
+        },
+        {
+          "flag": "--for",
+          "value": "DURATION",
+          "optional": true,
+          "description": "Duration for --preview"
+        },
+        {
+          "flag": "--selector",
+          "value": "EXPR",
+          "optional": true,
+          "description": "Selector shorthand for --preview"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute capacity",
+        "better-compute capacity --pool pool_01k…",
+        "better-compute capacity --preview --pool pool_01k… --gpus 8 --for 1d --selector \"vramGiB >= 80\""
+      ]
+    },
+    {
+      "name": "fleet export",
+      "aliases": [],
+      "group": "Fleet",
+      "summary": "Write the tenant's platform objects as a FleetConfig document (fleet.export)",
+      "description": "fleet export prints (or writes with --out) the sites, provider accounts, pools with their owner quotas and offers, and VPS flavors the tenant owns, keyed by name. Objects fleet did not create are named by their id; rename them in the document and the next apply keeps them. Secrets appear only as references.",
+      "usage": "better-compute fleet export --tenant ID [--out PATH] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--out",
+          "value": "PATH",
+          "optional": true,
+          "description": "Write the document to a new file"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute fleet export --out fleet.json"]
+    },
+    {
+      "name": "fleet plan",
+      "aliases": [],
+      "group": "Fleet",
+      "summary": "Show what applying a FleetConfig document would change (fleet.plan)",
+      "description": "fleet plan diffs the document against the tenant's current objects and prints each change: + create, ~ update (with the fields), - delete (only with --prune), and BLOCKED for changes the platform cannot make (a site's region, a pool's class or site, dangling names). It changes nothing. The printed planHash, passed to fleet apply --plan-hash, applies exactly this plan. With --fail-on-drift it exits FLEET_DRIFTED when anything would change, for drift checks in CI; a blocked plan always exits PLAN_BLOCKED.",
+      "usage": "better-compute fleet plan FILE --tenant ID [--prune] [--fail-on-drift] [--calls] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "file",
+          "description": "The FleetConfig document (JSON), or - for standard input",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--prune",
+          "optional": true,
+          "description": "Also delete what the document no longer lists (pools are archived)"
+        },
+        {
+          "flag": "--fail-on-drift",
+          "optional": true,
+          "description": "Exit FLEET_DRIFTED when the plan is not empty"
+        },
+        {
+          "flag": "--calls",
+          "optional": true,
+          "description": "Also print the API calls apply would make"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute fleet plan fleet.json",
+        "better-compute fleet plan fleet.json --prune --fail-on-drift"
+      ]
+    },
+    {
+      "name": "fleet status",
+      "aliases": [],
+      "group": "Fleet",
+      "summary": "Show the last applied document and whether the fleet drifted from it (fleet.status)",
+      "description": "fleet status shows the planHash, author and time of the tenant's last fleet apply, and the drift the fleet.drift job found when it last re-planned that document (every 15 minutes by default): changes made outside fleet, listed like fleet plan. With --fail-on-drift it exits FLEET_DRIFTED while there is drift, for monitoring.",
+      "usage": "better-compute fleet status --tenant ID [--fail-on-drift] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--fail-on-drift",
+          "optional": true,
+          "description": "Exit FLEET_DRIFTED while the fleet drifted"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute fleet status", "better-compute fleet status --fail-on-drift"]
+    },
+    {
+      "name": "fleet apply",
+      "aliases": [],
+      "group": "Fleet",
+      "summary": "Apply a FleetConfig document (fleet.plan, then fleet.apply)",
+      "description": "fleet apply plans the document, prints the changes, then applies exactly that plan. Every underlying call (sites.create, pools.*, quotas.set, flavors.*, providerAccounts.*) is decided for you before anything runs, and then all of them run in one transaction, so a denial or failure applies nothing. If the fleet changes between the plan and the apply, nothing is applied and the command exits CONFIG_DRIFT. Pass --plan-hash to apply a plan reviewed earlier with fleet plan; without --yes it only plans.",
+      "usage": "better-compute fleet apply FILE --tenant ID [--prune] [--plan-hash HASH] [--yes] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "file",
+          "description": "The FleetConfig document (JSON), or - for standard input",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--prune",
+          "optional": true,
+          "description": "Also delete what the document no longer lists (pools are archived)"
+        },
+        {
+          "flag": "--plan-hash",
+          "value": "HASH",
+          "optional": true,
+          "description": "Apply only if the plan still has this hash (from fleet plan)"
+        },
+        {
+          "flag": "--yes",
+          "optional": true,
+          "description": "Apply without stopping after the plan"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute fleet apply fleet.json --yes",
+        "better-compute fleet apply fleet.json --prune --plan-hash 3f1c…"
+      ]
+    },
+    {
+      "name": "pki init",
+      "aliases": [],
+      "group": "PKI",
+      "summary": "Create the machine PKI: root, node, serving and internal CAs and the JoinService keys",
+      "description": "pki init creates a deployment's machine PKI (PLAN.md §13) and writes it to one JSON file with mode 0600: an offline root CA, the per-region node CA (agent client certificates), the gateway serving CA, the internal control-plane CA, and the JoinService signing and encryption keys. No key does two jobs. The private keys are sealed with AES-256-GCM under a key derived from BETTER_COMPUTE_SECRET; without the secret, pass --plaintext to store them as PEM instead. --offline-root writes the root key to its own file and leaves it out of the bundle: keep that file off the servers. It prints the pins install scripts need (the same as pki show) and never overwrites an existing file.",
+      "usage": "better-compute pki init --trust-domain DOMAIN [--pki PATH] [--offline-root PATH] [--organization NAME] [--plaintext]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--trust-domain",
+          "value": "DOMAIN",
+          "optional": false,
+          "description": "SPIFFE trust domain of agent identities, e.g. compute.example.com",
+          "env": "BETTER_COMPUTE_TRUST_DOMAIN"
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--offline-root",
+          "value": "PATH",
+          "optional": true,
+          "description": "Write the root key here (sealed like the bundle) and leave it out of the bundle"
+        },
+        {
+          "flag": "--organization",
+          "value": "NAME",
+          "optional": true,
+          "description": "Subject organization of the CA certificates",
+          "default": "better-compute"
+        },
+        {
+          "flag": "--plaintext",
+          "optional": true,
+          "description": "Store private keys as PEM (mode 0600) when BETTER_COMPUTE_SECRET is not set"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "BETTER_COMPUTE_SECRET=... better-compute pki init --trust-domain compute.example.com",
+        "better-compute pki init --trust-domain compute.test --plaintext --pki ./dev/pki.json",
+        "better-compute pki init --trust-domain compute.example.com --offline-root /media/usb/root-ca.key"
+      ]
+    },
+    {
+      "name": "pki show",
+      "aliases": [],
+      "group": "PKI",
+      "summary": "Print the pins install scripts and bcd need, and the CA expiry dates",
+      "description": "pki show reads only the public half of the bundle (no secret needed) and prints the trust domain, the gateway serving CA's SPKI pin, the JoinService signing and encryption key pins in bcd's sha256/<base64> form, the encryption key as a JWK, and when each CA expires.",
+      "usage": "better-compute pki show [--pki PATH]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pki show", "better-compute pki show --query servingCaSpkiPin"]
+    },
+    {
+      "name": "pki issue-gateway",
+      "aliases": [],
+      "group": "PKI",
+      "summary": "Issue a gateway serving certificate and key from the serving CA",
+      "description": "pki issue-gateway generates a P-256 key and issues a serving certificate for it from the bundle's gateway serving CA (PLAN.md §7.1): DNS SANs from --san (comma-separated), serverAuth, 30 days by default. It writes <name>.key (mode 0600) and <name>.crt (the certificate followed by the serving CA's chain) into --out, replacing earlier files atomically so a running gateway can hot-reload them. Daemons trust the certificate through the serving CA pin (pki show).",
+      "usage": "better-compute pki issue-gateway --san NAMES [--out DIR] [--name NAME] [--days N] [--pki PATH]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--san",
+          "value": "NAMES",
+          "optional": false,
+          "description": "DNS names, comma-separated, e.g. gw.eu-central.example.com"
+        },
+        {
+          "flag": "--out",
+          "value": "DIR",
+          "optional": true,
+          "description": "Directory for the key and certificate",
+          "default": ".better-compute/gateway"
+        },
+        {
+          "flag": "--name",
+          "value": "NAME",
+          "optional": true,
+          "description": "File name stem: NAME.key and NAME.crt",
+          "default": "gateway"
+        },
+        {
+          "flag": "--days",
+          "value": "N",
+          "optional": true,
+          "description": "Certificate lifetime in days",
+          "default": 30
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute pki issue-gateway --san gw.eu-central.example.com",
+        "better-compute pki issue-gateway --san gw1.example.com,gw.example.com --out /etc/better-compute/tls --days 14"
+      ]
+    },
+    {
+      "name": "daemon install-script",
+      "aliases": [],
+      "group": "Fleet",
+      "summary": "Write the POSIX sh script that installs bcd on a server and joins it to a pool",
+      "description": "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band.",
+      "usage": "better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--pki PATH] [--out PATH]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": false,
+          "description": "The pool the node joins (named in the script)"
+        },
+        {
+          "flag": "--site",
+          "value": "ID",
+          "optional": false,
+          "description": "The pool's site id (config.toml site)"
+        },
+        {
+          "flag": "--gateway-url",
+          "value": "URL",
+          "optional": false,
+          "description": "The regional gateway bcd dials, https://…",
+          "env": "BETTER_COMPUTE_GATEWAY_URL"
+        },
+        {
+          "flag": "--base-url",
+          "value": "URL",
+          "optional": false,
+          "description": "The control plane serving the bcd downloads, https://…",
+          "env": "BETTER_COMPUTE_BASE_URL"
+        },
+        {
+          "flag": "--base-path",
+          "value": "PATH",
+          "optional": true,
+          "description": "The API's base path",
+          "default": "/api/compute"
+        },
+        {
+          "flag": "--bcd-version",
+          "value": "VERSION",
+          "optional": false,
+          "description": "The bcd release to install, e.g. 0.1.0",
+          "env": "BETTER_COMPUTE_BCD_VERSION"
+        },
+        {
+          "flag": "--sha256",
+          "value": "ARCH=HEX,…",
+          "optional": true,
+          "description": "SHA-256 of each architecture’s binary: amd64=<hex>,arm64=<hex> (or use --release-manifest)"
+        },
+        {
+          "flag": "--release-manifest",
+          "value": "PATH",
+          "optional": true,
+          "description": "A signed bcd release manifest: its verified digests are pinned instead"
+        },
+        {
+          "flag": "--release-pins",
+          "value": "PINS",
+          "optional": true,
+          "description": "Comma-separated sha256/… pins of the release keys",
+          "env": "BCD_RELEASE_PINS"
+        },
+        {
+          "flag": "--release-threshold",
+          "value": "N",
+          "optional": true,
+          "description": "Release keys that must have signed (default 1)"
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--out",
+          "value": "PATH",
+          "optional": true,
+          "description": "Write the script to a new file (mode 0755) instead of standard output"
+        }
+      ],
+      "examples": [
+        "better-compute daemon install-script --pool pool_h100 --site fsn1 --gateway-url https://gw.eu.example.com --base-url https://compute.example.com --bcd-version 0.1.0 --sha256 amd64=<hex> > install-bcd.sh",
+        "BCD_JOIN_TOKEN=bcjt_... sudo -E sh install-bcd.sh"
+      ]
+    },
+    {
+      "name": "iam setup",
+      "aliases": [],
+      "group": "IAM",
+      "summary": "Print the example compute policies and create the root billing meters in better-iam",
+      "description": "iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardrails, for an organization administrator to apply: compute cannot write organization policies. The policies are parameterized by the session JWT audience (the compute API's URL), the GPU model, regions and limits of the bounded-reservation statement. With --meters it also creates the §12.7 root meters in better-iam: one gpu.<model>.hours per GPU model family, plus node.metal.hours, vps.vcpu.hours and vps.memory.gib.hours. Meters that already exist are left alone, so re-running is safe. Creating meters calls better-iam at --iam-url as BETTER_IAM_TOKEN, which must be a root credential, through the optional peer @better-iam/client. It sets no prices: pricing is an operator decision (billing.setPrice).",
+      "usage": "better-compute iam setup --audience URL [--gpu-model MODEL] [--regions LIST] [--max-gpus N] [--max-hours N] [--feature FLAG] [--meters] [--iam-url URL] [--iam-base-path PATH] [--root-tenant ID] [--gpu-models LIST]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--audience",
+          "value": "URL",
+          "optional": false,
+          "description": "The compute API URL, used as the session JWT audience",
+          "env": "BETTER_COMPUTE_BASE_URL"
+        },
+        {
+          "flag": "--gpu-model",
+          "value": "MODEL",
+          "optional": true,
+          "description": "GPU model family the bounded-reservation statement allows",
+          "default": "H100"
+        },
+        {
+          "flag": "--regions",
+          "value": "LIST",
+          "optional": true,
+          "description": "Regions the bounded-reservation statement allows, comma-separated"
+        },
+        {
+          "flag": "--max-gpus",
+          "value": "N",
+          "optional": true,
+          "description": "GPUs per reservation",
+          "default": 8
+        },
+        {
+          "flag": "--max-hours",
+          "value": "N",
+          "optional": true,
+          "description": "Hours per reservation, extensions included",
+          "default": 72
+        },
+        {
+          "flag": "--feature",
+          "value": "FLAG",
+          "optional": true,
+          "description": "Tenant feature the reservation statement requires (default compute.<model>)"
+        },
+        {
+          "flag": "--meters",
+          "optional": true,
+          "description": "Also create the root billing meters in better-iam"
+        },
+        {
+          "flag": "--iam-url",
+          "value": "URL",
+          "optional": true,
+          "description": "better-iam base URL for --meters",
+          "env": "BETTER_IAM_URL"
+        },
+        {
+          "flag": "--iam-base-path",
+          "value": "PATH",
+          "optional": true,
+          "description": "better-iam's API base path",
+          "default": "/api/iam"
+        },
+        {
+          "flag": "--root-tenant",
+          "value": "ID",
+          "optional": true,
+          "description": "The root tenant that owns the meters (required with --meters)",
+          "env": "BETTER_COMPUTE_ROOT_TENANT"
+        },
+        {
+          "flag": "--gpu-models",
+          "value": "LIST",
+          "optional": true,
+          "description": "GPU model families to meter, comma-separated (default: every known family)"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute iam setup --audience https://compute.example.com --query \"[0]\"",
+        "BETTER_IAM_TOKEN=... better-compute iam setup --audience https://compute.example.com --meters --iam-url https://iam.example.com --root-tenant ten_root"
+      ]
+    },
+    {
+      "name": "audit checkpoint",
+      "aliases": [],
+      "group": "Audit",
+      "summary": "Seal committed audit events into signed per-tenant checkpoints",
+      "description": "audit checkpoint runs what the audit module's hourly job does: it seals every audit event committed since the last checkpoint into a signed, hash-chained Merkle checkpoint per tenant, signed with the PKI bundle's audit key (unsealed with BETTER_COMPUTE_SECRET). It repeats until nothing is left. The deployment must include auditModule() and be migrated.",
+      "usage": "better-compute audit checkpoint [--pki PATH] [--limit N] [--config PATH]",
+      "target": "config",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--limit",
+          "value": "N",
+          "optional": true,
+          "description": "Events per pass (default 50000)"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute audit checkpoint"]
+    },
+    {
+      "name": "audit verify",
+      "aliases": [],
+      "group": "Audit",
+      "summary": "Verify a tenant's audit trail against its signed checkpoints",
+      "description": "audit verify recomputes every checkpoint of --tenant from the audit events as they are now: signatures under the audit key's pin, the hash chain, contiguous ranges, sizes and Merkle roots. An edited, deleted or inserted event in a sealed range, a broken chain or a foreign signature is a problem; with any problem the command exits AUDIT_TAMPERED after printing the report. It only reads.",
+      "usage": "better-compute audit verify --tenant ID [--pin PIN] [--pki PATH] [--config PATH]",
+      "target": "config",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pin",
+          "value": "PIN",
+          "optional": true,
+          "description": "The audit signing key pin (sha256/…); default: from the PKI bundle",
+          "env": "BETTER_COMPUTE_AUDIT_PIN"
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute audit verify --tenant org_acme",
+        "better-compute audit verify --tenant org_acme --query problems"
+      ]
+    },
+    {
+      "name": "audit prove",
+      "aliases": [],
+      "group": "Audit",
+      "summary": "Write an inclusion proof that one audit event is sealed",
+      "description": "audit prove writes a self-contained proof that the event is in a signed checkpoint: the event, its Merkle path and the signed checkpoint. Anyone holding the audit key pin checks it offline with audit check-proof, without database access.",
+      "usage": "better-compute audit prove EVENT --tenant ID [--out PATH] [--config PATH]",
+      "target": "config",
+      "args": [
+        {
+          "name": "event",
+          "description": "The audit event id",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--out",
+          "value": "PATH",
+          "optional": true,
+          "description": "Write the proof to a file instead of printing it"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute audit prove aud_01k… --tenant org_acme --out proof.json"]
+    },
+    {
+      "name": "audit check-proof",
+      "aliases": [],
+      "group": "Audit",
+      "summary": "Check an inclusion proof offline against the audit key pin",
+      "description": "audit check-proof verifies a proof written by audit prove: the checkpoint's signature under the pin and the event's Merkle path to the signed root. It needs no database; it exits INVALID_PROOF when the proof does not hold.",
+      "usage": "better-compute audit check-proof FILE [--pin PIN] [--pki PATH]",
+      "target": "none",
+      "args": [
+        {
+          "name": "file",
+          "description": "The proof (JSON), or - for standard input",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--pin",
+          "value": "PIN",
+          "optional": true,
+          "description": "The audit signing key pin (sha256/…); default: from the PKI bundle",
+          "env": "BETTER_COMPUTE_AUDIT_PIN"
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute audit check-proof proof.json --pin sha256/…"]
+    },
+    {
+      "name": "release keygen",
+      "aliases": [],
+      "group": "Release",
+      "summary": "Create an offline release signing key and print its pin",
+      "description": "release keygen writes a new P-256 release signing key to --out (owner-only, never overwritten) and its public half to <out>.pub.pem, and prints the key's pin. Keep the key offline. Give the pin to installers (BCD_RELEASE_PINS) and daemons; give the .pub.pem to whoever builds manifests that you will cosign.",
+      "usage": "better-compute release keygen --out PATH",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--out",
+          "value": "PATH",
+          "optional": false,
+          "description": "Where to write the key"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute release keygen --out ~/keys/release-alice.pem"]
+    },
+    {
+      "name": "release sign",
+      "aliases": [],
+      "group": "Release",
+      "summary": "Sign a release manifest over a directory's artifacts",
+      "description": "release sign hashes every file in DIR (not subdirectories; *.sha256, manifest.json and signature files are skipped), derives each artifact's platform from goreleaser names (_linux_amd64.), and writes a manifest signed with --key. --sequence must increase with every release of --product: installers and bcd refuse a manifest whose sequence is below the last one they accepted. List the public halves of keys that will cosign later with --cosigners so their signatures count.",
+      "usage": "better-compute release sign DIR --product NAME --version SEMVER --sequence N --key PATH [--cosigners PATHS] [--validity-days DAYS] [--out PATH]",
+      "target": "none",
+      "args": [
+        {
+          "name": "dir",
+          "description": "The directory holding the release artifacts",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--product",
+          "value": "NAME",
+          "optional": false,
+          "description": "e.g. bcd"
+        },
+        {
+          "flag": "--version",
+          "value": "SEMVER",
+          "optional": false,
+          "description": "e.g. 1.4.0"
+        },
+        {
+          "flag": "--sequence",
+          "value": "N",
+          "optional": false,
+          "description": "The rollback counter: higher than every earlier release"
+        },
+        {
+          "flag": "--key",
+          "value": "PATH",
+          "optional": false,
+          "description": "The signing key"
+        },
+        {
+          "flag": "--cosigners",
+          "value": "PATHS",
+          "optional": true,
+          "description": "Comma-separated .pub.pem files of keys that will cosign"
+        },
+        {
+          "flag": "--validity-days",
+          "value": "DAYS",
+          "optional": true,
+          "description": "How long installers accept the manifest (default 365)"
+        },
+        {
+          "flag": "--out",
+          "value": "PATH",
+          "optional": true,
+          "description": "Where to write the manifest (default DIR/manifest.json)"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute release sign dist --product bcd --version 1.4.0 --sequence 14 --key ~/keys/release-alice.pem"
+      ]
+    },
+    {
+      "name": "release cosign",
+      "aliases": [],
+      "group": "Release",
+      "summary": "Add your signature to a release manifest",
+      "description": "release cosign adds --key's signature to MANIFEST in place. The key must be one the manifest lists (release sign --cosigners), so a threshold of release managers can each sign on their own machine.",
+      "usage": "better-compute release cosign MANIFEST --key PATH",
+      "target": "none",
+      "args": [
+        {
+          "name": "manifest",
+          "description": "The manifest.json",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--key",
+          "value": "PATH",
+          "optional": false,
+          "description": "Your signing key"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute release cosign dist/manifest.json --key ~/keys/release-bob.pem"]
+    },
+    {
+      "name": "release verify",
+      "aliases": [],
+      "group": "Release",
+      "summary": "Verify a release manifest (and its artifacts) against pinned keys",
+      "description": "release verify checks MANIFEST the way installers and bcd do, in this order: a --threshold of distinct keys among --pins signed it; its sequence is not below --min-sequence (rollback); it has not expired; and, with --dir, every listed artifact present there matches its size and SHA-256. It exits RELEASE_REJECTED with the reason otherwise.",
+      "usage": "better-compute release verify MANIFEST --pins PINS [--threshold N] [--min-sequence N] [--product NAME] [--dir DIR]",
+      "target": "none",
+      "args": [
+        {
+          "name": "manifest",
+          "description": "The manifest.json",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--pins",
+          "value": "PINS",
+          "optional": false,
+          "description": "Comma-separated sha256/… pins of the release keys",
+          "env": "BCD_RELEASE_PINS"
+        },
+        {
+          "flag": "--threshold",
+          "value": "N",
+          "optional": true,
+          "description": "Default 1"
+        },
+        {
+          "flag": "--min-sequence",
+          "value": "N",
+          "optional": true,
+          "description": "The last sequence accepted before"
+        },
+        {
+          "flag": "--product",
+          "value": "NAME",
+          "optional": true,
+          "description": "Refuse other products"
+        },
+        {
+          "flag": "--dir",
+          "value": "DIR",
+          "optional": true,
+          "description": "Also check the artifacts in DIR"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute release verify dist/manifest.json --pins sha256/…,sha256/… --threshold 2 --dir dist"
+      ]
+    }
+  ],
+  "env": [
+    {
+      "name": "BETTER_COMPUTE_CONFIG",
+      "description": "Configuration module, like --config"
+    },
+    {
+      "name": "BETTER_COMPUTE_TOKEN",
+      "description": "IAM session token, API key or session JWT that token commands act as"
+    },
+    {
+      "name": "BETTER_COMPUTE_URL",
+      "description": "Compute server token commands call, like --url"
+    },
+    {
+      "name": "BETTER_COMPUTE_DATABASE_URL",
+      "description": "Without a configuration file: the database (postgres://, pglite:DIR, pglite:memory), with BETTER_COMPUTE_SECRET"
+    },
+    {
+      "name": "BETTER_COMPUTE_SECRET",
+      "description": "Without a configuration file: the deployment secret (at least 32 characters)"
+    },
+    {
+      "name": "BETTER_COMPUTE_BASE_URL",
+      "description": "Without a configuration file: the public origin (default http://localhost:3000)"
+    },
+    {
+      "name": "BETTER_COMPUTE_DEBUG",
+      "description": "Print the stack trace of a failure"
+    }
+  ]
+}

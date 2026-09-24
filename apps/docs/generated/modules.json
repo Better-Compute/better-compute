@@ -1,0 +1,81 @@
+{
+  "modules": [
+    {
+      "name": "node-controllers",
+      "groups": [],
+      "migrations": []
+    },
+    {
+      "name": "inventory",
+      "groups": ["inventory"],
+      "migrations": []
+    },
+    {
+      "name": "capacity",
+      "groups": ["capacity", "pools", "quotas", "reservations"],
+      "migrations": ["capacity/0001_device_links"]
+    },
+    {
+      "name": "provision",
+      "groups": ["images", "profiles", "workflows"],
+      "migrations": [
+        "provision/0001_workflows",
+        "provision/0002_images",
+        "provision/0003_workflow_owner"
+      ]
+    },
+    {
+      "name": "metal",
+      "groups": ["metal"],
+      "migrations": ["metal/0001_nodes", "metal/0002_addresses"]
+    },
+    {
+      "name": "vps",
+      "groups": ["flavors", "instances", "providerAccounts"],
+      "migrations": ["vps/0001_instances"]
+    },
+    {
+      "name": "events",
+      "groups": ["webhooks"],
+      "migrations": ["events/0001_webhooks"]
+    },
+    {
+      "name": "fleet",
+      "groups": ["fleet"],
+      "migrations": ["fleet/0001_names", "fleet/0002_applied"]
+    },
+    {
+      "name": "rollout",
+      "groups": ["releases", "rollouts"],
+      "migrations": ["rollout/0001_rollouts"]
+    },
+    {
+      "name": "audit",
+      "groups": [],
+      "migrations": ["audit/0001_checkpoints"]
+    }
+  ],
+  "jobs": [
+    "audit.checkpoint",
+    "capacity.reservations",
+    "capacity.rollup",
+    "capacity.usage",
+    "command-sweeper",
+    "drain",
+    "event-subscribers",
+    "events.deliver",
+    "events.fanout",
+    "fleet.drift",
+    "health",
+    "inventory",
+    "liveness",
+    "metal",
+    "node",
+    "nodespec",
+    "outbox-dispatch",
+    "rollout",
+    "vps.instances",
+    "vps.usage",
+    "workflow"
+  ]
+}

@@ -1,0 +1,210 @@
+[
+  {
+    "name": "@better-compute/audit",
+    "directory": "packages/audit",
+    "description": "Tamper-evident audit for better-compute: signed hourly per-tenant Merkle checkpoints over audit_events, inclusion proofs and verification.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "better-compute",
+    "directory": "packages/better-compute",
+    "description": "Manage GPU and bare-metal capacity and provision nodes in many ways: one package with every better-compute subpath.",
+    "private": false,
+    "exports": [
+      ".",
+      "./core",
+      "./protocol",
+      "./inventory",
+      "./capacity",
+      "./provision",
+      "./metal",
+      "./vps",
+      "./iam",
+      "./iam/plugin",
+      "./iam/testing",
+      "./events",
+      "./fleet",
+      "./rollout",
+      "./audit",
+      "./observability",
+      "./server",
+      "./gateway",
+      "./pki",
+      "./postgres",
+      "./pglite",
+      "./client",
+      "./cli",
+      "./mcp",
+      "./testing"
+    ]
+  },
+  {
+    "name": "@better-compute/capacity",
+    "directory": "packages/capacity",
+    "description": "Capacity for better-compute: atoms, bookings, quotas, rollups and the placement pipeline.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/cli",
+    "directory": "packages/cli",
+    "description": "The better-compute command line.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/client",
+    "directory": "packages/client",
+    "description": "Typed, browser-safe client for the better-compute API.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/console-kit",
+    "directory": "packages/console-kit",
+    "description": "Framework-free view models for better-compute consoles: resource stores with pagination, live event refresh and permission-aware actions.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/core",
+    "directory": "packages/core",
+    "description": "Browser-safe contracts for better-compute: domain types, errors, state tables, extension contracts and the IAM catalog.",
+    "private": false,
+    "exports": [".", "./conformance"]
+  },
+  {
+    "name": "@better-compute/driver-sdk",
+    "directory": "packages/driver-sdk",
+    "description": "bcx, the better-compute out-of-process driver protocol: serveDriver runs a defineDriver object as a plugin, externalDriver hosts one over auto-mTLS gRPC.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/events",
+    "directory": "packages/events",
+    "description": "Event delivery for better-compute: per-tenant signed webhooks with retries and dead letters, and the SSE /watch stream, read from the outbox.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/fleet",
+    "directory": "packages/fleet",
+    "description": "FleetConfig as code for better-compute: export, plan and apply sites, pools, offers, quotas, flavors and provider accounts.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/gateway",
+    "directory": "packages/gateway",
+    "description": "The better-compute gateway: daemon sessions over gRPC/HTTP/2 mTLS, liveness, command dispatch and Join/Renew/Secret forwarding.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/iam",
+    "directory": "packages/iam",
+    "description": "The better-iam bridge for better-compute: IAM plugin and catalog, event inbox, authz projection and resolver, the embedded IamPort, usage sink and flag cache.",
+    "private": false,
+    "exports": [".", "./plugin", "./testing"]
+  },
+  {
+    "name": "@better-compute/inventory",
+    "directory": "packages/inventory",
+    "description": "Hardware inventory for better-compute: section hashing, diffs, GPU model mapping, labels and health conditions.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/mcp",
+    "directory": "packages/mcp",
+    "description": "Model Context Protocol tools for better-compute: pools, capacity, GPU reservations and node status for AI agents, gated by better-iam.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/metal",
+    "directory": "packages/metal",
+    "description": "Bare-metal lifecycle for better-compute: power, management, boot, deploy and inspect drivers.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/observability",
+    "directory": "packages/observability",
+    "description": "Metrics for better-compute: a bounded Prometheus registry, the standard better_compute_* series, a metered IamPort and backlog gauges.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/pki",
+    "directory": "packages/pki",
+    "description": "Machine PKI for better-compute: local CAs, SPIFFE node certificates, sealed join tokens, signed join responses and renew proofs.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/postgres",
+    "directory": "packages/postgres",
+    "description": "PostgreSQL and PGlite storage for better-compute: executor, migrations and store conformance.",
+    "private": false,
+    "exports": [".", "./pglite", "./conformance"]
+  },
+  {
+    "name": "@better-compute/protocol",
+    "directory": "packages/protocol",
+    "description": "Wire contracts between the bcd daemon and the better-compute control plane (protobuf-es generated).",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/provider-hetzner",
+    "directory": "packages/provider-hetzner",
+    "description": "Hetzner providers for better-compute: Hetzner Cloud servers as VPS instances and offers.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/provider-proxmox",
+    "directory": "packages/provider-proxmox",
+    "description": "Proxmox VE provider for better-compute: QEMU VMs cloned from templates as VPS instances.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/provision",
+    "directory": "packages/provision",
+    "description": "Provisioning for better-compute: profiles, steps and the workflow engine.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/rollout",
+    "directory": "packages/rollout",
+    "description": "Signed bcd releases and wave rollouts (A/B self-update) for better-compute, within each pool's disruption budget.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/server",
+    "directory": "packages/server",
+    "description": "The better-compute control plane: betterCompute(), the operation envelope, router and runtimes.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/testing",
+    "directory": "packages/testing",
+    "description": "Testing kit for better-compute: fixtures, simulated daemons, sim clock and conformance runners.",
+    "private": false,
+    "exports": ["."]
+  },
+  {
+    "name": "@better-compute/vps",
+    "directory": "packages/vps",
+    "description": "VPS instances for better-compute: runtimes, flavors and external providers.",
+    "private": false,
+    "exports": ["."]
+  }
+]

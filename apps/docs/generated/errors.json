@@ -1,0 +1,127 @@
+[
+  {
+    "code": "UNAUTHENTICATED",
+    "status": 401,
+    "description": ""
+  },
+  {
+    "code": "ACCESS_DENIED",
+    "status": 403,
+    "description": ""
+  },
+  {
+    "code": "CONFIRMATION_REQUIRED",
+    "status": 403,
+    "description": ""
+  },
+  {
+    "code": "NOT_FOUND",
+    "status": 404,
+    "description": ""
+  },
+  {
+    "code": "INVALID_INPUT",
+    "status": 400,
+    "description": ""
+  },
+  {
+    "code": "INVALID_STATE",
+    "status": 409,
+    "description": ""
+  },
+  {
+    "code": "CONFLICT",
+    "status": 409,
+    "description": ""
+  },
+  {
+    "code": "CAPACITY_UNAVAILABLE",
+    "status": 409,
+    "description": ""
+  },
+  {
+    "code": "QUOTA_EXCEEDED",
+    "status": 409,
+    "description": ""
+  },
+  {
+    "code": "SPEND_LIMIT_REACHED",
+    "status": 402,
+    "description": ""
+  },
+  {
+    "code": "UNSUPPORTED",
+    "status": 422,
+    "description": ""
+  },
+  {
+    "code": "UPGRADE_REQUIRED",
+    "status": 426,
+    "description": ""
+  },
+  {
+    "code": "RATE_LIMITED",
+    "status": 429,
+    "description": ""
+  },
+  {
+    "code": "DRIVER_ERROR",
+    "status": 502,
+    "description": ""
+  },
+  {
+    "code": "PROVIDER_ERROR",
+    "status": 502,
+    "description": ""
+  },
+  {
+    "code": "INVALID_CONFIG",
+    "status": 500,
+    "description": ""
+  },
+  {
+    "code": "NOT_IMPLEMENTED",
+    "status": 501,
+    "description": ""
+  },
+  {
+    "code": "CSRF_REJECTED",
+    "status": 403,
+    "description": ""
+  },
+  {
+    "code": "UNTRUSTED_ORIGIN",
+    "status": 403,
+    "description": ""
+  },
+  {
+    "code": "METHOD_NOT_ALLOWED",
+    "status": 405,
+    "description": ""
+  },
+  {
+    "code": "PAYLOAD_TOO_LARGE",
+    "status": 413,
+    "description": ""
+  },
+  {
+    "code": "INTERNAL_ERROR",
+    "status": 500,
+    "description": ""
+  },
+  {
+    "code": "MISSING_DEPENDENCY",
+    "status": 500,
+    "description": ""
+  },
+  {
+    "code": "CONFIG_DRIFT",
+    "status": 409,
+    "description": ""
+  },
+  {
+    "code": "UNAVAILABLE",
+    "status": 503,
+    "description": ""
+  }
+]

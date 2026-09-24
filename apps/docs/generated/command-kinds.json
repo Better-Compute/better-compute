@@ -1,0 +1,178 @@
+[
+  {
+    "kind": "bmc.boot",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "2m",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.BmcOperationRequest"
+  },
+  {
+    "kind": "bmc.power",
+    "lane": "control",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": true,
+    "timeout": "5m",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.BmcOperationRequest"
+  },
+  {
+    "kind": "bmc.query",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "2m",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.BmcOperationRequest"
+  },
+  {
+    "kind": "boot.cleanUp",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "2m",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.BootCleanUpRequest"
+  },
+  {
+    "kind": "boot.kexec",
+    "lane": "control",
+    "retrySafe": false,
+    "selfTerminating": true,
+    "attested": false,
+    "destructive": false,
+    "timeout": "15m",
+    "roles": ["ramdisk"],
+    "payload": "bettercompute.agent.v1.KexecRequest"
+  },
+  {
+    "kind": "boot.prepareRamdisk",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "2m",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.ProxyDhcpEntry"
+  },
+  {
+    "kind": "daemon.upgrade",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": true,
+    "attested": false,
+    "destructive": false,
+    "timeout": "15m",
+    "roles": ["node", "site"],
+    "payload": "bettercompute.agent.v1.DaemonSection"
+  },
+  {
+    "kind": "deploy.image",
+    "lane": "provision",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": true,
+    "timeout": "1h",
+    "roles": ["ramdisk"],
+    "payload": "bettercompute.agent.v1.DeployImageRequest"
+  },
+  {
+    "kind": "diag.dcgm",
+    "lane": "provision",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": true,
+    "destructive": false,
+    "timeout": "1h",
+    "roles": ["ramdisk", "node"],
+    "payload": "bettercompute.agent.v1.DiagDcgmRequest"
+  },
+  {
+    "kind": "diag.nvml",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": true,
+    "destructive": false,
+    "timeout": "2m",
+    "roles": ["node", "ramdisk"],
+    "payload": "bettercompute.agent.v1.DiagNvmlRequest"
+  },
+  {
+    "kind": "disk.wipe",
+    "lane": "provision",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": true,
+    "destructive": true,
+    "timeout": "6h",
+    "roles": ["ramdisk"],
+    "payload": "bettercompute.agent.v1.WipeRequest"
+  },
+  {
+    "kind": "gpu.reset",
+    "lane": "control",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": true,
+    "destructive": true,
+    "timeout": "5m",
+    "roles": ["node"],
+    "payload": "bettercompute.agent.v1.GpuResetRequest"
+  },
+  {
+    "kind": "inventory.refresh",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "2m",
+    "roles": ["node", "site", "ramdisk"],
+    "payload": "bettercompute.agent.v1.InventoryRefreshRequest"
+  },
+  {
+    "kind": "logs.collect",
+    "lane": "bulk",
+    "retrySafe": true,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "15m",
+    "roles": ["node", "site", "ramdisk"],
+    "payload": "bettercompute.agent.v1.LogsCollectRequest"
+  },
+  {
+    "kind": "node.reboot",
+    "lane": "control",
+    "retrySafe": true,
+    "selfTerminating": true,
+    "attested": false,
+    "destructive": true,
+    "timeout": "15m",
+    "roles": ["node", "site"],
+    "payload": "bettercompute.agent.v1.NodeRebootRequest"
+  },
+  {
+    "kind": "site.httpProxy",
+    "lane": "control",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "1m",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.HttpProxyRequest"
+  }
+]
