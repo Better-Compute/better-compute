@@ -144,3 +144,11 @@ export type { AgentFrameValue, DaemonHarness, DaemonHarnessOptions } from './dae
 
 export * from './sim/index.js';
 export * from './realtime/index.js';
+export { createDevStack, DEV_ROOT_TOKEN } from './dev/stack.js';
+export type {
+  DevJoinOptions,
+  DevPool,
+  DevStack,
+  DevStackIam,
+  DevStackOptions,
+} from './dev/stack.js';
