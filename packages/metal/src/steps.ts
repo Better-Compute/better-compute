@@ -18,6 +18,7 @@ import {
   type CommandOutcome,
 } from '@better-compute/provision';
 import { isIP } from 'node:net';
+import { nodeSignedResults } from './attestation.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
 
@@ -30,7 +31,11 @@ import { readMetalNode, type MetalNodeRow } from './store.js';
 /** Decides whether an attested command result is trustworthy (pki verifies `node_sig`, §13). */
 export type AttestationVerifier = (tx: SqlTx, outcome: CommandOutcome, context: StepContext) => Promise<boolean>;
 
-/** The default verifier accepts what the gateway marked attested on ingest. */
+/**
+ * FOR TESTS AND SIMULATIONS ONLY: accepts `commands.attested`, which says only that the kind must be
+ * node-signed, not that it was. The default is `nodeSignedResults()` (attestation.ts): without a
+ * configured signature check, nothing is attested and releases never reach `ready`.
+ */
 export const acceptIngestedAttestation: AttestationVerifier = async (_tx, outcome) => outcome.attested;
 
 export interface MetalStepOptions {
@@ -146,7 +151,7 @@ async function ramdiskConnected(context: StepContext, nodeId: string): Promise<b
 
 /** Every metal step, configured. */
 export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
-  const verify = options.verifyAttestation ?? acceptIngestedAttestation;
+  const verify = options.verifyAttestation ?? nodeSignedResults();
 
   const getPower = defineStep({
     id: 'power.getPower',
@@ -449,7 +454,9 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
         );
         await tx.query('UPDATE nodes SET identity_gen = identity_gen + 1, drivers = $2::jsonb WHERE id = $1', [nodeId, '{}']);
         await tx.query('UPDATE metal_nodes SET bmc_credentials = NULL, updated_at = compute_now() WHERE node_id = $1', [nodeId]);
-        return { revokedCertificates: revoked.rowCount };
+        // A retired machine may join again as a new node: its hardware subjects are free (core/0012).
+        const unbound = await tx.query('DELETE FROM node_bindings WHERE node_id = $1', [nodeId]);
+        return { revokedCertificates: revoked.rowCount, unboundSubjects: unbound.rowCount };
       });
     },
   });

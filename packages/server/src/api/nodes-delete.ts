@@ -9,7 +9,8 @@ import { parser, v } from './input.js';
 // capacity lock order (quota_usage → pools → nodes → devices → node_resources →
 // pool_capacity_rollup). Then the node is tombstoned: audit rows, certs, inventory snapshots and
 // past allocations keep referencing it. It leaves its pool and the projection (nobody sees it), its
-// certs are revoked, and its trusted hardware key is freed so the machine can join again as a new node.
+// certs are revoked, and its trusted hardware key and attestor bindings (`node_bindings`) are freed, so
+// the machine can join again as a new node.
 
 export interface DeleteNodeInput {
   tenantId: string;
@@ -119,6 +120,7 @@ export function nodesDeleteApi(): NodesDeleteApi {
               WHERE node_id = $1 AND revoked_at IS NULL`,
             [row.id],
           );
+          await sql.query('DELETE FROM node_bindings WHERE node_id = $1', [row.id]);
           await sql.query(
             `UPDATE commands SET state = 'cancelled', reason = 'node-deleted', updated_at = compute_now()
               WHERE node_id = $1 AND state = 'pending'`,

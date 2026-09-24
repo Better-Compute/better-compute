@@ -128,6 +128,57 @@ describe('the site agent dies mid-deploy', () => {
   });
 });
 
+describe('node-signed results (§13, P14): the gateway cannot vouch for a wipe', () => {
+  async function releaseWith(fault: Partial<MetalSim['faults']>) {
+    const node = await readyNode();
+    await sim.call('deploy', { tenantId: 'root', nodeId: node, profileId: 'chaos-deploy', profileVersion: 1 });
+    await sim.settle();
+    expect((await sim.state(node)).provision_state).toBe('deployed');
+    const saved = { ...sim.faults };
+    Object.assign(sim.faults, fault);
+    try {
+      await sim.call('undeploy', { tenantId: 'root', nodeId: node });
+      await sim.settle();
+    } finally {
+      Object.assign(sim.faults, saved);
+    }
+    return node;
+  }
+  const wipeStep = async (node: string) =>
+    (
+      await sim.db.query<{ result: { attested: boolean } }>(
+        `SELECT s.result FROM workflow_steps s JOIN workflows w ON w.id = s.workflow_id
+          WHERE w.node_id = $1 AND w.profile_id = 'metal-release' AND s.action = 'disk.wipe' AND s.state = 'succeeded'
+          ORDER BY w.id DESC LIMIT 1`,
+        [node],
+      )
+    ).rows[0]?.result;
+
+  it('a signed, verified wipe releases to ready', async () => {
+    const node = await releaseWith({});
+    expect((await sim.state(node)).provision_state).toBe('ready');
+    expect((await wipeStep(node))?.attested).toBe(true);
+  });
+
+  it('a gateway that rewrites a failed wipe as verified is caught by the signature', async () => {
+    const node = await releaseWith({ failWipeReadBack: true, forgeWipe: true });
+    expect(await sim.state(node)).toMatchObject({ provision_state: 'failed', failed_from: 'releasing', maintenance: true });
+    expect((await wipeStep(node))?.attested).toBe(false);
+  });
+
+  it('an unsigned wipe result, or one signed with another key, never reaches ready', async () => {
+    for (const fault of [{ attestWipe: false }, { foreignSigner: true }]) {
+      const node = await releaseWith(fault);
+      expect(await sim.state(node), JSON.stringify(fault)).toMatchObject({ provision_state: 'failed', failed_from: 'releasing' });
+    }
+  });
+
+  it('an honest wipe whose read-back failed is not attested either', async () => {
+    const node = await releaseWith({ failWipeReadBack: true });
+    expect((await sim.state(node)).provision_state).toBe('failed');
+  });
+});
+
 describe('site isolation', () => {
   it("never routes a machine's site steps to another site's agent", async () => {
     await sim.addSiteAgent(SITE_B, 'site_b');

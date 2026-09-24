@@ -107,6 +107,10 @@ describe('nodes.delete', () => {
        VALUES ($1, $2, 'node', 0, '\\x01', '\\x02', compute_now(), compute_now() + interval '1 day')`,
       [`serial-${node}`, node],
     );
+    await h.store.query(`INSERT INTO node_bindings (attestor, subject, node_id) VALUES ('tpm', $1, $2)`, [
+      new Uint8Array(32).fill(node.charCodeAt(node.length - 2)),
+      node,
+    ]);
     await h.store.query('UPDATE nodes SET hardware_key = $2, hardware_key_trusted = true WHERE id = $1', [
       node,
       new Uint8Array(32).fill(node.charCodeAt(node.length - 1)),
@@ -124,6 +128,7 @@ describe('nodes.delete', () => {
     );
     expect(rows[0]).toEqual({ deleted: true, pool_id: null, trusted: false, identity_gen: 1 });
     expect((await h.store.query('SELECT 1 FROM node_resources WHERE node_id = $1', [node])).rowCount).toBe(0);
+    expect((await h.store.query('SELECT 1 FROM node_bindings WHERE node_id = $1', [node])).rowCount).toBe(0);
     const { rows: devices } = await h.store.query<{ bookable: boolean }>('SELECT bookable FROM devices WHERE id = $1', [device]);
     expect(devices[0]!.bookable).toBe(false);
     const { rows: certs } = await h.store.query<{ reason: string }>('SELECT revocation_reason AS reason FROM node_certs WHERE node_id = $1', [node]);

@@ -71,6 +71,7 @@ describe('migrate', () => {
       'core/0009_runtime',
       'core/0010_v02_server',
       'core/0011_v02_security',
+      'core/0012_v02_evidence',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });

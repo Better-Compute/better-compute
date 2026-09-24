@@ -27,6 +27,7 @@ import {
   registerImage,
 } from '@better-compute/provision';
 import {
+  acceptIngestedAttestation,
   metal,
   metalCommandKinds,
   metalMigrations,
@@ -103,7 +104,9 @@ const secrets: SecretBroker = {
 // --- Modules ---------------------------------------------------------------------------------------
 
 const hardwareProfiles = { 'gpu-redfish': { drivers: { boot: 'ipxe', deploy: 'image-stream', inspect: 'agent' } } };
-const bareMetal = metal({ hardwareProfiles });
+// This suite drives state; node signatures on results are covered on the simulated site
+// (tests/extensions/metal-sim.ts, tests/metal-chaos.test.ts).
+const bareMetal = metal({ hardwareProfiles, verifyAttestation: acceptIngestedAttestation });
 const gpuHost = defineProfile({
   id: 'ubuntu-24.04-gpu-host',
   version: 1,

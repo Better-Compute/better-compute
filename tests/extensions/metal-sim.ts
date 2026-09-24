@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, type KeyObject } from 'node:crypto';
 import { create, toBinary } from '@bufbuild/protobuf';
 import type {
   CommandQueue,
@@ -13,13 +13,48 @@ import type {
 } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
+  CommandState,
   DiagDcgmResultSchema,
+  SignatureSchema,
   InventoryRefreshResultSchema,
   WipeResultSchema,
   site,
 } from '@better-compute/protocol';
 import { provisionMigrations, provisionModule } from '@better-compute/provision';
-import { metal, metalCommandKinds, metalMigrations, metalWorkKind, reconcileMetalNode, type MetalApi } from '@better-compute/metal';
+import {
+  metal,
+  metalCommandKinds,
+  metalMigrations,
+  metalWorkKind,
+  nodeSignedResults,
+  reconcileMetalNode,
+  type MetalApi,
+  type NodeSignatureCheck,
+} from '@better-compute/metal';
+import {
+  createCsr,
+  createNodeCa,
+  generateP256KeyPair,
+  nodeCertsLookup,
+  nodeSpiffeId,
+  signCommandUpdate,
+  spkiSha256,
+  verifyNodeStatement,
+} from '@better-compute/pki';
+
+/** pki's node-signature check, as a host wires it into `metal({ verifyAttestation })`. */
+export const pkiSignatureCheck: NodeSignatureCheck = async (tx, statement) => {
+  try {
+    await verifyNodeStatement(statement.input, create(SignatureSchema, { kid: statement.kid, sig: statement.sig }), {
+      nodeId: statement.nodeId,
+      lookup: nodeCertsLookup(tx),
+      now: Date.now(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 // A simulated metal site for walkthrough and chaos tests: PGlite, the real provision engine and
 // metal module, a site agent, and per-machine BMC state. Booting from PXE brings up the ramdisk;
@@ -53,7 +88,7 @@ export const simNodeId = (n: number) =>
 
 export async function createMetalSim(options: MetalSimOptions = {}) {
   const db: SqlExecutor = pglite();
-  const bareMetal = metal();
+  const bareMetal = metal({ verifyAttestation: nodeSignedResults(pkiSignatureCheck) });
   const provision = provisionModule({
     modules: [bareMetal, ...(options.modules ?? [])],
     steps: [...(options.steps ?? [])],
@@ -124,7 +159,39 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
   const machines = new Map<string, SimMachine>();
   const seen: { id: string; kind: string; node: string; payload: Record<string, any>; args: Record<string, any> }[] = [];
   /** Switches for failure injection. */
-  const faults = { attestWipe: true, siteAgentDown: false, dropNextResults: 0 };
+  const faults = {
+    /** false: the ramdisk sends its wipe result unsigned. */
+    attestWipe: true,
+    siteAgentDown: false,
+    dropNextResults: 0,
+    /** The daemon's wipe reports a disk it could not verify; with `forgeWipe` the gateway rewrites it as verified. */
+    failWipeReadBack: false,
+    forgeWipe: false,
+    /** Results are signed by another machine's key (a stolen or confused identity). */
+    foreignSigner: false,
+  };
+  // Every machine's node key and certificate (role ramdisk), issued by a node CA on first boot.
+  const nodeCa = createNodeCa({});
+  const nodeKeys = new Map<string, KeyObject>();
+  async function nodeKey(nodeId: string): Promise<KeyObject> {
+    let key = nodeKeys.get(nodeId);
+    if (key) return key;
+    key = generateP256KeyPair().privateKey;
+    nodeKeys.set(nodeId, key);
+    const issued = await nodeCa.sign(createCsr(key), {
+      usage: 'client',
+      role: 'ramdisk',
+      ttlSeconds: 3600,
+      uriSans: [nodeSpiffeId({ trustDomain: 'compute.test', siteId: 'site_a', nodeId })],
+    });
+    await db.query(
+      `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after)
+       VALUES ($1, $2, 'ramdisk', 0, $3, $4, $5, $6)`,
+      [issued.serial, nodeId, spkiSha256(key), issued.certificate, new Date(issued.notBefore), new Date(issued.notAfter)],
+    );
+    return key;
+  }
+  const outsider = generateP256KeyPair().privateKey;
   let sessionEpoch = 0;
 
   async function connect(nodeId: string, role: string, bootId: string) {
@@ -212,7 +279,10 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
           result = toBinary(DiagDcgmResultSchema, create(DiagDcgmResultSchema, { passed: true, level: payload.level }));
           break;
         case 'disk.wipe':
-          result = toBinary(WipeResultSchema, create(WipeResultSchema, { disks: [{ id: 'wwn-0x5000', method: 'nvme-format', verified: true }] }));
+          result = toBinary(
+            WipeResultSchema,
+            create(WipeResultSchema, { disks: [{ id: 'wwn-0x5000', method: 'nvme-format', verified: !faults.failWipeReadBack }] }),
+          );
           break;
         case 'inventory.refresh':
           result = toBinary(InventoryRefreshResultSchema, create(InventoryRefreshResultSchema, {}));
@@ -224,11 +294,20 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
         await db.query(`UPDATE commands SET state = 'dispatched' WHERE id = $1`, [command.id]);
         continue;
       }
-      await db.query('UPDATE commands SET state = $2, result = $3, attested = attested AND $4 WHERE id = $1', [
+      // The node signs attested results (`CommandUpdate.node_sig`); the gateway stores what it relays.
+      let signature: { kid: string; sig: Uint8Array } | undefined;
+      if (attested.has(command.kind) && (command.kind !== 'disk.wipe' || faults.attestWipe)) {
+        const key = faults.foreignSigner ? outsider : await nodeKey(command.node_id);
+        signature = signCommandUpdate(key, { commandId: command.id, state: CommandState.SUCCEEDED, result });
+      }
+      if (command.kind === 'disk.wipe' && faults.forgeWipe)
+        result = toBinary(WipeResultSchema, create(WipeResultSchema, { disks: [{ id: 'wwn-0x5000', method: 'nvme-format', verified: true }] }));
+      await db.query('UPDATE commands SET state = $2, result = $3, result_sig_kid = $4, result_sig = $5 WHERE id = $1', [
         command.id,
         'succeeded',
         result,
-        command.kind !== 'disk.wipe' || faults.attestWipe,
+        signature?.kid ?? null,
+        signature?.sig ?? null,
       ]);
       answered++;
     }
