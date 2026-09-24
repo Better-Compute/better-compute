@@ -40,6 +40,15 @@ orchestrator-only lockfile/umbrella/installs, [9e83b6] sole writer of core migra
 | docs site `apps/docs`, console-kit + `apps/console` | unassigned (new sessions: ask [37c0ab]) | generated API/CLI/error reference from the live registry (mirror better-iam apps/docs), guides per module; console-kit React views (v0.5) |
 | W1 Go daemon | blocked on Go install (user) | — |
 
+Round 2 reassignments ([37c0ab], later on 2026-09-24): [9e83b6] → `inventory.history/diff`, walkthrough 1 (Ubuntu
+autoinstall) + 20-loop sim acceptance, `metal-chaos`, then (on the orchestrator's go) server v0.2 groups `siteTokens`,
+`joinRequests` (with [df4a91]'s discovery attestor), `secrets`, `drivers.list`, `sites.update/delete`, `nodes.delete` as
+new files in `packages/server/src/api/`. [7fe4f7] → owns `packages/cli/**` now (`dev --sim N` on `createDevStack`,
+serve composition audit), then docs site. [0b2be8] (= former [9ec62d]) → tunnels API half, new
+`packages/server/src/tunnels/**`; options/index one-liners go through [37c0ab]. [df4a91] → pki attestors incl.
+`cloud-iid` (seams in bb7106b). [18810e] → gateway. [90a507] is a better-iam session: never assign it better-compute
+work. console-kit + `apps/console` still unassigned.
+
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
 P0 is committed (3a70aa0, `pnpm check` green). v0.1 = PLAN.md §16 "Adopt & reserve". One owner per unit; message the
@@ -211,7 +220,7 @@ Rules for v0.1:
 - Tunnels (v0.3, [17cfb9]) api half for W5a: `tunnels.open` authorizes (`instances:exec` / `nodes:console`), issues an
   exec ticket (pki `createExecTicketIssuer`, sid = tunnel id), returns the ticket; host GET `/tunnels/{ticket}`
   relays to `gatewayControlClient.openTunnel({ ticket, nodeId, target })` → `{ send, frames, close }` on the owning
-  gateway (`node_sessions.gateway_id`). `createGateway({ tickets: { jwks, issuer?, jtiCache? } })` gets the issuer's
+  gateway (`node_sessions.gateway_id`). `createGateway({ tunnels: { jwks, issuer?, jtiCache?, reauthorize? } })` gets the issuer's
   JWKS; host supplies `reauthorize(tunnel)` (60 s) and calls POST `/v1/tunnels/close {subject|tunnelId|nodeId}` on
   revocation events. The daemon ALWAYS re-verifies the ticket (P14); the gateway check is defence in depth.
 - Health for W5a ([060790] 0e70a77, c0f2a59, 08f1a15): gateway `node.event` XIDs → `recordXid(tx, nodeId, {gpuUuid,
@@ -318,12 +327,32 @@ Rules for v0.1:
   NodeSpec.daemon via nodeSpec(), daemon.upgrade kind), `tests/rollout-*.test.ts`. Also pki `release.ts` (b226081).
 - (Feature expansion [9e83b6] = former [060790], resumed) owns again `packages/{inventory,provision,metal}/**`,
   `packages/postgres/src/migrations/` (core/0009+; column requests to me), `tests/{inventory,postgres,pglite,provision,
-  metal}-*`. Now: §5.6 walkthrough 3 (Talos): metal `httpViaSite` (SSRF checks mirroring site.v1.HttpProxyRequest),
-  agent:'none' OOB metal profiles, `tests/extensions/talos.test.ts`.
+  metal}-*`. Done: Talos walkthrough 66a494d, core/0009_runtime + retention f2e761b. Now (from [37c0ab]): walkthrough 1
+  `tests/extensions/ubuntu-autoinstall.test.ts` (+ 20-loop acceptance with the verified-wipe invariant), then
+  `tests/metal-chaos.test.ts`. (inventory.history/diff already landed 488c49e.) Later, on [37c0ab]'s go: server groups
+  siteTokens/joinRequests/secrets/drivers.list/sites.update+delete/nodes.delete as new files in packages/server/src/api/.
+- (Feature expansion [3afca2] = former [1f44fd], resumed) owns again `packages/{iam,events,audit,observability,
+  provider-proxmox}/**`, `packages/testing/src/realtime/**`, `tests/{realtime/**,bench/realtime-fleet*,iam-bridge-*,
+  events-*,audit-*,observability-*,provider-proxmox*}`. Now: `createRealtimeFleet` (join-to-adopted, place-to-active)
+  in `packages/testing/src/realtime/fleet.ts`; then the 10-min zero-IAM sim (`tests/sim/iam-negative.test.ts`).
 - (Feature expansion [df4a91], v0.2/v0.3 attestors §3.3/§15, 2026-09-24) NEW files only in pki:
   `packages/pki/src/attestors/{x509pop,provisioned,discovery,cloud-iid,index}.ts` + one export line in
   `packages/pki/src/index.ts`; `tests/pki-attestors-*.test.ts`. Verifier halves (control plane) + TS NodeAttestor
   producers for FakeDaemon. Not touching server JoinService (W5a wires `attestors: [...]`), migrations, or existing pki files.
-- (Feature expansion [9ec62d], W5c resumed after W5a landed) CLI `serve` / `dev` in
-  `packages/cli/src/commands/serve.ts` (+ optional `CliIO.signal` in framework.ts), `tests/cli-serve.test.ts`.
+- (Feature expansion [9ec62d], W5c resumed after W5a landed) CLI `serve` / `dev` (7ba486a), `sim` (5826c1f). The CLI
+  now belongs to [7fe4f7].
+- (Feature expansion [0b2be8] = former [9ec62d], v0.3 tunnels API half, assigned by [37c0ab]) NEW files
+  `packages/server/src/tunnels/**`, `tests/server-tunnels*.test.ts`: `tunnels.open` (exec ticket from pki's issuer),
+  nodeSpec access.execTicketJwks, host-supplied `TunnelRelay`, exported `handleTunnel`, gateway `reauthorize` hook.
+  options.ts/index.ts one-liners go through [37c0ab].
 - (Feature expansion [9ec62d], v0.4 audit primitives, 2026-09-24; split with [1f44fd] per [56cfd7]) pure crypto only in `packages/pki/src/audit.ts`: RFC 6962 hashing, inclusion + consistency proofs, `signCheckpoint`/`verifyCheckpoint` ('audit-checkpoint'), the bundle's audit signing key; CLI `audit verify|prove|checkpoint` calling `@better-compute/audit`. No table in pki (`packages/audit` owns it).
+
+- ([7fe4f7], dev stack, 2026-09-24) NEW files only: `packages/testing/src/dev/stack.ts` (`createDevStack()`: PGlite +
+  server runtime + local CAs/JoinService + real gateway on h2c + FakeDaemons that JOIN via sealed tokens over the
+  gateway's Join RPC, then Session; adopted in ~1 s/node) + 2 export lines in `packages/testing/src/index.ts`;
+  `tests/testing-dev-stack.test.ts`. Not touching CLI (serve/dev stay [9ec62d]'s: the `dev` command can call
+  `createDevStack({ iam })`) or `realtime/**` ([3afca2]).
+- ([18810e], continuing [17cfb9]'s W2b gateway, 2026-09-24) `packages/gateway/**`, `tests/gateway-*.test.ts`,
+  `tests/bench/gateway-streams.bench.ts`: Hello writes `node_sessions.daemon_version/proto_max` (core/0008); a
+  `reports.status(tx, ctx, StatusReport)` hook for health (XID conditions → inventory `recordXid`); dispatch/cancel
+  queries driven from the commands partial indexes (2k saturation); then the v0.4 WS fallback.
