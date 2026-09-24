@@ -58,6 +58,11 @@ const allowed = await permissions.can(release);
   - `createFleetDriftView` / `fleetDriftView` group the fleet's drift from its applied FleetConfig by object kind.
   - `nodeTable` filters nodes by text, connectivity, provision state, cordon, pool and active conditions, and sorts them stably.
 
+- **Terminal** (`createTerminalSession`) opens a browser shell on an instance:
+  - It calls `tunnels.open`, then opens the WebSocket tunnel with the single-use ticket.
+  - The store holds the session state and a bounded output buffer.
+  - `write`, `resize` and `close` go straight to the node, and `onOutput` streams output to xterm-style views.
+
 ## License
 
 [Apache License 2.0](LICENSE)
