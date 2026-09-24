@@ -14,6 +14,7 @@ import {
   sealJoinToken,
   sha256,
   signRenewPop,
+  openJoinResponse,
   verifyJoinResponse,
   type LocalCertificateAuthority,
   type SigningKey,
@@ -530,10 +531,16 @@ describe('JoinService two-round joins (AttestationDeferral)', () => {
         return reason;
       }
     })();
-    // Signature and CSR binding pass; only the (absent) certificate is refused.
+    // Signature and CSR binding pass; a deferral is never taken for a join.
     expect(isComputeError(error, 'ACCESS_DENIED') && error.details?.reason).toBe(
-      'empty certificate chain',
+      'response is a deferral',
     );
+    // openJoinResponse is the agent's way to read it.
+    const opened = openJoinResponse(response as never, {
+      signer: { publicKey: s.signingKey.publicKey },
+      csr,
+    });
+    expect(opened.kind).not.toBe('joined');
     return fromBinary(JoinResponseBodySchema, response.body);
   }
 

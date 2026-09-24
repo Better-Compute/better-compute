@@ -141,6 +141,7 @@ export type {
 export type { DaemonFact, ExecutionIdentity, FactSink } from './daemon/facts.js';
 export { ScriptedServer, createDaemonHarness } from './daemon/harness.js';
 export type { AgentFrameValue, DaemonHarness, DaemonHarnessOptions } from './daemon/harness.js';
+export { runAgentJoin, type AgentJoinOptions, type AgentJoinResult } from './daemon/join.js';
 
 export * from './sim/index.js';
 export * from './realtime/index.js';

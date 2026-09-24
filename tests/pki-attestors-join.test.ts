@@ -17,13 +17,15 @@ import {
   provisionedAttestor,
   sealJoinToken,
   sha256,
+  signDiscoveryAssertion,
+  discoveryAttestor,
   staticJwks,
   verifyJoinResponse,
   x509popAttestor,
 } from '@better-compute/pki';
 import { AgentRole, HardwareClaimsSchema, JoinRequestSchema } from '@better-compute/protocol';
 import { createJoinService, pkiJoinCrypto } from '@better-compute/server';
-import { closeFixtures, computeFixture } from '@better-compute/testing';
+import { closeFixtures, computeFixture, runAgentJoin } from '@better-compute/testing';
 
 // The v0.2+ attestors through the real JoinService (bb7106b seams: `evidence.token`,
 // `context.csrSha256`): x509pop re-joins a node in place, provisioned spends a single-use token,
@@ -70,6 +72,7 @@ async function setup() {
     attestors: [
       x509popAttestor(),
       provisionedAttestor(),
+      discoveryAttestor({ approval: 'always' }),
       cloudIidAttestor({
         providers: [gcpInstanceIdentity({ audience: AUDIENCE, jwks: staticJwks(gcpJwks) })],
         resolve: async (_tx, identity) =>
@@ -86,7 +89,7 @@ async function setup() {
       nodeCaRoots: [nodeCa.certificate],
       now: fixture.clock.now(),
     });
-  return { fixture, service, encryption, verify };
+  return { fixture, service, encryption, verify, signingKey, nodeCa };
 }
 
 type Setup = Awaited<ReturnType<typeof setup>>;
@@ -242,5 +245,96 @@ describe('attestors through JoinService', () => {
         request(s, { csr: other, attestor: 'cloud-iid', attestation: identity(other, 'stranger') }),
       ),
     );
+  });
+
+  it('discovery with approval: pending → operator approves → the same CSR joins as a ramdisk', async () => {
+    const s = await setup();
+    const db = s.fixture.database;
+    const root = s.fixture.tenants.root.id;
+    const signer = { publicKey: s.signingKey.publicKey };
+    const wait = (ms: number) => s.fixture.advance(ms).then(() => undefined);
+    const siteToken = async (role: 'site' | 'discovery') => {
+      const issued = issueJoinToken();
+      await db.query(
+        `INSERT INTO join_tokens (id, tenant_id, role, pool_id, site_id, secret_hash, uses_left, expect,
+           allow_reclaim, expires_at)
+         VALUES ($1, $2, $3, NULL, $4, $5, 1, NULL, false, compute_now() + interval '1 hour')`,
+        [issued.id, root, role, SITE, issued.secretHash],
+      );
+      return issued.token;
+    };
+
+    // The site agent joins first and takes the site's boot lease.
+    const siteAgent = await runAgentJoin({
+      send: (r) => s.service.join(r),
+      signer,
+      wait,
+      now: () => s.fixture.clock.now(),
+      role: AgentRole.SITE,
+      claims: {
+        ...claims,
+        productUuid: '4c4c4544-0042-3510-8052-b7c04f4e4eff',
+        permanentMacs: ['3c:ec:ef:ff:ff:ff'],
+      },
+      token: { token: await siteToken('site'), joinEncryptionKey: s.encryption.publicKey },
+    });
+    const siteAgentId = siteAgent.body.nodeId;
+    await db.query(
+      `INSERT INTO leases (name, owner, epoch, expires_at) VALUES ($1, $2, 4, compute_now() + interval '1 hour')`,
+      [`site:${SITE}:boot`, siteAgentId],
+    );
+
+    // The PXE-booted ramdisk: token from its iPXE script, a fresh assertion every round.
+    const deferrals: string[] = [];
+    let requestId = '';
+    const ramdisk = await runAgentJoin({
+      send: (r) => s.service.join(r),
+      signer,
+      now: () => s.fixture.clock.now(),
+      wait: async (ms) => {
+        const { rows } = await db.query<{ state: string }>(
+          'SELECT state FROM join_requests WHERE id = $1',
+          [requestId],
+        );
+        expect(rows[0]?.state).toBe('pending');
+        await db.query(
+          `UPDATE join_requests SET state = 'approved', decided_at = compute_now(), decided_by = 'user_ops',
+              pool_id = $2, expires_at = compute_now() + interval '1 hour' WHERE id = $1`,
+          [requestId, POOL],
+        );
+        await wait(ms);
+      },
+      role: AgentRole.RAMDISK,
+      claims,
+      token: { token: await siteToken('discovery'), joinEncryptionKey: s.encryption.publicKey },
+      attestor: {
+        id: 'discovery',
+        produce: async () => ({
+          attestor: 'discovery',
+          payload: signDiscoveryAssertion(siteAgent.privateKey, {
+            siteId: SITE,
+            siteAgentNodeId: siteAgentId,
+            bootLeaseEpoch: 4,
+            mac: claims.permanentMacs[0]!,
+            productUuid: claims.productUuid,
+            issuedAt: s.fixture.clock.now(),
+            notAfter: s.fixture.clock.now() + 600_000,
+          }),
+        }),
+      },
+      onDeferral: (d) => {
+        deferrals.push(d.kind);
+        requestId = d.requestId ?? requestId;
+      },
+    });
+    expect(deferrals).toEqual(['pending']);
+    expect(ramdisk.rounds).toBe(2);
+    expect(ramdisk.body.role).toBe(AgentRole.RAMDISK);
+    const { rows } = await db.query<{ state: string; role: string; pool_id: string | null }>(
+      `SELECT r.state, c.role, n.pool_id FROM join_requests r, node_certs c JOIN nodes n ON n.id = c.node_id
+        WHERE r.id = $1 AND c.node_id = $2`,
+      [requestId, ramdisk.body.nodeId],
+    );
+    expect(rows).toEqual([{ state: 'consumed', role: 'ramdisk', pool_id: POOL }]);
   });
 });

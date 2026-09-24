@@ -118,6 +118,8 @@ export function verifyJoinResponse(
   }
   const csr = parseCsr(options.csr);
   if (!timingSafeEqualBytes(body.csrSha256, csr.sha256)) throw deny('response is for another CSR');
+  // A deferral is never a join: read it with `openJoinResponse`.
+  if (body.deferral?.kind.case !== undefined) throw deny('response is a deferral');
   const leafDer = body.certChain[0];
   if (!leafDer) throw deny('empty certificate chain');
   const leaf = parseCertificate(leafDer);
@@ -137,6 +139,55 @@ export function verifyJoinResponse(
       usage: 'client',
     });
   return body;
+}
+
+/** What a verified `JoinResponse` says: a certificate, or a signed, CSR-bound deferral. */
+export type OpenedJoinResponse =
+  | { kind: 'joined'; body: JoinResponseBody }
+  | { kind: 'pending'; requestId: string; retryAfterSeconds: number }
+  | { kind: 'challenge'; attestor: string; payload: Uint8Array; notAfter?: number };
+
+/**
+ * The agent's check of a `JoinResponse` that may be a two-round deferral (§3.3): the signature
+ * and CSR binding first, then either the full `verifyJoinResponse` checks or the deferral. A
+ * deferral carries no identity; the agent retries `Join` with the SAME CSR (after
+ * `retryAfterSeconds`, or answering the challenge in `attestation`). Throws `ACCESS_DENIED`.
+ */
+export function openJoinResponse(
+  response: JoinResponse,
+  options: VerifyJoinResponseOptions,
+): OpenedJoinResponse {
+  const deny = (reason: string) =>
+    new ComputeError('ACCESS_DENIED', 'Join response rejected', undefined, { reason });
+  if (!verifySignature('join-response', [response.body], response.sig, options.signer))
+    throw deny('bad signature');
+  let body: JoinResponseBody;
+  try {
+    body = fromBinary(JoinResponseBodySchema, response.body);
+  } catch {
+    throw deny('unreadable body');
+  }
+  if (!timingSafeEqualBytes(body.csrSha256, parseCsr(options.csr).sha256))
+    throw deny('response is for another CSR');
+  const deferral = body.deferral?.kind;
+  if (deferral?.case === undefined)
+    return { kind: 'joined', body: verifyJoinResponse(response, options) };
+  if (body.nodeId || body.certChain.length > 0) throw deny('a deferral carries no identity');
+  if (deferral.case === 'pending')
+    return {
+      kind: 'pending',
+      requestId: deferral.value.requestId,
+      retryAfterSeconds: deferral.value.retryAfterSeconds || 30,
+    };
+  const notAfter = deferral.value.notAfter;
+  return {
+    kind: 'challenge',
+    attestor: deferral.value.attestor,
+    payload: deferral.value.payload,
+    ...(notAfter
+      ? { notAfter: Number(notAfter.seconds) * 1000 + Math.floor(notAfter.nanos / 1e6) }
+      : {}),
+  };
 }
 
 /** A `TrustBundle` signed by the JoinService key (purpose `trust-bundle`), sent in `Welcome`. */
