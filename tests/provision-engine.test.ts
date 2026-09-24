@@ -225,6 +225,27 @@ describe('expandProfile', () => {
     expect(issues.map((i) => i.path)).toEqual(['steps[0].use', 'steps[1].with.label', 'steps[2].on']);
   });
 
+  it("lets a relaying control-plane step be written with on: its agent, and nothing else", async () => {
+    const relay = defineStep({
+      id: 'relay.ping',
+      runsOn: 'control-plane',
+      relays: ['site'],
+      timeout: '1m',
+      retrySafe: true,
+      input: manifest({}),
+      run: async () => null,
+    });
+    const doc = defineProfile({ id: 'relay', version: 1, target: 'metal', steps: [{ use: 'relay.ping', on: 'site' }, { use: 'relay.ping', on: 'ramdisk' }] });
+    const { steps, issues } = await expandProfile(doc, stepRegistry([relay]));
+    expect(steps[0]).toMatchObject({ action: 'relay.ping', runsOn: 'control-plane' });
+    expect(issues.map((i) => i.path)).toEqual(['steps[1].on']);
+    const { extension: _stamp, ...input } = relay;
+    expect(() => defineStep({ ...input, relays: ['moon'] as never })).toThrow(/relays\[0\]/);
+    expect(() =>
+      defineStep({ id: 'agent.x', runsOn: 'site', command: 'agent.x', timeout: '1m', retrySafe: true, input: manifest({}), relays: ['site'] }),
+    ).toThrow(/only for control-plane steps/);
+  });
+
   it('evaluates when: against node labels', () => {
     const labels = { 'gpu.model': 'H100', nvswitch: 'true', 'mig.capable': 'false' };
     expect(evaluateWhen('nvswitch', labels)).toBe(true);

@@ -7,6 +7,7 @@ import {
   type RunsOn,
   type StepDefinition,
 } from '@better-compute/core';
+import { stepRelays } from './step.js';
 
 // Expanding a profile into the persisted steps of one workflow (PLAN.md §11.2, §11.4).
 //
@@ -128,7 +129,7 @@ async function resolve(
   for (const use of candidates) {
     const definition = registry.get(use);
     if (definition) {
-      if (step.on !== undefined && step.on !== definition.runsOn) {
+      if (step.on !== undefined && step.on !== definition.runsOn && !stepRelays(definition).includes(step.on)) {
         issues.push({ path: `${path}.on`, message: `${use} runs on ${definition.runsOn}, not ${step.on}` });
         return undefined;
       }

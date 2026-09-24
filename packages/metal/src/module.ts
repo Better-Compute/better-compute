@@ -1,26 +1,53 @@
-import { notImplemented, type ComputeModule, type NodeDriverBindings } from '@better-compute/core';
+import { defineModule, type ComputeModule, type ReconcileContext, type Reconciler } from '@better-compute/core';
+import { metalApi, type MetalApi } from './api.js';
+import { metalCommandKinds } from './commands.js';
+import { metalMigrations } from './migrations.js';
+import type { HardwareProfile } from './module-types.js';
+import { metalProfiles } from './profiles.js';
+import { metalWorkKind, reconcileMetalNode } from './reconcile.js';
+import { metalSteps, type AttestationVerifier } from './steps.js';
 
-/** Per-concern driver bindings that nodes of a pool inherit (`pool.policy.hardwareProfile`). */
-export interface HardwareProfile {
-  description?: string;
-  /** e.g. `{ power: 'redfish', management: 'redfish', boot: 'ipxe', deploy: 'image-stream' }`. */
-  drivers: NodeDriverBindings;
-}
+export type { HardwareProfile } from './module-types.js';
 
 /** Options of `metal()`. */
 export interface MetalOptions {
-  /** Hardware profiles by name. */
+  /** Hardware profiles by name; a pool picks one with `policy.hardwareProfile`. */
   hardwareProfiles?: Record<string, HardwareProfile>;
+  /** Verifies node-signed results (wipe, diagnostics); pki's verifier plugs in here (§13). */
+  verifyAttestation?: AttestationVerifier;
 }
 
 /**
- * The bare-metal module: enrollment, inspection, commissioning, deploy, release and rescue through
- * the `metal` API group, built on the provision workflow engine (§3.5, §11.1). Injected by the
- * application (`betterCompute({ modules: [metal({ hardwareProfiles })] })`); the server never
- * imports it.
+ * The bare-metal module (PLAN.md §3.5, §11.1): the `metal` API group, the metal reconciler that
+ * runs each provision state's workflow, the site and ramdisk command kinds, and the steps and
+ * profiles those workflows use. Built on the provision workflow engine, which must know metal's
+ * steps and profiles:
  *
- * @throws `NOT_IMPLEMENTED` until v0.2.
+ * ```ts
+ * const bareMetal = metal({ hardwareProfiles });
+ * const compute = betterCompute({ modules: [provisionModule({ modules: [bareMetal] }), bareMetal], ... });
+ * ```
  */
-export function metal(options?: MetalOptions): ComputeModule<'metal'> {
-  throw notImplemented('bare-metal provisioning', 'v0.2');
+export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalApi> {
+  const hardwareProfiles = options.hardwareProfiles ?? {};
+  const reconciler: Reconciler = {
+    name: metalWorkKind,
+    shardBy: 'node',
+    async run(context: ReconcileContext, nodeId: string) {
+      await reconcileMetalNode(context, nodeId);
+      return 'DONE';
+    },
+  };
+  return Object.freeze(
+    defineModule({
+      name: 'metal',
+      requires: ['provision'],
+      migrations: [...metalMigrations],
+      extensions: metalSteps(options.verifyAttestation ? { verifyAttestation: options.verifyAttestation } : {}),
+      profiles: [...metalProfiles],
+      commandKinds: [...metalCommandKinds],
+      reconcilers: [reconciler],
+      api: () => metalApi(hardwareProfiles),
+    }),
+  );
 }

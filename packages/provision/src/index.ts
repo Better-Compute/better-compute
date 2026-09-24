@@ -4,7 +4,7 @@
  * stored profiles, and the `profiles` and `workflows` API groups. The step, profile and workflow
  * contracts are declared in `@better-compute/core` and re-exported here.
  */
-export { defineStep } from './step.js';
+export { defineStep, stepRelays, type RelayingStepDefinition, type StepInputWithRelays } from './step.js';
 export { defineProfile } from './profile.js';
 export * from './module.js';
 export * from './expand.js';

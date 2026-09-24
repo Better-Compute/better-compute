@@ -90,19 +90,10 @@ describe('the subpaths of umbrella.json', () => {
 });
 
 describe('the four named subpaths', () => {
-  it.each([
-    ['better-compute/metal', 'metal', 'bare-metal provisioning', 'v0.2'],
-  ])(
-    '%s: %s() throws NOT_IMPLEMENTED naming its phase',
-    async (specifier, name, feature, phase) => {
-      const factory = ((await load(specifier)) as Record<string, unknown>)[name];
-      expect(typeof factory).toBe('function');
-      const error = await notImplemented(() => (factory as () => unknown)());
-      expect(error.message).toBe(`${feature} arrives in ${phase}`);
-      expect(error.status).toBe(501);
-      expect(error.details).toEqual({ feature, phase });
-    },
-  );
+  it('better-compute/metal: metal() builds the metal module', async () => {
+    const { metal } = (await load('better-compute/metal')) as typeof import('@better-compute/metal');
+    expect(metal().name).toBe('metal');
+  });
 
   it('better-compute/vps: vps() builds the vps module', async () => {
     const { vps } = (await load('better-compute/vps')) as typeof import('@better-compute/vps');

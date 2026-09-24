@@ -21,29 +21,12 @@ const { metal } = metalPackage;
 const { vps } = vpsPackage;
 const { provisionModule } = provision;
 
-function notImplemented(run: () => unknown): ComputeError {
-  try {
-    run();
-  } catch (error) {
-    if (isComputeError(error, 'NOT_IMPLEMENTED')) return error;
-    throw error;
-  }
-  throw new Error('expected NOT_IMPLEMENTED');
-}
-
 describe('module factories of the P0 stubs', () => {
-  it.each([
-    ['metal()', () => metal(), 'bare-metal provisioning', 'v0.2'],
-    ['metal(options)', () => metal({ hardwareProfiles: {} }), 'bare-metal provisioning', 'v0.2'],
-  ] as const)('%s throws NOT_IMPLEMENTED naming its phase', (_label, create, feature, phase) => {
-    const error = notImplemented(create);
-    expect(error.message).toBe(`${feature} arrives in ${phase}`);
-    expect(error.status).toBe(501);
-    expect(error.details).toEqual({ feature, phase });
-  });
-
-  it('declare the modules they will return', () => {
-    expectTypeOf(metal).returns.toEqualTypeOf<ComputeModule<'metal'>>();
+  // The metal control plane landed in v0.2 (tests/metal-*.test.ts).
+  it('metal() returns the metal module', () => {
+    const module = metal({ hardwareProfiles: {} });
+    expect(module.name).toBe('metal');
+    expectTypeOf(module).toExtend<ComputeModule<'metal'>>();
   });
 
   // The VPS control plane landed in v0.3 (tests/vps-*.test.ts).
