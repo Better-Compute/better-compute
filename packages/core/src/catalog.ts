@@ -247,7 +247,9 @@ export type ApiModule =
   /** `@better-compute/events` (webhooks); an injected module like provision. */
   | 'events'
   /** `@better-compute/fleet` (FleetConfig as code); an injected module. */
-  | 'fleet';
+  | 'fleet'
+  /** `@better-compute/rollout` (daemon releases and staged rollouts, v0.4); an injected module. */
+  | 'rollout';
 
 export interface ApiTarget {
   action: ComputeAction;
@@ -490,6 +492,18 @@ group('fleet', 'fleet', [
   ['plan', 'read', 'fleet:admin', 'fleet', 'v0.2'],
   ['apply', 'mutation', 'fleet:admin', 'fleet', 'v0.2'],
   ['status', 'read', 'fleet:admin', 'fleet', 'v0.2'],
+]);
+group('releases', 'rollout', [
+  ['register', 'mutation', 'fleet:admin', 'fleet', 'v0.4'],
+  ['list', 'read', 'fleet:admin', 'fleet', 'v0.4'],
+]);
+group('rollouts', 'rollout', [
+  ['create', 'mutation', 'fleet:admin', 'fleet', 'v0.4'],
+  ['list', 'read', 'fleet:admin', 'fleet', 'v0.4'],
+  ['get', 'read', 'fleet:admin', 'fleet', 'v0.4'],
+  ['pause', 'mutation', 'fleet:admin', 'fleet', 'v0.4'],
+  ['resume', 'mutation', 'fleet:admin', 'fleet', 'v0.4'],
+  ['abort', 'mutation', 'fleet:admin', 'fleet', 'v0.4'],
 ]);
 
 /**
