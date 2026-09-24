@@ -277,6 +277,7 @@ afterAll(async () => {
 });
 
 const tables = [
+  'usage_windows',
   'ip_leases',
   'ip_pools',
   'instances',
@@ -880,5 +881,45 @@ describe('time', () => {
       [created.id],
     );
     expect(rows[0]!.ms).toBe(T0 + 1000);
+  });
+});
+
+describe('instance metering (§12.7)', () => {
+  it('bills vCPU, memory and GPU hours from placement until the allocation is released', async () => {
+    const created = (await call(
+      'instances',
+      'create',
+      createHosted({ flavor: 'gpu1.l40s' }),
+    )) as View;
+    const usage = module.reconcilers!.find((reconciler) => reconciler.name === 'vps.usage')!;
+    const runUsage = () =>
+      usage.run({ ...moduleContext(db), signal: new AbortController().signal }, 'all');
+    clock.advance(90 * 60_000);
+    await setSimClock(db, clock.now());
+    await runUsage();
+    const first = await db.query<{ meter: string; quantity: string }>(
+      `SELECT meter, quantity::text FROM usage_windows ORDER BY meter`,
+    );
+    expect(first.rows.map((row) => [row.meter, Number(row.quantity)])).toEqual([
+      ['gpu.l40s.hours', 1],
+      ['vps.memory.gib.hours', 32],
+      ['vps.vcpu.hours', 8],
+    ]);
+
+    await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
+    await reconcile(created.id);
+    await report(created.nodeId!, []);
+    await reconcile(created.id);
+    await runUsage();
+    const { rows } = await db.query<{ meter: string; total: string }>(
+      `SELECT meter, sum(quantity)::text AS total FROM usage_windows GROUP BY meter ORDER BY meter`,
+    );
+    expect(rows.map((row) => [row.meter, Number(row.total)])).toEqual([
+      ['gpu.l40s.hours', 1.5],
+      ['vps.memory.gib.hours', 48],
+      ['vps.vcpu.hours', 12],
+    ]);
+    await runUsage();
+    expect((await db.query(`SELECT 1 FROM usage_windows`)).rows).toHaveLength(6);
   });
 });

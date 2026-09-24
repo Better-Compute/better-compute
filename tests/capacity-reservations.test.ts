@@ -276,6 +276,7 @@ describe('capacityModule API surface', () => {
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       reservationWork,
       'capacity.rollup',
+      'capacity.usage',
     ]);
     expect(module.reconcilers![1]!.periodic).toEqual([{ key: 'all', every: '5m' }]);
   });

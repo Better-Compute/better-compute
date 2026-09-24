@@ -66,6 +66,7 @@ import {
   type PoolCapacity,
 } from './rollup.js';
 import { loadNodeViews, readPool } from './store.js';
+import { meterReservations } from './usage.js';
 
 // capacityModule (PLAN.md §4.2): the always-on built-in module behind the pools, capacity,
 // reservations and quotas groups of §9.2, the reservation lifecycle reconciler, the `devices`
@@ -446,6 +447,8 @@ export interface CapacityModuleOptions extends PlacementOptions {
   maxAttempts?: number;
   /** How often the rollup job rebuilds every pool (default `5m`). */
   rollupEvery?: `${number}${'s' | 'm' | 'h'}`;
+  /** How often the usage job writes closed hourly windows (default `5m`). */
+  usageEvery?: `${number}${'s' | 'm' | 'h'}`;
 }
 
 function depsFrom(
@@ -897,6 +900,16 @@ export function capacityModule(
       return 'DONE';
     },
   };
+  // §12.7: hourly usage windows for the IAM usage sink, which flushes hourly before closePeriod.
+  const usageReconciler: Reconciler = {
+    name: 'capacity.usage',
+    shardBy: 'none',
+    periodic: [{ key: 'all', every: options.usageEvery ?? '5m' }],
+    async run(context) {
+      await inTx(context, (tx) => meterReservations(tx, context.clock.now()));
+      return 'DONE';
+    },
+  };
   const rollupReconciler: Reconciler = {
     name: 'capacity.rollup',
     shardBy: 'none',
@@ -916,7 +929,7 @@ export function capacityModule(
     name: 'capacity',
     migrations: [...capacityMigrations],
     api: () => buildApi(options, placer),
-    reconcilers: [reservationsReconciler, rollupReconciler],
+    reconcilers: [reservationsReconciler, rollupReconciler, usageReconciler],
     async nodeSpec(context, node) {
       const assignments = await deviceAssignments(context.sql, node.id);
       return { devices: { assignments } };

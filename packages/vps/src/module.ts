@@ -55,6 +55,7 @@ import {
 } from './instances.js';
 import { instanceSpecs, reconcileInstance } from './lifecycle.js';
 import { vpsMigrations } from './migrations.js';
+import { meterInstances } from './usage.js';
 
 /** Options of `vps()`. */
 export interface VpsOptions {
@@ -419,6 +420,16 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             await context.sql.transaction((tx) =>
               context.work.enqueue(tx, instanceWork, key, { notBefore: next }),
             );
+          return 'DONE';
+        },
+      },
+      {
+        // §12.7: vps.vcpu.hours, vps.memory.gib.hours (and GPU hours) for hosted instances.
+        name: 'vps.usage',
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '5m' }],
+        async run(context) {
+          await context.sql.transaction((tx) => meterInstances(tx, context.clock.now()));
           return 'DONE';
         },
       },

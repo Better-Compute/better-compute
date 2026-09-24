@@ -15,3 +15,4 @@ export * from './rollup.js';
 export * from './migrations.js';
 export * from './reservations.js';
 export * from './module.js';
+export * from './usage.js';

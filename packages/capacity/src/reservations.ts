@@ -328,7 +328,7 @@ export async function reservationView(tx: SqlTx, row: ReservationRow): Promise<R
     const { rows } = await tx.query<{ node_id: string; binding: Json | string | null }>(
       `SELECT node_id, binding FROM allocations
         WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL
-          AND bound_at IS NOT NULL ORDER BY id LIMIT 1`,
+          AND bound_at IS NOT NULL AND NOT binding ? 'lost' ORDER BY id LIMIT 1`,
       [row.id],
     );
     const bound = rows[0];
@@ -1102,8 +1102,9 @@ export async function markAllocationReleased(
 ): Promise<boolean> {
   const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
     `UPDATE allocations SET binding = COALESCE(binding, '{}'::jsonb) || '{"lost": true}'::jsonb,
-                            bound_at = NULL, version = version + 1
-      WHERE id = $1 AND released_at IS NULL AND bound_at IS NOT NULL RETURNING owner_id, owner_kind`,
+                            version = version + 1
+      WHERE id = $1 AND released_at IS NULL AND bound_at IS NOT NULL AND NOT binding ? 'lost'
+      RETURNING owner_id, owner_kind`,
     [allocationId],
   );
   return wakeOwner(tx, work, rows[0]);
@@ -1255,7 +1256,7 @@ export async function reconcileReservation(
 
   // active: Degraded while a node reports it lost an assignment it had bound.
   const { rows } = await tx.query<{ lost: string | number }>(
-    `SELECT count(*) FILTER (WHERE binding ? 'lost' AND bound_at IS NULL) AS lost FROM allocations
+    `SELECT count(*) FILTER (WHERE binding ? 'lost') AS lost FROM allocations
       WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL`,
     [id],
   );
