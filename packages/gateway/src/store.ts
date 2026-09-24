@@ -324,12 +324,23 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     if (!rowCount) throw new FencedError(lease.name);
   }
 
-  async function settle(
-    tx: SqlTx,
-    nodeId: string,
-    tenantId: string,
-    settled: SettledCommand,
-  ): Promise<void> {
+  type OutboxEvent = Parameters<EventPublisher['publish']>[1];
+
+  /** Set-based when the host's publisher supports it (one INSERT per batch), else one per event. */
+  async function publishAll(tx: SqlTx, list: readonly OutboxEvent[]): Promise<void> {
+    if (!list.length) return;
+    if (events.publishMany) return events.publishMany(tx, list);
+    for (const event of list) await events.publish(tx, event);
+  }
+
+  /** Set-based when the host's queue supports it, else one enqueue per key. */
+  async function enqueueAll(tx: SqlTx, kind: string, keys: readonly string[]): Promise<void> {
+    if (!keys.length) return;
+    if (work.enqueueMany) return work.enqueueMany(tx, kind, keys);
+    for (const key of keys) await work.enqueue(tx, kind, key);
+  }
+
+  function settledEvent(nodeId: string, tenantId: string, settled: SettledCommand): OutboxEvent {
     const data: Record<string, Json> = {
       commandId: settled.id,
       nodeId,
@@ -337,12 +348,11 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       state: settled.state,
     };
     if (settled.reason) data.reason = settled.reason;
-    await events.publish(tx, {
-      type: 'command.settled',
-      tenantId,
-      subject: `command/${settled.id}`,
-      data,
-    });
+    return { type: 'command.settled', tenantId, subject: `command/${settled.id}`, data };
+  }
+
+  async function settle(tx: SqlTx, nodeId: string, tenantId: string, settled: SettledCommand): Promise<void> {
+    await events.publish(tx, settledEvent(nodeId, tenantId, settled));
   }
 
   interface UpdateEntry {
@@ -427,13 +437,15 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         [list.map(([id]) => id), list.map(([, secs]) => secs)],
       );
     }
-    for (const { entry, settled } of settledEvents)
-      await settle(tx, entries[entry]!.nodeId, entries[entry]!.tenantId, settled);
+    await publishAll(
+      tx,
+      settledEvents.map(({ entry, settled }) => settledEvent(entries[entry]!.nodeId, entries[entry]!.tenantId, settled)),
+    );
     const wake = new Set<string>();
     entries.forEach((entry, index) => {
       if (results[index]!.settled.length || results[index]!.busy.length) wake.add(entry.nodeId);
     });
-    for (const nodeId of wake) await work.enqueue(tx, 'node', nodeId);
+    await enqueueAll(tx, 'node', [...wake]);
     return results;
   }
 
@@ -445,6 +457,102 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     busyBackoffMs: (commandId: string) => number,
   ): Promise<UpdatesResult> {
     return (await applyUpdatesBulk(tx, [{ nodeId, tenantId, updates, busyBackoffMs }]))[0]!;
+  }
+
+  /** One EventBatch in the caller's transaction; undefined when it is for another journal. */
+  async function ingestEvents(
+    tx: SqlTx,
+    nodeId: string,
+    tenantId: string,
+    batch: EventBatch,
+  ): Promise<{ ackedEventSeq: number; stored: number } | undefined> {
+    const { rows } = await tx.query<{ journal_id: string | null; acked_event_seq: number }>(
+      'SELECT journal_id, acked_event_seq FROM node_sessions WHERE node_id = $1 FOR UPDATE',
+      [nodeId],
+    );
+    const session = rows[0];
+    if (!session || session.journal_id !== batch.journalId) return undefined;
+    let acked = Number(session.acked_event_seq);
+    let stored = 0;
+    const fresh = [...batch.events]
+      .filter((event) => Number(event.seq) > acked)
+      .sort((a, b) => Number(a.seq - b.seq));
+    for (const event of fresh) {
+      const data: Record<string, Json> = {
+        nodeId,
+        journalId: batch.journalId,
+        seq: Number(event.seq),
+        event: toJson(EventSchema, event, { registry: protocolRegistry }) as Json,
+      };
+      let type = 'node.event';
+      const context: ReportContext = {
+        nodeId,
+        tenantId,
+        journalId: batch.journalId,
+        seq: Number(event.seq),
+        bootId: '',
+        signed: false,
+        work,
+      };
+      let apply: (() => Promise<unknown>) | undefined;
+      if (event.body.case === 'attested') {
+        const envelope = event.body.value;
+        try {
+          const report = unwrapAttestedReport(envelope);
+          data.report = toJson(AttestedReportBodySchema, report, {
+            registry: protocolRegistry,
+          }) as Json;
+          if (report.nodeId !== nodeId) type = 'security.node-mismatch';
+          else {
+            context.bootId = report.bootId;
+            context.signed = Boolean(envelope.nodeSig?.sig.byteLength);
+            const inner = report.report;
+            if (inner.case === 'allocationBound' && reports.allocationBound)
+              apply = () => reports.allocationBound!(tx, context, inner.value);
+            else if (inner.case === 'allocationReleased' && reports.allocationReleased)
+              apply = () => reports.allocationReleased!(tx, context, inner.value);
+          }
+        } catch {
+          type = 'security.invalid-report';
+        }
+      } else if (event.body.case === 'allocationFailed' && reports.allocationFailed) {
+        const failed = event.body.value;
+        apply = () => reports.allocationFailed!(tx, context, failed);
+      }
+      await events.publish(tx, { type, tenantId, subject: `node/${nodeId}`, data });
+      if (apply) {
+        // A failing handler must not poison the stream (no ack → replay → same failure): its
+        // writes roll back to the savepoint, the failure is published, and ingestion goes on.
+        await tx.query('SAVEPOINT gateway_report');
+        try {
+          await apply();
+          await tx.query('RELEASE SAVEPOINT gateway_report');
+        } catch (error) {
+          await tx.query('ROLLBACK TO SAVEPOINT gateway_report');
+          await events.publish(tx, {
+            type: 'node.report-failed',
+            tenantId,
+            subject: `node/${nodeId}`,
+            data: {
+              nodeId,
+              journalId: batch.journalId,
+              seq: Number(event.seq),
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+      }
+      acked = Math.max(acked, Number(event.seq));
+      stored++;
+    }
+    if (stored) {
+      await tx.query('UPDATE node_sessions SET acked_event_seq = $2 WHERE node_id = $1', [
+        nodeId,
+        acked,
+      ]);
+      await work.enqueue(tx, 'node', nodeId);
+    }
+    return { ackedEventSeq: acked, stored };
   }
 
   return {
@@ -789,97 +897,39 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       tenantId: string,
       batch: EventBatch,
     ): Promise<{ ackedEventSeq: number; stored: number } | undefined> {
-      return db.transaction(async (tx) => {
-        const { rows } = await tx.query<{ journal_id: string | null; acked_event_seq: number }>(
-          'SELECT journal_id, acked_event_seq FROM node_sessions WHERE node_id = $1 FOR UPDATE',
-          [nodeId],
-        );
-        const session = rows[0];
-        if (!session || session.journal_id !== batch.journalId) return undefined;
-        let acked = Number(session.acked_event_seq);
-        let stored = 0;
-        const fresh = [...batch.events]
-          .filter((event) => Number(event.seq) > acked)
-          .sort((a, b) => Number(a.seq - b.seq));
-        for (const event of fresh) {
-          const data: Record<string, Json> = {
-            nodeId,
-            journalId: batch.journalId,
-            seq: Number(event.seq),
-            event: toJson(EventSchema, event, { registry: protocolRegistry }) as Json,
-          };
-          let type = 'node.event';
-          const context: ReportContext = {
-            nodeId,
-            tenantId,
-            journalId: batch.journalId,
-            seq: Number(event.seq),
-            bootId: '',
-            signed: false,
-            work,
-          };
-          let apply: (() => Promise<unknown>) | undefined;
-          if (event.body.case === 'attested') {
-            const envelope = event.body.value;
-            try {
-              const report = unwrapAttestedReport(envelope);
-              data.report = toJson(AttestedReportBodySchema, report, {
-                registry: protocolRegistry,
-              }) as Json;
-              if (report.nodeId !== nodeId) type = 'security.node-mismatch';
-              else {
-                context.bootId = report.bootId;
-                context.signed = Boolean(envelope.nodeSig?.sig.byteLength);
-                const inner = report.report;
-                if (inner.case === 'allocationBound' && reports.allocationBound)
-                  apply = () => reports.allocationBound!(tx, context, inner.value);
-                else if (inner.case === 'allocationReleased' && reports.allocationReleased)
-                  apply = () => reports.allocationReleased!(tx, context, inner.value);
-              }
-            } catch {
-              type = 'security.invalid-report';
-            }
-          } else if (event.body.case === 'allocationFailed' && reports.allocationFailed) {
-            const failed = event.body.value;
-            apply = () => reports.allocationFailed!(tx, context, failed);
-          }
-          await events.publish(tx, { type, tenantId, subject: `node/${nodeId}`, data });
-          if (apply) {
-            // A failing handler must not poison the stream (no ack → replay → same failure): its
-            // writes roll back to the savepoint, the failure is published, and ingestion goes on.
-            await tx.query('SAVEPOINT gateway_report');
-            try {
-              await apply();
-              await tx.query('RELEASE SAVEPOINT gateway_report');
-            } catch (error) {
-              await tx.query('ROLLBACK TO SAVEPOINT gateway_report');
-              await events.publish(tx, {
-                type: 'node.report-failed',
-                tenantId,
-                subject: `node/${nodeId}`,
-                data: {
-                  nodeId,
-                  journalId: batch.journalId,
-                  seq: Number(event.seq),
-                  error: error instanceof Error ? error.message : String(error),
-                },
-              });
-            }
-          }
-          acked = Math.max(acked, Number(event.seq));
-          stored++;
-        }
-        if (stored) {
-          await tx.query('UPDATE node_sessions SET acked_event_seq = $2 WHERE node_id = $1', [
-            nodeId,
-            acked,
-          ]);
-          await work.enqueue(tx, 'node', nodeId);
-        }
-        return { ackedEventSeq: acked, stored };
-      });
+      return db.transaction((tx) => ingestEvents(tx, nodeId, tenantId, batch));
     },
 
+    /**
+     * Group commit of event batches from many sessions: one transaction, session rows locked in
+     * node-id order; on failure each batch is retried alone (its slot holds the error).
+     */
+    async eventsBatch(
+      entries: readonly { nodeId: string; tenantId: string; batch: EventBatch }[],
+    ): Promise<({ ackedEventSeq: number; stored: number } | undefined | Error)[]> {
+      const order = entries.map((_, index) => index).sort((a, b) =>
+        entries[a]!.nodeId < entries[b]!.nodeId ? -1 : entries[a]!.nodeId > entries[b]!.nodeId ? 1 : a - b,
+      );
+      try {
+        return await db.transaction(async (tx) => {
+          const results: ({ ackedEventSeq: number; stored: number } | undefined)[] = new Array(entries.length);
+          for (const index of order) {
+            const entry = entries[index]!;
+            results[index] = await ingestEvents(tx, entry.nodeId, entry.tenantId, entry.batch);
+          }
+          return results;
+        });
+      } catch {
+        const results: ({ ackedEventSeq: number; stored: number } | undefined | Error)[] = [];
+        for (const entry of entries)
+          results.push(
+            await db
+              .transaction((tx) => ingestEvents(tx, entry.nodeId, entry.tenantId, entry.batch))
+              .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error)))),
+          );
+        return results;
+      }
+    },
     /**
      * A status report (§7.2): `observed_generation` only moves forward; the report is published for
      * the Inventory/Health reconciler, which owns conditions.

@@ -579,52 +579,56 @@ export function createGateway(options: GatewayOptions): Gateway {
   }
 
   /**
-   * Group commit of CommandUpdates: every session's updates that arrive in the same I/O turn share
-   * one transaction (one per frame serializes a large fleet on the store). A session still awaits
-   * its own entry before its next frame, so per-session order is kept.
+   * Group commit (updates and event batches): frames from every session that arrive in the same
+   * I/O turn share one transaction, at most `maxBatch` per flush. A session still awaits its own
+   * entry before its next frame, so per-session order is kept, and a lone frame never waits.
    */
-  const updateBatch: {
-    session: Session;
-    updates: CommandUpdate[];
-    resolve: (result: Awaited<ReturnType<typeof store.updates>>) => void;
-    reject: (error: unknown) => void;
-  }[] = [];
-  let updateFlush: ReturnType<typeof setImmediate> | undefined;
-
-  function flushUpdates() {
-    updateFlush = undefined;
-    const batch = updateBatch.splice(0, maxUpdateBatch);
-    if (updateBatch.length) updateFlush = setImmediate(flushUpdates);
-    void store
-      .updatesBatch(
-        batch.map((entry) => ({
-          nodeId: entry.session.nodeId,
-          tenantId: entry.session.tenantId,
-          updates: entry.updates,
-          busyBackoffMs: (commandId: string) => backoffMs(entry.session, commandId),
-        })),
-      )
-      .then(
-        (results) => {
-          results.forEach((result, index) => {
+  function groupCommit<I, O>(run: (inputs: I[]) => Promise<(O | Error)[]>, maxBatch: number) {
+    const pending: { input: I; resolve: (output: O) => void; reject: (error: unknown) => void }[] = [];
+    let scheduled: ReturnType<typeof setImmediate> | undefined;
+    const flush = () => {
+      scheduled = undefined;
+      const batch = pending.splice(0, maxBatch);
+      if (pending.length) scheduled = setImmediate(flush);
+      run(batch.map((entry) => entry.input)).then(
+        (outputs) =>
+          outputs.forEach((output, index) => {
             const entry = batch[index]!;
-            if (result instanceof Error) entry.reject(result);
-            else entry.resolve(result);
-          });
-        },
+            if (output instanceof Error) entry.reject(output);
+            else entry.resolve(output);
+          }),
         (error: unknown) => batch.forEach((entry) => entry.reject(error)),
       );
+    };
+    return (input: I) =>
+      new Promise<O>((resolve, reject) => {
+        pending.push({ input, resolve, reject });
+        scheduled ??= setImmediate(flush);
+      });
   }
 
-  function applyUpdatesBatched(session: Session, updates: CommandUpdate[]) {
-    return new Promise<Awaited<ReturnType<typeof store.updates>>>((resolve, reject) => {
-      updateBatch.push({ session, updates, resolve, reject });
-      updateFlush ??= setImmediate(flushUpdates);
-    });
-  }
+  const applyUpdatesBatched = groupCommit(
+    (inputs: { session: Session; updates: CommandUpdate[] }[]) =>
+      store.updatesBatch(
+        inputs.map(({ session, updates }) => ({
+          nodeId: session.nodeId,
+          tenantId: session.tenantId,
+          updates,
+          busyBackoffMs: (commandId: string) => backoffMs(session, commandId),
+        })),
+      ),
+    maxUpdateBatch,
+  );
 
+  const ingestEventsBatched = groupCommit(
+    (inputs: { session: Session; batch: EventBatch }[]) =>
+      store.eventsBatch(
+        inputs.map(({ session, batch }) => ({ nodeId: session.nodeId, tenantId: session.tenantId, batch })),
+      ),
+    maxUpdateBatch,
+  );
   async function onUpdates(session: Session, updates: CommandUpdate[]) {
-    const result = await applyUpdatesBatched(session, updates);
+    const result = await applyUpdatesBatched({ session, updates });
     for (const update of updates) if (isTerminalUpdate(update)) release(session, update.commandId);
     for (const commandId of result.busy) release(session, commandId);
     for (const settled of result.settled) session.busyCount.delete(settled.id);
@@ -639,7 +643,7 @@ export function createGateway(options: GatewayOptions): Gateway {
   }
 
   async function onEvents(session: Session, batch: EventBatch) {
-    const result = await store.events(session.nodeId, session.tenantId, batch);
+    const result = await ingestEventsBatched({ session, batch });
     if (!result) return;
     session.sink.send(
       frame({
