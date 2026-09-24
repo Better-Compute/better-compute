@@ -1,0 +1,64 @@
+{
+  "name": "@better-compute/mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol tools for better-compute: pools, capacity, GPU reservations and node status for AI agents, gated by better-iam.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "gpu",
+    "bare-metal",
+    "capacity",
+    "provisioning",
+    "infrastructure",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/client": "workspace:*"
+  },
+  "peerDependencies": {
+    "@better-iam/mcp": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@better-iam/mcp": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@better-iam/mcp": "0.1.0"
+  }
+}

@@ -25,6 +25,7 @@ const scoped: Record<string, string> = {
   '@better-compute/server': 'server/src/index.ts',
   '@better-compute/gateway': 'gateway/src/index.ts',
   '@better-compute/client': 'client/src/index.ts',
+  '@better-compute/mcp': 'mcp/src/index.ts',
   '@better-compute/cli': 'cli/src/index.ts',
   '@better-compute/testing': 'testing/src/index.ts',
 };
