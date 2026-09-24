@@ -168,6 +168,10 @@ describe('help and the manifest', () => {
       'audit verify',
       'audit prove',
       'audit check-proof',
+      'release keygen',
+      'release sign',
+      'release cosign',
+      'release verify',
     ]);
     const api = manifest.commands.find((command: { name: string }) => command.name === 'api');
     expect(api.target).toBe('token');

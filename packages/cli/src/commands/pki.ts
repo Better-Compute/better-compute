@@ -30,7 +30,7 @@ export const pkiFlag: FlagSpec = {
 const minSecret = 32;
 
 /** Writes a file readable only by its owner, never replacing one that exists. */
-async function writeNew(path: string, content: string): Promise<void> {
+export async function writeNew(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   try {
     await writeFile(path, content, { flag: 'wx', mode: 0o600 });
@@ -42,7 +42,7 @@ async function writeNew(path: string, content: string): Promise<void> {
 }
 
 /** Replaces a file atomically (write beside it, then rename), owner-only. */
-async function replace(path: string, content: string, mode = 0o600): Promise<void> {
+export async function replace(path: string, content: string, mode = 0o600): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, content, { mode });

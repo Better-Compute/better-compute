@@ -1,5 +1,10 @@
 import { readFile, writeFile } from 'node:fs/promises';
-import { readPkiPins } from '@better-compute/pki';
+import {
+  readPkiPins,
+  verifyReleaseManifest,
+  type ReleaseManifest,
+  type SignedReleaseManifest,
+} from '@better-compute/pki';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { renderInstallScript, type BcdArch } from '../install-script.js';
@@ -21,13 +26,82 @@ export function parseSha256Flag(value: string): Partial<Record<BcdArch, string>>
   return out;
 }
 
+const archive = /\.(tar\.gz|tgz|zip|sha256|sig|pem|json|txt|sbom|spdx|intoto\.jsonl)$/;
+
+/**
+ * The binary digests an install script pins, from a verified release manifest: per architecture,
+ * the one `linux-<arch>` artifact that is the bare binary (archives, checksums and metadata are
+ * not what `{downloads}/bcd/{version}/linux-{arch}` serves).
+ */
+export function binaryDigests(manifest: ReleaseManifest): Partial<Record<BcdArch, string>> {
+  const out: Partial<Record<BcdArch, string>> = {};
+  for (const arch of ['amd64', 'arm64'] as const) {
+    const binaries = manifest.artifacts.filter(
+      (artifact) => artifact.platform === `linux-${arch}` && !archive.test(artifact.name),
+    );
+    if (binaries.length > 1)
+      throw new CliError(
+        'RELEASE_AMBIGUOUS',
+        `The manifest lists ${binaries.length} linux-${arch} binaries: ${binaries.map((item) => item.name).join(', ')}`,
+      );
+    if (binaries[0]) out[arch] = binaries[0].sha256;
+  }
+  if (!out.amd64 && !out.arm64)
+    throw new CliError(
+      'RELEASE_INCOMPLETE',
+      'The manifest lists no linux-amd64 or linux-arm64 bcd binary',
+    );
+  return out;
+}
+
+/** Verifies `--release-manifest` under `--release-pins` for bcd at `version`. */
+async function digestsFromManifest(
+  file: string,
+  pins: string | undefined,
+  threshold: number | undefined,
+  version: string,
+): Promise<Partial<Record<BcdArch, string>>> {
+  const list = (pins ?? '')
+    .split(',')
+    .map((pin) => pin.trim())
+    .filter(Boolean);
+  if (!list.length || !list.every((pin) => /^sha256\/[A-Za-z0-9+/]{43}=$/.test(pin)))
+    throw usageError('--release-manifest needs --release-pins sha256/…[,sha256/…]');
+  let signed: SignedReleaseManifest;
+  try {
+    signed = JSON.parse(await readFile(file, 'utf8')) as SignedReleaseManifest;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+      throw new CliError('FILE_NOT_FOUND', `No release manifest at ${file}`);
+    throw usageError(`${file} is not JSON`);
+  }
+  let manifest: ReleaseManifest;
+  try {
+    manifest = verifyReleaseManifest(
+      signed,
+      { pins: list, ...(threshold !== undefined ? { threshold } : {}) },
+      { product: 'bcd' },
+    );
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ACCESS_DENIED')
+      throw new CliError('RELEASE_REJECTED', (error as Error).message);
+    throw error;
+  }
+  if (manifest.version.replace(/^v/, '') !== version)
+    throw new CliError(
+      'RELEASE_MISMATCH',
+      `The manifest releases bcd ${manifest.version}, not ${version}`,
+    );
+  return binaryDigests(manifest);
+}
+
 export const daemonCommands = [
   defineCommand({
     name: 'daemon install-script',
     group: 'Fleet',
     summary: 'Write the POSIX sh script that installs bcd on a server and joins it to a pool',
     description:
-      "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256, installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band.",
+      "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band.",
     output: 'text',
     flags: {
       pool: {
@@ -72,9 +146,26 @@ export const daemonCommands = [
       sha256: {
         type: 'string',
         value: 'ARCH=HEX,…',
-        required: true,
         description:
-          'SHA-256 of each architecture’s binary: amd64=<hex>,arm64=<hex> (from the release .sha256 files)',
+          'SHA-256 of each architecture’s binary: amd64=<hex>,arm64=<hex> (or use --release-manifest)',
+      },
+      'release-manifest': {
+        type: 'string',
+        value: 'PATH',
+        description: 'A signed bcd release manifest: its verified digests are pinned instead',
+      },
+      'release-pins': {
+        type: 'string',
+        value: 'PINS',
+        env: 'BCD_RELEASE_PINS',
+        description: 'Comma-separated sha256/… pins of the release keys',
+      },
+      'release-threshold': {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 16,
+        description: 'Release keys that must have signed (default 1)',
       },
       pki: pkiFlag,
       out: {
@@ -87,7 +178,20 @@ export const daemonCommands = [
       'better-compute daemon install-script --pool pool_h100 --site fsn1 --gateway-url https://gw.eu.example.com --base-url https://compute.example.com --bcd-version 0.1.0 --sha256 amd64=<hex> > install-bcd.sh',
       'BCD_JOIN_TOKEN=bcjt_... sudo -E sh install-bcd.sh',
     ],
+    validate(flags) {
+      if ((flags.sha256 === undefined) === (flags['release-manifest'] === undefined))
+        throw usageError('Give exactly one of --sha256 or --release-manifest');
+    },
     async run({ flags, path, note, program }) {
+      const version = flags['bcd-version']!.replace(/^v/, '');
+      const sha256 = flags['release-manifest']
+        ? await digestsFromManifest(
+            path(flags['release-manifest']),
+            flags['release-pins'],
+            flags['release-threshold'],
+            version,
+          )
+        : parseSha256Flag(flags.sha256!);
       const basePath = (flags['base-path'] ?? '/api/compute').replace(/\/+$/, '');
       if (!/^(\/[A-Za-z0-9._~-]+)*$/.test(basePath))
         throw usageError('--base-path must look like /api/compute');
@@ -108,8 +212,8 @@ export const daemonCommands = [
         siteId: flags.site!,
         gatewayUrl: flags['gateway-url']!,
         downloadsBase: `${flags['base-url']!.replace(/\/+$/, '')}${basePath}/downloads`,
-        version: flags['bcd-version']!.replace(/^v/, ''),
-        sha256: parseSha256Flag(flags.sha256!),
+        version,
+        sha256,
         servingCaSpkiPin: pins.servingCaSpkiPin,
         joinSigningKeyPin: pins.joinSigningKeyPin,
         joinEncryptionKeyPin: pins.joinEncryptionKeyPin,

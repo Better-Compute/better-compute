@@ -36,6 +36,7 @@ export * from './join-token.js';
 export * from './jwe.js';
 export * from './keys.js';
 export * from './pop.js';
+export * from './release.js';
 export * from './revocation.js';
 export * from './signing.js';
 export * from './spiffe.js';

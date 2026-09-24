@@ -14,13 +14,17 @@ import {
 import { manualClock } from '@better-compute/core';
 import { pkiFindings } from '../packages/cli/src/commands/pki.js';
 import {
+  buildReleaseManifest,
   createPkiBundle,
+  createReleaseSigningKey,
   exportPkiBundle,
   fromPem,
   importPkiBundle,
   parseCertificate,
   pkiPins,
   readPkiPins,
+  releaseArtifact,
+  signReleaseManifest,
   spkiPin,
 } from '@better-compute/pki';
 
@@ -296,6 +300,43 @@ describe('daemon install-script', () => {
     // The token never reaches a command line.
     expect(script).not.toMatch(/bcd join[^\n]*\$TOKEN/);
     expect(script).toContain('| /usr/local/bin/bcd join --config /etc/bcd/config.toml');
+  });
+
+  it('pins the binary digests of a verified release manifest instead of --sha256', async () => {
+    const key = createReleaseSigningKey();
+    const binary = new TextEncoder().encode('bcd 0.1.0 amd64 binary');
+    const manifest = buildReleaseManifest({
+      product: 'bcd',
+      version: '0.1.0',
+      sequence: 3,
+      signers: [key],
+      artifacts: [
+        releaseArtifact('bcd_0.1.0_linux_amd64', binary, 'linux-amd64'),
+        releaseArtifact('bcd_0.1.0_linux_amd64.tar.gz', new Uint8Array(9), 'linux-amd64'),
+      ],
+    });
+    await writeFile(
+      join(scratch, 'release.json'),
+      JSON.stringify(signReleaseManifest(manifest, [key])),
+    );
+    const withManifest = [...base.slice(0, -2), '--release-manifest', 'release.json'];
+    const pins = { BCD_RELEASE_PINS: spkiPin(key.publicKey) };
+    const result = await run(withManifest, pins);
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(`SHA256_amd64='${manifest.artifacts[0]!.sha256}'`);
+    expect(result.stdout).toContain("SHA256_arm64=''");
+
+    const other = createReleaseSigningKey();
+    expect(await run(withManifest, { BCD_RELEASE_PINS: spkiPin(other.publicKey) })).toMatchObject({
+      ok: false,
+      code: 'RELEASE_REJECTED',
+    });
+    const wrongVersion = withManifest.map((arg) => (arg === 'v0.1.0' ? '0.2.0' : arg));
+    expect(await run(wrongVersion, pins)).toMatchObject({ ok: false, code: 'RELEASE_MISMATCH' });
+    expect(await run([...base, '--release-manifest', 'release.json'], pins)).toMatchObject({
+      ok: false,
+      code: 'INVALID_ARGUMENT',
+    });
   });
 
   it('is valid POSIX sh', async () => {

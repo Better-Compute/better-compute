@@ -175,6 +175,32 @@ package supplies the cryptography and touches no database.
 - The PKI bundle carries an `auditSigning` key, and `pki show` prints its `auditSigningKeyPin`.
   Bundles written before this still load.
 
+## Offline release signing (§13 supply chain)
+
+`release.ts` is a TUF-lite scheme: a signed manifest of one release's artifacts. It can grow into
+real TUF roles later by bumping `spec`.
+
+- **Keys.** `createReleaseSigningKey()` creates a key that stays offline. Installers and daemons know
+  it only by its `sha256/…` pin.
+- **Building the manifest.** `buildReleaseManifest({ product, version, sequence, signers, artifacts })`
+  produces a body with these fields:
+  - `type: 'bettercompute.release'` and `spec: 1`;
+  - `product`, `version`, `issuedAt` and `expiresAt`;
+  - a monotonic `sequence`, which is the rollback counter;
+  - `keys: [{ kid, alg: 'ES256', spki }]`, the signers, cosigners included;
+  - `artifacts: [{ name, platform?, sha256, size }]`, sorted by name. `platform` is `linux-amd64`,
+    `linux-arm64` and so on, and `platformFromName` derives it from goreleaser names.
+- **Signing.** `signReleaseManifest(manifestOrSigned, keys)` signs the canonical body bytes under
+  purpose `release-manifest`. The result is
+  `{ manifest: base64(body), signatures: [{ kid, sig }] }`. Pass an already signed manifest to
+  cosign it.
+- **Verifying.** `verifyReleaseManifest(signed, { pins, threshold }, { minSequence, product })`
+  counts distinct pinned keys with a valid signature. `verifyReleaseArtifact(manifest, name, bytes)`
+  then checks a download against the manifest.
+- **CLI.** `release keygen|sign|cosign|verify`. `daemon install-script --release-manifest …
+  --release-pins …` pins the verified per-architecture digests of the bare `linux-<arch>` binaries,
+  so the script's `sha256sum -c` check follows from the release signature.
+
 ## v0.5 (optional): workload identity
 
 - `createWorkloadIssuer({ issuer, defaultAudience })` issues ES256 OIDC tokens (`typ: JWT`, at most
@@ -235,6 +261,18 @@ part)*`, SHA-256.
   `epk` (65-byte uncompressed point).
 - **Renew.** `pop_sig` covers `renew-pop` [sha256(new CSR), node_id, int64_be(seconds) ‖
   int32_be(nanos)], signed with the current key. Renew at ~60% of the lifetime.
+- **Release manifests (v0.4 self-update).**
+  - **Signed bytes.** Base64-decode `manifest`; the result is the canonical JSON body. Each
+    `signatures[i].sig` is base64url raw `r ‖ s` over `signingInput('release-manifest', [body])`.
+  - **Trust.** Find each signature's key in the body's `keys` by `kid`. Parse the key's `spki` (DER
+    SubjectPublicKeyInfo) and accept it only if SHA-256(SPKI) matches a configured pin. Count each
+    pinned key at most once, and require `threshold` of them.
+  - **Check order:**
+    1. the manifest verifies (threshold, and a canonical, spec 1 body for product `bcd`);
+    2. `sequence` ≥ the stored sequence (persist the new one only after installing);
+    3. now < `expiresAt`;
+    4. the downloaded artifact's size and SHA-256 match its entry for `linux-<arch>`.
+  - Refuse the update on any failure, and keep running the current binary.
 
 ## Also here
 
