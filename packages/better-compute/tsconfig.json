@@ -27,6 +27,9 @@
       "path": "../events"
     },
     {
+      "path": "../fleet"
+    },
+    {
       "path": "../gateway"
     },
     {

@@ -193,6 +193,11 @@ Rules for v0.1:
   gateway (`node_sessions.gateway_id`). `createGateway({ tickets: { jwks, issuer?, jtiCache? } })` gets the issuer's
   JWKS; host supplies `reauthorize(tunnel)` (60 s) and calls POST `/v1/tunnels/close {subject|tunnelId|nodeId}` on
   revocation events. The daemon ALWAYS re-verifies the ticket (P14); the gateway check is defence in depth.
+- Health for W5a ([060790] 0e70a77, c0f2a59, 08f1a15): gateway `node.event` XIDs → `recordXid(tx, nodeId, {gpuUuid,
+  xid})` then `work.enqueue(tx, 'health', nodeId)`; pass `work` to `applyInventory`; run the provision `health`
+  reconciler. W5a's final commit also swaps the NOT_IMPLEMENTED probes (server-operation, server-http, client,
+  umbrella-subpaths use `inventory.history`) for an `acme.notYet` plugin method in tests/support/server.ts, so
+  [060790] can land inventory.history/diff right after.
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also

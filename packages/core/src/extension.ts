@@ -819,13 +819,18 @@ export interface MethodContext extends ModuleContext {
   /**
    * Composite methods (e.g. `fleet.apply`), phase 1: decides another method's call exactly as the
    * envelope would for the current caller (tenant pre-check, validation, one IAM decision), with no
-   * transaction open (IAM is never awaited inside a compute transaction). Methods with `admission`
-   * are refused with `UNSUPPORTED`. Only available to methods declared `transaction: 'manual'`.
+   * transaction open (IAM is never awaited inside a compute transaction). Methods whose `admission`
+   * has a `denied` hook (reservations, instances) are refused with `UNSUPPORTED`; replay-only admissions
+   * run `admission.prepare` in a short transaction of their own: `decide` → one IAM decision on the
+   * returned resource, `replay` → allowed. Only available to methods declared `transaction: 'manual'`;
+   * `check` and `invoke` always act as the calling identity.
    */
   check?(path: `${string}/${string}`, input: unknown): Promise<void>;
   /**
    * Phase 2: runs a call that `check` allowed earlier in this same method call, inside `tx`, without
-   * another decision. Any other call is refused with `ACCESS_DENIED`.
+   * another decision. Any other call is refused with `ACCESS_DENIED`. For admission methods it re-runs
+   * `admission.prepare` in `tx` (a replay returns the stored result) and sets `ctx.admission` for the
+   * handler. Matching: path + canonical JSON of the raw input; one `invoke` per successful `check`.
    */
   invoke?<O = unknown>(tx: SqlTx, path: `${string}/${string}`, input: unknown): Promise<O>;
 }

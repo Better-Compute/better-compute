@@ -394,7 +394,9 @@ describe('apiSurface (§9.2)', () => {
       flavors: 'vps',
       providerAccounts: 'vps',
       tunnels: 'server',
-      fleet: 'server',
+      // Injected modules outside the plan's original table: `@better-compute/fleet`, `@better-compute/events`.
+      fleet: 'fleet',
+      webhooks: 'events',
     });
     const phaseOf = (group: string) =>
       new Set(apiSurface.filter((row) => row.group === group).map((row) => row.phase));

@@ -86,6 +86,10 @@
       "types": "./dist/events.d.ts",
       "import": "./dist/events.js"
     },
+    "./fleet": {
+      "types": "./dist/fleet.d.ts",
+      "import": "./dist/fleet.js"
+    },
     "./audit": {
       "types": "./dist/audit.d.ts",
       "import": "./dist/audit.js"
@@ -142,6 +146,7 @@
     "@better-compute/client": "workspace:*",
     "@better-compute/core": "workspace:*",
     "@better-compute/events": "workspace:*",
+    "@better-compute/fleet": "workspace:*",
     "@better-compute/gateway": "workspace:*",
     "@better-compute/iam": "workspace:*",
     "@better-compute/inventory": "workspace:*",

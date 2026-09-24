@@ -94,8 +94,20 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@22.20.4)(supports-color@7.2.0)
 
+  packages/audit:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/pki':
+        specifier: workspace:*
+        version: link:../pki
+
   packages/better-compute:
     dependencies:
+      '@better-compute/audit':
+        specifier: workspace:*
+        version: link:../audit
       '@better-compute/capacity':
         specifier: workspace:*
         version: link:../capacity
@@ -111,6 +123,9 @@ importers:
       '@better-compute/events':
         specifier: workspace:*
         version: link:../events
+      '@better-compute/fleet':
+        specifier: workspace:*
+        version: link:../fleet
       '@better-compute/gateway':
         specifier: workspace:*
         version: link:../gateway
@@ -126,6 +141,9 @@ importers:
       '@better-compute/metal':
         specifier: workspace:*
         version: link:../metal
+      '@better-compute/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@better-compute/pki':
         specifier: workspace:*
         version: link:../pki
@@ -177,6 +195,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@better-compute/audit':
+        specifier: workspace:*
+        version: link:../audit
       '@better-compute/capacity':
         specifier: workspace:*
         version: link:../capacity
@@ -229,6 +250,12 @@ importers:
   packages/core: {}
 
   packages/events:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/fleet:
     dependencies:
       '@better-compute/core':
         specifier: workspace:*
@@ -305,6 +332,12 @@ importers:
       '@better-compute/provision':
         specifier: workspace:*
         version: link:../provision
+
+  packages/observability:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/pki:
     dependencies:
@@ -387,6 +420,12 @@ importers:
       '@better-compute/core':
         specifier: workspace:*
         version: link:../core
+      '@better-compute/gateway':
+        specifier: workspace:*
+        version: link:../gateway
+      '@better-compute/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@better-compute/postgres':
         specifier: workspace:*
         version: link:../postgres

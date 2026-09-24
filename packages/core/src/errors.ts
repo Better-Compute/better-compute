@@ -25,6 +25,8 @@ export const errorCodes = [
   'PAYLOAD_TOO_LARGE',
   'INTERNAL_ERROR',
   'MISSING_DEPENDENCY',
+  /** Configuration as code: live state differs from the plan (`fleet.apply`, `--fail-on-drift`). */
+  'CONFIG_DRIFT',
 ] as const;
 export type ErrorCode = (typeof errorCodes)[number];
 
@@ -56,6 +58,7 @@ export const defaultStatus: Readonly<Record<ErrorCode, number>> = {
   PAYLOAD_TOO_LARGE: 413,
   INTERNAL_ERROR: 500,
   MISSING_DEPENDENCY: 500,
+  CONFIG_DRIFT: 409,
 };
 
 /** The `error` member of a failed response: `{ error: { code, message, retryAfterMs?, details? } }`. */
