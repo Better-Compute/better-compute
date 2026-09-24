@@ -25,7 +25,9 @@ export type SigningPurpose =
   /** Current node key; parts [sha256(csr), node_id, client_time]. */
   | 'renew-pop'
   /** Site agent node key; parts [SignedDiscoveryAssertion.body] (site/v1, draft). */
-  | 'discovery-assertion';
+  | 'discovery-assertion'
+  /** Audit signing key; parts [canonical checkpoint body]. */
+  | 'audit-checkpoint';
 
 const PREFIX = 'bettercompute.v1/';
 const utf8 = new TextEncoder();
