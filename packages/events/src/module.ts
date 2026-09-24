@@ -1,0 +1,212 @@
+// `eventsModule()`: the §9.2 `webhooks` group (v0.3; every method decides `compute:webhooks:manage` on
+// `compute-tenant/{t}`) and the workers that fan outbox events out to webhooks and deliver them.
+
+import {
+  defineMethod,
+  defineModule,
+  field,
+  idPrefixes,
+  manifest,
+  type ComputeModule,
+  type Finding,
+  type MethodDefinition,
+  type Reconciler,
+  type SqlTx,
+} from '@better-compute/core';
+import { eventsMigrations } from './migrations.js';
+import type { UrlPolicy } from './safe-url.js';
+import {
+  deliverWebhooks,
+  fanOutWebhooks,
+  webhookStore,
+  type DeliverOptions,
+  type DeliveryState,
+  type Webhook,
+  type WebhookDelivery,
+  type WebhookSecrets,
+} from './webhooks.js';
+
+const tenantId = field.string({ pattern: '^[A-Za-z0-9._:-]{1,128}$' });
+const webhookId = field.string({ pattern: `^${idPrefixes.webhook}_[0-9a-hjkmnp-tv-z]{26,52}$` });
+const eventPattern = field.string({
+  pattern: '^(\\*|[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)*(\\.\\*)?)$',
+  maxLength: 128,
+});
+const events = field.list(eventPattern, { min: 1, max: 20 });
+const description = field.string({ maxLength: 256 });
+
+const createInput = manifest({
+  tenantId,
+  url: field.url(),
+  events,
+  description: description.optional(),
+});
+const listInput = manifest({ tenantId });
+const refInput = manifest({ tenantId, webhookId });
+const updateInput = manifest({
+  tenantId,
+  webhookId,
+  url: field.url().optional(),
+  events: events.optional(),
+  description: description.optional(),
+  active: field.boolean().optional(),
+});
+const rotateInput = manifest({
+  tenantId,
+  webhookId,
+  keepPreviousSeconds: field.int({ min: 0, max: 86_400 }).optional(),
+});
+const deliveriesInput = manifest({
+  tenantId,
+  webhookId,
+  state: field.option(['pending', 'delivered', 'dead', 'cancelled']).optional(),
+  limit: field.int({ min: 1, max: 200 }).optional(),
+});
+const redeliverInput = manifest({
+  tenantId,
+  deliveryId: field.string({ pattern: '^dlv_[0-9a-hjkmnp-tv-z]{26,52}$' }),
+});
+
+type Input<M extends { parse(value: unknown): unknown }> = ReturnType<M['parse']>;
+
+export type EventsApi = {
+  webhooks: {
+    create: MethodDefinition<Input<typeof createInput>, { webhook: Webhook; secret: string }>;
+    list: MethodDefinition<Input<typeof listInput>, { items: Webhook[] }>;
+    get: MethodDefinition<Input<typeof refInput>, Webhook>;
+    update: MethodDefinition<Input<typeof updateInput>, Webhook>;
+    rotateSecret: MethodDefinition<Input<typeof rotateInput>, { webhook: Webhook; secret: string }>;
+    delete: MethodDefinition<Input<typeof refInput>, { deleted: true }>;
+    ping: MethodDefinition<Input<typeof refInput>, { delivery: WebhookDelivery }>;
+    deliveries: MethodDefinition<Input<typeof deliveriesInput>, { items: WebhookDelivery[] }>;
+    redeliver: MethodDefinition<Input<typeof redeliverInput>, { delivery: WebhookDelivery }>;
+  };
+};
+
+export interface EventsModuleOptions extends WebhookSecrets, UrlPolicy {
+  fetch?: typeof globalThis.fetch;
+  maxPerTenant?: number;
+  delivery?: Pick<
+    DeliverOptions,
+    'limit' | 'timeoutMs' | 'maxAttempts' | 'backoffSeconds' | 'resolve'
+  >;
+}
+
+/** The events module: webhook management, outbox fan-out and signed delivery. */
+export function eventsModule(options: EventsModuleOptions): ComputeModule<'events', EventsApi> {
+  const store = webhookStore(options);
+  const method = <I, O>(
+    kind: 'read' | 'mutation',
+    schema: { parse(value: unknown): I },
+    run: (tx: SqlTx, input: I) => Promise<O>,
+  ) =>
+    defineMethod<I, O>({
+      action: 'compute:webhooks:manage',
+      kind,
+      resource: (input) => ({ type: 'tenant', id: (input as { tenantId: string }).tenantId }),
+      validate: (input) => schema.parse(input),
+      handler: (context, input) => context.sql.transaction((tx) => run(tx, input)),
+    });
+
+  const api = (): EventsApi => ({
+    webhooks: {
+      create: method('mutation', createInput, (tx, input) =>
+        store.create(tx, {
+          tenantId: input.tenantId,
+          url: input.url,
+          events: input.events,
+          ...(input.description === undefined ? {} : { description: input.description }),
+        }),
+      ),
+      list: method('read', listInput, async (tx, input) => ({
+        items: await store.list(tx, input.tenantId),
+      })),
+      get: method('read', refInput, (tx, input) => store.get(tx, input.tenantId, input.webhookId)),
+      update: method('mutation', updateInput, (tx, input) => {
+        const { tenantId: tenant, webhookId: id, ...changes } = input;
+        return store.update(tx, tenant, id, changes);
+      }),
+      rotateSecret: method('mutation', rotateInput, (tx, input) =>
+        store.rotateSecret(tx, input.tenantId, input.webhookId, input.keepPreviousSeconds ?? 0),
+      ),
+      delete: method('mutation', refInput, async (tx, input) => {
+        await store.delete(tx, input.tenantId, input.webhookId);
+        return { deleted: true as const };
+      }),
+      ping: method('mutation', refInput, async (tx, input) => ({
+        delivery: await store.ping(tx, input.tenantId, input.webhookId),
+      })),
+      deliveries: method('read', deliveriesInput, async (tx, input) => ({
+        items: await store.deliveries(tx, input.tenantId, input.webhookId, {
+          ...(input.state ? { state: input.state as DeliveryState } : {}),
+          ...(input.limit ? { limit: input.limit } : {}),
+        }),
+      })),
+      redeliver: method('mutation', redeliverInput, async (tx, input) => ({
+        delivery: await store.redeliver(tx, input.tenantId, input.deliveryId),
+      })),
+    },
+  });
+
+  const reconcilers: Reconciler[] = [
+    {
+      name: 'events.fanout',
+      shardBy: 'none',
+      periodic: [{ key: 'webhooks', every: '1s' }],
+      run: async (context) =>
+        (await fanOutWebhooks(context.sql, { clock: context.clock })).more ? 'SYNC_AGAIN' : 'DONE',
+    },
+    {
+      name: 'events.deliver',
+      shardBy: 'none',
+      periodic: [{ key: 'deliveries', every: '2s' }],
+      run: async (context) => {
+        const limit = options.delivery?.limit ?? 50;
+        const result = await deliverWebhooks(context.sql, {
+          ...options,
+          ...options.delivery,
+          clock: context.clock,
+        });
+        return result.attempted >= limit ? 'SYNC_AGAIN' : 'DONE';
+      },
+    },
+  ];
+
+  const selfCheck = async (
+    context: Parameters<NonNullable<ComputeModule['selfCheck']>>[0],
+  ): Promise<Finding[]> => {
+    const { rows } = await context.sql.query<{ dead: string; backlog: string }>(
+      `SELECT count(*) FILTER (WHERE state = 'dead')::text AS dead,
+              count(*) FILTER (WHERE state = 'pending' AND next_attempt_at < compute_now() - interval '5 minutes')::text AS backlog
+         FROM webhook_deliveries`,
+    );
+    const findings: Finding[] = [];
+    const dead = Number(rows[0]?.dead ?? 0);
+    const backlog = Number(rows[0]?.backlog ?? 0);
+    if (dead > 0)
+      findings.push({
+        check: 'events.webhook-dead-letters',
+        severity: 'warning',
+        message: `${dead} webhook deliveries failed every attempt`,
+        fix: 'Inspect webhooks.deliveries({ state: "dead" }) and redeliver once the endpoint is fixed',
+        count: dead,
+      });
+    if (backlog > 1000)
+      findings.push({
+        check: 'events.webhook-backlog',
+        severity: 'warning',
+        message: `${backlog} webhook deliveries are overdue`,
+        fix: 'Run a worker with the events.deliver reconciler',
+        count: backlog,
+      });
+    return findings;
+  };
+
+  return defineModule({
+    name: 'events',
+    migrations: [...eventsMigrations],
+    api,
+    reconcilers,
+    selfCheck,
+  });
+}

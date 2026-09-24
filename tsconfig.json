@@ -32,6 +32,9 @@
       "path": "./packages/iam"
     },
     {
+      "path": "./packages/events"
+    },
+    {
       "path": "./packages/postgres"
     },
     {

@@ -11,6 +11,7 @@
     "./iam": "@better-compute/iam",
     "./iam/plugin": "@better-compute/iam/plugin",
     "./iam/testing": "@better-compute/iam/testing",
+    "./events": "@better-compute/events",
     "./server": "@better-compute/server",
     "./gateway": "@better-compute/gateway",
     "./pki": "@better-compute/pki",
