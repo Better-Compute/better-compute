@@ -518,6 +518,126 @@ describe('discovery', () => {
     ]);
   });
 
+  describe('with operator approval (join_requests)', () => {
+    const csr = () => sha256(createCsr(generateP256KeyPair().privateKey));
+    const withCsr = (csrSha256: Uint8Array) => ({ csrSha256 });
+    const macOf = (n: number) => `3c:ec:ef:00:00:${n.toString(16).padStart(2, '0')}`;
+    let n = 0;
+    const machine = () => {
+      n++;
+      return {
+        claims: {
+          productUuid: `00000000-0000-4000-8000-0000000000${n.toString(16).padStart(2, '0')}`,
+          macs: [macOf(n)],
+        },
+        mac: macOf(n),
+      };
+    };
+    const vouch = (m: ReturnType<typeof machine>) =>
+      assertion({ mac: m.mac, productUuid: m.claims.productUuid });
+    const request = async (id: string) =>
+      (await db.query<Record<string, unknown>>('SELECT * FROM join_requests WHERE id = $1', [id]))
+        .rows[0]!;
+    const usesLeft = async (id: string) =>
+      Number(
+        (
+          await db.query<{ uses_left: number }>('SELECT uses_left FROM join_tokens WHERE id = $1', [
+            id,
+          ])
+        ).rows[0]!.uses_left,
+      );
+
+    it('defers without spending the token, refreshes the one pending request, then consumes the approval once', async () => {
+      const attestor = discoveryAttestor({ approval: 'always' });
+      const m = machine();
+      const issued = await insertToken('discovery', { pool_id: null });
+      const first = csr();
+      const deferral = await attest(attestor, issued.token, vouch(m), {
+        claims: m.claims,
+        ...withCsr(first),
+      });
+      expect(deferral).toMatchObject({ deferred: 'approval', retryAfterSeconds: 30 });
+      const requestId = (deferral as { requestId: string }).requestId;
+      expect(requestId).toMatch(/^jreq_/);
+      expect(await usesLeft(issued.id)).toBe(1);
+      expect(await request(requestId)).toMatchObject({
+        state: 'pending',
+        attestor: 'discovery',
+        mac: m.mac,
+        vouched_by: agentId,
+      });
+
+      // The ramdisk rebooted with a new key: same pending request, now for the newest CSR.
+      const second = csr();
+      await expect(
+        attest(attestor, issued.token, vouch(m), { claims: m.claims, ...withCsr(second) }),
+      ).resolves.toMatchObject({
+        deferred: 'approval',
+        requestId,
+      });
+      expect(Buffer.from((await request(requestId)).csr_sha256 as Uint8Array)).toEqual(
+        Buffer.from(second),
+      );
+
+      await db.query(
+        `UPDATE join_requests SET state = 'approved', decided_at = compute_now(), decided_by = 'user_ops',
+            pool_id = $2, expires_at = compute_now() + interval '1 hour' WHERE id = $1`,
+        [requestId, poolId],
+      );
+      await expect(
+        attest(attestor, issued.token, vouch(m), { claims: m.claims, ...withCsr(second) }),
+      ).resolves.toMatchObject({
+        role: 'ramdisk',
+        tokenId: issued.id,
+        poolId,
+        allowedKinds: discoveryAllowedKinds,
+      });
+      expect(await usesLeft(issued.id)).toBe(0);
+      expect(await request(requestId)).toMatchObject({ state: 'consumed' });
+    });
+
+    it('refuses a rejected machine, needs the CSR binding, and skips approval for machines a workflow names', async () => {
+      const hook = refusals();
+      const attestor = discoveryAttestor({
+        ...hook,
+        approval: 'unknown-machines',
+        resolveWorkflowNode: async () => 'node_known',
+      });
+      const m = machine();
+      const c = csr();
+      const issued = await insertToken('discovery', { pool_id: null });
+      const deferral = (await attest(attestor, issued.token, vouch(m), {
+        claims: m.claims,
+        ...withCsr(c),
+      })) as { requestId: string };
+      await db.query(
+        `UPDATE join_requests SET state = 'rejected', decided_at = compute_now(), reason = 'unknown chassis' WHERE id = $1`,
+        [deferral.requestId],
+      );
+      await expect(
+        attest(attestor, issued.token, vouch(m), { claims: m.claims, ...withCsr(c) }),
+      ).rejects.toMatchObject(denied);
+      await expect(
+        attest(attestor, issued.token, vouch(m), { claims: m.claims }),
+      ).rejects.toMatchObject(denied);
+      expect(hook.reasons).toEqual(['rejected', 'no-csr-binding']);
+
+      const known = machine();
+      const token2 = await insertToken('discovery', { pool_id: null });
+      await expect(
+        attest(
+          attestor,
+          token2.token,
+          assertion({ mac: known.mac, productUuid: known.claims.productUuid, workflowId: 'wf_9' }),
+          {
+            claims: known.claims,
+            ...withCsr(csr()),
+          },
+        ),
+      ).resolves.toMatchObject({ role: 'ramdisk', nodeId: 'node_known' });
+    });
+  });
+
   it('refuses once the vouching agent lost the boot lease', async () => {
     const hook = refusals();
     await db.query(`UPDATE leases SET owner = 'node_someone_else' WHERE name = $1`, [

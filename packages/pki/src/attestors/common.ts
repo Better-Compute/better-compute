@@ -91,6 +91,34 @@ export async function spendSingleUseToken(
   input: { role: JoinTokenRole; agentRole: AgentRole; claims: JoinClaims; now: number },
   refuse: ReturnType<typeof refuser>,
 ): Promise<SpentToken> {
+  const checked = await checkSingleUseToken(tx, token, input, refuse);
+  await spendToken(tx, checked.record.id, refuse);
+  return checked;
+}
+
+/**
+ * Decrements a checked token (locked by `checkSingleUseToken` in the same transaction). Separate so
+ * an attestor can defer (JoinService commits a deferral) without spending the token.
+ */
+export async function spendToken(
+  tx: SqlTx,
+  tokenId: string,
+  refuse: ReturnType<typeof refuser>,
+): Promise<void> {
+  const updated = await tx.query(
+    'UPDATE join_tokens SET uses_left = uses_left - 1 WHERE id = $1 AND uses_left = 1',
+    [tokenId],
+  );
+  if (updated.rowCount !== 1) refuse('exhausted', { tokenId });
+}
+
+/** `spendSingleUseToken` without the spend: locks the row and runs every check. */
+export async function checkSingleUseToken(
+  tx: SqlTx,
+  token: string,
+  input: { role: JoinTokenRole; agentRole: AgentRole; claims: JoinClaims; now: number },
+  refuse: ReturnType<typeof refuser>,
+): Promise<SpentToken> {
   const parsed = parseJoinToken(token);
   if (!parsed) return refuse('malformed');
   const { rows } = await tx.query<TokenRow>(
@@ -123,10 +151,5 @@ export async function spendSingleUseToken(
   if (!verdict.ok) return refuse(verdict.reason, { tokenId: parsed.id });
   if (record!.role !== input.role) return refuse('token-role', { tokenId: parsed.id });
   if (record!.usesLeft !== 1) return refuse('not-single-use', { tokenId: parsed.id });
-  const updated = await tx.query(
-    'UPDATE join_tokens SET uses_left = uses_left - 1 WHERE id = $1 AND uses_left = 1',
-    [parsed.id],
-  );
-  if (updated.rowCount !== 1) return refuse('exhausted', { tokenId: parsed.id });
   return { record: record!, now };
 }

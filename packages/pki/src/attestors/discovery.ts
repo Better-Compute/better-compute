@@ -2,7 +2,10 @@ import type { KeyObject } from 'node:crypto';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
 import {
+  ComputeError,
+  newId,
   defineAttestor,
+  type AttestationDeferral,
   type AttestationResult,
   type AttestorVerifier,
   type SqlTx,
@@ -10,7 +13,14 @@ import {
 import { signingInput, site } from '@better-compute/protocol';
 import { normalizeClaim, type JoinClaims } from '../claims.js';
 import { nodeCertsLookup, signNodeStatement, verifyNodeStatement } from '../node-signatures.js';
-import { refuser, spendSingleUseToken, tokenOf, type AttestorBaseOptions } from './common.js';
+import {
+  checkSingleUseToken,
+  csrSha256Of,
+  refuser,
+  spendToken,
+  tokenOf,
+  type AttestorBaseOptions,
+} from './common.js';
 
 /**
  * The `discovery` attestor (v0.2, PLAN.md §5 walkthrough "Commission", §8.5): a PXE-booted
@@ -66,6 +76,142 @@ export interface DiscoveryAttestorOptions extends AttestorBaseOptions {
   certTtlSeconds?: number;
   allowedKinds?: readonly string[];
   maxAgeMs?: number;
+  /**
+   * Operator approval through `join_requests` (joinRequests.approve/reject): `never` (default),
+   * `unknown-machines` (no discovery workflow names the machine) or `always`. A pending join is
+   * deferred; the ramdisk retries with the same CSR, token and a fresh assertion, and the approved
+   * request is consumed in that join's transaction (single use).
+   */
+  approval?: 'never' | 'unknown-machines' | 'always';
+  /**
+   * The machine's TRUSTED hardware key bytes (inventory's `hardwareKeyFromClaims`, when trusted), so
+   * requests key on it; without one they key on (site, MAC).
+   */
+  hardwareKey?(claims: JoinClaims): Uint8Array | undefined;
+  /** How long a pending request waits for a decision (default 24 h). */
+  pendingTtlSeconds?: number;
+  retryAfterSeconds?: number;
+}
+
+interface Machine {
+  key: Uint8Array | undefined;
+  siteId: string;
+  mac: string;
+}
+
+/** SQL for "this machine": its trusted key, else (site, MAC) among keyless rows. */
+function machineMatch(machine: Machine, first: number): { sql: string; params: unknown[] } {
+  return machine.key
+    ? { sql: `hardware_key = $${first}`, params: [machine.key] }
+    : {
+        sql: `hardware_key IS NULL AND site_id = $${first} AND mac = $${first + 1}`,
+        params: [machine.siteId, machine.mac],
+      };
+}
+
+async function consumeApproved(
+  tx: SqlTx,
+  tenantId: string,
+  csrSha256: Uint8Array,
+  machine: Machine,
+): Promise<{ id: string; node_id: string | null; pool_id: string | null } | undefined> {
+  const match = machineMatch(machine, 3);
+  const { rows } = await tx.query<{ id: string; node_id: string | null; pool_id: string | null }>(
+    `UPDATE join_requests SET state = 'consumed', consumed_at = compute_now(), version = version + 1
+      WHERE tenant_id = $1 AND state = 'approved' AND csr_sha256 = $2 AND expires_at > compute_now()
+        AND ${match.sql}
+      RETURNING id, node_id, pool_id`,
+    [tenantId, csrSha256, ...match.params],
+  );
+  return rows[0];
+}
+
+async function wasRejected(
+  tx: SqlTx,
+  tenantId: string,
+  csrSha256: Uint8Array,
+  machine: Machine,
+): Promise<boolean> {
+  const match = machineMatch(machine, 3);
+  const { rows } = await tx.query(
+    `SELECT 1 FROM join_requests
+      WHERE tenant_id = $1 AND state = 'rejected' AND csr_sha256 = $2 AND ${match.sql} LIMIT 1`,
+    [tenantId, csrSha256, ...match.params],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * The machine's pending request, created or refreshed: the newest attempt's CSR is the one an
+ * approval admits (a ramdisk that rebooted has a new key). At most one pending row per machine.
+ */
+async function recordPending(
+  tx: SqlTx,
+  input: {
+    tenantId: string;
+    poolId: string | null;
+    csrSha256: Uint8Array;
+    machine: Machine;
+    claims: JoinClaims;
+    ip: string | null;
+    workflowId: string | null;
+    vouchedBy: string;
+    epoch: bigint;
+    nodeId: string | null;
+    ttlSeconds: number;
+  },
+): Promise<string> {
+  const refresh = async () => {
+    const match = machineMatch(input.machine, 7);
+    const { rows } = await tx.query<{ id: string }>(
+      `UPDATE join_requests SET csr_sha256 = $2, ip = $3, vouched_by = $4, boot_lease_epoch = $5,
+              claims = $6, version = version + 1
+        WHERE tenant_id = $1 AND state = 'pending' AND ${match.sql} RETURNING id`,
+      [
+        input.tenantId,
+        input.csrSha256,
+        input.ip,
+        input.vouchedBy,
+        input.epoch.toString(),
+        JSON.stringify(input.claims),
+        ...match.params,
+      ],
+    );
+    return rows[0]?.id;
+  };
+  const existing = await refresh();
+  if (existing) return existing;
+  const id = newId('jreq');
+  const inserted = await tx.query<{ id: string }>(
+    `INSERT INTO join_requests (id, tenant_id, site_id, pool_id, attestor, state, claims, hardware_key,
+       mac, ip, workflow_id, vouched_by, boot_lease_epoch, csr_sha256, node_id, expires_at)
+     VALUES ($1, $2, $3, $4, 'discovery', 'pending', $5, $6, $7, $8, $9, $10, $11, $12, $13,
+       compute_now() + make_interval(secs => $14))
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [
+      id,
+      input.tenantId,
+      input.machine.siteId,
+      input.poolId,
+      JSON.stringify(input.claims),
+      input.machine.key ?? null,
+      input.machine.mac,
+      input.ip,
+      input.workflowId,
+      input.vouchedBy,
+      input.epoch.toString(),
+      input.csrSha256,
+      input.nodeId,
+      input.ttlSeconds,
+    ],
+  );
+  if (inserted.rows[0]) return inserted.rows[0].id;
+  // A concurrent attempt inserted it first (or decided it in between): let the agent retry.
+  const raced = await refresh();
+  if (raced) return raced;
+  throw new ComputeError('CONFLICT', 'The join request changed concurrently; retry', undefined, {
+    retryAfterMs: 1000,
+  });
 }
 
 /** The site agent side (Go in `bcd site`; TS for the sim): signs an assertion with its node key. */
@@ -127,7 +273,7 @@ export function discoveryAttestor(options: DiscoveryAttestorOptions = {}): Attes
     id: 'discovery',
     version: '1.0.0',
     roles: ['ramdisk'],
-    async verify(evidence, context): Promise<AttestationResult> {
+    async verify(evidence, context): Promise<AttestationResult | AttestationDeferral> {
       const refuse = refuser('discovery', options.onRefusal);
       const token = tokenOf(evidence);
       if (!token) return refuse('no-token');
@@ -150,7 +296,7 @@ export function discoveryAttestor(options: DiscoveryAttestorOptions = {}): Attes
         return refuse('malformed');
 
       const claims = context.claims as JoinClaims;
-      const { record, now } = await spendSingleUseToken(
+      const { record, now } = await checkSingleUseToken(
         context.tx,
         token,
         { role: 'discovery', agentRole: context.role, claims, now: context.clock.now() },
@@ -213,15 +359,57 @@ export function discoveryAttestor(options: DiscoveryAttestorOptions = {}): Attes
         )
           return refuse('product-uuid-mismatch', ids);
       }
-      const nodeId = assertion.workflowId
+      const workflowNode = assertion.workflowId
         ? await options.resolveWorkflowNode?.(context.tx, assertion.workflowId)
         : undefined;
+
+      // Operator approval (joinRequests, core/0010): consume an approved request for this CSR and
+      // machine, or record a pending one and defer. Nothing is spent until the final round.
+      const approval = options.approval ?? 'never';
+      let nodeId = workflowNode;
+      let poolId = record.poolId ?? undefined;
+      if (approval !== 'never') {
+        const csrSha256 = csrSha256Of(context);
+        if (!csrSha256) return refuse('no-csr-binding', ids);
+        const machine = {
+          key: options.hardwareKey?.(claims),
+          siteId: assertion.siteId,
+          mac: normalizeClaim.mac(assertion.mac),
+        };
+        const consumed = await consumeApproved(context.tx, record.tenantId, csrSha256, machine);
+        if (consumed) {
+          nodeId = consumed.node_id ?? nodeId;
+          poolId = consumed.pool_id ?? poolId;
+        } else if (approval === 'always' || !workflowNode) {
+          if (await wasRejected(context.tx, record.tenantId, csrSha256, machine))
+            return refuse('rejected', ids);
+          const requestId = await recordPending(context.tx, {
+            tenantId: record.tenantId,
+            poolId: record.poolId ?? null,
+            csrSha256,
+            machine,
+            claims,
+            ip: assertion.ip || null,
+            workflowId: assertion.workflowId || null,
+            vouchedBy: assertion.siteAgentNodeId,
+            epoch: assertion.bootLeaseEpoch,
+            nodeId: workflowNode ?? null,
+            ttlSeconds: options.pendingTtlSeconds ?? 86_400,
+          });
+          return {
+            deferred: 'approval',
+            requestId,
+            retryAfterSeconds: options.retryAfterSeconds ?? 30,
+          };
+        }
+      }
+      await spendToken(context.tx, record.id, refuse);
       return {
         tenantId: record.tenantId,
         role: 'ramdisk',
         tokenId: record.id,
         siteId: assertion.siteId,
-        ...(record.poolId ? { poolId: record.poolId } : {}),
+        ...(poolId ? { poolId } : {}),
         ...(nodeId ? { nodeId } : {}),
         certTtlSeconds,
         allowedKinds,
