@@ -49,7 +49,25 @@ const capacity = capacityModule({ plugins: [], weights: { spread: 0.5 }, topN: 5
   its lease lapses.
   - A pending reservation retries every 30 s until `policy.maxPending` (default 24 h).
   - A bind timeout (5 min) re-places the reservation twice, then fails it.
+- **Delegated confirmation** (§3.4 step 7).
+  - A `CONFIRMATION_REQUIRED` refusal parks the draft in `awaiting-confirmation`, with the
+    confirmation id and a deadline of at most 30 minutes.
+  - The agent's retry with the same key decides the same draft again.
+  - An unconfirmed request becomes `expired`.
+- **`reservations.list`** defaults to `scope: 'mine'`, the caller's own reservations (§9.2).
+  `scope: 'all'` lists the whole tenant. Pages follow `(created_at, id)`.
+- **`capacity.timeline`** reports GPUs booked per bucket (5 min to 24 h each, at most 7 days),
+  for calendar views.
+- **`pools.update`** changes a pool's policy or GPU model and refreshes every tenant's authz view
+  of the pool.
+- **`quotas.set`** is a fleet operation. `pools.archive` waits on a schema column.
 - **`capacity.rollup`** rebuilds every pool's rollup every 5 minutes.
+- **`capacity.usage`** writes hourly `usage_windows` for the IAM usage sink (§12.7, D14).
+  - Meter: `gpu.<model>.hours`, billed on reserved time from `active` (`bound_at`) to the release
+    or the booked end.
+  - Only final windows are written, idempotently by `cmp:<allocId>:<windowStartMs>`.
+  - Delegated work bills the person and tags the agent.
+  - `meterAllocation` lets other modules, such as vps, meter their own allocations.
 - **`nodeSpec`** puts the CDI assignments of started reservations in the node's `devices`
   section.
 - **`pools.offer`** enforces the offering validator. A pool with tenant-owned nodes, or a
