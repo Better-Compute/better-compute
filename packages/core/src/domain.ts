@@ -78,6 +78,11 @@ export interface PoolPolicy {
   maxPending?: Duration;
   /** The hardware profile per-node driver bindings inherit from. */
   hardwareProfile?: string;
+  /**
+   * Fractional-GPU parameters for `timeslice` and `mps` pools (§10.6): slot atoms per GPU
+   * (defaults: timeslice 4, mps 10). Ignored by `exclusive` and `mig` pools.
+   */
+  sharing?: { replicas?: number };
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
