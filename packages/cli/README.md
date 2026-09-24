@@ -4,8 +4,16 @@ The `better-compute` command line. It runs deployment jobs (`init`, `migrate`, `
 any API method as an IAM credential (`api`). It is a port of better-iam's `defineCommand` framework,
 so your own project commands get the same flag parsing, help, configuration loading and output.
 
-**Status: P0 shell.** The commands are `init`, `migrate`, `doctor`, `api`, `version` and `help`.
-The rest of PLAN.md §9.3 arrives with its phase.
+**Status: v0.1 in progress.**
+
+- Setup: `init`, `migrate`, `doctor`, `version`, `help`.
+- API: `api`, plus the capacity shortcuts `reserve`, `release`, `extend`, `reservations list|get`,
+  `pools list` and `capacity`.
+- Machine PKI and fleet: `pki init|show|issue-gateway` and `daemon install-script`.
+- IAM: `iam setup`.
+- Arriving with the v0.1 runtime: `dev` and `serve`.
+
+Commands may be two words (`pki init`); `help pki` lists a group.
 
 ```sh
 better-compute help                 # every command; help <command> for one; help --json for tools
@@ -15,6 +23,7 @@ better-compute doctor --strict      # selfCheck findings; exits 1 (DOCTOR_FINDIN
 better-compute api --list           # every route, whether it needs a token, its IAM action
 better-compute api system.version
 BETTER_COMPUTE_TOKEN=… better-compute api system.whoami --url https://compute.example.com
+BETTER_COMPUTE_TENANT=org_… better-compute reserve --pool pool_… --gpus 4 --for 8h --model H100
 ```
 
 ## Configuration
@@ -69,6 +78,49 @@ better-compute api GROUP.METHOD [key=value ...] [--data JSON|@FILE|-] [--list [G
   one rate-limit retry. `https` is required except for localhost.
 - **Token.** The token is `BETTER_COMPUTE_TOKEN`. Public methods need none; `system.whoami`
   carries the token when one is set.
+
+## Capacity shortcuts
+
+These call the capacity routes as `BETTER_COMPUTE_TOKEN` (in process, or with `--url`), for the
+tenant in `--tenant` or `BETTER_COMPUTE_TENANT`:
+
+| Command                                                                                                                                      | Route                                       |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `reserve --pool ID --gpus N --for 8h [--model M] [--product P] [--selector EXPR] [--nvlink] [--start TIME] [--lease S] [--key K] [--wait S]` | `reservations.create`                       |
+| `release RSV [--cancel]`                                                                                                                     | `reservations.release` / `.cancel`          |
+| `extend RSV --by 4h \| --until TIME \| --renew`                                                                                              | `reservations.extend` / `.renew`            |
+| `reservations list [--state S] [--pool ID]`, `reservations get RSV`                                                                          | `reservations.list` / `.get`                |
+| `pools list`                                                                                                                                 | `pools.list`                                |
+| `capacity [--pool ID] [--preview --gpus N --for D]`                                                                                          | `capacity.summary` / `.byPool` / `.preview` |
+
+- `--selector` takes the PLAN.md §10.3 shorthand, parsed by `@better-compute/capacity`, for example
+  `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80, !fabric.domain`.
+- Times are ISO 8601, epoch milliseconds, or `+DURATION` from now.
+- `reserve` and `extend` send a new idempotency key on each run and print it on stderr. Repeat the
+  command with `--key` to retry the same request safely.
+
+## Machine PKI and the daemon installer
+
+```sh
+BETTER_COMPUTE_SECRET=… better-compute pki init --trust-domain compute.example.com [--offline-root PATH]
+better-compute pki show                                       # pins for install scripts; no secret needed
+better-compute pki issue-gateway --san gw.eu.example.com      # gateway.key + gateway.crt, 30 days
+better-compute daemon install-script --pool pool_… --site fsn1 --gateway-url https://gw.eu.example.com \
+  --base-url https://compute.example.com --bcd-version 0.1.0 --sha256 amd64=<hex>,arm64=<hex> > install-bcd.sh
+better-compute iam setup --audience https://compute.example.com   # example policies to apply
+```
+
+- **`pki init`** writes `.better-compute/pki.json` (`--pki` or `BETTER_COMPUTE_PKI` to move it,
+  mode 0600). The bundle holds the root, node, serving and internal CAs and the JoinService signing
+  and encryption keys. Private keys are sealed under `BETTER_COMPUTE_SECRET`; `--plaintext` stores
+  PEM instead. `--offline-root` keeps the root key in its own file.
+- **The install script** reads the join token only from `BCD_JOIN_TOKEN` or standard input. It
+  checks the pinned SHA-256 of bcd, writes `/etc/bcd/config.toml` (0600, bcd's TOML subset with the
+  three pins) and a hardened `bcd.service`, and runs `bcd join`. On a host that is already
+  configured, running it without a token upgrades bcd in place.
+- **`iam setup`** prints the §12.6 example policies for an organization administrator. With
+  `--meters --iam-url URL --root-tenant ID` and a root `BETTER_IAM_TOKEN`, it also creates the
+  §12.7 root meters through the optional peer `@better-iam/client`.
 
 ## Output and exit codes
 
