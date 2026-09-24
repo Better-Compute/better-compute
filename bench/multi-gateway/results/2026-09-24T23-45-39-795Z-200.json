@@ -1,0 +1,47 @@
+{
+  "suite": "multi-gateway",
+  "commit": "674b725",
+  "date": "2026-09-24T23:45:39.795Z",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores     ",
+    "memoryGiB": 255
+  },
+  "node": "v25.6.0",
+  "config": {
+    "nodes": 200,
+    "gateways": 3
+  },
+  "wall": {
+    "joinMs": 3206,
+    "totalMs": 21210
+  },
+  "connected": 200,
+  "sessionsPerGateway": [
+    67,
+    67,
+    66
+  ],
+  "heap": {
+    "mibTotal": 80,
+    "kibPerSessionUpperBound": 408
+  },
+  "kill": {
+    "moved": 67,
+    "rehomed": 67,
+    "rehomeMs": {
+      "count": 67,
+      "p50": 500,
+      "p90": 1000,
+      "p99": 1250,
+      "max": 1250
+    }
+  },
+  "invariants": 0,
+  "violationsSample": [],
+  "gate": {
+    "rehomeP99Ms": 60000,
+    "met": true
+  }
+}

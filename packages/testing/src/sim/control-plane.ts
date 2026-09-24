@@ -7,7 +7,12 @@
 
 import { create } from '@bufbuild/protobuf';
 import type { IamPort, SqlExecutor } from '@better-compute/core';
-import { attachFrameConn, createGateway, type Gateway } from '@better-compute/gateway';
+import {
+  attachFrameConn,
+  createGateway,
+  type Gateway,
+  type GatewayOptions,
+} from '@better-compute/gateway';
 import {
   createCsr,
   createNodeCa,
@@ -202,6 +207,24 @@ export interface ControlPlaneSimOptions
    * pass an IAM spy's `path` to attribute calls. Default: runs `fn` as is.
    */
   trace?: <T>(path: string, fn: () => T) => T;
+  /** Gateway processes behind the simulator (default 1); dials are spread over the live ones. */
+  gateways?: number;
+  /** Extra gateway options (e.g. lease timings). */
+  gateway?: Partial<
+    Omit<
+      GatewayOptions,
+      'database' | 'services' | 'work' | 'events' | 'reports' | 'manual' | 'clock' | 'id'
+    >
+  >;
+}
+
+interface GatewaySlot {
+  index: number;
+  gateway?: Gateway;
+  starting?: Promise<Gateway>;
+  down: boolean;
+  stalled: boolean;
+  generation: number;
 }
 
 export interface ControlPlaneSim {
@@ -214,7 +237,18 @@ export interface ControlPlaneSim {
   siteId: string;
   poolId: string;
   nodes: readonly { nodeId: string; hardware: FakeHardware }[];
+  /** The first gateway slot's current process. */
   readonly gateway: Gateway | undefined;
+  /** Every slot's current process (undefined while down, or before its first dial). */
+  readonly gateways: readonly (Gateway | undefined)[];
+  /** The slot whose gateway holds the node's session right now. */
+  homeOf(nodeId: string): number | undefined;
+  /** Crashes slot `index` (no disconnect writes, no lease release), keeps it down and resets its daemons' links; returns the nodes it served. */
+  killGateway(index: number): string[];
+  /** Lets a killed slot take dials again (a fresh process). */
+  reviveGateway(index: number): void;
+  /** Pauses (or resumes) slot `index`'s jobs while its connections stay open: a stalled process. */
+  stallGateway(index: number, stalled: boolean): void;
   facts: ControlPlaneFacts;
   /** Runs an operator or tenant call (traced as `api`). */
   api<T>(fn: () => Promise<T>): Promise<T>;
@@ -316,9 +350,9 @@ export async function createControlPlaneSim(
       }),
     },
   });
-  let gateway: Gateway | undefined;
+  let slots: GatewaySlot[] = [];
   const close = async () => {
-    await gateway?.stop().catch(() => {});
+    for (const slot of slots) await slot.gateway?.stop().catch(() => {});
     await compute.stop().catch(() => {});
     await raw.close();
   };
@@ -396,26 +430,48 @@ export async function createControlPlaneSim(
       }
     });
 
-    let generation = 0;
-    const gatewayNow = async (): Promise<Gateway> => {
-      if (gateway) return gateway;
-      const created = createGateway({
-        id: `gw_sim_${++generation}`,
-        region: 'sim',
-        database,
-        clock,
-        manual: true,
-        services: compute.gatewayServices,
-        work: compute.context.work,
-        events: compute.context.events,
-        reports: gatewayReportHandlers,
-      });
-      await created.start();
-      gateway = created;
-      return created;
+    // Gateway slots: each runs one real gateway process at a time. A dial goes to the next live, running slot;
+    // `killGateway` crashes a slot's process (no disconnect writes, no lease release) and resets its links so the
+    // daemons re-home; `stallGateway` stops a slot's jobs (a paused process) while its connections stay open.
+    slots = Array.from({ length: Math.max(1, options.gateways ?? 1) }, (_, index) => ({
+      index,
+      down: false,
+      stalled: false,
+      generation: 0,
+    }));
+    const slotGateway = async (slot: GatewaySlot): Promise<Gateway> => {
+      if (slot.gateway) return slot.gateway;
+      slot.starting ??= (async () => {
+        const created = createGateway({
+          id: `gw_sim_${slot.index + 1}_${++slot.generation}`,
+          region: 'sim',
+          database,
+          clock,
+          manual: true,
+          services: compute.gatewayServices,
+          work: compute.context.work,
+          events: compute.context.events,
+          reports: gatewayReportHandlers,
+          ...options.gateway,
+        });
+        await created.start();
+        slot.gateway = created;
+        slot.starting = undefined;
+        return created;
+      })();
+      return slot.starting;
     };
+    let cursor = 0;
     const facts = controlPlaneFacts(raw);
-    const { nodes: _nodes, variant: _variant, iam: _iam, trace: _trace, ...fleetOptions } = options;
+    const {
+      nodes: _nodes,
+      variant: _variant,
+      iam: _iam,
+      trace: _trace,
+      gateways: _gateways,
+      gateway: _gateway,
+      ...fleetOptions
+    } = options;
     sim = createFleetSim({
       ...fleetOptions,
       start,
@@ -423,26 +479,51 @@ export async function createControlPlaneSim(
       logFrames: options.logFrames ?? false,
       gateway: () => ({
         async accept(conn, peer) {
-          attachFrameConn(await gatewayNow(), { nodeId: peer.nodeId, role: 'node' }, conn as never);
+          const live = slots.filter((slot) => !slot.down && !slot.stalled);
+          if (!live.length) {
+            // Nothing to serve it: the dial is refused and the daemon backs off.
+            (conn as unknown as { close(reason?: string): void }).close('no gateway');
+            return;
+          }
+          const slot = live[cursor++ % live.length]!;
+          attachFrameConn(
+            await slotGateway(slot),
+            { nodeId: peer.nodeId, role: 'node' },
+            conn as never,
+          );
         },
         async tick() {
-          const current = await gatewayNow();
           await trace('gateway', async () => {
-            for (const job of ['lease', 'dispatch', 'status', 'liveness', 'specs'] as const)
-              await current.jobs[job].tick();
+            for (const slot of slots) {
+              if (slot.down || slot.stalled) continue;
+              const current = await slotGateway(slot);
+              for (const job of ['lease', 'dispatch', 'status', 'liveness', 'specs'] as const)
+                await current.jobs[job].tick();
+            }
           });
           await trace('reconcilers', async () => {
             for (const job of Object.values(compute.jobs)) await job.tick();
           });
         },
         kill() {
-          // Process death: no disconnect writes, no lease release; a fresh gateway takes the next dial.
-          gateway?.crash();
-          gateway = undefined;
+          // The simulator's gateway kill takes down every process; fresh ones take the next dials.
+          for (const slot of slots) {
+            slot.gateway?.crash();
+            slot.gateway = undefined;
+          }
         },
         facts: () => facts.facts(),
       }),
     });
+    // A zombie may still list a session its node has left: the node's home is the newest epoch's gateway.
+    const homeOf = (nodeId: string): number | undefined => {
+      let best: { index: number; epoch: number } | undefined;
+      for (const slot of slots)
+        for (const session of slot.gateway?.sessions() ?? [])
+          if (session.nodeId === nodeId && (!best || session.epoch > best.epoch))
+            best = { index: slot.index, epoch: session.epoch };
+      return best?.index;
+    };
     await trace('fleet', () => sim!.start());
 
     return {
@@ -455,7 +536,26 @@ export async function createControlPlaneSim(
       poolId: pool.id,
       nodes,
       get gateway() {
-        return gateway;
+        return slots[0]!.gateway;
+      },
+      get gateways() {
+        return slots.map((slot) => slot.gateway);
+      },
+      homeOf,
+      killGateway(index) {
+        const slot = slots[index]!;
+        const homed = slot.gateway?.sessions().map((session) => session.nodeId) ?? [];
+        slot.gateway?.crash();
+        slot.gateway = undefined;
+        slot.down = true;
+        for (const nodeId of homed) sim!.resetLink(nodeId);
+        return homed;
+      },
+      reviveGateway(index) {
+        slots[index]!.down = false;
+      },
+      stallGateway(index, stalled) {
+        slots[index]!.stalled = stalled;
       },
       facts,
       api,
