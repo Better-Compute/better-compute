@@ -385,6 +385,15 @@ importers:
         specifier: workspace:*
         version: link:../vps
 
+  packages/provider-proxmox:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../vps
+
   packages/provision:
     dependencies:
       '@better-compute/core':
