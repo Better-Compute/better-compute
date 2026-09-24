@@ -83,6 +83,8 @@ export interface PoolPolicy {
    * (defaults: timeslice 4, mps 10). Ignored by `exclusive` and `mig` pools.
    */
   sharing?: { replicas?: number };
+  /** `mig` pools: the MIG layout the `mig-layout` config unit applies (e.g. `all-1g.10gb`, `mixed:3g.40gb+2x2g.20gb`). */
+  migLayout?: string;
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
