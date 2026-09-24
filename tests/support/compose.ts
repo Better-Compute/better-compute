@@ -19,7 +19,8 @@ import {
 import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
 import { rolloutModule } from '@better-compute/rollout';
-import { pkiJoinCrypto } from '@better-compute/server';
+import { pkiJoinCrypto, type BetterCompute } from '@better-compute/server';
+import type { SqlExecutor } from '@better-compute/core';
 import { instanceStatusHandler, vps } from '@better-compute/vps';
 
 // The serve composition audit's deployment (tests/cli-serve-compose.test.ts): every module of the repository
@@ -50,6 +51,9 @@ export function everyModule(): ComputeModule[] {
 export interface ComposeState {
   iam: EmbeddedTestIam;
   bundle: PkiBundle;
+  /** Set once serve built the deployment and called the host factory. */
+  compute?: BetterCompute<any, any>;
+  database?: SqlExecutor;
 }
 
 const stateKey = Symbol.for('better-compute.tests.compose');
@@ -67,12 +71,13 @@ export async function composedConfig() {
     role: 'gateway',
     ttlSeconds: 86_400,
   });
-  (globalThis as Record<symbol, ComposeState>)[stateKey] = { iam, bundle };
+  const state: ComposeState = { iam, bundle };
+  (globalThis as Record<symbol, ComposeState>)[stateKey] = state;
   const metrics = createMetrics();
   standardMetrics(metrics);
 
   const options = () => ({
-    database: pglite(),
+    database: (state.database = pglite()),
     iam: iam.port,
     secret: COMPOSE_SECRET,
     baseURL: 'http://127.0.0.1:3000',
@@ -88,7 +93,11 @@ export async function composedConfig() {
     },
   });
 
-  const host = defineHost(({ compute }) => ({
+  const host = defineHost(({ compute }) => {
+    state.compute = compute;
+    return hostConfig(compute);
+  });
+  const hostConfig = (compute: BetterCompute<any, any>) => ({
     http: {
       routes: [
         {
@@ -128,7 +137,7 @@ export async function composedConfig() {
       // vps() is registered: its orphan detection joins the default XID status handler.
       options: { reports: { status: instanceStatusHandler({ events: compute.context.events }) } },
     },
-  }));
+  });
 
   return { options, host };
 }

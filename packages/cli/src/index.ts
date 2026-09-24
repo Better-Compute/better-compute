@@ -87,7 +87,14 @@ export {
   type HostRoute,
   type HostUpgradeHandler,
 } from './host/http.js';
-export { gatewayOptions, startGateway, type RunningGateway } from './host/gateway.js';
+export {
+  gatewayIdentity,
+  gatewayOptions,
+  startGateway,
+  type GatewayIdentity,
+  type RevocationSetLike,
+  type RunningGateway,
+} from './host/gateway.js';
 export { joinKeysWellKnown } from './host/well-known.js';
 export {
   parseRoles,

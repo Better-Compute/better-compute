@@ -5,12 +5,13 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
-import { createCli, gatewayOptions, type CliIO } from '@better-compute/cli';
+import { createCli, gatewayIdentity, gatewayOptions, type CliIO } from '@better-compute/cli';
 import { AGENT_GATEWAY_SERVICE, frameMessage, MessageDecoder } from '@better-compute/gateway';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import {
   createCsr,
   generateP256KeyPair,
+  parseCertificate,
   privateKeyPem,
   sealJoinToken,
   toPem,
@@ -27,6 +28,7 @@ import {
   JoinResponseSchema,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  unwrapCommand,
 } from '@better-compute/protocol';
 import { betterCompute, type BetterCompute } from '@better-compute/server';
 import { createDevJoinKeys } from '@better-compute/testing';
@@ -82,6 +84,76 @@ function grpc(
     if (options.endStream) stream.end(frameMessage(body));
     else stream.write(frameMessage(body));
   });
+}
+
+const until = async (check: () => boolean, timeoutMs: number, what: string) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
+
+/** A daemon's Session over mutual TLS: Hello sent, server frames collected until the stream ends. */
+function openSession(
+  port: number,
+  bundle: { rootCertificate: Uint8Array },
+  certificate: { key: string; cert: string },
+  nodeId: string,
+) {
+  const h2 = connect(`https://localhost:${port}`, {
+    ca: toPem(bundle.rootCertificate),
+    ...certificate,
+  });
+  h2.on('error', () => undefined);
+  const state = {
+    frames: [] as ReturnType<typeof decodeServerFrame>[],
+    closed: false,
+    status: undefined as number | undefined,
+    close: () => h2.destroy(),
+  };
+  const stream = h2.request({
+    ':method': 'POST',
+    ':path': `/${AGENT_GATEWAY_SERVICE}/Session`,
+    'content-type': 'application/grpc+proto',
+    te: 'trailers',
+  });
+  const decoder = new MessageDecoder(MAX_FRAME_BYTES);
+  // A refusal is trailers-only (the status in the response headers); a close sends trailers.
+  const status = (headers: Record<string, unknown>) => {
+    if (headers['grpc-status'] === undefined) return;
+    state.status ??= Number(headers['grpc-status']);
+    state.closed = true;
+  };
+  stream.on('response', status);
+  stream.on('trailers', status);
+  stream.on('data', (chunk: Uint8Array) => {
+    for (const bytes of decoder.push(chunk)) state.frames.push(decodeServerFrame(bytes));
+  });
+  stream.on('error', () => undefined);
+  stream.on('close', () => (state.closed = true));
+  h2.on('close', () => (state.closed = true));
+  stream.write(
+    frameMessage(
+      encodeAgentFrame(
+        create(AgentFrameSchema, {
+          msg: {
+            case: 'hello',
+            value: {
+              nodeId,
+              bootId: 'boot-compose',
+              journalId: 'journal-compose',
+              role: AgentRole.NODE,
+              daemonVersion: '0.1.0',
+              protoMin: PROTOCOL_VERSION.min,
+              protoMax: PROTOCOL_VERSION.max,
+            },
+          },
+        }),
+      ),
+    ),
+  );
+  return state;
 }
 
 describe('serve composition audit', () => {
@@ -140,6 +212,38 @@ describe('serve composition audit', () => {
     );
     expect(composed).toMatchObject({ maxStreams: 10, region: 'eu-1' });
     expect(composed).not.toHaveProperty('tunnels');
+  });
+
+  it('authenticates daemons by node certificate or refuses to start the gateway role', () => {
+    const gateway = { region: 'eu-1', tls: {} };
+    // Never by name alone: no node CA and trust domain, no gateway.
+    expect(() => gatewayIdentity({} as any, gateway)).toThrow(/node certificate/);
+    const revocations = { has: () => false, subscribe: () => () => undefined };
+    const certificate = new Uint8Array([1, 2, 3]);
+    expect(
+      gatewayIdentity(
+        { pki: { nodeCa: { certificate, revocations }, join: { trustDomain: 'td.test' } } } as any,
+        gateway,
+      ),
+    ).toEqual({ roots: [certificate], trustDomain: 'td.test', revocations });
+    const roots = [new Uint8Array([9])];
+    expect(
+      gatewayIdentity({} as any, { ...gateway, identity: { roots, trustDomain: 'other.test' } }),
+    ).toEqual({ roots, trustDomain: 'other.test' });
+    // Revocations reach createGateway for the live push.
+    expect(
+      gatewayOptions(
+        { xidStatusHandler: undefined },
+        { endpoint: {}, context: {} } as any,
+        {} as any,
+        gateway,
+        {
+          roots,
+          trustDomain: 'x',
+          revocations,
+        },
+      ),
+    ).toMatchObject({ revocations });
   });
 
   // ([37c0ab]) createModuleContext sets no ctx.workflows yet, so metal verbs fail under betterCompute().
@@ -286,36 +390,61 @@ export const host = composed.host;
           now: Date.now(),
         });
 
-        // The node opens its Session with the issued certificate (mutual TLS) and is welcomed.
-        const mutual = connect(`https://localhost:${gatewayPort}`, {
-          ca: toPem(bundle.rootCertificate),
+        // A restricted certificate (as discovery/ramdisk joins get): only diag.* may reach it.
+        const { compute: served, database } = composeState()!;
+        await database!.query(
+          `UPDATE node_certs SET allowed_kinds = ARRAY['diag.*'] WHERE node_id = $1`,
+          [joined.nodeId],
+        );
+        const certificate = {
           key: privateKeyPem(nodeKey),
           cert: joined.certChain.map((der) => toPem(der)).join(''),
-        });
-        mutual.on('error', () => undefined);
-        const [first] = await grpc(
-          mutual,
-          'Session',
-          encodeAgentFrame(
-            create(AgentFrameSchema, {
-              msg: {
-                case: 'hello',
-                value: {
-                  nodeId: joined.nodeId,
-                  bootId: 'boot-compose',
-                  journalId: 'journal-compose',
-                  role: AgentRole.NODE,
-                  daemonVersion: '0.1.0',
-                  protoMin: PROTOCOL_VERSION.min,
-                  protoMax: PROTOCOL_VERSION.max,
-                },
-              },
-            }),
-          ),
-          { endStream: false, untilMessages: 1 },
+        };
+
+        // The node opens its Session with the issued certificate (mutual TLS) and is welcomed.
+        const live = openSession(gatewayPort, bundle, certificate, joined.nodeId);
+        await until(() => live.frames.length > 0, 10_000, 'Welcome');
+        expect(live.frames[0]!.msg.case).toBe('welcome');
+
+        // A disallowed kind is never sent: it settles server-side; the allowed one is dispatched.
+        const enqueued = await database!.transaction(async (tx) => ({
+          reboot: await served!.context.commands.enqueue(tx, {
+            nodeId: joined.nodeId,
+            kind: 'node.reboot',
+            payload: {},
+            idempotencyKey: 'compose-reboot',
+            notAfter: Date.now() + 600_000,
+          }),
+          diag: await served!.context.commands.enqueue(tx, {
+            nodeId: joined.nodeId,
+            kind: 'diag.nvml',
+            payload: {},
+            idempotencyKey: 'compose-diag',
+            notAfter: Date.now() + 600_000,
+          }),
+        }));
+        const commandKinds = () =>
+          live.frames
+            .filter((frame) => frame.msg.case === 'command')
+            .map((frame) => unwrapCommand(frame.msg.value as never).kind);
+        await until(() => commandKinds().includes('diag.nvml'), 15_000, 'diag.nvml dispatch');
+        const reboot = await database!.query<{ state: string }>(
+          'SELECT state FROM commands WHERE id = $1',
+          [enqueued.reboot.id],
         );
-        expect(decodeServerFrame(first!).msg.case).toBe('welcome');
-        mutual.close();
+        expect(reboot.rows[0]!.state).not.toMatch(/^(pending|dispatched|accepted|running)$/);
+        expect(commandKinds()).not.toContain('node.reboot');
+
+        // Revocation: the live session is closed (RevocationNotice), and the certificate is refused
+        // at the next open.
+        await bundle.nodeCa.revoke(parseCertificate(joined.certChain[0]!).serial, 'key-compromise');
+        await until(() => live.closed, 10_000, 'the revoked session to close');
+        const again = openSession(gatewayPort, bundle, certificate, joined.nodeId);
+        await until(() => again.closed, 10_000, 'the revoked certificate to be refused');
+        expect(again.status).toBe(16); // UNAUTHENTICATED
+        expect(again.frames.some((frame) => frame.msg.case === 'welcome')).toBe(false);
+        live.close();
+        again.close();
 
         // node.joined reaches the SSE watch through the outbox.
         const reader = watch.body!.getReader();

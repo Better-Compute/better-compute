@@ -32,6 +32,25 @@ export interface HostGatewayConfig {
    */
   internal?: { url: string; listen?: { host?: string; port?: number }; tls: SecureServerOptions };
   /**
+   * How daemons authenticate (default: the deployment's `pki.nodeCa`, its revocation set, and
+   * `pki.join.trustDomain`). The role refuses to start without roots and a trust domain.
+   */
+  identity?: {
+    /** DER node-CA certificates that anchor node certificates. */
+    roots?: readonly Uint8Array[];
+    trustDomain?: string;
+    /** Revoked serials: refused at session open, and pushed to live sessions (≤ 5 s). */
+    revocations?: {
+      has(serial: string): boolean;
+      subscribe(listener: (entry: { serial: string; reason?: string }) => void): () => void;
+    };
+  };
+  /**
+   * The WebSocket fallback (v0.4) for networks whose TLS-inspecting proxy strips client certificates:
+   * `wss://<publicHost>/v1/session`, identity proven in-band, served with the same key and chain as `tls`.
+   */
+  ws?: { publicHost: string; listen?: { host?: string; port?: number } };
+  /**
    * Anything else `createGateway()` takes (credits, rates, revocations, extra report handlers). The host
    * fills `database`, `services`, `work`, `events`, `region` and the default `reports`
    * (`gatewayReportHandlers`, and `status: [xidStatusHandler, ...reports.status]`: add vps's
@@ -89,6 +108,14 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       throw new ComputeError(
         'INVALID_CONFIG',
         'host.gateway.tls needs key and cert (gateway serving CA) and ca (node CA roots): daemons connect over mTLS',
+      );
+    if (
+      gateway.ws !== undefined &&
+      (!isRecord(gateway.ws) || typeof gateway.ws.publicHost !== 'string' || !gateway.ws.publicHost)
+    )
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'host.gateway.ws needs publicHost, the name daemons dial (the proof audience)',
       );
     if (gateway.internal !== undefined) {
       if (!isRecord(gateway.internal) || typeof gateway.internal.url !== 'string')
