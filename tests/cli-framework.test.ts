@@ -147,6 +147,8 @@ describe('help and the manifest', () => {
       'migrate',
       'doctor',
       'version',
+      'serve',
+      'dev',
       'api',
       'reserve',
       'release',

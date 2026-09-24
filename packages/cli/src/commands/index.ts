@@ -7,11 +7,13 @@ import { fleetCommands } from './fleet.js';
 import { iamSetupCommands } from './iam-setup.js';
 import { pkiCommands } from './pki.js';
 import { releaseCommands } from './release.js';
+import { serveCommands } from './serve.js';
 import { setupCommands } from './setup.js';
 
 /** Every built-in command, in help order. */
 export const builtinCommands: readonly CommandSpec<any>[] = [
   ...setupCommands,
+  ...serveCommands,
   ...apiCommands,
   ...capacityCommands,
   ...fleetCommands,

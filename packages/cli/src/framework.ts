@@ -30,6 +30,8 @@ export interface CliIO {
   cwd?: string;
   /** The Fetch implementation remote (`--url`) calls use (default `globalThis.fetch`). */
   fetch?: typeof globalThis.fetch;
+  /** Ends long-running commands (`serve`, `dev`); default: SIGINT or SIGTERM. */
+  signal?: AbortSignal;
 }
 
 /** One flag of a command. Keys of a command's `flags` object are the flag names without the leading `--`. */
