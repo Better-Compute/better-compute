@@ -3,6 +3,7 @@ import { apiCommands } from './api.js';
 import { auditCommands } from './audit.js';
 import { capacityCommands } from './capacity.js';
 import { daemonCommands } from './daemon.js';
+import { fleetCommands } from './fleet.js';
 import { iamSetupCommands } from './iam-setup.js';
 import { pkiCommands } from './pki.js';
 import { setupCommands } from './setup.js';
@@ -12,6 +13,7 @@ export const builtinCommands: readonly CommandSpec<any>[] = [
   ...setupCommands,
   ...apiCommands,
   ...capacityCommands,
+  ...fleetCommands,
   ...pkiCommands,
   ...daemonCommands,
   ...iamSetupCommands,

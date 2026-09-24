@@ -42,7 +42,7 @@ Every method decides `compute:fleet:admin` on the `fleet` scope (`global`, which
     - A provider account is deleted only once no pool uses it.
 - **`fleet.apply`** runs the plan through the owning modules' own methods (`sites.create`, `pools.*`, `quotas.set`, `flavors.*`, `providerAccounts.*`). It is a composite method with `transaction: 'manual'`, and runs in two phases:
   1. Each call is decided for the caller with `ctx.check`, with no transaction open. The caller therefore needs each underlying permission as well as `fleet:admin`.
-  2. Inside one transaction, fleet re-reads the state and plans again. If the call list changed, the state moved between the phases: nothing is applied and apply fails with `CONFLICT` and `details.reason = 'CONFIG_DRIFT'`. Otherwise every call runs through `ctx.invoke`.
+  2. Inside one transaction, fleet re-reads the state and plans again. If the call list changed, the state moved between the phases: nothing is applied and apply fails with `CONFIG_DRIFT` (409). Otherwise every call runs through `ctx.invoke`.
 
   Pass the reviewed `planHash` to apply exactly the plan that was shown. If the state has moved since then, apply fails with the same drift error.
 

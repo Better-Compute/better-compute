@@ -386,7 +386,10 @@ export async function planFleet(
       }
     for (const account of state.providerAccounts)
       if (!wantedAccounts.has(account.name)) {
-        const user = state.pools.find((pool) => pool.providerAccountId === account.id);
+        // Pools archived in this same plan release the account (archived pools do not pin it).
+        const user = state.pools.find(
+          (pool) => pool.providerAccountId === account.id && wantedPools.has(pool.name),
+        );
         if (user) {
           add({
             kind: 'providerAccount',

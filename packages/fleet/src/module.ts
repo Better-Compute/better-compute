@@ -25,7 +25,7 @@ export interface PlanInput {
 }
 
 export interface ApplyInput extends PlanInput {
-  /** The `planHash` of the plan the caller reviewed; apply refuses with `CONFLICT` (CONFIG_DRIFT) if it moved. */
+  /** The `planHash` of the plan the caller reviewed; apply refuses with `CONFIG_DRIFT` if it moved. */
   planHash?: string;
 }
 
@@ -85,8 +85,7 @@ export function planHash(calls: readonly FleetCall[]): string {
     .digest('hex');
 }
 
-const drift = (message: string) =>
-  new ComputeError('CONFLICT', message, undefined, { reason: 'CONFIG_DRIFT' });
+const drift = (message: string) => new ComputeError('CONFIG_DRIFT', message);
 
 async function plan(context: MethodContext, tx: SqlTx, input: PlanInput): Promise<PlanResult> {
   const identityId = context.caller?.identityId;
@@ -130,8 +129,7 @@ async function recordNames(
  * provider accounts, pools, owner quotas, offers and flavors as a document; `plan` diffs a document
  * against them; `apply` runs the plan through the owning modules' own methods, each decided for the
  * caller (`ctx.check`, no transaction open) and then run in one transaction (`ctx.invoke`), after
- * re-planning inside it: if the state moved in between, nothing is applied (`CONFLICT`,
- * `details.reason = 'CONFIG_DRIFT'`).
+ * re-planning inside it: if the state moved in between, nothing is applied (`CONFIG_DRIFT`).
  */
 export function fleetModule(): ComputeModule<'fleet', FleetApi> {
   const resource = () => ({ type: 'fleet', id: fleetResourceId });

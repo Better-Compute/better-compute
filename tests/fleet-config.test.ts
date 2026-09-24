@@ -353,16 +353,14 @@ describe('fleet.apply', () => {
       'flavors/delete',
       'pools/unoffer',
       'pools/archive',
+      // Archived pools do not pin their provider account.
+      'providerAccounts/delete',
     ]);
-    // The account is kept while the pool about to be archived still refers to it.
-    expect(pruned.changes.find((change) => change.kind === 'providerAccount')).toMatchObject({
-      action: 'unchanged',
-      note: 'kept: pool burst uses it',
-    });
     await apply(next, { prune: true });
     const state = await fleet<{ config: FleetConfig }>('export', { tenantId: 'root' });
     expect(state.config.pools?.map((pool) => pool.name)).toEqual(['vps-fra']);
     expect(state.config.flavors).toBeUndefined();
+    expect(state.config.providerAccounts).toBeUndefined();
     expect(
       await db.query(`SELECT 1 FROM fleet_names WHERE kind = 'pool' AND name = 'burst'`),
     ).toMatchObject({
@@ -411,8 +409,7 @@ describe('fleet.apply', () => {
     const reviewed = await plan(base);
     await apply({ ...clone(), flavors: [] });
     await expect(apply(base, { planHash: reviewed.planHash })).rejects.toMatchObject({
-      code: 'CONFLICT',
-      details: { reason: 'CONFIG_DRIFT' },
+      code: 'CONFIG_DRIFT',
     });
   });
 
@@ -430,7 +427,7 @@ describe('fleet.apply', () => {
         ]);
       },
     };
-    await expect(apply(next)).rejects.toMatchObject({ details: { reason: 'CONFIG_DRIFT' } });
+    await expect(apply(next)).rejects.toMatchObject({ code: 'CONFIG_DRIFT' });
     expect(composite.invokes).toEqual([]);
     const flavor = await db.query<{ vcpu: number }>(
       `SELECT vcpu FROM flavors WHERE name = 'g1.small'`,
