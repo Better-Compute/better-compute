@@ -141,6 +141,29 @@ export class WsConnection {
     if (!this.closed) this.socket.write(encodeWsFrame(WsOpcode.ping, payload, this.mask()));
   }
 
+  private pongWaiters: ((alive: boolean) => void)[] = [];
+
+  /** Sends a ping; true when a pong arrives within `timeoutMs` (a transport liveness probe). */
+  probe(timeoutMs: number): Promise<boolean> {
+    if (this.closed) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const waiter = (alive: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(alive);
+      };
+      const timer = setTimeout(() => {
+        this.pongWaiters = this.pongWaiters.filter((entry) => entry !== waiter);
+        waiter(false);
+      }, timeoutMs);
+      timer.unref?.();
+      this.pongWaiters.push(waiter);
+      this.ping();
+    });
+  }
+
   close(code = 1000, reason = ''): void {
     if (this.closed) return;
     const body = Buffer.alloc(2 + Buffer.byteLength(reason));
@@ -156,6 +179,7 @@ export class WsConnection {
   private finish(code: number, reason: string): void {
     if (this.closed) return;
     this.closed = true;
+    for (const waiter of this.pongWaiters.splice(0)) waiter(false);
     this.options.onClose({ code, reason });
   }
 
@@ -175,6 +199,7 @@ export class WsConnection {
           this.socket.write(encodeWsFrame(WsOpcode.pong, frame.payload, this.mask()));
           break;
         case WsOpcode.pong:
+          for (const waiter of this.pongWaiters.splice(0)) waiter(true);
           break;
         case WsOpcode.close: {
           const code = frame.payload.length >= 2 ? frame.payload.readUInt16BE(0) : 1005;

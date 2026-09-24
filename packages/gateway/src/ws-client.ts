@@ -41,6 +41,10 @@ export interface GatewayWsClient {
   /** The gateway id the verified gateway proof names. */
   readonly gatewayId: string;
   send(frame: AgentFrame): boolean;
+  /** A WS ping; true when the pong arrives in time. */
+  ping(timeoutMs: number): Promise<boolean>;
+  /** Drops the connection without a close handshake (a network reset). */
+  abort(): void;
   close(code?: number, reason?: string): void;
 }
 
@@ -131,6 +135,8 @@ export function connectGatewayWs(options: GatewayWsClientOptions): Promise<Gatew
       resolve({
         gatewayId,
         send: (frame) => connection.send(frameMessage(encodeAgentFrame(frame))),
+        ping: (timeoutMs) => connection.probe(timeoutMs),
+        abort: () => socket.destroy(),
         close: (code = 1000, reason = '') => connection.close(code, reason),
       });
     };
