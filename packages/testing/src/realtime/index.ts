@@ -6,4 +6,5 @@ export type {
   LatencySummary,
   RealtimeHarness,
   RealtimeHarnessOptions,
+  StormResult,
 } from './harness.js';

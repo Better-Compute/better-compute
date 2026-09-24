@@ -13,12 +13,13 @@ import { createRealtimeHarness, type RealtimeHarness } from '@better-compute/tes
 //   BETTER_COMPUTE_POSTGRES_URL=postgres://… pnpm bench:scale   a disposable Postgres (the harness migrates it)
 //
 // Knobs: BENCH_RT_NODES (1000), BENCH_RT_PER_NODE (1), BENCH_RT_SHARED=1 (one connection for all daemons),
-// BENCH_RT_POLL_MS (50; how often the harness reads states, which bounds resolution), BENCH_RT_GATE=1 to fail the run when acknowledgement p99 ≥ 2 s or any command fails.
+// BENCH_RT_POLL_MS (50; how often the harness reads states, which bounds resolution), BENCH_RT_STORM (1: the share of the\n// fleet dropped at once after the dispatch; 0 skips it), BENCH_RT_GATE=1 to fail the run when acknowledgement p99 ≥ 2 s or any command fails.
 
 const nodes = Number(process.env.BENCH_RT_NODES ?? 1_000);
 const perNode = Number(process.env.BENCH_RT_PER_NODE ?? 1);
 const shared = process.env.BENCH_RT_SHARED === '1';
 const pollMs = Number(process.env.BENCH_RT_POLL_MS ?? 50);
+const stormFraction = Number(process.env.BENCH_RT_STORM ?? 1);
 const postgresUrl = process.env.BETTER_COMPUTE_POSTGRES_URL;
 
 function commit(): string {
@@ -47,6 +48,11 @@ describe('realtime-fleet', () => {
     });
     const connect = await harness.connectAll(10 * 60_000);
     const dispatch = await harness.dispatch({ kind: 'diag.nvml', perNode, timeoutMs: 10 * 60_000 });
+    // Then the whole fleet loses its sessions at once (a gateway or network blip) and redials.
+    const storm =
+      stormFraction > 0
+        ? await harness.storm({ fraction: stormFraction, timeoutMs: 10 * 60_000 })
+        : undefined;
 
     const result = {
       suite: 'realtime-fleet',
@@ -60,12 +66,22 @@ describe('realtime-fleet', () => {
       },
       node: process.version,
       database: postgresUrl ? 'postgres' : 'pglite',
-      config: { nodes, perNode, sharedConnection: shared, pollMs },
+      config: { nodes, perNode, sharedConnection: shared, pollMs, stormFraction },
       connect: { elapsedMs: connect.elapsedMs },
       ack: dispatch.firstUpdate,
       terminal: dispatch.terminal,
       failed: dispatch.failed.length,
       failures: dispatch.failed.slice(0, 20),
+      ...(storm
+        ? {
+            storm: {
+              nodes: storm.nodes,
+              reconnect: storm.reconnect,
+              elapsedMs: storm.elapsedMs,
+              missing: storm.missing.length,
+            },
+          }
+        : {}),
       gate: {
         ackP99Ms: 2_000,
         met: dispatch.failed.length === 0 && dispatch.firstUpdate.p99 < 2_000,
@@ -80,7 +96,13 @@ describe('realtime-fleet', () => {
     );
     console.log(
       JSON.stringify(
-        { connect: result.connect, ack: result.ack, terminal: result.terminal, gate: result.gate },
+        {
+          connect: result.connect,
+          ack: result.ack,
+          terminal: result.terminal,
+          storm: result.storm,
+          gate: result.gate,
+        },
         null,
         2,
       ),

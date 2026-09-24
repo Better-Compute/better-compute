@@ -77,7 +77,26 @@ export interface RealtimeHarness {
     perNode?: number;
     timeoutMs?: number;
   }): Promise<DispatchResult>;
+  /**
+   * A reconnect storm (PLAN.md §15 scale risk 3): drops the sessions of a `fraction` of the fleet at once
+   * (`disconnect`: the network resets and the daemons redial with backoff; `crash`: the processes die and
+   * start again, recovering their journals) and times each node until the gateway holds a new session.
+   */
+  storm(options?: {
+    fraction?: number;
+    mode?: 'disconnect' | 'crash';
+    timeoutMs?: number;
+  }): Promise<StormResult>;
   close(): Promise<void>;
+}
+
+export interface StormResult {
+  nodes: number;
+  /** Drop → a new session on the gateway, per node. */
+  reconnect: LatencySummary;
+  elapsedMs: number;
+  /** Nodes without a new session within the timeout. */
+  missing: string[];
 }
 
 const TENANT = 'tenant-root';
@@ -183,6 +202,12 @@ export async function createRealtimeHarness(
       'Enqueue → acknowledged',
       ['kind'],
       [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2],
+    ),
+    reconnect: metrics.histogram(
+      'rt_reconnect_seconds',
+      'Session drop → a new session',
+      ['mode'],
+      [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
     ),
     done: metrics.histogram(
       'rt_command_done_seconds',
@@ -336,6 +361,46 @@ export async function createRealtimeHarness(
               ...(finished?.reason ? { reason: finished.reason } : {}),
             };
           }),
+      };
+    },
+    async storm(stormOptions = {}) {
+      const mode = stormOptions.mode ?? 'disconnect';
+      const fraction = Math.min(1, Math.max(0, stormOptions.fraction ?? 1));
+      const chosen = daemons.slice(0, Math.max(1, Math.round(daemons.length * fraction)));
+      const before = new Map(
+        gateway.sessions().map((session) => [session.nodeId, session.sessionId]),
+      );
+      const pending = new Set(chosen.map((daemon) => daemon.nodeId));
+      const samples: number[] = [];
+      const started = Date.now();
+      for (const daemon of chosen)
+        if (mode === 'crash') {
+          daemon.crash('storm');
+          daemon.restart();
+        } else daemon.disconnect('storm');
+      try {
+        await waitFor(
+          () => {
+            const now = Date.now();
+            for (const session of gateway.sessions())
+              if (pending.has(session.nodeId) && session.sessionId !== before.get(session.nodeId)) {
+                pending.delete(session.nodeId);
+                samples.push(now - started);
+                histograms.reconnect.observe({ mode }, (now - started) / 1000);
+              }
+            return pending.size === 0;
+          },
+          stormOptions.timeoutMs ?? 60_000,
+          `${pending.size} daemons to reconnect`,
+        );
+      } catch {
+        // Report the stragglers instead of throwing away the measurements.
+      }
+      return {
+        nodes: chosen.length,
+        reconnect: summarize(samples),
+        elapsedMs: Date.now() - started,
+        missing: [...pending],
       };
     },
     async close() {

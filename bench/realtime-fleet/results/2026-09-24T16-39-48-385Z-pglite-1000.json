@@ -1,0 +1,43 @@
+{
+  "suite": "realtime-fleet",
+  "commit": "72b550a",
+  "date": "2026-09-24T16:39:48.385Z",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores     ",
+    "memoryGiB": 255
+  },
+  "node": "v25.6.0",
+  "database": "pglite",
+  "config": {
+    "nodes": 1000,
+    "perNode": 1,
+    "sharedConnection": false,
+    "pollMs": 50
+  },
+  "connect": {
+    "elapsedMs": 11568
+  },
+  "ack": {
+    "count": 1000,
+    "p50": 1358,
+    "p90": 1896,
+    "p99": 2009,
+    "max": 2009
+  },
+  "terminal": {
+    "count": 1000,
+    "p50": 3409,
+    "p90": 4075,
+    "p99": 4075,
+    "max": 4075
+  },
+  "failed": 0,
+  "failures": [],
+  "gate": {
+    "ackP99Ms": 2000,
+    "met": false,
+    "placeToActive": "pending W5a"
+  }
+}

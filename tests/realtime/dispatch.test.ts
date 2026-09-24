@@ -63,6 +63,21 @@ describe('real-time harness', () => {
     expect(result.terminal.count).toBe(10);
   }, 60_000);
 
+  it('rides out a reconnect storm: every dropped or crashed daemon gets a new session', async () => {
+    harness = await createRealtimeHarness({ nodes: 20 });
+    await harness.connectAll(20_000);
+    const dropped = await harness.storm({ mode: 'disconnect', timeoutMs: 20_000 });
+    expect(dropped).toMatchObject({ nodes: 20, missing: [] });
+    expect(dropped.reconnect.count).toBe(20);
+    const crashed = await harness.storm({ mode: 'crash', fraction: 0.25, timeoutMs: 20_000 });
+    expect(crashed).toMatchObject({ nodes: 5, missing: [] });
+    expect(harness.gateway.sessions()).toHaveLength(20);
+    // The fleet still takes work after the storm.
+    const result = await harness.dispatch({ kind: 'diag.nvml', timeoutMs: 20_000 });
+    expect(result.failed).toEqual([]);
+    expect(harness.metrics.expose()).toContain('rt_reconnect_seconds_count{mode="crash"} 5');
+  }, 90_000);
+
   it('refuses Join with a gRPC status until the JoinService is wired', async () => {
     harness = await createRealtimeHarness({ nodes: 1 });
     const client = createH2cClient({ url: `http://127.0.0.1:${harness.served.port}` });
