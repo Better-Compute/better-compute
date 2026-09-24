@@ -450,6 +450,9 @@ importers:
       '@better-compute/observability':
         specifier: workspace:*
         version: link:../observability
+      '@better-compute/pki':
+        specifier: workspace:*
+        version: link:../pki
       '@better-compute/postgres':
         specifier: workspace:*
         version: link:../postgres

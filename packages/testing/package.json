@@ -50,6 +50,7 @@
     "@better-compute/core": "workspace:*",
     "@better-compute/gateway": "workspace:*",
     "@better-compute/observability": "workspace:*",
+    "@better-compute/pki": "workspace:*",
     "@better-compute/postgres": "workspace:*",
     "@better-compute/protocol": "workspace:*",
     "@better-compute/server": "workspace:*",
