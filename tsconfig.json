@@ -23,6 +23,9 @@
       "path": "./packages/vps"
     },
     {
+      "path": "./packages/provider-hetzner"
+    },
+    {
       "path": "./packages/pki"
     },
     {

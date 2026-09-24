@@ -37,3 +37,4 @@ export type {
   ProviderInput,
   RescueAccess,
 } from '@better-compute/core';
+export * from './conformance.js';
