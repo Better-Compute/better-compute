@@ -61,7 +61,13 @@ Rules for v0.1:
   sweep another session's staged files into your commit (6a8bfca "W4 iam-lane gate bench" also carries all of
   W2b gateway). Commit through a private index instead:
   `$env:GIT_INDEX_FILE="$env:TEMP\idx-<you>"; git read-tree HEAD; git add <your paths>; git commit -F msg;
-  Remove-Item Env:GIT_INDEX_FILE`, then `git reset -q -- <your paths>` is not needed (the shared index is untouched).
+  Remove-Item Env:GIT_INDEX_FILE`, then ALWAYS `git reset -q -- <your paths>` on the shared index (orchestrator
+  correction): after HEAD moves, the shared index still holds the OLD blobs for your paths, so a later plain
+  `git commit` by anyone would silently revert your commit. Never run a bare `git commit` / `git commit -a` on the
+  shared index; always use a private index. ENFORCED: `.git/hooks/pre-commit` (local, installed by [56cfd7]) refuses
+  any commit whose `GIT_INDEX_FILE` is the shared `.git/index`. The orchestrator reset the shared index to HEAD after
+  finding stale entries that would have reverted fffbb97/c0a25fc; if you had files staged there, re-stage them in
+  your private index.
 
 ## Sessions
 
@@ -123,6 +129,10 @@ Rules for v0.1:
   booking/release/extend §10.5, rollups §10.6), new `tests/capacity-*.test.ts`. One-line inserts for `capacity` in root
   `tsconfig.json`, `vitest.config.ts`, `umbrella.json`. Not touching inventory, server, proto/, migrations, daemon,
   better-iam.
+- (Feature expansion [38c2f9], v0.3 VPS control plane, 2026-09-24, offered by [56cfd7]) `packages/vps/**` (`vps()`:
+  instances/flavors/providerAccounts groups, Instance reconciler for hosted + provider pools, IPAM, module
+  migrations `vps/0001_*`), new `tests/vps-*.test.ts`; then new package `packages/provider-hetzner/**`. Adds
+  `resizeAllocation` to `packages/capacity`. Dependency vps → capacity requested from [56cfd7].
 - (Feature expansion [9ec62d], v0.1 W2 PKI, 2026-09-24) new package `packages/pki/**` (`@better-compute/pki`: DER/X.509
   writer, CSR parse+verify, local CAs, SPIFFE node certs, sealed join tokens, signed JoinResponse, Renew PoP), new
   `tests/pki-*.test.ts`. One-line inserts for `pki` in root `tsconfig.json`, `vitest.config.ts`, `umbrella.json`.
