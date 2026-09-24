@@ -13,6 +13,7 @@
     "./iam/testing": "@better-compute/iam/testing",
     "./events": "@better-compute/events",
     "./audit": "@better-compute/audit",
+    "./observability": "@better-compute/observability",
     "./server": "@better-compute/server",
     "./gateway": "@better-compute/gateway",
     "./pki": "@better-compute/pki",
