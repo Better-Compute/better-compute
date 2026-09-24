@@ -35,6 +35,9 @@
       "path": "./packages/server"
     },
     {
+      "path": "./packages/gateway"
+    },
+    {
       "path": "./packages/client"
     },
     {

@@ -1,0 +1,58 @@
+{
+  "name": "@better-compute/gateway",
+  "version": "0.1.0",
+  "description": "The better-compute gateway: daemon sessions over gRPC/HTTP/2 mTLS, liveness, command dispatch and Join/Renew/Secret forwarding.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/gateway#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/gateway"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "gpu",
+    "bare-metal",
+    "capacity",
+    "provisioning",
+    "infrastructure",
+    "grpc",
+    "mtls",
+    "gateway"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/core": "workspace:*",
+    "@better-compute/inventory": "workspace:*",
+    "@better-compute/pki": "workspace:*",
+    "@better-compute/protocol": "workspace:*",
+    "@better-compute/server": "workspace:*",
+    "@bufbuild/protobuf": "^2.15.0"
+  }
+}

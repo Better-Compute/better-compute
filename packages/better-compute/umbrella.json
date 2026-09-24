@@ -11,6 +11,7 @@
     "./iam": "@better-compute/iam",
     "./iam/plugin": "@better-compute/iam/plugin",
     "./server": "@better-compute/server",
+    "./gateway": "@better-compute/gateway",
     "./postgres": "@better-compute/postgres",
     "./pglite": "@better-compute/postgres/pglite",
     "./client": "@better-compute/client",
