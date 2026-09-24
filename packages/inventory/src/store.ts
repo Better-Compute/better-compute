@@ -12,6 +12,7 @@ import { INVENTORY_SECTIONS, type InventorySectionName } from '@better-compute/p
 import { devicesFromGpus, planDevices, type StoredDevice } from './devices.js';
 import { diffInventory } from './diff.js';
 import { hardwareKey } from './hardware-key.js';
+import { applyInventoryHealth, inventoryHealthFindings, type HealthFinding } from './health.js';
 import {
   inventoryConditions,
   inventoryLabels,
@@ -134,6 +135,8 @@ export type ApplyInventoryResult =
       digest: string;
       changes: ReturnType<typeof diffInventory>;
       conditions: InventoryCondition[];
+      /** Health findings from the GPU counters (§10.1): quarantines and, for pending row remaps, NoSchedule. */
+      health: HealthFinding[];
       /** `claimedElsewhere`: reported device ids another node already owns (raises DuplicateIdentity). */
       devices: { upserted: number; removed: number; quarantined: number; claimedElsewhere: string[] };
     };
@@ -229,6 +232,9 @@ export async function applyInventory(
       [snapshotId, nodeId, digest, JSON.stringify(reported), JSON.stringify(json), state.rows[0]!.boot_id],
     );
 
+    // Health first, so the device plan already sees this inventory's quarantines.
+    const health = inventoryHealthFindings(sections.gpus);
+    const healthReasons = await applyInventoryHealth(tx, nodeId, health, node.no_schedule_reasons);
     const devices = await applyDevices(tx, nodeId, sections);
     await applyLabels(tx, nodeId, sections);
 
@@ -285,7 +291,7 @@ export async function applyInventory(
         [nodeId, condition.type, condition.status, condition.reason ?? null],
       );
 
-    const reasons = mergeNoScheduleReasons(node.no_schedule_reasons, inventoryOwnedConditions, conditions);
+    const reasons = mergeNoScheduleReasons(healthReasons, inventoryOwnedConditions, conditions);
     const currentKey = node.hardware_key ? Buffer.from(node.hardware_key).toString('hex') : null;
     const reasonsChanged = JSON.stringify(reasons) !== JSON.stringify([...node.no_schedule_reasons].sort());
     if (reasonsChanged || keyHex !== currentKey || trusted !== node.hardware_key_trusted)
@@ -319,7 +325,7 @@ export async function applyInventory(
           data: { snapshotId, ...(change as unknown as Record<string, Json>) },
         });
     }
-    return { status: 'applied', snapshotId, digest, changes, conditions, devices };
+    return { status: 'applied', snapshotId, digest, changes, conditions, devices, health };
   });
 }
 
@@ -349,15 +355,14 @@ async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySectio
       WHERE d.node_id = $1 AND (upper_inf(b.during) OR upper(b.during) > compute_now())`,
     [nodeId],
   );
-  // `taint`ed devices (Health, v0.2) stay unhealthy: inventory only ever lowers health.
-  const tainted = await tx.query<{ id: string }>(
-    `SELECT d.id FROM devices d JOIN nodes n ON n.id = d.node_id
-      WHERE d.node_id = $1 AND ('unhealthy.gpu/' || d.id) = ANY(n.no_schedule_reasons)`,
+  // Quarantined devices (`device_health`, v0.2 Health) stay unhealthy whatever inventory says.
+  const quarantined = await tx.query<{ device_id: string }>(
+    'SELECT DISTINCT device_id FROM device_health WHERE node_id = $1',
     [nodeId],
   );
   const plan = planDevices(current, devicesFromGpus(nodeId, sections.gpus), {
     bookedDeviceIds: new Set(booked.rows.map((row) => row.device_id)),
-    unhealthy: new Set(tainted.rows.map((row) => row.id)),
+    unhealthy: new Set(quarantined.rows.map((row) => row.device_id)),
   });
 
   // Parents before children on insert; the plan lists devices in that order.

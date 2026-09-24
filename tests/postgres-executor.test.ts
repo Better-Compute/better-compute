@@ -140,6 +140,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0004_command_cancel',
       'core/0005_audit_commit_order',
       'core/0006_pool_archive',
+      'core/0007_device_health',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });

@@ -5,9 +5,10 @@ import { v01Migration, v01Tables } from './0003_v01.js';
 import { commandCancelMigration } from './0004_command_cancel.js';
 import { auditCommitOrderMigration } from './0005_audit_commit_order.js';
 import { poolArchiveMigration } from './0006_pool_archive.js';
+import { deviceHealthMigration, deviceHealthTables } from './0007_device_health.js';
 
 /** Every table the base schema creates, in creation order. */
-export const baseTables = Object.freeze([...base0002Tables, ...v01Tables]);
+export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables]);
 
 /**
  * The adapter-owned base schema, owner `core`, applied before any module migration. Append-only:
@@ -20,6 +21,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   commandCancelMigration,
   auditCommitOrderMigration,
   poolArchiveMigration,
+  deviceHealthMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

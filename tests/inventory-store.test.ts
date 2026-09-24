@@ -149,8 +149,12 @@ describe('report → pull → apply', () => {
     );
     expect(conditions.rows).toEqual([
       { type: 'DuplicateIdentity', status: 'false' },
+      { type: 'EccUncorrectable', status: 'false' },
       { type: 'GpuCountMismatch', status: 'false' },
       { type: 'GpuModelUnknown', status: 'false' },
+      { type: 'NvlinkDegraded', status: 'false' },
+      { type: 'RowRemapFailed', status: 'false' },
+      { type: 'RowRemapPending', status: 'false' },
     ]);
     const row = await nodeRow();
     expect(row.no_schedule_reasons).toEqual([]);
