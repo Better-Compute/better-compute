@@ -26,6 +26,9 @@
       "path": "./packages/provider-hetzner"
     },
     {
+      "path": "./packages/provider-proxmox"
+    },
+    {
       "path": "./packages/pki"
     },
     {
