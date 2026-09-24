@@ -104,6 +104,34 @@ describe('JSON-RPC over Streamable HTTP', () => {
   });
 });
 
+describe('create_instance', () => {
+  it('sends the vps instances.create shape (flavor name, imageId, sshKeys)', async () => {
+    const { api, calls } = recorder(() => ({ id: 'inst_1' }));
+    const mcp = mcpWith(api);
+    const result = await rpc(mcp, 'tools/call', {
+      name: 'create_instance',
+      arguments: {
+        poolId: POOL,
+        flavor: 'g1.small',
+        imageId: 'ubuntu-24.04',
+        sshKeys: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq3 alice@laptop'],
+      },
+    });
+    expect(result.body.result.isError).toBeUndefined();
+    expect(calls[0]).toEqual({
+      path: 'instances/create',
+      input: {
+        tenantId: 'org_acme',
+        poolId: POOL,
+        flavor: 'g1.small',
+        imageId: 'ubuntu-24.04',
+        sshKeys: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq3 alice@laptop'],
+        idempotencyKey: expect.any(String),
+      },
+    });
+  });
+});
+
 describe('fleet tools (opt-in, read-only)', () => {
   it('exports and plans, hides the call list, and never applies', async () => {
     const { api, calls } = recorder((path) =>

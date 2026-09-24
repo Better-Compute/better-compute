@@ -340,12 +340,25 @@ export function computeTools(
         'Creates a virtual machine from a flavor and an image in a pool (v0.3). If a person must approve it, retry with the returned idempotencyKey after they do.',
       inputSchema: {
         type: 'object',
-        required: ['poolId', 'flavorId', 'imageId'],
+        required: ['poolId', 'flavor', 'imageId'],
         properties: {
           poolId: id('pool', 'The pool'),
-          flavorId: id('flv', 'The flavor (size)'),
-          imageId: id('img', 'The image'),
-          name: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,62}$', description: 'A name' },
+          flavor: {
+            type: 'string',
+            pattern: '^[a-z0-9][a-z0-9._-]{0,62}$',
+            description: 'The flavor (size) name offered by the pool, e.g. "g1.small"',
+          },
+          imageId: {
+            type: 'string',
+            pattern: '^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$',
+            description: 'The image, e.g. "ubuntu-24.04"',
+          },
+          sshKeys: {
+            type: 'array',
+            maxItems: 32,
+            items: { type: 'string', maxLength: 8192, description: 'An OpenSSH public key line' },
+            description: 'Public keys to install for the default user',
+          },
           idempotencyKey,
         },
         additionalProperties: false,
@@ -362,9 +375,9 @@ export function computeTools(
           context.api.$request('instances/create', {
             tenantId: context.tenantId,
             poolId: args.poolId,
-            flavorId: args.flavorId,
+            flavor: args.flavor,
             imageId: args.imageId,
-            ...(args.name ? { name: args.name } : {}),
+            ...(args.sshKeys ? { sshKeys: args.sshKeys } : {}),
             idempotencyKey: key,
           }),
         );
