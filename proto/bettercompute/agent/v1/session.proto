@@ -112,6 +112,35 @@ message JoinResponseBody {
   bettercompute.common.v1.AgentRole role = 7;
   // Server time at issue, for a first clock-offset estimate.
   google.protobuf.Timestamp issued_at = 8;
+  // (v0.2) Set when the attestor could not decide yet: node_id and cert_chain are empty, nothing
+  // was issued and no token was spent. The daemon re-sends Join with the SAME csr (csr_sha256 still
+  // binds this response to it): after `pending.retry_after_seconds`, or with its answer to
+  // `challenge` in JoinRequest.attestation.
+  JoinDeferral deferral = 9;
+}
+
+// A two-round join (§3.3): an operator approval (discovery → joinRequests) or an attestor challenge
+// (tpm credential activation).
+message JoinDeferral {
+  oneof kind {
+    JoinPending pending = 1;
+    JoinChallenge challenge = 2;
+  }
+}
+
+message JoinPending {
+  // The join request an operator approves or rejects (joinRequests.*).
+  string request_id = 1;
+  uint32 retry_after_seconds = 2;
+}
+
+message JoinChallenge {
+  // The attestor that answers it, as in JoinRequest.attestor.
+  string attestor = 1;
+  // Attestor-specific (tpm: credential blob, encrypted secret and opaque server state).
+  bytes payload = 2;
+  // Answers after this are refused.
+  google.protobuf.Timestamp not_after = 3;
 }
 
 message RenewRequest {

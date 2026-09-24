@@ -1,8 +1,8 @@
 import type { KeyObject } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
-import { create } from '@bufbuild/protobuf';
+import { create, fromBinary } from '@bufbuild/protobuf';
 import { timestampFromMs } from '@bufbuild/protobuf/wkt';
-import { isComputeError, shardOf, type ErrorCode } from '@better-compute/core';
+import { defineAttestor, isComputeError, shardOf, type ErrorCode } from '@better-compute/core';
 import {
   createCsr,
   createNodeCa,
@@ -22,6 +22,7 @@ import {
   AgentRole,
   HardwareClaimsSchema,
   JoinRequestSchema,
+  JoinResponseBodySchema,
   RenewRequestSchema,
   type JoinRequest,
   type JoinResponseBody,
@@ -467,6 +468,115 @@ describe('JoinService.join', () => {
       trust: 'tenant-owned',
       site_id: 'site_custom',
     });
+  });
+});
+
+describe('JoinService two-round joins (AttestationDeferral)', () => {
+  /** An attestor that defers until its evidence says 'answer', recording what it saw in a table. */
+  async function deferring(mode: 'approval' | 'challenge') {
+    const s = await setup();
+    await s.fixture.database.query('CREATE TABLE plg_test_rounds (csr text, evidence text)');
+    const attestor = defineAttestor({
+      id: 'two-round',
+      version: '1.0.0',
+      roles: ['node'],
+      async verify(evidence, { tx, csrSha256 }) {
+        const text = new TextDecoder().decode(evidence.payload);
+        await tx.query('INSERT INTO plg_test_rounds VALUES ($1, $2)', [
+          Buffer.from(csrSha256!).toString('hex'),
+          text,
+        ]);
+        if (text !== 'answer')
+          return mode === 'approval'
+            ? { deferred: 'approval', requestId: 'jr_1', retryAfterSeconds: 12 }
+            : {
+                deferred: 'challenge',
+                challenge: new TextEncoder().encode('nonce-1'),
+                notAfter: new Date(s.fixture.clock.now() + 300_000),
+              };
+        return { tenantId: s.fixture.tenants.root.id, role: 'node', poolId: POOL };
+      },
+    });
+    const service = createJoinService({
+      database: s.fixture.database,
+      clock: s.fixture.clock,
+      work: s.fixture.compute.context.work,
+      events: s.fixture.compute.context.events,
+      crypto: s.crypto,
+      attestors: [attestor],
+    });
+    const host = machine(9);
+    const csr = createCsr(host.key);
+    const request = (attestation: string) =>
+      create(JoinRequestSchema, {
+        csr,
+        attestor: 'two-round',
+        attestation: new TextEncoder().encode(attestation),
+        claims: create(HardwareClaimsSchema, host.claims),
+        role: AgentRole.NODE,
+      });
+    return { s, service, csr, request };
+  }
+
+  /** The signed body of a deferral: checked like any response, minus the certificate. */
+  function deferralOf(s: Setup, response: { body: Uint8Array; sig?: unknown }, csr: Uint8Array) {
+    const error = (() => {
+      try {
+        verifyJoinResponse(response as never, {
+          signer: { publicKey: s.signingKey.publicKey },
+          csr,
+        });
+      } catch (reason) {
+        return reason;
+      }
+    })();
+    // Signature and CSR binding pass; only the (absent) certificate is refused.
+    expect(isComputeError(error, 'ACCESS_DENIED') && error.details?.reason).toBe(
+      'empty certificate chain',
+    );
+    return fromBinary(JoinResponseBodySchema, response.body);
+  }
+
+  it('answers an approval deferral with a signed pending response, commits the attestor rows, issues nothing', async () => {
+    const { s, service, csr, request } = await deferring('approval');
+    const body = deferralOf(s, await service.join(request('first')), csr);
+    expect(body.nodeId).toBe('');
+    expect(body.certChain).toHaveLength(0);
+    expect(body.deferral?.kind).toMatchObject({
+      case: 'pending',
+      value: { requestId: 'jr_1', retryAfterSeconds: 12 },
+    });
+    const rounds = await s.fixture.database.query('SELECT evidence FROM plg_test_rounds');
+    expect(rounds.rows).toEqual([{ evidence: 'first' }]);
+    const nodes = await s.fixture.database.query('SELECT id FROM nodes');
+    expect(nodes.rows).toHaveLength(0);
+
+    // Approved: the retry with the same CSR joins.
+    const joined = verifyJoinResponse(await service.join(request('answer')), {
+      signer: { publicKey: s.signingKey.publicKey },
+      csr,
+      nodeCaRoots: [s.nodeCa.certificate],
+      now: s.fixture.clock.now(),
+    });
+    expect(joined.deferral).toBeUndefined();
+    expect(await nodeRow(s, joined.nodeId)).toMatchObject({ pool_id: POOL, identity_gen: 1 });
+  });
+
+  it('delivers a challenge inside the signed body, bound to the CSR', async () => {
+    const { s, service, csr, request } = await deferring('challenge');
+    const body = deferralOf(s, await service.join(request('hello')), csr);
+    expect(body.deferral?.kind.case).toBe('challenge');
+    const challenge = body.deferral!.kind.value as {
+      attestor: string;
+      payload: Uint8Array;
+      notAfter?: { seconds: bigint };
+    };
+    expect(challenge.attestor).toBe('two-round');
+    expect(new TextDecoder().decode(challenge.payload)).toBe('nonce-1');
+    expect(Number(challenge.notAfter!.seconds) * 1000).toBe(
+      Math.floor((s.fixture.clock.now() + 300_000) / 1000) * 1000,
+    );
+    expect(Buffer.from(body.csrSha256).equals(Buffer.from(parseCsr(csr).sha256))).toBe(true);
   });
 });
 

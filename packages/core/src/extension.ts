@@ -319,10 +319,40 @@ export interface AttestationResult {
   allowedKinds?: readonly string[];
 }
 
+/**
+ * A join the attestor cannot decide yet (a two-round join, §3.3). JoinService commits the
+ * transaction (so the attestor's own rows persist), issues nothing, spends no token, and answers
+ * with a signed `JoinResponseBody.deferral`; the agent re-sends `Join` with the same CSR.
+ */
+export interface AttestationDeferral {
+  /**
+   * `approval`: waiting for an operator (`joinRequests.approve`); the agent retries the same Join.
+   * `challenge`: the agent answers `challenge` in its next Join's `attestation` (tpm).
+   */
+  deferred: 'approval' | 'challenge';
+  /** `approval`: the join request to approve or reject. */
+  requestId?: string;
+  /** When the agent should retry (`approval`; default 30 s). */
+  retryAfterSeconds?: number;
+  /** `challenge`: attestor-specific bytes, delivered inside the signed response. */
+  challenge?: Uint8Array;
+  /** `challenge`: answers after this are refused. */
+  notAfter?: Date;
+}
+
+export const isAttestationDeferral = (
+  value: AttestationResult | AttestationDeferral,
+): value is AttestationDeferral => 'deferred' in value && value.deferred !== undefined;
+
 /** The agent half of an attestor: produces evidence (in Go in `bcd`; in TS for `FakeDaemon`). */
 export interface NodeAttestor {
   readonly id: string;
-  produce(input: { claims: HardwareClaims; nonce?: Uint8Array }): Promise<AttestationEvidence>;
+  /** `challenge`: the payload of a `JoinChallenge` from the previous round, when there was one. */
+  produce(input: {
+    claims: HardwareClaims;
+    nonce?: Uint8Array;
+    challenge?: Uint8Array;
+  }): Promise<AttestationEvidence>;
 }
 
 export interface AttestorVerifierInput {
@@ -331,8 +361,14 @@ export interface AttestorVerifierInput {
   version: string;
   /** Roles this attestor may admit. */
   roles: readonly AgentRole[];
-  /** Verifies evidence inside JoinService's transaction; throws `ACCESS_DENIED` to refuse. */
-  verify(evidence: AttestationEvidence, context: AttestationContext): Promise<AttestationResult>;
+  /**
+   * Verifies evidence inside JoinService's transaction; throws `ACCESS_DENIED` to refuse, or
+   * returns an `AttestationDeferral` for a second round.
+   */
+  verify(
+    evidence: AttestationEvidence,
+    context: AttestationContext,
+  ): Promise<AttestationResult | AttestationDeferral>;
 }
 /** The control-plane half of an attestor, run by JoinService. */
 export interface AttestorVerifier extends AttestorVerifierInput, Extension {

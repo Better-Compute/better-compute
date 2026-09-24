@@ -1,10 +1,11 @@
 import {
   ComputeError,
+  isAttestationDeferral,
   isComputeError,
   newId,
   shardOf,
   type AgentRole,
-  type AttestationResult,
+  type AttestationDeferral,
   type AttestorVerifier,
   type AuthzWriter,
   type Clock,
@@ -21,6 +22,7 @@ import {
   JoinResponseBodySchema,
   encodeMessage,
   renewPopSigningInput,
+  type JoinDeferral,
   type JoinRequest,
   type JoinResponse,
   type JoinResponseBody,
@@ -248,6 +250,63 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
     return { ...issued, serial, chain: [issued.certificate, ...issued.chain] };
   }
 
+  /** The signed answer to a deferred join: no node, no certificate, the same CSR binding. */
+  async function deferred(
+    crypto: JoinCrypto,
+    attestorId: string,
+    csrSha256: Uint8Array,
+    deferral: AttestationDeferral,
+  ): Promise<JoinResponse> {
+    let kind: JoinDeferral['kind'];
+    if (deferral.deferred === 'challenge') {
+      if (!(deferral.challenge instanceof Uint8Array) || deferral.challenge.length === 0)
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          `Attestor ${attestorId} deferred with no challenge`,
+        );
+      kind = {
+        case: 'challenge',
+        value: {
+          $typeName: 'bettercompute.agent.v1.JoinChallenge',
+          attestor: attestorId,
+          payload: deferral.challenge,
+          ...(deferral.notAfter ? { notAfter: timestamp(deferral.notAfter.getTime()) } : {}),
+        },
+      };
+    } else {
+      kind = {
+        case: 'pending',
+        value: {
+          $typeName: 'bettercompute.agent.v1.JoinPending',
+          requestId: deferral.requestId ?? '',
+          retryAfterSeconds: Math.max(1, Math.round(deferral.retryAfterSeconds ?? 30)),
+        },
+      };
+    }
+    log?.info('join deferred', {
+      attestor: attestorId,
+      deferred: deferral.deferred,
+      ...(deferral.requestId ? { requestId: deferral.requestId } : {}),
+    });
+    const body: JoinResponseBody = {
+      $typeName: 'bettercompute.agent.v1.JoinResponseBody',
+      nodeId: '',
+      certChain: [],
+      csrSha256,
+      trustDomain: crypto.trustDomain,
+      siteId: '',
+      role: WireAgentRole.UNSPECIFIED,
+      issuedAt: timestamp(clock.now()),
+      deferral: { $typeName: 'bettercompute.agent.v1.JoinDeferral', kind },
+    };
+    const bytes = encodeMessage(JoinResponseBodySchema, body);
+    return {
+      $typeName: 'bettercompute.agent.v1.JoinResponse',
+      body: bytes,
+      sig: signature(await crypto.sign('join-response', [bytes])),
+    };
+  }
+
   async function join(
     request: JoinRequest,
     context: GatewayCallContext = {},
@@ -289,10 +348,12 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
     const key = claimedHardwareKey(request.claims);
     const revoked: string[] = [];
     const response = await database.transaction(async (tx) => {
-      const result: AttestationResult = await attestor.verify(
+      const result = await attestor.verify(
         { attestor: attestorId, payload, ...(openedToken ? { token: openedToken } : {}) },
         { tx, clock, claims: coreClaims(request.claims), role, csrSha256: csr.sha256 },
       );
+      // A two-round join: the attestor's rows commit, nothing is issued, the agent comes back.
+      if (isAttestationDeferral(result)) return deferred(crypto, attestorId, csr.sha256, result);
       if (result.role !== role) throw deny('role');
 
       const token = result.tokenId
