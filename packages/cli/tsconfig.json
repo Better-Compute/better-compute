@@ -29,6 +29,9 @@
     },
     {
       "path": "../capacity"
+    },
+    {
+      "path": "../audit"
     }
   ]
 }
