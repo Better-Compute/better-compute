@@ -39,6 +39,28 @@ export { attachFrameConn, closeReason } from './frames.js';
 export type { FrameEndpoint } from './frames.js';
 export { certificateAuthenticate, peerChain } from './identity.js';
 export { xidStatusHandler } from './health.js';
+export { attachGatewayWs, serveGatewayWs, WS_PATH, WS_SUBPROTOCOL } from './ws.js';
+export type { GatewayWsOptions, ServedGatewayWs } from './ws.js';
+export {
+  agentProofType,
+  gatewayProofType,
+  signAgentProof,
+  signGatewayProof,
+  verifyAgentProof,
+  verifyGatewayProof,
+  wsNonce,
+} from './ws-auth.js';
+export type { VerifyAgentProofOptions } from './ws-auth.js';
+export {
+  encodeWsFrame,
+  WsConnection,
+  WsFrameDecoder,
+  WsOpcode,
+  WsProtocolError,
+  wsAcceptKey,
+  wsClientKey,
+} from './websocket.js';
+export type { WsConnectionOptions, WsFrame } from './websocket.js';
 export { gatewayControlClient, gatewayNotifier, internalHandler, serveInternal } from './internal.js';
 export type {
   ControlClientOptions,

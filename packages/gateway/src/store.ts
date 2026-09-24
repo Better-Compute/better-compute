@@ -78,6 +78,8 @@ export interface HelloInput {
   unackedResults: readonly CommandUpdate[];
   /** `Hello.inventory_hashes`: section name → SHA-256 of its content. */
   inventoryHashes: Readonly<Record<string, Uint8Array>>;
+  /** The session certificate's serial: its `node_certs.allowed_kinds` restrict dispatch. */
+  certSerial?: string;
   /** `Hello.daemon_version` / `proto_max`, stored on the session row for Rollout (v0.4). */
   daemonVersion?: string;
   protoMax?: number;
@@ -103,6 +105,8 @@ export interface HelloResult {
   bootChanged: boolean;
   /** The node has commands waiting for dispatch (so the Hello is worth a dispatch poke). */
   hasPending: boolean;
+  /** `node_certs.allowed_kinds` of the session's certificate; null = unrestricted. */
+  allowedKinds: string[] | null;
 }
 
 export interface UpdatesResult {
@@ -754,6 +758,16 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         });
         if (connected.rowCount || settled.length) await work.enqueue(tx, 'node', input.nodeId);
 
+        // A restricted certificate (discovery/ramdisk, core/0010) limits what may be sent here.
+        let allowedKinds: string[] | null = null;
+        if (input.certSerial) {
+          const cert = await tx.query<{ allowed_kinds: string[] | null }>(
+            'SELECT allowed_kinds FROM node_certs WHERE serial = $1 AND node_id = $2',
+            [input.certSerial, input.nodeId],
+          );
+          allowedKinds = cert.rows[0]?.allowed_kinds ?? null;
+        }
+
         const requestSections = await inventory.recordHashes(
           tx,
           work,
@@ -774,6 +788,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           journalChanged,
           bootChanged,
           hasPending: Boolean(prior.has_pending) || updates.busy.length > 0,
+          allowedKinds,
         };
       });
     },
@@ -846,6 +861,28 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         return chosen
           .filter((command) => attempts.has(command.id))
           .map((command) => ({ ...command, state: 'dispatched' as const, attempt: attempts.get(command.id)! }));
+      });
+    },
+
+    /**
+     * Settles commands the gateway will not deliver to this node (e.g. `kind-not-allowed` for a
+     * restricted certificate) as `cancelled`, from any non-terminal state, with their events.
+     */
+    async refuse(nodeId: string, tenantId: string, ids: readonly string[], reason: string): Promise<string[]> {
+      if (!ids.length) return [];
+      return db.transaction(async (tx) => {
+        const { rows } = await tx.query<{ id: string; kind: string }>(
+          `UPDATE commands SET state = 'cancelled', reason = $3, updated_at = compute_now()
+           WHERE id = ANY($1::text[]) AND node_id = $2 AND state = ANY($4::text[])
+           RETURNING id, kind`,
+          [[...ids], nodeId, reason, ['pending', ...inFlight]],
+        );
+        await publishAll(
+          tx,
+          rows.map((row) => settledEvent(nodeId, tenantId, { id: row.id, kind: row.kind, state: 'cancelled', reason })),
+        );
+        if (rows.length) await work.enqueue(tx, 'node', nodeId);
+        return rows.map((row) => row.id);
       });
     },
 

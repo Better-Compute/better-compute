@@ -37,6 +37,7 @@ import {
   type SpecRequest,
   type StatusReport,
 } from '@better-compute/protocol';
+import { commandKindAllowed } from '@better-compute/pki';
 import type { GatewayServices } from '@better-compute/server';
 import { GrpcCode, GrpcError, toGrpcError } from './grpc.js';
 import { sqlEventPublisher, sqlWorkQueue } from './ports.js';
@@ -76,6 +77,11 @@ export interface PeerIdentity {
    * no destructive platform commands; those are rejected `tenant-controlled` instead of sent.
    */
   tenantControlled?: boolean;
+  /**
+   * WS fallback sessions (v0.4, §7.1): only signed commands and desired states are sent; unsigned
+   * ones stay pending (deliverable over mTLS, or they expire) and unsigned specs are withheld.
+   */
+  signedOnly?: boolean;
 }
 
 /** What the gateway needs from a revocation feed (pki's `RevocationSet` satisfies it). */
@@ -295,6 +301,8 @@ interface Session {
   busyCount: Map<string, number>;
   /** Cancel frames sent on this session (resent on the next session after a reconnect). */
   cancelsSent: Set<string>;
+  /** `node_certs.allowed_kinds` of this session's certificate; null = unrestricted. */
+  allowedKinds: string[] | null;
   pendingStatus?: StatusReport;
   closed: boolean;
 }
@@ -402,6 +410,10 @@ export function createGateway(options: GatewayOptions): Gateway {
 
   function sendDesired(session: Session, desired: DesiredState | undefined, generation: number) {
     if (!desired || session.closed) return;
+    if (session.peer.signedOnly && !desired.signature?.sig.byteLength) {
+      log.warn('gateway: unsigned spec withheld from a WS session', { nodeId: session.nodeId, generation });
+      return;
+    }
     session.sink.send(frame({ case: 'desired', value: desired }));
     session.sentGeneration = Math.max(session.sentGeneration, generation);
   }
@@ -479,6 +491,7 @@ export function createGateway(options: GatewayOptions): Gateway {
           inventoryHashes: hello.inventoryHashes,
           daemonVersion: hello.daemonVersion,
           protoMax: hello.protoMax,
+          ...(peer.serial ? { certSerial: peer.serial } : {}),
         },
         { liveWindowMs: sessionLeaseTtlMs },
       )
@@ -520,6 +533,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       inFlight: new Map(),
       busyCount: new Map(),
       cancelsSent: new Set(),
+      allowedKinds: result.allowedKinds,
       closed: false,
     };
     sessions.set(session.nodeId, session);
@@ -562,8 +576,15 @@ export function createGateway(options: GatewayOptions): Gateway {
     )
       sendDesired(session, await store.desired(session.nodeId), result.generation);
     else session.sentGeneration = result.generation;
-    for (const command of [...result.running, ...result.replay]) reserveUnchecked(session, command);
-    for (const command of result.replay) sendCommand(session, command);
+    // A restricted certificate (e.g. a node that re-joined as a ramdisk) never receives kinds
+    // outside its allowed list, including in-flight ones from before: those are cancelled.
+    const disallowed = result.replay.filter((command) => !commandKindAllowed(command.kind, session.allowedKinds));
+    if (disallowed.length)
+      await store.refuse(session.nodeId, session.tenantId, disallowed.map((command) => command.id), 'kind-not-allowed');
+    const replay = result.replay.filter((command) => !disallowed.includes(command));
+    for (const command of [...result.running, ...replay]) reserveUnchecked(session, command);
+    for (const command of replay)
+      if (!session.peer.signedOnly || command.signature?.sig.byteLength) sendCommand(session, command);
     // Only when there is something to send: a reconnect storm must not turn every Hello into a
     // dispatch pass over every session on this gateway.
     if (result.hasPending) gateway.poke();
@@ -763,6 +784,15 @@ export function createGateway(options: GatewayOptions): Gateway {
             if (session.epoch !== command.epoch || blocked.has(laneKey)) return false;
             if (!command.valid) {
               refuse.push({ command, reason: 'invalid-body' });
+              return false;
+            }
+            if (!commandKindAllowed(command.kind, session.allowedKinds)) {
+              refuse.push({ command, reason: 'kind-not-allowed' });
+              return false;
+            }
+            if (session.peer.signedOnly && !command.signature?.sig.byteLength) {
+              // WS mode: unsigned intent never crosses a TLS-inspecting proxy; it stays pending. Not
+              // a credit decision, so it must not block signed commands behind it in the lane.
               return false;
             }
             if (session.peer.tenantControlled && isDestructive(command.kind)) {

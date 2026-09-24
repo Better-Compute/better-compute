@@ -330,3 +330,59 @@ describe('mutual TLS', () => {
     expect(f.services.calls.map((call) => call.method)).toEqual(['join']);
   });
 });
+
+describe('restricted certificates (node_certs.allowed_kinds)', () => {
+  let f: GatewayFixture;
+  beforeEach(async () => {
+    f = await gatewayFixture();
+  });
+  afterEach(() => f.close());
+
+  async function cert(nodeId: string, serial: string, allowed: string[] | null) {
+    await f.db.query(
+      `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after, allowed_kinds)
+       VALUES ($1, $2, 'ramdisk', 1, '\\x00', '\\x00', compute_now() - interval '1 minute', compute_now() + interval '1 hour', $3)`,
+      [serial, nodeId, allowed],
+    );
+  }
+
+  it('dispatches only allowed kinds; the rest are cancelled kind-not-allowed', async () => {
+    const node = await f.addNode();
+    await cert(node, 'a1', ['inventory.*', 'diag.*']);
+    const diag = await f.enqueue(node);
+    const refresh = await f.enqueue(node, { kind: 'inventory.refresh' });
+    const reset = await f.enqueue(node, { kind: 'gpu.reset' });
+    const reboot = await f.enqueue(node, { kind: 'node.reboot' });
+    const stream = new FakeStream();
+    await f.gateway.open({ nodeId: node, serial: 'a1' }, stream).receive(helloFrame(node));
+    await f.gateway.jobs.dispatch.tick();
+    expect(stream.commandIds().sort()).toEqual([diag, refresh].sort());
+    for (const id of [reset, reboot])
+      expect(await f.command(id)).toMatchObject({ state: 'cancelled', reason: 'kind-not-allowed' });
+  });
+
+  it('cancels in-flight commands of a disallowed kind instead of replaying them after a restricted re-join', async () => {
+    const node = await f.addNode();
+    await cert(node, 'b2', ['diag.*']);
+    const reset = await f.enqueue(node, { kind: 'gpu.reset' });
+    const first = await f.connect(node);
+    await f.gateway.jobs.dispatch.tick();
+    expect(first.stream.commandIds()).toEqual([reset]);
+    await first.handle.end();
+
+    const stream = new FakeStream();
+    await f.gateway.open({ nodeId: node, serial: 'b2' }, stream).receive(helloFrame(node));
+    expect(stream.commandIds()).toEqual([]);
+    expect(await f.command(reset)).toMatchObject({ state: 'cancelled', reason: 'kind-not-allowed' });
+  });
+
+  it('treats NULL allowed_kinds and unknown serials as unrestricted', async () => {
+    const node = await f.addNode();
+    await cert(node, 'c3', null);
+    const reset = await f.enqueue(node, { kind: 'gpu.reset' });
+    const stream = new FakeStream();
+    await f.gateway.open({ nodeId: node, serial: 'c3' }, stream).receive(helloFrame(node));
+    await f.gateway.jobs.dispatch.tick();
+    expect(stream.commandIds()).toEqual([reset]);
+  });
+});
