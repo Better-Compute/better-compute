@@ -155,6 +155,25 @@ describe('remediation', () => {
     expect((await reconcileHealth(context, b!)).action).toBe('started');
   });
 
+  it('shares the disruption budget with rollouts and any other workflow', async () => {
+    const [a, b, c] = await pool('p_shared', 20); // 1 disruption allowed
+    await db.query(`CREATE TABLE IF NOT EXISTS rollout_nodes (node_id text, state text)`);
+    await db.query(`INSERT INTO rollout_nodes VALUES ($1, 'upgrading')`, [a]);
+    await xid(b!, 79);
+    expect(await reconcileHealth(context, b!)).toEqual({ action: 'waiting', reason: 'budget' });
+    await db.query(`UPDATE rollout_nodes SET state = 'done' WHERE node_id = $1`, [a]);
+    // A deploy (any owner) disrupts too.
+    await db.query(
+      `INSERT INTO workflows (id, tenant_id, node_id, profile_id, profile_version, state, work_key)
+       VALUES ('wf_other_owner', 'root', $1, 'x', 1, 'running', $1)`,
+      [c],
+    );
+    expect(await reconcileHealth(context, b!)).toEqual({ action: 'waiting', reason: 'budget' });
+    await db.query(`UPDATE workflows SET state = 'succeeded' WHERE id = 'wf_other_owner'`);
+    expect((await reconcileHealth(context, b!)).action).toBe('started');
+    await db.query(`DROP TABLE rollout_nodes`);
+  });
+
   it("honours the pool's own disruption budget", async () => {
     const nodes = await pool('p_budget_policy', 20);
     await db.query(`UPDATE pools SET policy = '{"disruptionBudget": 0.1}' WHERE id = 'p_budget_policy'`); // 2 of 20

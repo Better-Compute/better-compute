@@ -33,7 +33,10 @@ const healthConditions: readonly NodeConditionType[] = [
 ];
 
 export interface RemediationPolicy {
-  /** Share of a pool's nodes that may be remediating at once (default 5%, at least one node). */
+  /**
+   * Share of a pool's nodes that may be disrupted at once (default 5%, at least one node): nodes
+   * with any active workflow or a rollout upgrading them. `pools.policy.disruptionBudget` wins.
+   */
   disruptionBudget: number;
   /** Open the breaker when more than this share of a pool turned unhealthy within `breakerWindowMs`. */
   breakerThreshold: number;
@@ -175,10 +178,16 @@ export async function reconcileHealth(
     );
     if (live.rowCount) return { action: 'waiting', reason: 'draining' };
 
+    // The pool's disruption budget is shared with rollouts (§10.1): a node is disrupted while any
+    // workflow runs on it (deploys disrupt too) or while a rollout upgrades or rolls it back.
+    const rollouts = await tx.query<{ present: boolean }>(`SELECT to_regclass('rollout_nodes') IS NOT NULL AS present`);
+    const rolloutClause = rollouts.rows[0]?.present
+      ? `OR EXISTS (SELECT 1 FROM rollout_nodes r WHERE r.node_id = n.id AND r.state IN ('upgrading', 'rolling-back'))`
+      : '';
     const pool = await tx.query<{ nodes: number; remediating: number; unhealthy: number }>(
       `SELECT count(*)::int AS nodes,
-              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM workflows w WHERE w.node_id = n.id AND w.owner = $3
-                                              AND w.state IN ('pending', 'running', 'paused')))::int AS remediating,
+              count(*) FILTER (WHERE EXISTS (SELECT 1 FROM workflows w WHERE w.node_id = n.id AND $3::text IS NOT NULL
+                                              AND w.state IN ('pending', 'running', 'paused')) ${rolloutClause})::int AS remediating,
               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM node_conditions c WHERE c.node_id = n.id AND c.status = 'true'
                                               AND c.type = ANY($4) AND c.since > compute_now() - make_interval(secs => $5 / 1000.0)))::int AS unhealthy
          FROM nodes n WHERE (n.pool_id = $1) OR ($1::text IS NULL AND n.id = $2)`,
