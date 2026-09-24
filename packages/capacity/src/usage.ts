@@ -103,6 +103,43 @@ export async function meterAllocation(
   return written;
 }
 
+/** Compute slices of a full GPU a MIG profile holds (A100/H100/H200/B200: 7 slices). */
+export const migSlicesPerGpu = 7;
+
+/**
+ * The share of a whole GPU one atom bills (§10.6): a `gpu` is 1; a time-slice slot is `1/slots`;
+ * an MPS slot is `mpsUnits/100`; a MIG instance is its compute slices over 7 (`3g.40gb` → 3/7).
+ * `gpuFractionSql` is the same rule in SQL; tests keep the two in agreement.
+ */
+export function gpuFraction(
+  deviceClass: string,
+  attributes: Readonly<Record<string, string | number | boolean>>,
+): number {
+  if (deviceClass === 'gpu') return 1;
+  if (deviceClass === 'gpu.slot') {
+    if (typeof attributes.mpsUnits === 'number') return attributes.mpsUnits / 100;
+    const slots = Number(attributes.slots);
+    return slots > 0 ? 1 / slots : 0;
+  }
+  if (deviceClass === 'gpu.mig') {
+    const slices = /^(\d+)g/.exec(String(attributes.migProfile ?? ''));
+    return (slices ? Number(slices[1]) : 1) / migSlicesPerGpu;
+  }
+  return 0;
+}
+
+/** `gpuFraction` over a `devices` row aliased `d`. */
+export function gpuFractionSql(d: string): string {
+  return `CASE WHEN ${d}.class = 'gpu' THEN 1
+    WHEN ${d}.class = 'gpu.slot' AND ${d}.attributes ? 'mpsUnits'
+      THEN (${d}.attributes->>'mpsUnits')::numeric / 100
+    WHEN ${d}.class = 'gpu.slot' AND (${d}.attributes->>'slots')::numeric > 0
+      THEN 1 / (${d}.attributes->>'slots')::numeric
+    WHEN ${d}.class = 'gpu.mig'
+      THEN COALESCE(substring(${d}.attributes->>'migProfile' from '^(\\d+)g')::numeric, 1) / ${migSlicesPerGpu}
+    ELSE 0 END`;
+}
+
 interface MeterableReservation {
   allocation_id: string;
   tenant_id: string;
@@ -131,8 +168,8 @@ export async function meterReservations(
   const { rows } = await tx.query<MeterableReservation>(
     `SELECT a.id AS allocation_id, a.tenant_id, r.owner_identity_id, r.delegation_id, r.agent_id,
             r.project_id, a.pool_id, p.gpu_model, s.region,
-            (SELECT count(*) FROM unnest(a.atoms) atom JOIN devices d ON d.id = atom
-              WHERE d.class = 'gpu') AS gpus,
+            (SELECT COALESCE(sum(${gpuFractionSql('d')}), 0) FROM unnest(a.atoms) atom
+               JOIN devices d ON d.id = atom) AS gpus,
             (extract(epoch FROM a.bound_at) * 1000)::float8 AS from_ms,
             (extract(epoch FROM LEAST(COALESCE(a.released_at, upper(a.during)), upper(a.during))) * 1000)::float8 AS to_ms
        FROM allocations a

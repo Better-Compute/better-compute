@@ -276,8 +276,6 @@ export function parseCreatePool(raw: unknown): CreatePoolInput {
     fail(`class must be one of ${poolClasses.join(', ')}`);
   const sharing = (input.sharing ?? 'exclusive') as SharingMode;
   if (!sharingModes.includes(sharing)) fail(`sharing must be one of ${sharingModes.join(', ')}`);
-  if (sharing !== 'exclusive')
-    throw new ComputeError('UNSUPPORTED', 'Shared GPU pools (mig, timeslice, mps) arrive in v0.5');
   const agent = (input.agent ?? (input.class === 'provider' ? 'none' : 'bcd')) as PoolAgent;
   if (agent !== 'bcd' && agent !== 'none') fail('agent must be bcd or none');
   if (

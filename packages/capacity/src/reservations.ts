@@ -143,8 +143,11 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
         fail(`devices[${index}].topology must be any or nvlink-all`);
       request.topology = device.topology;
     }
-    if (device.sharing !== undefined && device.sharing !== 'exclusive')
-      throw new ComputeError('UNSUPPORTED', 'Shared GPUs (mig, timeslice, mps) arrive in v0.5');
+    if (device.sharing !== undefined) {
+      if (!['exclusive', 'mig', 'timeslice', 'mps'].includes(device.sharing as string))
+        fail(`devices[${index}].sharing must be exclusive, mig, timeslice or mps`);
+      request.sharing = device.sharing as DeviceRequest['sharing'] & string;
+    }
     return request;
   });
   if (devices.reduce((sum, device) => sum + device.count, 0) > 64)
@@ -425,7 +428,15 @@ export async function visiblePool(
   tenantId: string,
   poolId: string,
 ): Promise<
-  { id: string; ownerTenantId: string; gpuModel?: string; region: string; policy: Json } | undefined
+  | {
+      id: string;
+      ownerTenantId: string;
+      gpuModel?: string;
+      region: string;
+      policy: Json;
+      sharing: string;
+    }
+  | undefined
 > {
   const { rows } = await tx.query<{
     id: string;
@@ -433,8 +444,9 @@ export async function visiblePool(
     gpu_model: string | null;
     region: string;
     policy: Json | string;
+    sharing: string;
   }>(
-    `SELECT p.id, p.owner_tenant_id, p.gpu_model, s.region, p.policy
+    `SELECT p.id, p.owner_tenant_id, p.gpu_model, s.region, p.policy, p.sharing
        FROM pools p JOIN sites s ON s.id = p.site_id
       WHERE p.id = $1 AND (p.owner_tenant_id = $2
             OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))
@@ -449,14 +461,47 @@ export async function visiblePool(
     gpuModel?: string;
     region: string;
     policy: Json;
+    sharing: string;
   } = {
     id: row.id,
     ownerTenantId: row.owner_tenant_id,
     region: row.region,
     policy: json(row.policy),
+    sharing: row.sharing,
   };
   if (row.gpu_model !== null) pool.gpuModel = row.gpu_model;
   return pool;
+}
+
+/** Whole GPUs a request books (`gpuCount` in policies). */
+export function wholeGpus(devices: readonly DeviceRequest[]): number {
+  return devices.filter((device) => device.class === 'gpu').reduce((sum, d) => sum + d.count, 0);
+}
+
+/** MIG instances and time-slice/MPS slots a request books (`gpuSlices` in policies). */
+export function gpuSlices(devices: readonly DeviceRequest[]): number {
+  return devices
+    .filter((device) => device.class === 'gpu.mig' || device.class === 'gpu.slot')
+    .reduce((sum, d) => sum + d.count, 0);
+}
+
+/**
+ * Whether a request fits a pool's sharing mode (§10.6): slots only in `timeslice`/`mps` pools, MIG
+ * instances only in `mig` pools, and a device's explicit `sharing` must be the pool's.
+ */
+export function assertSharingFits(devices: readonly DeviceRequest[], poolSharing: string): void {
+  devices.forEach((device, index) => {
+    if (device.class === 'gpu.slot' && poolSharing !== 'timeslice' && poolSharing !== 'mps')
+      fail(`devices[${index}]: gpu.slot atoms exist only in timeslice or mps pools`);
+    if (device.class === 'gpu.mig' && poolSharing !== 'mig')
+      fail(`devices[${index}]: gpu.mig atoms exist only in mig pools`);
+    if (
+      device.sharing !== undefined &&
+      device.sharing !== 'exclusive' &&
+      device.sharing !== poolSharing
+    )
+      fail(`devices[${index}]: the pool shares GPUs as ${poolSharing}, not ${device.sharing}`);
+  });
 }
 
 /** The attributes IAM policies read on a reservation (§12.3), e.g. `ReserveBoundedH100`. */
@@ -467,9 +512,8 @@ export function reservationAttributes(
 ): AuthzAttributes {
   const attributes: AuthzAttributes = {
     gpuModel: pool.gpuModel ?? 'other',
-    gpuCount: spec.devices
-      .filter((device) => device.class.startsWith('gpu'))
-      .reduce((sum, device) => sum + device.count, 0),
+    gpuCount: wholeGpus(spec.devices),
+    gpuSlices: gpuSlices(spec.devices),
     durationHours: Math.round((durationMs / hour) * 1000) / 1000,
     region: pool.region,
     binding: spec.binding ?? 'hold',
@@ -562,6 +606,7 @@ export async function prepareCreate(
 
   const pool = await visiblePool(tx, input.tenantId, input.poolId);
   if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
+  assertSharingFits(input.devices, pool.sharing);
   const id =
     existing?.id ?? (await draftId('rsv', input.tenantId, caller.identityId, input.idempotencyKey));
   const spec = reservationSpec(input);
@@ -918,9 +963,7 @@ export async function prepareExtend(
       status: 'replay',
       result: { reservation: await reservationView(tx, row), extended: false },
     };
-  const gpuCount = row.request.devices
-    .filter((device) => device.class.startsWith('gpu'))
-    .reduce((sum, device) => sum + device.count, 0);
+  const gpuCount = wholeGpus(row.request.devices);
   await context.authz.setPending(
     tx,
     { type: 'reservation', id: row.id, tenantId: row.tenantId },
