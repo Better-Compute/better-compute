@@ -864,6 +864,29 @@ describe('provider instances', () => {
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
+  it('lets an account go once its pools are archived and its instances deleted', async () => {
+    const created = (await call('instances', 'create', createProvider())) as View;
+    await reconcile(created.id);
+    await callCapacity('pools', 'archive', { tenantId: 'root', poolId: providerPool });
+    // A live instance still pins the account.
+    await expect(
+      call('providerAccounts', 'delete', { tenantId: 'root', accountId }, root),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await call('instances', 'delete', { tenantId: 'acme', instanceId: created.id });
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('deleted');
+    expect(await call('providerAccounts', 'delete', { tenantId: 'root', accountId }, root)).toEqual(
+      {
+        deleted: true,
+      },
+    );
+    const { rows } = await db.query<{ provider_account_id: string | null }>(
+      `SELECT provider_account_id FROM instances WHERE id = $1`,
+      [created.id],
+    );
+    expect(rows).toEqual([{ provider_account_id: null }]);
+  });
+
   it('cannot be resized in place', async () => {
     const created = (await call('instances', 'create', createProvider())) as View;
     await expect(

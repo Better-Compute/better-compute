@@ -212,7 +212,10 @@ export async function updateAccount(
   return (await readAccount(tx, account.id))!;
 }
 
-/** Deletes an account no pool and no live instance uses. */
+/**
+ * Deletes an account that no live pool and no live instance uses. Archived pools do not pin it, and
+ * deleted instances keep their history but drop the reference.
+ */
 export async function deleteAccount(
   tx: SqlTx,
   input: { tenantId: string; accountId: string },
@@ -220,15 +223,19 @@ export async function deleteAccount(
   const account = await readAccount(tx, input.accountId, input.tenantId);
   if (!account)
     throw new ComputeError('NOT_FOUND', `Provider account ${input.accountId} not found`);
-  const pools = await tx.query(`SELECT id FROM pools WHERE provider_account_id = $1 LIMIT 1`, [
-    account.id,
-  ]);
+  const pools = await tx.query(
+    `SELECT id FROM pools WHERE provider_account_id = $1 AND archived_at IS NULL LIMIT 1`,
+    [account.id],
+  );
   const live = await tx.query(
     `SELECT id FROM instances WHERE provider_account_id = $1 AND state <> 'deleted' LIMIT 1`,
     [account.id],
   );
   if (pools.rows.length > 0 || live.rows.length > 0)
     throw new ComputeError('INVALID_STATE', `Provider account ${account.name} is in use`);
+  await tx.query(`UPDATE instances SET provider_account_id = NULL WHERE provider_account_id = $1`, [
+    account.id,
+  ]);
   await tx.query(`DELETE FROM provider_accounts WHERE id = $1`, [account.id]);
 }
 

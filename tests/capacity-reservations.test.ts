@@ -3,6 +3,7 @@ import {
   apiMethod,
   ComputeError,
   draftId,
+  fleetResourceId,
   manualClock,
   type AuthzAttributes,
   type AuthzRow,
@@ -1129,5 +1130,16 @@ describe('keyed pools.create (FleetConfig ids)', () => {
     await expect(
       call('pools', 'create', body({ idempotencyKey: 'bad key' }), { who: root }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+});
+
+describe('fleet-scoped methods', () => {
+  it('decide on fleet/global like every other fleet method', () => {
+    const set = api.quotas.set as unknown as { resource(input: unknown): unknown };
+    expect(set.resource({ tenantId: 'acme', poolId, resource: 'gpu', max: 1 })).toEqual({
+      type: 'fleet',
+      id: fleetResourceId,
+    });
+    expect(fleetResourceId).toBe('global');
   });
 });

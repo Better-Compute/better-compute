@@ -3,6 +3,7 @@ import {
   defineMethod,
   defineModule,
   draftId,
+  fleetResourceId,
   isId,
   newId,
   reservationStates,
@@ -1089,7 +1090,7 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
     set: defineMethod({
       action: 'compute:quotas:manage',
       kind: 'mutation',
-      resource: () => ({ type: 'fleet', id: 'fleet' }),
+      resource: () => ({ type: 'fleet', id: fleetResourceId }),
       validate: parseSetQuota,
       handler: async (context, input) => {
         const tx = context.sql;
