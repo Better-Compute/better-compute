@@ -12,6 +12,7 @@ const scoped: Record<string, string> = {
   '@better-compute/provision': 'provision/src/index.ts',
   '@better-compute/metal': 'metal/src/index.ts',
   '@better-compute/vps': 'vps/src/index.ts',
+  '@better-compute/pki': 'pki/src/index.ts',
   '@better-compute/postgres/pglite': 'postgres/src/pglite.ts',
   '@better-compute/postgres/conformance': 'postgres/src/conformance.ts',
   '@better-compute/postgres': 'postgres/src/index.ts',

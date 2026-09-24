@@ -1,0 +1,56 @@
+{
+  "name": "@better-compute/pki",
+  "version": "0.1.0",
+  "description": "Machine PKI for better-compute: local CAs, SPIFFE node certificates, sealed join tokens, signed join responses and renew proofs.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/pki#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/pki"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "gpu",
+    "bare-metal",
+    "capacity",
+    "provisioning",
+    "infrastructure",
+    "pki",
+    "x509",
+    "spiffe",
+    "jwe"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/core": "workspace:*",
+    "@better-compute/protocol": "workspace:*",
+    "@bufbuild/protobuf": "^2.15.0"
+  }
+}

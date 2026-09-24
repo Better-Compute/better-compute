@@ -23,6 +23,9 @@
       "path": "./packages/vps"
     },
     {
+      "path": "./packages/pki"
+    },
+    {
       "path": "./packages/postgres"
     },
     {
