@@ -328,6 +328,8 @@ type PoolInput = { tenantId: string; poolId: string };
 type ReservationInput = { tenantId: string; reservationId: string };
 type ListReservationsInput = {
   tenantId: string;
+  /** `mine` (the default): only the caller's own; `all`: the tenant's, for admins (§9.2). */
+  scope: 'mine' | 'all';
   state?: ReservationState;
   poolId?: string;
   limit?: number;
@@ -358,14 +360,14 @@ export type CapacityApi = {
     capacity: MethodDefinition<PoolInput, PoolCapacity[]>;
     offer: MethodDefinition<OfferPoolInput, TenantPool>;
     unoffer: MethodDefinition<PoolInput & { toTenantId: string }, { removed: boolean }>;
-    update: MethodDefinition<PoolInput, Pool>;
+    update: MethodDefinition<UpdatePoolInput, Pool>;
     archive: MethodDefinition<PoolInput, Pool>;
   };
   capacity: {
     summary: MethodDefinition<TenantInput, CapacitySummary>;
     byPool: MethodDefinition<PoolInput, PoolCapacity[]>;
     preview: MethodDefinition<CreateReservationInput, CapacityPreview>;
-    timeline: MethodDefinition<PoolInput, never>;
+    timeline: MethodDefinition<TimelineInput, CapacityTimeline>;
   };
   reservations: {
     create: MethodDefinition<CreateReservationInput, Reservation>;
@@ -378,9 +380,93 @@ export type CapacityApi = {
   };
   quotas: {
     get: MethodDefinition<TenantInput & { poolId?: string }, { items: QuotaRow[] }>;
-    set: MethodDefinition<TenantInput, never>;
+    set: MethodDefinition<SetQuotaInput, QuotaRow>;
   };
 };
+
+export interface UpdatePoolInput {
+  tenantId: string;
+  poolId: string;
+  policy?: PoolPolicy;
+  gpuModel?: string;
+}
+
+export interface TimelineInput {
+  tenantId: string;
+  poolId: string;
+  /** Epoch ms; default: the current hour. */
+  from?: number;
+  /** Epoch ms; default: `from` + 24 h. At most 7 days and 336 buckets. */
+  to?: number;
+  /** Bucket width in minutes (default 60). */
+  stepMinutes?: number;
+}
+
+/** `capacity.timeline`: GPUs booked per bucket, for calendar views and future reservations. */
+export interface CapacityTimeline {
+  poolId: string;
+  /** Schedulable, healthy GPUs now (the rollup's `allocatable`). */
+  allocatable: number;
+  buckets: { start: number; end: number; booked: number; free: number }[];
+}
+
+export interface SetQuotaInput {
+  tenantId: string;
+  poolId: string;
+  resource: string;
+  max: number;
+}
+
+function parseUpdatePool(raw: unknown): UpdatePoolInput {
+  const input = object(raw, ['tenantId', 'poolId', 'policy', 'gpuModel']);
+  const result: UpdatePoolInput = {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+  };
+  if (input.policy !== undefined) {
+    if (typeof input.policy !== 'object' || input.policy === null || Array.isArray(input.policy))
+      fail('policy must be an object');
+    result.policy = input.policy as PoolPolicy;
+  }
+  if (input.gpuModel !== undefined) {
+    if (typeof input.gpuModel !== 'string' || !/^[A-Za-z0-9-]{1,32}$/.test(input.gpuModel))
+      fail('gpuModel is invalid');
+    result.gpuModel = input.gpuModel;
+  }
+  if (result.policy === undefined && result.gpuModel === undefined) fail('Nothing to update');
+  return result;
+}
+
+const hourMs = 3_600_000;
+
+function parseTimeline(raw: unknown): TimelineInput {
+  const input = object(raw, ['tenantId', 'poolId', 'from', 'to', 'stepMinutes']);
+  const result: TimelineInput = {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+  };
+  const from = optionalInt(input.from, 'from', 0, 2 ** 47);
+  const to = optionalInt(input.to, 'to', 0, 2 ** 47);
+  const step = optionalInt(input.stepMinutes, 'stepMinutes', 5, 24 * 60);
+  if (from !== undefined) result.from = from;
+  if (to !== undefined) result.to = to;
+  if (step !== undefined) result.stepMinutes = step;
+  return result;
+}
+
+function parseSetQuota(raw: unknown): SetQuotaInput {
+  const input = object(raw, ['tenantId', 'poolId', 'resource', 'max']);
+  if (typeof input.resource !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(input.resource))
+    fail('resource is invalid');
+  const max = optionalInt(input.max, 'max', 0, Number.MAX_SAFE_INTEGER);
+  if (max === undefined) fail('max is required');
+  return {
+    tenantId: tenant(input.tenantId),
+    poolId: id(input.poolId, 'pool', 'poolId'),
+    resource: input.resource,
+    max,
+  };
+}
 
 function parseTenant(raw: unknown): TenantInput {
   const input = object(raw, ['tenantId']);
@@ -398,8 +484,13 @@ function parseReservation(raw: unknown): ReservationInput {
   };
 }
 function parseListReservations(raw: unknown): ListReservationsInput {
-  const input = object(raw, ['tenantId', 'state', 'poolId', 'limit', 'cursor']);
-  const result: ListReservationsInput = { tenantId: tenant(input.tenantId) };
+  const input = object(raw, ['tenantId', 'scope', 'state', 'poolId', 'limit', 'cursor']);
+  if (input.scope !== undefined && input.scope !== 'mine' && input.scope !== 'all')
+    fail('scope must be mine or all');
+  const result: ListReservationsInput = {
+    tenantId: tenant(input.tenantId),
+    scope: (input.scope as 'mine' | 'all' | undefined) ?? 'mine',
+  };
   if (input.state !== undefined) {
     if (!reservationStates.includes(input.state as ReservationState)) fail('state is invalid');
     result.state = input.state as ReservationState;
@@ -630,14 +721,40 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
         return { removed: rowCount > 0 };
       },
     }),
-    update: later(
-      'pools.update',
-      'v0.2',
-      'compute:pools:manage',
-      'mutation',
-      poolResource,
-      parsePool,
-    ),
+    update: defineMethod({
+      action: 'compute:pools:manage',
+      kind: 'mutation',
+      resource: poolResource,
+      validate: parseUpdatePool,
+      handler: async (context, input) => {
+        const tx = context.sql;
+        const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
+        const next: Pool = { ...pool, version: pool.version + 1 };
+        if (input.policy !== undefined) next.policy = input.policy;
+        if (input.gpuModel !== undefined) next.gpuModel = input.gpuModel;
+        await tx.query(
+          `UPDATE pools SET policy = $2::jsonb, gpu_model = $3, version = version + 1 WHERE id = $1`,
+          [pool.id, JSON.stringify(next.policy), next.gpuModel ?? null],
+        );
+        // Every tenant view of the pool carries the new attributes.
+        const offers = await tx.query<{ tenant_id: string }>(
+          `SELECT tenant_id FROM pool_offers WHERE pool_id = $1`,
+          [pool.id],
+        );
+        for (const viewer of new Set([
+          pool.ownerTenantId,
+          ...offers.rows.map((row) => row.tenant_id),
+        ]))
+          await context.authz.upsert(tx, await poolAuthzRow(tx, next, viewer));
+        await context.events.publish(tx, {
+          type: 'pool.updated',
+          tenantId: input.tenantId,
+          subject: `pool/${pool.id}`,
+          data: { version: next.version },
+        });
+        return next;
+      },
+    }),
     archive: later(
       'pools.archive',
       'v0.2',
@@ -731,14 +848,53 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
         return preview;
       },
     }),
-    timeline: later(
-      'capacity.timeline',
-      'v0.2',
-      'compute:capacity:read',
-      'read',
-      poolResource,
-      parsePool,
-    ),
+    timeline: defineMethod({
+      action: 'compute:capacity:read',
+      kind: 'read',
+      resource: poolResource,
+      validate: parseTimeline,
+      handler: async (context, input) => {
+        const tx = context.sql;
+        const [visible] = await tenantPools(tx, input.tenantId, input.poolId);
+        if (!visible) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
+        const step = (input.stepMinutes ?? 60) * 60_000;
+        const from = input.from ?? Math.floor(context.clock.now() / hourMs) * hourMs;
+        const to = input.to ?? from + 24 * hourMs;
+        if (!(to > from)) fail('to must be after from');
+        if (to - from > 7 * 24 * hourMs || Math.ceil((to - from) / step) > 336)
+          fail('A timeline spans at most 7 days and 336 buckets');
+        const { rows } = await tx.query<{ start_ms: number; booked: string | number }>(
+          `SELECT (extract(epoch FROM g.t) * 1000)::float8 AS start_ms,
+                  count(DISTINCT b.device_id) AS booked
+             FROM generate_series($2::timestamptz, $3::timestamptz - make_interval(secs => $4 / 1000.0),
+                                  make_interval(secs => $4 / 1000.0)) AS g(t)
+             LEFT JOIN device_bookings b
+               ON b.during && tstzrange(g.t, g.t + make_interval(secs => $4 / 1000.0))
+              AND b.device_id IN (SELECT d.id FROM devices d JOIN nodes n ON n.id = d.node_id
+                                   WHERE n.pool_id = $1 AND d.class = 'gpu')
+            GROUP BY g.t ORDER BY g.t`,
+          [input.poolId, new Date(from).toISOString(), new Date(to).toISOString(), step],
+        );
+        const gpu = (await readPoolCapacity(tx, input.poolId)).find(
+          (row) => row.resource === 'gpu',
+        );
+        const allocatable = gpu?.allocatable ?? 0;
+        return {
+          poolId: input.poolId,
+          allocatable,
+          buckets: rows.map((row) => {
+            const start = Number(row.start_ms);
+            const booked = Number(row.booked);
+            return {
+              start,
+              end: Math.min(start + step, to),
+              booked,
+              free: Math.max(0, allocatable - booked),
+            };
+          }),
+        };
+      },
+    }),
   };
 
   const reservations: CapacityApi['reservations'] = {
@@ -771,7 +927,13 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
       kind: 'read',
       resource: tenantResource,
       validate: parseListReservations,
-      handler: (context, input) => listReservations(context.sql, input),
+      handler: (context, input) => {
+        const { scope, ...filters } = input;
+        return listReservations(context.sql, {
+          ...filters,
+          ...(scope === 'mine' ? { ownerIdentityId: context.caller?.identityId ?? '' } : {}),
+        });
+      },
     }),
     release: defineMethod({
       action: 'compute:reservations:release',
@@ -825,14 +987,27 @@ function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['place
         items: await readQuotas(context.sql, input.tenantId, input.poolId),
       }),
     }),
-    set: later(
-      'quotas.set',
-      'v0.2',
-      'compute:quotas:manage',
-      'mutation',
-      () => ({ type: 'fleet', id: 'fleet' }),
-      parseTenant,
-    ),
+    // A fleet operation (§9.2 `quotas:manage` @ fleet): set any tenant's limit on any pool.
+    set: defineMethod({
+      action: 'compute:quotas:manage',
+      kind: 'mutation',
+      resource: () => ({ type: 'fleet', id: 'fleet' }),
+      validate: parseSetQuota,
+      handler: async (context, input) => {
+        const tx = context.sql;
+        const pool = await readPool(tx, input.poolId);
+        if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
+        await setQuota(tx, input.tenantId, input.poolId, input.resource, input.max);
+        await context.events.publish(tx, {
+          type: 'quota.updated',
+          tenantId: input.tenantId,
+          subject: `pool/${input.poolId}`,
+          data: { resource: input.resource, max: input.max },
+        });
+        const rows = await readQuotas(tx, input.tenantId, input.poolId);
+        return rows.find((row) => row.resource === input.resource)!;
+      },
+    }),
   };
 
   return { pools, capacity, reservations, quotas };

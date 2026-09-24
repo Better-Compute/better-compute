@@ -861,8 +861,9 @@ export async function listInstances(
       WHERE i.tenant_id = $1 AND NOT i.draft
         AND ($2::text IS NULL OR i.owner_identity_id = $2)
         AND ($3::text IS NULL OR i.state = $3) AND ($4::text IS NULL OR i.pool_id = $4)
-        AND ($5::text IS NULL OR i.id < $5)
-      ORDER BY i.id DESC LIMIT $6`,
+        AND ($5::text IS NULL OR (i.created_at, i.id) <
+             (SELECT created_at, id FROM instances WHERE id = $5 AND tenant_id = $1))
+      ORDER BY i.created_at DESC, i.id DESC LIMIT $6`,
     [
       input.tenantId,
       owner,

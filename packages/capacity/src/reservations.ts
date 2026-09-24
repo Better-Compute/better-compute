@@ -1300,13 +1300,18 @@ export async function deviceAssignments(
   }));
 }
 
-/** A tenant's reservations, newest first, optionally filtered by state; keyset-paginated by id. */
+/**
+ * A tenant's reservations, newest first, optionally filtered by state, pool and owner (§9.2: owner-
+ * scoped kinds list the caller's own by default). Draft-derived ids are not time-ordered, so pages
+ * follow `(created_at, id)`; the cursor is the last reservation's id.
+ */
 export async function listReservations(
   tx: SqlTx,
   input: {
     tenantId: string;
     state?: ReservationState;
     poolId?: string;
+    ownerIdentityId?: string;
     limit?: number;
     cursor?: string;
   },
@@ -1316,9 +1321,18 @@ export async function listReservations(
     `SELECT ${reservationColumns} FROM reservations
       WHERE tenant_id = $1 AND state <> 'draft'
         AND ($2::text IS NULL OR state = $2) AND ($3::text IS NULL OR pool_id = $3)
-        AND ($4::text IS NULL OR id < $4)
-      ORDER BY id DESC LIMIT $5`,
-    [input.tenantId, input.state ?? null, input.poolId ?? null, input.cursor ?? null, limit + 1],
+        AND ($6::text IS NULL OR owner_identity_id = $6)
+        AND ($4::text IS NULL OR (created_at, id) <
+             (SELECT created_at, id FROM reservations WHERE id = $4 AND tenant_id = $1))
+      ORDER BY created_at DESC, id DESC LIMIT $5`,
+    [
+      input.tenantId,
+      input.state ?? null,
+      input.poolId ?? null,
+      input.cursor ?? null,
+      limit + 1,
+      input.ownerIdentityId ?? null,
+    ],
   );
   const page = rows.slice(0, limit).map(toReservation);
   const items: Reservation[] = [];

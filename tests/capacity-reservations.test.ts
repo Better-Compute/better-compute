@@ -759,10 +759,64 @@ describe('pools, capacity and quotas', () => {
       items: { resource: string }[];
     };
     expect(quotas.items.map((row) => row.resource)).toEqual(['gpu']);
-    await expect(call('capacity', 'timeline', { tenantId: 'acme', poolId })).rejects.toMatchObject({
-      code: 'NOT_IMPLEMENTED',
-      details: { phase: 'v0.2' },
-    });
+    await expect(
+      call('pools', 'archive', { tenantId: 'root', poolId }, { who: root }),
+    ).rejects.toMatchObject({ code: 'NOT_IMPLEMENTED', details: { phase: 'v0.2' } });
+  });
+
+  it('draws a booking timeline in buckets', async () => {
+    await call('reservations', 'create', create({ devices: [{ class: 'gpu', count: 3 }] }));
+    await call(
+      'reservations',
+      'create',
+      create({ idempotencyKey: 'later', start: T0 + 2 * HOUR, duration: '1h' }),
+    );
+    const timeline = (await call('capacity', 'timeline', {
+      tenantId: 'acme',
+      poolId,
+      from: T0,
+      to: T0 + 4 * HOUR,
+    })) as { allocatable: number; buckets: { start: number; booked: number; free: number }[] };
+    expect(timeline.buckets.map((bucket) => [bucket.start - T0, bucket.booked])).toEqual([
+      [0, 3],
+      [HOUR, 3],
+      [2 * HOUR, 2],
+      [3 * HOUR, 0],
+    ]);
+    await expect(
+      call('capacity', 'timeline', { tenantId: 'acme', poolId, from: T0, to: T0 + 30 * 24 * HOUR }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(call('capacity', 'timeline', { tenantId: 'other', poolId })).rejects.toMatchObject(
+      { code: 'NOT_FOUND' },
+    );
+  });
+
+  it('lets the owner update a pool and the fleet set quotas', async () => {
+    const updated = (await call(
+      'pools',
+      'update',
+      { tenantId: 'root', poolId, policy: { maxPending: '1h' }, gpuModel: 'H200' },
+      { who: root },
+    )) as { gpuModel: string; policy: { maxPending: string }; version: number };
+    expect(updated).toMatchObject({ gpuModel: 'H200', policy: { maxPending: '1h' }, version: 2 });
+    expect(recorded.authz.map((row) => [row.tenantId, row.attributes.gpuModel])).toEqual([
+      ['root', 'H200'],
+      ['acme', 'H200'],
+    ]);
+    await expect(
+      call('pools', 'update', { tenantId: 'acme', poolId, gpuModel: 'B200' }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      call('pools', 'update', { tenantId: 'root', poolId }, { who: root }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+
+    const quota = await call(
+      'quotas',
+      'set',
+      { tenantId: 'acme', poolId, resource: 'gpu', max: 16 },
+      { who: root },
+    );
+    expect(quota).toMatchObject({ resource: 'gpu', max: 16, used: 0, available: 16 });
   });
 });
 
@@ -947,5 +1001,34 @@ describe('delegated confirmation (§3.4 step 7)', () => {
       `SELECT state FROM reservations WHERE idempotency_key = 'k2'`,
     );
     expect(rows).toEqual([{ state: 'denied' }]);
+  });
+});
+
+describe('reservations.list scope', () => {
+  it('lists the caller’s own by default and the whole tenant with scope all', async () => {
+    await call(
+      'reservations',
+      'create',
+      create({ idempotencyKey: 'mine-1', devices: [{ class: 'gpu', count: 1 }] }),
+    );
+    await call(
+      'reservations',
+      'create',
+      create({ idempotencyKey: 'bob-1', devices: [{ class: 'gpu', count: 1 }] }),
+      {
+        who: { ...caller, identityId: 'usr_bob' },
+      },
+    );
+    const mine = (await call('reservations', 'list', { tenantId: 'acme' })) as { items: Rsv[] };
+    expect(mine.items).toHaveLength(1);
+    const all = (await call('reservations', 'list', { tenantId: 'acme', scope: 'all' })) as {
+      items: Rsv[];
+    };
+    expect(all.items).toHaveLength(2);
+    await expect(
+      call('reservations', 'list', { tenantId: 'acme', scope: 'everyone' }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
   });
 });
