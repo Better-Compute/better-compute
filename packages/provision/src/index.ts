@@ -35,6 +35,7 @@ export { provisionMigrations } from './migrations.js';
 export * from './images.js';
 export * from './command-step.js';
 export * from './remediation.js';
+export * from './renderers.js';
 export type * from './api.js';
 export { provisionApi } from './api.js';
 

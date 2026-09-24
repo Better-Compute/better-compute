@@ -10,6 +10,7 @@ import {
 import {
   awaitCommand,
   defineStep,
+  renderedUserData,
   resolveImageRef,
   siteAgentFor,
   stepNotReady,
@@ -351,7 +352,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       if (!image) throw new ComputeError('NOT_FOUND', `Image ${ref} is not in the catalog`);
       const format = imageFormatNames[pinned?.profile.image?.format ?? image.format];
       if (!format) throw new ComputeError('INVALID_INPUT', `deploy.deploy cannot write a ${image.format} image to disk`);
-      // User data rendering (a secret ref embedding a `provisioned` token) arrives with renderers.
+      // A `userdata.render` step earlier in the workflow stored the user data as a secret.
+      const userData = await renderedUserData(context.sql, context.workflowId);
+      if (pinned?.profile.userData && !userData)
+        throw new ComputeError('INVALID_CONFIG', 'The profile has userData but no userdata.render step ran before deploy.deploy');
       const outcome = await awaitCommand(context, {
         nodeId: node.node_id,
         kind: 'deploy.image',
@@ -361,7 +365,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
           format,
           compression: compressionNames[pinned?.profile.image?.compression ?? image.compression]!,
           uefi: node.uefi,
-          ...(pinned?.profile.userData ? { userDataKind: pinned.profile.userData.kind } : {}),
+          ...(userData ? { userDataRef: userData.userDataRef, userDataKind: userData.kind } : {}),
         },
         timeoutMs: 60 * 60_000,
       });

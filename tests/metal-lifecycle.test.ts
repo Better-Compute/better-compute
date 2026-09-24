@@ -102,7 +102,9 @@ const gpuHost = defineProfile({
   target: 'metal',
   role: 'host',
   image: { ref: 'ubuntu-24.04-server@2026.09', format: 'raw', compression: 'zstd' },
+  userData: { kind: 'cloud-init', template: 'bcd-host.yaml.hbs' },
   steps: [
+    { use: 'userdata.render' },
     { use: 'boot.prepareRamdisk', on: 'site' },
     { use: 'management.setBootDevice', on: 'site', with: { device: 'pxe' } },
     { use: 'power.setPower', on: 'site', with: { action: 'cycle' } },
@@ -112,7 +114,18 @@ const gpuHost = defineProfile({
     { use: 'boot.kexec', on: 'ramdisk', await: 'rejoin', timeout: '15m' },
   ],
 });
-const provision = provisionModule({ modules: [bareMetal], profiles: [gpuHost] });
+const provision = provisionModule({
+  modules: [bareMetal],
+  profiles: [gpuHost],
+  userData: { controlPlaneUrl: 'https://gw.example.com', bcdUrl: 'https://dl.example.com/bcd', bcdSha256: 'cd'.repeat(32) },
+});
+const issuedTokens: { role: string; maxUses?: number }[] = [];
+const pki = {
+  async issueJoinToken(_tx: unknown, input: { role: string; maxUses?: number }) {
+    issuedTokens.push(input);
+    return { id: `jt_${issuedTokens.length}`, token: `bcj_secret_${issuedTokens.length}` };
+  },
+};
 
 let context: ModuleContext & MethodContext;
 let api: MetalApi;
@@ -227,7 +240,7 @@ beforeAll(async () => {
     [SITE_AGENT],
   );
   await connect(SITE_AGENT, 'site', 'site-boot');
-  const base = { sql: db, work, events: eventLog, commands, secrets, requestId: 'req_metal', iam: { rootTenantId: 'root' } };
+  const base = { sql: db, work, events: eventLog, commands, secrets, pki, requestId: 'req_metal', iam: { rootTenantId: 'root' } };
   context = { ...base, workflows: provision.workflowEngine(base as never) } as unknown as ModuleContext & MethodContext;
   api = bareMetal.api!(context);
   await db.transaction((tx) =>
@@ -354,6 +367,14 @@ describe('deploy, release, retire', () => {
       compression: 'IMAGE_COMPRESSION_ZSTD',
     });
     expect(seen.find((c) => c.kind === 'boot.kexec')!.node).toBe(id);
+    // User data travels as a secret reference only; the stored document embeds a single-use token.
+    const deployPayload = seen.find((c) => c.kind === 'deploy.image')!.payload;
+    expect(deployPayload).toMatchObject({ userDataKind: 'cloud-init', userDataRef: expect.stringMatching(/^secret:\/\//) });
+    expect(JSON.stringify(seen)).not.toContain('bcj_secret_');
+    const document = stored.get(deployPayload.userDataRef as string)!;
+    expect(document).toContain(`bcj_secret_${issuedTokens.length}`);
+    expect(document).toContain(`--node-id, ${id}`);
+    expect(issuedTokens.at(-1)).toMatchObject({ role: 'provisioned', maxUses: 1 });
     const session = await db.query<{ role: string }>('SELECT role FROM node_sessions WHERE node_id = $1', [id]);
     expect(session.rows[0]!.role).toBe('node');
   });

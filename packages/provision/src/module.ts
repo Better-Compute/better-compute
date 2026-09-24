@@ -21,6 +21,7 @@ import {
 import { stepRegistry } from './expand.js';
 import { provisionMigrations } from './migrations.js';
 import { profileSource } from './profiles.js';
+import { userDataStep, type UserDataOptions } from './renderers.js';
 import {
   defaultRemediationPolicy,
   healthWorkKind,
@@ -47,6 +48,8 @@ export interface ProvisionOptions {
    * on by default. `false` leaves it out; an object tunes the budget and the circuit breaker.
    */
   remediation?: false | Partial<RemediationPolicy>;
+  /** User data rendering (`userData.render`): templates and where the installed bcd joins. */
+  userData?: UserDataOptions;
 }
 
 /** The provision module, plus the `WorkflowEngine` the host puts on `ModuleContext.workflows`. */
@@ -75,6 +78,7 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
   const steps = stepRegistry([
     ...(options.builtinSteps === false ? [] : builtinSteps),
     ...(remediation ? remediationSteps : []),
+    userDataStep(options.userData),
     ...fromModules,
     ...(options.steps ?? []),
   ]);
