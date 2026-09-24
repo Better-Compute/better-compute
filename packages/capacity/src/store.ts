@@ -121,13 +121,17 @@ interface RawNode {
   observed_generation: string | number;
 }
 
-/** Every node of a pool, ordered by id. */
-export async function readPoolNodes(tx: SqlTx, poolId: string): Promise<NodeRow[]> {
+/** Every node of a pool (or just `onlyNodes` of it), ordered by id. */
+export async function readPoolNodes(
+  tx: SqlTx,
+  poolId: string,
+  onlyNodes?: readonly string[],
+): Promise<NodeRow[]> {
   const { rows } = await tx.query<RawNode>(
     `SELECT id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
             connectivity, trust, no_schedule_reasons, observed_generation
-       FROM nodes WHERE pool_id = $1 ORDER BY id`,
-    [poolId],
+       FROM nodes WHERE pool_id = $1 ${onlyNodes ? 'AND id = ANY($2::text[])' : ''} ORDER BY id`,
+    onlyNodes ? [poolId, [...onlyNodes]] : [poolId],
   );
   return rows.map((row) => ({
     id: row.id,
@@ -328,6 +332,8 @@ export async function syncDeviceLinks(
 export interface LoadNodeViewsOptions {
   /** Leave these nodes out entirely. */
   excludeNodes?: readonly string[];
+  /** Load only these nodes of the pool (a placement shortlist). */
+  onlyNodes?: readonly string[];
 }
 
 /**
@@ -343,7 +349,9 @@ export async function loadNodeViews(
   options: LoadNodeViewsOptions = {},
 ): Promise<NodeView[]> {
   const excluded = new Set(options.excludeNodes ?? []);
-  const nodes = (await readPoolNodes(tx, pool.id)).filter((node) => !excluded.has(node.id));
+  const nodes = (await readPoolNodes(tx, pool.id, options.onlyNodes)).filter(
+    (node) => !excluded.has(node.id),
+  );
   const live = nodes.filter((node) => isSchedulable(node, pool)).map((node) => node.id);
   const [devices, busy, resources, labels, links] = [
     await readDevices(tx, live),

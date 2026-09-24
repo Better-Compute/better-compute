@@ -4,6 +4,7 @@ import {
   type Allocation,
   type GangSpec,
   type IdGenerator,
+  type NodeView,
   type PlacementContext,
   type PlacementOutcome,
   type PlacementRequest,
@@ -14,7 +15,8 @@ import { schedulableSql } from './eligibility.js';
 import { assertGang, chooseGang, maxGangSize, planGangs } from './gang.js';
 import { choosePlan, planPlacement, summarizeRejections, type NodePlan } from './pipeline.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
-import { loadNodeViews, lockPool, type PoolRow } from './store.js';
+import { planFromShortlist, shortlistable } from './shortlist.js';
+import { loadNodeViews, lockPool, readPool, type PoolRow } from './store.js';
 
 export interface InlinePlacerOptions {
   /** Placement attempts before the request goes `pending` (PLAN.md §10.3: ≤3). */
@@ -49,6 +51,11 @@ export function assertPlacementRequest(request: PlacementRequest): void {
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start)
     fail('during must be a non-empty interval');
 }
+
+const archived: PlacementOutcome = Object.freeze({
+  status: 'pending',
+  reason: 'the pool is archived',
+}) as PlacementOutcome;
 
 type Commit = { ok: true; allocation: Allocation } | { ok: false; reason: string };
 
@@ -181,9 +188,10 @@ async function commitPlan(
 }
 
 /**
- * The v0.1 placer (PLAN.md §10.3): runs in the admission transaction, fenced by the pool row lock.
- * Plans against a snapshot of the pool, commits the chosen node with guarded statements, and on a
- * lost race replans without that node, up to `maxAttempts` times; then answers `pending`.
+ * The v0.1 placer (PLAN.md §10.3): runs in the admission transaction. Plans on plain reads (from a
+ * SQL shortlist of the pool when that decides exactly, else the whole pool), then takes the pool row
+ * lock and commits the chosen node with guarded statements; on a lost race it replans without that
+ * node, up to `maxAttempts` times, then answers `pending`.
  * Quota is not charged here (see `chargeQuota`): a `pending` reservation keeps its charge (D9).
  */
 export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
@@ -200,33 +208,51 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
     ): Promise<PlacementOutcome> {
       assertPlacementRequest(request);
       if (request.gang !== undefined) assertGang(request.gang);
-      const pool = await lockPool(tx, request.poolId);
-      if (pool.archived) return { status: 'pending', reason: 'the pool is archived' };
+      // Plans on plain reads; the pool row lock is taken only before the first guarded commit, which
+      // re-validates node, atoms and scalars, so the critical section is the commit alone.
+      let pool = await readPool(tx, request.poolId);
+      if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${request.poolId} not found`);
+      if (pool.archived) return archived;
       if (context.admission)
         for (const plugin of context.plugins) await plugin.admit?.(request, context.admission);
+      let locked = false;
+      const lock = async (): Promise<PoolRow | undefined> => {
+        if (!locked) {
+          pool = await lockPool(tx, request.poolId);
+          locked = true;
+        }
+        return pool!.archived ? undefined : pool!;
+      };
 
       const excluded = new Set(request.excludeNodes ?? []);
-      const views = await loadNodeViews(tx, pool, request.during);
       if (request.gang !== undefined)
         return placeGang(
           tx,
           request,
           request.gang,
           pool,
-          views,
+          await loadNodeViews(tx, pool, request.during),
           excluded,
           context,
           maxAttempts,
           ids,
+          lock,
         );
+      const fast = shortlistable(request, context.plugins);
+      let views: NodeView[] | undefined;
       const conflicts: string[] = [];
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const { ranked, rejected } = planPlacement(
-          { ...request, excludeNodes: [...excluded] },
-          views,
-          pool,
-          { plugins: context.plugins, weights: context.weights },
-        );
+        let plan = fast
+          ? (await planFromShortlist(tx, pool, request, [...excluded], context))?.plan
+          : undefined;
+        if (!plan) {
+          views ??= await loadNodeViews(tx, pool, request.during);
+          plan = planPlacement({ ...request, excludeNodes: [...excluded] }, views, pool, {
+            plugins: context.plugins,
+            weights: context.weights,
+          });
+        }
+        const { ranked, rejected } = plan;
         const choice = choosePlan(ranked, () => context.random(), context.topN);
         if (!choice) {
           const why = summarizeRejections(
@@ -239,10 +265,12 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
             reason: conflicts.length ? `${why}; after conflicts: ${conflicts.join('; ')}` : why,
           };
         }
+        const current = await lock();
+        if (!current) return archived;
         const result = await commitPlan(
           tx,
           request,
-          pool,
+          current,
           choice,
           `capacity_place_${attempt}`,
           ids,
@@ -274,6 +302,7 @@ async function placeGang(
   context: PlacementContext,
   maxAttempts: number,
   ids: IdGenerator,
+  lock: () => Promise<PoolRow | undefined>,
 ): Promise<PlacementOutcome> {
   if (gang.size > maxGangSize) throw new ComputeError('INVALID_INPUT', 'gang too large');
   const conflicts: string[] = [];
@@ -301,6 +330,9 @@ async function placeGang(
         reason: conflicts.length ? `${why}; after conflicts: ${conflicts.join('; ')}` : why,
       };
     }
+    const current = await lock();
+    if (!current) return archived;
+    pool = current;
     const outer = `capacity_gang_${attempt}`;
     await tx.query(`SAVEPOINT ${outer}`);
     const allocations: Allocation[] = [];
