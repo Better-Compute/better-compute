@@ -144,13 +144,13 @@ describe('createComputeClient()', () => {
 
   it('raises ComputeClientError with the code, status, details and request id', async () => {
     const { client: api } = client({ token: USER });
-    const error = await failure(api.inventory.get({ tenantId: ACME, nodeId: NODE_ID }));
+    const error = await failure(api.inventory.history({ tenantId: ACME, nodeId: NODE_ID }));
     expect(error).toMatchObject({
       name: 'ComputeClientError',
       code: 'NOT_IMPLEMENTED',
-      message: 'inventory.get arrives in v0.1',
+      message: 'inventory.history arrives in v0.2',
       status: 501,
-      details: { feature: 'inventory.get', phase: 'v0.1' },
+      details: { feature: 'inventory.history', phase: 'v0.2' },
       requestId: expect.stringMatching(/^req_/),
     });
   });

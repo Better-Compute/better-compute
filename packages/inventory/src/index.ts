@@ -1,10 +1,17 @@
 /**
  * Hardware inventory for better-compute (PLAN.md §10.1): GPU naming (`normalizeGpuProduct`, the
- * versioned `gpuModels` table), node condition types, and the always-on `inventoryModule`.
- * Section hashing, diffs, labels and the Inventory controller arrive in v0.1.
+ * versioned `gpuModels` table), section verification and snapshot digests, diffs, devices and
+ * atoms, GFD-style labels, `hardware_key`, the v0.1 conditions, and the always-on
+ * `inventoryModule`.
  */
 export * from './gpu-models.js';
 export * from './conditions.js';
+export * from './sections.js';
+export * from './devices.js';
+export * from './labels.js';
+export * from './hardware-key.js';
+export * from './diff.js';
+export * from './store.js';
 export * from './module.js';
 
 /** NodeInventory v1 and its sections, as the daemon reports them (`agent/v1/inventory.proto`). */

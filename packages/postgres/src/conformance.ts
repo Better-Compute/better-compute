@@ -179,11 +179,14 @@ const completeWork = 'DELETE FROM work_queue WHERE kind = $1 AND key = $2 AND ge
 
 const insertOutbox = 'INSERT INTO outbox (topic, payload) VALUES ($1, $2)';
 
-/** The outbox reader of §8.4, narrowed to one topic. */
+/**
+ * The outbox reader of §8.4, narrowed to one topic. ORDER BY names the table's columns: a bare
+ * `txid` would resolve to the text output alias and sort "1000" before "999".
+ */
 const readOutbox = `SELECT seq, txid::text AS txid, payload FROM outbox
   WHERE txid < pg_snapshot_xmin(pg_current_snapshot()) AND (txid, seq) > ($1::xid8, $2::bigint)
     AND topic = $3
-  ORDER BY txid, seq`;
+  ORDER BY outbox.txid, outbox.seq`;
 
 interface OutboxRow {
   seq: number;
@@ -815,6 +818,34 @@ const queueCases: StoreConformanceCase[] = [
       });
       const later = await db.query<OutboxRow>(readOutbox, [last.txid, last.seq, topic]);
       checkEqual(payloads(later.rows), [4], 'the row appears once its transaction commits');
+    },
+  },
+  {
+    name: 'outbox: the cursor orders txids numerically across a change in digit count',
+    async run(db) {
+      await db.migrate();
+      const topic = `conformance.${unique()}`;
+      const current = async () =>
+        BigInt((await db.query<{ x: string }>('SELECT pg_current_xact_id()::text AS x')).rows[0]!.x);
+      // One row just below a power of ten, then burn xids so the next row's txid has one more digit.
+      let xid = await current();
+      const boundary = 10n ** BigInt(xid.toString().length);
+      // A long-lived server may be far from the next power of ten; burning that many xids is not
+      // worth it there. Fresh databases (every PGlite run, CI's Postgres) are always close.
+      if (boundary - xid > 20_000n) return;
+      while (xid < boundary - 3n) xid = await current();
+      await db.transaction((tx) => tx.query(insertOutbox, [topic, '{"n":1}']));
+      while (xid < boundary) xid = await current();
+      await db.transaction((tx) => tx.query(insertOutbox, [topic, '{"n":2}']));
+      const rows = (await db.query<OutboxRow>(readOutbox, ['0', 0, topic])).rows;
+      checkEqual(
+        rows.map((row) => row.payload.n),
+        [1, 2],
+        'the shorter txid sorts first',
+      );
+      check(rows[1]!.txid.length > rows[0]!.txid.length, 'the two txids differ in digit count');
+      const resumed = await db.query<OutboxRow>(readOutbox, [rows[0]!.txid, rows[0]!.seq, topic]);
+      checkEqual(resumed.rows.map((row) => row.payload.n), [2], 'the cursor resumes across the boundary');
     },
   },
 ];

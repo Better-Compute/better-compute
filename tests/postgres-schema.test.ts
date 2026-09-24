@@ -60,7 +60,7 @@ async function indexDefinition(name: string): Promise<string | undefined> {
 describe('migrate', () => {
   it('applies the base schema on a fresh database, then skips it', async () => {
     const names = baseMigrations.map((migration) => migration.name);
-    expect(names).toEqual(['core/0001_clock', 'core/0002_base']);
+    expect(names).toEqual(['core/0001_clock', 'core/0002_base', 'core/0003_v01']);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
     const { rows } = await db.query('SELECT version FROM compute_schema_version');
@@ -71,7 +71,7 @@ describe('migrate', () => {
     const { rows } = await db.query<{ applied_at: Date }>(
       'SELECT applied_at FROM compute_migrations ORDER BY name',
     );
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     for (const row of rows)
       expect(Math.abs(row.applied_at.getTime() - Date.now())).toBeLessThan(600_000);
   });

@@ -1,4 +1,5 @@
 import {
+  ComputeError,
   defineMethod,
   defineModule,
   field,
@@ -10,8 +11,11 @@ import {
   type Json,
   type MethodDefinition,
   type Phase,
+  type ReconcileContext,
+  type Reconciler,
 } from '@better-compute/core';
 import type { InventoryChangeType } from './conditions.js';
+import { applyInventory, inventoryWorkKind, latestInventory } from './store.js';
 
 /** Addresses one node's inventory. `tenantId` scopes the call (the §3.4 tenant pre-check). */
 export interface InventoryNodeInput {
@@ -56,32 +60,67 @@ const nodeInput = manifest({
   nodeId: field.string({ pattern: `^${idPrefixes.node}_[0-9a-hjkmnp-tv-z]{26,52}$` }),
 });
 
-function readMethod<O>(method: string, phase: Phase): MethodDefinition<InventoryNodeInput, O> {
+function readMethod<O>(
+  method: string,
+  phase: Phase,
+  handler?: MethodDefinition<InventoryNodeInput, O>['handler'],
+): MethodDefinition<InventoryNodeInput, O> {
   return defineMethod<InventoryNodeInput, O>({
     action: 'compute:nodes:read',
     kind: 'read',
     resource: (input) => ({ type: 'node', id: input.nodeId }),
     validate: (input) => nodeInput.parse(input),
-    handler: async () => {
-      throw notImplemented(`inventory.${method}`, phase);
-    },
+    handler:
+      handler ??
+      (async () => {
+        throw notImplemented(`inventory.${method}`, phase);
+      }),
   });
 }
 
 const api: InventoryApi = Object.freeze({
   inventory: Object.freeze({
-    get: readMethod<InventorySnapshot>('get', 'v0.1'),
+    get: readMethod<InventorySnapshot>('get', 'v0.1', async (context, input) => {
+      // The node must be the caller's tenant's; the resolver already decided on it, and this keeps
+      // an allow rule on another tenant's node id from reading it.
+      const owned = await context.sql.query(
+        'SELECT 1 FROM nodes WHERE id = $1 AND owner_tenant_id = $2',
+        [input.nodeId, input.tenantId],
+      );
+      const snapshot = owned.rowCount ? await latestInventory(context.sql, input.nodeId) : undefined;
+      if (!snapshot)
+        throw new ComputeError('NOT_FOUND', `Node ${input.nodeId} has no inventory yet`);
+      return snapshot;
+    }),
     history: readMethod<InventoryHistory>('history', 'v0.2'),
     diff: readMethod<InventoryDiff>('diff', 'v0.2'),
   }),
 });
 
 /**
+ * The Inventory reconciler (§8.4, sharded by node): applies a node's complete, changed section set.
+ * An incomplete set is not retried here: the ingest of the missing section enqueues the node again.
+ */
+export const inventoryReconciler: Reconciler = Object.freeze({
+  name: inventoryWorkKind,
+  shardBy: 'node' as const,
+  async run(context: ReconcileContext, nodeId: string): Promise<'DONE' | 'SYNC_AGAIN'> {
+    try {
+      await applyInventory(context.sql, nodeId, { events: context.events });
+    } catch (error) {
+      // A node deleted after its work was queued has nothing left to reconcile.
+      if (error instanceof ComputeError && error.code === 'NOT_FOUND') return 'DONE';
+      throw error;
+    }
+    return 'DONE';
+  },
+});
+
+/**
  * The always-on built-in inventory module; the server registers it before any injected module.
- * Its actions are part of compute's own catalog, so it adds no catalog fragment. In P0 the methods
- * validate their input and then throw `NOT_IMPLEMENTED`: `inventory.get` arrives in v0.1,
- * `history` and `diff` in v0.2.
+ * Its actions are part of compute's own catalog, so it adds no catalog fragment. `inventory.get`
+ * returns the latest snapshot; `history` and `diff` arrive in v0.2 and throw `NOT_IMPLEMENTED`.
  */
 export const inventoryModule: ComputeModule<'inventory', InventoryApi> = Object.freeze(
-  defineModule({ name: 'inventory', api: () => api }),
+  defineModule({ name: 'inventory', api: () => api, reconcilers: [inventoryReconciler] }),
 );

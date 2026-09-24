@@ -113,8 +113,8 @@ describe('the four named subpaths', () => {
     expect(inventoryModule.name).toBe('inventory');
     const api = inventoryModule.api!({} as ModuleContext);
     const input = { tenantId: 'tenant-acme', nodeId: newId('node') };
+    // inventory.get landed in v0.1 (tests/inventory-store.test.ts).
     for (const [method, phase] of [
-      ['get', 'v0.1'],
       ['history', 'v0.2'],
       ['diff', 'v0.2'],
     ] as const) {

@@ -521,9 +521,9 @@ describe('the operation envelope', () => {
   it('lets root callers through the pre-check for IAM to decide in the target tenant', async () => {
     const { compute, iam } = setup();
     iam.allow({ token: ADMIN });
-    const error = await failure(() => compute.api.inventory.get({ token: ADMIN }, input));
+    const error = await failure(() => compute.api.inventory.history({ token: ADMIN }, input));
     expect(error.code).toBe('NOT_IMPLEMENTED');
-    expect(error.message).toBe('inventory.get arrives in v0.1');
+    expect(error.message).toBe('inventory.history arrives in v0.2');
     expect(error.status).toBe(501);
     expect(iam.calls.map((call) => call.method)).toEqual(['authenticate', 'authorize']);
     expect(iam.calls[1]!.decision).toEqual({

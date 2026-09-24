@@ -4,9 +4,41 @@ Hardware inventory for better-compute: GPU naming, node condition types, and `in
 the always-on built-in module that the server registers before any injected module. It depends on
 `@better-compute/core` and `@better-compute/protocol`.
 
-**Status: P0 stub.** GPU naming works now. Section hashing, diffs, labels, health conditions and
-the Inventory controller arrive in v0.1. Until then `inventory.get` rejects with
-`NOT_IMPLEMENTED` naming v0.1, and `inventory.history` and `inventory.diff` name v0.2.
+**Status: v0.1.** GPU naming, section verification, diffs, devices and atoms, labels, the hardware
+key, the v0.1 conditions, the Inventory reconciler and `inventory.get` work. `inventory.history`
+and `inventory.diff` reject with `NOT_IMPLEMENTED` naming v0.2.
+
+## From Hello to devices (PLAN.md §10.1)
+
+1. **Report.** In the Hello transaction, and on every heartbeat that carries hashes, the gateway
+   calls `recordInventoryHashes(tx, work, nodeId, hashes)`. It stores the hashes in
+   `node_inventory` and returns the sections to pull (`Welcome.request_sections`): those whose
+   stored bytes have a different hash.
+2. **Pull.** For each `InventorySection` frame the gateway calls
+   `ingestInventorySection(tx, work, nodeId, section)`. The section is checked against its own
+   SHA-256 over the received bytes (`INVALID_INPUT` otherwise) and never re-encoded. It is stored in
+   `node_inventory_sections`, and work kind `inventory` is queued for the node.
+3. **Apply.** `inventoryReconciler` runs `applyInventory(sql, nodeId, { events })` in one
+   transaction with the node row locked. Once every reported section's bytes are present and the
+   digest differs from the last applied one, it:
+   - appends an `inventory_snapshots` row (decoded sections as JSON, bigints as strings);
+   - plans devices with `planDevices`. GPUs become `gpu` atoms, and a MIG GPU becomes a non-bookable
+     parent of `gpu.mig` atoms. A vanished device that still has live bookings is kept with
+     `healthy = false` and deleted once its bookings end. A device id another node owns is left
+     alone and raises `DuplicateIdentity`;
+   - replaces the `inventory`-sourced labels (`gpu.product`, `gpu.model`, `gpu.count`,
+     `cuda.driver.major`, `mig.capable`, `fabric.domain`, …);
+   - writes `GpuCountMismatch`, `GpuModelUnknown` and `DuplicateIdentity` into `node_conditions`, and
+     mirrors the true ones into `nodes.no_schedule_reasons` as bare type names (keeping every entry
+     it does not own);
+   - sets `hardware_key`. It is trusted with two or more independent identifiers, and a clash on the
+     unique index is caught in a savepoint and becomes `DuplicateIdentity`;
+   - publishes `node.inventory.changed` plus one `node.<change>` event per diff entry.
+
+Pure building blocks: `verifySection`, `sectionsToRequest`, `mergeSections`, `inventoryDigest`,
+`devicesFromGpus`, `gpuLinks` (undirected GPU pairs for placement), `planDevices`,
+`inventoryLabels`, `inventoryConditions`, `mergeNoScheduleReasons`, `diffInventory`,
+`hardwareKey` / `hardwareKeyFromClaims` (join claims hash exactly like inventory).
 
 ```ts
 import { inventoryModule, normalizeGpuProduct } from 'better-compute/inventory';

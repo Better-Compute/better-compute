@@ -271,10 +271,11 @@ describe('request()', () => {
     expect(iam.count('authorize')).toBe(1);
 
     iam.allow({ token: tenants.acme.token, action: 'compute:nodes:read' });
+    // Allowed: the handler runs and finds no inventory for a node that never reported one.
     expect(failed(await get(tenants.acme.token))).toEqual({
-      status: 501,
-      code: 'NOT_IMPLEMENTED',
-      message: 'inventory.get arrives in v0.1',
+      status: 404,
+      code: 'NOT_FOUND',
+      message: `Node ${input.nodeId} has no inventory yet`,
     });
     expect(iam.calls.at(-1)?.decision).toEqual({
       tenantId: tenants.acme.id,
@@ -290,7 +291,7 @@ describe('request()', () => {
     const input = { tenantId: tenants.acme.id, nodeId: 'node_01jz0000000000000000000000' };
     for (const token of [tenants.acme.token, 'token-extra-0123456789'])
       expect(failed(await request('inventory', 'get', input, { token }))).toMatchObject({
-        code: 'NOT_IMPLEMENTED',
+        code: 'NOT_FOUND',
       });
   });
 

@@ -117,7 +117,8 @@ describe('the envelope', () => {
       [post('inventory/get', input), 401, 'UNAUTHENTICATED'],
       [post('inventory/get', input, bearer(OUTSIDER)), 403, 'ACCESS_DENIED'],
       [post('inventory/get', { tenantId: ACME }, bearer(USER)), 400, 'INVALID_INPUT'],
-      [post('inventory/get', input, bearer(USER)), 501, 'NOT_IMPLEMENTED'],
+      [post('inventory/get', input, bearer(USER)), 404, 'NOT_FOUND'],
+      [post('inventory/history', input, bearer(USER)), 501, 'NOT_IMPLEMENTED'],
       [post('inventory/get', input, bearer('token-nobody-0123456789')), 401, 'UNAUTHENTICATED'],
     ];
     for (const [pending, status, code] of cases) {
@@ -130,10 +131,10 @@ describe('the envelope', () => {
       );
       expect(result.headers.get('cache-control')).toBe('no-store');
     }
-    expect((await post('inventory/get', input, bearer(USER))).json!.error).toEqual({
+    expect((await post('inventory/history', input, bearer(USER))).json!.error).toEqual({
       code: 'NOT_IMPLEMENTED',
-      message: 'inventory.get arrives in v0.1',
-      details: { feature: 'inventory.get', phase: 'v0.1' },
+      message: 'inventory.history arrives in v0.2',
+      details: { feature: 'inventory.history', phase: 'v0.2' },
     });
   });
 

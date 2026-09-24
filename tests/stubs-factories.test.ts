@@ -56,7 +56,8 @@ describe('inventoryModule', () => {
   const api = inventory.inventoryModule.api!({} as ModuleContext);
   const input = { tenantId: 'ten_acme', nodeId: newId('node') };
 
-  it.each(apiSurface.filter((row) => row.group === 'inventory'))(
+  // inventory.get landed in v0.1 (tests/inventory-store.test.ts); the rest are still stubs.
+  it.each(apiSurface.filter((row) => row.group === 'inventory' && row.method !== 'get'))(
     'inventory.$method rejects NOT_IMPLEMENTED until $phase',
     async ({ method, phase }) => {
       const definition = api.inventory[method as keyof typeof api.inventory];
