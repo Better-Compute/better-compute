@@ -1,13 +1,5 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import {
-  apiSurface,
-  isComputeError,
-  newId,
-  type ComputeError,
-  type ComputeModule,
-  type MethodContext,
-  type ModuleContext,
-} from '@better-compute/core';
+import { apiSurface, newId, type ComputeModule, type ModuleContext } from '@better-compute/core';
 import * as inventory from '@better-compute/inventory';
 import * as metalPackage from '@better-compute/metal';
 import * as provision from '@better-compute/provision';
@@ -48,19 +40,12 @@ describe('inventoryModule', () => {
   const api = inventory.inventoryModule.api!({} as ModuleContext);
   const input = { tenantId: 'ten_acme', nodeId: newId('node') };
 
-  // inventory.get landed in v0.1 (tests/inventory-store.test.ts); the rest are still stubs.
-  it.each(apiSurface.filter((row) => row.group === 'inventory' && row.method !== 'get'))(
-    'inventory.$method rejects NOT_IMPLEMENTED until $phase',
-    async ({ method, phase }) => {
-      const definition = api.inventory[method as keyof typeof api.inventory];
-      const error: unknown = await definition
-        .handler({} as MethodContext, definition.validate(input))
-        .catch((caught: unknown) => caught);
-      expect(isComputeError(error, 'NOT_IMPLEMENTED')).toBe(true);
-      expect((error as ComputeError).message).toBe(`inventory.${method} arrives in ${phase}`);
-      expect((error as ComputeError).details).toEqual({ feature: `inventory.${method}`, phase });
-    },
-  );
+  // Every inventory method is implemented (tests/inventory-store.test.ts); here only the §9.2 shape.
+  it.each(apiSurface.filter((row) => row.group === 'inventory'))('inventory.$method matches its §9.2 row', ({ method, action, kind }) => {
+    const definition = api.inventory[method as keyof typeof api.inventory];
+    expect([definition.action, definition.kind]).toEqual([action, kind]);
+    expect(definition.resource(definition.validate(input))).toEqual({ type: 'node', id: input.nodeId });
+  });
 });
 
 describe('umbrella subpaths', () => {
