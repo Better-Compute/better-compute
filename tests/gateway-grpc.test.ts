@@ -12,7 +12,7 @@ import {
   isGrpcContentType,
   MessageDecoder,
   serveGateway,
-  spiffeAuthenticate,
+  unsafeSanOnlyAuthenticate,
   toGrpcError,
   type ServedGateway,
 } from '@better-compute/gateway';
@@ -79,19 +79,19 @@ describe('framing', () => {
   });
 });
 
-describe('spiffeAuthenticate', () => {
+describe('unsafeSanOnlyAuthenticate', () => {
   const peer = (subjectaltname: string, authorized = true) =>
     ({ authorized, certificate: { subjectaltname } as never, headers: {} });
   it('reads the node and site from an authorized SPIFFE URI SAN', () => {
-    expect(spiffeAuthenticate(peer('DNS:x, URI:spiffe://compute.test/site/site_1/node/node_2'))).toEqual({
+    expect(unsafeSanOnlyAuthenticate(peer('DNS:x, URI:spiffe://compute.test/site/site_1/node/node_2'))).toEqual({
       nodeId: 'node_2',
       siteId: 'site_1',
     });
   });
   it('rejects unauthorized chains and foreign SANs', () => {
-    expect(spiffeAuthenticate(peer('URI:spiffe://compute.test/site/s/node/n', false))).toBeUndefined();
-    expect(spiffeAuthenticate(peer('URI:spiffe://compute.test/workload/w'))).toBeUndefined();
-    expect(spiffeAuthenticate({ authorized: true, headers: {} })).toBeUndefined();
+    expect(unsafeSanOnlyAuthenticate(peer('URI:spiffe://compute.test/site/s/node/n', false))).toBeUndefined();
+    expect(unsafeSanOnlyAuthenticate(peer('URI:spiffe://compute.test/workload/w'))).toBeUndefined();
+    expect(unsafeSanOnlyAuthenticate({ authorized: true, headers: {} })).toBeUndefined();
   });
 });
 
@@ -296,7 +296,9 @@ describe('serveGateway over h2c', () => {
   });
 
   it('refuses to serve without TLS unless insecure is explicit', async () => {
-    await expect(serveGateway(f.gateway)).rejects.toBeInstanceOf(GrpcError);
+    await expect(serveGateway(f.gateway)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     await expect(serveGateway(f.gateway, { insecure: true })).rejects.toThrow(/authenticate/);
+    // No silent SAN-only fallback: TLS without an authenticator needs the node CA roots.
+    await expect(serveGateway(f.gateway, { tls: {} })).rejects.toThrow(/nodeRoots/);
   });
 });

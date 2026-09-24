@@ -12,7 +12,8 @@ import {
 import type { AddressInfo } from 'node:net';
 import type { DetailedPeerCertificate, TLSSocket } from 'node:tls';
 import { fromBinary, toBinary, type DescMessage, type MessageShape } from '@bufbuild/protobuf';
-import { isComputeError } from '@better-compute/core';
+import { ComputeError, isComputeError } from '@better-compute/core';
+import type { RevocationSet } from '@better-compute/pki';
 import {
   JoinRequestSchema,
   JoinResponseSchema,
@@ -25,6 +26,7 @@ import {
 } from '@better-compute/protocol';
 import type { Gateway, PeerIdentity, SessionHandle, SessionSink } from './gateway.js';
 import type { TunnelStreamHandle } from './tunnels.js';
+import { certificateAuthenticate } from './identity.js';
 import {
   frameMessage,
   grpcResponseHeaders,
@@ -64,8 +66,18 @@ export interface ServeGatewayOptions {
    * there is no certificate to read.
    */
   insecure?: boolean;
-  /** Default: an authorized certificate whose URI SAN is `spiffe://<td>/site/<site>/node/<id>`. */
+  /**
+   * Maps a caller to a node identity. When omitted, `nodeRoots` is required and the gateway uses
+   * `certificateAuthenticate` (chain to the node CA, revocation, role, serial): there is no weaker
+   * default, because the serial and role drive `allowed_kinds`, revocation and role checks.
+   */
   authenticate?: Authenticate;
+  /** The node CA trust anchors (DER) for the default `certificateAuthenticate`. */
+  nodeRoots?: readonly Uint8Array[];
+  /** Revoked serials, refused at the handshake by the default authenticator. */
+  revocations?: RevocationSet;
+  /** Only this SPIFFE trust domain, for the default authenticator. */
+  trustDomain?: string;
   /** HTTP/2 PING period (default 20 000 ms, §7.5). */
   pingIntervalMs?: number;
 }
@@ -80,8 +92,13 @@ export interface ServedGateway {
 
 const spiffeNode = /^spiffe:\/\/[^/]+\/site\/([^/]+)\/node\/([^/]+)$/;
 
-/** Reads the node id and site from an authorized certificate's SPIFFE URI SAN. */
-export const spiffeAuthenticate: Authenticate = (peer) => {
+/**
+ * UNSAFE outside tests: reads only the node id and site from a TLS-authorized certificate's SPIFFE
+ * URI SAN. It yields no serial, role or expiry, so `node_certs.allowed_kinds`, revocation refusal,
+ * certificate-expiry close and the Hello role check are all skipped. Production uses
+ * `certificateAuthenticate`.
+ */
+export const unsafeSanOnlyAuthenticate: Authenticate = (peer) => {
   if (!peer.authorized || !peer.certificate) return undefined;
   const names = (peer.certificate.subjectaltname ?? '').split(/,\s*/);
   for (const name of names) {
@@ -273,10 +290,21 @@ export async function serveGateway(
   options: ServeGatewayOptions = {},
 ): Promise<ServedGateway> {
   if (!options.tls && !options.insecure)
-    throw new GrpcError(GrpcCode.FAILED_PRECONDITION, 'serveGateway needs tls, or insecure for tests');
+    throw new ComputeError('INVALID_CONFIG', 'serveGateway needs tls, or insecure for tests');
   if (options.insecure && !options.authenticate)
-    throw new GrpcError(GrpcCode.FAILED_PRECONDITION, 'insecure (h2c) serving needs an authenticate hook');
-  const authenticate = options.authenticate ?? spiffeAuthenticate;
+    throw new ComputeError('INVALID_CONFIG', 'insecure (h2c) serving needs an authenticate hook');
+  if (!options.authenticate && !options.nodeRoots?.length)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'serveGateway needs nodeRoots (the node CA) for certificateAuthenticate, or an explicit authenticate hook',
+    );
+  const authenticate =
+    options.authenticate ??
+    certificateAuthenticate({
+      roots: options.nodeRoots!,
+      ...(options.revocations ? { revocations: options.revocations } : {}),
+      ...(options.trustDomain ? { trustDomain: options.trustDomain } : {}),
+    });
   const server = options.tls
     ? createSecureServer({ ...options.tls, requestCert: true, rejectUnauthorized: false, allowHTTP1: false })
     : createServer();

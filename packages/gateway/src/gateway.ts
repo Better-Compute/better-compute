@@ -929,6 +929,11 @@ export function createGateway(options: GatewayOptions): Gateway {
 
     async start() {
       if (started) return;
+      if (!options.revocations && !options.manual)
+        log.warn(
+          'gateway: no revocation feed (createGateway({ revocations })): revoked certificates keep their live sessions until they expire',
+          { gatewayId: id },
+        );
       await store.register({
         id,
         region: options.region,

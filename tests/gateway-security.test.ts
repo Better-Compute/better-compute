@@ -1,7 +1,6 @@
 import { connect, type ClientHttp2Session } from 'node:http2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  certificateAuthenticate,
   frameMessage,
   GrpcCode,
   MessageDecoder,
@@ -207,11 +206,10 @@ describe('mutual TLS', () => {
         ca: toPem(nodeCa.certificate),
         minVersion: 'TLSv1.3',
       },
-      authenticate: certificateAuthenticate({
-        roots: [nodeCa.certificate],
-        revocations,
-        trustDomain: 'compute.test',
-      }),
+      // The production default: certificateAuthenticate built from the node CA roots.
+      nodeRoots: [nodeCa.certificate],
+      revocations,
+      trustDomain: 'compute.test',
     });
   });
   afterEach(async () => {

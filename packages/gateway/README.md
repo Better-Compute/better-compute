@@ -23,7 +23,8 @@ await gateway.start(); // directory row + `gateway:<id>` lease
 await serveGateway(gateway, {
   port: 443,
   tls: { key, cert, ca: nodeCaPem },
-  authenticate: certificateAuthenticate({ roots: [nodeCa.certificate], revocations }),
+  nodeRoots: [nodeCa.certificate], // → certificateAuthenticate (required: no weaker default)
+  revocations,
 });
 ```
 
@@ -59,7 +60,11 @@ await serveGateway(gateway, {
 - no compression;
 - HTTP/2 PING every 20 s.
 
-`Join` accepts clients without a certificate. `Renew` and `Session` require one that `authenticate` accepts, and the node id always comes from the certificate's SPIFFE SAN. `Tunnel` answers `UNIMPLEMENTED` until v0.3. `insecure: true` serves h2c for tests only.
+`Join` accepts clients without a certificate. `Renew`, `Session` and `Tunnel` require one that the authenticator accepts, and the node id always comes from the certificate's SPIFFE SAN.
+- Pass `nodeRoots` (plus `revocations` and `trustDomain`) to get `certificateAuthenticate`, or pass an explicit `authenticate`. Anything else is `INVALID_CONFIG`.
+- The serial, role and expiry that `certificateAuthenticate` returns drive `allowed_kinds`, revocation and the Hello role check. `unsafeSanOnlyAuthenticate` skips all three and is for tests only.
+- `insecure: true` serves h2c for tests only.
+- `createGateway` warns at start when it has no `revocations` feed.
 
 Tests drive the core without a transport (`gateway.open(peer, sink)` plus `gateway.jobs.*.tick()` with `manual: true`).
 `tests/gateway-*.test.ts` covers the core on PGlite with the sim clock, the transport over h2c with a real HTTP/2

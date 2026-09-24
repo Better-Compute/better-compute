@@ -34,7 +34,7 @@ export {
   statusTrailers,
   toGrpcError,
 } from './grpc.js';
-export { AGENT_GATEWAY_SERVICE, serveGateway, spiffeAuthenticate } from './http2.js';
+export { AGENT_GATEWAY_SERVICE, serveGateway, unsafeSanOnlyAuthenticate } from './http2.js';
 export { attachFrameConn, closeReason } from './frames.js';
 export type { FrameEndpoint } from './frames.js';
 export { certificateAuthenticate, peerChain } from './identity.js';
