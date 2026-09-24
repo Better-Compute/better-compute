@@ -114,7 +114,12 @@ export interface IamPort {
     credential: Credential,
     decision: Decision & { reason: string },
   ): Promise<{ confirmationId: string; expiresAt?: number } | 'not-held-back'>;
-  billingCheck(input: SpendCheckInput): Promise<SpendCheck>;
+  /**
+   * Budget check before admitting (`budgetCheck: 'meter'` pools). Embedded ignores `credential`; remote
+   * mode needs the caller's credential, because better-iam's HTTP `billing/check` decides for the
+   * credential's own tenant and identity only.
+   */
+  billingCheck(input: SpendCheckInput, credential?: Credential): Promise<SpendCheck>;
   /** Records usage with poison isolation: one result per event, in order. */
   recordUsage(events: UsageEvent[]): Promise<UsageResult[]>;
   /** From the flag cache; never one `isEnabled` call per admission. */
