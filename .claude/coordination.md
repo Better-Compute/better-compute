@@ -318,6 +318,8 @@ Rules for v0.1:
   `packages/capacity/**`, `tests/capacity-*.test.ts`: all-or-nothing multi-node reservations on one topology key
   (§10.3), then BookingRepair re-placing calendar reservations at T−15 min (§10.5). Core ask to the orchestrator:
   additive `gang?: { size; topologyKey? }` on `ReservationRequest`/`PlacementRequest`.
+  Next (asked by [37c0ab]): shrink the inline placer's pool-lock critical section; new suite
+  `tests/bench/placements.bench.ts` + `bench/placements/**` (PLAN §16 placements/s). Then spot preemption.
 - (Feature expansion [9ec62d], v0.2 FleetConfig, 2026-09-24, asked by [56cfd7]) new package `packages/fleet/**`
   (`fleetModule()`: fleet.export/plan/apply, composite apply via check/invoke, `fleet/0001_names`), CLI
   `packages/cli/src/commands/fleet.ts`, `tests/{fleet-config,cli-fleet}.test.ts`. Committed 9ccff66, 05e6265.
@@ -327,10 +329,13 @@ Rules for v0.1:
   NodeSpec.daemon via nodeSpec(), daemon.upgrade kind), `tests/rollout-*.test.ts`. Also pki `release.ts` (b226081).
 - (Feature expansion [9e83b6] = former [060790], resumed) owns again `packages/{inventory,provision,metal}/**`,
   `packages/postgres/src/migrations/` (core/0009+; column requests to me), `tests/{inventory,postgres,pglite,provision,
-  metal}-*`. Done: Talos walkthrough 66a494d, core/0009_runtime + retention f2e761b. Now (from [37c0ab]): walkthrough 1
-  `tests/extensions/ubuntu-autoinstall.test.ts` (+ 20-loop acceptance with the verified-wipe invariant), then
-  `tests/metal-chaos.test.ts`. (inventory.history/diff already landed 488c49e.) Later, on [37c0ab]'s go: server groups
-  siteTokens/joinRequests/secrets/drivers.list/sites.update+delete/nodes.delete as new files in packages/server/src/api/.
+  metal}-*`. Done: Talos walkthrough 66a494d, core/0009_runtime + retention f2e761b, walkthrough 1 + 20-loop
+  acceptance + metal-chaos, core/0010_v02_server (join_requests, node_certs.allowed_kinds, nodes.deleted_at,
+  secret_refs) 15903ff, PGlite ANALYZE, core/0011_v02_security (sites.deleted_at, attestation_uses) ef279fa, v0.2
+  server groups as NEW files packages/server/src/api/{join-requests,site-tokens,secrets,drivers,sites-manage,
+  nodes-delete,v02}.ts + controllers/site-boot.ts (ef279fa, tests eb82f90; registration lines sent to [37c0ab]).
+  Also own `tests/server-groups-{join-requests,site-tokens,secrets-drivers,sites-nodes-delete}.test.ts`,
+  `tests/support/server-v02.ts`.
 - (Feature expansion [3afca2] = former [1f44fd], resumed) owns again `packages/{iam,events,audit,observability,
   provider-proxmox}/**`, `packages/testing/src/realtime/**`, `tests/{realtime/**,bench/realtime-fleet*,iam-bridge-*,
   events-*,audit-*,observability-*,provider-proxmox*}`. Now: `createRealtimeFleet` (join-to-adopted, place-to-active)
@@ -339,20 +344,60 @@ Rules for v0.1:
   `packages/pki/src/attestors/{x509pop,provisioned,discovery,cloud-iid,index}.ts` + one export line in
   `packages/pki/src/index.ts`; `tests/pki-attestors-*.test.ts`. Verifier halves (control plane) + TS NodeAttestor
   producers for FakeDaemon. Not touching server JoinService (W5a wires `attestors: [...]`), migrations, or existing pki files.
+  COMMITTED 27418ec (on [37c0ab]'s bb7106b seams: `evidence.token`, `context.csrSha256`, purpose 'x509pop').
+  JoinService wiring for hosts: `createJoinService({ attestors: [x509popAttestor(), provisionedAttestor({ resolveTarget }),
+  discoveryAttestor({ resolveWorkflowNode }), cloudIidAttestor({ providers, resolve })] })`. Host-supplied pieces:
+  `provisioned.resolveTarget(tx, {id, tenantId, poolId?, siteId?}) → {nodeId?, productUuid?}` (provision: the
+  `userdata.render` result `joinTokenId` → `workflows.node_id`; provider bootstrap: the server's SMBIOS UUID) — without
+  a target the token must carry `expect.productUuid`; `discovery.resolveWorkflowNode(tx, workflowId)` →
+  `workflows.node_id`; `cloudIid.resolve(tx, identity) → AttestationResult | undefined` (map accountId/instanceId to
+  the provider account's pool; admit an AWS instance once). Providers: `gcpInstanceIdentity({ audience, fetch })`
+  (agent requests aud = `cloudIidAudience(audience, sha256(csr))`, format=full), `awsInstanceIdentity({ certificates:
+  { region: PEM } })` (AWS certs NOT bundled: copy them from AWS docs into config), `oidcInstanceIdentity` (generic).
+  Discovery checks `leases` row `site:<id>:boot` (owner = signer, live, epoch == assertion epoch). Ramdisk result
+  carries `certTtlSeconds: 7200` + `allowedKinds` — JoinService/gateway must enforce allowedKinds (not yet done).
+  Agent side: `createX509popEvidence`/`x509popProducer`, `signDiscoveryAssertion` (site agent), `createCloudIidEvidence`.
+  Next for [df4a91]: join_requests approval in discoveryAttestor once [9e83b6]'s table + a core `pending` result land.
+  allowedKinds (orchestrator decision (a)): `node_certs.allowed_kinds text[]` (NULL = all; asked [9e83b6]); gateway
+  dispatch rejects out-of-set kinds as 'kind-not-allowed' (agreeing with [18810e]); after [37c0ab]'s go, [df4a91]
+  makes JoinService persist allowedKinds + min(attestor ttl, role cap) and CommandQueue.enqueue refuse up front.
+  W1 daemon TODO (b): encode allowed kinds as a cert extension next to the role OID so bcd self-enforces.
+  Later commits: b1de42a discovery approvals (`approval: 'never'|'unknown-machines'|'always'`, `hardwareKey`),
+  e673802 pki `openJoinResponse` + testing `runAgentJoin` (two-round agent loop; dev/stack + realtime/fleet may
+  switch to it), 4abbc82 single-use cloud instances/assertions (`attestation_uses`), f6653df/674b725 `tpm`
+  attestor (`tpmAttestor({ challengeKey, ekRoots, pcrPolicy?, resolve })`, `tpmProducer(SoftwareTpm)`).
+  W1 daemon TODO: bcd must use `openJoinResponse` semantics (never take a deferral for a join), answer
+  challenges with the SAME CSR, pass sha256(csr) as the tpm quote binding, and implement the tpm agent side
+  via go-attestation (ActivateCredential + Quote over the challenge's pcrSelection).
 - (Feature expansion [9ec62d], W5c resumed after W5a landed) CLI `serve` / `dev` (7ba486a), `sim` (5826c1f). The CLI
   now belongs to [7fe4f7].
 - (Feature expansion [0b2be8] = former [9ec62d], v0.3 tunnels API half, assigned by [37c0ab]) NEW files
   `packages/server/src/tunnels/**`, `tests/server-tunnels*.test.ts`: `tunnels.open` (exec ticket from pki's issuer),
   nodeSpec access.execTicketJwks, host-supplied `TunnelRelay`, exported `handleTunnel`, gateway `reauthorize` hook.
   options.ts/index.ts one-liners go through [37c0ab].
+- (Feature expansion [0b2be8], v0.5 console-kit, assigned by [37c0ab]) NEW package `packages/console-kit/**`
+  (framework-free stores over @better-compute/client, SSE watch, permission-aware actions; outside the umbrella),
+  `tests/console-kit*.test.ts`, root tsconfig + vitest inserts.
 - (Feature expansion [9ec62d], v0.4 audit primitives, 2026-09-24; split with [1f44fd] per [56cfd7]) pure crypto only in `packages/pki/src/audit.ts`: RFC 6962 hashing, inclusion + consistency proofs, `signCheckpoint`/`verifyCheckpoint` ('audit-checkpoint'), the bundle's audit signing key; CLI `audit verify|prove|checkpoint` calling `@better-compute/audit`. No table in pki (`packages/audit` owns it).
 
 - ([7fe4f7], dev stack, 2026-09-24) NEW files only: `packages/testing/src/dev/stack.ts` (`createDevStack()`: PGlite +
   server runtime + local CAs/JoinService + real gateway on h2c + FakeDaemons that JOIN via sealed tokens over the
   gateway's Join RPC, then Session; adopted in ~1 s/node) + 2 export lines in `packages/testing/src/index.ts`;
-  `tests/testing-dev-stack.test.ts`. Not touching CLI (serve/dev stay [9ec62d]'s: the `dev` command can call
-  `createDevStack({ iam })`) or `realtime/**` ([3afca2]).
+  `tests/testing-dev-stack.test.ts`. Committed 43bb7de; split into `createDevJoinKeys`/`devFleetNotifier`/
+  `attachDevFleet` (needs `insecureHeaderAuth: true`) in c084bb2. Not touching `realtime/**` ([3afca2]).
+- ([7fe4f7], owns `packages/cli/**` + `tests/cli-*.test.ts` since 2026-09-24, from [9ec62d]) `dev --sim N` landed
+  c084bb2 (`packages/cli/src/dev-sim.ts`; runServer hooks afterMigrate/started/stopping). Now: `serve` composition
+  audit — `--roles gateway` (mTLS gateway via `spiffeAuthenticate`, report handlers, gatewayNotifier) and config-module
+  wiring of every module; new files `packages/cli/src/host/**` (landed 268d0be, 18432ca). Now `apps/docs/**` (NEW:
+  phase 1 = `apps/docs/scripts/{generate,check-content}.mjs` from the live registry with every module, generated
+  `apps/docs/{generated,content/docs/reference}/**`, hand-written guides; no package.json/deps until phase 2).
 - ([18810e], continuing [17cfb9]'s W2b gateway, 2026-09-24) `packages/gateway/**`, `tests/gateway-*.test.ts`,
   `tests/bench/gateway-streams.bench.ts`: Hello writes `node_sessions.daemon_version/proto_max` (core/0008); a
   `reports.status(tx, ctx, StatusReport)` hook for health (XID conditions → inventory `recordXid`); dispatch/cancel
   queries driven from the commands partial indexes (2k saturation); then the v0.4 WS fallback.
+- (orchestrator [37c0ab] subagent, v0.5 bcx driver-sdk, 2026-09-24) packages/driver-sdk/**, tests/driver-sdk-*.test.ts, tests/fixtures/bcx-*
+  ([18810e] addendum) FakeDaemon WS mode approved by [37c0ab] under the W5b exception: new
+  `packages/testing/src/daemon/ws-dial.ts` (createWsDialer) + one export line in `packages/testing/src/index.ts`.
+  ([18810e], assigned by [37c0ab]) (1) join-storm throughput: `packages/server/src/join/service.ts` (JoinService.join)
+  + gateway forwarding, target 1k joins < 30 s on PGlite; (2) then docs site phase 1: `apps/docs/**`,
+  `tests/docs-generate.test.ts`.

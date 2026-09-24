@@ -264,6 +264,21 @@ importers:
 
   packages/core: {}
 
+  packages/driver-sdk:
+    dependencies:
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../core
+      '@better-compute/pki':
+        specifier: workspace:*
+        version: link:../pki
+      '@better-compute/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@bufbuild/protobuf':
+        specifier: ^2.15.0
+        version: 2.15.0
+
   packages/events:
     dependencies:
       '@better-compute/core':

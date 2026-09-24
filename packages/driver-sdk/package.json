@@ -1,0 +1,57 @@
+{
+  "name": "@better-compute/driver-sdk",
+  "version": "0.1.0",
+  "description": "bcx, the better-compute out-of-process driver protocol: serveDriver runs a defineDriver object as a plugin, externalDriver hosts one over auto-mTLS gRPC.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "better-compute contributors",
+  "homepage": "https://github.com/better-compute/better-compute/tree/main/packages/driver-sdk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-compute/better-compute.git",
+    "directory": "packages/driver-sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/better-compute/better-compute/issues"
+  },
+  "keywords": [
+    "gpu",
+    "bare-metal",
+    "capacity",
+    "provisioning",
+    "infrastructure",
+    "driver",
+    "plugin",
+    "grpc",
+    "mtls"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-compute/core": "workspace:*",
+    "@better-compute/pki": "workspace:*",
+    "@better-compute/protocol": "workspace:*",
+    "@bufbuild/protobuf": "^2.15.0"
+  }
+}
