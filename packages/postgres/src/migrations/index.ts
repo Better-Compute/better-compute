@@ -8,9 +8,10 @@ import { poolArchiveMigration } from './0006_pool_archive.js';
 import { deviceHealthMigration, deviceHealthTables } from './0007_device_health.js';
 import { sessionVersionsMigration } from './0008_session_versions.js';
 import { runtimeMigration, runtimeTables } from './0009_runtime.js';
+import { v02ServerMigration, v02ServerTables } from './0010_v02_server.js';
 
 /** Every table the base schema creates, in creation order. */
-export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables]);
+export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables, ...v02ServerTables]);
 
 /**
  * The adapter-owned base schema, owner `core`, applied before any module migration. Append-only:
@@ -26,6 +27,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   deviceHealthMigration,
   sessionVersionsMigration,
   runtimeMigration,
+  v02ServerMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

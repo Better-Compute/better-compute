@@ -20,7 +20,6 @@ import { checkSqlNow, definesComputeNow } from '../scripts/check-sql-now.mjs';
 
 const laterTables = [
   'instances',
-  'join_requests',
   'workflows',
   'workflow_steps',
   'images',
@@ -70,6 +69,7 @@ describe('migrate', () => {
       'core/0007_device_health',
       'core/0008_session_versions',
       'core/0009_runtime',
+      'core/0010_v02_server',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });

@@ -5,6 +5,7 @@ import {
   type AuthzRow,
   type CommandQueue,
   type ComputeEvent,
+  type ComputeModule,
   type ComputePlugin,
   type Credential,
   type EnqueueCommand,
@@ -191,6 +192,8 @@ const unused = (what: string) => () => Promise.reject(new Error(`${what} is not 
 
 export interface HarnessOptions {
   plugins?: readonly ComputePlugin[];
+  /** Modules registered after the core groups (groups not yet in `coreGroups`). */
+  modules?: readonly ComputeModule[];
   iam?: FakeIam;
   joinTokens?: JoinTokenMinter;
 }
@@ -249,7 +252,7 @@ export async function serverHarness(options: HarnessOptions = {}) {
       },
       { listRetryDelayMs: 0, ...(options.joinTokens ? { joinTokens: options.joinTokens } : {}) },
     ),
-    modules: [],
+    modules: options.modules ?? [],
     plugins,
     extensions: [],
     context: (view) =>

@@ -13,6 +13,13 @@ export interface PgliteOptions {
    * needs, is always included.
    */
   extensions?: Record<string, unknown>;
+  /**
+   * PGlite has no autovacuum, so nothing gathers planner statistics and plans stay those of empty
+   * tables (a sequential scan where Postgres would use an index). The executor runs `ANALYZE` after
+   * `migrate()` and then every `analyzeEveryMs` (default 60 000; 0 turns the timer off, for tests
+   * that want no background statements).
+   */
+  analyzeEveryMs?: number;
 }
 
 function missingPeer(error: unknown): boolean {
@@ -79,6 +86,9 @@ export function pglite(options: PgliteOptions = {}): SqlExecutor {
     (typeof options.extensions !== 'object' || options.extensions === null)
   )
     throw new ComputeError('INVALID_CONFIG', 'extensions must map namespaces to PGlite extensions');
+  const analyzeEveryMs = options.analyzeEveryMs ?? 60_000;
+  if (!Number.isInteger(analyzeEveryMs) || analyzeEveryMs < 0)
+    throw new ComputeError('INVALID_CONFIG', 'analyzeEveryMs must be a whole number ≥ 0');
 
   const mutex = new Mutex();
   let opening: Promise<{ db: PGlite; session: Session }> | undefined;
@@ -99,11 +109,33 @@ export function pglite(options: PgliteOptions = {}): SqlExecutor {
       return mutex.run(async () => (await ready()).session.query<R>(text, params));
     },
     async close() {
+      if (timer) clearInterval(timer);
+      timer = undefined;
       // Waits for the running and queued transactions, then shuts PGlite down.
       await mutex.run(async () => {
         if (opening) await (await opening.catch(() => undefined))?.db.close();
       });
     },
   };
-  return createExecutor(driver);
+  const executor = createExecutor(driver);
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let closed = false;
+  const analyze = () => driver.standalone('ANALYZE');
+  const migrate = executor.migrate.bind(executor);
+  const close = executor.close.bind(executor);
+  executor.migrate = async (extra) => {
+    const result = await migrate(extra);
+    await analyze();
+    if (analyzeEveryMs > 0 && !timer && !closed) {
+      // Best effort: a failed ANALYZE (say, racing close) only leaves the old statistics.
+      timer = setInterval(() => void analyze().catch(() => undefined), analyzeEveryMs);
+      timer.unref?.();
+    }
+    return result;
+  };
+  executor.close = async () => {
+    closed = true;
+    await close();
+  };
+  return executor;
 }
