@@ -9,3 +9,5 @@ export type {
   RealtimeHarnessOptions,
   StormResult,
 } from './harness.js';
+export { createRealtimeFleet } from './fleet.js';
+export type { JoinResult, PlaceResult, RealtimeFleet, RealtimeFleetOptions } from './fleet.js';
