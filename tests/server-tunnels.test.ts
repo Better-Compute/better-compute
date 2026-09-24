@@ -15,6 +15,13 @@ import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { generateKeyPairSync } from 'node:crypto';
 import {
+  connectTunnel,
+  decodeTunnelFrame,
+  encodeTunnelFrame,
+  tunnelUrl,
+  type TunnelFrameBody,
+} from '@better-compute/client';
+import {
   createExecTicketIssuer,
   createReplayCache,
   createSshCertificateAuthority,
@@ -396,7 +403,50 @@ const until = async (check: () => boolean) => {
   for (let i = 0; i < 200 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
 };
 
+describe('client tunnel frames', () => {
+  it('are wire compatible with the protobuf schema both ways', () => {
+    const cases: TunnelFrameBody[] = [
+      { case: 'opened' },
+      { case: 'data', data: Buffer.from('hello'), channel: 0 },
+      { case: 'data', data: Buffer.from('oops'), channel: 1 },
+      { case: 'resize', rows: 40, cols: 120 },
+      { case: 'closed', exitCode: -1, reason: 'killed' },
+      { case: 'closed', exitCode: 0, reason: '' },
+    ];
+    for (const body of cases) {
+      const decoded = decodeMessage(TunnelFrameSchema, encodeTunnelFrame(body));
+      expect(decoded.body.case).toBe(body.case);
+      const again = decodeTunnelFrame(encodeMessage(TunnelFrameSchema, decoded));
+      expect(again).toEqual(
+        body.case === 'data' ? { ...body, data: new Uint8Array(body.data) } : body,
+      );
+    }
+    expect(tunnelUrl('https://compute.test', '/api/compute/', 'tunnels/abc')).toBe(
+      'wss://compute.test/api/compute/tunnels/abc',
+    );
+  });
+});
+
 describe('GET /tunnels/{ticket}', () => {
+  it('works with the client’s connectTunnel', async () => {
+    const recorded: Recorded = { opened: [], received: [], closed: 0 };
+    const { server, base } = await listen({ relay: echoRelay(recorded) });
+    try {
+      const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+      const tunnel = connectTunnel({ url: `${base}/${ticket.path}` });
+      const output: string[] = [];
+      tunnel.onData((data) => output.push(Buffer.from(data).toString()));
+      tunnel.write('uptime');
+      await tunnel.ready;
+      await until(() => output.length > 0);
+      expect(output).toEqual(['echo:uptime']);
+      tunnel.close();
+      expect(await tunnel.exited).toEqual({ exitCode: 0, reason: 'bye' });
+    } finally {
+      server.close();
+    }
+  });
+
   it('relays frames both ways through the node’s gateway, once per ticket', async () => {
     const recorded: Recorded = { opened: [], received: [], closed: 0 };
     const { server, base } = await listen({ relay: echoRelay(recorded) });

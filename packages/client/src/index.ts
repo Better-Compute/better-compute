@@ -1,5 +1,7 @@
 import type { Credential } from '@better-compute/core';
 
+export * from './tunnel.js';
+
 /** HTTP errors keep the server's stable code without exposing raw response bodies. */
 export class ComputeClientError extends Error {
   /** Machine-readable context from the server, such as `confirmationId` for `CONFIRMATION_REQUIRED`. */
