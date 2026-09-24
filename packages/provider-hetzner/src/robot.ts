@@ -326,13 +326,23 @@ class HetznerRobotClient implements ProviderImpl {
         'CONFLICT',
         `Robot server ${request.offerId} is in use (named ${JSON.stringify(server.server_name)})`,
       );
-    const renamed = await this.#request<{ server: RobotServer }>(
+    await this.#request(
       'POST',
       `/server/${server.server_number}`,
       [['server_name', claim]],
       context.signal,
     );
-    return toMachine(renamed?.server ?? { ...server, server_name: claim });
+    // Robot has no compare-and-set: a concurrent claim under another key can rename after us. Read
+    // back, so the loser of an observed race answers CONFLICT. This narrows the race but cannot
+    // close it (both may read their own name before the other writes); the vps reconciler must
+    // not create concurrently on one Robot account (it runs one instance per key, serially).
+    const settled = await this.#server(request.offerId, context.signal);
+    if (!settled || settled.server_name !== claim)
+      throw new ComputeError(
+        'CONFLICT',
+        `Robot server ${request.offerId} was claimed concurrently`,
+      );
+    return toMachine(settled);
   }
 
   /** A claimed server; unclaimed ones are not this provider's and read as absent. */

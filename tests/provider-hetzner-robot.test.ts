@@ -378,3 +378,25 @@ describe('bootstrapScript', () => {
     expect(() => execFileSync(process.env.BC_SH!, ['-n'], { input: script })).not.toThrow();
   });
 });
+
+describe('hetznerRobot claim races', () => {
+  it('answers CONFLICT when another claim renamed the server right after ours', async () => {
+    const api = new RobotEmulator();
+    const raced: typeof api.fetch = async (input, init) => {
+      const response = await api.fetch(input, init);
+      if ((init?.method ?? 'GET') === 'POST' && String(input).endsWith('/server/1001'))
+        api.servers.get(1001)!.server_name = robotClaimName('someone-else');
+      return response;
+    };
+    const provider = hetznerRobotProvider({ fetch: raced, endpoint: 'https://robot.test' });
+    const parsed = await provider.config['~standard'].validate(config);
+    const impl = await provider.create((parsed as { value: never }).value, {
+      clock,
+      secrets,
+      log: console,
+    });
+    await expect(
+      impl.create({ offerId: '1001', image: '', userData: '', name: 'n' }, call('mine')),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+});
