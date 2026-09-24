@@ -144,6 +144,23 @@ fleetSize)`, then `removeTrustRoot`.
   - An expired certificate is accepted for 7 more days, for results journaled offline.
   - Agents sign with `signCommandUpdate` and `signAttestedReport`.
 
+## v0.3: exec tickets and break-glass SSH
+
+- **Exec tickets** (§7.6). `createExecTicketIssuer({ issuer })` issues ES256 JWTs with
+  `typ: bc-exec+jwt`, `aud: node:<id>`, `sid`, `op` (`exec`, `console`, `ssh`, `tcp`), a single-use
+  `jti`, and a lifetime of at most 60 s.
+  - `jwksJson()` is `AccessSection.exec_ticket_jwks_json`. `rotate()` keeps the previous key listed.
+  - The gateway and the daemon both run
+    `verifyExecTicket(token, { jwks, nodeId, now, jtiCache: createReplayCache() })`, which checks
+    `alg`, `typ`, key, audience, lifetime, op and replay.
+- **SSH break-glass** (§13). `createSshCertificateAuthority({ algorithm: 'ed25519' | 'ecdsa-p256' })`
+  issues OpenSSH cert-v01 user certificates.
+  - `publicKey` is an `AccessSection.ssh_ca_public_keys` entry.
+  - `issueUserCertificate({ publicKey, principals, keyId, validBefore })` refuses more than 1 h and
+    empty principals. It grants `permit-pty` only unless told otherwise.
+  - `parseSshCertificate` reads and verifies certificates, ssh-keygen's included. Tests round-trip
+    both ways with OpenSSH's `ssh-keygen`.
+
 ## Go parity (for `bcd`, W1)
 
 Everything `bcd` produces or checks must match this package byte for byte. Use only Go's standard

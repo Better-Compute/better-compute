@@ -38,4 +38,6 @@ export * from './pop.js';
 export * from './revocation.js';
 export * from './signing.js';
 export * from './spiffe.js';
+export * from './ssh.js';
+export * from './tickets.js';
 export * from './x509.js';
