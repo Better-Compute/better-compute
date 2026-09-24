@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { xidStatusHandler } from '@better-compute/gateway';
-import { ConditionStatus } from '@better-compute/protocol';
+import { ConditionStatus, InstanceObservedState, type StatusReport } from '@better-compute/protocol';
 import { agentFrame, gatewayFixture, type GatewayFixture } from './support/gateway.js';
 
 // Status-driven health (§10.1) and session versions for Rollout (§6, v0.4) at the gateway.
@@ -89,5 +89,43 @@ describe('xidStatusHandler', () => {
     const { rows } = await f.db.query('SELECT observed_generation, cordoned FROM nodes WHERE id = $1', [node]);
     expect(rows).toEqual([{ observed_generation: 4, cordoned: false }]);
     expect((await f.outbox('node.report-failed'))[0]!.payload.data).toMatchObject({ report: 'status', error: 'health store down' });
+  });
+});
+
+describe('composed status handlers', () => {
+  it('runs every handler in its own savepoint: one failing never blocks the others', async () => {
+    const seen: StatusReport[] = [];
+    f = await gatewayFixture({
+      reports: {
+        status: [
+          async function brokenHealth(tx) {
+            await tx.query(`UPDATE nodes SET cordoned = true`);
+            throw new Error('boom');
+          },
+          async function instances(_tx, _context, report) {
+            seen.push(report);
+          },
+        ],
+      },
+    });
+    const node = await f.addNode();
+    const { handle } = await f.connect(node);
+    await handle.receive(
+      agentFrame({
+        case: 'status',
+        value: {
+          observedGeneration: 3n,
+          instances: [{ instanceId: 'inst_1', state: InstanceObservedState.RUNNING, addresses: ['10.0.0.5/24'], runtime: 'libvirt-kvm' }],
+          instancesComplete: true,
+        },
+      }),
+    );
+    await f.gateway.jobs.status.tick();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.instances).toMatchObject([{ instanceId: 'inst_1', state: InstanceObservedState.RUNNING }]);
+    expect(seen[0]!.instancesComplete).toBe(true);
+    const { rows } = await f.db.query('SELECT cordoned, observed_generation FROM nodes WHERE id = $1', [node]);
+    expect(rows).toEqual([{ cordoned: false, observed_generation: 3 }]);
+    expect((await f.outbox('node.report-failed'))[0]!.payload.data).toMatchObject({ handler: 'brokenHealth', error: 'boom' });
   });
 });

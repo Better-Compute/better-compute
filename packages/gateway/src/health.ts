@@ -1,6 +1,6 @@
 import { recordXid } from '@better-compute/inventory';
 import { ConditionStatus } from '@better-compute/protocol';
-import type { ReportHandlers } from './store.js';
+import type { StatusHandler } from './store.js';
 
 const xidType = /^Xid(\d{1,5})$/;
 
@@ -14,7 +14,7 @@ const xidType = /^Xid(\d{1,5})$/;
  * createGateway({ reports: { ...gatewayReportHandlers, status: xidStatusHandler } })
  * ```
  */
-export const xidStatusHandler: NonNullable<ReportHandlers['status']> = async (tx, context, report) => {
+export const xidStatusHandler: StatusHandler = async function xidStatusHandler(tx, context, report) {
   let recorded = 0;
   for (const condition of report.conditions) {
     const match = xidType.exec(condition.type);

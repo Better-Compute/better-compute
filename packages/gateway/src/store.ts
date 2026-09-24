@@ -185,12 +185,19 @@ export interface ReportHandlers {
    * The node's coalesced StatusReport (latest wins, so it carries the full condition set): e.g.
    * conditions `Xid<n>` with a `device_id` → inventory's `recordXid` (§10.1 health).
    */
-  status?(
-    tx: SqlTx,
-    context: { nodeId: string; tenantId: string; work: WorkQueue },
-    report: StatusReport,
-  ): Promise<unknown>;
+  status?: StatusHandler | readonly StatusHandler[];
 }
+
+/**
+ * Consumes a node's coalesced StatusReport in the status transaction. Several may be given
+ * (`[xidStatusHandler, vpsInstanceStatusHandler]`): each runs under its own savepoint, so one
+ * failing (published as `node.report-failed`) never blocks the others.
+ */
+export type StatusHandler = (
+  tx: SqlTx,
+  context: { nodeId: string; tenantId: string; work: WorkQueue },
+  report: StatusReport,
+) => Promise<unknown>;
 
 export const inventoryStore: InventoryIngest = {
   recordHashes: (tx, work, nodeId, hashes, options) =>
@@ -1008,12 +1015,13 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           },
         });
         await work.enqueue(tx, 'node', nodeId);
-        if (reports.status) {
-          // Health (XID conditions, section failures) is the host's; a failing handler must not
-          // hold back observed_generation, so it runs under a savepoint and is published on failure.
+        // Health, instances, … are the host's; a failing handler must not hold back
+        // observed_generation or the other handlers: each runs under its own savepoint.
+        const handlers = reports.status === undefined ? [] : Array.isArray(reports.status) ? reports.status : [reports.status];
+        for (const [index, handler] of (handlers as readonly StatusHandler[]).entries()) {
           await tx.query('SAVEPOINT gateway_status');
           try {
-            await reports.status(tx, { nodeId, tenantId, work }, report);
+            await handler(tx, { nodeId, tenantId, work }, report);
             await tx.query('RELEASE SAVEPOINT gateway_status');
           } catch (error) {
             await tx.query('ROLLBACK TO SAVEPOINT gateway_status');
@@ -1021,7 +1029,12 @@ export function createGatewayStore(options: GatewayStoreOptions) {
               type: 'node.report-failed',
               tenantId,
               subject: `node/${nodeId}`,
-              data: { nodeId, report: 'status', error: error instanceof Error ? error.message : String(error) },
+              data: {
+                nodeId,
+                report: 'status',
+                handler: handler.name || String(index),
+                error: error instanceof Error ? error.message : String(error),
+              },
             });
           }
         }

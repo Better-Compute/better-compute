@@ -90,6 +90,7 @@ export type {
   ReportContext,
   ReportHandlers,
   SettledCommand,
+  StatusHandler,
   SpecSource,
   StoredCommand,
   UpdatesResult,
