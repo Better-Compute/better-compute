@@ -167,6 +167,30 @@ describe('drainIamInbox', () => {
     expect(isEnabledCalls).toBe(2);
   });
 
+  it('isolates a handler whose SQL fails: its writes roll back, later events still process', async () => {
+    await sqlInbox(db).put([
+      inboxEvent('p1', 'ten_a', 1, 'agent:suspend', { resourceId: 'agt_1' }),
+      inboxEvent('p2', 'ten_a', 2, 'agent:suspend', { resourceId: 'agt_2' }),
+    ]);
+    const handled: string[] = [];
+    const result = await drainIamInbox(db, {
+      handlers: {
+        agent: async (tx, event) => {
+          await rememberSuccessor(tx, 'ten_a', `idn_${event.eventId}`, 'idn_x');
+          if (event.eventId === 'p1') await tx.query('SELECT * FROM no_such_table');
+          handled.push(event.eventId);
+        },
+      },
+    });
+    expect(result).toEqual({ processed: 2, more: false, failures: 1 });
+    expect(handled).toEqual(['p2']);
+    // p1's partial write rolled back to its savepoint; p2's committed.
+    expect(await successorLookup(db)('ten_a', 'idn_p1')).toBeUndefined();
+    expect(await successorLookup(db)('ten_a', 'idn_p2')).toBe('idn_x');
+    const { rows } = await db.query('SELECT 1 FROM iam_inbox WHERE processed_at IS NULL');
+    expect(rows).toEqual([]);
+  });
+
   it('stops at successor cycles', async () => {
     await db.transaction(async (tx) => {
       await rememberSuccessor(tx, 't', 'x', 'y');

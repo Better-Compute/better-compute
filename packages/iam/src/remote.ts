@@ -6,8 +6,8 @@
 // - authenticate is `sts.getCallerIdentity` (2 lock acquisitions); callers cache it 30 s by token.
 // - require is `authorize` + a thrown ACCESS_DENIED (the same decision, audited the same way).
 // - usage goes through HTTP `billing.recordMany`, at most 100 events per call, as the root tenant.
-// - billingCheck runs with the service credential, so it can check only the service account's own tenant
-//   (HTTP `billing.check` has no identity parameter); per-tenant budget checks stay embedded-only until then.
+// - billingCheck runs as the caller when the envelope passes its credential (HTTP `billing.check` checks the
+//   credential's own spend in its own tenant); without one it uses the service credential.
 
 import {
   ComputeError,
@@ -354,13 +354,14 @@ export function remoteIam(options: RemoteIamOptions): RemoteIam {
         throw fromIamError(error);
       }
     },
-    billingCheck: (input) =>
+    billingCheck: (input, credential?: Credential) =>
       mapped(async () => {
+        // HTTP billing.check checks the credential's own spend in its own tenant: the caller's when given.
         const verdict = await (
           await client()
         ).billing.check(
           { tenantId: input.tenantId, ...(input.meter ? { meter: input.meter } : {}) },
-          await service(),
+          credential ? as(credential) : await service(),
         );
         return {
           allowed: verdict.allowed,

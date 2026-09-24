@@ -176,32 +176,42 @@ export async function drainIamInbox(
       [limit],
     );
     let failures = 0;
+    // A failing statement aborts a PostgreSQL transaction, so every step runs in its own savepoint: one
+    // broken handler can neither poison the pass (and every event after it, forever) nor undo the
+    // built-in reactions.
+    const isolated = async (
+      event: IamInboxEvent,
+      reaction: InboxReaction,
+      step: () => Promise<void>,
+    ) => {
+      await tx.query('SAVEPOINT iam_reaction');
+      try {
+        await step();
+        await tx.query('RELEASE SAVEPOINT iam_reaction');
+      } catch (error) {
+        await tx.query('ROLLBACK TO SAVEPOINT iam_reaction');
+        await tx.query('RELEASE SAVEPOINT iam_reaction');
+        failures++;
+        try {
+          handlers.onError?.(error, event, reaction);
+        } catch {
+          // Reporting must not stop the pass.
+        }
+      }
+    };
     for (const row of rows) {
       const event = inboxEventOf(row);
       for (const reaction of event.reactions) {
-        try {
-          if (
-            reaction === 'identity' &&
-            typeof event.metadata.successorId === 'string' &&
-            event.subjectId
-          )
-            await rememberSuccessor(
-              tx,
-              event.tenantId,
-              event.subjectId,
-              event.metadata.successorId,
-            );
-          if (reaction === 'features' || reaction === 'authz') options.flags?.invalidate();
-          if (reaction === 'features') continue;
-          await handlers[reaction]?.(tx, event);
-        } catch (error) {
-          failures++;
-          try {
-            handlers.onError?.(error, event, reaction);
-          } catch {
-            // Reporting must not stop the pass.
-          }
+        const successorId = event.metadata.successorId;
+        if (reaction === 'identity' && typeof successorId === 'string' && event.subjectId) {
+          const subjectId = event.subjectId;
+          await isolated(event, reaction, () =>
+            rememberSuccessor(tx, event.tenantId, subjectId, successorId),
+          );
         }
+        if (reaction === 'features' || reaction === 'authz') options.flags?.invalidate();
+        const handler = reaction === 'features' ? undefined : handlers[reaction];
+        if (handler) await isolated(event, reaction, () => handler(tx, event));
       }
     }
     if (rows.length)

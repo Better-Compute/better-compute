@@ -197,8 +197,12 @@ describe('remoteIam', () => {
       'duplicate',
     ]);
     expect((await port.recordUsage([usage(1)]))[0]!.status).toBe('duplicate');
-    // The service account's own tenant can be checked; better-iam 0.1.0 has no HTTP check for other tenants.
+    // Without a credential the service account checks its own tenant; with the caller's, the caller's spend.
     expect(await port.billingCheck({ tenantId: t.root.tenantId })).toMatchObject({ allowed: true });
+    expect(await port.billingCheck({ tenantId: t.acme.tenantId }, bob.credential)).toMatchObject({
+      allowed: true,
+      budgets: [],
+    });
   });
 
   it('validates its options and presented credentials', () => {
