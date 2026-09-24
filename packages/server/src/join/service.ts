@@ -157,6 +157,22 @@ export function normalizeSerial(serial: string): string {
   return BigInt(`0x${text}`).toString(16);
 }
 
+/**
+ * An attestor's `allowedKinds`, checked before it restricts a certificate: exact kinds or
+ * `prefix.*` globs. A malformed entry is a bug in the attestor, so the join fails loudly rather
+ * than issuing a certificate with a restriction nobody can read.
+ */
+function checkedKinds(kinds: readonly string[] | undefined): readonly string[] | undefined {
+  if (kinds === undefined) return undefined;
+  for (const kind of kinds)
+    if (typeof kind !== 'string' || !/^[a-z][\w-]*(\.[\w-]+)*(\.\*)?$/.test(kind))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `Attestor returned an invalid allowed kind: ${String(kind)}`,
+      );
+  return kinds;
+}
+
 const sameBytes = (a: Uint8Array, b: Uint8Array) =>
   a.length === b.length && Buffer.from(a).equals(Buffer.from(b));
 
@@ -224,6 +240,8 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       csr: Uint8Array;
       spkiSha256: Uint8Array;
       ttlSeconds: number;
+      /** `node_certs.allowed_kinds`: exact kinds or `prefix.*`; undefined/null = unrestricted. */
+      allowedKinds?: readonly string[] | null;
     },
   ) {
     const issued = await crypto.nodeCa.sign(input.csr, {
@@ -234,8 +252,9 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
     });
     const serial = normalizeSerial(issued.serial);
     await tx.query(
-      `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after,
+         allowed_kinds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         serial,
         input.nodeId,
@@ -245,6 +264,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         issued.certificate,
         new Date(issued.notBefore),
         new Date(issued.notAfter),
+        input.allowedKinds ? [...input.allowedKinds] : null,
       ],
     );
     return { ...issued, serial, chain: [issued.certificate, ...issued.chain] };
@@ -501,6 +521,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         csr: request.csr,
         spkiSha256: csr.spkiSha256,
         ttlSeconds,
+        allowedKinds: checkedKinds(result.allowedKinds),
       });
 
       if (options.authz) await refreshNodeAuthz(tx, options.authz, nodeId);
@@ -620,8 +641,9 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         provision_state: string;
         identity_gen: number;
         current_gen: boolean;
+        allowed_kinds: string[] | null;
       }>(
-        `SELECT c.node_id, c.role, c.der, n.site_id, n.provision_state, n.identity_gen,
+        `SELECT c.node_id, c.role, c.der, c.allowed_kinds, n.site_id, n.provision_state, n.identity_gen,
                 (c.revoked_at IS NULL AND c.not_after > compute_now()) AS usable,
                 c.identity_gen = n.identity_gen AS current_gen
            FROM node_certs c JOIN nodes n ON n.id = c.node_id
@@ -654,6 +676,8 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         spkiSha256: csr.spkiSha256,
         ttlSeconds:
           row.role === 'ramdisk' ? Math.min(certTtlSeconds, ramdiskMaxTtlS) : certTtlSeconds,
+        // A restricted certificate renews restricted: the gateway caches the set per session.
+        allowedKinds: row.allowed_kinds,
       });
       const renewed: RenewResponse = {
         $typeName: 'bettercompute.agent.v1.RenewResponse',

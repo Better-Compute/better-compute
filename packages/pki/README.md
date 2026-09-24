@@ -130,6 +130,29 @@ Agent side: `createX509popEvidence` / `x509popProducer`, `signDiscoveryAssertion
 agent), `createCloudIidEvidence`. Tests: `tests/pki-attestors*.test.ts`, which include runs through
 the real JoinService.
 
+Single use. `cloud-iid` admits each (provider, account, instance) once. `discovery` admits each
+signed assertion once. Both are recorded in `attestation_uses` in the join transaction. A known
+machine that lost its certificate re-joins with `x509pop`.
+
+Two-round joins: an attestor may return a core `AttestationDeferral`. JoinService commits the
+transaction, answers with a signed deferral, and spends nothing, so attestors consume tokens and
+record uses only on the final round. Agents read the response with `openJoinResponse` (joined,
+pending or challenge; `verifyJoinResponse` refuses a deferral) and retry with the SAME CSR
+(`runAgentJoin` in `@better-compute/testing` is the reference loop).
+
+- `discoveryAttestor({ approval: 'unknown-machines' | 'always', hardwareKey })` defers with
+  `{ deferred: 'approval', requestId }`. It keeps one pending `join_requests` row per machine for
+  the newest CSR, and consumes the approved row when the retry arrives.
+- `tpmAttestor({ challengeKey, ekRoots, pcrSelection?, pcrPolicy?, resolve })` (v0.5):
+  - Round 1 checks the EK certificate chain and the AK's attributes, then answers with
+    `MakeCredential` plus a state sealed under `challengeKey` (AES-256-GCM, bound to the CSR,
+    ≤ 5 min).
+  - Round 2 checks the activated secret, and a quote by the AK with
+    `extraData = sha256(secret ‖ sha256(csr))`, PCR values matching the digest, and the policy.
+    Then `resolve(tx, { ekSha256, … })`.
+  - The TPM 2.0 structures live in `tpm2.ts` (KDFa is checked against go-tpm's vectors).
+  - `tpmProducer(SoftwareTpm)` is the agent side for tests.
+
 ## Bundles, CLI, agent side
 
 - `createPkiBundle({ trustDomain })` creates the whole set. `exportPkiBundle(bundle, { secret })`
@@ -230,7 +253,7 @@ real TUF roles later by bumping `spec`.
   counts distinct pinned keys with a valid signature. `verifyReleaseArtifact(manifest, name, bytes)`
   then checks a download against the manifest.
 - **CLI.** `release keygen|sign|cosign|verify`. `daemon install-script --release-manifest …
-  --release-pins …` pins the verified per-architecture digests of the bare `linux-<arch>` binaries,
+--release-pins …` pins the verified per-architecture digests of the bare `linux-<arch>` binaries,
   so the script's `sha256sum -c` check follows from the release signature.
 
 ## v0.5 (optional): workload identity

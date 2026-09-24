@@ -759,3 +759,102 @@ describe('GatewayServices', () => {
     await compute.stop();
   });
 });
+
+describe('JoinService restricted certificates (AttestationResult.allowedKinds, certTtlSeconds)', () => {
+  const kinds = ['inventory', 'diag.*', 'wipe'];
+
+  async function restricted(allowedKinds: readonly string[] = kinds, certTtlSeconds = 5400) {
+    const s = await setup();
+    const service = createJoinService({
+      database: s.fixture.database,
+      clock: s.fixture.clock,
+      work: s.fixture.compute.context.work,
+      events: s.fixture.compute.context.events,
+      crypto: s.crypto,
+      attestors: [
+        defineAttestor({
+          id: 'restricted',
+          version: '1.0.0',
+          roles: ['ramdisk'],
+          async verify() {
+            return {
+              tenantId: s.fixture.tenants.root.id,
+              role: 'ramdisk',
+              siteId: SITE,
+              certTtlSeconds,
+              allowedKinds,
+            };
+          },
+        }),
+      ],
+    });
+    const host = machine(21);
+    const csr = createCsr(host.key);
+    const request = create(JoinRequestSchema, {
+      csr,
+      attestor: 'restricted',
+      claims: create(HardwareClaimsSchema, host.claims),
+      role: AgentRole.RAMDISK,
+    });
+    return { s, service, host, csr, request };
+  }
+
+  const certRows = (s: Setup, nodeId: string) =>
+    s.fixture.database
+      .query<{ allowed_kinds: string[] | null; ttl: number }>(
+        `SELECT allowed_kinds, extract(epoch FROM not_after - issued_at)::int AS ttl
+           FROM node_certs WHERE node_id = $1 ORDER BY issued_at, serial`,
+        [nodeId],
+      )
+      .then((r) => r.rows);
+
+  it('persists the allowed kinds and the shorter lifetime, and renew keeps the restriction', async () => {
+    const { s, service, host, csr, request } = await restricted();
+    const body = verifyJoinResponse(await service.join(request), {
+      signer: { publicKey: s.signingKey.publicKey },
+      csr,
+      nodeCaRoots: [s.nodeCa.certificate],
+      now: s.fixture.clock.now(),
+    });
+    expect(await certRows(s, body.nodeId)).toEqual([{ allowed_kinds: kinds, ttl: 5400 }]);
+
+    await s.fixture.advance(60_000);
+    const nextCsr = createCsr(host.key);
+    const pop = signRenewPop({
+      csr: nextCsr,
+      nodeId: body.nodeId,
+      clientTime: s.fixture.clock.now(),
+      privateKey: host.key,
+    });
+    await service.renew(
+      create(RenewRequestSchema, {
+        csr: nextCsr,
+        chain: body.certChain,
+        clientTime: pop.clientTime,
+        popSig: pop.popSig,
+      }),
+    );
+    const rows = await certRows(s, body.nodeId);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ allowed_kinds: kinds });
+    expect(rows[1]!.ttl).toBeLessThanOrEqual(2 * 3600); // the ramdisk cap still applies
+  });
+
+  it('caps an attestor asking for more than the role allows, and refuses malformed kinds', async () => {
+    const long = await restricted(kinds, 86_400);
+    const body = verifyJoinResponse(await long.service.join(long.request), {
+      signer: { publicKey: long.s.signingKey.publicKey },
+      csr: long.csr,
+    });
+    expect((await certRows(long.s, body.nodeId))[0]!.ttl).toBe(2 * 3600);
+
+    const bad = await restricted(['wipe; DROP TABLE nodes']);
+    const error = await bad.service.join(bad.request).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(isComputeError(error, 'INVALID_CONFIG')).toBe(true);
+    const certs = await bad.s.fixture.database.query('SELECT 1 FROM node_certs');
+    expect(certs.rows).toHaveLength(0);
+  });
+});
