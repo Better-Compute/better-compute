@@ -4,7 +4,8 @@ Machine PKI for better-compute (PLAN.md §3.3, §7.7, §13): the CAs that identi
 join tokens, the signed `JoinResponse`, and Renew proofs of possession. better-iam is the only
 identity provider for people and agents; this package covers machines only.
 
-**Status: v0.1 (W2).** Node.js only (it runs in `api`, `worker` and the CLI). No dependencies
+**Status: v0.1 (W2), plus the v0.2 cryptography (secrets, signed intent, attested results) ready
+for the server to wire.** Node.js only (it runs in `api`, `worker` and the CLI). No dependencies
 beyond `node:crypto`, `@better-compute/core`, `@better-compute/protocol` and `@bufbuild/protobuf`:
 a minimal DER layer builds and parses the X.509 certificates and PKCS#10 requests. Everything is
 ECDSA P-256 with SHA-256.
@@ -107,8 +108,8 @@ signature bytes, so the second valid ECDSA form `(r, n − s)` cannot be replaye
 
 - `createPkiBundle({ trustDomain })` creates the whole set. `exportPkiBundle(bundle, { secret })`
   and `importPkiBundle(text, { secret })` seal it with HKDF-SHA256 + AES-256-GCM, with the trust
-  domain in the AAD. `readPkiPins(text)` reads only the public half. `better-compute pki init|show|
-issue-gateway` are built on these.
+  domain in the AAD. `readPkiPins(text)` reads only the public half. The CLI's `pki init`,
+  `pki show` and `pki issue-gateway` are built on these.
 - `agentIdentityFromChain(chainDer, { roots, now, revocations })` authenticates a gateway handshake.
   A `node-tenant` certificate runs as `node` with `tenantControlled: true`.
 - `startAgentJoin`, `finishAgentJoin` and `prepareAgentRenew` are the agent half (for `FakeDaemon`
