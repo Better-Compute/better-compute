@@ -40,6 +40,8 @@ export type { FrameEndpoint } from './frames.js';
 export { certificateAuthenticate, peerChain } from './identity.js';
 export { xidStatusHandler } from './health.js';
 export { attachGatewayWs, serveGatewayWs, WS_PATH, WS_SUBPROTOCOL } from './ws.js';
+export { connectGatewayWs } from './ws-client.js';
+export type { GatewayWsClient, GatewayWsClientOptions } from './ws-client.js';
 export type { GatewayWsOptions, ServedGatewayWs } from './ws.js';
 export {
   agentProofType,

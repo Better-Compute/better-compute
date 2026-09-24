@@ -2,6 +2,7 @@ import { connect, type Socket } from 'node:net';
 import { create, toBinary } from '@bufbuild/protobuf';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  connectGatewayWs,
   encodeWsFrame,
   frameMessage,
   MessageDecoder,
@@ -27,6 +28,8 @@ import {
   createServingCa,
   generateP256KeyPair,
   nodeSpiffeId,
+  privateKeyPem,
+  toPem,
   type LocalCertificateAuthority,
   type RevocationSet,
 } from '@better-compute/pki';
@@ -298,5 +301,101 @@ describe('WS sessions end to end', () => {
     expect(decodeURIComponent(replayed.head.headers['x-bc-reason']!)).toBe('Proof rejected');
     // A fresh proof still works.
     expect((await dial(node)).head.status).toBe(101);
+  });
+});
+
+describe('connectGatewayWs (the daemon side)', () => {
+  let f: GatewayFixture;
+  let p: Pki;
+  const closers: (() => Promise<void>)[] = [];
+  beforeEach(async () => {
+    f = await gatewayFixture();
+    p = await pki(f.clock);
+  });
+  afterEach(async () => {
+    for (const close of closers.splice(0)) await close();
+    await f.close();
+  });
+
+  const serve = async (options: Partial<Parameters<typeof serveGatewayWs>[1]> = {}) => {
+    const served = await serveGatewayWs(f.gateway, {
+      insecure: true,
+      roots: [p.nodeCa.certificate],
+      audiences: ['gw.eu-1.test'],
+      serving: p.serving,
+      clock: f.clock,
+      ...options,
+    });
+    closers.push(() => served.close());
+    return served;
+  };
+
+  it('connects, verifies the gateway and runs a session', async () => {
+    const served = await serve();
+    const node = await f.addNode();
+    const agent = await p.agent(node);
+    const frames: ServerFrame[] = [];
+    const client = await connectGatewayWs({
+      url: `ws://127.0.0.1:${served.port}`,
+      nodeId: node,
+      ...agent,
+      audience: 'gw.eu-1.test',
+      servingRoots: [p.servingCa.certificate],
+      clock: f.clock,
+      onFrame: (frame) => frames.push(frame),
+    });
+    expect(client.gatewayId).toBe(f.gateway.id);
+    client.send(helloFrame(node));
+    await expect.poll(() => frames.map((frame) => frame.msg.case)).toEqual(['welcome']);
+    client.close();
+  });
+
+  it('refuses a gateway whose proof does not chain to the pinned serving CA (an impersonator)', async () => {
+    const impostor = createServingCa({ clock: f.clock });
+    const key = generateP256KeyPair();
+    const cert = await impostor.issue(key.publicKey, { usage: 'server', dnsSans: ['gw.eu-1.test'], ttlSeconds: 3_600 });
+    const served = await serve({ serving: { key: key.privateKey, chain: [cert.certificate, ...cert.chain] } });
+    const node = await f.addNode();
+    const agent = await p.agent(node);
+    await expect(
+      connectGatewayWs({
+        url: `ws://127.0.0.1:${served.port}`,
+        nodeId: node,
+        ...agent,
+        audience: 'gw.eu-1.test',
+        servingRoots: [p.servingCa.certificate],
+        clock: f.clock,
+        onFrame: () => {},
+      }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED', details: { reason: 'serving chain not trusted' } });
+  });
+
+  it('works through a TLS-inspecting proxy: transport trust from the proxy CA, identity from the in-band proofs', async () => {
+    // The proxy re-signs TLS with its own CA; the client trusts it for transport only. (Wall clock:
+    // node:tls checks transport certificates against real time.)
+    const proxyCa = createServingCa();
+    const proxyKey = generateP256KeyPair();
+    const proxyCert = await proxyCa.issue(proxyKey.publicKey, { usage: 'server', dnsSans: ['localhost'], ttlSeconds: 3_600 });
+    const served = await serve({
+      insecure: false,
+      tls: { key: privateKeyPem(proxyKey.privateKey), cert: toPem(proxyCert.certificate) },
+    });
+    const node = await f.addNode();
+    const agent = await p.agent(node);
+    const frames: ServerFrame[] = [];
+    const client = await connectGatewayWs({
+      url: `wss://localhost:${served.port}`,
+      nodeId: node,
+      ...agent,
+      audience: 'gw.eu-1.test',
+      servingRoots: [p.servingCa.certificate],
+      tls: { ca: toPem(proxyCa.certificate) },
+      clock: f.clock,
+      onFrame: (frame) => frames.push(frame),
+    });
+    expect(client.gatewayId).toBe(f.gateway.id);
+    client.send(helloFrame(node));
+    await expect.poll(() => frames.length).toBe(1);
+    client.close();
   });
 });
