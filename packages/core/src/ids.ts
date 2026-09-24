@@ -29,6 +29,7 @@ export const idPrefixes = {
   audit: 'aud',
   operation: 'op',
   request: 'req',
+  inventorySnapshot: 'inv',
 } as const;
 export type IdKind = keyof typeof idPrefixes;
 export type IdPrefix = (typeof idPrefixes)[IdKind];
