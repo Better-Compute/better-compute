@@ -187,6 +187,11 @@ export interface Gateway {
   start(): Promise<void>;
   /** Closes every session (`UNAVAILABLE`), releases the lease and stops the loops. */
   stop(): Promise<void>;
+  /**
+   * Simulates process death for the simulator: loops stop and every session is forgotten with no
+   * database write (no disconnect, no lease release). The lease simply expires.
+   */
+  crash(): void;
   /** A new stream. Throws `GrpcError` (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`) when not admitted. */
   open(peer: PeerIdentity, sink: SessionSink): SessionHandle;
   /** Forwarded to the api's JoinService; counted against the handshake bucket. */
@@ -843,6 +848,15 @@ export function createGateway(options: GatewayOptions): Gateway {
         await store.releaseLease(lease).catch(() => {});
       }
       lease = undefined;
+    },
+
+    crash() {
+      stopping = true;
+      unsubscribe?.();
+      for (const timer of timers.splice(0)) clearInterval(timer);
+      lease = undefined;
+      for (const session of sessions.values()) session.closed = true;
+      sessions.clear();
     },
 
     open(peer, sink) {
