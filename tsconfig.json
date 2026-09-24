@@ -44,6 +44,9 @@
       "path": "./packages/fleet"
     },
     {
+      "path": "./packages/rollout"
+    },
+    {
       "path": "./packages/observability"
     },
     {

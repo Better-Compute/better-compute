@@ -13,6 +13,7 @@
     "./iam/testing": "@better-compute/iam/testing",
     "./events": "@better-compute/events",
     "./fleet": "@better-compute/fleet",
+    "./rollout": "@better-compute/rollout",
     "./audit": "@better-compute/audit",
     "./observability": "@better-compute/observability",
     "./server": "@better-compute/server",

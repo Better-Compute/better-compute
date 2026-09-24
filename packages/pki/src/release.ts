@@ -290,6 +290,29 @@ export function verifyReleaseArtifact(
   return artifact;
 }
 
+const archiveName = /\.(tar\.gz|tgz|zip|sha256|sig|pem|json|txt|sbom|spdx|intoto\.jsonl)$/;
+
+/**
+ * The bare binary per platform (`linux-amd64` → artifact): the one artifact of that platform that
+ * is not an archive, checksum or metadata file, which is what `{downloads}/bcd/{version}/{platform}`
+ * serves. A platform with several candidates is left out (ambiguous) and listed in `ambiguous`.
+ */
+export function releaseBinaries(manifest: ReleaseManifest): {
+  binaries: Record<string, ReleaseArtifact>;
+  ambiguous: string[];
+} {
+  const byPlatform = new Map<string, ReleaseArtifact[]>();
+  for (const artifact of manifest.artifacts)
+    if (artifact.platform && !archiveName.test(artifact.name))
+      byPlatform.set(artifact.platform, [...(byPlatform.get(artifact.platform) ?? []), artifact]);
+  const binaries: Record<string, ReleaseArtifact> = {};
+  const ambiguous: string[] = [];
+  for (const [platform, artifacts] of [...byPlatform].sort(([a], [b]) => (a < b ? -1 : 1)))
+    if (artifacts.length === 1) binaries[platform] = artifacts[0]!;
+    else ambiguous.push(platform);
+  return { binaries, ambiguous };
+}
+
 /** A release signing key. Keep it offline; distribute only `spkiPin(key.publicKey)`. */
 export function createReleaseSigningKey(options: { clock?: Clock } = {}): SigningKey {
   return createSigningKey({
