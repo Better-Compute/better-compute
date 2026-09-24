@@ -98,6 +98,8 @@ export interface HelloResult {
   requestSections: string[];
   journalChanged: boolean;
   bootChanged: boolean;
+  /** The node has commands waiting for dispatch (so the Hello is worth a dispatch poke). */
+  hasPending: boolean;
 }
 
 export interface UpdatesResult {
@@ -630,8 +632,10 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           live: boolean;
           tenant_id: string;
           generation: number;
+          has_pending: boolean;
         }>(
           `SELECT s.boot_id, s.journal_id, s.role, n.owner_tenant_id AS tenant_id, n.generation,
+             EXISTS (SELECT 1 FROM commands c WHERE c.node_id = s.node_id AND c.state = 'pending') AS has_pending,
              (s.gateway_id IS NOT NULL AND s.disconnected_at IS NULL
               AND s.last_seen > compute_now() - make_interval(secs => $2::float8)) AS live
            FROM node_sessions s JOIN nodes n ON n.id = s.node_id
@@ -754,6 +758,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           requestSections,
           journalChanged,
           bootChanged,
+          hasPending: Boolean(prior.has_pending) || updates.busy.length > 0,
         };
       });
     },
@@ -963,6 +968,40 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           sha256: section.sha256,
         }),
       );
+    },
+
+    /**
+     * Group commit of inventory work from many sessions: pulled sections and heartbeat hash reports
+     * in one transaction, each under its own SAVEPOINT so a corrupt section (`INVALID_INPUT`) fails
+     * only itself. The slot of a failed entry holds its error.
+     */
+    async inventoryBatch(
+      entries: readonly (
+        | { kind: 'section'; nodeId: string; section: InventorySection }
+        | { kind: 'hashes'; nodeId: string; bootId: string; hashes: Readonly<Record<string, Uint8Array>> }
+      )[],
+    ): Promise<(undefined | Error)[]> {
+      return db.transaction(async (tx) => {
+        const results: (undefined | Error)[] = [];
+        for (const entry of entries) {
+          await tx.query('SAVEPOINT gateway_inventory');
+          try {
+            if (entry.kind === 'section')
+              await inventory.ingestSection(tx, work, entry.nodeId, {
+                section: entry.section.section,
+                content: entry.section.content,
+                sha256: entry.section.sha256,
+              });
+            else await inventory.recordHashes(tx, work, entry.nodeId, entry.hashes, { bootId: entry.bootId });
+            await tx.query('RELEASE SAVEPOINT gateway_inventory');
+            results.push(undefined);
+          } catch (error) {
+            await tx.query('ROLLBACK TO SAVEPOINT gateway_inventory');
+            results.push(error instanceof Error ? error : new Error(String(error)));
+          }
+        }
+        return results;
+      });
     },
 
     /** Hashes a heartbeat carries (every 10th); a changed set is pulled at the next Hello. */

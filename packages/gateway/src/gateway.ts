@@ -560,7 +560,9 @@ export function createGateway(options: GatewayOptions): Gateway {
     else session.sentGeneration = result.generation;
     for (const command of [...result.running, ...result.replay]) reserveUnchecked(session, command);
     for (const command of result.replay) sendCommand(session, command);
-    gateway.poke();
+    // Only when there is something to send: a reconnect storm must not turn every Hello into a
+    // dispatch pass over every session on this gateway.
+    if (result.hasPending) gateway.poke();
     return session;
   }
 
@@ -575,7 +577,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       if (counter) counter.used = Math.min(counter.limit, Math.max(0, counter.limit - free));
     }
     if (Object.keys(heartbeat.inventoryHashes).length)
-      await store.inventoryHashes(session.nodeId, session.bootId, heartbeat.inventoryHashes);
+      await inventoryBatched({ kind: 'hashes', nodeId: session.nodeId, bootId: session.bootId, hashes: heartbeat.inventoryHashes });
   }
 
   /**
@@ -620,6 +622,10 @@ export function createGateway(options: GatewayOptions): Gateway {
     maxUpdateBatch,
   );
 
+  const inventoryBatched = groupCommit(
+    (inputs: Parameters<typeof store.inventoryBatch>[0][number][]) => store.inventoryBatch(inputs),
+    maxUpdateBatch,
+  );
   const ingestEventsBatched = groupCommit(
     (inputs: { session: Session; batch: EventBatch }[]) =>
       store.eventsBatch(
@@ -655,7 +661,7 @@ export function createGateway(options: GatewayOptions): Gateway {
 
   async function onInventory(session: Session, section: InventorySection) {
     try {
-      await store.inventory(session.nodeId, section);
+      await inventoryBatched({ kind: 'section', nodeId: session.nodeId, section });
     } catch (error) {
       if (!isComputeError(error, 'INVALID_INPUT')) throw error;
       log.warn('gateway: inventory section rejected', {
