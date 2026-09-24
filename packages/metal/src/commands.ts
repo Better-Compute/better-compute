@@ -19,6 +19,8 @@ export const metalPayloads = Object.freeze({
   deployImage: message('bettercompute.agent.v1.DeployImageRequest'),
   /** `{ kernel_path, initrd_path, kernel_cmdline[] }`: boots the installed OS, so it never reports success itself. */
   kexec: message('bettercompute.agent.v1.KexecRequest'),
+  /** Proposed: `{ url, method, headers, body, tls_spki_sha256, timeout_ms }` → `HttpProxyResponse { status, headers, body }`. */
+  httpProxy: message('bettercompute.site.v1.HttpProxyRequest'),
 });
 
 /**
@@ -63,6 +65,9 @@ export const metalCommandKinds: readonly CommandKindSpec[] = Object.freeze([
     roles: ['ramdisk'],
     payload: metalPayloads.deployImage,
   },
+  // One HTTP(S) request from the site agent to a machine's own address (§5.6 walkthrough 3): how
+  // control-plane steps reach agentless machines (the Talos API) without breaking P5.
+  { kind: 'site.httpProxy', lane: 'control', retrySafe: false, timeout: '1m', roles: ['site'], payload: metalPayloads.httpProxy },
   {
     kind: 'boot.kexec',
     lane: 'control',

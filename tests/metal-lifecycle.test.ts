@@ -10,8 +10,16 @@ import {
   type WorkQueue,
 } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
-import { fromJson, type DescMessage } from '@bufbuild/protobuf';
-import { commandKinds, protocolRegistry } from '@better-compute/protocol';
+import { create, fromJson, toBinary, type DescMessage } from '@bufbuild/protobuf';
+import {
+  DeployImageResultSchema,
+  DiagDcgmResultSchema,
+  InventoryRefreshResultSchema,
+  WipeResultSchema,
+  commandKinds,
+  protocolRegistry,
+  site,
+} from '@better-compute/protocol';
 import {
   defineProfile,
   provisionMigrations,
@@ -159,17 +167,32 @@ async function runAgents(): Promise<number> {
       ? (await db.query<{ node_id: string }>('SELECT node_id FROM metal_nodes WHERE bmc_address = $1', [payload.address])).rows[0]?.node_id
       : undefined;
     const target = byBmc ?? command.node_id;
-    let result: unknown = {};
+    // Results travel as the kind's result message in binary protobuf, as a real agent sends them.
+    let result: Uint8Array = new Uint8Array();
     let state = 'succeeded';
+    const bmc = (value: unknown) => toBinary(site.BmcOperationResultSchema, create(site.BmcOperationResultSchema, { ok: true, resultJson: JSON.stringify(value) }));
     switch (command.kind) {
       case 'bmc.query':
-        result = payload.operation === 'inspect.inspect' ? { macs: ['B8:CE:F6:00:00:01'], productUuid: '4C4C4544-0000-0000-0000-000000000001' } : { power: 'off' };
+        result = bmc(payload.operation === 'inspect.inspect' ? { macs: ['B8:CE:F6:00:00:01'], productUuid: '4C4C4544-0000-0000-0000-000000000001' } : { power: 'off' });
+        break;
+      case 'bmc.boot':
+        result = bmc({});
         break;
       case 'bmc.power':
+        result = bmc({});
         if (['cycle', 'on', 'reset'].includes(args.action)) await connect(target, 'ramdisk', `ramdisk-${command.id}`);
         break;
       case 'diag.dcgm':
-        result = { passed: agents.dcgmPasses };
+        result = toBinary(DiagDcgmResultSchema, create(DiagDcgmResultSchema, { passed: agents.dcgmPasses, level: payload.level, tests: [{ name: 'pcie.bandwidth', passed: agents.dcgmPasses }] }));
+        break;
+      case 'disk.wipe':
+        result = toBinary(WipeResultSchema, create(WipeResultSchema, { disks: [{ id: 'wwn-0x5000', method: 'nvme-format', verified: true }] }));
+        break;
+      case 'deploy.image':
+        result = toBinary(DeployImageResultSchema, create(DeployImageResultSchema, { sha256: Buffer.from(payload.sha256, 'base64'), writtenBytes: 1024n, rootDisk: 'wwn-0x5000' }));
+        break;
+      case 'inventory.refresh':
+        result = toBinary(InventoryRefreshResultSchema, create(InventoryRefreshResultSchema, {}));
         break;
       case 'boot.kexec':
         // The ramdisk ends: the command never reports; the installed OS rejoins as `node`.
@@ -180,7 +203,7 @@ async function runAgents(): Promise<number> {
     await db.query('UPDATE commands SET state = $2, result = $3, attested = attested AND $4 WHERE id = $1', [
       command.id,
       state,
-      new TextEncoder().encode(JSON.stringify(result)),
+      result,
       command.kind !== 'disk.wipe' || agents.attestWipe,
     ]);
   }

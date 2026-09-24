@@ -37,4 +37,12 @@ CREATE TABLE metal_nodes (
 CREATE INDEX metal_nodes_tenant ON metal_nodes (tenant_id);
 `,
   },
+  {
+    name: 'metal/0002_addresses',
+    sql: `
+-- The machine's own IP addresses (from Redfish inspection or the operator). site.httpProxy may only
+-- reach these, so a step cannot turn the site agent into a proxy for anything on its network.
+ALTER TABLE metal_nodes ADD COLUMN addresses text[] NOT NULL DEFAULT '{}';
+`,
+  },
 ]);

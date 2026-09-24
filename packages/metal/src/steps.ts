@@ -17,6 +17,7 @@ import {
   workflowProfile,
   type CommandOutcome,
 } from '@better-compute/provision';
+import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
 
 // Metal's workflow steps (PLAN.md §3.5, §11.3). Most are control-plane steps that build a command
@@ -67,7 +68,7 @@ async function bmc(
     payload: bmcOperationJson(node, operation, args),
     ...(key ? { key } : {}),
   });
-  return decodeResult(outcome);
+  return bmcResult(outcome).result;
 }
 
 // Payloads are the proto3 JSON of each kind's message (`metalPayloads`): the runtime packs them.
@@ -128,20 +129,6 @@ async function prepareBootEntries(context: StepContext, node: MetalNodeRow, keyP
       key: `${keyPrefix ?? 'entry'}-${i}`,
       payload: entry,
     });
-}
-
-/** Results travel as canonical JSON (`result_json`) or raw bytes; both come back as JSON here. */
-function decodeResult(outcome: CommandOutcome): Json {
-  if (!outcome.result || outcome.result.byteLength === 0) return { commandId: outcome.commandId };
-  const text = new TextDecoder().decode(outcome.result);
-  try {
-    const parsed = JSON.parse(text) as Json;
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? { ...(parsed as Record<string, Json>), commandId: outcome.commandId }
-      : { value: parsed, commandId: outcome.commandId };
-  } catch {
-    return { commandId: outcome.commandId, resultBase64: Buffer.from(outcome.result).toString('base64') };
-  }
 }
 
 const powerActions = ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'] as const;
@@ -298,7 +285,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     input: manifest({}),
     async run(_input, context) {
       const outcome = await awaitCommand(context, { nodeId: requireNode(context), kind: 'inventory.refresh', payload: { rescan: true } });
-      return decodeResult(outcome);
+      return inventoryRefreshResult(outcome);
     },
   });
 
@@ -313,9 +300,11 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       const outcome = await awaitCommand(context, { nodeId: requireNode(context), kind: 'diag.dcgm', payload: { level: input.level } });
       const attested = await verify(context.sql, outcome, context);
       if (!attested) throw new ComputeError('DRIVER_ERROR', 'The diagnostics result is not attested by the node');
-      const result = decodeResult(outcome) as Record<string, Json>;
-      if (result.passed === false) throw new ComputeError('DRIVER_ERROR', `DCGM level ${input.level} failed`, undefined, { result });
-      return { ...result, level: input.level, attested };
+      const result = dcgmResult(outcome);
+      const failed = [...result.tests, ...result.gpus.flatMap((gpu) => gpu.checks)].filter((test) => !test.passed).map((test) => test.name);
+      if (!result.passed)
+        throw new ComputeError('DRIVER_ERROR', `DCGM level ${input.level} failed${failed.length ? `: ${failed.join(', ')}` : ''}`);
+      return { passed: true, level: input.level, attested, checks: result.tests.length };
     },
   });
 
@@ -326,13 +315,17 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     timeout: '6h',
     retrySafe: false,
     input: manifest({ mode: field.option(['none', 'quick', 'secure-erase', 'crypto-erase']).optional() }),
-    async run(input, context) {
+    async run(input, context): Promise<Json> {
       const node = await metalNode(context);
       const mode = input.mode ?? node.release_wipe;
       if (mode === 'none') return { mode, attested: true };
       const outcome = await awaitCommand(context, { nodeId: node.node_id, kind: 'disk.wipe', payload: { mode: wipeModeNames[mode]! } });
       // `ready` follows only a verified wipe (§11.1): the release completes only on attested: true.
-      return { ...(decodeResult(outcome) as Record<string, Json>), mode, attested: await verify(context.sql, outcome, context) };
+      // Verified means both: the node signed the result, and every disk's read-back check passed.
+      const result = wipeResult(outcome);
+      const unverified = result.disks.filter((disk) => !disk.verified).map((disk) => disk.id);
+      const attested = (await verify(context.sql, outcome, context)) && result.disks.length > 0 && unverified.length === 0;
+      return { mode, attested, disks: result.disks.map((disk) => ({ id: disk.id, method: disk.method, verified: disk.verified })), unverified };
     },
   });
 
@@ -369,7 +362,11 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
         },
         timeoutMs: 60 * 60_000,
       });
-      return { ...(decodeResult(outcome) as Record<string, Json>), imageId: image.id, sha256: image.sha256 };
+      const written = deployResult(outcome);
+      const streamed = Buffer.from(written.sha256).toString('hex');
+      if (streamed && streamed !== image.sha256)
+        throw new ComputeError('DRIVER_ERROR', `The ramdisk wrote an image with sha256 ${streamed}, not ${image.sha256}`);
+      return { imageId: image.id, sha256: image.sha256, rootDisk: written.rootDisk, writtenBytes: Number(written.writtenBytes) };
     },
   });
 
