@@ -846,9 +846,10 @@ export function createCapacityPort(
       return outcome;
     },
     async release(tx, allocationId) {
-      const allocation = await readAllocation(tx, allocationId);
+      // Lock order matches reserve (quota before rollup), so the two never deadlock.
+      const allocation = await readAllocation(tx, allocationId, { lock: true });
       if (!allocation) throw new ComputeError('NOT_FOUND', `Allocation ${allocationId} not found`);
-      if (!(await releaseAllocation(tx, allocationId))) return;
+      if (allocation.released) return;
       const { rows } = await tx.query<{ class: string; count: string | number }>(
         `SELECT class, count(*) AS count FROM devices WHERE id = ANY($1::text[]) GROUP BY class`,
         [allocation.atoms],
@@ -856,6 +857,7 @@ export function createCapacityPort(
       const demand: Record<string, number> = { ...allocation.resources };
       for (const row of rows) demand[row.class] = (demand[row.class] ?? 0) + Number(row.count);
       await refundQuota(tx, allocation.tenantId, allocation.poolId, demand);
+      await releaseAllocation(tx, allocationId);
     },
   };
 }

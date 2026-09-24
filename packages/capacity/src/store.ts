@@ -15,6 +15,7 @@ import type {
   TimeRange,
 } from '@better-compute/core';
 import { ComputeError } from '@better-compute/core';
+import { gpuLinks, type GpusSection } from '@better-compute/inventory';
 import { isSchedulable } from './eligibility.js';
 import { gpuLinkOrder } from './pipeline.js';
 
@@ -301,6 +302,19 @@ export async function writeDeviceLinks(
       ],
     );
   return list.length;
+}
+
+/**
+ * Materializes a node's GPU topology from its inventory `gpus` section (inventory's `gpuLinks`:
+ * pairs of the GPU UUIDs that `devicesFromGpus` gives the `gpu` atoms). Call it wherever
+ * `node.inventory.changed` is handled, in the same transaction as the device upsert.
+ */
+export async function syncDeviceLinks(
+  tx: SqlTx,
+  nodeId: string,
+  section: GpusSection | undefined,
+): Promise<number> {
+  return writeDeviceLinks(tx, nodeId, gpuLinks(section));
 }
 
 export interface LoadNodeViewsOptions {

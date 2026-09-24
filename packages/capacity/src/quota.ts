@@ -4,6 +4,10 @@ import { ComputeError, type DeviceRequest, type SqlTx } from '@better-compute/co
 // rows `pools.offer` and `pools.create` create. A missing row grants 0. D9 (conservative): a
 // reservation holds its charge from admission until it is terminal, `pending` included, so charges
 // belong to the reservation lifecycle, not to individual placement attempts.
+//
+// Lock order, everywhere in capacity: quota_usage → pools → nodes → devices → node_resources →
+// pool_capacity_rollup. Charges precede placement and refunds precede releases, so concurrent
+// reserve and release transactions never wait on each other in a cycle.
 
 /** What a request counts against quota, per resource: device classes by count, then scalars. */
 export function quotaDemand(request: {

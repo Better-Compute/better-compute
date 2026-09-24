@@ -327,7 +327,7 @@ export async function reservationView(tx: SqlTx, row: ReservationRow): Promise<R
     const { rows } = await tx.query<{ node_id: string; binding: Json | string | null }>(
       `SELECT node_id, binding FROM allocations
         WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL
-          AND binding IS NOT NULL ORDER BY id LIMIT 1`,
+          AND bound_at IS NOT NULL ORDER BY id LIMIT 1`,
       [row.id],
     );
     const bound = rows[0];
@@ -719,8 +719,8 @@ export async function endReservation(
   if (reservationStateTable.terminal.includes(row.state)) return row;
   if (row.state === 'draft' || row.state === 'awaiting-confirmation')
     throw new ComputeError('INVALID_STATE', `Reservation ${row.id} is ${row.state}`);
-  await releaseBookings(tx, row, deps);
   await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+  await releaseBookings(tx, row, deps);
   let next: ReservationRow;
   if (row.state === 'pending') next = await move(tx, row, 'cancel');
   else if (row.state === 'releasing') next = await move(tx, row, 'complete');
@@ -738,8 +738,8 @@ async function failReservation(
   row: ReservationRow,
   condition: Omit<Condition, 'since'>,
 ): Promise<ReservationRow> {
-  await releaseBookings(tx, row, deps);
   await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+  await releaseBookings(tx, row, deps);
   const failed = await move(tx, row, 'fail', {
     conditions: withCondition(row.conditions, condition, deps.clock.now()),
   });
@@ -766,8 +766,8 @@ export async function cancelReservation(
       'INVALID_STATE',
       `Only pending or not-yet-started reservations can be cancelled (${row.state}); release it instead`,
     );
-  await releaseBookings(tx, row, deps);
   await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+  await releaseBookings(tx, row, deps);
   const cancelled = await move(tx, row, 'cancel');
   await publish(deps, tx, cancelled, 'reservation.cancelled');
   return reservationView(tx, cancelled);
@@ -995,10 +995,71 @@ export async function markAllocationBound(
       JSON.stringify({ cdiDevices: [...binding.cdiDevices], envFile: binding.envFile ?? '' }),
     ],
   );
-  const owner = rows[0];
+  return wakeOwner(tx, work, rows[0]);
+}
+
+async function wakeOwner(
+  tx: SqlTx,
+  work: ModuleContext['work'],
+  owner: { owner_id: string; owner_kind: string } | undefined,
+): Promise<boolean> {
   if (!owner) return false;
   if (owner.owner_kind === 'reservation') await work.enqueue(tx, reservationWork, owner.owner_id);
   return true;
+}
+
+/**
+ * Records a node's `AllocationFailed` report: it could not expose the devices. The reservation
+ * treats it as an immediate bind failure (re-placed up to `maxBindRetries` times, then failed).
+ * Returns `false` for an unknown, released or already bound allocation.
+ */
+export async function markAllocationFailed(
+  tx: SqlTx,
+  work: ModuleContext['work'],
+  allocationId: string,
+  failure: { reason: string },
+): Promise<boolean> {
+  const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
+    `UPDATE allocations SET binding = jsonb_build_object('failed', $2::text), version = version + 1
+      WHERE id = $1 AND released_at IS NULL AND bound_at IS NULL RETURNING owner_id, owner_kind`,
+    [allocationId, failure.reason.slice(0, 500)],
+  );
+  return wakeOwner(tx, work, rows[0]);
+}
+
+/**
+ * Records a node's `AllocationReleased` report. For a released allocation that is the expected
+ * acknowledgement (`false`). For a live, bound one the node lost the assignment: the reservation
+ * gets `Degraded` (`BindingLost`) until the node reports it bound again.
+ */
+export async function markAllocationReleased(
+  tx: SqlTx,
+  work: ModuleContext['work'],
+  allocationId: string,
+): Promise<boolean> {
+  const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
+    `UPDATE allocations SET binding = COALESCE(binding, '{}'::jsonb) || '{"lost": true}'::jsonb,
+                            bound_at = NULL, version = version + 1
+      WHERE id = $1 AND released_at IS NULL AND bound_at IS NOT NULL RETURNING owner_id, owner_kind`,
+    [allocationId],
+  );
+  return wakeOwner(tx, work, rows[0]);
+}
+
+async function setConditions(
+  tx: SqlTx,
+  row: ReservationRow,
+  conditions: Condition[],
+): Promise<ReservationRow> {
+  if (JSON.stringify(conditions) === JSON.stringify(row.conditions)) return row;
+  const { rowCount } = await tx.query(
+    `UPDATE reservations SET conditions = $3::jsonb, version = version + 1
+      WHERE id = $1 AND version = $2`,
+    [row.id, row.version, JSON.stringify(conditions)],
+  );
+  if (rowCount === 0)
+    throw new ComputeError('CONFLICT', `Reservation ${row.id} changed concurrently`);
+  return { ...row, conditions, version: row.version + 1 };
 }
 
 function maxPendingMs(policy: Json): number {
@@ -1076,13 +1137,20 @@ export async function reconcileReservation(
   }
 
   if (row.state === 'binding') {
-    const { rows } = await tx.query<{ total: string | number; bound: string | number }>(
-      `SELECT count(*) AS total, count(bound_at) AS bound FROM allocations
+    const { rows } = await tx.query<{
+      total: string | number;
+      bound: string | number;
+      failed: string | number;
+    }>(
+      `SELECT count(*) AS total, count(bound_at) AS bound,
+              count(*) FILTER (WHERE binding ? 'failed') AS failed
+         FROM allocations
         WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL`,
       [id],
     );
     const total = Number(rows[0]?.total ?? 0);
     const bound = Number(rows[0]?.bound ?? 0);
+    const rejected = Number(rows[0]?.failed ?? 0) > 0;
     if (total > 0 && bound === total) {
       const active = await move(tx, row, 'bind', {
         conditions: withoutCondition(row.conditions, 'BindTimeout'),
@@ -1090,13 +1158,14 @@ export async function reconcileReservation(
       await publish(deps, tx, active, 'reservation.active');
       return wake(row.during.end);
     }
-    if (now - row.during.start < bindTimeoutMs) return wake(row.during.start + bindTimeoutMs);
+    if (!rejected && now - row.during.start < bindTimeoutMs)
+      return wake(row.during.start + bindTimeoutMs);
     const previous = row.conditions.find((entry) => entry.type === 'BindTimeout');
     const attempts = Number(previous?.message ?? 0) + 1;
     const condition = {
       type: 'BindTimeout',
       status: 'true' as const,
-      reason: 'NodeDidNotBind',
+      reason: rejected ? 'NodeRejectedBinding' : 'NodeDidNotBind',
       message: String(attempts),
     };
     if (attempts > maxBindRetries) {
@@ -1112,7 +1181,26 @@ export async function reconcileReservation(
     return now;
   }
 
-  // active
+  // active: Degraded while a node reports it lost an assignment it had bound.
+  const { rows } = await tx.query<{ lost: string | number }>(
+    `SELECT count(*) FILTER (WHERE binding ? 'lost' AND bound_at IS NULL) AS lost FROM allocations
+      WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL`,
+    [id],
+  );
+  const conditions =
+    Number(rows[0]?.lost ?? 0) > 0
+      ? withCondition(
+          row.conditions,
+          {
+            type: 'Degraded',
+            status: 'true',
+            reason: 'BindingLost',
+            message: 'a node dropped the devices',
+          },
+          now,
+        )
+      : withoutCondition(row.conditions, 'Degraded');
+  await setConditions(tx, row, conditions);
   return wake(row.during.end);
 }
 

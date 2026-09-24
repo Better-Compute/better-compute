@@ -20,6 +20,8 @@ import {
   createCapacityPort,
   deviceAssignments,
   markAllocationBound,
+  markAllocationFailed,
+  markAllocationReleased,
   readQuotas,
   reservationWork,
   type CapacityApi,
@@ -782,5 +784,78 @@ describe('createCapacityPort', () => {
     await db.transaction((tx) => port.release(tx, outcome.allocations[0]!.id));
     await db.transaction((tx) => port.release(tx, outcome.allocations[0]!.id));
     expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(0);
+  });
+});
+
+describe('node reports', () => {
+  it('re-places at once when a node rejects the binding, and marks lost bindings Degraded', async () => {
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    await reconcile(created.id); // → binding
+    const node = recorded.invalidated.at(-1)!;
+    const [first] = await deviceAssignments(db, node);
+    const work = moduleContext(db).work;
+    expect(
+      await db.transaction((tx) =>
+        markAllocationFailed(tx, work, first!.allocationId, { reason: 'cdi: no such device' }),
+      ),
+    ).toBe(true);
+    await reconcile(created.id); // rejected → pending without waiting for the timeout
+    const pending = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: created.id,
+    })) as Rsv;
+    expect(pending.state).toBe('pending');
+    expect(pending.conditions).toMatchObject([
+      { type: 'BindTimeout', reason: 'NodeRejectedBinding', message: '1' },
+    ]);
+
+    await reconcile(created.id); // → placed
+    await reconcile(created.id); // → binding
+    const [second] = await deviceAssignments(db, recorded.invalidated.at(-1)!);
+    await db.transaction((tx) =>
+      markAllocationBound(tx, work, second!.allocationId, { cdiDevices: ['nvidia.com/gpu=0'] }),
+    );
+    await reconcile(created.id); // → active
+    // Late reports about the first allocation are stale.
+    expect(
+      await db.transaction((tx) =>
+        markAllocationFailed(tx, work, first!.allocationId, { reason: 'late' }),
+      ),
+    ).toBe(false);
+    expect(
+      await db.transaction((tx) =>
+        markAllocationBound(tx, work, first!.allocationId, { cdiDevices: [] }),
+      ),
+    ).toBe(false);
+
+    expect(
+      await db.transaction((tx) => markAllocationReleased(tx, work, second!.allocationId)),
+    ).toBe(true);
+    await reconcile(created.id);
+    const degraded = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: created.id,
+    })) as Rsv;
+    expect(degraded).toMatchObject({
+      state: 'active',
+      conditions: [{ type: 'Degraded', reason: 'BindingLost' }],
+    });
+    expect(degraded.binding).toBeUndefined();
+
+    await db.transaction((tx) =>
+      markAllocationBound(tx, work, second!.allocationId, { cdiDevices: ['nvidia.com/gpu=0'] }),
+    );
+    await reconcile(created.id);
+    const healed = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: created.id,
+    })) as Rsv;
+    expect(healed.conditions).toEqual([]);
+    expect(healed.binding).toMatchObject({ cdiDevices: ['nvidia.com/gpu=0'] });
+
+    await call('reservations', 'release', { tenantId: 'acme', reservationId: created.id });
+    expect(
+      await db.transaction((tx) => markAllocationReleased(tx, work, second!.allocationId)),
+    ).toBe(false);
   });
 });
