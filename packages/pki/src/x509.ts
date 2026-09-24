@@ -95,6 +95,8 @@ export interface CertificateTemplate {
   /** A CA certificate; `pathLength` bounds the CAs below it. */
   ca?: { pathLength?: number };
   usage?: readonly ExtendedKeyUsage[];
+  /** Further extended key usages by OID (the command-signing usage). */
+  extKeyUsageOids?: readonly string[];
   uriSans?: readonly string[];
   dnsSans?: readonly string[];
   /** The role extension (`node`, `site`, `ramdisk`, `gateway`, `internal`, …). */
@@ -137,17 +139,15 @@ export function buildCertificate(template: CertificateTemplate, signer: KeyObjec
     extensions.push(extension(oids.basicConstraints, true, der.sequence()));
     extensions.push(extension(oids.keyUsage, true, der.namedBits([keyUsageBits.digitalSignature])));
   }
-  if (template.usage?.length)
+  const ekus = [
+    ...(template.usage ?? []).map((usage) =>
+      usage === 'server' ? oids.serverAuth : oids.clientAuth,
+    ),
+    ...(template.extKeyUsageOids ?? []),
+  ];
+  if (ekus.length)
     extensions.push(
-      extension(
-        oids.extKeyUsage,
-        false,
-        der.sequence(
-          ...template.usage.map((usage) =>
-            der.oid(usage === 'server' ? oids.serverAuth : oids.clientAuth),
-          ),
-        ),
-      ),
+      extension(oids.extKeyUsage, false, der.sequence(...ekus.map((oid) => der.oid(oid)))),
     );
   const names = [
     ...(template.dnsSans ?? []).map((name) => der.implicit(2, parseDer(der.ia5(name)).value)),

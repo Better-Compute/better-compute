@@ -103,6 +103,90 @@ the ±60 s window, and a 120 s replay cache. The cache is keyed by the signed st
 signature bytes, so the second valid ECDSA form `(r, n − s)` cannot be replayed. Agents sign with
 `signRenewPop`.
 
+## Bundles, CLI, agent side
+
+- `createPkiBundle({ trustDomain })` creates the whole set. `exportPkiBundle(bundle, { secret })`
+  and `importPkiBundle(text, { secret })` seal it with HKDF-SHA256 + AES-256-GCM, with the trust
+  domain in the AAD. `readPkiPins(text)` reads only the public half. `better-compute pki init|show|
+issue-gateway` are built on these.
+- `agentIdentityFromChain(chainDer, { roots, now, revocations })` authenticates a gateway handshake.
+  A `node-tenant` certificate runs as `node` with `tenantControlled: true`.
+- `startAgentJoin`, `finishAgentJoin` and `prepareAgentRenew` are the agent half (for `FakeDaemon`
+  and the simulator). `tests/pki-flow.test.ts` runs join → handshake → rotate → revoke end to end.
+
+## v0.2: secrets, signed intent, attested results
+
+- **Secrets.** `localSealedSecretStore({ sql, keys })` is core's `SecretStore` over
+  `sealed_secrets`, and `sealedSecretsMigration` (`pki/0001_sealed_secrets`) creates that table.
+  - Values are sealed with AES-256-GCM under HKDF keys, with the AAD binding ref and tenant.
+  - `keys` may hold several ids. `reseal()` moves rows to the current key and reports rows it
+    cannot open.
+  - Refs are `secret://<tenant>/<id>`.
+  - The broker runs `openSecretRequest(req, { nodeId, lookup, now, isBound })`: the node signature
+    against `node_certs`, the `epk` point, then the binding. Refusals carry `details.refusal` for
+    `SecretResponse.error`.
+  - `sealSecretResponse` answers with a JWE to `epk`.
+  - Agents use `createSecretRequest` and `openSecretResponse`.
+- **Signed intent.** `createCommandSigningAuthority()` is the root (in production, KMS or Vault
+  transit). It issues `issueWorkerKey({ workerId })` keys that last ≤ 24 h and carry the
+  command-signing EKU.
+  - `signCommand`/`verifyCommand` and `signDesiredState`/`verifyDesiredState` check the chain to
+    the `TrustBundle` roots, the EKU, purpose-bound ES256 and the node id. `required` comes from the
+    daemon's kind table, and a signature that is present is always checked.
+  - Root rotation: `addTrustRoot`, then switch once `trustVersionAcknowledged(version, acks,
+fleetSize)`, then `removeTrustRoot`.
+- **Attested results.** `verifyAttestedUpdate` (a `CommandUpdate.node_sig` over
+  [command_id, uint32(state), sha256(result)]) and `verifyAttestedReport` (AllocationBound or
+  AllocationReleased; the body must name the session's node) look the key up by `kid` in
+  `node_certs` (`nodeCertsLookup(tx)`).
+  - A revoked certificate is refused.
+  - An expired certificate is accepted for 7 more days, for results journaled offline.
+  - Agents sign with `signCommandUpdate` and `signAttestedReport`.
+
+## Go parity (for `bcd`, W1)
+
+Everything `bcd` produces or checks must match this package byte for byte. Use only Go's standard
+library: `crypto/ecdsa`, `crypto/ecdh`, `crypto/aes` + `crypto/cipher` (GCM), `crypto/sha256`,
+`crypto/x509`. RFC 3394 AES key wrap is about 30 lines; no JOSE library is needed.
+
+- **Signatures.** ES256 over `signingInput(purpose, parts)` from
+  `packages/protocol/src/signing.ts`: `"bettercompute.v1/" ‖ purpose ‖ 0x00 ‖ (uint32_be(len) ‖
+part)*`, SHA-256.
+  - `Signature.sig` is raw `r ‖ s`, each left-padded to 32 bytes. Go's `ecdsa.Sign` returns
+    `r, s` big.Ints, so pad them; never send ASN.1.
+  - Node keys: `kid` = base64url (no padding) of SHA-256 over the SPKI DER.
+  - Control-plane keys: `kid` = base64url of the certificate's subject key id, with the certificate
+    in `Signature.chain[0]`.
+- **Pins.** `sha256/` + standard base64 of SHA-256(SPKI DER), as `config.DecodePin` expects. To
+  check a JoinResponse, take the key from `sig.chain[0]` and compare its SPKI hash with
+  `join_signing_key_pin` before verifying.
+- **Sealed join token.** A compact JWE whose protected header is exactly
+  `{"typ":"bcjt+jwe","csr":<b64url sha256(CSR DER)>,"iat":<unix seconds>,"alg":"ECDH-ES+A256KW","enc":"A256GCM","epk":{"kty":"EC","crv":"P-256","x":…,"y":…}}`
+  (member order is free: the AAD is the header bytes as sent).
+  - KEK = Concat KDF: SHA-256(`00000001` ‖ Z ‖ len‖"ECDH-ES+A256KW" ‖ len‖"" ‖ len‖"" ‖
+    `00000100`), with 32-bit big-endian lengths and Z the ECDH x-coordinate.
+  - The CEK (32 random bytes) is wrapped with RFC 3394 under the default IV `A6A6A6A6A6A6A6A6`.
+  - Payload: A256GCM with a 12-byte IV and the AAD = ASCII of the base64url protected header.
+  - Plaintext: the token's UTF-8.
+  - Load the key from `/etc/bcd/join-encryption.jwk`, else `/.well-known/better-compute`, and use
+    it only if it matches `join_encryption_key_pin`.
+- **JoinResponse check.** In order:
+  1. the signature under the pinned key;
+  2. `csr_sha256` equals SHA-256 of the CSR you sent;
+  3. the leaf's public key equals your key;
+  4. the leaf's one URI SAN is `spiffe://<trust_domain>/site/<site_id>/node/<node_id>`;
+  5. the role extension matches `role`.
+- **Certificates.** Agent certificates carry the role in non-critical extension
+  `2.25.121396728463777788658791269357486937304.1.1` as a UTF8String. Worker command-signing
+  certificates carry EKU `2.25.121396728463777788658791269357486937304.2.1`: in `x509.Verify`, pass
+  `KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}` and check `UnknownExtKeyUsage` yourself.
+  Nothing we issue is critical except BasicConstraints and KeyUsage, which Go understands.
+- **SecretResponse.** The JWE has `typ` `bcsecret+jwe` and carries `ref` and `rid` (request id) in
+  the protected header. Check both before using the value; the recipient is the request's one-time
+  `epk` (65-byte uncompressed point).
+- **Renew.** `pop_sig` covers `renew-pop` [sha256(new CSR), node_id, int64_be(seconds) ‖
+  int32_be(nanos)], signed with the current key. Renew at ~60% of the lifetime.
+
 ## Also here
 
 - `sealJwe` / `openJwe`: compact JWE, `ECDH-ES+A256KW` + `A256GCM` only, typed by `typ`. It also

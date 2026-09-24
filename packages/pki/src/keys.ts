@@ -15,6 +15,8 @@ import { ComputeError } from '@better-compute/core';
 export const oidArc = '2.25.121396728463777788658791269357486937304';
 /** Certificate extension carrying the agent role as a UTF8String (`node`, `site`, `ramdisk`, …). */
 export const roleExtensionOid = `${oidArc}.1.1`;
+/** Extended key usage of worker keys that sign commands and desired state (§13). */
+export const commandSigningEkuOid = `${oidArc}.2.1`;
 
 export interface KeyPair {
   privateKey: KeyObject;
@@ -115,6 +117,40 @@ export function timingSafeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
   let diff = 0;
   for (let index = 0; index < a.length; index++) diff |= a[index]! ^ b[index]!;
   return diff === 0;
+}
+
+/**
+ * A P-256 public key from an uncompressed SEC1 point (`0x04 ‖ x ‖ y`, 65 bytes), as
+ * `SecretRequest.epk` carries it. Importing checks that the point is on the curve.
+ */
+export function p256PublicKeyFromPoint(point: Uint8Array): KeyObject {
+  if (!(point instanceof Uint8Array) || point.length !== 65 || point[0] !== 0x04)
+    throw new ComputeError('INVALID_INPUT', 'Expected an uncompressed P-256 point (65 bytes)');
+  try {
+    return createPublicKey({
+      key: {
+        kty: 'EC',
+        crv: 'P-256',
+        x: Buffer.from(point.subarray(1, 33)).toString('base64url'),
+        y: Buffer.from(point.subarray(33)).toString('base64url'),
+      },
+      format: 'jwk',
+    });
+  } catch {
+    throw new ComputeError('INVALID_INPUT', 'The point is not on the P-256 curve');
+  }
+}
+
+/** The uncompressed SEC1 point of a P-256 public key (65 bytes). */
+export function p256Point(key: PublicKeyInput): Uint8Array {
+  const publicKey = toPublicKey(key);
+  assertP256(publicKey);
+  const jwk = publicKey.export({ format: 'jwk' });
+  return new Uint8Array([
+    0x04,
+    ...Buffer.from(jwk.x!, 'base64url'),
+    ...Buffer.from(jwk.y!, 'base64url'),
+  ]);
 }
 
 /** PEM armour for DER bytes. */
