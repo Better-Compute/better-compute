@@ -6,7 +6,7 @@ import {
   type ProvisionState,
   type SqlTx,
 } from '@better-compute/core';
-import { stateProfiles, workflowStates } from './profiles.js';
+import { stateProfile, workflowStates } from './profiles.js';
 import { applyProvisionVerb, readMetalNode, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
 // The metal reconciler (key: node id). Level-triggered: for a node in a workflow-driven provision
@@ -65,7 +65,10 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
         return { action: 'waiting', state, workflowId: node.workflow_id };
       if (workflow?.state === 'succeeded') {
         if (state === 'rescue') return { action: 'idle', state };
-        if (state === 'releasing' && !(await releaseVerified(tx, node.workflow_id, node.release_wipe))) {
+        const unverifiedOk = node.pool_agent === 'none' && node.pool_policy?.allowUnverifiedRelease === true;
+        if (state === 'releasing' && unverifiedOk)
+          await publish(context, tx, node, 'node.release.unverified', { workflowId: node.workflow_id, reason: 'agentless pool; allowUnverifiedRelease' });
+        else if (state === 'releasing' && !(await releaseVerified(tx, node.workflow_id, node.release_wipe))) {
           const error = { code: 'UNVERIFIED_WIPE', message: 'the release wipe is not attested; the node does not return to ready' };
           await applyProvisionVerb(tx, node, 'fail', { error });
           await setMetalWorkflow(tx, nodeId, null, null);
@@ -96,7 +99,14 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
       profileId = node.deploy_profile_id;
       profileVersion = node.deploy_profile_version;
     } else {
-      const profile = stateProfiles[state]!;
+      const profile = stateProfile(state, node.pool_agent);
+      if (!profile) {
+        // Rescue boots a ramdisk, which an agentless machine never runs.
+        const error = { code: 'UNSUPPORTED', message: `${state} needs an agent; pool ${node.pool_id} has agent 'none'` };
+        await applyProvisionVerb(tx, node, 'fail', { error });
+        await publish(context, tx, node, 'node.provision.failed', { from: state, error });
+        return { action: 'failed', from: state, error };
+      }
       profileId = profile.id;
       profileVersion = profile.version;
     }

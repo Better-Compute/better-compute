@@ -12,6 +12,8 @@ export * from './migrations.js';
 export * from './profiles.js';
 export * from './reconcile.js';
 export * from './steps.js';
+export * from './http-proxy.js';
+export * from './results.js';
 export { applyProvisionVerb, readMetalNode, resolveDriverBindings, type MetalNodeRow } from './store.js';
 
 export type { PowerAction, PowerState, WipeMode } from '@better-compute/core';

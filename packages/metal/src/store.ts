@@ -41,13 +41,19 @@ export interface MetalNodeRow {
   deploy_profile_version: number | null;
   release_wipe: 'none' | 'quick' | 'secure-erase' | 'crypto-erase';
   last_error: Json | null;
+  /** The machine's own IP addresses (Redfish inspection or the operator). */
+  addresses: string[];
+  /** `bcd`, or `none` for agentless machines (Talos, appliances): inspected and managed out of band only. */
+  pool_agent: 'bcd' | 'none' | null;
+  pool_policy: Record<string, unknown> | null;
 }
 
 const select = `SELECT m.node_id, m.tenant_id, n.site_id, n.pool_id, n.provision_state, n.failed_from, n.maintenance,
     n.power, n.role, n.version AS node_version, m.bmc_driver, m.bmc_address, m.bmc_credentials,
     m.bmc_tls_spki_sha256, m.macs, m.product_uuid, m.arch, m.uefi, m.hardware_profile, m.phase, m.workflow_id,
-    m.deploy_profile_id, m.deploy_profile_version, m.release_wipe, m.last_error
-  FROM metal_nodes m JOIN nodes n ON n.id = m.node_id`;
+    m.deploy_profile_id, m.deploy_profile_version, m.release_wipe, m.last_error, m.addresses,
+    p.agent AS pool_agent, p.policy AS pool_policy
+  FROM metal_nodes m JOIN nodes n ON n.id = m.node_id LEFT JOIN pools p ON p.id = n.pool_id`;
 
 function normalize(row: MetalNodeRow): MetalNodeRow {
   return {

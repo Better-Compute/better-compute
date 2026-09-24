@@ -17,6 +17,7 @@ import {
   workflowProfile,
   type CommandOutcome,
 } from '@better-compute/provision';
+import { isIP } from 'node:net';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
 
@@ -211,11 +212,17 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       // Redfish reports the PXE MACs and the SMBIOS UUID; keep them for the boot entry.
       const macs = Array.isArray(result.macs) ? result.macs.filter((m): m is string => typeof m === 'string').map((m) => m.toLowerCase()) : [];
       const uuid = typeof result.productUuid === 'string' ? result.productUuid.toLowerCase() : null;
-      if (macs.length || uuid)
+      // The machine's own IPs: the only hosts site.httpProxy may reach for it.
+      const addresses = Array.isArray(result.ipAddresses)
+        ? result.ipAddresses.filter((a): a is string => typeof a === 'string' && isIP(a) !== 0)
+        : [];
+      if (macs.length || uuid || addresses.length)
         await context.sql.query(
           `UPDATE metal_nodes SET macs = CASE WHEN cardinality($2::text[]) > 0 THEN $2::text[] ELSE macs END,
-             product_uuid = COALESCE($3, product_uuid), updated_at = compute_now() WHERE node_id = $1`,
-          [requireNode(context), macs, uuid],
+             product_uuid = COALESCE($3, product_uuid),
+             addresses = CASE WHEN cardinality($4::text[]) > 0 THEN $4::text[] ELSE addresses END,
+             updated_at = compute_now() WHERE node_id = $1`,
+          [requireNode(context), macs, uuid, addresses],
         );
       return result;
     },
@@ -273,6 +280,32 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       await bmc(context, 'bmc.power', 'power.setPower', { action: 'cycle' }, 'power-cycle');
       if (!(await ramdiskConnected(context, node.node_id))) throw stepNotReady(5_000);
       return { ramdisk: 'booted' };
+    },
+  });
+
+  /** Mounts an ISO (an https URL, usually the site cache) through the BMC's virtual media. */
+  const mediaInsert = defineStep({
+    id: 'media.insert',
+    runsOn: 'control-plane',
+    relays: ['site'],
+    timeout: '5m',
+    retrySafe: true,
+    input: manifest({ url: field.string({ pattern: '^https://', maxLength: 2048 }) }),
+    async run(input, context) {
+      await bmc(context, 'bmc.boot', 'virtual-media.insert', { url: input.url });
+      return { inserted: input.url };
+    },
+  });
+  const mediaEject = defineStep({
+    id: 'media.eject',
+    runsOn: 'control-plane',
+    relays: ['site'],
+    timeout: '5m',
+    retrySafe: true,
+    input: manifest({}),
+    async run(_input, context) {
+      await bmc(context, 'bmc.boot', 'virtual-media.eject', {});
+      return { ejected: true };
     },
   });
 
@@ -402,5 +435,5 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     },
   });
 
-  return [getPower, setPower, setBootDevice, inspectOob, prepareRamdisk, cleanUp, ensureRamdisk, refreshInventory, dcgm, wipe, deploy, kexec, revokeIdentity];
+  return [getPower, setPower, setBootDevice, inspectOob, mediaInsert, mediaEject, prepareRamdisk, cleanUp, ensureRamdisk, refreshInventory, dcgm, wipe, deploy, kexec, revokeIdentity];
 }
