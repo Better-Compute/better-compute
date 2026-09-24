@@ -207,6 +207,10 @@ Rules for v0.1:
   iam.require on the returned resource; `replay` → grant); `invoke` re-runs `prepare` in the caller's tx (replay →
   return stored result) and sets `ctx.admission`. Methods whose admission has `denied` stay UNSUPPORTED. New core
   error code `CONFIG_DRIFT` (409). [9ec62d] fleet committed 9ccff66; next: CLI `fleet export|plan|apply`.
+- Fleet wiring for W5a ([9ec62d] 9ccff66, 1b89b67, 6c55dea): register `fleetModule({ driftEvery? })` (migrations
+  fleet/0001_names, fleet/0002_applied; reconciler `fleet.drift`, shardBy none, periodic key 'all' every 15m which
+  enqueues 'tenant:<id>'); events `fleet.drifted` / `fleet.converged` (subject fleet/<tenant>). core apiSurface has
+  `fleet.status` (read).
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also

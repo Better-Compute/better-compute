@@ -27,7 +27,9 @@ export type SigningPurpose =
   /** Site agent node key; parts [SignedDiscoveryAssertion.body] (site/v1, draft). */
   | 'discovery-assertion'
   /** Audit signing key; parts [canonical checkpoint body]. */
-  | 'audit-checkpoint';
+  | 'audit-checkpoint'
+  /** Offline release signing key; parts [canonical release manifest body]. */
+  | 'release-manifest';
 
 const PREFIX = 'bettercompute.v1/';
 const utf8 = new TextEncoder();
