@@ -53,6 +53,7 @@
     "@better-compute/capacity": "workspace:*",
     "@better-compute/client": "workspace:*",
     "@better-compute/core": "workspace:*",
+    "@better-compute/gateway": "workspace:*",
     "@better-compute/iam": "workspace:*",
     "@better-compute/inventory": "workspace:*",
     "@better-compute/pki": "workspace:*",

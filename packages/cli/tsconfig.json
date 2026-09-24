@@ -32,6 +32,9 @@
     },
     {
       "path": "../audit"
+    },
+    {
+      "path": "../gateway"
     }
   ]
 }

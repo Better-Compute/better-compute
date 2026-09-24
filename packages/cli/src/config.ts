@@ -17,6 +17,7 @@ import {
 } from '@better-compute/server';
 import { CliError } from './errors.js';
 import type { CommandSpec } from './framework.js';
+import type { HostExport } from './host/config.js';
 import { unconfiguredIam } from './iam.js';
 
 /** Configuration file names the CLI looks for, in this order, in the working directory and then each parent. */
@@ -56,6 +57,8 @@ export interface CliSettings {
  */
 export interface ConfigModule {
   default?: ConfigExport;
+  /** What `serve` runs around the control plane: extra routes, the gateway role (`defineHost`). */
+  host?: HostExport;
   commands?: readonly CommandSpec<any>[];
   cli?: CliSettings;
 }

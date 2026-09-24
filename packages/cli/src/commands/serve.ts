@@ -3,10 +3,21 @@ import { createServer, type Server } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { workerRoles, type WorkerRole } from '@better-compute/server';
-import { configFromEnv, createDeployment, type AnyCompute, type Deployment } from '../config.js';
+import {
+  configFromEnv,
+  createDeployment,
+  type AnyCompute,
+  type AnyComputeOptions,
+  type Deployment,
+} from '../config.js';
 import { prepareDevSim, simVariants, type SimVariant } from '../dev-sim.js';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
+import { resolveHost, type HostConfig } from '../host/config.js';
+import { startGateway, type RunningGateway } from '../host/gateway.js';
+import { hostListener } from '../host/http.js';
+import { joinKeysWellKnown } from '../host/well-known.js';
+import { defaultPkiPath, loadPkiBundle, pkiFlag } from './pki.js';
 
 // `serve` and `dev` (PLAN.md §9.3): one process runs the HTTP API (`compute.nodeHandler`) and the
 // worker roles, after migrating, until SIGINT/SIGTERM (or `CliIO.signal`). `dev` needs no setup:
@@ -29,12 +40,20 @@ export interface RunServerOptions {
   started?(running: RunningServer): Promise<void>;
   /** On the stop signal, before the listener and the workers stop. */
   stopping?(): Promise<void>;
+  /** The configuration's `host` export: routes, upgrade handlers, well-known fields, the gateway. */
+  hostConfig?: HostConfig;
+  /** Run the gateway role (needs `hostConfig.gateway` and `computeOptions`). */
+  gateway?: boolean;
+  /** The options `compute` was built from (the gateway role reads the store and tunnels from them). */
+  computeOptions?: AnyComputeOptions;
 }
 
 export interface RunningServer {
   /** `http://host:port` once listening; undefined for a worker-only process. */
   url?: string;
   roles: readonly WorkerRole[];
+  /** The gateway role, when it runs. */
+  gateway?: { id: string; port: number; internalPort?: number };
 }
 
 const listen = (server: Server, host: string, port: number) =>
@@ -65,16 +84,29 @@ export async function runServer(
   await options.afterMigrate?.();
   const running: RunningServer = { roles: options.roles };
   let server: Server | undefined;
+  let gateway: RunningGateway | undefined;
   let stopping = false;
   try {
     if (options.roles.length) await compute.start({ roles: [...options.roles] });
+    if (options.gateway) {
+      const config = options.hostConfig?.gateway;
+      if (!config || !options.computeOptions)
+        throw new CliError(
+          'INVALID_CONFIG',
+          'The gateway role needs host.gateway in the configuration',
+          'Export host = defineHost({ gateway: { region, tls: { key, cert, ca } } }) from better-compute.config.ts.',
+        );
+      gateway = await startGateway(compute, options.computeOptions, config, options.note);
+      running.gateway = {
+        id: gateway.id,
+        port: gateway.port,
+        ...(gateway.internalPort === undefined ? {} : { internalPort: gateway.internalPort }),
+      };
+    }
     if (options.api !== false) {
-      server = createServer((req, res) => {
-        void compute.nodeHandler(req, res).catch(() => {
-          if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
-          res.end('{"error":{"code":"INTERNAL_ERROR","message":"Internal error"}}');
-        });
-      });
+      const listener = hostListener(compute, options.hostConfig?.http);
+      server = createServer(listener.request);
+      server.on('upgrade', listener.upgrade);
       const port = await listen(server, options.host, options.port);
       const host = options.host.includes(':') ? `[${options.host}]` : options.host;
       running.url = `http://${host}:${port}`;
@@ -93,6 +125,8 @@ export async function runServer(
   } finally {
     // A failed start still releases what `started` attached.
     if (!stopping) await options.stopping?.().catch(() => undefined);
+    // Daemons first (they reconnect to another gateway), then HTTP, then the workers' leases.
+    await gateway?.stop().catch(() => undefined);
     if (server) await closeServer(server);
     await compute.stop();
   }
@@ -114,27 +148,36 @@ function stopSignal(signal: AbortSignal | undefined): { signal: AbortSignal; dis
   };
 }
 
-/** Parses `--roles`: `all`, `none`, or worker roles and `api` separated by commas. */
-export function parseRoles(value: string): { api: boolean; roles: WorkerRole[] } {
+/**
+ * Parses `--roles`: `all`, or a comma list of `api`, `gateway` and worker roles. `gateway` is `'auto'` for
+ * `all` (it runs when the configuration has `host.gateway`) and `true` when named.
+ */
+export function parseRoles(value: string): {
+  api: boolean;
+  roles: WorkerRole[];
+  gateway: boolean | 'auto';
+} {
   const items = value
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
-  if (items.length === 1 && items[0] === 'all') return { api: true, roles: [...workerRoles] };
-  if (items.length === 1 && items[0] === 'api') return { api: true, roles: [] };
+  if (items.length === 1 && items[0] === 'all')
+    return { api: true, roles: [...workerRoles], gateway: 'auto' };
   const roles: WorkerRole[] = [];
   let api = false;
+  let gateway = false;
   for (const item of items) {
     if (item === 'api') api = true;
+    else if (item === 'gateway') gateway = true;
     else if ((workerRoles as readonly string[]).includes(item)) roles.push(item as WorkerRole);
     else
       throw usageError(
         `--roles: unknown role ${JSON.stringify(item)}`,
-        `Use all, or api and any of ${workerRoles.join(', ')}.`,
+        `Use all, or any of api, gateway, ${workerRoles.join(', ')}.`,
       );
   }
-  if (!api && !roles.length) throw usageError('--roles needs at least one role');
-  return { api, roles: [...new Set(roles)] };
+  if (!api && !gateway && !roles.length) throw usageError('--roles needs at least one role');
+  return { api, roles: [...new Set(roles)], gateway };
 }
 
 const portFlag = {
@@ -152,7 +195,7 @@ export const serveCommands = [
     group: 'Setup',
     summary: 'Run the API and the workers in this process',
     description:
-      'serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener. SIGINT or SIGTERM stops the listener first, then the workers, releasing their leases.',
+      "serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener; --roles gateway runs the daemon gateway over mTLS from the configuration's host.gateway (all includes it when configured), with the report hooks of the built-in modules and tunnels when the deployment issues exec tickets. Beside the API the listener answers /healthz, /readyz, /.well-known/better-compute (with --pki, the join keys bcd may fall back to) and the host export's own routes (for example GET /watch and GET /metrics). SIGINT or SIGTERM drains the gateway first, then stops the listener and the workers, releasing their leases.",
     target: 'config',
     output: 'text',
     flags: {
@@ -169,25 +212,48 @@ export const serveCommands = [
         value: 'ROLES',
         default: 'all',
         env: 'BETTER_COMPUTE_ROLES',
-        description: `all, or a comma list of api and ${workerRoles.join(', ')}`,
+        description: `all, or a comma list of api, gateway and ${workerRoles.join(', ')}`,
       },
       'no-migrate': { type: 'boolean', description: 'Do not run migrations first' },
+      pki: {
+        ...pkiFlag,
+        description:
+          'Publish the join keys of this PKI bundle at /.well-known/better-compute (the bcd fallback to its pins)',
+      },
     },
     examples: [
       'better-compute serve',
       'better-compute serve --roles api --port 8080',
       'better-compute serve --roles controllers,sinks,iam --no-migrate',
+      'better-compute serve --roles gateway,controllers',
     ],
-    async run({ flags, deployment, io, note }) {
-      const { api, roles } = parseRoles(flags.roles ?? 'all');
-      const { compute } = await deployment();
+    async run({ flags, explicit, deployment, configModule, io, env, cwd, path, note }) {
+      const parsed = parseRoles(flags.roles ?? 'all');
+      const { compute, options } = await deployment();
+      const hostConfig = await resolveHost((await configModule()).host, {
+        compute,
+        options,
+        env,
+        cwd,
+      });
+      const gateway = parsed.gateway === 'auto' ? hostConfig.gateway !== undefined : parsed.gateway;
+      if (explicit.has('pki')) {
+        const bundle = await loadPkiBundle(path(flags.pki ?? defaultPkiPath), env);
+        hostConfig.http = {
+          ...hostConfig.http,
+          wellKnown: { ...joinKeysWellKnown(bundle), ...hostConfig.http?.wellKnown },
+        };
+      }
       const stop = stopSignal(io.signal);
       try {
         const running = await runServer(compute, {
           host: flags.host ?? '0.0.0.0',
           port: flags.port ?? 3000,
-          api,
-          roles,
+          api: parsed.api,
+          roles: parsed.roles,
+          gateway,
+          hostConfig,
+          computeOptions: options,
           migrate: !flags['no-migrate'],
           signal: stop.signal,
           note,

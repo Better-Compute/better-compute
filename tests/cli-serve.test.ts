@@ -57,12 +57,15 @@ describe('serve and dev', () => {
     expect(parseRoles('all')).toEqual({
       api: true,
       roles: ['controllers', 'scheduler', 'sinks', 'iam'],
+      gateway: 'auto',
     });
-    expect(parseRoles('api')).toEqual({ api: true, roles: [] });
+    expect(parseRoles('api')).toEqual({ api: true, roles: [], gateway: false });
     expect(parseRoles('controllers, sinks,controllers')).toEqual({
       api: false,
       roles: ['controllers', 'sinks'],
+      gateway: false,
     });
+    expect(parseRoles('gateway')).toEqual({ api: false, roles: [], gateway: true });
     expect(() => parseRoles('api,web')).toThrow(/unknown role/);
   });
 
@@ -142,6 +145,18 @@ describe('serve and dev', () => {
         cwd,
       }),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('refuses --roles gateway without host.gateway in the configuration', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'bc-serve-'));
+    await expect(
+      createCli().run(['serve', '--roles', 'gateway', '--port', '0'], {
+        out() {},
+        env: { BETTER_COMPUTE_DATABASE_URL: 'pglite:memory', BETTER_COMPUTE_SECRET: SECRET },
+        cwd,
+        signal: AbortSignal.abort(),
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG', message: /host\.gateway/ });
   });
 
   it('refuses bad roles before loading anything', async () => {

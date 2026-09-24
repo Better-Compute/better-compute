@@ -71,6 +71,31 @@ export {
 } from './config.js';
 export { isUnconfiguredIam, unconfiguredIam } from './iam.js';
 export {
+  defineHost,
+  resolveHost,
+  type HostConfig,
+  type HostContext,
+  type HostExport,
+  type HostGatewayConfig,
+} from './host/config.js';
+export {
+  checkHostRoutes,
+  hostListener,
+  toRequest,
+  writeResponse,
+  type HostListener,
+  type HostRoute,
+  type HostUpgradeHandler,
+} from './host/http.js';
+export { gatewayOptions, startGateway, type RunningGateway } from './host/gateway.js';
+export { joinKeysWellKnown } from './host/well-known.js';
+export {
+  parseRoles,
+  runServer,
+  type RunServerOptions,
+  type RunningServer,
+} from './commands/serve.js';
+export {
   isPublicRoute,
   listRoutes,
   localTransport,

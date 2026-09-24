@@ -129,9 +129,8 @@ export async function prepareDevSim(
   let ended = false;
   return {
     options: simOptions,
-    async afterMigrate() {
-      await embedded?.bind(options.database);
-    },
+    // The IAM bridge's module binds its projection to the runtime's store in `initialize()`.
+    async afterMigrate() {},
     async started(compute) {
       fleet = await testing.attachDevFleet({
         compute,
