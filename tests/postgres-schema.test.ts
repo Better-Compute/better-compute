@@ -60,7 +60,13 @@ async function indexDefinition(name: string): Promise<string | undefined> {
 describe('migrate', () => {
   it('applies the base schema on a fresh database, then skips it', async () => {
     const names = baseMigrations.map((migration) => migration.name);
-    expect(names).toEqual(['core/0001_clock', 'core/0002_base', 'core/0003_v01', 'core/0004_command_cancel']);
+    expect(names).toEqual([
+      'core/0001_clock',
+      'core/0002_base',
+      'core/0003_v01',
+      'core/0004_command_cancel',
+      'core/0005_audit_commit_order',
+    ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
     const { rows } = await db.query('SELECT version FROM compute_schema_version');
@@ -282,6 +288,29 @@ describe('store conformance on PGlite (one shared database)', () => {
     it(test.name, async () => {
       await test.run(db);
     });
+});
+
+describe('audit commit order (core/0005)', () => {
+  it('stamps audit rows with their transaction id and a sequence, like the outbox', async () => {
+    const fresh = pglite();
+    try {
+      await fresh.migrate();
+      await fresh.transaction(async (tx) => {
+        await tx.query(`INSERT INTO audit_events (id, tenant_id, action, resource_type, resource_id) VALUES ('aud_1', 't', 'a', 'node', 'n')`);
+        await tx.query(`INSERT INTO audit_events (id, tenant_id, action, resource_type, resource_id) VALUES ('aud_2', 't', 'a', 'node', 'n')`);
+      });
+      await fresh.query(`INSERT INTO audit_events (id, tenant_id, action, resource_type, resource_id) VALUES ('aud_3', 't', 'a', 'node', 'n')`);
+      const { rows } = await fresh.query<{ id: string; txid_text: string; seq: number }>(
+        `SELECT id, txid::text AS txid_text, seq FROM audit_events ORDER BY audit_events.txid, audit_events.seq`,
+      );
+      expect(rows.map((row) => row.id)).toEqual(['aud_1', 'aud_2', 'aud_3']);
+      expect(rows[0]!.txid_text).toBe(rows[1]!.txid_text);
+      expect(BigInt(rows[2]!.txid_text)).toBeGreaterThan(BigInt(rows[1]!.txid_text));
+      expect(await indexDefinition('audit_events_tenant_commit')).toMatch(/\(tenant_id, txid, seq\)/);
+    } finally {
+      await fresh.close();
+    }
+  });
 });
 
 describe('store conformance on PGlite (a fresh database per case)', () => {

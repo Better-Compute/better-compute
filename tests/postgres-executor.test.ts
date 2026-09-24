@@ -133,7 +133,13 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
 
   it('migrates a fresh schema', async () => {
     const result = await db.migrate();
-    expect(result.applied).toEqual(['core/0001_clock', 'core/0002_base', 'core/0003_v01', 'core/0004_command_cancel']);
+    expect(result.applied).toEqual([
+      'core/0001_clock',
+      'core/0002_base',
+      'core/0003_v01',
+      'core/0004_command_cancel',
+      'core/0005_audit_commit_order',
+    ]);
     expect((await db.migrate()).applied).toEqual([]);
   });
 });
