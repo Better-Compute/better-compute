@@ -11,7 +11,11 @@ import {
   renderInstallScript,
   type CliIO,
 } from '@better-compute/cli';
+import { manualClock } from '@better-compute/core';
+import { pkiFindings } from '../packages/cli/src/commands/pki.js';
 import {
+  createPkiBundle,
+  exportPkiBundle,
   fromPem,
   importPkiBundle,
   parseCertificate,
@@ -198,6 +202,52 @@ function pkiPinsOf(bundle: ReturnType<typeof importPkiBundle>) {
     joinEncryptionKeyPin: pins.joinEncryptionKeyPin,
   };
 }
+
+describe('doctor PKI findings', () => {
+  it('reports nothing without a bundle, and expiry and unseal problems with one', async () => {
+    expect(await pkiFindings(join(scratch, 'none.json'), {})).toEqual([]);
+    const clock = manualClock(Date.UTC(2026, 8, 24));
+    const bundle = createPkiBundle({
+      trustDomain: 'compute.test',
+      clock,
+      caValiditySeconds: 20 * 86_400,
+    });
+    const file = join(scratch, 'expiring.json');
+    await writeFile(file, exportPkiBundle(bundle, { secret: SECRET }));
+    const soon = await pkiFindings(file, { BETTER_COMPUTE_SECRET: SECRET }, clock.now());
+    expect(soon.map((finding) => finding.check)).toEqual([
+      'pki.ca-expiring',
+      'pki.ca-expiring',
+      'pki.ca-expiring',
+    ]);
+    const later = await pkiFindings(file, {}, clock.now() + 21 * 86_400_000);
+    expect(later.map((finding) => finding.check)).toEqual([
+      'pki.ca-expired',
+      'pki.ca-expired',
+      'pki.ca-expired',
+      'pki.unseal',
+    ]);
+    await writeFile(join(scratch, 'broken.json'), '{"format":"x"}');
+    expect((await pkiFindings(join(scratch, 'broken.json'), {}))[0]).toMatchObject({
+      check: 'pki.unreadable',
+      severity: 'error',
+    });
+  });
+
+  it('runs as part of doctor', async () => {
+    const env = {
+      BETTER_COMPUTE_DATABASE_URL: 'pglite:memory',
+      BETTER_COMPUTE_SECRET: 'wrong-secret-but-long-enough-0123456789',
+    };
+    const result = await run(['doctor', '--query', 'findings[].check'], env);
+    expect(result.ok && JSON.parse(result.stdout)).toContain('pki.unseal');
+    const good = await run(['doctor', '--query', 'findings[].check'], {
+      ...env,
+      BETTER_COMPUTE_SECRET: SECRET,
+    });
+    expect(good.ok && JSON.parse(good.stdout)).not.toContain('pki.unseal');
+  });
+});
 
 describe('daemon install-script', () => {
   const base = [

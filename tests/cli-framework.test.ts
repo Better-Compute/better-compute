@@ -126,7 +126,7 @@ describe('help and the manifest', () => {
     const { status, stdout } = await run(['help', 'doctor']);
     expect(status).toBe(0);
     expect(stdout).toMatch(/^better-compute doctor - /);
-    expect(stdout).toContain('better-compute doctor [--strict] [--config PATH]');
+    expect(stdout).toContain('better-compute doctor [--strict] [--pki PATH] [--config PATH]');
     expect(stdout).toMatch(/--config PATH\s+Configuration module/);
     expect(stdout).toContain('env BETTER_COMPUTE_CONFIG');
     expect(stdout).toContain('--format FORMAT');

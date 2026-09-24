@@ -12,6 +12,7 @@ import {
   toPem,
   type PkiBundle,
 } from '@better-compute/pki';
+import type { Finding } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
 
@@ -69,6 +70,69 @@ export async function loadPkiBundle(path: string, env: NodeJS.ProcessEnv): Promi
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
+
+/** CAs expiring within this window are reported by `doctor`. */
+export const caExpiryWarningMs = 30 * 86_400_000;
+
+/**
+ * `doctor`'s machine-PKI checks: nothing when there is no bundle at `path`; otherwise an error for
+ * an unreadable bundle, an expired CA or a bundle that does not unseal with the deployment secret,
+ * and a warning for a CA expiring within 30 days.
+ */
+export async function pkiFindings(
+  path: string,
+  env: NodeJS.ProcessEnv,
+  now: number = Date.now(),
+): Promise<Finding[]> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const findings: Finding[] = [];
+  let pins: ReturnType<typeof readPkiPins>;
+  try {
+    pins = readPkiPins(text);
+  } catch (error) {
+    return [
+      {
+        check: 'pki.unreadable',
+        severity: 'error',
+        message: `The PKI bundle at ${path} cannot be read: ${(error as Error).message}`,
+        fix: 'Restore it from backup, or create a new PKI with better-compute pki init (every node rejoins)',
+      },
+    ];
+  }
+  for (const [name, notAfter] of Object.entries(pins.expires)) {
+    if (notAfter <= now)
+      findings.push({
+        check: 'pki.ca-expired',
+        severity: 'error',
+        message: `The ${name} certificate expired at ${iso(notAfter)}`,
+        fix: 'Reissue the CA from the offline root before any certificate it signs can be trusted again',
+      });
+    else if (notAfter - now <= caExpiryWarningMs)
+      findings.push({
+        check: 'pki.ca-expiring',
+        severity: 'warning',
+        message: `The ${name} certificate expires at ${iso(notAfter)}`,
+        fix: 'Reissue the CA from the offline root and roll the new certificate out before it expires',
+      });
+  }
+  try {
+    importPkiBundle(text, env.BETTER_COMPUTE_SECRET ? { secret: env.BETTER_COMPUTE_SECRET } : {});
+  } catch (error) {
+    findings.push({
+      check: 'pki.unseal',
+      severity: 'error',
+      message: `The PKI bundle does not load with this deployment's secret: ${(error as Error).message}`,
+      fix: 'Set BETTER_COMPUTE_SECRET to the secret the bundle was sealed with',
+    });
+  }
+  return findings;
+}
 
 export const pkiCommands = [
   defineCommand({

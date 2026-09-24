@@ -3,6 +3,7 @@ import type { Finding } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { isUnconfiguredIam } from '../iam.js';
+import { defaultPkiPath, pkiFindings, pkiFlag } from './pki.js';
 
 /**
  * The starter configuration `init` writes: a side-effect-free factory with PGlite in development,
@@ -115,16 +116,18 @@ export const setupCommands = [
     target: 'config',
     flags: {
       strict: { type: 'boolean', description: 'Exit non-zero when any error or warning is found' },
+      pki: pkiFlag,
     },
     examples: [
       'better-compute doctor',
       'better-compute doctor --strict --query "findings[].check"',
     ],
-    async run({ deployment, flags, print }) {
+    async run({ deployment, flags, print, path, env }) {
       const { compute, options, source } = await deployment();
       const check = await compute.selfCheck();
       const findings = [...check.findings];
       if (isUnconfiguredIam(options.iam)) findings.push(noIamFinding);
+      findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env)));
       print({
         node: process.versions.node,
         config: source,
