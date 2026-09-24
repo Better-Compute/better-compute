@@ -47,6 +47,8 @@ export interface PkiBundle {
   internalCa: LocalCertificateAuthority;
   joinSigning: SigningKey;
   joinEncryption: { privateKey: KeyObject; publicKey: KeyObject };
+  /** Signs audit checkpoints (v0.4). Absent in bundles made before it existed. */
+  auditSigning?: SigningKey;
   /** Shared by the three CAs. */
   revocations: RevocationSet;
 }
@@ -59,6 +61,8 @@ export interface PkiPins {
   joinEncryptionKeyPin: string;
   /** The key bcd seals join tokens to; its pin is `joinEncryptionKeyPin`. */
   joinEncryptionJwk: JsonWebKey;
+  /** What `audit verify` and third parties check checkpoints against. */
+  auditSigningKeyPin?: string;
 }
 
 export interface CreatePkiBundleOptions {
@@ -109,6 +113,7 @@ export function createPkiBundle(options: CreatePkiBundleOptions): PkiBundle {
     internalCa: createInternalCa({ ...sub(`${organization} internal CA`), id: 'internal-ca' }),
     joinSigning: createSigningKey({ clock, commonName: `${organization} join signing` }),
     joinEncryption: encryption,
+    auditSigning: createSigningKey({ clock, commonName: `${organization} audit signing` }),
     revocations,
   };
 }
@@ -120,6 +125,7 @@ export function pkiPins(bundle: PkiBundle): PkiPins {
     joinSigningKeyPin: spkiPin(bundle.joinSigning.publicKey),
     joinEncryptionKeyPin: spkiPin(bundle.joinEncryption.publicKey),
     joinEncryptionJwk: publicJwk(bundle.joinEncryption.publicKey),
+    ...(bundle.auditSigning ? { auditSigningKeyPin: spkiPin(bundle.auditSigning.publicKey) } : {}),
   };
 }
 
@@ -153,6 +159,13 @@ export function readPkiPins(text: string): PkiPins & { expires: Record<string, n
     joinSigningKeyPin: spkiPin(signing.publicKey),
     joinEncryptionKeyPin: spkiPin(stored.joinEncryptionPublicKey),
     joinEncryptionJwk: publicJwk(stored.joinEncryptionPublicKey),
+    ...(stored.auditSigningCertificate
+      ? {
+          auditSigningKeyPin: spkiPin(
+            first(stored.auditSigningCertificate, 'audit signing').publicKey,
+          ),
+        }
+      : {}),
     expires: {
       root: root.notAfter,
       nodeCa: node.notAfter,
@@ -175,11 +188,19 @@ interface StoredBundle {
   internalCa: string;
   joinSigningCertificate: string;
   joinEncryptionPublicKey: string;
+  auditSigningCertificate?: string;
   /** PEM private keys by name, or `sealed` instead. */
   keys?: Record<KeyName, string>;
   sealed?: { alg: 'HKDF-SHA256+A256GCM'; salt: string; iv: string; data: string };
 }
-type KeyName = 'root' | 'nodeCa' | 'servingCa' | 'internalCa' | 'joinSigning' | 'joinEncryption';
+type KeyName =
+  | 'root'
+  | 'nodeCa'
+  | 'servingCa'
+  | 'internalCa'
+  | 'joinSigning'
+  | 'joinEncryption'
+  | 'auditSigning';
 
 const minSecretLength = 32;
 
@@ -213,6 +234,7 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
     joinEncryption: privateKeyPem(bundle.joinEncryption.privateKey),
   };
   if (bundle.root && !options.omitRootKey) keys.root = bundle.root.export().privateKeyPem;
+  if (bundle.auditSigning) keys.auditSigning = bundle.auditSigning.export().privateKeyPem;
   const stored: StoredBundle = {
     format: 'better-compute-pki',
     version: 1,
@@ -225,6 +247,9 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
     joinEncryptionPublicKey: toPublicKey(bundle.joinEncryption.publicKey)
       .export({ type: 'spki', format: 'pem' })
       .toString(),
+    ...(bundle.auditSigning
+      ? { auditSigningCertificate: bundle.auditSigning.export().certificatePem }
+      : {}),
   };
   if (options.secret !== undefined) {
     const salt = randomBytesArray(16);
@@ -354,6 +379,11 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
     })(),
     revocations,
   };
+  if (stored.auditSigningCertificate)
+    bundle.auditSigning = createSigningKey({
+      privateKey: need('auditSigning'),
+      certificate: fromPem(stored.auditSigningCertificate)[0]!,
+    });
   if (rootKey)
     bundle.root = createRootCa({
       clock,

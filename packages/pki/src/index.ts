@@ -12,6 +12,7 @@
  */
 export * from './agent.js';
 export * from './attestor.js';
+export * from './audit.js';
 export * from './bundle.js';
 export * from './ca.js';
 export * from './csr.js';

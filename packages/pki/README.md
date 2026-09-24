@@ -161,6 +161,20 @@ fleetSize)`, then `removeTrustRoot`.
   - `parseSshCertificate` reads and verifies certificates, ssh-keygen's included. Tests round-trip
     both ways with OpenSSH's `ssh-keygen`.
 
+## v0.4: audit primitives
+
+`@better-compute/audit` owns the checkpoint table, the commit-order cursor and the hourly job. This
+package supplies the cryptography and touches no database.
+
+- `merkleLeafHash`, `merkleRoot`, `merkleInclusionProof` / `verifyMerkleInclusion` and
+  `merkleConsistencyProof` / `verifyMerkleConsistency` implement RFC 6962, checked against the
+  certificate-transparency reference roots.
+- `canonicalJson` defines the bytes that get hashed and signed.
+- `signCheckpoint(body, key)` / `verifyCheckpoint(signed, { pin })` handle purpose `audit-checkpoint`;
+  the signed bytes must be canonical.
+- The PKI bundle carries an `auditSigning` key, and `pki show` prints its `auditSigningKeyPin`.
+  Bundles written before this still load.
+
 ## v0.5 (optional): workload identity
 
 - `createWorkloadIssuer({ issuer, defaultAudience })` issues ES256 OIDC tokens (`typ: JWT`, at most
