@@ -37,7 +37,7 @@ import {
 } from './projection.js';
 import { pullRemoteInbox } from './host.js';
 import { remoteIam, type RemoteIam, type RemoteIamOptions } from './remote.js';
-import { computeResolver, type ResourceResolver } from './resolver.js';
+import { computeResolver, type ComputeResolverOptions, type ResourceResolver } from './resolver.js';
 import {
   drainIamInbox,
   flushUsageWindows,
@@ -93,7 +93,10 @@ export interface ComputeIamBridge {
   /** Writes `iam_inbox` through the bound store; rejects until bound, so events spill meanwhile. */
   localInbox(): InboxWriter;
   /** better-iam's `resolveResource`; other types go to `hostFallback`. */
-  resolveResource(hostFallback?: ResourceResolver): ResourceResolver;
+  resolveResource(
+    hostFallback?: ResourceResolver,
+    options?: Pick<ComputeResolverOptions, 'onLookup'>,
+  ): ResourceResolver;
   /**
    * The IamPort over an embedded better-iam. `runIamJobs` adds better-iam's scheduler jobs to the iam
    * module (worker role `iam`): required when compute's processes are the only IAM hosts (§12.1).
@@ -254,11 +257,12 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
     localInbox: () => ({
       put: async (events) => sqlInbox(requireSql()).put(events),
     }),
-    resolveResource: (hostFallback) =>
+    resolveResource: (hostFallback, resolverOptions = {}) =>
       computeResolver(projection, {
         typePrefix: catalog.typePrefix,
         rootTenantId: () => rootTenantId,
         ...(hostFallback ? { hostFallback } : {}),
+        ...(resolverOptions.onLookup ? { onLookup: resolverOptions.onLookup } : {}),
       }),
     remote(remoteOptions) {
       portTaken();

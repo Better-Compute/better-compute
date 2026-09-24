@@ -231,6 +231,28 @@ describe('computeResolver', () => {
     ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
   });
 
+  it('reports each lookup to onLookup, and a throwing hook changes nothing', async () => {
+    const seen: string[] = [];
+    const resolve = computeResolver(await ready(pool('p1', 't')), {
+      rootTenantId: 'root',
+      onLookup: (result) => {
+        seen.push(result);
+        throw new Error('broken metrics');
+      },
+    });
+    await resolve({ tenantId: 't', type: 'compute-pool', id: 'p1' });
+    await expect(
+      resolve({ tenantId: 't', type: 'compute-pool', id: 'nope' }),
+    ).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    await resolve({ tenantId: 't', type: 'compute-tenant', id: 't' });
+    await expect(resolve({ tenantId: 't', type: 'app-doc', id: 'd' })).rejects.toMatchObject({
+      code: 'RESOURCE_RESOLVER_REQUIRED',
+    });
+    expect(seen).toEqual(['hit', 'miss', 'scope', 'fallback']);
+  });
+
   it('delegates other types to the host fallback, and denies while the projection is not loaded', async () => {
     const resolve = computeResolver(createAuthzProjection(), {
       hostFallback: async (reference) => ({ ...reference, attributes: { app: true } }),

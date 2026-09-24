@@ -17,6 +17,8 @@ export interface ComputeResolverOptions {
   rootTenantId?: string | (() => string | undefined);
   /** The host's own app types; without it, other types fail with `RESOURCE_RESOLVER_REQUIRED`. */
   hostFallback?: ResourceResolver;
+  /** Called once per lookup (feeds `resolver_lookups_total{result}`); must not throw. */
+  onLookup?(result: 'hit' | 'miss' | 'timeout' | 'unavailable' | 'scope' | 'fallback'): void;
 }
 
 /**
@@ -36,15 +38,24 @@ export function computeResolver(
   const rootTenant = () =>
     typeof options.rootTenantId === 'function' ? options.rootTenantId() : options.rootTenantId;
   const notFound = () => new IamError('NOT_FOUND', 'Resource not visible in this tenant', 404);
+  const note = (result: Parameters<NonNullable<ComputeResolverOptions['onLookup']>>[0]) => {
+    try {
+      options.onLookup?.(result);
+    } catch {
+      // Metrics hooks must never change a decision.
+    }
+  };
 
   return async (reference) => {
     const { tenantId, type, id } = reference;
     if (!type.startsWith(prefix)) {
+      note('fallback');
       if (options.hostFallback) return options.hostFallback(reference);
       throw new IamError('RESOURCE_RESOLVER_REQUIRED', 'No resolver for this resource type', 400);
     }
     const kind = type.slice(prefix.length);
     const echo = { tenantId, type, id };
+    if (kind === 'fleet' || kind === 'tenant') note('scope');
     if (kind === 'fleet') {
       const root = rootTenant();
       if (root === undefined)
@@ -58,6 +69,7 @@ export function computeResolver(
     }
 
     const outcome = await projection.resolve(kind, id, tenantId);
+    note(outcome.status);
     if (outcome.status === 'miss') throw notFound();
     if (outcome.status !== 'hit')
       throw new IamError(

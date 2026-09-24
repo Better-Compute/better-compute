@@ -25,6 +25,8 @@ export interface ComputeIamPluginOptions extends ComputeCatalogOptions {
   accept?(event: AuditEventLike): boolean;
   /** Called (and guarded) when an inbox write fails or times out. */
   onError?(error: unknown, events: readonly InboxEvent[]): void;
+  /** Called (and guarded) for each event that spills (feeds `iam_inbox_spill_total`). */
+  onSpill?(event: InboxEvent): void;
 }
 
 /** Counters for `selfCheck` and metrics (`better_compute_iam_inbox_spill_total`). */
@@ -142,6 +144,11 @@ export function computeIamPlugin(options: ComputeIamPluginOptions): ComputeIamPl
         if (!(await write([item]))) {
           spill.push(item);
           stats.spilled++;
+          try {
+            options.onSpill?.(item);
+          } catch {
+            // A metrics hook must not break the never-throw guarantee.
+          }
           return;
         }
         if (spill.size > 0) await flush();

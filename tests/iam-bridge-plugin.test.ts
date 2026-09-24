@@ -166,6 +166,21 @@ describe('computeIamPlugin (unit)', () => {
     expect(plugin.stats().pending).toBe(0);
   });
 
+  it('reports each spilled event to onSpill without ever throwing', async () => {
+    const { writer } = flakyInbox();
+    const spilled: string[] = [];
+    const plugin = computeIamPlugin({
+      inbox: writer,
+      onSpill: (item) => {
+        spilled.push(item.eventId);
+        throw new Error('broken metrics');
+      },
+    });
+    writer.set('down');
+    await expect(plugin.afterAudit!(event('s1'))).resolves.toBeUndefined();
+    expect(spilled).toEqual(['s1']);
+  });
+
   it('bounds the spill and counts what it dropped', async () => {
     const { inbox, writer } = flakyInbox();
     const plugin = computeIamPlugin({ inbox: writer, spill: 2 });
