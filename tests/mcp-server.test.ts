@@ -104,6 +104,52 @@ describe('JSON-RPC over Streamable HTTP', () => {
   });
 });
 
+describe('fleet tools (opt-in, read-only)', () => {
+  it('exports and plans, hides the call list, and never applies', async () => {
+    const { api, calls } = recorder((path) =>
+      path === 'fleet/plan'
+        ? { changes: [], summary: {}, calls: [{ path: 'sites/create' }], planHash: 'h' }
+        : { config: { version: 1 } },
+    );
+    expect(mcpWith(api).tools.map((tool) => tool.name)).not.toContain('fleet_plan');
+    const mcp = mcpWith(api, { fleet: true });
+    const names = mcp.tools.map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining(['fleet_export', 'fleet_plan']));
+    expect(names.some((name) => name.includes('apply'))).toBe(false);
+    expect(
+      mcp.tools
+        .filter((tool) => tool.name.startsWith('fleet_'))
+        .map((tool) => tool.annotations.readOnlyHint),
+    ).toEqual([true, true]);
+
+    await rpc(mcp, 'tools/call', { name: 'fleet_export', arguments: {} });
+    const planned = await rpc(mcp, 'tools/call', {
+      name: 'fleet_plan',
+      arguments: { config: { version: 1 }, prune: true },
+    });
+    expect(calls).toEqual([
+      { path: 'fleet/export', input: { tenantId: 'org_acme' } },
+      { path: 'fleet/plan', input: { tenantId: 'org_acme', config: { version: 1 }, prune: true } },
+    ]);
+    expect(planned.body.result.structuredContent).toEqual({
+      changes: [],
+      summary: {},
+      planHash: 'h',
+      callCount: 1,
+    });
+    const missing = await rpc(mcp, 'tools/call', { name: 'fleet_plan', arguments: {} });
+    expect(missing.body.result.isError).toBe(true);
+
+    const rules = gateTools({ fleet: true });
+    expect(rules.fleet_plan).toMatchObject({ action: 'compute:fleet:admin' });
+    expect((rules.fleet_plan as { resource(args: object): unknown }).resource({})).toEqual({
+      type: 'compute-fleet',
+      id: 'global',
+    });
+    expect(gateTools().fleet_plan).toBeUndefined();
+  });
+});
+
 describe('tools', () => {
   it('call the compute routes as the caller, in the caller’s tenant', async () => {
     const { api, calls } = recorder();

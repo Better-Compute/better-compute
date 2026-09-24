@@ -34,6 +34,9 @@ export default {
 | `run_diagnostic` | `commands.run` (`diag.nvml`) | `compute:nodes:read` on the node |
 | `create_instance` | `instances.create` | `compute:pools:read` on the pool |
 | `exec_command` (only with `execCommand: true`) | `commands.run` (allowlisted kinds) | `compute:nodes:read` on the node |
+| `fleet_export`, `fleet_plan` (only with `fleet: true`) | `fleet.export`, `fleet.plan` (read-only) | `compute:fleet:admin` on the fleet |
+
+- **Fleet tools plan but never apply.** `fleet_plan` returns the changes and a `planHash`, but not the call list. A person applies the reviewed plan with `better-compute fleet apply FILE --plan-hash HASH`. Pass the same `fleet: true` to `gateTools()`.
 
 - **The gate checks visibility only.** Actions that must be confirmed are never gate actions, so
   nobody is asked twice about different resources.

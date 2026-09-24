@@ -154,8 +154,21 @@ async function withConfirmation(
   }
 }
 
-/** The tools of PLAN.md §9.3. `exec_command` is only built when asked for. */
-export function computeTools(options: { execCommand?: boolean } = {}): ComputeTool[] {
+/** A fleet plan without its call list: what a model needs to explain a change to a person. */
+function planView(plan: unknown): unknown {
+  if (typeof plan !== 'object' || plan === null) return plan;
+  const { calls, ...rest } = plan as { calls?: unknown[] } & Record<string, unknown>;
+  return { ...rest, callCount: Array.isArray(calls) ? calls.length : 0 };
+}
+
+/**
+ * The tools of PLAN.md §9.3. `exec_command` and the read-only fleet tools (`fleet_export`,
+ * `fleet_plan`) are only built when asked for. There is deliberately no fleet apply tool: a person
+ * applies a reviewed plan (`better-compute fleet apply --plan-hash`).
+ */
+export function computeTools(
+  options: { execCommand?: boolean; fleet?: boolean } = {},
+): ComputeTool[] {
   const tools: ComputeTool[] = [
     {
       name: 'list_pools',
@@ -389,6 +402,49 @@ export function computeTools(options: { execCommand?: boolean } = {}): ComputeTo
           idempotencyKey: args.idempotencyKey ?? context.newKey(),
         }),
     });
+  if (options.fleet)
+    tools.push(
+      {
+        name: 'fleet_export',
+        title: 'Export the fleet configuration',
+        description:
+          "Returns the tenant's platform configuration as a FleetConfig document: sites, provider accounts, pools with owner quotas and offers to other tenants, and VPS flavors, keyed by name. Start here before proposing a change.",
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: (_args, context) =>
+          context.api.$request('fleet/export', { tenantId: context.tenantId }),
+      },
+      {
+        name: 'fleet_plan',
+        title: 'Plan a fleet configuration change',
+        description:
+          'Diffs a FleetConfig document (fleet_export returns one) against the current fleet and lists each change: create, update (with fields), delete (only with prune) or blocked (with the reason). It changes nothing. To apply, give a person the document and the returned planHash to run `better-compute fleet apply FILE --plan-hash HASH`.',
+        inputSchema: {
+          type: 'object',
+          required: ['config'],
+          properties: {
+            config: {
+              type: 'object',
+              description: 'The whole FleetConfig document ({ version: 1, sites, pools, … })',
+            },
+            prune: {
+              type: 'boolean',
+              description: 'Also plan deletes for what the document no longer lists',
+            },
+          },
+          additionalProperties: false,
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        run: async (args, context) =>
+          planView(
+            await context.api.$request('fleet/plan', {
+              tenantId: context.tenantId,
+              config: args.config,
+              prune: args.prune === true,
+            }),
+          ),
+      },
+    );
   return tools;
 }
 

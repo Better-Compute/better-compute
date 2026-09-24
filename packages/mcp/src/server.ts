@@ -31,6 +31,8 @@ export interface ComputeMcpOptions {
   tenantId?: string | ((caller?: McpCallerLike) => string | undefined);
   /** Build `exec_command` (off by default: node commands through a model need a deliberate choice). */
   execCommand?: boolean;
+  /** Build the read-only `fleet_export` and `fleet_plan` tools (off by default; platform admins only). */
+  fleet?: boolean;
   /** Wait for people to approve held-back actions inside the tool call (see `ConfirmationPolling`). */
   confirmations?: ConfirmationPolling;
   serverInfo?: { name: string; version: string };
@@ -110,7 +112,10 @@ function errorResult(
 export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
   if (!options.client && !options.baseURL)
     throw new Error('createComputeMcp needs client or baseURL');
-  const tools = computeTools({ execCommand: options.execCommand ?? false });
+  const tools = computeTools({
+    execCommand: options.execCommand ?? false,
+    fleet: options.fleet ?? false,
+  });
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const maxBodyBytes = options.maxBodyBytes ?? 1024 * 1024;
   const serverInfo = options.serverInfo ?? { name: 'better-compute', version: '0.1.0' };
@@ -248,7 +253,7 @@ export interface GateToolRule {
  * twice about different resources.
  */
 export function gateTools(
-  options: { typePrefix?: string; execCommand?: boolean } = {},
+  options: { typePrefix?: string; execCommand?: boolean; fleet?: boolean } = {},
 ): Record<string, GateToolRule> {
   const prefix = options.typePrefix ?? 'compute-';
   const pool = (args: Record<string, unknown>) => ({
@@ -272,5 +277,14 @@ export function gateTools(
     create_instance: poolRead,
   };
   if (options.execCommand) rules.exec_command = nodeRead;
+  if (options.fleet) {
+    // The fleet scope resolves only in the root tenant, so other tenants never see these tools work.
+    const fleetAdmin = {
+      action: 'compute:fleet:admin',
+      resource: () => ({ type: `${prefix}fleet`, id: 'global' }),
+    };
+    rules.fleet_export = fleetAdmin;
+    rules.fleet_plan = fleetAdmin;
+  }
   return rules;
 }
