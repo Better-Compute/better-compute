@@ -26,6 +26,9 @@
       "path": "./packages/pki"
     },
     {
+      "path": "./packages/iam"
+    },
+    {
       "path": "./packages/postgres"
     },
     {

@@ -8,6 +8,8 @@
     "./provision": "@better-compute/provision",
     "./metal": "@better-compute/metal",
     "./vps": "@better-compute/vps",
+    "./iam": "@better-compute/iam",
+    "./iam/plugin": "@better-compute/iam/plugin",
     "./server": "@better-compute/server",
     "./postgres": "@better-compute/postgres",
     "./pglite": "@better-compute/postgres/pglite",
