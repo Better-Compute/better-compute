@@ -23,6 +23,23 @@ Several Claude sessions and workflow agents may edit this tree at once. Rules:
 - Docker is not running; PGlite (PostgreSQL 18, `btree_gist` verified) is the local database. Postgres-only
   suites skip unless `BETTER_COMPUTE_POSTGRES_URL` is set.
 
+## Round 2 allocation (orchestrator is now [37c0ab], formerly [56cfd7]; 2026-09-24 after W5a landed at 8180bf8)
+
+Sessions resume their former areas. Open items are assigned to the natural owner. Message [37c0ab] for installs,
+core/protocol changes, and anything unassigned. All earlier rules below still apply (private-index commits,
+orchestrator-only lockfile/umbrella/installs, [9e83b6] sole writer of core migrations).
+
+| Area | Owner (resumed) | Open items this round |
+|---|---|---|
+| inventory, postgres migrations, provision, metal | [9e83b6] (ex-060790) | Talos walkthrough (§5.6 #3, httpViaSite with SSRF checks); W5a schema asks: `outbox_cursors(name PK, txid xid8, seq bigint, updated_at)`, `work_queue.attempts`, `commands.owner`, indexes `outbox((payload->>'tenantId'), txid, seq)`, `usage_windows(tenant_id, window_start, idempotency_key)`, `join_tokens(tenant_id, pool_id, id)`; retention GC for `outbox`/`authz_changes` |
+| gateway | ex-[17cfb9] | v0.4 WS fallback (signed frames only); re-send `Cancel` for `cancel_requested_at` rows; pass `{ peerNodeId, gatewayId }` to `services.join/renew`; Hello writes `node_sessions.daemon_version/proto_max` (core/0008); drive dispatch + `store.cancels()` from partial indexes (2k steady saturation) |
+| capacity, vps, providers | ex-[38c2f9] | v0.5 calendar reservations + BookingRepair (T−15 min), gang scheduling on topology keys, MIG/slot atoms (capacity side, atom rule with [9e83b6]'s `gpuAtomFamily`); fix `quotas.set` fleet id → `fleetResourceId` ('global'); decide the `observed_generation >= 1` schedulability gate (§3.3 step 7) |
+| pki, cli, fleet, rollout | ex-[9ec62d] | CLI `dev` (all-in-one: PGlite + embedded better-iam + local CAs + `--sim N`) and `serve --mode api\|gateway\|worker\|all` composing EVERY module (capacity built in, inventory, provision+metal, vps, events, fleet, rollout, audit, observability, iam bridge, gateway with `gatewayReportHandlers`, `gatewayNotifier`, PKI bundle → `pki.join`); `better-compute sim`; `cloud-iid` attestor in pki |
+| iam bridge, observability, audit, real-time harness | ex-[1f44fd] | the §16 v0.1 security negative: 10-min simulated run with `spyIamPort` recording zero IAM calls on heartbeat/inventory/command paths; realtime join-to-adopted and place-to-active benches; fleet-sim capacity facts for I1/I8 |
+| server follow-ups | orchestrator [37c0ab] (may delegate) | `/.well-known/better-compute` join-key fallback (`joinEncryptionJwk` + join signing cert); `MethodContext.check/invoke` + `transaction:'manual'` (verify/implement for fleet.apply); runtime `publishMany/enqueueMany`; outbox cursors on `outbox_cursors`; `ModuleContext.afterCommit`/`caches`; `ReconcileContext.lease` |
+| docs site `apps/docs`, console-kit + `apps/console` | unassigned (new sessions: ask [37c0ab]) | generated API/CLI/error reference from the live registry (mirror better-iam apps/docs), guides per module; console-kit React views (v0.5) |
+| W1 Go daemon | blocked on Go install (user) | — |
+
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
 P0 is committed (3a70aa0, `pnpm check` green). v0.1 = PLAN.md §16 "Adopt & reserve". One owner per unit; message the
@@ -288,6 +305,10 @@ Rules for v0.1:
   `tests/metal-*.test.ts`: the metal group (§9.2 v0.2 rows), verbs validated against core's metal state table and
   run as workflows via `ctx.workflows`, built-in commission/deploy/release/retire profiles + steps, site/ramdisk
   command kinds, driver bindings inherited from the pool hardware profile. Proto additions go to [56cfd7].
+- (Feature expansion [13084d] = former [38c2f9], v0.5 gang scheduling + BookingRepair, 2026-09-24)
+  `packages/capacity/**`, `tests/capacity-*.test.ts`: all-or-nothing multi-node reservations on one topology key
+  (§10.3), then BookingRepair re-placing calendar reservations at T−15 min (§10.5). Core ask to the orchestrator:
+  additive `gang?: { size; topologyKey? }` on `ReservationRequest`/`PlacementRequest`.
 - (Feature expansion [9ec62d], v0.2 FleetConfig, 2026-09-24, asked by [56cfd7]) new package `packages/fleet/**`
   (`fleetModule()`: fleet.export/plan/apply, composite apply via check/invoke, `fleet/0001_names`), CLI
   `packages/cli/src/commands/fleet.ts`, `tests/{fleet-config,cli-fleet}.test.ts`. Committed 9ccff66, 05e6265.
@@ -295,4 +316,14 @@ Rules for v0.1:
 - (Feature expansion [9ec62d], v0.4 Rollout controller, 2026-09-24, offered by [56cfd7]) new package
   `packages/rollout/**` (`rolloutModule()`: releases + rollouts groups, rollout/0001 tables, `rollout` reconciler,
   NodeSpec.daemon via nodeSpec(), daemon.upgrade kind), `tests/rollout-*.test.ts`. Also pki `release.ts` (b226081).
+- (Feature expansion [9e83b6] = former [060790], resumed) owns again `packages/{inventory,provision,metal}/**`,
+  `packages/postgres/src/migrations/` (core/0009+; column requests to me), `tests/{inventory,postgres,pglite,provision,
+  metal}-*`. Now: §5.6 walkthrough 3 (Talos): metal `httpViaSite` (SSRF checks mirroring site.v1.HttpProxyRequest),
+  agent:'none' OOB metal profiles, `tests/extensions/talos.test.ts`.
+- (Feature expansion [df4a91], v0.2/v0.3 attestors §3.3/§15, 2026-09-24) NEW files only in pki:
+  `packages/pki/src/attestors/{x509pop,provisioned,discovery,cloud-iid,index}.ts` + one export line in
+  `packages/pki/src/index.ts`; `tests/pki-attestors-*.test.ts`. Verifier halves (control plane) + TS NodeAttestor
+  producers for FakeDaemon. Not touching server JoinService (W5a wires `attestors: [...]`), migrations, or existing pki files.
+- (Feature expansion [9ec62d], W5c resumed after W5a landed) CLI `serve` / `dev` in
+  `packages/cli/src/commands/serve.ts` (+ optional `CliIO.signal` in framework.ts), `tests/cli-serve.test.ts`.
 - (Feature expansion [9ec62d], v0.4 audit primitives, 2026-09-24; split with [1f44fd] per [56cfd7]) pure crypto only in `packages/pki/src/audit.ts`: RFC 6962 hashing, inclusion + consistency proofs, `signCheckpoint`/`verifyCheckpoint` ('audit-checkpoint'), the bundle's audit signing key; CLI `audit verify|prove|checkpoint` calling `@better-compute/audit`. No table in pki (`packages/audit` owns it).

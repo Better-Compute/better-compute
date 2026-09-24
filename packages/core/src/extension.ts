@@ -15,6 +15,7 @@ import type {
   Device,
   DeviceRequest,
   Finding,
+  GangSpec,
   ImageCompression,
   ImageFormat,
   Json,
@@ -165,6 +166,8 @@ export interface PlacementRequest {
   instanceId?: string;
   devices: readonly DeviceRequest[];
   topology?: Topology;
+  /** Multi-node placement: `devices` per node, `size` nodes sharing one `topologyKey` value (§10.3). */
+  gang?: GangSpec;
   /** Scalar claims (`vcpu`, `memoryGiB`, `diskGiB`), multiplied by the pool's overcommit. */
   resources?: Readonly<Record<string, number>>;
   during: TimeRange;

@@ -256,12 +256,24 @@ export interface WaitOptions {
 }
 
 /** The request body of `reservations.create`. */
+/**
+ * A multi-node (gang) request (§10.3): `devices` are per node, and the gang books `size` nodes that share one
+ * value of the node label `topologyKey` (any nodes when unset), all or nothing, one allocation per node.
+ */
+export interface GangSpec {
+  /** Nodes, 2..64. */
+  size: number;
+  /** A node label, e.g. `fabric.domain`, `rack`. */
+  topologyKey?: string;
+}
+
 export interface ReservationRequest {
   tenantId: string;
   poolId: string;
   projectId?: string;
   devices: DeviceRequest[];
   topology?: Topology;
+  gang?: GangSpec;
   /** Epoch milliseconds; absent means now. */
   start?: number;
   duration: Duration;
