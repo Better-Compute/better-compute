@@ -2,10 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { cpus, totalmem } from 'node:os';
 import { afterAll, describe, expect, it } from 'vitest';
-import {
-  createRealtimeHarness,
-  type RealtimeHarness,
-} from '../../packages/testing/src/realtime/index.js';
+import { createRealtimeHarness, type RealtimeHarness } from '@better-compute/testing';
 
 // The v0.1 real-time acceptance run (PLAN.md §15 "Real-time harness", §16): 1k FakeDaemons on the wall clock,
 // each on its own HTTP/2 connection to a real gateway. Until W5a's placement path lands, the measured lane is

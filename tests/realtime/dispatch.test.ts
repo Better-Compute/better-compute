@@ -8,7 +8,7 @@ import {
   isRetryable,
   summarize,
   type RealtimeHarness,
-} from '../../packages/testing/src/realtime/index.js';
+} from '@better-compute/testing';
 
 // The real-time harness (PLAN.md §15): a real gateway over h2c, a real database and FakeDaemons on the wall
 // clock. The default run is small enough for CI; the 1k acceptance run lives behind `pnpm bench:scale`.
