@@ -128,7 +128,8 @@ async function twoRounds(
   const clock = options.clock ?? manualClock(now);
   const csr = sha256(createCsr(generateP256KeyPair().privateKey));
   const ctx = (csrSha256: Uint8Array): AttestationContext => ({
-    tx: {} as SqlTx,
+    // No node_bindings row: every EK here is new (the JoinService tests cover bound EKs).
+    tx: { query: async () => ({ rows: [], rowCount: 0 }) } as unknown as SqlTx,
     clock,
     claims: {},
     role: 'node',
@@ -168,6 +169,7 @@ describe('tpm attestor', () => {
       tenantId: 'org_acme',
       role: 'node',
       poolId: 'pool_tpm',
+      bind: sha256(tpm.ekPublic),
     });
     expect(seen).toEqual([hex(sha256(tpm.ekPublic))]);
   });
@@ -319,5 +321,95 @@ describe('tpm attestor', () => {
       [joined.body.nodeId],
     );
     expect(rows).toEqual([{ pool_id: 'pool_tpm' }]);
+  });
+
+  it('enrolls an unknown EK after operator approval, binds it, and later re-joins reclaim the node', async () => {
+    const fixture = await computeFixture({ clock: 'sim' });
+    const { database, compute, tenants } = fixture;
+    await database.query(
+      `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_t', $1, 'shared', 'eu-1', 1)`,
+      [tenants.root.id],
+    );
+    await database.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, gpu_model, sharing, agent, policy, version)
+       VALUES ('pool_tpm', $1, 'site_t', 'metal-host', 'H100', 'exclusive', 'bcd', '{}', 1)`,
+      [tenants.root.id],
+    );
+    const tpm = softwareTpm({ certifiedBy: acme }); // not in `known`: needs enrollment
+    const nodeCa = createNodeCa({ clock: fixture.clock, trustDomain: 'compute.test' });
+    const signingKey = createSigningKey({ clock: fixture.clock });
+    const service = createJoinService({
+      database,
+      clock: fixture.clock,
+      work: compute.context.work,
+      events: compute.context.events,
+      crypto: pkiJoinCrypto({
+        trustDomain: 'compute.test',
+        nodeCa,
+        signingKey,
+        encryptionKey: generateP256KeyPair().privateKey,
+      }),
+      attestors: [
+        attestor({
+          resolve: async () => undefined,
+          enrollment: { tenantId: tenants.root.id, siteId: 'site_t' },
+        }),
+      ],
+    });
+    const join = (deferrals: string[], onWait: () => Promise<void> = async () => {}) =>
+      runAgentJoin({
+        send: (request) => service.join(request),
+        signer: { publicKey: signingKey.publicKey },
+        wait: async (ms) => {
+          await onWait();
+          await fixture.advance(ms);
+        },
+        now: () => fixture.clock.now(),
+        nodeCaRoots: [nodeCa.certificate],
+        claims: {
+          productUuid: '4c4c4544-0042-3510-8052-b7c04f4e4e78',
+          productSerial: 'SN-TPM-2',
+          permanentMacs: ['3c:ec:ef:78:78:78'],
+        },
+        attestor: tpmProducer(tpm),
+        onDeferral: (d) => void deferrals.push(d.kind),
+      });
+
+    const first: string[] = [];
+    const enrolled = await join(first, async () => {
+      const pending = await database.query<{
+        id: string;
+        attestor: string;
+        claims: { tpm?: unknown };
+      }>(`SELECT id, attestor, claims FROM join_requests WHERE state = 'pending'`);
+      expect(pending.rows).toHaveLength(1);
+      expect(pending.rows[0]).toMatchObject({
+        attestor: 'tpm',
+        claims: { tpm: { ekSha256: hex(sha256(tpm.ekPublic)) } },
+      });
+      await database.query(
+        `UPDATE join_requests SET state = 'approved', decided_at = compute_now(), decided_by = 'user_ops',
+            pool_id = 'pool_tpm', expires_at = compute_now() + interval '1 hour' WHERE id = $1`,
+        [pending.rows[0]!.id],
+      );
+    });
+    expect(first).toEqual(['challenge', 'pending', 'challenge']);
+    expect(enrolled.rounds).toBe(4);
+    const bindings = await database.query<{ node_id: string }>(
+      `SELECT node_id FROM node_bindings WHERE attestor = 'tpm' AND subject = $1`,
+      [sha256(tpm.ekPublic)],
+    );
+    expect(bindings.rows).toEqual([{ node_id: enrolled.body.nodeId }]);
+
+    // Reinstalled (new key): the bound EK brings the machine back as the same node, no approval.
+    const second: string[] = [];
+    const again = await join(second);
+    expect(second).toEqual(['challenge']);
+    expect(again.body.nodeId).toBe(enrolled.body.nodeId);
+    const node = await database.query<{ identity_gen: number; pool_id: string }>(
+      'SELECT identity_gen, pool_id FROM nodes WHERE id = $1',
+      [enrolled.body.nodeId],
+    );
+    expect(node.rows).toEqual([{ identity_gen: 2, pool_id: 'pool_tpm' }]);
   });
 });

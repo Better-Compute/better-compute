@@ -858,3 +858,60 @@ describe('JoinService restricted certificates (AttestationResult.allowedKinds, c
     expect(certs.rows).toHaveLength(0);
   });
 });
+
+describe('JoinService node bindings (AttestationResult.bind)', () => {
+  it('binds a proven hardware subject to one node and refuses it for any other', async () => {
+    const s = await setup();
+    let subject: Uint8Array = new Uint8Array(32).fill(0xe5);
+    const service = createJoinService({
+      database: s.fixture.database,
+      clock: s.fixture.clock,
+      work: s.fixture.compute.context.work,
+      events: s.fixture.compute.context.events,
+      crypto: s.crypto,
+      attestors: [
+        defineAttestor({
+          id: 'binder',
+          version: '1.0.0',
+          roles: ['node'],
+          async verify() {
+            return {
+              tenantId: s.fixture.tenants.root.id,
+              role: 'node',
+              poolId: POOL,
+              bind: subject,
+            };
+          },
+        }),
+      ],
+    });
+    const joinAs = (n: number) => {
+      const host = machine(n);
+      return service.join(
+        create(JoinRequestSchema, {
+          csr: createCsr(host.key),
+          attestor: 'binder',
+          claims: create(HardwareClaimsSchema, host.claims),
+          role: AgentRole.NODE,
+        }),
+      );
+    };
+    const first = fromBinary(JoinResponseBodySchema, (await joinAs(31)).body);
+    const bound = await s.fixture.database.query<{ node_id: string }>(
+      `SELECT node_id FROM node_bindings WHERE attestor = 'binder'`,
+    );
+    expect(bound.rows).toEqual([{ node_id: first.nodeId }]);
+
+    // Another machine claiming the same subject would become a second node: refused, rolled back.
+    expect(await refusal(joinAs(32))).toBe('bound-elsewhere');
+    const nodes = await s.fixture.database.query('SELECT id FROM nodes');
+    expect(nodes.rows).toHaveLength(1);
+
+    subject = new Uint8Array(16);
+    const error = await joinAs(33).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(isComputeError(error, 'INVALID_CONFIG')).toBe(true);
+  });
+});

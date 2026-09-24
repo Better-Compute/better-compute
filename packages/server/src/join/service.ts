@@ -173,6 +173,30 @@ function checkedKinds(kinds: readonly string[] | undefined): readonly string[] |
   return kinds;
 }
 
+/** `node_bindings` (core/0012_v02_evidence): one node per (attestor, subject); another node is `bound-elsewhere`. */
+async function bindSubject(
+  tx: SqlTx,
+  attestor: string,
+  subject: Uint8Array,
+  nodeId: string,
+): Promise<void> {
+  if (!(subject instanceof Uint8Array) || subject.length !== 32)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `Attestor ${attestor} returned a bind subject that is not 32 bytes`,
+    );
+  const { rows } = await tx.query<{ node_id: string }>(
+    `WITH ins AS (
+       INSERT INTO node_bindings (attestor, subject, node_id) VALUES ($1, $2, $3)
+       ON CONFLICT (attestor, subject) DO NOTHING RETURNING node_id)
+     SELECT node_id FROM ins
+     UNION ALL SELECT node_id FROM node_bindings WHERE attestor = $1 AND subject = $2
+     LIMIT 1`,
+    [attestor, subject, nodeId],
+  );
+  if (rows[0]?.node_id !== nodeId) throw deny('bound-elsewhere');
+}
+
 const sameBytes = (a: Uint8Array, b: Uint8Array) =>
   a.length === b.length && Buffer.from(a).equals(Buffer.from(b));
 
@@ -523,6 +547,9 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         ttlSeconds,
         allowedKinds: checkedKinds(result.allowedKinds),
       });
+      // A hardware subject the attestor proved (a TPM EK hash) is bound to this node for good: a
+      // later join proving it reclaims this node, and it can never admit another one.
+      if (result.bind !== undefined) await bindSubject(tx, attestorId, result.bind, nodeId);
 
       if (options.authz) await refreshNodeAuthz(tx, options.authz, nodeId);
       const subject = `node/${nodeId}`;

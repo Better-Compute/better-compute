@@ -17,6 +17,7 @@ import {
 } from '@better-compute/core';
 import { base64url, fromBase64url, sha256, timingSafeEqualBytes } from '../keys.js';
 import { csrSha256Of, refuser, type AttestorBaseOptions } from './common.js';
+import { consumeApprovedRequest, recordPendingRequest, requestRejected } from './join-requests.js';
 import {
   activateCredential,
   isAttestationKey,
@@ -74,17 +75,51 @@ export interface TpmAttestorOptions extends AttestorBaseOptions {
   pcrSelection?: readonly PcrSelection[];
   /** Returns a refusal reason, or undefined when the PCR values are acceptable. */
   pcrPolicy?(pcrs: TpmIdentity['pcrs']): string | undefined;
-  /** Where the machine joins; undefined refuses (an EK compute does not know). */
-  resolve(
+  /**
+   * Pre-allowed EKs (e.g. from a vendor's delivery manifest): where an EK that is not yet bound to
+   * a node joins. Undefined falls through to `enrollment`, else refuses.
+   */
+  resolve?(
     tx: SqlTx,
     identity: TpmIdentity,
     request: { role: AgentRole },
   ): Promise<AttestationResult | undefined>;
+  /**
+   * Operator enrollment of unknown EKs through `join_requests` (joinRequests.approve assigns the
+   * pool): the join defers until approved; the retry (same CSR) consumes the approval. The request
+   * is filed under this tenant and site.
+   */
+  enrollment?: {
+    tenantId: string;
+    siteId: string;
+    poolId?: string;
+    pendingTtlSeconds?: number;
+    retryAfterSeconds?: number;
+  };
   challengeTtlMs?: number;
   roles?: readonly AgentRole[];
 }
 
 export const tpmChallengeMaxTtlMs = 5 * 60_000;
+
+interface BoundNode {
+  id: string;
+  owner_tenant_id: string;
+  pool_id: string | null;
+  site_id: string;
+  provision_state: string;
+}
+
+/** The node an EK was bound to at its first join (`node_bindings`, written by JoinService). */
+async function boundNode(tx: SqlTx, ekSha256: Uint8Array): Promise<BoundNode | undefined> {
+  const { rows } = await tx.query<BoundNode>(
+    `SELECT n.id, n.owner_tenant_id, n.pool_id, n.site_id, n.provision_state
+       FROM node_bindings b JOIN nodes n ON n.id = b.node_id
+      WHERE b.attestor = 'tpm' AND b.subject = $1`,
+    [ekSha256],
+  );
+  return rows[0];
+}
 const stateAad = new TextEncoder().encode('bettercompute.v1/tpm-challenge-state');
 
 interface TpmEvidence {
@@ -334,14 +369,64 @@ export function tpmAttestor(options: TpmAttestorOptions): AttestorVerifier {
         const policy = options.pcrPolicy?.(pcrs);
         if (policy) fail(`pcr-policy:${policy}`);
 
-        const result = await options.resolve(
-          context.tx,
-          { ekSha256, ...(ekCertificate ? { ekCertificate } : {}), akName, pcrs },
-          { role: context.role },
-        );
-        if (!result) fail('unknown-ek');
-        if (result!.role !== context.role) fail('role');
-        return result!;
+        // Where the machine joins: 1) the node this EK is bound to (a re-join after reinstall or a
+        // lost key is a reclaim of that node); 2) the host's allow-list; 3) operator enrollment.
+        const bound = await boundNode(context.tx, ekSha256);
+        if (bound) {
+          if (bound.provision_state === 'retired') fail('retired');
+          return {
+            tenantId: bound.owner_tenant_id,
+            role: context.role,
+            nodeId: bound.id,
+            siteId: bound.site_id,
+            ...(bound.pool_id ? { poolId: bound.pool_id } : {}),
+            bind: ekSha256,
+          };
+        }
+        const identity = { ekSha256, ...(ekCertificate ? { ekCertificate } : {}), akName, pcrs };
+        const resolved = await options.resolve?.(context.tx, identity, { role: context.role });
+        if (resolved) {
+          if (resolved.role !== context.role) fail('role');
+          return { ...resolved, bind: ekSha256 };
+        }
+        const enrollment = options.enrollment;
+        if (!enrollment) return fail('unknown-ek');
+        const request = {
+          tenantId: enrollment.tenantId,
+          attestor: 'tpm',
+          csrSha256,
+          machine: { key: ekSha256, siteId: enrollment.siteId, mac: undefined },
+        };
+        const approved = await consumeApprovedRequest(context.tx, request);
+        if (approved)
+          return {
+            tenantId: enrollment.tenantId,
+            role: context.role,
+            siteId: approved.site_id,
+            ...(approved.pool_id ? { poolId: approved.pool_id } : {}),
+            ...(approved.node_id ? { nodeId: approved.node_id } : {}),
+            bind: ekSha256,
+          };
+        if (await requestRejected(context.tx, request)) fail('rejected');
+        const requestId = await recordPendingRequest(context.tx, {
+          ...request,
+          poolId: enrollment.poolId ?? null,
+          claims: {
+            ...context.claims,
+            tpm: {
+              ekSha256: Buffer.from(ekSha256).toString('hex'),
+              ...(ekCertificate
+                ? { ekIssuer: ekCertificate.issuer, ekSerial: ekCertificate.serialNumber }
+                : {}),
+            },
+          },
+          ttlSeconds: enrollment.pendingTtlSeconds ?? 86_400,
+        });
+        return {
+          deferred: 'approval',
+          requestId,
+          retryAfterSeconds: enrollment.retryAfterSeconds ?? 30,
+        };
       } catch (error) {
         if (error instanceof Refusal) return refuse(error.message);
         throw error;
