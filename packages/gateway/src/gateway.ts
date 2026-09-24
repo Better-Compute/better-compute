@@ -164,6 +164,17 @@ export interface GatewaySessionInfo {
   upgradeRequired: boolean;
 }
 
+export interface GatewayStatus {
+  id: string;
+  region: string;
+  started: boolean;
+  draining: boolean;
+  sessions: number;
+  maxStreams: number;
+  /** The `gateway:<id>` lease epoch, or null while fenced. */
+  leaseEpoch: number | null;
+}
+
 export interface Gateway {
   readonly id: string;
   /** Registers the directory row and takes the `gateway:<id>` lease; then admits sessions. */
@@ -180,9 +191,14 @@ export interface Gateway {
   drain(options?: { reason?: string }): Promise<void>;
   /** Pushes a RevocationNotice to the node's session and closes it (§13). */
   revoke(nodeId: string, notice: { reason: string; serials?: Uint8Array[] }): Promise<boolean>;
-  /** Runs dispatch (and the spec sweep) soon: after an enqueue commits. */
+  /**
+   * Runs dispatch and the spec sweep soon: after an enqueue or a NodeSpec bump commits. An
+   * accelerator only: the 1 s dispatch loop and the spec sweep converge without it.
+   */
   poke(): void;
   sessions(): GatewaySessionInfo[];
+  /** What `GET /v1/health` reports. */
+  status(): GatewayStatus;
   readonly jobs: Readonly<{
     dispatch: GatewayJob;
     liveness: GatewayJob;
@@ -911,6 +927,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       setImmediate(() => {
         pokeScheduled = false;
         jobs.dispatch.tick().catch((error: unknown) => log.warn('gateway: dispatch failed', { cause: String(error) }));
+        jobs.specs.tick().catch((error: unknown) => log.warn('gateway: spec push failed', { cause: String(error) }));
       });
     },
 
@@ -926,6 +943,18 @@ export function createGateway(options: GatewayOptions): Gateway {
         inFlight: session.inFlight.size,
         upgradeRequired: session.upgradeRequired,
       }));
+    },
+
+    status() {
+      return {
+        id,
+        region: options.region,
+        started,
+        draining,
+        sessions: sessions.size,
+        maxStreams,
+        leaseEpoch: lease?.epoch ?? null,
+      };
     },
   };
   return gateway;

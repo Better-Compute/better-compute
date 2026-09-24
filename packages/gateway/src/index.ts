@@ -16,6 +16,7 @@ export type {
   GatewayJob,
   GatewayOptions,
   GatewaySessionInfo,
+  GatewayStatus,
   LaneCreditLimits,
   PeerIdentity,
   RevocationFeed,
@@ -37,6 +38,14 @@ export { AGENT_GATEWAY_SERVICE, serveGateway, spiffeAuthenticate } from './http2
 export { attachFrameConn, closeReason } from './frames.js';
 export type { FrameEndpoint } from './frames.js';
 export { certificateAuthenticate, peerChain } from './identity.js';
+export { gatewayControlClient, gatewayNotifier, internalHandler, serveInternal } from './internal.js';
+export type {
+  ControlClientOptions,
+  GatewayControlClient,
+  GatewayNotifierOptions,
+  ServedInternal,
+  ServeInternalOptions,
+} from './internal.js';
 export type { CertificateAuthenticateOptions } from './identity.js';
 export type { Authenticate, PeerContext, ServedGateway, ServeGatewayOptions } from './http2.js';
 export { sqlEventPublisher, sqlWorkQueue } from './ports.js';
