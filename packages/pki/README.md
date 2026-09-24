@@ -172,6 +172,12 @@ fleetSize)`, then `removeTrustRoot`.
 
 ## v0.3: exec tickets and break-glass SSH
 
+- **Keys in the bundle.** `pki init` bundles now carry an exec ticket key and the compute SSH CA,
+  sealed with the other keys.
+  - `execTicketIssuer(bundle, { issuer })` rebuilds the issuer. A key's `kid` is its RFC 7638
+    thumbprint, so api replicas, restarts and the gateway's JWKS all agree on it.
+  - `pki show` prints `execTicketKeyId` and `sshCaPublicKey`.
+  - Older bundles still load; they just lack both keys.
 - **Exec tickets** (§7.6). `createExecTicketIssuer({ issuer })` issues ES256 JWTs with
   `typ: bc-exec+jwt`, `aud: node:<id>`, `sid`, `op` (`exec`, `console`, `ssh`, `tcp`), a single-use
   `jti`, and a lifetime of at most 60 s.

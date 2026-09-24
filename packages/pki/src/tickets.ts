@@ -1,4 +1,11 @@
-import { createPublicKey, sign, verify, type JsonWebKey, type KeyObject } from 'node:crypto';
+import {
+  createHash,
+  createPublicKey,
+  sign,
+  verify,
+  type JsonWebKey,
+  type KeyObject,
+} from 'node:crypto';
 import { ComputeError, newId, systemClock, type Clock } from '@better-compute/core';
 import {
   assertP256,
@@ -73,7 +80,16 @@ function ticketKey(privateKey: KeyObject): TicketKey {
   assertP256(privateKey, 'ticket signing key');
   const jwk = toPublicKey(privateKey).export({ format: 'jwk' });
   const publicJwk: JsonWebKey = { kty: 'EC', crv: 'P-256', x: jwk.x!, y: jwk.y! };
-  return { kid: newId('tkey'), privateKey, publicJwk };
+  return { kid: jwkThumbprint(publicJwk), privateKey, publicJwk };
+}
+
+/**
+ * RFC 7638 thumbprint of a P-256 public JWK: the `kid`, so every process holding the same key
+ * (api replicas, the gateway's copy of the JWKS) names it the same way.
+ */
+export function jwkThumbprint(jwk: JsonWebKey): string {
+  const canonical = `{"crv":"${jwk.crv}","kty":"${jwk.kty}","x":"${jwk.x}","y":"${jwk.y}"}`;
+  return base64url(new Uint8Array(createHash('sha256').update(canonical).digest()));
 }
 
 const encode = (value: unknown) => base64url(new TextEncoder().encode(JSON.stringify(value)));

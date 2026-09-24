@@ -28,6 +28,8 @@ import {
 } from './keys.js';
 import { createRevocationSet, type RevocationSet } from './revocation.js';
 import { createSigningKey, type SigningKey } from './signing.js';
+import { createSshCertificateAuthority, type SshCertificateAuthority } from './ssh.js';
+import { createExecTicketIssuer, jwkThumbprint, type ExecTicketIssuer } from './tickets.js';
 import { isTrustDomain } from './spiffe.js';
 import { parseCertificate } from './x509.js';
 
@@ -49,6 +51,13 @@ export interface PkiBundle {
   joinEncryption: { privateKey: KeyObject; publicKey: KeyObject };
   /** Signs audit checkpoints (v0.4). Absent in bundles made before it existed. */
   auditSigning?: SigningKey;
+  /**
+   * Signs exec tickets (v0.3 tunnels; P-256): `execTicketIssuer(bundle, { issuer })`. Every api
+   * replica and the gateway derive the same `kid` from it. Absent in older bundles.
+   */
+  execTicketKey?: KeyObject;
+  /** The compute SSH CA for break-glass certificates (v0.3). Absent in older bundles. */
+  sshCa?: SshCertificateAuthority;
   /** Shared by the three CAs. */
   revocations: RevocationSet;
 }
@@ -63,6 +72,10 @@ export interface PkiPins {
   joinEncryptionJwk: JsonWebKey;
   /** What `audit verify` and third parties check checkpoints against. */
   auditSigningKeyPin?: string;
+  /** The exec ticket key's JWKS `kid` (RFC 7638 thumbprint). */
+  execTicketKeyId?: string;
+  /** The SSH CA's OpenSSH public key (`TrustedUserCAKeys`, NodeSpec `access.sshCaPublicKeys`). */
+  sshCaPublicKey?: string;
 }
 
 export interface CreatePkiBundleOptions {
@@ -114,9 +127,29 @@ export function createPkiBundle(options: CreatePkiBundleOptions): PkiBundle {
     joinSigning: createSigningKey({ clock, commonName: `${organization} join signing` }),
     joinEncryption: encryption,
     auditSigning: createSigningKey({ clock, commonName: `${organization} audit signing` }),
+    execTicketKey: generateP256KeyPair().privateKey,
+    sshCa: createSshCertificateAuthority({ clock, comment: `${organization} ssh ca` }),
     revocations,
   };
 }
+
+/** The exec ticket issuer of a bundle (throws `INVALID_CONFIG` for a bundle made before v0.3). */
+export function execTicketIssuer(
+  bundle: PkiBundle,
+  options: { issuer: string; clock?: Clock },
+): ExecTicketIssuer {
+  if (!bundle.execTicketKey)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'The PKI bundle has no exec ticket key; create a new one with pki init',
+    );
+  return createExecTicketIssuer({ ...options, privateKey: bundle.execTicketKey });
+}
+
+const execTicketKeyIdOf = (key: KeyObject) => {
+  const jwk = toPublicKey(key).export({ format: 'jwk' });
+  return jwkThumbprint({ kty: 'EC', crv: 'P-256', x: jwk.x!, y: jwk.y! });
+};
 
 export function pkiPins(bundle: PkiBundle): PkiPins {
   return {
@@ -126,6 +159,8 @@ export function pkiPins(bundle: PkiBundle): PkiPins {
     joinEncryptionKeyPin: spkiPin(bundle.joinEncryption.publicKey),
     joinEncryptionJwk: publicJwk(bundle.joinEncryption.publicKey),
     ...(bundle.auditSigning ? { auditSigningKeyPin: spkiPin(bundle.auditSigning.publicKey) } : {}),
+    ...(bundle.execTicketKey ? { execTicketKeyId: execTicketKeyIdOf(bundle.execTicketKey) } : {}),
+    ...(bundle.sshCa ? { sshCaPublicKey: bundle.sshCa.publicKey } : {}),
   };
 }
 
@@ -166,6 +201,10 @@ export function readPkiPins(text: string): PkiPins & { expires: Record<string, n
           ),
         }
       : {}),
+    ...(stored.execTicketPublicKey
+      ? { execTicketKeyId: execTicketKeyIdOf(toPublicKey(stored.execTicketPublicKey)) }
+      : {}),
+    ...(stored.sshCaPublicKey ? { sshCaPublicKey: stored.sshCaPublicKey } : {}),
     expires: {
       root: root.notAfter,
       nodeCa: node.notAfter,
@@ -189,6 +228,10 @@ interface StoredBundle {
   joinSigningCertificate: string;
   joinEncryptionPublicKey: string;
   auditSigningCertificate?: string;
+  /** SPKI PEM of the exec ticket key. */
+  execTicketPublicKey?: string;
+  /** OpenSSH public key line of the SSH CA. */
+  sshCaPublicKey?: string;
   /** PEM private keys by name, or `sealed` instead. */
   keys?: Record<KeyName, string>;
   sealed?: { alg: 'HKDF-SHA256+A256GCM'; salt: string; iv: string; data: string };
@@ -200,7 +243,9 @@ type KeyName =
   | 'internalCa'
   | 'joinSigning'
   | 'joinEncryption'
-  | 'auditSigning';
+  | 'auditSigning'
+  | 'execTickets'
+  | 'sshCa';
 
 const minSecretLength = 32;
 
@@ -235,6 +280,8 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
   };
   if (bundle.root && !options.omitRootKey) keys.root = bundle.root.export().privateKeyPem;
   if (bundle.auditSigning) keys.auditSigning = bundle.auditSigning.export().privateKeyPem;
+  if (bundle.execTicketKey) keys.execTickets = privateKeyPem(bundle.execTicketKey);
+  if (bundle.sshCa) keys.sshCa = bundle.sshCa.export().privateKeyPem;
   const stored: StoredBundle = {
     format: 'better-compute-pki',
     version: 1,
@@ -250,6 +297,14 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
     ...(bundle.auditSigning
       ? { auditSigningCertificate: bundle.auditSigning.export().certificatePem }
       : {}),
+    ...(bundle.execTicketKey
+      ? {
+          execTicketPublicKey: toPublicKey(bundle.execTicketKey)
+            .export({ type: 'spki', format: 'pem' })
+            .toString(),
+        }
+      : {}),
+    ...(bundle.sshCa ? { sshCaPublicKey: bundle.sshCa.publicKey } : {}),
   };
   if (options.secret !== undefined) {
     const salt = randomBytesArray(16);
@@ -384,6 +439,22 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
       privateKey: need('auditSigning'),
       certificate: fromPem(stored.auditSigningCertificate)[0]!,
     });
+  if (stored.execTicketPublicKey) {
+    const key = toPrivateKey(need('execTickets'));
+    if (spkiPin(key) !== spkiPin(stored.execTicketPublicKey))
+      throw new ComputeError('INVALID_CONFIG', 'The exec ticket key does not match its public key');
+    bundle.execTicketKey = key;
+  }
+  if (stored.sshCaPublicKey) {
+    const comment = stored.sshCaPublicKey.split(' ').slice(2).join(' ');
+    bundle.sshCa = createSshCertificateAuthority({
+      clock,
+      privateKey: need('sshCa'),
+      ...(comment ? { comment } : {}),
+    });
+    if (bundle.sshCa.publicKey.split(' ')[1] !== stored.sshCaPublicKey.split(' ')[1])
+      throw new ComputeError('INVALID_CONFIG', 'The SSH CA key does not match its public key');
+  }
   if (rootKey)
     bundle.root = createRootCa({
       clock,
