@@ -20,6 +20,12 @@
     },
     {
       "path": "../pki"
+    },
+    {
+      "path": "../iam"
+    },
+    {
+      "path": "../inventory"
     }
   ]
 }

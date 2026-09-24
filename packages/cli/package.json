@@ -51,6 +51,8 @@
   "dependencies": {
     "@better-compute/client": "workspace:*",
     "@better-compute/core": "workspace:*",
+    "@better-compute/iam": "workspace:*",
+    "@better-compute/inventory": "workspace:*",
     "@better-compute/pki": "workspace:*",
     "@better-compute/postgres": "workspace:*",
     "@better-compute/server": "workspace:*"
@@ -60,7 +62,8 @@
     "@electric-sql/pglite": "^0.5.8",
     "@better-iam/server": "^0.1.0",
     "@better-iam/cli": "^0.1.0",
-    "@better-iam/adapter-sqlite": "^0.1.0"
+    "@better-iam/adapter-sqlite": "^0.1.0",
+    "@better-iam/client": "^0.1.0"
   },
   "peerDependenciesMeta": {
     "@better-compute/testing": {
@@ -76,6 +79,9 @@
       "optional": true
     },
     "@better-iam/adapter-sqlite": {
+      "optional": true
+    },
+    "@better-iam/client": {
       "optional": true
     }
   }
