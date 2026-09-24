@@ -405,7 +405,15 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       for (const row of read.rows) rows.set(row.id, { nodeId: row.node_id, state: row.state, kind: row.kind });
     }
     // Final write per command after every update of the batch, in order.
-    const writes = new Map<string, { state: CommandState; reason: string | null; result: Uint8Array | null }>();
+    const writes = new Map<
+      string,
+      {
+        state: CommandState;
+        reason: string | null;
+        /** Set together or not at all: a node signature never sits next to another result. */
+        result: { bytes: Uint8Array; sigKid: string | null; sig: Uint8Array | null } | null;
+      }
+    >();
     const busy = new Map<string, number>();
     const settledEvents: { entry: number; settled: SettledCommand }[] = [];
     entries.forEach((entry, index) => {
@@ -423,7 +431,17 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             busy.delete(update.commandId);
             const reason = reasonOf(update);
             // The result is stored with the terminal state; owners read it from the row.
-            const result = commandTerminalStates.has(to) && update.result.byteLength ? update.result : null;
+            // The node's signature (attested kinds) is stored exactly as received, with the result
+            // it covers; workers verify it (§6), the gateway never judges or strips it.
+            const signed = Boolean(update.nodeSig?.sig.byteLength);
+            const result =
+              commandTerminalStates.has(to) && (update.result.byteLength || signed)
+                ? {
+                    bytes: update.result,
+                    sigKid: signed ? update.nodeSig!.kid : null,
+                    sig: signed ? update.nodeSig!.sig : null,
+                  }
+                : null;
             writes.set(update.commandId, { state: to, reason, result });
             if (commandTerminalStates.has(to)) {
               const settled: SettledCommand = { id: update.commandId, kind: row.kind, state: to };
@@ -440,15 +458,20 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     if (writes.size) {
       const list = [...writes];
       await tx.query(
-        `UPDATE commands c SET state = v.state, reason = v.reason,
-           result = COALESCE(decode(v.result, 'hex'), c.result), updated_at = compute_now()
-         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS v(id, state, reason, result)
+        `UPDATE commands c SET state = v.state, reason = v.reason, updated_at = compute_now(),
+           result = CASE WHEN v.result IS NULL THEN c.result ELSE decode(v.result, 'hex') END,
+           result_sig_kid = CASE WHEN v.result IS NULL THEN c.result_sig_kid ELSE v.sig_kid END,
+           result_sig = CASE WHEN v.result IS NULL THEN c.result_sig ELSE decode(v.sig, 'hex') END
+         FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+           AS v(id, state, reason, result, sig_kid, sig)
          WHERE c.id = v.id`,
         [
           list.map(([id]) => id),
           list.map(([, write]) => write.state),
           list.map(([, write]) => write.reason),
-          list.map(([, write]) => (write.result ? Buffer.from(write.result).toString('hex') : null)),
+          list.map(([, write]) => (write.result ? Buffer.from(write.result.bytes).toString('hex') : null)),
+          list.map(([, write]) => write.result?.sigKid ?? null),
+          list.map(([, write]) => (write.result?.sig ? Buffer.from(write.result.sig).toString('hex') : null)),
         ],
       );
     }

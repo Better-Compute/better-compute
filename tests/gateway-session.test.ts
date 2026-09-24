@@ -771,3 +771,30 @@ describe('group commit', () => {
     }
   });
 });
+describe('attested results (core/0012)', () => {
+  it('stores node_sig exactly as received, together with the result it covers', async () => {
+    const node = await f.addNode();
+    const [signed, plain, empty] = [await f.enqueue(node), await f.enqueue(node), await f.enqueue(node)];
+    const { handle } = await f.connect(node);
+    await f.gateway.jobs.dispatch.tick();
+    const sig = (kid: string, bytes: number[]) => ({ kid, sig: new Uint8Array(bytes) });
+    await handle.receive(update(signed, CommandState.SUCCEEDED, { result: new Uint8Array([9, 9]), nodeSig: sig('node-k1', [1, 2, 3]) }));
+    await handle.receive(update(plain, CommandState.SUCCEEDED, { result: new Uint8Array([5]) }));
+    await handle.receive(update(empty, CommandState.SUCCEEDED, { nodeSig: sig('node-k1', [4]) }));
+    // A later duplicate (e.g. a journal replay with another signature) changes nothing.
+    await handle.receive(update(signed, CommandState.SUCCEEDED, { result: new Uint8Array([7]), nodeSig: sig('node-k2', [8]) }));
+
+    const row = async (id: string) =>
+      (await f.db.query<{ result: Uint8Array | null; result_sig_kid: string | null; result_sig: Uint8Array | null }>(
+        'SELECT result, result_sig_kid, result_sig FROM commands WHERE id = $1',
+        [id],
+      )).rows[0]!;
+    const bytes = (value: Uint8Array | null) => (value === null ? null : [...value]);
+    const a = await row(signed);
+    expect([bytes(a.result), a.result_sig_kid, bytes(a.result_sig)]).toEqual([[9, 9], 'node-k1', [1, 2, 3]]);
+    const b = await row(plain);
+    expect([bytes(b.result), b.result_sig_kid, bytes(b.result_sig)]).toEqual([[5], null, null]);
+    const c = await row(empty);
+    expect([bytes(c.result), c.result_sig_kid, bytes(c.result_sig)]).toEqual([[], 'node-k1', [4]]);
+  });
+});
