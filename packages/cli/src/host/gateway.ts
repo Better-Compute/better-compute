@@ -59,6 +59,13 @@ export function gatewayOptions(
 ): Record<string, unknown> {
   const extra = config.options ?? {};
   const issuer = ticketIssuer(options);
+  // Status handlers compose (the gateway runs each): XID health always, then the configuration's, such
+  // as vps's `instanceStatusHandler({ events, log })` when it registers `vps()`.
+  const { status, ...reports } = (extra.reports ?? {}) as Record<string, unknown>;
+  const statusHandlers = [
+    pkg.xidStatusHandler,
+    ...(status === undefined ? [] : Array.isArray(status) ? status : [status]),
+  ];
   return {
     ...(issuer
       ? {
@@ -76,11 +83,7 @@ export function gatewayOptions(
     services: compute.gatewayServices,
     work: compute.context.work,
     events: compute.context.events,
-    reports: {
-      ...gatewayReportHandlers,
-      status: pkg.xidStatusHandler,
-      ...(extra.reports as Record<string, unknown> | undefined),
-    },
+    reports: { ...gatewayReportHandlers, ...reports, status: statusHandlers },
   };
 }
 

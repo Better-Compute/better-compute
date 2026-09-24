@@ -20,7 +20,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
 import { rolloutModule } from '@better-compute/rollout';
 import { pkiJoinCrypto } from '@better-compute/server';
-import { vps } from '@better-compute/vps';
+import { instanceStatusHandler, vps } from '@better-compute/vps';
 
 // The serve composition audit's deployment (tests/cli-serve-compose.test.ts): every module of the repository
 // in one control plane, and a `host` export with the gateway role over mTLS, the events module's SSE watch and
@@ -125,6 +125,8 @@ export async function composedConfig() {
         cert: [issued.certificate, ...issued.chain.slice(0, -1)].map((der) => toPem(der)).join(''),
         ca: bundle.nodeCa.export().certificatesPem,
       },
+      // vps() is registered: its orphan detection joins the default XID status handler.
+      options: { reports: { status: instanceStatusHandler({ events: compute.context.events }) } },
     },
   }));
 

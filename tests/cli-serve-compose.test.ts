@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
-import { createCli, type CliIO } from '@better-compute/cli';
+import { createCli, gatewayOptions, type CliIO } from '@better-compute/cli';
 import { AGENT_GATEWAY_SERVICE, frameMessage, MessageDecoder } from '@better-compute/gateway';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import {
@@ -124,6 +124,23 @@ describe('serve composition audit', () => {
         expect(groups, group).toContain(group);
     },
   );
+
+  it('composes gateway report hooks: capacity transitions, XID health first, then the configuration’s', () => {
+    const xid = async () => undefined;
+    const instances = async () => undefined;
+    const fake = { endpoint: { origin: 'http://x' }, gatewayServices: {}, context: {} } as any;
+    const composed = gatewayOptions({ xidStatusHandler: xid }, fake, { database: {} } as any, {
+      region: 'eu-1',
+      tls: {},
+      options: { reports: { status: instances }, maxStreams: 10 },
+    }) as { reports: Record<string, unknown>; maxStreams: number; region: string };
+    expect(composed.reports.status).toEqual([xid, instances]);
+    expect(Object.keys(composed.reports)).toEqual(
+      expect.arrayContaining(['allocationBound', 'allocationReleased', 'allocationFailed']),
+    );
+    expect(composed).toMatchObject({ maxStreams: 10, region: 'eu-1' });
+    expect(composed).not.toHaveProperty('tunnels');
+  });
 
   // ([37c0ab]) createModuleContext sets no ctx.workflows yet, so metal verbs fail under betterCompute().
   it.todo('runs a metal verb as a provision workflow under betterCompute()');

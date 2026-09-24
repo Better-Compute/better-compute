@@ -10,7 +10,7 @@
 // tests. Local development only: sessions authenticate by a header over h2c (no TLS), so attaching a fleet
 // demands `insecureHeaderAuth: true`.
 
-import { create } from '@bufbuild/protobuf';
+import type { KeyObject } from 'node:crypto';
 import {
   ComputeError,
   type ComputeModule,
@@ -28,17 +28,15 @@ import {
   type ServedGateway,
 } from '@better-compute/gateway';
 import {
-  createCsr,
   createNodeCa,
   createSigningKey,
   generateP256KeyPair,
   parseCertificate,
   publicJwk,
-  sealJoinToken,
-  verifyJoinResponse,
+  type SignerTrust,
 } from '@better-compute/pki';
 import { pglite } from '@better-compute/postgres/pglite';
-import { AgentRole, HardwareClaimsSchema, JoinRequestSchema } from '@better-compute/protocol';
+import type { JoinRequest } from '@better-compute/protocol';
 import {
   betterCompute,
   gatewayReportHandlers,
@@ -48,6 +46,7 @@ import {
   type WorkerOptions,
 } from '@better-compute/server';
 import { FakeDaemon, type FakeDaemonOptions } from '../daemon/fake-daemon.js';
+import { runAgentJoin } from '../daemon/join.js';
 import { fakeHardware, type FakeHardwareVariant } from '../fake-hw.js';
 import { fakeIam } from '../fake-iam.js';
 import {
@@ -70,12 +69,8 @@ export interface DevJoinKeys {
     joinSigningKey: JsonWebKey;
     nodeCaCertificate: Uint8Array;
   };
-  /** The agent half: seal a token for JoinService, check its signed answer. */
-  seal(token: string, csr: Uint8Array): string;
-  verify(
-    response: Parameters<typeof verifyJoinResponse>[0],
-    csr: Uint8Array,
-  ): ReturnType<typeof verifyJoinResponse>;
+  /** What the agent half (`runAgentJoin`) needs: the pinned signer, the encryption key, the node CA. */
+  agent: { signer: SignerTrust; joinEncryptionKey: KeyObject; nodeCaRoots: readonly Uint8Array[] };
 }
 
 export function createDevJoinKeys(options: { trustDomain?: string } = {}): DevJoinKeys {
@@ -99,14 +94,11 @@ export function createDevJoinKeys(options: { trustDomain?: string } = {}): DevJo
       joinSigningKey: publicJwk(signingKey.publicKey),
       nodeCaCertificate: nodeCa.certificate,
     },
-    seal: (token, csr) => sealJoinToken(token, encryption.publicKey, { csr, issuedAt: Date.now() }),
-    verify: (response, csr) =>
-      verifyJoinResponse(response, {
-        signer: { publicKey: signingKey.publicKey },
-        csr,
-        nodeCaRoots: [nodeCa.certificate],
-        now: Date.now(),
-      }),
+    agent: {
+      signer: { publicKey: signingKey.publicKey },
+      joinEncryptionKey: encryption.publicKey,
+      nodeCaRoots: [nodeCa.certificate],
+    },
   };
 }
 
@@ -274,29 +266,11 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   client = createH2cClient({ url: gatewayUrl });
   const h2c = client;
 
-  const joinOne = async (token: string, hardware: ReturnType<typeof fakeHardware>) => {
-    const csr = createCsr(generateP256KeyPair().privateKey);
-    // A join storm may meet the handshake bucket: retry with jitter, like bcd.
+  /** The unary Join; a join storm may meet the handshake bucket, so it retries with jitter, like bcd. */
+  const send = async (request: JoinRequest) => {
     for (let attempt = 0; ; attempt++) {
       try {
-        const response = await h2c.join(
-          create(JoinRequestSchema, {
-            sealedToken: new TextEncoder().encode(keys.seal(token, csr)),
-            csr,
-            claims: create(HardwareClaimsSchema, hardware.claims),
-            daemonVersion: '0.1.0-dev',
-            role: AgentRole.NODE,
-          }),
-        );
-        const body = keys.verify(response, csr);
-        const spiffe = parseCertificate(body.certChain[0]!).uriSans[0] ?? '';
-        const siteId = /\/site\/([^/]+)\/node\//.exec(spiffe)?.[1];
-        if (!siteId)
-          throw new ComputeError(
-            'INTERNAL_ERROR',
-            `Join issued a certificate without a site: ${spiffe}`,
-          );
-        return { nodeId: body.nodeId, siteId };
+        return await h2c.join(request);
       } catch (error) {
         if (attempt < 20 && isRetryable(error as GrpcStatus)) {
           await sleep(50 + Math.random() * 200 * (attempt + 1));
@@ -311,6 +285,29 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         throw error;
       }
     }
+  };
+
+  // The agent's Join loop (deferrals included), with a sealed-token join.
+  const joinOne = async (token: string, hardware: ReturnType<typeof fakeHardware>) => {
+    const { body } = await runAgentJoin({
+      send,
+      signer: keys.agent.signer,
+      nodeCaRoots: keys.agent.nodeCaRoots,
+      wait: async (ms) => {
+        await sleep(ms);
+      },
+      claims: hardware.claims,
+      daemonVersion: '0.1.0-dev',
+      token: { token, joinEncryptionKey: keys.agent.joinEncryptionKey },
+    });
+    const spiffe = parseCertificate(body.certChain[0]!).uriSans[0] ?? '';
+    const siteId = /\/site\/([^/]+)\/node\//.exec(spiffe)?.[1];
+    if (!siteId)
+      throw new ComputeError(
+        'INTERNAL_ERROR',
+        `Join issued a certificate without a site: ${spiffe}`,
+      );
+    return { nodeId: body.nodeId, siteId };
   };
 
   return {

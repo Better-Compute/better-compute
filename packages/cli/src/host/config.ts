@@ -34,7 +34,9 @@ export interface HostGatewayConfig {
   /**
    * Anything else `createGateway()` takes (credits, rates, revocations, extra report handlers). The host
    * fills `database`, `services`, `work`, `events`, `region` and the default `reports`
-   * (`gatewayReportHandlers` + `xidStatusHandler`), and `tunnels` from `ComputeOptions.tunnels.issuer`.
+   * (`gatewayReportHandlers`, and `status: [xidStatusHandler, ...reports.status]`: add vps's
+   * `instanceStatusHandler({ events, log })` there when you register `vps()`), and `tunnels` from
+   * `ComputeOptions.tunnels.issuer`.
    */
   options?: Record<string, unknown>;
 }
