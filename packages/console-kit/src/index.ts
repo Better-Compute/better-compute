@@ -7,6 +7,7 @@ export * from './forms.js';
 export * from './instance-form.js';
 export * from './list.js';
 export * from './live.js';
+export * from './quotas.js';
 export * from './react.js';
 export * from './resources.js';
 export * from './store.js';
