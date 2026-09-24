@@ -159,10 +159,12 @@ class PveEmulator {
     if (vm.lock && method !== 'GET') return this.fail(500, `VM is locked (${vm.lock})`);
     if (rest === 'config' && method === 'GET')
       return this.ok({
+        ...vm.config,
         name: vm.name,
         description: vm.description,
         cores: vm.cores,
-        memory: vm.memory,
+        memory: String(vm.memory),
+        ...(vm.disk ? { scsi0: `local-lvm:vm-${vm.vmid}-disk-0,size=${vm.disk}` } : {}),
       });
     if (rest === 'config' && method === 'PUT') {
       if (body.tags !== undefined) vm.tags = body.tags;
@@ -530,6 +532,47 @@ describe('proxmox specifics', () => {
     );
     await expect(impl.power!(id, 'nmi', call('nmi'))).rejects.toSatisfy((error: unknown) =>
       isComputeError(error, 'UNSUPPORTED'),
+    );
+  });
+
+  it('reinstalls under the same VMID, keeping key, name, size, disk and cloud-init', async () => {
+    const api = new PveEmulator();
+    const impl = await client(
+      api,
+      { offers: ['4c-8g-40d'] },
+      {
+        writeSnippet: async (name) => `local:snippets/${name}`,
+      },
+    );
+    const userData = '#cloud-config\nruncmd: [echo hi]\n';
+    const { id } = await impl.create(
+      { ...request('inst_16', '4c-8g-40d'), userData },
+      call('inst_16'),
+    );
+    api.settle();
+    await impl.reinstall!(id, 'debian-12', call('reinstall'));
+    api.settle();
+    const vm = api.vms.get(Number(id))!;
+    expect(vm).toMatchObject({
+      name: 'inst-16',
+      node: 'pve1',
+      cores: 4,
+      memory: 8192,
+      disk: '40G',
+      tags: managedTag,
+      status: 'running',
+      description: 'better-compute-idempotency-key: inst_16',
+    });
+    expect(vm.config.cicustom).toBe(`user=local:snippets/bc-${id}.yaml`);
+    const clones = api.requests.filter((entry) => entry.path.endsWith('/clone'));
+    expect(clones.map((entry) => [entry.path, entry.body.newid, entry.body.target])).toEqual([
+      ['/nodes/pve1/qemu/9000/clone', id, undefined],
+      ['/nodes/pve2/qemu/9001/clone', id, 'pve1'],
+    ]);
+    // A retried create under the key still finds the same machine.
+    expect((await impl.create(request('inst_16', '4c-8g-40d'), call('inst_16'))).id).toBe(id);
+    await expect(impl.reinstall!('100', 'debian-12', call('r'))).rejects.toSatisfy(
+      (error: unknown) => isComputeError(error, 'ACCESS_DENIED'),
     );
   });
 

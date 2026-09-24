@@ -483,40 +483,26 @@ class ProxmoxClient implements ProviderImpl {
         const template = await this.#template(request.image, signal);
         const node = this.#config.node ?? template.node;
         try {
-          const upid = await this.#request<string>(
-            'POST',
-            `/nodes/${encodeURIComponent(template.node)}/qemu/${template.vmid}/clone`,
-            {
-              newid: slot,
-              name: vmName(request.name),
-              description: `${keyLine}${key}`,
-              full: this.#config.fullClone ? 1 : 0,
-              ...(node !== template.node ? { target: node } : {}),
-              ...(this.#config.pool ? { pool: this.#config.pool } : {}),
-              ...(this.#config.fullClone && this.#config.storage
-                ? { storage: this.#config.storage }
-                : {}),
-            },
-            signal,
-          );
-          await this.#wait(template.node, upid, signal);
+          await this.#clone(template, slot, node, vmName(request.name), key, signal);
         } catch (error) {
           // Someone cloned into the slot first: look again at who holds it.
           if (/already exists/i.test((error as Error).message)) continue;
           throw error;
         }
-        return this.#finish(slot, node, vmName(request.name), size, request.userData, context);
+        const cicustom = await this.#snippet(slot, request.userData, context);
+        return this.#finish(slot, node, vmName(request.name), size, cicustom, context);
       }
       if ((await this.#ownerOf(vm, signal)) === key) {
         // Ours. A clone still running (a concurrent create) or already configured is returned as is; one
         // interrupted between clone and configuration is finished now.
         if (vm.lock || tagsOf(vm).includes(managedTag)) return toMachine(vm, this.#config.region);
+        const cicustom = await this.#snippet(slot, request.userData, context);
         return this.#finish(
           slot,
           vm.node,
           vm.name ?? vmName(request.name),
           size,
-          request.userData,
+          cicustom,
           context,
         );
       }
@@ -533,21 +519,55 @@ class ProxmoxClient implements ProviderImpl {
     );
   }
 
+  /** Clones `template` into `vmid` on `node`, recording the key; waits for the clone task. */
+  async #clone(
+    template: PveResource,
+    vmid: number,
+    node: string,
+    name: string,
+    key: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const upid = await this.#request<string>(
+      'POST',
+      `/nodes/${encodeURIComponent(template.node)}/qemu/${template.vmid}/clone`,
+      {
+        newid: vmid,
+        name,
+        description: `${keyLine}${key}`,
+        full: this.#config.fullClone ? 1 : 0,
+        ...(node !== template.node ? { target: node } : {}),
+        ...(this.#config.pool ? { pool: this.#config.pool } : {}),
+        ...(this.#config.fullClone && this.#config.storage
+          ? { storage: this.#config.storage }
+          : {}),
+      },
+      signal,
+    );
+    await this.#wait(template.node, upid, signal);
+  }
+
+  /** The `cicustom` user volume for user data, written through `writeSnippet`; none for empty data. */
+  async #snippet(
+    vmid: number,
+    userData: string,
+    context: CallContext,
+  ): Promise<string | undefined> {
+    if (!hasUserData(userData) || !this.#options.writeSnippet) return undefined;
+    return `user=${await this.#options.writeSnippet(`bc-${vmid}.yaml`, userData, context)}`;
+  }
+
   /** Sizes, tags and starts a fresh clone; every step tolerates having been done already. */
   async #finish(
     vmid: number,
     node: string,
     name: string,
     size: { vcpu: number; memoryGiB: number; diskGiB?: number },
-    userData: string,
+    cicustom: string | undefined,
     context: CallContext,
   ): Promise<ExternalMachine> {
     const { signal } = context;
     const path = `/nodes/${encodeURIComponent(node)}/qemu/${vmid}`;
-    const snippet =
-      hasUserData(userData) && this.#options.writeSnippet
-        ? await this.#options.writeSnippet(`bc-${vmid}.yaml`, userData, context)
-        : undefined;
     if (size.diskGiB)
       try {
         await this.#request(
@@ -571,7 +591,7 @@ class ProxmoxClient implements ProviderImpl {
         cores: size.vcpu,
         memory: size.memoryGiB * 1024,
         ipconfig0: 'ip=dhcp',
-        ...(snippet ? { cicustom: `user=${snippet}` } : {}),
+        ...(cicustom ? { cicustom } : {}),
         tags: managedTag,
       },
       signal,
@@ -583,6 +603,44 @@ class ProxmoxClient implements ProviderImpl {
       if (!/already running/i.test((error as Error).message)) throw error;
     }
     return { id: String(vmid), name, state: 'pending', region: this.#config.region, addresses: [] };
+  }
+
+  /**
+   * Rebuilds the VM from `image` under the same VMID: PVE cannot rebuild in place, so the VM is
+   * destroyed and the template cloned into its VMID again, keeping its key, name, size, boot disk
+   * size and cloud-init volume. A create under the key meanwhile lands on the same VMID and meets it.
+   */
+  async reinstall(id: string, image: ImageRef, context: CallContext): Promise<void> {
+    const { signal } = context;
+    const vm = await this.#managed(id, signal);
+    const config = await this.#request<Record<string, string | number | undefined>>(
+      'GET',
+      `/nodes/${encodeURIComponent(vm.node)}/qemu/${vm.vmid}/config`,
+      undefined,
+      signal,
+    );
+    const key = String(config?.description ?? '')
+      .split('\n')
+      .find((line) => line.startsWith(keyLine))
+      ?.slice(keyLine.length)
+      .trim();
+    if (!config || !key)
+      throw new ComputeError(
+        'INVALID_STATE',
+        `VM ${id} carries no idempotency key to reinstall under`,
+      );
+    const template = await this.#template(image, signal);
+    const disk = /(?:^|,)size=(\d+)G(?:,|$)/.exec(String(config[this.#config.disk] ?? ''));
+    const size = {
+      vcpu: Number(config.cores ?? 1),
+      memoryGiB: Math.max(1, Math.round(Number(config.memory ?? 1024) / 1024)),
+      ...(disk ? { diskGiB: Number(disk[1]) } : {}),
+    };
+    const name = vm.name ?? String(config.name ?? `bc-${vm.vmid}`);
+    await this.#destroy(vm, signal);
+    await this.#clone(template, vm.vmid!, vm.node, name, key, signal);
+    const cicustom = typeof config.cicustom === 'string' ? config.cicustom : undefined;
+    await this.#finish(vm.vmid!, vm.node, name, size, cicustom, context);
   }
 
   async get(id: string, context: CallContext): Promise<ExternalMachine | undefined> {
@@ -651,7 +709,7 @@ export function proxmoxProvider(options: ProxmoxOptions = {}): ProviderDefinitio
     version: '0.1.0',
     provides: ['vps'],
     config: proxmoxConfig as unknown as ProviderDefinition<ProxmoxConfig>['config'],
-    capabilities: ['power', 'list'],
+    capabilities: ['power', 'reinstall', 'list'],
     create: (config, context) => new ProxmoxClient(config, context, options),
   });
 }

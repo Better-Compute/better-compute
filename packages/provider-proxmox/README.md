@@ -36,6 +36,6 @@ The image is a template's VMID or name. The token needs `VM.Clone` on the templa
 - **Offers.** An offer is `available` when an online node, or the pinned `node`, has at least as many CPUs and enough free memory.
 - **Self-signed clusters.** Pass a `fetch` bound to a dispatcher that pins the cluster CA.
 
-Capabilities: `power` (`on`, `off`, `graceful-off`, `reset`, `graceful-restart`, and `cycle` as stop and start; `nmi` is unsupported) and `list`. `reinstall` is not offered, because PVE cannot rebuild a VM in place.
+Capabilities: `power` (`on`, `off`, `graceful-off`, `reset`, `graceful-restart`, and `cycle` as stop and start; `nmi` is unsupported), `reinstall` and `list`. PVE cannot rebuild a VM in place, so `reinstall` destroys the VM and clones the new template into the same VMID. The machine keeps its id, idempotency key, name, cores, memory, boot disk size and cloud-init volume.
 
 Tests: [`tests/provider-proxmox.test.ts`](../../tests/provider-proxmox.test.ts) runs `providerConformanceCases()` and the PVE specifics against an in-memory API emulator.
