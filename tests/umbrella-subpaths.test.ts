@@ -91,7 +91,9 @@ describe('the subpaths of umbrella.json', () => {
 
 describe('the four named subpaths', () => {
   it('better-compute/metal: metal() builds the metal module', async () => {
-    const { metal } = (await load('better-compute/metal')) as typeof import('@better-compute/metal');
+    const { metal } = (await load(
+      'better-compute/metal',
+    )) as typeof import('@better-compute/metal');
     expect(metal().name).toBe('metal');
   });
 
@@ -101,7 +103,9 @@ describe('the four named subpaths', () => {
   });
 
   it('better-compute/provision: provisionModule() builds the provision module', async () => {
-    const { provisionModule } = (await load('better-compute/provision')) as typeof import('@better-compute/provision');
+    const { provisionModule } = (await load(
+      'better-compute/provision',
+    )) as typeof import('@better-compute/provision');
     expect(provisionModule().name).toBe('provision');
   });
 
