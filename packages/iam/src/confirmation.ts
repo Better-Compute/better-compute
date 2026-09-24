@@ -49,10 +49,11 @@ export async function delegatedDenial(
     const outcome = await iam.requestConfirmation(input.credential, {
       ...input.decision,
       reason: input.reason.slice(0, 512),
+      // Not part of core's Decision; the embedded and remote ports forward it (default 900).
       validSeconds: input.validSeconds ?? confirmationValidSeconds,
     } as Decision & { reason: string });
     if (outcome === 'not-held-back') return denied();
-    const { expiresAt } = outcome as { expiresAt?: unknown };
+    const { expiresAt } = outcome;
     const details: ConfirmationDetails = {
       confirmationId: outcome.confirmationId,
       action: input.decision.action,

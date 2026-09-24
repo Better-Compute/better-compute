@@ -19,6 +19,7 @@ import {
   type UsageEvent,
   type UsageResult,
 } from '@better-compute/core';
+import { confirmationValidSeconds } from './confirmation.js';
 import { createFlagCache, type FlagCache } from './flags.js';
 import { recordUsageIsolated, type UsageBilling } from './usage.js';
 
@@ -42,6 +43,8 @@ export interface EmbeddedIamHost {
     identity: { id: string; tenantId: string; kind: string };
     session: {
       id: string;
+      /** The tenant the session acts in: the role's tenant for assumed roles. */
+      tenantId?: string;
       kind: string;
       mfa: boolean;
       agentId?: string;
@@ -124,7 +127,6 @@ const sessionKinds: ReadonlySet<string> = new Set([
   'session-token',
   'delegated',
 ]);
-const notHeldBack = 'This delegation does not hold that action back for confirmation';
 
 /**
  * Converts a better-iam error to a `ComputeError` with the same code when compute knows it; otherwise a
@@ -177,7 +179,8 @@ export function toCaller(principal: Awaited<ReturnType<EmbeddedIamHost['authenti
   const caller: Caller = {
     identityId: identity.id,
     identityKind: identity.kind as Caller['identityKind'],
-    tenantId: identity.tenantId,
+    // The acting tenant (§3.4 step 3 pre-checks it): a role session acts in the role's tenant.
+    tenantId: session.tenantId ?? identity.tenantId,
     sessionId: session.id,
     sessionKind: session.kind as Caller['sessionKind'],
     mfa: session.mfa === true,
@@ -267,7 +270,8 @@ export function embeddedIam(iam: EmbeddedIamHost, options: EmbeddedIamOptions = 
           action: decision.action,
           resource: { type: decision.resource.type, id: decision.resource.id },
           reason: decision.reason,
-          ...(typeof validSeconds === 'number' ? { validSeconds } : {}),
+          // §3.4 step 7: approvals last 15 min unless the caller says otherwise.
+          validSeconds: typeof validSeconds === 'number' ? validSeconds : confirmationValidSeconds,
         });
         return {
           confirmationId: confirmation.id,
@@ -275,8 +279,8 @@ export function embeddedIam(iam: EmbeddedIamHost, options: EmbeddedIamOptions = 
         };
       } catch (error) {
         const { code } = error as { code?: unknown };
-        if (code === 'INVALID_INPUT' && (error as Error).message === notHeldBack)
-          return 'not-held-back';
+        // §3.4 step 7: INVALID_INPUT (typically "does not hold that action back") ⇒ a plain denial.
+        if (code === 'INVALID_INPUT') return 'not-held-back';
         throw fromIamError(error);
       }
     },

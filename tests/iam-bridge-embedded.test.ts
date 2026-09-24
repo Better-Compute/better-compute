@@ -6,6 +6,7 @@ import {
   fromIamError,
   isPoisonError,
   recordUsageIsolated,
+  toCaller,
   type UsageBilling,
   type UsageInputLike,
 } from '@better-compute/iam';
@@ -351,6 +352,25 @@ describe('usage with poison isolation (§12.7)', () => {
     await expect(
       recordUsageIsolated(billing, [{ ...events(1)[0]!, idempotencyKey: '' }]),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+});
+
+describe('toCaller', () => {
+  it('uses the tenant the session acts in, and fails closed on unknown kinds', () => {
+    const principal = {
+      identity: { id: 'idn_1', tenantId: 'ten_home', kind: 'user' },
+      session: { id: 'ses_1', tenantId: 'ten_role', kind: 'role', mfa: true },
+    };
+    expect(toCaller(principal)).toMatchObject({
+      tenantId: 'ten_role',
+      sessionKind: 'role',
+      mfa: true,
+    });
+    const { tenantId: _omitted, ...legacy } = principal.session;
+    expect(toCaller({ ...principal, session: legacy }).tenantId).toBe('ten_home');
+    expect(() =>
+      toCaller({ ...principal, session: { ...principal.session, kind: 'future-kind' } }),
+    ).toThrow(/Unsupported/);
   });
 });
 
