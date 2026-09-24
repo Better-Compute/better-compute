@@ -336,7 +336,8 @@ describe('VPS churn (§16 v0.3 acceptance shape)', () => {
     expect(deleted).toBeGreaterThan(50);
     const midChurn = await liveInstances();
     expect(midChurn.length).toBeGreaterThan(20);
-    expect(new Set(midChurn.map((row) => row.node_id)).size).toBe(3);
+    // Placed on all three hosts (instances still waiting for room have no node yet).
+    expect(new Set(midChurn.flatMap((row) => (row.node_id ? [row.node_id] : []))).size).toBe(3);
     expect(midChurn.some((row) => row.state === 'stopped')).toBe(true);
     expect([...runtimes.values()].reduce((sum, runtime) => sum + runtime.size, 0)).toBe(
       midChurn.filter((row) => row.node_id).length,
