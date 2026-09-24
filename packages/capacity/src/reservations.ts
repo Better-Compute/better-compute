@@ -35,6 +35,7 @@ import {
   type AllocationRecord,
 } from './bookings.js';
 import { chargeQuota, quotaDemand, refundQuota } from './quota.js';
+import { schedulableSql } from './eligibility.js';
 import { assertGang } from './gang.js';
 import { assertSelector } from './selector.js';
 
@@ -1261,8 +1262,12 @@ export async function reconcileReservation(
     Math.min(at, row.during!.end, row.leaseExpiresAt ?? Number.POSITIVE_INFINITY);
 
   if (row.state === 'placed') {
+    // BookingRepair (§10.5): from T−15 min, a booking that went bad is re-placed before it starts.
+    if (row.during.start - now > repairLeadMs) return wake(row.during.start - repairLeadMs);
+    const repaired = await repairBooking(deps, tx, row);
+    if (repaired.state !== 'placed') return now + pendingRetryMs;
     if (row.during.start > now) return wake(row.during.start);
-    const binding = await move(tx, row, 'start');
+    const binding = await move(tx, repaired, 'start');
     const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id });
     for (const allocation of allocations) await deps.desired.invalidate(tx, allocation.nodeId);
     await publish(deps, tx, binding, 'reservation.binding');
@@ -1435,4 +1440,76 @@ export async function wakePendingForNode(
   );
   const poolId = rows[0]?.pool_id;
   return poolId ? wakePendingReservations(tx, work, poolId) : 0;
+}
+
+/** How long before its start a placed reservation's booking is checked and repaired (§10.5). */
+export const repairLeadMs = 15 * 60_000;
+
+/**
+ * BookingRepair (§10.5, v0.5): checks that every allocation of a placed reservation still sits on a
+ * schedulable node with healthy, bookable atoms. A bad booking is released and placed again for the
+ * same window, avoiding the bad nodes, with the quota charge kept; if nothing fits, the reservation
+ * goes `pending` (`Unschedulable`, reason `BookingRepairFailed`) and retries like any pending one.
+ * The pool is locked first, keeping capacity's lock order (pools before node_resources).
+ */
+export async function repairBooking(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  row: ReservationRow,
+): Promise<ReservationRow> {
+  if (!row.during) return row;
+  await tx.query(`SELECT 1 FROM pools WHERE id = $1 FOR UPDATE`, [row.poolId]);
+  const { rows } = await tx.query<{ node_id: string; node_ok: boolean; atoms_ok: boolean }>(
+    `SELECT a.node_id,
+            EXISTS (SELECT 1 FROM nodes n JOIN pools p ON p.id = n.pool_id
+                     WHERE n.id = a.node_id AND ${schedulableSql}) AS node_ok,
+            NOT EXISTS (SELECT 1 FROM devices d WHERE d.id = ANY(a.atoms)
+                         AND NOT (d.healthy AND d.bookable)) AS atoms_ok
+       FROM allocations a
+      WHERE a.owner_kind = 'reservation' AND a.owner_id = $1 AND a.released_at IS NULL`,
+    [row.id],
+  );
+  const bad = rows
+    .filter((entry) => !entry.node_ok || !entry.atoms_ok)
+    .map((entry) => entry.node_id);
+  if (rows.length > 0 && bad.length === 0) return row;
+
+  const now = deps.clock.now();
+  const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: row.id });
+  for (const allocation of allocations) {
+    await releaseAllocation(tx, allocation.id);
+    await deps.desired.invalidate(tx, allocation.nodeId);
+  }
+  const outcome = await deps.placer.place(
+    tx,
+    { ...placementRequest(row, row.during), excludeNodes: [...new Set(bad)] },
+    { ...deps.placement, clock: deps.clock },
+  );
+  if (outcome.status === 'placed') {
+    const conditions = withoutCondition(row.conditions, 'Unschedulable');
+    const { rowCount } = await tx.query(
+      `UPDATE reservations SET conditions = $3::jsonb, version = version + 1 WHERE id = $1 AND version = $2`,
+      [row.id, row.version, JSON.stringify(conditions)],
+    );
+    if (rowCount === 0)
+      throw new ComputeError('CONFLICT', `Reservation ${row.id} changed concurrently`);
+    const repaired = { ...row, conditions, version: row.version + 1 };
+    await publish(deps, tx, repaired, 'reservation.repaired', {
+      from: [...new Set(bad)],
+      nodeIds: outcome.allocations.map((allocation) => allocation.nodeId),
+    });
+    return repaired;
+  }
+  const reason = outcome.status === 'pending' ? outcome.reason : 'queued';
+  const pending = await move(tx, row, 'defer', {
+    during: null,
+    conditions: withCondition(
+      row.conditions,
+      { type: 'Unschedulable', status: 'true', reason: 'BookingRepairFailed', message: reason },
+      now,
+    ),
+  });
+  await deps.work.enqueue(tx, reservationWork, row.id, { notBefore: now + pendingRetryMs });
+  await publish(deps, tx, pending, 'reservation.pending', { reason: 'booking repair failed' });
+  return pending;
 }

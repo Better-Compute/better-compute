@@ -432,7 +432,8 @@ describe('the reservation lifecycle', () => {
     const created = (await call('reservations', 'create', create({ start: T0 + HOUR }))) as Rsv;
     expect(recorded.work.at(-1)!.notBefore).toBe(T0 + HOUR);
     await reconcile(created.id);
-    expect(recorded.work.at(-1)).toMatchObject({ notBefore: T0 + HOUR });
+    // BookingRepair looks again 15 minutes before the start.
+    expect(recorded.work.at(-1)).toMatchObject({ notBefore: T0 + 45 * 60_000 });
 
     await advance(HOUR);
     await reconcile(created.id);
@@ -1254,5 +1255,85 @@ describe('waking pending reservations', () => {
     expect(
       await db.transaction((tx) => wakePendingForNode(tx, moduleContext(db).work, 'node_missing')),
     ).toBe(0);
+  });
+});
+
+describe('BookingRepair (v0.5)', () => {
+  const soon = () => create({ start: T0 + 2 * HOUR, devices: [{ class: 'gpu', count: 4 }] });
+
+  it('leaves a healthy booking alone and re-checks at the start', async () => {
+    const created = (await call('reservations', 'create', soon())) as Rsv;
+    await reconcile(created.id);
+    expect(recorded.work.at(-1)).toMatchObject({ notBefore: T0 + 2 * HOUR - 15 * 60_000 });
+    await advance(2 * HOUR - 15 * 60_000);
+    recorded.events = [];
+    await reconcile(created.id);
+    expect(recorded.events.map((event) => event.type)).toEqual([]);
+    expect(recorded.work.at(-1)).toMatchObject({ notBefore: T0 + 2 * HOUR });
+  });
+
+  it('moves a booking off a node cordoned since, for the same window, keeping the quota', async () => {
+    const created = (await call('reservations', 'create', soon())) as Rsv;
+    const { rows } = await db.query<{ node_id: string }>(
+      `SELECT node_id FROM allocations WHERE owner_id = $1`,
+      [created.id],
+    );
+    const before = rows[0]!.node_id;
+    await db.query(`UPDATE nodes SET cordoned = true WHERE id = $1`, [before]);
+    await advance(2 * HOUR - 15 * 60_000);
+    await reconcile(created.id);
+    const after = await db.query<{ node_id: string; start_ms: number }>(
+      `SELECT node_id, (extract(epoch FROM lower(during)) * 1000)::float8 AS start_ms FROM allocations
+        WHERE owner_id = $1 AND released_at IS NULL`,
+      [created.id],
+    );
+    expect(after.rows).toHaveLength(1);
+    expect(after.rows[0]!.node_id).not.toBe(before);
+    expect(after.rows[0]!.start_ms).toBe(T0 + 2 * HOUR);
+    expect(recorded.events.at(-1)).toMatchObject({
+      type: 'reservation.repaired',
+      data: { from: [before] },
+    });
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(4);
+    const view = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: created.id,
+    })) as Rsv;
+    expect(view.state).toBe('placed');
+  });
+
+  it('repairs around a quarantined GPU, and goes pending when nothing else fits', async () => {
+    const created = (await call('reservations', 'create', soon())) as Rsv;
+    // The other node is taken for the same window, so there is nowhere to move to.
+    await call(
+      'reservations',
+      'create',
+      create({
+        start: T0 + 2 * HOUR,
+        devices: [{ class: 'gpu', count: 4 }],
+        idempotencyKey: 'other',
+      }),
+    );
+    const { rows } = await db.query<{ atoms: string[] }>(
+      `SELECT atoms FROM allocations WHERE owner_id = $1`,
+      [created.id],
+    );
+    await db.query(`UPDATE devices SET healthy = false WHERE id = $1`, [rows[0]!.atoms[0]]);
+    await advance(2 * HOUR - 15 * 60_000);
+    await reconcile(created.id);
+    const view = (await call('reservations', 'get', {
+      tenantId: 'acme',
+      reservationId: created.id,
+    })) as Rsv;
+    expect(view).toMatchObject({
+      state: 'pending',
+      conditions: [{ type: 'Unschedulable', reason: 'BookingRepairFailed' }],
+    });
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(8);
+    const live = await db.query(
+      `SELECT 1 FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+      [created.id],
+    );
+    expect(live.rows).toEqual([]);
   });
 });
