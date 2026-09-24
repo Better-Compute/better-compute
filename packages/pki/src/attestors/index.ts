@@ -5,3 +5,4 @@ export * from './x509pop.js';
 export * from './provisioned.js';
 export * from './discovery.js';
 export * from './cloud-iid.js';
+export * from './tpm2.js';
