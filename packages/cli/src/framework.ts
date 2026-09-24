@@ -603,9 +603,14 @@ export function createCliProgram(
         if (['help', '--help', '-h'].includes(name)) {
           const rest = argv.slice(1);
           const json = rest.includes('--json');
-          const topic = rest.find(
+          const words = rest.filter(
             (item, index) => !item.startsWith('-') && rest[index - 1] !== '--config',
           );
+          // `help pki init` names the two-word command.
+          const topic =
+            words.length > 1 && find(commands, `${words[0]} ${words[1]}`)
+              ? `${words[0]} ${words[1]}`
+              : words[0];
           let all = commands;
           // Project commands from the configuration module appear in help when a configuration is found.
           try {
@@ -626,8 +631,10 @@ export function createCliProgram(
             );
           else if (topic) {
             const spec = find(all, topic);
-            if (!spec) throw unknown(topic, all);
-            io.out(commandHelp(spec));
+            const subcommands = all.filter((command) => command.name.startsWith(`${topic} `));
+            if (spec) io.out(commandHelp(spec));
+            else if (subcommands.length) io.out(overviewHelp(subcommands, cliVersion));
+            else throw unknown(topic, all);
           } else io.out(overviewHelp(all, cliVersion));
           return;
         }
@@ -638,6 +645,22 @@ export function createCliProgram(
         let spec = find(commands, name);
         let extra: CommandSpec<any>[] | undefined;
         let rest = argv.slice(1);
+        // Two-word commands (`pki init`, `daemon install-script`): the pair wins over a one-word name.
+        const second = argv[1];
+        const pair =
+          second && !second.startsWith('-') ? find(commands, `${name} ${second}`) : undefined;
+        if (pair) {
+          spec = pair;
+          rest = argv.slice(2);
+        } else if (!spec && commands.some((command) => command.name.startsWith(`${name} `)))
+          throw new CliError(
+            'INVALID_COMMAND',
+            `${name} needs a subcommand: ${commands
+              .filter((command) => command.name.startsWith(`${name} `))
+              .map((command) => command.name.slice(name.length + 1))
+              .join(', ')}`,
+            `Run better-compute help ${name} <subcommand>.`,
+          );
         // An unknown name may be a project command: a configuration that fails to load reports its
         // own error then, instead of "unknown command".
         if (!spec && !name.startsWith('-')) {

@@ -49,10 +49,11 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@better-compute/core": "workspace:*",
-    "@better-compute/server": "workspace:*",
     "@better-compute/client": "workspace:*",
-    "@better-compute/postgres": "workspace:*"
+    "@better-compute/core": "workspace:*",
+    "@better-compute/pki": "workspace:*",
+    "@better-compute/postgres": "workspace:*",
+    "@better-compute/server": "workspace:*"
   },
   "peerDependencies": {
     "@better-compute/testing": "workspace:*",

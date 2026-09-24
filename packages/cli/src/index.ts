@@ -24,6 +24,16 @@ import {
 export { builtinCommands } from './commands/index.js';
 export { configTemplate } from './commands/setup.js';
 export { requestBody } from './commands/api.js';
+export { parseSha256Flag } from './commands/daemon.js';
+export { defaultPkiPath, loadPkiBundle } from './commands/pki.js';
+export {
+  bcdServiceUnit,
+  checkInstallScriptOptions,
+  renderBcdConfig,
+  renderInstallScript,
+  type BcdArch,
+  type InstallScriptOptions,
+} from './install-script.js';
 export { CliError, errorCode, usageCodes, usageError } from './errors.js';
 export {
   commandHelp,

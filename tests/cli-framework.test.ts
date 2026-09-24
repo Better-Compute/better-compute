@@ -148,6 +148,10 @@ describe('help and the manifest', () => {
       'doctor',
       'version',
       'api',
+      'pki init',
+      'pki show',
+      'pki issue-gateway',
+      'daemon install-script',
     ]);
     const api = manifest.commands.find((command: { name: string }) => command.name === 'api');
     expect(api.target).toBe('token');
