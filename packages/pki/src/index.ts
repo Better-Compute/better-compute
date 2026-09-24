@@ -11,6 +11,7 @@
  * - Signing: ES256 over `@better-compute/protocol`'s `signingInput` framing; compact JWE.
  */
 export * from './attestor.js';
+export * from './bundle.js';
 export * from './ca.js';
 export * from './csr.js';
 export {
@@ -24,6 +25,7 @@ export {
   type DerNode,
 } from './der.js';
 export * from './claims.js';
+export * from './identity.js';
 export * from './join-response.js';
 export * from './join-token.js';
 export * from './jwe.js';
