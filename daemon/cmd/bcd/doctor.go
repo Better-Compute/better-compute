@@ -61,7 +61,10 @@ func configChecks(cfg *config.Config, role string) []doctorCheck {
 	} else {
 		out = append(out, doctorCheck{"ok", "update", fmt.Sprintf("%d release pins, threshold %d", len(pins), cfg.Update.ReleaseThreshold)})
 	}
-	slots := selfupdate.Slots{Dir: filepath.Join(cfg.DataDir, "bin"), Entrypoint: cfg.Update.Entrypoint}
+	// The same resolver as bcd update: [update] slots_dir, /usr/local/lib/bcd under bcd helper, else
+	// <data_dir>/bin (and the records beside the slots, or in data_dir).
+	slotsDir, stateDir := cfg.UpdateDirs()
+	slots := selfupdate.Slots{Dir: slotsDir, Entrypoint: cfg.Update.Entrypoint}
 	if cur, err := slots.Current(); err == nil && cur != "" {
 		if target, _ := os.Readlink(cfg.Update.Entrypoint); target != filepath.Join(slots.Dir, "current") {
 			out = append(out, doctorCheck{"fail", "slots", fmt.Sprintf("%s does not link to %s: bcd.service would not start the current slot", cfg.Update.Entrypoint, filepath.Join(slots.Dir, "current"))})
@@ -69,10 +72,10 @@ func configChecks(cfg *config.Config, role string) []doctorCheck {
 			out = append(out, doctorCheck{"ok", "slots", fmt.Sprintf("running slot %s (%s)", cur, slots.Versions()[cur])})
 		}
 	}
-	if p, err := selfupdate.LoadPending(cfg.DataDir); err == nil && p != nil {
+	if p, err := selfupdate.LoadPending(stateDir); err == nil && p != nil {
 		out = append(out, doctorCheck{"warn", "update", fmt.Sprintf("update %s -> %s is %s", p.FromVersion, p.Version, p.State)})
 	}
-	for v, why := range selfupdate.LoadRecord(cfg.DataDir).Failed {
+	for v, why := range selfupdate.LoadRecord(stateDir).Failed {
 		out = append(out, doctorCheck{"warn", "update", fmt.Sprintf("bcd %s failed (%s); bcd update --clear-failed lets a rollout retry it", v, why)})
 	}
 	if role == "site" && cfg.BMCNetworks == "" {

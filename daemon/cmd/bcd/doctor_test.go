@@ -34,3 +34,20 @@ func TestConfigChecks(t *testing.T) {
 		t.Fatal("a node was asked for bmc_networks")
 	}
 }
+
+// doctor reads the slots and records where bcd update does: [update] slots_dir when set.
+func TestConfigChecksReadSlotsDir(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.DataDir = t.TempDir()
+	cfg.Update.SlotsDir = t.TempDir()
+	_ = selfupdate.SaveRecord(cfg.Update.SlotsDir, selfupdate.Record{Failed: map[string]string{"0.9.2": "not welcomed"}})
+	_ = selfupdate.SavePending(cfg.Update.SlotsDir, &selfupdate.Pending{Version: "0.9.3", FromVersion: "0.9.1", State: selfupdate.StateSwapped})
+	var failed, pending bool
+	for _, c := range configChecks(cfg, "node") {
+		failed = failed || (c.check == "update" && strings.Contains(c.detail, "0.9.2"))
+		pending = pending || (c.check == "update" && strings.Contains(c.detail, "0.9.3"))
+	}
+	if !failed || !pending {
+		t.Fatalf("doctor did not read slots_dir: failed %v, pending %v", failed, pending)
+	}
+}
