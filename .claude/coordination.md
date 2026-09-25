@@ -173,7 +173,8 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - tests/e2e/sandboxes.test.ts (500 TTL expiries, zero-leak diff, warm claim with no placement);
       - widen vitest.iam-remote beyond 9 files.
     - [6a20b8]:
-      - bcd instance-address dial + advertise `tunnel.instance-dial`;
+      - bcd instance-address dial + advertise `tunnel.instance-dial`: DONE (13aa5cf), plus converger PAUSED (fab94d4)
+        and a real bcd vps e2e (0fc0405);
       - a bcx host in bcd;
       - walkthrough 4 as a Go runtime plugin;
       - PAUSED/restore_from/instance.snapshot in the converger.
