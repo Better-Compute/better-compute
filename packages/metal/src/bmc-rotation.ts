@@ -2,8 +2,8 @@ import { randomInt } from 'node:crypto';
 import type { Json, SqlTx } from '@better-compute/core';
 
 // BMC credential rotation (PLAN.md §3.5, §13), two-phase. `metal.rotateBmcCredential` (steps.ts):
-// 1. makes (or, on a retry, reuses) a pending version: a generated password, sealed in the
-//    SecretStore, known here only by its ref;
+// 1. makes (or, on a retry, reuses) a pending version: a generated password with the current
+//    username (`rotatedCredentialValue`), sealed in the SecretStore, known here only by its ref;
 // 2. sends `bmc.rotate` to the site agent with refs only. The agent fetches the new value as a JWE,
 //    applies it through the driver's `management.rotateCredential`, logs in with it, and signs the
 //    result;
@@ -23,6 +23,26 @@ export function generateBmcPassword(length = 20): string {
     [chars[i], chars[j]] = [chars[j]!, chars[i]!];
   }
   return chars.join('');
+}
+
+/**
+ * The secret value of a rotated credential, in the enrollment shape `{username, password}` so
+ * everything that resolves the ref still gets the username. The username is the one asked for,
+ * else the current credential's (`current` is its resolved value: enrollment JSON, or a bare
+ * password from before this shape). With no username known, a bare password, as before.
+ */
+export function rotatedCredentialValue(current: string, password: string, username?: string): string {
+  let known = username;
+  if (!known) {
+    try {
+      const parsed = JSON.parse(current) as unknown;
+      if (parsed && typeof parsed === 'object' && typeof (parsed as { username?: unknown }).username === 'string')
+        known = (parsed as { username: string }).username;
+    } catch {
+      // a bare password: no username to carry
+    }
+  }
+  return known ? JSON.stringify({ username: known, password }) : password;
 }
 
 export interface CredentialVersion {

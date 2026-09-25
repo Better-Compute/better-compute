@@ -31,6 +31,7 @@ import {
   pendingCredential,
   promoteCredential,
   purgeableCredentials,
+  rotatedCredentialValue,
 } from './bmc-rotation.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
@@ -702,7 +703,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       // A retry picks up the pending version, whose password the BMC may already have.
       let pending = await pendingCredential(context.sql, node.node_id);
       if (!pending) {
-        const ref = await context.secrets.put(node.tenant_id, generateBmcPassword());
+        const current = await context.secrets.resolve(previousRef as SecretRef);
+        const ref = await context.secrets.put(node.tenant_id, rotatedCredentialValue(current, generateBmcPassword(), input.username));
         pending = await context.sql.transaction((tx) => addPendingCredential(tx, node.node_id, ref, previousRef));
       }
       const fail = async (error: ComputeError) => {

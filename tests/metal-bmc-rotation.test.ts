@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { rotatedCredentialValue } from '@better-compute/metal';
 import { defineProfile } from '@better-compute/provision';
 import { createMetalSim, type MetalSim } from './extensions/metal-sim.js';
 
@@ -78,6 +79,34 @@ describe('metal.rotateBmcCredential', () => {
     expect(await run(node, 'probe-bmc')).toBe('succeeded');
     const drivers = await sim.db.query<{ drivers: string }>('SELECT drivers::text AS drivers FROM nodes WHERE id = $1', [node]);
     expect(drivers.rows[0]!.drivers).not.toContain('bmc-initial');
+  });
+
+  it('keeps the enrolled username in the rotated credential', async () => {
+    const enrolled = await sim.call('enroll', {
+      tenantId: 'root',
+      siteId: 'site_a',
+      poolId: 'pool_metal',
+      bmc: { address: `https://10.13.0.${++n}`, driver: 'redfish', credentials: { username: 'ops', password: 'initial-pass' } },
+    });
+    await sim.settle();
+    const node = enrolled.nodeId as string;
+    for (let round = 0; round < 2; round++) {
+      expect(await run(node, 'rotate-bmc')).toBe('succeeded');
+      const resolved = JSON.parse(await sim.context.secrets!.resolve((await current(node)) as never)) as { username: string; password: string };
+      expect(resolved.username).toBe('ops');
+      expect(resolved.password).toMatch(/^.{20}$/);
+      expect(resolved.password).not.toBe('initial-pass');
+    }
+    expect(await run(node, 'probe-bmc')).toBe('succeeded');
+  });
+
+  it('builds the rotated value from the current credential', () => {
+    expect(JSON.parse(rotatedCredentialValue('{"username":"root","password":"a"}', 'b'))).toEqual({ username: 'root', password: 'b' });
+    expect(JSON.parse(rotatedCredentialValue('{"username":"root","password":"a"}', 'b', 'admin'))).toEqual({ username: 'admin', password: 'b' });
+    expect(JSON.parse(rotatedCredentialValue('bare', 'b', 'admin'))).toEqual({ username: 'admin', password: 'b' });
+    // No username known (a bare password, no override): the bare password, as before.
+    expect(rotatedCredentialValue('bare', 'b')).toBe('b');
+    expect(rotatedCredentialValue('', 'b')).toBe('b');
   });
 
   it('rotates again from a rotated credential', async () => {
