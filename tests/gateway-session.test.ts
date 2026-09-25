@@ -150,7 +150,7 @@ describe('Hello', () => {
          ($1, 'bc.dev/gpu.count', '8', 'inventory')`,
       [node],
     );
-    const helloWith = (bootId: string, drivers: { id: string; version: string }[]) => {
+    const helloWith = (bootId: string, drivers: { id: string; version: string; kinds?: string[] }[]) => {
       const frame = helloFrame(node, { bootId });
       if (frame.msg.case === 'hello')
         frame.msg.value.drivers = drivers.map((driver) => create(DriverManifestSchema, driver));
@@ -186,6 +186,24 @@ describe('Hello', () => {
       { key: 'bc.dev/driver.nvidia', value: '575.10', source: 'system' },
       { key: 'bc.dev/gpu.count', value: '8', source: 'inventory' },
       { key: 'team', value: 'ml', source: 'operator' },
+    ]);
+
+    // The kinds a driver serves: one label each, gone when a later Hello drops them.
+    const third = new FakeStream();
+    await f.gateway
+      .open({ nodeId: node }, third)
+      .receive(helloWith('boot-3', [{ id: 'ipmi', version: '0.4.0', kinds: ['power', 'management', 'inspect', 'Bad Kind'] }]));
+    expect((await labels()).filter((label) => label.source === 'system')).toEqual([
+      { key: 'bc.dev/driver-kind.ipmi.inspect', value: '1', source: 'system' },
+      { key: 'bc.dev/driver-kind.ipmi.management', value: '1', source: 'system' },
+      { key: 'bc.dev/driver-kind.ipmi.power', value: '1', source: 'system' },
+      { key: 'bc.dev/driver.ipmi', value: '0.4.0', source: 'system' },
+    ]);
+    const fourth = new FakeStream();
+    await f.gateway.open({ nodeId: node }, fourth).receive(helloWith('boot-4', [{ id: 'ipmi', version: '0.4.1', kinds: ['power'] }]));
+    expect((await labels()).filter((label) => label.source === 'system').map((label) => label.key)).toEqual([
+      'bc.dev/driver-kind.ipmi.power',
+      'bc.dev/driver.ipmi',
     ]);
   });
 

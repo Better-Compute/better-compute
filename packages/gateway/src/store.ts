@@ -108,7 +108,7 @@ export interface HelloInput {
    */
   capabilities?: readonly string[];
   /** `Hello.drivers`: each becomes the node label `bc.dev/driver.<id>=<version>`. */
-  drivers?: readonly { id: string; version: string }[];
+  drivers?: readonly { id: string; version: string; kinds?: readonly string[] }[];
 }
 
 /**
@@ -137,13 +137,23 @@ export const driverLabelPrefix = 'bc.dev/driver.';
  * Hello's drivers as node labels. Ids outside `[a-z0-9._-]` (1-63) are skipped rather than trusted
  * into a label key; a missing version is recorded as `unknown`; the last entry for an id wins.
  */
-export function driverLabels(drivers: readonly { id: string; version: string }[]): { key: string; value: string }[] {
+export function driverLabels(
+  drivers: readonly { id: string; version: string; kinds?: readonly string[] }[],
+): { key: string; value: string }[] {
   const labels = new Map<string, string>();
-  for (const driver of drivers.slice(0, 64))
-    if (/^[a-z0-9][a-z0-9._-]{0,62}$/.test(driver.id))
-      labels.set(`${driverLabelPrefix}${driver.id}`, (driver.version || 'unknown').slice(0, 63));
+  for (const driver of drivers.slice(0, 64)) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,62}$/.test(driver.id)) continue;
+    labels.set(`${driverLabelPrefix}${driver.id}`, (driver.version || 'unknown').slice(0, 63));
+    // One label per kind the driver serves, so a step can require one (`'*'` on the key) before it
+    // runs: `bc.dev/driver-kind.ipmi.power=1`. Kinds outside `[a-z][a-z0-9-]` (1-32) are skipped.
+    for (const kind of (driver.kinds ?? []).slice(0, 32))
+      if (/^[a-z][a-z0-9-]{0,31}$/.test(kind)) labels.set(`${driverKindLabelPrefix}${driver.id}.${kind}`, '1');
+  }
   return [...labels].map(([key, value]) => ({ key, value }));
 }
+
+/** The prefix of the node labels Hello writes for the kinds each advertised driver serves. */
+export const driverKindLabelPrefix = 'bc.dev/driver-kind.';
 
 /** The prefix of the node labels Hello writes for advertised capabilities (source `system`). */
 export const capabilityLabelPrefix = 'bc.dev/cap.';
@@ -1111,7 +1121,8 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           `WITH wanted AS (SELECT * FROM unnest($2::text[], $3::text[]) AS w(key, value)),
            gone AS (
              DELETE FROM node_labels l WHERE l.node_id = $1 AND l.source = 'system'
-               AND (starts_with(l.key, '${driverLabelPrefix}') OR starts_with(l.key, '${capabilityLabelPrefix}'))
+               AND (starts_with(l.key, '${driverLabelPrefix}') OR starts_with(l.key, '${driverKindLabelPrefix}')
+                    OR starts_with(l.key, '${capabilityLabelPrefix}'))
                AND NOT EXISTS (SELECT 1 FROM wanted w WHERE w.key = l.key))
            INSERT INTO node_labels (node_id, key, value, source)
            SELECT $1, w.key, w.value, 'system' FROM wanted w
