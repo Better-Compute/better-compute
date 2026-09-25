@@ -190,9 +190,9 @@ reports, command traffic, joins, gateway jobs and reconcilers make no IAM call. 
 | A list page | One coarse decision, then at most one `authorizeMany` per 50 items |
 | A feature flag | One `features.isEnabled` per tenant and key on a cache miss, never one per admission |
 
-A resolver hit inside IAM's locked transaction does no I/O. PLAN.md adds one more acquisition for pools whose
-policy sets `admission.budgetCheck: 'meter'`; the port supports that check, but the admission path does not call
-it yet (see [Billing and usage](/docs/guides/iam/billing-and-usage)).
+A resolver hit inside IAM's locked transaction does no I/O. A reservation admission costs one more call,
+`billingCheck`, when its pool's policy sets `admission.budgetCheck: 'meter'` or the tenant's offer reacts to a
+spent budget with `stop-new` or `drain` (see [Billing and usage](/docs/guides/iam/billing-and-usage#budgets)).
 
 `tests/sim/iam-negative.test.ts` enforces the rule: it wraps the port in `spyIamPort`, tags fleet code paths with
 `spy.path(name, fn)`, runs ten simulated minutes of joins, heartbeats, inventory, commands and a reservation, and
@@ -230,7 +230,7 @@ event id, because Better IAM delivers at least once:
 | `auth:session:revoke`, `auth:session:revoke-others`, `identity:revoke-sessions`, `tenant:revoke-sessions`, `iam:roles:revoke-sessions` | `sessions`: recheck streams, drop cached authentications |
 | `agent:suspend`, `agent:suspend-all`, `delegation:revoke` | `agent`: close the agent's streams, cancel its unplaced work |
 | `binding:activate`, `binding:deactivate`, `iam:bindings:activate` | `binding`: cap or close break-glass sessions |
-| `iam:tenants:update`, `iam:tenants:delete` | `tenant`: suspend admissions, schedule teardown |
+| `iam:tenants:update`, `iam:tenants:delete` | `tenant`: refuse a suspended tenant's mutations and a deleted tenant's calls, tear the deleted one down |
 | Policy, role, binding and relationship changes, `feature:*` | `authz`: drop read-decision and flag caches |
 | `billing:budget-alert` | `budget`: apply the offering's budget policy |
 
@@ -244,12 +244,12 @@ built in: remembering `successorId` from `identity:offboard`, and invalidating t
 | Reaction | Default |
 | --- | --- |
 | `agent` | Closes the agent's or delegation's tunnels on every live gateway within the 2-second inbox drain (`agentStreamCloser(gatewayStreamCloser(...))`), drops its cached authentications, and cancels the reservations it created that have not started (`pending`, `placed`, `awaiting-confirmation`) with capacity's `withdrawAgentReservations` |
-| `identity` | Drops the identity's cached authentications. For an owner gone for good (offboarded, expired, deleted, or found so by the `IamReconcile` backstop), `identityEndOf` finds the successor (from the event, or the one remembered in `iam_successors`) and `reassignReservations` hands its live reservations to it (`reservation.reassigned`); without a successor its unstarted reservations are cancelled. Its streams and tunnels close |
-| `sessions` | Clears the authentication cache, and re-authorizes an identity's tunnels at once when its own sessions are revoked |
+| `identity` | Drops the identity's cached authentications. For an owner gone for good (offboarded, expired, deleted, or found so by the `IamReconcile` backstop), `identityEndOf` finds the successor (from the event, or the one remembered in `iam_successors`) and `reassignReservations` hands its live reservations to it (`reservation.reassigned`); without a successor its unstarted reservations are cancelled. Its break-glass SSH certificates are revoked in every tenant, then its streams and tunnels close |
+| `sessions` | Clears the authentication cache. When an identity's own sessions are revoked, it revokes the identity's break-glass SSH certificates (the event does not say which session ended) and re-authorizes its tunnels at once |
 | `authz` | Drops read-decision and flag caches |
 | `binding` | On `binding:deactivate`, revokes the holder's live SSH certificates in the tenant (`node.ssh-cert.revoked`, the serial joins the node's KRL) and has every gateway re-check the holder's tunnels |
 | `budget` | `budgetAlertHandler(applyBudgetPolicy)`: for an exceeded budget, each offer to the tenant publishes `quota.budget-exceeded`, and `drain` also cancels the tenant's unstarted reservations in that pool |
-| `tenant` | No default |
+| `tenant` | The server's `tenantStateHandler`: mirrors suspended and deleted tenants into `compute_tenant_states`, publishes `tenant.state-changed`, reloads the envelope's tenant gate and schedules a deleted tenant's teardown. With `host.iam.readTenants` a suspension or deletion cascades to the subtree; without it only a deletion of the named tenant applies. See [tenancy](/docs/guides/iam/tenancy#suspended-and-deleted-tenants) |
 
 `host.iam.handlers` replace the defaults one by one. A failed successor lookup fails the reaction, so the inbox
 retries it rather than cancelling as if there were no successor.

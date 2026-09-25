@@ -281,8 +281,10 @@ From the reports, the reconciler moves the instance:
 - A reported `error` moves it to `error` with a `RuntimeError` condition and publishes `instance.failed`.
 - While the report and `desiredState` disagree, it waits and looks again in 10 seconds.
 
-<Callout type="warn" title="The host side is not built yet">
-bcd is written in `daemon/` but not built or released, and has no VM runtime behind its `instances` section. The
+<Callout type="warn" title="The host side is not written yet">
+bcd's node agent is built and tested but not released, and it has no VM runtime and no `instances` converger: a
+non-empty `instances` section is reported `SectionUnsupported`. It also never sends `SecretRequest`, so it cannot
+fetch user data. The
 TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
 user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway
 with it.
@@ -393,6 +395,11 @@ Out-of-process runtimes (a Kata runtime as a bcx plugin, selected by pools) are 
 [drivers](/docs/extending/drivers). `vps({ runtimes })` only names the ids: the first one is recorded on every new
 hosted instance and sent in its spec.
 
+The control plane already places plugin runtimes correctly: an instance whose runtime is not one of bcd's built-ins
+(`bcdBuiltinRuntimes`: `libvirt-kvm`, `cloud-hypervisor`) is placed only on hosts carrying the node label
+`bc.dev/driver.<runtime>`, in any version (`runtimeNodeLabels`). The gateway writes that label from the drivers a
+daemon advertises in `Hello`; see [placement](/docs/guides/capacity/placement#eligibility-filters).
+
 ## Events
 
 Instance events have subject `instance/<id>` and carry `state`, `desiredState` and `poolId`:
@@ -425,7 +432,7 @@ only when the deployment configures tunnels. See [tunnels](/docs/guides/access/t
 A hosted instance can prove who it is to a third party (Better IAM's `sts/assumeRoleWithWebIdentity`, a cloud STS)
 with a short-lived OIDC token, `sub = "t:<tenantId>:instance:<instanceId>"`, that it fetches from its host's
 metadata service (IMDS). This is v0.5 and optional: the control plane half is built and tested end to end against
-the FakeDaemon (`tests/e2e/imds.test.ts`); the IMDS in `bcd` is not built.
+the FakeDaemon (`tests/e2e/imds.test.ts`); `bcd` has no IMDS and does not send `WorkloadTokenRequest` yet.
 
 ```mermaid
 sequenceDiagram

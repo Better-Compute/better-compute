@@ -50,7 +50,7 @@
   {
     "id": "bcd",
     "term": "bcd",
-    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. It is written but not built yet; the TypeScript `FakeDaemon` stands in for it.",
+    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. Its v0.1 node agent (`bcd join`, `bcd node`, `bcd status`) is built and tested end to end but not released; the `site`, `ramdisk` and `sim` modes are not written, and the TypeScript `FakeDaemon` stands in for them.",
     "href": "/docs/daemon"
   },
   {
@@ -176,7 +176,7 @@
   {
     "id": "fake-daemon",
     "term": "FakeDaemon",
-    "definition": "The TypeScript implementation of the daemon side of the protocol in `@better-compute/testing`, with the same journal rules, acceptance checks and lanes as bcd. It runs in tests, the fleet simulator and `better-compute dev --sim N`.",
+    "definition": "The TypeScript implementation of the daemon side of the protocol in `@better-compute/testing`, with the same journal rules, acceptance checks and lanes as bcd. It runs in tests, the fleet simulator and `better-compute dev --sim N`, and covers what bcd does not implement yet: tunnels, VM hosts, site agents, self-update and the WebSocket fallback.",
     "href": "/docs/operations/testing"
   },
   {

@@ -24,6 +24,11 @@ sources:
   - daemon/internal/dispatch/lane.go
   - daemon/internal/converge/converge.go
   - daemon/internal/session/session.go
+  - daemon/internal/journal/bolt.go
+  - daemon/internal/agent/commands.go
+  - daemon/internal/agent/spec.go
+  - daemon/internal/agent/devices.go
+  - tests/e2e/bcd.test.ts
   - .claude/coordination.md
   - PLAN.md
 ---
@@ -108,8 +113,10 @@ The daemon stores the last full spec, its hash and its signature in the journal,
 `observed_generation` advances to a spec's generation only when every section has converged or failed terminally;
 a retryable failure keeps the section `PROGRESSING` and it is retried on the next pass. A section the daemon has no
 converger for converges trivially when empty and is `UNSUPPORTED` otherwise, which counts as terminal, with
-condition `SectionUnsupported` (reason: the field number) so the rest of the spec still converges. Go's
-`converge.Run` implements the rule; the section convergers themselves arrive in v0.1 and later.
+condition `SectionUnsupported` (reason: the field number) so the rest of the spec still converges. bcd applies the
+rule with `converge.Run`. It has convergers for `devices` and `telemetry` (which accepts the section; bcd's own OTLP
+exporter is not written), so in bcd today a non-empty `host`, `instances`, `access`, `daemon` or `site` section is
+`UNSUPPORTED`, and so is a section number it does not know.
 
 The daemon reports progress in `StatusReport`: observed and applied generation, the spec hash, one
 `SectionStatus` per section (`CONVERGED`, `PROGRESSING`, `FAILED`, `UNSUPPORTED`, with the generation, a reason and
@@ -127,8 +134,11 @@ assignment the daemon writes a CDI spec `/etc/cdi/bcd-<allocation_id>.json`, an 
 names (`bcd.dev/gpu=<id>`). Removing an assignment releases it (`AllocationReleased`). An assignment the daemon
 cannot honor (a device missing, a device already held by another allocation, an unsupported binding) produces an
 `AllocationFailed` event with a reason such as `overlap` or `device-missing`, and the section fails terminally at
-that generation. The daemon never drops an assignment on its own, not even while disconnected. The FakeDaemon
-implements this converger; bcd's arrives in v0.1.
+that generation. The daemon never drops an assignment on its own, not even while disconnected. bcd and the
+FakeDaemon both implement this converger: bcd writes the CDI spec and env file in the FakeDaemon's shape, reads its
+holds back from `/etc/cdi` on every pass, supports the `hold` binding and GPUs only (anything else fails with
+`unsupported-binding` or `unsupported-device`), and signs `AllocationBound` and `AllocationReleased` with the node
+key. `tests/e2e/bcd.test.ts` binds and releases a 2-GPU reservation through it.
 
 ## Commands
 
@@ -187,15 +197,15 @@ crash interrupted, then passes these checks in order:
    spec re-runs the checks; still behind at `not_after`, the command is `STALE_GENERATION`.
 3. **`EXPIRED`**: past `not_after`, in server time through the `Welcome` offset. A command without `not_after` is
    `EXPIRED`, so the control plane always sets one.
-4. **`BUSY`**: no free credit on the lane, or the journal is full. Not terminal: see
+4. **`BAD_SIGNATURE`**: a missing, unknown-key or invalid signature on a kind that requires one, or an invalid
+   signature on any kind.
+5. **`BUSY`**: no free credit on the lane, or the journal is full. Not terminal: see
    [BUSY](/docs/daemon/sessions#busy).
-5. **`BAD_SIGNATURE`**: a missing, unknown-key or invalid signature on a kind that requires one.
 
 `UNSUPPORTED`, `EXPIRED`, `STALE_GENERATION` and `BAD_SIGNATURE` are terminal: the command becomes `rejected`, and
 the rejection is journaled, so a duplicate delivery or a `Hello` replay gets the same answer. `BUSY` is never
-journaled. The Go dispatcher (`dispatch.Precheck`, then `Lanes.Admit`) and the FakeDaemon follow this order. One
-difference: the FakeDaemon evaluates the signature verdict inside its precheck, so `BAD_SIGNATURE` wins over a
-missing credit there.
+journaled. bcd (`dispatch.Precheck`, then a lane credit) and the FakeDaemon both follow this order, so a bad
+signature is refused even when the lane has no credit.
 
 ### Lanes, credits and workers
 
@@ -247,7 +257,9 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   command-signing roots of the daemon's trust bundle. The server signs every command when `pki.commandSigning` is
   configured, and sends the matching trust bundle in `JoinResponse` and `Welcome`; without it commands go unsigned,
   as v0.1 allows. The daemon's own kind table decides which kinds require a signature, never a flag the body could
-  carry: destructive kinds from v0.2, all kinds from v0.4.
+  carry: destructive kinds from v0.2, all kinds from v0.4. bcd enforces nothing until its trust bundle holds
+  command-signing roots; from then on a present signature is always checked and its destructive kind
+  (`node.reboot`) requires one.
 - **Signed desired state.** Specs have the same envelope under purpose `desired-state`. With
   `pki.commandSigning`, the NodeSpec controller signs each new generation's `DesiredStateBody` with the worker key
   (`CommandSigner.signDesiredState`) in the transaction that bumps the generation, and every bump rewrites both
@@ -256,7 +268,8 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   present one is always checked. A refused spec is not applied. The FakeDaemon implements this
   (`intent.signedSpecs`, default `'always'`: with command-signing roots every spec must be signed, because an
   unsigned spec with a high generation would freeze all later ones; `'access'` for a control plane that signs only
-  access changes; refusals in `specRejections`); bcd must implement the same rule.
+  access changes; refusals in `specRejections`). bcd implements the `'always'` rule: once it holds command-signing
+  roots, a spec without a valid signature is logged and not applied.
 - **Attested results.** For attested kinds (`diag.*`, `gpu.reset`, and later `wipe`, `deploy.*`, `firmware.*`) the
   node signs `CommandUpdate.node_sig` over the command id, the state and the SHA-256 of the result, and allocation
   reports travel as node-signed `AttestedReport`s. Workers verify them against `node_certs` before any state
@@ -282,18 +295,23 @@ the same failure.
 
 ## The journal
 
-The journal is the daemon's durable memory. The production store is bbolt, which arrives with the Go toolchain; the
-Go package holds the contract, the command rules and an in-memory store, and the FakeDaemon mirrors them rule for
-rule.
+The journal is the daemon's durable memory. bcd's store is bbolt (`journal.OpenBolt`, `journal.db` under
+`data_dir`); the Go package also holds the contract, the command rules and an in-memory store for tests, and the
+FakeDaemon mirrors them rule for rule.
 
 | Part | Holds |
 | --- | --- |
-| `meta` | Node id, `journal_id`, the event sequence, the last epoch, the applied generation |
+| `meta` | Node id, `journal_id`, the event sequence, the last epoch, the applied generation, the server time mark |
 | `commands` | Command id to `accepted`, `running{boot_id}` or `done` with its result; done entries kept 7 days |
 | `events` | Unacked events |
 | `spec` | The last full spec, its hash and its signature |
-| `certs` | The certificate chain and the command-signing trust bundle |
-| exec tickets | The `jti` set of tickets already used |
+| `certs` | The certificate chain and the command-signing trust bundle (bcd keeps these in `identity.json` beside the journal) |
+| exec tickets | The `jti` set of tickets already used (planned with tunnels; not in bcd yet) |
+
+The server time mark is the highest server time the daemon has seen (on `Welcome` and every heartbeat). It only
+moves forward, and a `Welcome` whose `server_time` is more than 5 minutes before it is refused, so a gateway cannot
+wind the daemon's clock back into an old worker certificate's window and replay expired signed intent. bcd also
+mirrors the mark into `identity.json`, so a lost journal does not reset it.
 
 **Durability.** Every write is fsynced before it returns. `accepted` reaches disk before any side effect, and
 self-terminating kinds write `running{boot_id}` immediately before theirs, so a restart can tell the reboot they
@@ -321,13 +339,14 @@ journal first (`journal.Resolve`):
 At start, `journal.Recover` settles the entries whose outcome needs no server input (`rebooted` and `interrupted`)
 so they go out in `Hello.unacked_results`; retry-safe entries wait for the server to redeliver them, so a
 re-execution passes the `not_after` and `min_generation` checks again. `wipe`, `deploy.*`, `firmware.*` and
-`gpu.reset` are not retry-safe. `journal.Sweep` deletes done entries older than 7 days; accepted and running entries
-are never swept.
+`gpu.reset` are not retry-safe. `journal.Sweep` deletes done entries older than 7 days, and accepted or running
+entries that an earlier process left and nothing redelivered within those 7 days (the server has long expired them);
+entries of the running process are never swept.
 
 The server keeps the matching half at `Hello` (see [resume rules](/docs/daemon/sessions#resume-rules)): a new boot
 completes self-terminating commands, and a new journal fails non-retry-safe in-flight commands with `journal-lost`
 instead of replaying them into a journal that cannot deduplicate.
 
-Open items the FakeDaemon already covers and bcd must match: the `cancelled` journal outcome, recording the
-producing `boot_id` on results, filling `NodeRebootResult.previous_boot_id` on a `rebooted` result, and expiring
-accepted or running entries that are never redelivered.
+bcd and the FakeDaemon agree on these rules, including the `cancelled` journal outcome, the producing `boot_id` on
+every result, `NodeRebootResult.previous_boot_id` on a `rebooted` result, and journaled terminal rejections.
+`tests/e2e/bcd.test.ts` checks the reboot path end to end: `node.reboot` completes `SUCCEEDED` from the next boot.

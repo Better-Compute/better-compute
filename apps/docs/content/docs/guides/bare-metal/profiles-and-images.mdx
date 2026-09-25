@@ -12,6 +12,7 @@ sources:
   - packages/provision/src/renderers.ts
   - packages/provision/src/config-units.ts
   - packages/provision/src/images.ts
+  - packages/provision/src/site-cache.ts
   - packages/provision/src/migrations.ts
   - packages/provision/src/builtin-steps.ts
   - packages/metal/src/profiles.ts
@@ -315,9 +316,14 @@ await compute.api.images.register(credential, {
 ### Site caches
 
 The catalog also tracks which site caches hold which images (`image_locations`: `pulling`, `ready`,
-`failed`, `evicting`). `recordImageLocation` and `touchImageLocation` record reports and use (and pin
-an image while a deploy streams it), `imagesCachedAt(siteId)` feeds the `image-cached` placement
-scorer, and `evictionCandidates(siteId, bytes, inUse)` picks the least recently used ready images,
+`failed`, `evicting`). The rows are derived from the site agents' own caches: each agent reports its cache
+in the `images` inventory section (`node_image_cache`), a change queues the `provision.site-cache`
+reconciler for the site, and `syncSiteImageLocations` marks a catalog image whose digest a live site agent
+holds as at the site (`ready` if any agent has it ready, else `pulling` or `evicting`), and drops the
+locations no agent holds any more unless a deploy pinned them. `recordImageLocation` and
+`touchImageLocation` record reports and use (and pin an image while a deploy streams it), `imagesCachedAt(siteId)` lists the ready images at a site (the
+`image-cached` placement scorer reads nodes' own `node_image_cache` rows instead, see
+[scheduler plugins](/docs/extending/scheduler-plugins#the-image-cached-scorer)), and `evictionCandidates(siteId, bytes, inUse)` picks the least recently used ready images,
 never pinned or in-use ones. What to pre-warm is desired state today: a pool's `policy.prewarmImages` lists
 `name@version` refs, and provision puts the ones that verify into its site agents' NodeSpec `site.cacheImages`
 (see [sites](/docs/guides/bare-metal/sites)). The agent side (a `bcd site` cache that pulls on demand, pre-warms

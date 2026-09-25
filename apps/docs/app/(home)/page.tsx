@@ -91,7 +91,7 @@ export default function HomePage() {
       label: 'Bare metal',
       title: 'From a BMC address to a booted image',
       claim:
-        'Enroll a machine by its BMC, and metal takes it through inspection, commissioning and deployment as workflows of persisted steps, with node-signed wipes. The site and ramdisk halves run in bcd, which is not released yet.',
+        'Enroll a machine by its BMC, and metal takes it through inspection, commissioning and deployment as workflows of persisted steps, with node-signed wipes. The site and ramdisk modes of bcd, which run those steps on real machines, are not implemented yet.',
       href: '/docs/guides/bare-metal',
       linkLabel: 'The bare-metal lifecycle',
       stage: <MetalLifecycle />,
@@ -247,7 +247,8 @@ function Closing() {
             Run your own GPU, CPU and sandbox capacity, with the guarantees of a database
           </h2>
           <p className="relative max-w-md text-body-regular leading-6 text-text-secondary">
-            Pre-release: nothing is on npm yet, and bcd is written but not released. Everything
+            Pre-release: nothing is on npm yet, and bcd&rsquo;s node agent is built and tested but not
+            released. Everything
             else runs today from a checkout, on PGlite or PostgreSQL.
           </p>
           <CreatorCredit label="Built and maintained by" className="relative" />

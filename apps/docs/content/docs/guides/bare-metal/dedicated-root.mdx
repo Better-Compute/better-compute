@@ -93,7 +93,10 @@ const reservation = await client.reservations.create({
   version, publishes `node.tenant-root.refused`, and leaves the node `ready`.
 - A node binding cannot be `spot`, and a pool without `policy.tenantRoot` refuses it.
 - Placement takes nodes that are `ready`, not in maintenance, not cordoned, with `platform` trust and
-  no live allocation in the window, whose healthy atoms cover `devices`. The allocation books every
+  no live allocation in the window, whose healthy atoms cover `devices`. Other NoSchedule reasons do not
+  stop a lease, with one exception: a node tainted `dedicated=<tenant>` is leased only by that tenant
+  (see [taints](/docs/guides/nodes/operating-nodes#taints)). The same check guards the lease's commit and
+  BookingRepair. The allocation books every
   bookable atom of the node, so nothing else can land on it. `gang` leases several such nodes on one
   topology value.
 - The profile resolves in the lessee's tenant: the lessee's own profile, or a public one. The image
@@ -202,6 +205,13 @@ teardown clears them.
 runs again from the start. The same holds for a lessee deploy that failed: recovering it runs the
 tenant-root teardown, not the ordinary release. Maintenance stays on after recovery; see
 [failure and recovery](/docs/guides/bare-metal).
+
+## When the lessee's tenant is deleted
+
+When Better IAM deletes the lessee's tenant, compute's tenancy teardown ends its reservations through
+capacity (`capacityTenantDeleted`), so each lease is released now and runs the tenant-root teardown above.
+Metal's own `tenantDeleted` hook retires the machines the deleted tenant owns, not the platform machines it
+leased. See [tenancy](/docs/guides/iam/tenancy#suspended-and-deleted-tenants).
 
 ## Limits
 

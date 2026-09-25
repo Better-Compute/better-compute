@@ -72,7 +72,7 @@ export const redfish = defineDriver({
 
 The built-in drivers (Redfish, IPMI and vendor BMCs through bmclib, PXE, iPXE and UEFI HTTP boot,
 image streaming and kexec) run inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2 modes,
-which are not built yet. Out-of-process drivers in any language arrive with bcx and
+which are not written yet (both exit 2 with `NOT_IMPLEMENTED`; only bcd's node agent exists). Out-of-process drivers in any language arrive with bcx and
 `@better-compute/driver-sdk` in v0.5. See [drivers](/docs/extending/drivers).
 
 ## How BMC operations run

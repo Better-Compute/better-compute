@@ -28,8 +28,8 @@ from a per-machine ISO, and Talos on machines that never run `bcd`. Each follows
 control plane learns it is up.
 
 <Callout type="warn" title="Status">
-None of these run on real hardware yet: they need `bcd site` and `bcd ramdisk`, which are written for
-v0.2 but not built. The Ubuntu and Talos walkthroughs run in the test suite against simulated site
+None of these run on real hardware yet: they need `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
+modes, which are not written (only its node agent is). The Ubuntu and Talos walkthroughs run in the test suite against simulated site
 agents and machines (`tests/extensions/`), and the emulated-site configuration is checked to load
 and pass `better-compute doctor`.
 </Callout>

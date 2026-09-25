@@ -45,7 +45,8 @@ This section covers the second path: the `metal` module in `@better-compute/meta
 The control plane side is implemented and tested: the `metal` API group, the metal reconciler, the
 workflows, steps and profiles of every provision state, and the site and ramdisk command kinds. The
 agents that touch hardware are modes of the Go daemon `bcd` (`bcd site` and `bcd ramdisk`), which
-are written for v0.2 but not built or released yet. The test suite drives the whole lifecycle with
+are planned for v0.2 and not written yet: bcd's node agent is built and tested, but `bcd site` and
+`bcd ramdisk` exit 2 with `NOT_IMPLEMENTED`. The test suite drives the whole lifecycle with
 simulated site agents and ramdisks (`tests/extensions/metal-sim.ts`).
 </Callout>
 

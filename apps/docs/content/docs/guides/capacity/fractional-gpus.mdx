@@ -147,9 +147,16 @@ module gates the change per node, with the atom rule:
    (`node.mig.scheduled`, with the time).
 3. At that time it grants the new layout and invalidates the node's spec (`node.mig.granted`); the daemon
    repartitions the idle GPUs.
-4. Once the node has converged a newer spec (a higher generation, observed), or after 5 minutes if the generation
-   never moved because its spec does not carry the layout, it releases the partition bookings (`node.mig.applied`)
-   and the new atoms take work.
+4. Once the node has converged a newer spec (a higher generation, observed), it releases the partition bookings
+   (`node.mig.applied`) and the new atoms take work.
+
+At the grant, the gate asks whether the node's host config takes its layout from the pool (`carriesPoolLayout`):
+provision's last succeeded workflow with a host config has `mig-layout { from: 'pool' }`, which is what
+`hostSpecFor` resolves. If not (or without provision), nothing will repartition the node for this change, and the
+holds are released at the grant. If so, they are held until a newer generation is observed, however long that
+takes. No timer releases a hold: with a NodeSpec backlog, work could otherwise land on the old atoms and a late
+repartition would destroy them. A node that never converges keeps its GPUs held, and `better-compute doctor` reports
+it as `capacity.mig.stuck` after 24 hours (see [observability](/docs/operations/observability#doctor)).
 
 A node that joins later reads the pool's layout directly: it is not schedulable before its first converged spec.
 
@@ -162,13 +169,20 @@ Shipped in the control plane:
   atoms (covered by `tests/capacity-fractional.test.ts`);
 - the atom-rule primitive, fractional metering and the single-tenant offering rule;
 - the MIG layout gate, which wraps a pool's layout change in `bookPartitionChange` (covered by
-  `tests/capacity-mig-gate.test.ts`).
+  `tests/capacity-mig-gate.test.ts`);
+- the MIG torture test in `tests/capacity-torture.test.ts`: placers race on one MIG pool while simulated
+  repartitions go through the gate, and no parent and child, or atoms of different layouts, are ever live at once.
+
+On the node, `bcd` (built and tested end to end, not released) holds device assignments through its devices
+converger: CDI specs, env files and node-signed `AllocationBound` and `AllocationReleased` reports.
+It does not apply MIG layouts: it has no converger for the NodeSpec `host` section, where the `mig-layout`
+config unit lives, and reports that section `SectionUnsupported`, so nothing repartitions a GPU on a real node
+yet.
 
 Still to come in v0.5:
 
-- the node side: `bcd` is written but not built or released, its devices converger (the CDI hold) is
-  not written, and applying MIG layouts on the node is scheduled for v0.5;
-- the v0.5 exit tests, the MIG torture test and the real-hardware nightly.
+- applying MIG layouts on the node (the `host` section's `mig-layout` unit in `bcd`);
+- the remaining v0.5 exit tests and the real-hardware nightly.
 
 PLAN.md plans to reset GPUs on release and leaves one question open: clearing memory between tenants
 relies on the driver's guarantees, and a zeroing pass may be added. See the

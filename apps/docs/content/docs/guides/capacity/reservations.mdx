@@ -255,6 +255,12 @@ hands IAM the attributes above and the pool's relations, so pool access and requ
 decision; see [policies](/docs/guides/iam/policies). A refusal marks the draft `denied`, unless the
 caller is an agent in a delegated session and IAM opened a confirmation request (below).
 
+Still outside any transaction, the budget check (`budgetAdmissionCheck`) runs when the pool's policy
+sets `admission.budgetCheck: 'meter'` or the tenant's offer has `onBudgetExceeded: 'stop-new'` or
+`'drain'`: it calls Better IAM's `billing.check` for the caller, and a spent budget answers
+[`SPEND_LIMIT_REACHED`](/docs/reference/errors#spend_limit_reached). The draft stays, so the same key is
+decided again once the budget's window resets. See [budgets](/docs/guides/iam/billing-and-usage#budgets).
+
 </Step>
 <Step>
 
@@ -417,13 +423,15 @@ report`, a signature failure, `the signed report is not this allocation bound`, 
 Node leases (`binding: 'node'`) are exempt: metal's worker binds them after its deploy workflow verified the machine.
 The end-to-end test `tests/e2e/attested-bindings.test.ts` runs this through a real gateway on the dev stack: an
 unsigned report, one signed by a foreign key, and the node's genuine signature over another allocation never
-activate the reservation, and a forged re-report of an active binding marks it lost. The FakeDaemon signs its
-reports with its node key; the Go daemon has no signing code for them yet.
+activate the reservation, and a forged re-report of an active binding marks it lost. Both daemons sign these
+reports with their node key: the FakeDaemon, and the Go daemon `bcd`, whose devices converger sends every bind and
+release as a node-signed `AttestedReport` (purpose `attested-report`).
 
-The TypeScript FakeDaemon implements this node side (CDI spec `/etc/cdi/bcd-<alloc>.json`, env file
-`/run/bcd/allocations/<alloc>.env`, device names `bcd.dev/gpu=<id>`) and drives the simulator and
-`better-compute dev --sim N`. The devices converger of the Go daemon `bcd` is not written yet. See
-[desired state and commands](/docs/guides/concepts/desired-state-and-commands).
+Both implement the node side the same way (CDI spec `/etc/cdi/bcd-<alloc>.json`, env file
+`/run/bcd/allocations/<alloc>.env`, device names `bcd.dev/gpu=<id>`); the CDI spec is the hold itself, and neither
+drops a hold on its own. The FakeDaemon drives the simulator and `better-compute dev --sim N`; `bcd` is built and
+tested end to end against the gateway but not released. See
+[desired state and commands](/docs/guides/concepts/desired-state-and-commands) and [the daemon](/docs/daemon).
 
 **`node`** (v0.5) leases whole machines in a pool whose policy sets `tenantRoot: true`. It needs
 `node: { profileId, profileVersion? }` and cannot be spot. It books every bookable atom of `ready`,

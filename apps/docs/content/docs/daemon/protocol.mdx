@@ -26,6 +26,10 @@ sources:
   - packages/gateway/src/ws-auth.ts
   - packages/postgres/src/migrations/0008_session_versions.ts
   - daemon/internal/session/session.go
+  - daemon/internal/transport/transport.go
+  - daemon/buf.gen.yaml
+  - scripts/daemon-proto-gen.mjs
+  - tests/e2e/bcd.test.ts
   - docs/development.md
   - PLAN.md
 ---
@@ -56,9 +60,13 @@ flowchart LR
   and a percent-encoded `grpc-message` in trailers (trailers-only for immediate errors), no compression.
   `grpc-timeout` is tolerated and ignored, because sessions are long-lived by design. Other methods get HTTP 405,
   other content types 415.
-- **Daemon side.** bcd will use connect-go over the generated Go code. That code does not exist yet: Go is not
-  installed, so `daemon/gen/` is empty and the daemon's session package is a contract with a `TODO(v0.1)`. The
-  FakeDaemon in `@better-compute/testing` speaks the protocol over real HTTP/2 today.
+- **Daemon side.** bcd (`daemon/internal/transport`) uses connect-go over the Go code generated into `daemon/gen/`
+  (protoc-gen-go and protoc-gen-connect-go, through `daemon/buf.gen.yaml` and `node scripts/daemon-proto-gen.mjs`;
+  `--check` verifies it is current). It speaks gRPC over HTTP/2 with TLS 1.3 pinned to the serving CA's SPKI hash,
+  never the system roots, presents its node certificate, and sends HTTP/2 PINGs every 20 seconds. When
+  `gateway_url` names an IP address, `gateway_server_name` gives the name the gateway certificate must carry.
+  `tests/e2e/bcd.test.ts` runs it against `serveGateway`'s mTLS listener. The FakeDaemon in
+  `@better-compute/testing` speaks the same protocol over real HTTP/2 or in memory.
 
 ### WebSocket fallback (v0.4)
 
@@ -78,7 +86,8 @@ signature, and unsigned ones stay pending. The proxy can still see frame metadat
 delay or drop frames, but it cannot forge intent. PLAN.md allows this mode only once all commands and specs are
 signed: with `pki.commandSigning` both are (the gateway relays each generation's stored signed spec), so a
 WebSocket daemon receives its desired state. There is no long-poll or unary path before v1. The gateway side (`attachGatewayWs`, `serveGatewayWs`)
-and a daemon-side dialer (`connectGatewayWs`, used by the FakeDaemon) exist; bcd does not implement it yet.
+and a daemon-side dialer (`connectGatewayWs`, used by the FakeDaemon) exist; bcd does not implement it yet: it dials
+gRPC only.
 
 ## Proto packages
 
@@ -254,7 +263,8 @@ the highest version inside both ranges (`negotiateProtocolVersion`) and returns 
 along with its own capabilities. Today both sides speak exactly version 1 (`PROTOCOL_VERSION = { min: 1, max: 1 }`
 in TypeScript, `ProtoMin` and `ProtoMax` in Go). When the ranges do not overlap, the daemon is below the server's
 minimum: `Welcome.upgrade_required` is set, no desired state or command other than `daemon.upgrade` is sent, and
-the FakeDaemon rejects anything else `UNSUPPORTED`.
+the FakeDaemon and bcd reject anything else `UNSUPPORTED`. bcd has no `daemon.upgrade` kind yet, so an upgrade-only
+bcd session refuses every command until the binary is replaced by hand.
 
 **What is recorded.** The gateway stores `Hello.daemon_version` and `Hello.proto_max` in `node_sessions`
 (migration `core/0008_session_versions`), which is how the rollout controller sees a node finish an upgrade and

@@ -221,12 +221,14 @@ publishing job in CI skips until the umbrella's version is new on npm and Better
 offline-signed release manifest (`better-compute release sign`). `better-compute daemon install-script` already
 writes the POSIX installer: it downloads the pinned binary from
 `{base-url}{base-path}/downloads/bcd/{version}/linux-{arch}`, checks its SHA-256, writes `/etc/bcd/config.toml`
-and a hardened `bcd.service`, and runs `bcd join`. The control plane does not serve that download route yet.
+and a hardened `bcd.service`, and runs `bcd join`. The control plane serves that download route when you configure
+`downloads` (see [serving the binaries](/docs/daemon/install#serving-the-binaries)).
 
-No binary is released yet. `daemon/` is a Go module whose configuration, inventory encoding and fake hardware are
-done and whose session, journal, dispatch and converger packages are contracts; it has not been built because the
-build machine has no Go toolchain. The TypeScript `FakeDaemon` in `better-compute/testing` speaks the real protocol
-in the meantime. See [installing the daemon](/docs/daemon/install).
+No binary is released yet. `daemon/` is a Go module whose v0.1 node agent is built and tested: `bcd join`,
+`bcd node` and `bcd status` run end to end against a real gateway in `tests/e2e/bcd.test.ts`. What is missing is a
+release (goreleaser is configured but has not run), NVML, and the later modes. You can build it yourself with Go 1.26
+or later (`go build ./cmd/bcd` in `daemon/`). The TypeScript `FakeDaemon` in `better-compute/testing` speaks the real
+protocol for everything else. See [installing the daemon](/docs/daemon/install).
 
 ## All packages
 

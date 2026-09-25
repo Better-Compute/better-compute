@@ -10,6 +10,8 @@ sources:
   - packages/server/src/tunnels/module.ts
   - packages/server/src/tunnels/revoke.ts
   - packages/cli/src/host/iam.ts
+  - packages/cli/src/commands/ssh.ts
+  - tests/cli-ssh-cert.test.ts
   - packages/pki/src/ssh.ts
   - packages/pki/src/bundle.ts
   - packages/pki/README.md
@@ -144,6 +146,17 @@ A certificate never outlives the session that asked for it: when the caller's se
 ```bash
 export BETTER_COMPUTE_URL=https://compute.example.com
 export BETTER_COMPUTE_TOKEN=...   # a session verified with a second factor
+better-compute ssh-cert --tenant root --node node_01jzq3v0m6y8x7w5t4s3r2p1na
+ssh -i ~/.ssh/id_ed25519 root@10.20.0.14
+```
+
+`ssh-cert` sends `--key` (default `~/.ssh/id_ed25519.pub`, else `~/.ssh/id_ecdsa.pub`) as `publicKey`, `--account`
+(default `root`) as `principal` and `--minutes` (default 15, 1 to 60) as `ttlSeconds`, and writes the certificate
+beside the key as `<key>-cert.pub`. It prints the certificate's path, serial, principals, account and
+`validBefore`. A `--key` that is not a `.pub` file, or whose content holds a private key, is refused before anything
+is sent. The same call through `api`:
+
+```bash
 better-compute api nodes.issueSshCert \
   tenantId=root nodeId=node_01jzq3v0m6y8x7w5t4s3r2p1na \
   publicKey=@$HOME/.ssh/id_ed25519.pub principal=root ttlSeconds:=900 \
@@ -204,7 +217,8 @@ To read one back, run `ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub`, or call `pa
 Each issue writes an `audit_events` row with the admission context and publishes `node.ssh-cert.issued` (subject
 `node/<id>`) with the key id, serial, principals, identity and `validBefore`. Route it to a
 [webhook](/docs/guides/events/webhooks) if every break-glass login should page someone. The certificate itself is
-recorded in `ssh_certificates` (serial, node, tenant, identity, principal, key id, expiry) for revocation and audit.
+recorded in `ssh_certificates` (serial, node, tenant, identity, issuing session, principal, key id, expiry) for
+revocation, re-authorization and audit.
 
 ## Revoke a certificate
 
@@ -218,15 +232,34 @@ A revocation invalidates the node's desired state and publishes `node.ssh-cert.r
 KRL, for sshd's `RevokedKeys`. The hourly `tunnels.ssh-certificates-gc` reconciler drops records a day past their
 expiry, in batches of 5,000.
 
-Revocation also happens without a call: when a Better IAM role activation ends (`binding:deactivate`), `serve`'s
-default IAM `binding` handler revokes the holder's live certificates in that tenant the same way. See
-[IAM events](/docs/guides/iam#iam-events-compute-reacts-to).
+Revocation also happens without a call, the same way (the serial joins the node's KRL through its next NodeSpec):
+
+| Trigger | Revokes | Where |
+| --- | --- | --- |
+| A Better IAM role activation ends (`binding:deactivate`) | The holder's live certificates in that tenant | `serve`'s default IAM `binding` handler |
+| The identity is offboarded, expires or is deleted (or the `IamReconcile` backstop finds it gone) | Every certificate it holds, in every tenant, before its streams close; an update such as a rename keeps them | `serve`'s default `identity` handler |
+| The identity's sessions are revoked (`auth:session:revoke`, `auth:session:revoke-others`, `identity:revoke-sessions`) | Every certificate it holds, since the event does not say which session ended; issue a new one from a live session | `serve`'s default `sessions` handler |
+| A re-decision says no | That certificate, with reason `access-withdrawn` | The `tunnels.ssh-certificates-reauthorize` reconciler |
+
+The reconciler runs every minute and re-decides the 500 longest-unchecked live certificates: each one as
+`compute:nodes:ssh-root` on its node for the session that issued it (`ssh_certificates.session_id`), through
+`IamPort.authorizeSession`. An allow stamps `reauthorized_at`. This catches what Better IAM does not announce as an
+event: a deleted binding, an expired role activation, a changed policy. A certificate recorded without a session
+id, or an IAM port without `authorizeSession`, is not re-decided. Tenant-wide session revocations name no identity
+and are left to this re-decision. Each revocation publishes `node.ssh-cert.revoked` in the certificate's own tenant.
+See [IAM events](/docs/guides/iam#iam-events-compute-reacts-to).
+
+<Callout type="warn" title="IAM down keeps certificates valid">
+When the re-decision cannot reach Better IAM, the certificate stays valid until it expires, at most 1 hour after
+issue, and the reconciler logs a warning. This is deliberate: break-glass access exists for outages, and IAM may be
+part of one.
+</Callout>
 
 ## What the node needs
 
 The node must trust the CA for user certificates, accept only its own principals and honour the revocation list.
 The control plane sends all three in NodeSpec `access` (`sshCaPublicKeys`, `sshPrincipals`, `sshRevokedSerials`),
-but nothing applies them yet: `bcd`'s `access` converger is still empty, and the FakeDaemon reports a non-empty
+but nothing applies them yet: `bcd` has no `access` converger, so it and the FakeDaemon both report a non-empty
 `access` section as `SectionUnsupported`. Until the daemon does it, configure sshd yourself with the
 `sshCaPublicKey` that `better-compute pki show` prints:
 
@@ -257,5 +290,6 @@ asks you to sign in again with a second factor instead of showing the error.
 | Nodes applying them automatically | Not yet: needs the daemon's `access` converger |
 | `nodes.revokeSshCert` and the node's KRL (`access.sshRevokedSerials`) | Shipped in the control plane; sshd enforces it only once the node applies it |
 | Revoking certificates on `binding:deactivate` | Shipped as `serve`'s default IAM `binding` handler |
-| Revoking certificates on offboarding | Not done; the `identity` handler closes the identity's streams and tunnels, and certificates end with the session at the latest |
+| Revoking certificates on offboarding, expiry, deletion and session revocation | Shipped as `serve`'s default `identity` and `sessions` handlers |
+| Re-deciding live certificates every minute (`tunnels.ssh-certificates-reauthorize`) | Shipped; IAM unreachable keeps a certificate until it expires |
 | Rotating the SSH CA | No rotation flow; `access.sshCaPublicKeys` lists only the current key |

@@ -28,8 +28,9 @@ you already run (a brownfield adopt). Bare-metal machines join through other
 <Term id="attestor">attestors</Term>; see [attestation](/docs/guides/nodes/attestation).
 
 <Callout type="info" title="Not published yet">
-Better Compute is not on npm yet, and the Go daemon `bcd` is written but not built or released. The flow below
-is what the control plane implements and what `FakeDaemon` (and `better-compute dev --sim N`) exercises today.
+Better Compute is not on npm yet, and the Go daemon `bcd` is built and tested but not released, so there is no
+binary for the install script to download. The flow below is what the control plane implements; `bcd join` performs
+it in `tests/e2e/bcd.test.ts`, and `FakeDaemon` (and `better-compute dev --sim N`) exercises it everywhere else.
 </Callout>
 
 ## Before you start
@@ -147,7 +148,8 @@ sequenceDiagram
   G-->>B: Welcome
 ```
 
-1. **Key and CSR.** The daemon generates a P-256 key (kept in the TPM when there is one) and a PKCS#10 request.
+1. **Key and CSR.** The daemon generates a P-256 key and a PKCS#10 request. PLAN.md keeps the key in the TPM when
+   there is one; bcd today stores it as a 0600 `node.key` file under its data directory.
 2. **Sealed token.** The token is encrypted as a compact JWE (`ECDH-ES+A256KW`, `A256GCM`) to the JoinService
    encryption key pinned in the daemon's config. The protected header carries `typ: bcjt+jwe`, `iat` and `csr`,
    the SHA-256 of the request. The gateway relays the call but can neither read the token nor replay the sealed
@@ -336,6 +338,10 @@ whose `join` section the server publishes when `pki.join` is configured:
 ```
 
 The daemon accepts these keys only when they match its pins, so the fetch needs no trust in the transport.
+
+bcd does not implement this fallback yet: its configuration has no control-plane URL, and `bcd join` fails when
+`join-encryption.jwk` is missing or does not match `join_encryption_key_pin`. After rotating the key, generate the
+install script again and rerun it, which rewrites the file and the pins.
 
 ## Placeholder hardware and reclaims
 

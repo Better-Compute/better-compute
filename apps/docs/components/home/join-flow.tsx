@@ -801,8 +801,9 @@ export function JoinFlow() {
             <>
               Every refusal looks the same to the agent; only the audit event carries the reason.
               Simulated from JoinService and the pki attestors: <C>join-token</C> is built in, the
-              others are opt-in through <C>betterCompute({'{ attestors }'})</C>. bcd is written but
-              not released yet; tests run these joins with the TypeScript agent.
+              others are opt-in through <C>betterCompute({'{ attestors }'})</C>. The Go daemon&rsquo;s{' '}
+              <C>bcd join</C> runs the join-token path end to end against the real gateway (not released
+              yet); the other attestors&rsquo; agent halves run in the TypeScript agent in tests.
             </>
           }
         >

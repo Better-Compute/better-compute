@@ -17,6 +17,13 @@ sources:
   - packages/postgres/src/migrations/0002_base.ts
   - packages/iam/src/resolver.ts
   - packages/provision/src/images.ts
+  - packages/server/src/tenancy/tenancy.ts
+  - packages/capacity/src/tenancy.ts
+  - packages/provision/src/tenancy.ts
+  - packages/metal/src/tenancy.ts
+  - tests/server-tenancy.test.ts
+  - packages/cli/src/host/iam.ts
+  - packages/cli/src/host/config.ts
 ---
 
 import { Coins, Layers, ListChecks } from '@/lib/icons';
@@ -92,7 +99,8 @@ await compute.api.pools.offer(rootOperator, {
 
 - The call decides `compute:pools:share` on the pool. Offering again updates the quota and priority.
 - A pool holding `tenant-owned` nodes, or a single-tenant sharing mode (`timeslice`, `mps`), can be offered only
-  to its owner.
+  to its owner. A pool with `policy.singleTenant: true` (required for VPS container runtimes) can be offered to
+  one tenant besides its owner, without `includeDescendants`; another offer is `INVALID_STATE`.
 - `pools.unoffer` removes the pool from the organization's view and drops its quota to zero. Live reservations
   keep their charge; nothing new fits. A pool cannot be unoffered from its owner (`INVALID_INPUT`).
 - `includeDescendants: true` is stored on the offering, but this release writes the projection row only for
@@ -192,11 +200,98 @@ Everything else about the organization's work fits in projects.
   `allowed_regions` column, but `pools.offer` does not accept it and nothing enforces it yet. Until then, restrict
   regions in policy with `resource.region`, as the `gpu-user` example does.
 
-## Tenant lifecycle
+## Suspended and deleted tenants
 
-Compute reacts to Better IAM's `iam:tenants:update` and `iam:tenants:delete` events through the `tenant` reaction
-of the IAM inbox, whose intent is to suspend admissions and schedule teardown. The reaction is a hook you supply
-with `bridge.setHandlers()`; the server does not install one yet. See [IAM integration](/docs/guides/iam).
+Compute mirrors the Better IAM tenants that are not active in its own `compute_tenant_states` table, owned by the
+built-in `tenancy` module (migration `tenancy/0001_tenant_states`):
+
+```sql title="compute_tenant_states"
+CREATE TABLE compute_tenant_states (
+  tenant_id text PRIMARY KEY,
+  state text NOT NULL,           -- active | suspended | deleted
+  reason text,                   -- the IAM action that changed it
+  updated_at timestamptz NOT NULL,
+  teardown_done_at timestamptz   -- set once every module released a deleted tenant
+);
+```
+
+### The IAM reaction
+
+The rows are written by the `tenant` reaction of the IAM inbox, on `iam:tenants:update` and `iam:tenants:delete`.
+The server ships the handler, `tenantStateHandler`, and `better-compute serve` installs it as the default `tenant`
+reaction when the configuration's host sets `host.iam`. Give it `host.iam.readTenants` so suspensions and
+deletions cascade (anything but a function is `INVALID_CONFIG`):
+
+```ts title="better-compute.config.ts"
+export const host = defineHost(async () => ({
+  iam: {
+    bridge,
+    // The tenant and every tenant below it, as IAM reports them now.
+    readTenants: async (tenantId: string) => readSubtreeFromIam(tenantId),
+  },
+}));
+```
+
+`host.iam.handlers.tenant` replaces the default. A server you build yourself adds the handler to what it gives
+`bridge.setHandlers()`, which replaces the whole set:
+
+```ts title="compute.server.ts"
+import { tenantStateHandler } from '@better-compute/server';
+
+bridge.setHandlers({
+  ...handlers, // agent, identity, sessions, ...
+  tenant: tenantStateHandler(compute, {
+    // The tenant and every tenant below it, as IAM reports them now.
+    readTenants: async (tenantId) => readSubtreeFromIam(tenantId),
+  }),
+});
+```
+
+- `readTenants(tenantId)` returns `{ tenantId, status }` for the tenant acted on and its descendants, with `status`
+  one of `active`, `pending`, `suspended`, `deleted` or `missing` (IAM no longer knows it). A suspension or
+  deletion cascades to descendants, and the audit event names only the tenant acted on, so the handler re-reads
+  the subtree instead of trusting the event. `suspended` maps to `suspended`; `deleted` and `missing` map to
+  `deleted`; anything else is `active`.
+- Without `readTenants`, only `iam:tenants:delete` is applied, and only to the named tenant; an update changes
+  nothing.
+- Each change publishes `tenant.state-changed` (`tenantId`, `state`, `previous`, `reason`) on `tenant/{id}`, in the
+  inbox transaction. A replay changes nothing, and a tenant reactivated in IAM becomes `active` again.
+
+### What the envelope refuses
+
+Every call passes a tenant gate right after the cross-tenant pre-check, before compute's database or IAM decision:
+
+| Tenant state | Reads | Mutations |
+| --- | --- | --- |
+| `active` | allowed | allowed |
+| `suspended` | allowed | `TENANT_SUSPENDED` (403) |
+| `deleted` | `TENANT_SUSPENDED` (403) | `TENANT_SUSPENDED` (403) |
+
+The gate checks the caller's tenant and the tenants the call acts in; the error's `details` carry `tenantId` and
+`state`. Root-tenant callers are exempt, so the platform can still act in a suspended tenant. The gate answers from
+memory: each process loads the non-active states at start and reloads them every 5 seconds, and the process that
+applied a change reloads before its next call (`compute.tenants.invalidate()`). Another process may therefore
+admit a suspended tenant's mutation for up to 5 seconds.
+
+### Teardown of a deleted tenant
+
+A deletion enqueues the `tenancy` reconciler for the tenant. It calls every hosted module's `tenantDeleted` hook,
+plugins included; a module that answers `SYNC_AGAIN` is asked again by the 30-second `sweep`, which also recovers
+a lost work item. When every hook answers `DONE` in one pass, the reconciler sets `teardown_done_at` and publishes
+`tenant.torn-down`.
+
+| Module | What it releases (idempotent, in batches of 100) |
+| --- | --- |
+| `capacity` | Unstarted reservations cancelled, started ones released now (bookings and quota back); offers to the tenant withdrawn (quotas zeroed, `pool.unoffered` to the owner); pools it owns archived, with every offer withdrawn (`pool.archived`), while other tenants' live bookings there run to their end; its idle quota rows deleted. A dedicated-root lease is released this way too. |
+| `provision` | Active workflows aborted (their cleanup still runs); private images and profiles soft deleted with their authz rows; image signers revoked. Images it promoted to public stay, for the tenants that deploy them. |
+| `metal` | Every bare-metal node it owns retired, one legal transition per sweep: `ready`, `adopted`, `enrolling` and `failed` retire at once; `deployed` and `rescued` machines are released (wiped) first; a machine mid-workflow is aborted (it fails with `TENANT_DELETED`), then retired; `releasing` and `retiring` machines finish first. |
+
+<Callout type="warn" title="Not torn down yet">
+Only `capacity`, `provision` and `metal` implement `tenantDeleted` in this release. A deleted tenant's VPS
+instances, its non-metal `tenant-owned` nodes and its sites are not released by the teardown; the gate only stops
+the tenant from reaching them. Plugins release their own state through the same hook; see
+[modules](/docs/extending/modules#tenantdeleted).
+</Callout>
 
 <Cards>
   <Card icon={<ListChecks />} title="Actions and resources" href="/docs/guides/iam/actions-and-resources">

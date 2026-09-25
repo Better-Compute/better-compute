@@ -183,7 +183,8 @@ A site agent enrolled with a site token holds the site's boot lease and serves p
 inspected over Redfish, PXE-booted into `bcd ramdisk`, diagnosed and wiped (node-signed results), and reaches
 `ready`. [`metal.deploy`](/docs/reference/api/metal#deploy) streams an image to disk, writes cloud-init with a
 single-use token, and kexecs into the installed system, which rejoins as the same node. The control plane for this
-flow has landed; `bcd site` and `bcd ramdisk` are not built yet, so it runs against simulated agents. See
+flow has landed; `bcd site` and `bcd ramdisk` are not written yet (bcd has only its node agent), so it runs against
+simulated agents. See
 [bare metal](/docs/guides/bare-metal).
 
 ### A VPS instance (v0.3)

@@ -15,6 +15,8 @@ sources:
   - packages/cli/src/commands/fleet.ts
   - packages/cli/src/commands/audit.ts
   - packages/cli/src/commands/auth.ts
+  - packages/cli/src/commands/tunnel.ts
+  - packages/cli/src/commands/ssh.ts
   - packages/cli/src/credentials.ts
   - packages/cli/src/embed.ts
   - apps/docs/content/docs/reference/cli.mdx
@@ -38,7 +40,7 @@ Every command declares a target, and the target decides what it needs:
 
 | Target | Needs | Commands |
 | --- | --- | --- |
-| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `fleet export/plan/status/apply`, `auth login` |
+| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `console`, `exec`, `ssh-cert`, `fleet export/plan/status/apply`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
 | `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `audit check-proof` |
 
@@ -161,6 +163,35 @@ with that `--key`. It waits up to `--wait` seconds (default 20) while the reserv
 shorthand such as `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80`, and `--model` and `--product` add a `gpuModel`
 or `gpuProduct` match. See [reservations](/docs/guides/capacity/reservations).
 
+## Interactive access
+
+Three commands in the `Access` group open a shell from your terminal, decided like any other call as the token's
+identity:
+
+```bash
+better-compute console --url https://compute.example.com --tenant acme --node node_01k5w…
+better-compute exec --url https://compute.example.com --tenant acme --instance inst_01k5w…
+better-compute ssh-cert --tenant acme --node node_01k5w… && ssh -i ~/.ssh/id_ed25519 root@10.0.0.5
+```
+
+- **`console`** (`--node`) opens a root console on a node through `tunnels.open` with op `console`, decided as
+  `compute:nodes:console` on the node. **`exec`** (`--instance`) opens a shell in a running instance with op `exec`,
+  decided as `compute:instances:exec`; the instance's node agent runs it.
+- Both open the tunnel's WebSocket on the same server as the API call, so they need `--url` (or
+  `BETTER_COMPUTE_URL`). Without it they fail with `UNSUPPORTED` before a ticket is spent: an in-process call has no
+  WebSocket server.
+- The terminal is in raw mode until the remote program exits: every key goes to the remote, Ctrl-C included, and
+  the window size follows resizes. **Ctrl-]** detaches. The command exits with the remote program's status, as ssh
+  does, and with 255 when the tunnel itself breaks (`REMOTE_EXIT`).
+- **`ssh-cert`** sends your own public key (`--key`, default `~/.ssh/id_ed25519.pub`, else `id_ecdsa.pub`) to
+  `nodes.issueSshCert` and writes the node-bound certificate beside it as `<key>-cert.pub`, where `ssh -i <key>`
+  finds it. `--account` (default `root`) is the Unix account and `--minutes` (default 15, 1 to 60) the validity,
+  never past your session. It needs `compute:nodes:ssh-root` and, by default, an MFA session. The private key never
+  leaves your machine: a `--key` that is not a `.pub` file, or that holds a private key, is refused before anything
+  is sent.
+
+See [tunnels](/docs/guides/access/tunnels) and [break-glass SSH](/docs/guides/access/ssh).
+
 ## Fleet configuration
 
 `fleet` manages a tenant's platform objects (sites, provider accounts, pools with quotas and offers, VPS flavors) as
@@ -270,6 +301,7 @@ exit non-zero with the error's code:
 | `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
 | `AUDIT_TAMPERED`, `INVALID_PROOF`, `AUDIT_KEY_MISSING`, `PKI_NOT_FOUND` | audit verification outcomes |
 | `DOCTOR_FINDINGS` | `doctor --strict` found an error or warning |
+| `REMOTE_EXIT` | `console` or `exec`: the binary exits with the remote program's own status (1 to 255), or 255 when the tunnel broke |
 
 ## Project commands
 

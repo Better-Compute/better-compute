@@ -264,7 +264,8 @@ by `node_sessions.gateway_id`, caching gateway URLs for 30 seconds; an unregiste
 The api authorizes the caller and issues a 60-second single-use exec ticket for one node, then asks the owning
 gateway to open a tunnel. The gateway verifies the ticket (signature against the api's JWKS, audience, its own
 `jti` set, which fails closed when full), sends `OpenTunnel` on the node's session, and waits up to 10 seconds for the
-node's `Tunnel` stream. The daemon verifies the ticket again before opening it. The gateway then only relays frames,
+node's `Tunnel` stream. The daemon verifies the ticket again before opening it (the FakeDaemon does; bcd does not
+answer `OpenTunnel` yet). The gateway then only relays frames,
 with backpressure in both directions. It re-authorizes the caller every 60 seconds: a refusal closes the tunnel, and
 2 minutes of IAM failures close it too. A tunnel lives at most 12 hours, and revocation or
 `POST /v1/tunnels/close` ends it at once. See [tunnels](/docs/guides/access/tunnels).
@@ -316,3 +317,7 @@ The collector samples `gateway.status()` and `gateway.sessions()` at every scrap
 one over the testing kit's in-memory frame stream, so the fleet simulator runs real FakeDaemons against a real
 gateway on simulated time. `gateway.crash()` simulates process death: loops stop and every session is forgotten
 without a database write, so the lease simply expires. See [testing](/docs/operations/testing).
+
+With a network, `createDevStack({ externalTls })` serves the same gateway a second time over mTLS, with a dev serving
+CA and client certificates checked against the dev node CA, for daemons outside the test process.
+`tests/e2e/bcd.test.ts` runs the real Go bcd against it (see [the Go daemon](/docs/operations/testing#the-go-daemon)).

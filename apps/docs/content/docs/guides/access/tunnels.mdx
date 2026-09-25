@@ -23,6 +23,8 @@ sources:
   - packages/cli/src/host/tunnels.ts
   - packages/cli/src/host/gateway.ts
   - packages/cli/src/host/findings.ts
+  - packages/cli/src/commands/tunnel.ts
+  - tests/cli-console.test.ts
   - packages/iam/src/sessions.ts
   - apps/console/server.mjs
   - apps/console/console.config.mjs
@@ -61,10 +63,11 @@ sequenceDiagram
   end
 ```
 
-<Callout type="warn" title="The node half is not built yet">
-  The api, pki and gateway halves are implemented and tested. The daemon half (steps 8 and 9) is not: the Go `bcd`
-  is not built yet, and the TypeScript FakeDaemon does not answer `OpenTunnel`. Until it lands, a tunnel opens only
-  against the bcd-like stand-ins in `tests/`.
+<Callout type="warn" title="The node half is not in bcd yet">
+  The api, pki and gateway halves are implemented and tested. The daemon half (steps 8 and 9) is not in the Go
+  `bcd`: it is built and tested, but ignores `OpenTunnel`. The TypeScript FakeDaemon implements it (ticket check
+  against the spec's JWKS and its own `jti` set, `sid` equal to the tunnel id, then the `Tunnel` stream with `opened`
+  first), so tunnels open end to end in the tests and in `better-compute dev --sim N`, against an echo shell.
 </Callout>
 
 ## Turn tunnels on
@@ -355,6 +358,21 @@ Once open, the socket closes with one of these:
 
 The server pings every 30 seconds and drops a peer that has been silent for two periods. Backpressure runs end to
 end: a full socket on one side pauses reading on the other.
+
+### From a terminal
+
+The CLI does all of the above for you. `better-compute console --node ID` (op `console`) and `better-compute exec
+--instance ID` (op `exec`) call `tunnels.open` as the token, open the WebSocket on the server named by `--url`, and
+attach your terminal in raw mode until the remote program exits:
+
+```bash
+better-compute console --url https://compute.example.com --tenant acme --node node_01k5w…
+```
+
+Every key goes to the remote, Ctrl-C included; Ctrl-] detaches. The window size is sent at start and on every
+resize. The command exits with the remote program's status, and with 255 when the tunnel breaks, like ssh. Both
+need `--url`: without it they fail with `UNSUPPORTED` before spending a ticket. See the
+[CLI guide](/docs/guides/clients/cli#interactive-access).
 
 ## Re-authorization and revocation
 

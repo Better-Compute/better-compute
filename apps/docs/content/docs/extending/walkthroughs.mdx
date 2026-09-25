@@ -46,8 +46,8 @@ the best worked examples of the contracts on the other pages of this section.
 | Emulated site | v0.2 | a hardware profile, the whole metal lifecycle | `examples/emulated-site` | configuration checked; needs Linux, KVM and a `bcd` build to run |
 
 <Callout type="warn" title="No real hardware yet">
-Every metal walkthrough needs `bcd site` and `bcd ramdisk`, which are written for v0.2 but not built (Go is not
-installed on the build machine). The tests answer their commands with simulated site agents and machines, or with a
+Every metal walkthrough needs `bcd site` and `bcd ramdisk`, the v0.2 modes of the Go daemon, which are not written:
+bcd's node agent is built and tested, but those two modes exit 2 with `NOT_IMPLEMENTED`. The tests answer their commands with simulated site agents and machines, or with a
 FakeDaemon site agent over the real gateway. PLAN.md's pass criterion for walkthrough 1, "a sushy-tools VM reaches
 `deployed`", has not been met.
 </Callout>

@@ -84,7 +84,7 @@ function StatusStrip() {
         <span className="flex items-center gap-2 text-text-secondary">
           <span className="live-dot" />v{version} pre-release
         </span>
-        <span className="hidden sm:inline">bcd: written, not built</span>
+        <span className="hidden sm:inline">bcd node: built, not released</span>
         <span className="hidden md:inline">sim: better-compute dev --sim 8</span>
         <Link
           href="/docs/reference/changelog"

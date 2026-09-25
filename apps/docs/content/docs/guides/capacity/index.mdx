@@ -114,8 +114,8 @@ taints and `healthy` flips.
 5. **Quota.** `quota_usage` is charged with a guarded `used + n <= max` update, and a
    `CHECK (used BETWEEN 0 AND max)` backs it up.
 6. **Defence in depth on the node.** The node refuses an assignment that overlaps one it already
-   holds. The TypeScript FakeDaemon answers such an assignment with `AllocationFailed`; the matching
-   devices converger in `bcd` is still to be written.
+   holds. The TypeScript FakeDaemon and the devices converger of `bcd` both answer such an assignment
+   with `AllocationFailed`.
 
 Every guarded statement returns fewer rows instead of raising, and `INSERT … ON CONFLICT DO NOTHING`
 (without a conflict target) honours the exclusion constraint. A lost race therefore rolls back to a

@@ -32,12 +32,13 @@ Nodes learn their target version through their <Term id="nodespec">NodeSpec</Ter
 state rather than a command: a node that was offline during the rollout converges on the right version when it
 returns.
 
-<Callout type="warn" title="The daemon half of self-update is not built yet">
+<Callout type="warn" title="The daemon half of self-update is not written yet">
   The control plane is shipped in `@better-compute/rollout`: releases, rollouts, the controller, `NodeSpec.daemon`
   and the `daemon.upgrade` command kind. The node side that PLAN.md §6 designs for v0.4 (verify the binary, swap A/B
-  slots, write `upgrade.json` with a deadline, swap back when no `Welcome` arrives) is not implemented in `daemon/`,
-  and the FakeDaemon reports a non-empty `daemon` section as `SectionUnsupported`. No node reports a new version on
-  its own today, so upgrades time out and the failure gate pauses the rollout. Until then, upgrade by rerunning the
+  slots, write `upgrade.json` with a deadline, swap back when no `Welcome` arrives) is not implemented in `bcd`: it
+  reports a non-empty `daemon` section as `SectionUnsupported` and answers `daemon.upgrade` `UNSUPPORTED`. Only the
+  FakeDaemon's opt-in `selfUpdate` plays it, in tests. No real node reports a new version on its own today, so
+  upgrades time out and the failure gate pauses the rollout. Until then, upgrade by rerunning the
   install script, as PLAN.md prescribes before v0.4.
 </Callout>
 

@@ -28,6 +28,10 @@ sources:
   - vitest.bench.config.ts
   - vitest.nightly.config.ts
   - bench/REFERENCE.md
+  - scripts/daemon-test.mjs
+  - scripts/daemon-fixtures.mjs
+  - tests/e2e/bcd.test.ts
+  - packages/testing/src/dev/stack.ts
   - docs/development.md
   - package.json
   - PLAN.md
@@ -146,7 +150,9 @@ API admission. See [policies](/docs/guides/iam/policies).
 ## The FakeDaemon
 
 `FakeDaemon` is the daemon side of the protocol in TypeScript, rule for rule with the Go packages in
-`daemon/internal/{journal,dispatch,session,converge,fakehw}`. See [the daemon](/docs/daemon).
+`daemon/internal/{journal,dispatch,session,converge,agent,fakehw}`. The real bcd has its own tests (see
+[the Go daemon](#the-go-daemon)); the FakeDaemon is what runs where many daemons, or features bcd lacks, are needed.
+See [the daemon](/docs/daemon).
 
 - **Journal.** `accepted` before any side effect; `running{boot_id}` right before a self-terminating one; done
   results kept 7 days; unacked events capped at 64 MiB and 10,000. A crash keeps the journal, a reboot also changes
@@ -157,7 +163,11 @@ API admission. See [policies](/docs/guides/iam/policies).
 - **Acceptance order.** Another node's command or a disallowed kind is `UNSUPPORTED`; a `min_generation` above the
   applied spec defers with a `SpecRequest`; past `not_after` is `EXPIRED`; no free lane credit is `BUSY`.
 - **Session.** Hello from the journal, Welcome, heartbeats, PING liveness, full-jitter reconnect, `Drain`,
-  `RevocationNotice`, `Cancel`.
+  `RevocationNotice`, `Cancel`; a `Welcome` more than 5 minutes before the journal's server time mark is refused.
+  The mark (`JournalMeta.serverTimeMs`) is set on every Welcome and heartbeat and only moves forward, so a gateway
+  cannot rewind the unsigned `Welcome.server_time` to make a recorded signed command or an old worker certificate
+  valid again; the session drops with `server time went backwards` on every redial. It is not clamped to the local
+  clock, since sim and manual server clocks sit far from the host's.
 - **Desired state.** The devices converger writes the CDI spec and env file in an in-memory file map, reports
   `AllocationBound`, `AllocationReleased` and `AllocationFailed`, and never drops a hold on its own.
 - **Kinds.** `diag.nvml`, `inventory.refresh`, `logs.collect` and `node.reboot`, plus the opt-in `fakeGpuReset`
@@ -200,6 +210,53 @@ faults per direction from the link's seeded RNG: `latencyMs` (default 1), `jitte
 (`silent`, or `reset`, which breaks the stream as gRPC would), `duplicate`, and `reorder` within `reorderWindowMs`
 (default 50). Controls: `stall`, `partition` and `heal`, `halfOpen`, `reset`, `dropNext`, `duplicateNext` and
 `intercept`. `createDaemonHarness()` wires one daemon to scripted servers on a sim scheduler.
+
+## The Go daemon
+
+bcd has its own tests in `daemon/` (Go 1.26 or later) and one end-to-end suite against the real control plane.
+
+**Unit and interop tests.** `node scripts/daemon-test.mjs` runs the module's tests with the tags `nonvml,fakehw` (no
+cgo, no NVIDIA driver, the fake HGX node). On Linux it is `go test ./...`. On Windows, where bcd cannot run and
+Application Control may refuse locally built executables, it cross-compiles each package's test binary for
+linux/amd64 into `daemon/bin/tests/` and runs it inside WSL from the package directory, so `testdata` paths resolve.
+The pki tests read `daemon/internal/pki/testdata/interop.json`, which `node scripts/daemon-fixtures.mjs` writes with
+`@better-compute/pki` (a node certificate, a signed `JoinResponse`, a sealed JWE, signed commands, specs and a trust
+bundle), so Go is checked against the TypeScript implementation byte for byte.
+
+```bash
+node scripts/daemon-test.mjs                          # every package
+node scripts/daemon-test.mjs --run TestSweep -v ./internal/journal
+node scripts/daemon-test.mjs --build-bcd              # also writes daemon/bin/bcd-linux-amd64 (fakehw)
+```
+
+| Flag or variable | Meaning |
+| --- | --- |
+| `--run REGEXP` | Only tests matching the pattern |
+| `-v` | Verbose output |
+| `--distro NAME`, `BCD_WSL_DISTRO` | The WSL distribution on Windows (default `Ubuntu`) |
+| `--build-bcd` | Also build the fakehw `bcd` for linux/amd64 |
+| `packages...` | Go package patterns (default `./...`) |
+
+**End to end.** `tests/e2e/bcd.test.ts` runs the real binary (linux/amd64, fakehw, `BCD_FAKEHW_SEED=41`) against
+`createDevStack({ externalTls })`: the dev stack's mTLS listener with a dev serving CA, which the test pins in a
+generated `config.toml` together with the join keys, `gateway_server_name = "gw.dev.local"` and a data directory
+under `/tmp`. It checks that:
+
+- `bcd join` with a sealed token on standard input succeeds and never prints the token;
+- `bcd node` is adopted after its node-signed `diag.nvml`, and `bcd status --json` answers on the socket;
+- `inventory.refresh` succeeds;
+- a 2-GPU reservation turns active on a node-signed `AllocationBound` (checked by `pkiAllocationBindingCheck`), its
+  CDI hold appears under the fake root, and it disappears on release;
+- `node.reboot` completes `SUCCEEDED` from the next boot, with the new boot id recorded in `node_sessions`.
+
+On Linux the suite runs in `pnpm test` whenever Go is installed; it builds the binary first. On Windows it is opt-in:
+it needs `BCD_E2E=1`, a WSL distribution, and Go at `C:\Program Files\Go\bin` (or an existing
+`daemon/bin/bcd-linux-amd64`). bcd runs in WSL through `wsl -e`, never a shell, and reaches the gateway at WSL's
+default route. `BCD_E2E_LOG=1` streams bcd's log to standard error.
+
+```powershell
+$env:BCD_E2E = '1'; pnpm vitest run tests/e2e/bcd.test.ts
+```
 
 ## The fleet simulator
 

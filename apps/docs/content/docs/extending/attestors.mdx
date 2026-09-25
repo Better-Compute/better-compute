@@ -52,7 +52,8 @@ The verifier is what you register. The producer for real machines is Go in `bcd`
 `@better-compute/pki` exist for the FakeDaemon and tests.
 
 <Callout type="warn" title="The agent half">
-`bcd` is written but not built, and it has no plug-in point for third-party producers. A custom attestor can be
+`bcd` is built but not released, it joins only with `join-token` (it answers no attestor challenge), and it has no
+plug-in point for third-party producers. A custom attestor can be
 registered and exercised end to end today with TypeScript agents (`runAgentJoin` in `@better-compute/testing`), but a
 real machine needs a `bcd` that sends its `JoinRequest.attestor` and `attestation`.
 </Callout>

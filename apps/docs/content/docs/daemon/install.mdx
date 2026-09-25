@@ -10,7 +10,13 @@ sources:
   - packages/cli/src/commands/daemon.ts
   - daemon/internal/config/config.go
   - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/internal/agent/join.go
+  - daemon/internal/agent/state.go
+  - daemon/internal/journal/bolt.go
   - daemon/internal/journal/journal.go
+  - .github/workflows/daemon.yml
+  - scripts/daemon-test.mjs
   - daemon/internal/journal/rules.go
   - daemon/.goreleaser.yaml
   - daemon/README.md
@@ -30,10 +36,12 @@ repository; the token travels separately.
 <Callout type="warn" title="The pieces are not all runnable yet">
 The script generator (`better-compute daemon install-script`) is built and tested, and so is the
 `GET {basePath}/downloads/bcd/{version}/linux-{arch}` route it fetches from (see [serving the
-binaries](#serving-the-binaries)). What it installs is not: bcd is written but not built, because Go is not installed
-on the build machine, so no release binary exists, and in the skeleton `bcd join` and `bcd node` exit 2 with
-`NOT_IMPLEMENTED`. Until it lands, `better-compute dev --sim N` is the way to see nodes join: it runs the TypeScript
-FakeDaemon through the same join and session protocol. See [local development](/docs/operations/local-development).
+binaries](#serving-the-binaries)). bcd itself is built and tested: `bcd join` and `bcd node` work, and
+`tests/e2e/bcd.test.ts` runs them against a real gateway (see [the overview](/docs/daemon#what-bcd-does-today)). But
+bcd is not released: no goreleaser run has produced the bare binaries and digests the script pins, and no test yet
+runs the script itself on a host. You can build a binary from `daemon/` and serve it yourself; otherwise
+`better-compute dev --sim N` shows nodes joining through the same protocol with the TypeScript FakeDaemon. See
+[local development](/docs/operations/local-development).
 </Callout>
 
 ## Serving the binaries
@@ -184,7 +192,9 @@ sudo sh install-bcd.sh < token-file
     <File name="bcd.service (0644)" />
   </Folder>
   <Folder name="/var/lib/bcd (0700)" defaultOpen>
-    <File name="journal, and the node key when there is no TPM" />
+    <File name="node.key (0600, the node key)" />
+    <File name="identity.json (certificate chain, trust bundle, server time mark)" />
+    <File name="journal.db (the bbolt journal)" />
   </Folder>
   <Folder name="/run/bcd (0700)" defaultOpen>
     <File name="bcd.sock (root-only status socket)" />
@@ -194,9 +204,12 @@ sudo sh install-bcd.sh < token-file
   </Folder>
 </Files>
 
-The script writes the first four. The other paths belong to the running daemon: the journal and key under
-`data_dir`, the status socket under `socket_path`, and CDI specs for `hold` bindings. The token is consumed by the
-join and never written anywhere.
+The script writes the first four. The other paths belong to the daemon: `bcd join` writes the key and
+`identity.json` under `data_dir`, `bcd node` opens the journal there, serves the status socket at `socket_path`, and
+writes CDI specs for `hold` bindings (with env files under `/run/bcd/allocations`). A renewal writes the next key as
+`node.key.next` and promotes it only once the new certificate is stored. A journal that does not open is moved aside
+as `journal.db.corrupt-<unix time>` and a new one starts. The token is consumed by the join and never written
+anywhere.
 
 ### config.toml
 
@@ -227,6 +240,8 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[journal] max_events` | no | 10000 | May lower the 10,000 unacked-event cap, never raise it |
 | `[log] level` | no | `info` | `debug`, `info`, `warn` or `error` |
 | `[log] json` | no | `true` | JSON lines |
+| `gateway_server_name` | no | | The name the gateway certificate must carry when `gateway_url` names an IP address (an L4 balancer, a dev stack reached from WSL) |
+| `dev_insecure_h2c` | no | `false` | Allows an `http://` `gateway_url` (cleartext HTTP/2 to a dev gateway). Only fakehw builds accept it; the host build refuses to start |
 
 A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKeyInfo, the form HPKP and
 `curl --pinnedpubkey` use. `bcd doctor` warns when the file is readable or writable by anyone but its owner.
@@ -234,9 +249,10 @@ A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKey
 ### join-encryption.jwk
 
 The pins alone cannot seal a token, so the script also writes the JoinService encryption public key as a JWK.
-`bcd join` uses it only when its SPKI hash equals `join_encryption_key_pin`, and otherwise falls back to
-`GET {basePath}/.well-known/better-compute`, accepting keys from there only when they match the pins. See
-[the join key and its fallback](/docs/guides/nodes/joining#the-join-key-and-its-fallback).
+`bcd join` uses it only when its SPKI hash equals `join_encryption_key_pin`. The design falls back to
+`GET {basePath}/.well-known/better-compute` when the file is missing or stale, accepting keys from there only when
+they match the pins, but bcd does not implement that fallback yet: a missing or mismatched file fails `bcd join`
+with exit code 1. See [the join key and its fallback](/docs/guides/nodes/joining#the-join-key-and-its-fallback).
 
 ## The systemd unit
 
@@ -302,11 +318,14 @@ WantedBy=multi-user.target
 
 The join itself is `bcd join`, which the script runs for you:
 
-1. bcd generates a P-256 key, in the TPM when there is one, else in a 0600 file under `data_dir`, and a CSR.
+1. bcd generates a P-256 key and a CSR. PLAN.md keeps the key in the TPM when there is one; bcd today writes it to
+   `node.key` (0600) under `data_dir`.
 2. It seals the token to the JoinService encryption key and calls `Join` on the gateway over TLS pinned to the
-   serving CA. The gateway relays the call; it can neither read the token nor forge the answer.
+   serving CA, with its hardware claims and the attestor `join-token`. The gateway relays the call; it can neither
+   read the token nor forge the answer. A deferral is retried with the same CSR; retryable errors back off.
 3. It verifies the signed `JoinResponse` under the pinned signing key, checks that the response is for its own
-   CSR, and stores the certificate chain and trust bundle in the journal.
+   CSR, that the leaf certifies its key, the SPIFFE id and the role, and stores the certificate chain and trust
+   bundle in `identity.json`. A journal left by an earlier identity is moved aside.
 
 bcd never takes the token from a command-line argument, so a token pasted in the wrong place does not reach shell
 history or logs. `bcd join` rejects positional arguments without echoing them:
@@ -356,9 +375,10 @@ it to such nodes. `daemon.upgrade` is self-terminating, like `node.reboot`: see
 
 <Callout type="warn" title="Self-update is control-plane only today">
 `@better-compute/rollout` ships the releases, the rollout controller, `NodeSpec.daemon` and `daemon.upgrade`. The
-node half is not written: bcd has no slot swap yet, the unit the script installs has no `OnFailure` rollback
-service, and the FakeDaemon reports a non-empty `daemon` section as `SectionUnsupported`. Rerun the install script
-to upgrade.
+node half is not written: bcd has no slot swap and no `daemon.upgrade` kind yet (it answers that kind
+`UNSUPPORTED` and reports a non-empty `daemon` section as `SectionUnsupported`), and the unit the script installs has
+no `OnFailure` rollback service. Only the FakeDaemon's opt-in `selfUpdate` plays the node half, in tests. Rerun the
+install script to upgrade.
 </Callout>
 
 The fleet-wide order for any upgrade is: expand migrations, then workers and api, then gateways one at a time
@@ -373,8 +393,14 @@ so nothing is scheduled on it (see [operating nodes](/docs/guides/nodes/operatin
 
 ## Release artifacts
 
-bcd builds with goreleaser from `daemon/` (`.goreleaser.yaml`) for Linux on amd64 and arm64, with cgo and `zig cc`
-because go-nvml loads `libnvidia-ml`. A release produces `bcd_<version>_linux_{amd64,arm64}.tar.gz`, each with a
-`.sha256`, and the bare binaries `bcd_<version>_linux_{amd64,arm64}`. The bare binary is what the install script
-downloads, what a signed release manifest lists and what self-update verifies. Publishing is disabled in the
-configuration until the release workflow exists.
+bcd is configured to build with goreleaser from `daemon/` (`.goreleaser.yaml`) for Linux on amd64 and arm64, with
+cgo and `zig cc` because go-nvml will load `libnvidia-ml`. A release produces
+`bcd_<version>_linux_{amd64,arm64}.tar.gz`, each with a `.sha256`, and the bare binaries
+`bcd_<version>_linux_{amd64,arm64}`. The bare binary is what the install script downloads, what a signed release
+manifest lists and what self-update verifies. Publishing is disabled in the configuration until the release workflow
+exists, and no release has been cut: CI (`.github/workflows/daemon.yml`) only vets, tests and runs
+`goreleaser check`.
+
+Until then a binary comes from a plain `go build` in `daemon/`. The development and test builds are cross-compiled
+without cgo (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`); `node scripts/daemon-test.mjs --build-bcd` writes the fake
+hardware build to `daemon/bin/bcd-linux-amd64`. Since go-nvml is not wired in yet, a cgo build gains nothing today.

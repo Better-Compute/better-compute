@@ -45,6 +45,10 @@ command from the API. It accepts an allowlist of kinds; any other kind is `UNSUP
 | `logs.collect` | `{ sinceSeconds?, units? }`: 60 to 604,800 seconds, up to 16 systemd units | Collects logs and, when the server has `supportBundles`, uploads a support bundle (see [support bundles](#support-bundles)) |
 | `node.reboot` | `{}` | Reboots the machine; completes when the node rejoins |
 
+bcd runs all four. Its `diag.nvml` works from the collected GPU inventory, since NVML is not wired in yet: it checks
+that the GPUs are visible (and the expected count), and the ECC and row-remap checks can only fail on data the
+inventory carries (on a real host today it carries none). Its `node.reboot` goes through `systemctl reboot`.
+
 ```ts
 const command = await client.commands.run({
   tenantId,

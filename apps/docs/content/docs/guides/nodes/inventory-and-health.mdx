@@ -23,6 +23,8 @@ sources:
   - packages/provision/src/remediation.ts
   - packages/server/src/controllers/lifecycle.ts
   - proto/bettercompute/agent/v1/inventory.proto
+  - daemon/internal/inventory/collect.go
+  - daemon/internal/agent/kinds.go
 ---
 
 Placement can only book what the control plane knows a node has, and should only book it on hardware that
@@ -52,6 +54,15 @@ are never inventory; they are telemetry, and they never go to Postgres.
 
 The daemon collects inventory when its boot changes, on hardware events and XIDs, after provisioning steps,
 on a jittered 12-hour rescan, and when you run `inventory.refresh`.
+
+<Callout type="info" title="What bcd collects today">
+bcd's `inventory.Collector` reads procfs and sysfs without cgo. It fills `system`, `cpu`, `memory`, `disks`, `nics`
+(from sysfs, not netlink) and `os`, and reads NVIDIA GPUs from the kernel driver's `/proc/driver/nvidia` files
+(UUID, model, VBIOS, bus id, driver version). NVML is not wired in yet, so on a real host the `gpus` section has no
+ECC counters, row remapping, MIG state or NVLinks, and there is no `bmc` section. It collects when the process
+starts (so after every boot) and whenever `inventory.refresh` or `diag.nvml` asks for a rescan; the event-driven and
+12-hour rescans are not built. The fakehw build reports the full fake HGX board instead.
+</Callout>
 
 ## How inventory travels
 
@@ -183,7 +194,10 @@ The gateway writes one more kind at every `Hello`: each driver the daemon advert
 the label `bc.dev/driver.<id>=<version>` with source `system` (a missing version reads `unknown`; ids outside
 `[a-z0-9._-]` are skipped), and driver labels the daemon no longer advertises are dropped, in one statement that
 writes nothing when they did not change. Operators cannot overwrite them either. Placement can require them with
-`PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)).
+`PlacementRequest.nodeLabels`, where `'*'` accepts any version (see
+[placement](/docs/guides/capacity/placement#eligibility-filters)). The vps module does this for plugin runtimes: an
+instance whose runtime is not built into `bcd` (`libvirt-kvm`, `cloud-hypervisor`) is placed only on hosts carrying
+`bc.dev/driver.<runtime>`.
 
 ### The hardware key
 

@@ -311,6 +311,10 @@ better-compute doctor --strict --query "findings[].check"
 | `vps.pools.single-tenant` | error | A container-runtime pool without `policy.singleTenant: true`, which cannot run instances |
 | `vps.pools.ipam` | warning | A `vps-host` pool without an IP range, so its instances get no address |
 | `vps.hosts.capacity` | warning | Adopted VPS hosts without vCPU, memory and disk capacity rows: no inventory yet, or no worker runs `vps.hosts` |
+| `workflows-stuck` | warning | `provision`: active workflows with an in-flight step more than 5 minutes past its deadline. The engine fails an overdue step whenever it looks, so nobody runs their `workflow` reconciler |
+| `workflows-failed` | info | `provision`: workflows that failed in the last day; inspect with `workflows.get`, retry with `workflows.retry` |
+| `metal-failed` | warning | `metal`: machines `failed` with maintenance on, waiting for `metal.recover` or `metal.retire`, listed with their failure codes |
+| `metal-stalled` | warning | `metal`: machines more than 10 minutes in a workflow-driven state without an active workflow, so no worker runs the `metal` reconciler (a rescued machine resting after its rescue workflow is not stalled) |
 | `audit.checkpoints` | warning | Audit rows older than 3 hours not sealed by a checkpoint |
 | `history-partitions` | warning | `retentionModule()`: this or next month's partition of a history table is missing, so the retention pass is not running |
 | `history-default-partition` | warning | `retentionModule()`: rows of the last 13 months sit in a history table's default partition |

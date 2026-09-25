@@ -13,6 +13,11 @@ sources:
   - bench/realtime-spine/README.md
   - bench/multi-gateway/README.md
   - daemon/README.md
+  - daemon/cmd/bcd/main.go
+  - daemon/internal/agent/kinds.go
+  - daemon/.goreleaser.yaml
+  - scripts/daemon-test.mjs
+  - tests/e2e/bcd.test.ts
   - tests/server-spine-v01.test.ts
   - tests/capacity-concurrency.test.ts
   - tests/sim/fleet-gateway.test.ts
@@ -40,17 +45,20 @@ reference hardware in `bench/REFERENCE.md` (a gateway host with 8 vCPU and 32 Gi
 64 GiB NVMe).
 
 The phases were planned in order, but the work did not stay in order: the TypeScript control plane for every phase
-up to v0.5 exists in the repository, while the pieces that need a Go toolchain, a PostgreSQL server or real hardware
-do not. So no phase after P0 is formally closed yet. This page tracks each item as:
+up to v0.5 exists in the repository, and the Go daemon covers the v0.1 node agent, while the daemon's later modes and
+the pieces that need a PostgreSQL server or real hardware do not exist yet. So no phase after P0 is formally closed
+yet. This page tracks each item as:
 
 - **Done**: in the code, with tests, and listed in the changelog.
 - **In progress**: partly there. The note says which part is missing.
 - **Not started**: nothing in the repository yet.
 
-<Callout type="warn" title="Three blockers hold every phase open">
-- **The Go daemon is not built.** `bcd` is written in `daemon/` but Go is not installed on the build machine, so
-  nothing in it has been compiled, released or run on a server. Everything a daemon does is exercised through the
-  TypeScript `FakeDaemon`, which speaks the real protocol. See [the daemon](/docs/daemon).
+<Callout type="warn" title="Three things hold every phase open">
+- **The Go daemon covers v0.1 only, and is not released.** `bcd join`, `bcd node` and `bcd status` work and are
+  tested end to end against a real gateway (`tests/e2e/bcd.test.ts`, the fake-hardware build in WSL), but no
+  release has been cut, no real server has run it, NVML is a stub, and `bcd site`, `bcd ramdisk`, `bcd sim`,
+  tunnels, VM runtimes and self-update are not written. Those are exercised through the TypeScript `FakeDaemon`. See
+  [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No PostgreSQL server has run the suites.** Local runs use PGlite (PostgreSQL 18 in WebAssembly). Suites that need
   real concurrency skip unless `BETTER_COMPUTE_POSTGRES_URL` is set, and every benchmark number below is from PGlite
   on a development machine, which the gates do not count.
@@ -62,10 +70,10 @@ do not. So no phase after P0 is formally closed yet. This page tracks each item 
 
 | Phase | Theme | State |
 | --- | --- | --- |
-| [P0](#p0-scaffold) | Scaffold | Done, except the Go generated code |
-| [v0.1](#v01-adopt-and-reserve) | Adopt and reserve | Control plane done; blocked on bcd, PostgreSQL and the reference gate runs |
-| [v0.2](#v02-metal) | Bare metal | Control plane done and tested in simulation; site agent and ramdisk need bcd |
-| [v0.3](#v03-vps-and-access) | VPS and access | Control plane done; host runtimes and walkthrough runs need bcd |
+| [P0](#p0-scaffold) | Scaffold | Done |
+| [v0.1](#v01-adopt-and-reserve) | Adopt and reserve | Control plane done; bcd's node agent done and tested end to end, not released (NVML, a real host and the install-script run are open); PostgreSQL and the reference gate runs |
+| [v0.2](#v02-metal) | Bare metal | Control plane done and tested in simulation; `bcd site` and `bcd ramdisk` not written |
+| [v0.3](#v03-vps-and-access) | VPS and access | Control plane done; host runtimes, tunnels and the `access` section in bcd not written |
 | [v0.4](#v04-scale-and-ha) | Scale and HA | Mostly done in simulation; `bcd helper` missing, and the numbers need the reference PostgreSQL |
 | [v0.5](#v05-gpu-depth-and-ecosystem) | GPU depth and ecosystem | Control plane done ahead of schedule; hardware exits not run |
 | [v1.0](#v10-freeze) | Freeze | Not started |
@@ -85,8 +93,8 @@ reviewed edits.
 | Scripts `check-deps`, `check-sql-now`, `umbrella`, `sync-better-iam`, `proto-gen`, `authz-matrix` | Done | Under `scripts/`; `pnpm lint:repo` runs the repository rules |
 | Better IAM vendored | Done | 0.1.0 as tarballs in `vendor/better-iam`, pinned through `overrides` |
 | Packages `core`, `protocol`, `postgres` (with `./pglite` and `compute_now()`), shells of `server`, `client`, `cli`, `testing`, stubs of `inventory`, `provision`, `metal`, `vps`, and the umbrella | Done | The stubs have since been implemented |
-| `protocol` with TypeScript and Go generated code committed | In progress | TypeScript is generated; `daemon/gen/` stays empty until Go is installed |
-| `daemon/` skeleton and goreleaser configuration | In progress | Written; never built, since there is no Go toolchain |
+| `protocol` with TypeScript and Go generated code committed | Done | TypeScript by `scripts/proto-gen.mjs`; Go in `daemon/gen/` by `scripts/daemon-proto-gen.mjs` (protoc-gen-go v1.36.12, protoc-gen-connect-go v1.21.0), with `--check` |
+| `daemon/` skeleton and goreleaser configuration | Done | The module builds and its tests pass (`node scripts/daemon-test.mjs`; cross-compiled and run in WSL on Windows). goreleaser is configured and checked in CI, but no release has been cut |
 | CI: Ubuntu and Windows on Node 22 and 24, a PostgreSQL job, a Go job; the IAM contract test; `bench/REFERENCE.md` | Done | `.github/workflows/ci.yml` and `daemon.yml` are defined; this page does not track CI runs |
 
 | Exit | State |
@@ -96,8 +104,8 @@ reviewed edits.
 | Packed smoke importing `better-compute/{inventory,provision,metal,vps}` | Done: `test:packed` |
 | Freeze of `agent/v1`, the core contracts, the v0.1 schema and the v0.1 §9.2 rows | Done |
 
-Of the day-one verifications, PGlite's `btree_gist` is verified. The go-nvml mock, the KVM runner and CDI on target
-hosts are not, for want of Go and hardware.
+Of the day-one verifications, PGlite's `btree_gist` is verified. The go-nvml mock (go-nvml is not a dependency yet),
+the KVM runner and CDI on target hosts are not, for want of hardware.
 
 ## v0.1: Adopt and reserve
 
@@ -106,7 +114,7 @@ workstreams.
 
 | Workstream | State | Notes |
 | --- | --- | --- |
-| **W1, Go daemon**: join, session, journal, Renew with proof of possession, NVML inventory, `devices` and `access` convergence, CDI holds, `diag.nvml`, `node.reboot`, release artifacts, install script | In progress, blocked | The Go skeleton has `bcd version` and `bcd doctor` plus the contracts of every package; every other subcommand exits 2 `NOT_IMPLEMENTED`. The install script is done (`better-compute daemon install-script`). The FakeDaemon implements the whole W1 contract today |
+| **W1, Go daemon**: join, session, journal, Renew with proof of possession, NVML inventory, `devices` and `access` convergence, CDI holds, `diag.nvml`, `node.reboot`, release artifacts, install script | In progress | Done: `bcd join` (sealed token, verified `JoinResponse`), `bcd node` (session over pinned mTLS, bbolt journal, Renew with proof of possession at 60% of the lifetime, the `devices` converger with CDI holds and node-signed `AllocationBound`, `inventory.refresh`, attested `diag.nvml`, `logs.collect`, self-terminating `node.reboot`, signed-intent checks, the server time mark), `bcd status` over the unix socket, procfs/sysfs inventory, and the install script (`better-compute daemon install-script`); `tests/e2e/bcd.test.ts` runs it against a real gateway. Open: NVML (a stub), the `access` converger, release artifacts (no goreleaser run), and a run on a real host |
 | **W2, gateway and PKI**: mTLS sessions, the serving CA, epoch fencing, liveness batching, dispatch by join, resume rules, `BUSY` re-queue, local CAs, the `join-token` attestor, JoinService, the downloads route | Done | `@better-compute/gateway`, `@better-compute/pki` |
 | **W3, store, capacity and inventory**: schema, `compute_now()`, work queue, outbox, leases, CommandSweeper, `InlinePlacer`, atoms, rollups, `gpu-models.json`, conformance and torture tests | Done | `@better-compute/postgres`, `capacity`, `inventory` |
 | **W4, IAM bridge**: the catalog, plugin and inbox, projection and resolver, `embedded()`, IAM jobs, flag cache, usage sink, IamReconcile, contract test, authz matrix | Done | `@better-compute/iam` |
@@ -114,8 +122,8 @@ workstreams.
 
 | Acceptance | State | Notes |
 | --- | --- | --- |
-| A real `bcd` installed by the install script, plus 3 FakeDaemons, join and match the golden inventory | In progress | The FakeDaemon half is done; no real `bcd` exists yet |
-| An org user reserves 4 GPUs from an offered pool; the CDI spec lists exactly the booked UUIDs, which `reservations.get` returns | In progress | `tests/e2e/spine.test.ts` runs it with embedded Better IAM, the example policies, a real gateway and three FakeDaemons: the node's CDI spec, held devices and env file list exactly the booked UUIDs. A CDI spec on a real host needs bcd |
+| A real `bcd` installed by the install script, plus 3 FakeDaemons, join and match the golden inventory | In progress | The FakeDaemon half is done, and Go's `fakehw` matches the TypeScript section hashes. A real `bcd` (fakehw, in WSL) joins and is adopted in `tests/e2e/bcd.test.ts`, but not installed by the script (there is no release binary) and not beside FakeDaemons |
+| An org user reserves 4 GPUs from an offered pool; the CDI spec lists exactly the booked UUIDs, which `reservations.get` returns | In progress | `tests/e2e/spine.test.ts` runs it with embedded Better IAM, the example policies, a real gateway and three FakeDaemons: the node's CDI spec, held devices and env file list exactly the booked UUIDs. `tests/e2e/bcd.test.ts` binds a 2-GPU reservation on the real bcd and checks its CDI spec file under the fake root. A CDI spec on a real GPU host has not been checked |
 | `ReserveBoundedH100` allows 8 GPUs and denies 9; `BoundedExtend` denies 72 h + 1 h | Done | IAM bridge and contract tests |
 | `gpu.h100.hours` reaches Better IAM billing without duplicates across worker restarts, even with a deleted identity in a batch | Done | Idempotency keys on every usage window; the sink re-attributes deleted identities |
 | Place-to-active p99 under 2 s with 1k FakeDaemons in the real-time harness | Done, indicative | 1.02 s at 5 placements/s on PGlite; the inline placer saturates one pool between 5 and 10/s |
@@ -143,7 +151,7 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 
 | Deliverable | State | Notes |
 | --- | --- | --- |
-| `bcd site` and `bcd ramdisk` | In progress, blocked | Their command kinds, payloads and the control-plane side are done; the Go modes need a toolchain. The FakeDaemon plays both roles in tests |
+| `bcd site` and `bcd ramdisk` | In progress | Their command kinds, payloads and the control-plane side are done; the Go modes are not written (`bcd site` and `bcd ramdisk` exit 2 `NOT_IMPLEMENTED`). The FakeDaemon plays both roles in tests |
 | `provision` and `metal()` | Done | The workflow engine, profiles, the `metal` group and reconciler |
 | `siteTokens` and the SiteBoot lease; `joinRequests` | Done | A standby site agent is promoted within 30 s of the active one's loss |
 | `discovery`, `provisioned` and `x509pop` attestors | Done | |
@@ -171,10 +179,10 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | Deliverable | State | Notes |
 | --- | --- | --- |
 | `vps()`: instances, flavors, provider accounts, overcommit, IPAM | Done | The control plane and the instance reconciler |
-| Host runtimes `libvirt-kvm` and `cloud-hypervisor` | In progress, blocked | They run inside bcd on each host |
+| Host runtimes `libvirt-kvm` and `cloud-hypervisor` | In progress | They run inside bcd on each host; bcd has no `instances` converger yet, and the FakeDaemon's `FakeHypervisor` stands in |
 | `provider-hetzner` (Cloud, and Robot with `bootstrap`) | Done | Outside the umbrella package |
 | Single-tenant containers | In progress | Pools declare `policy.runtime` and must set `policy.singleTenant` for container runtimes, and vps refuses a container on a pool that serves other tenants; the host runtime needs bcd |
-| Tunnels with daemon-verified tickets, `nodes.issueSshCert`, the `access` section | Done | Including node-bound break-glass certificates and an SSH KRL for revocation |
+| Tunnels with daemon-verified tickets, `nodes.issueSshCert`, the `access` section | Done on the control plane | Including node-bound break-glass certificates and an SSH KRL for revocation. The daemon side runs in the FakeDaemon; bcd neither answers `OpenTunnel` nor converges `access` yet |
 | Webhooks and SSE | Done | `@better-compute/events` |
 | `mcp` | Done | `@better-compute/mcp` |
 | Delegated confirmation | Done | |
@@ -198,17 +206,17 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | `PoolLeasePlacer` | Done | Opt-in: `capacityModule({ placer: 'pool-lease' })` (D22) |
 | Shard rebalancing | Done | A silent worker's shards are taken at lease expiry |
 | Several gateways | Done in simulation | Three real gateways behind the fleet simulator, with gateway kill and zombie fencing |
-| WebSocket fallback, signed frames only | Done | Gateway and FakeDaemon sides; bcd's side needs Go |
-| A/B self-update and Rollout | In progress | Signed releases and wave rollouts are done; the A/B swap on the node is bcd's |
-| `bcd helper` | Not started | Go |
-| Signing of all commands and specs | Done | With `pki.commandSigning`, every command and every NodeSpec generation is signed by a worker key; the gateway relays stored signed specs verbatim, and the FakeDaemon verifies them (`intent.signedSpecs`). bcd's verification needs Go |
+| WebSocket fallback, signed frames only | Done | Gateway and FakeDaemon sides; bcd dials gRPC only |
+| A/B self-update and Rollout | In progress | Signed releases and wave rollouts are done; the A/B swap and `daemon.upgrade` on the node are bcd's and not written |
+| `bcd helper` | Not started | |
+| Signing of all commands and specs | Done | With `pki.commandSigning`, every command and every NodeSpec generation is signed by a worker key; the gateway relays stored signed specs verbatim, and the FakeDaemon verifies them (`intent.signedSpecs`). bcd verifies them too once its trust bundle holds command-signing roots: every spec, any present command signature, and a required one on `node.reboot` |
 | Remote IAM (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) | Done | U0 is an upstream Better IAM item outside this repository. With `remoteIam({ refresh })`, an admission waits (at most 2 s) until the IAM host's replica has replayed compute's commit and re-reads the row, failing closed with `UNAVAILABLE`; `doctor` warns `iam.refresh` when it is missing |
 | Remote-IAM MCP | Done | `remoteMcpIam()` gives `@better-iam/mcp`'s gate an IAM reached over HTTP; see [MCP](/docs/guides/clients/mcp#remote-iam) |
 | Remote-IAM event intake over webhooks | Done | `host.iam.webhook`: Better IAM's signed subtree webhooks into `iam_inbox`, for deployments that cannot read the IAM database. See [IAM events](/docs/guides/iam#iam-events-compute-reacts-to) |
 | Scheduler worker role | Done | `Reconciler.role` in core, the runtime's scheduler role with its own shard membership, and the pool-lease placer `capacity.placer` running in it |
 | Partitioned history | Done | `audit_events`, `inventory_snapshots` and `usage_windows` by UTC month (`core/0018_partitioned_history`); `retentionModule()` keeps months created ahead, prunes and drops emptied months; audit months are archived by hand. See [retention](/docs/operations/retention#history-partitions) |
 | Merkle audit checkpoints | Done | `@better-compute/audit`, with `better-compute audit verify` |
-| `bcd sim` | In progress | `better-compute sim` runs the FakeDaemon fleet simulator; the Go mode is not built |
+| `bcd sim` | In progress | `better-compute sim` runs the FakeDaemon fleet simulator; the Go mode is not written (`bcd sim` exits 2) |
 | R1, if the IAM-lane benchmark demands it | Not started | Waits for the v0.1 IAM-lane gate |
 
 The v0.4 acceptance is set at 10,000 nodes and 100,000 GPUs on the reference PostgreSQL. What exists is simulation:
@@ -235,7 +243,7 @@ Most of v0.5 landed early, on the control plane.
 | `dedicated-root` metal and `binding: 'node'` | Done | See [dedicated root](/docs/guides/bare-metal/dedicated-root) |
 | TPM attestor | In progress | The verifier and a software TPM producer are done; bcd's agent side (go-attestation) is not |
 | Optional workload identity | Done on the control plane | Workload OIDC tokens and the IMDS token exchange in pki, `WorkloadTokenRequest` over the session, the workload broker, and the issuer's discovery document and JWKS in `serve`; the IMDS on a host is bcd's. See [workload identity](/docs/guides/vps/instances#workload-identity) |
-| bcx and `driver-sdk` | In progress | The TypeScript SDK runs drivers out of process with mutual TLS; loading them from bcd needs Go |
+| bcx and `driver-sdk` | In progress | The TypeScript SDK runs drivers out of process with mutual TLS; bcd cannot load them yet (it has no `driver.invoke` kind) |
 | `provider-proxmox` | Done | |
 | console-kit and `apps/console` | Done | |
 | Walkthrough 4, a Kata runtime in Go | Not started | |
@@ -257,7 +265,7 @@ exists and what does not:
 | --- | --- | --- |
 | Isolated VMs as sandboxes | Done in the control plane (v0.3) | A sandbox is a VPS instance: flavors of vCPU, memory, disk and 0 to 16 GPUs, one IAM decision per create, quota, metering, sealed user data, no platform secrets in the guest, exec, SSH and TCP through tunnels. See [sandboxes](/docs/guides/vps/sandboxes) |
 | Provider pools running them | Done | Hetzner Cloud and Proxmox VE |
-| Hosted runtimes on your own servers | Not started | `libvirt-kvm` and `cloud-hypervisor` inside bcd (v0.3), which needs Go; a Kata runtime plugin via bcx (v0.5) |
+| Hosted runtimes on your own servers | Not started | `libvirt-kvm` and `cloud-hypervisor` inside bcd (v0.3), not written; a Kata runtime plugin via bcx (v0.5) |
 | Agents managing sandboxes over MCP | Done | `create_instance`, `list_instances`, `get_instance`, `start_instance`, `stop_instance` and `delete_instance`. See [MCP](/docs/guides/clients/mcp#the-tools) |
 | A dedicated sandbox API | Decided (D24), being planned, not built | The shape: a `sandboxes` group layered on `vps()`, with templates (flavor, image and user data), a time-to-live with auto-delete, snapshots and restore through the runtime driver, warm pools of pre-created stopped instances per template, and the microVM runtime (cloud-hypervisor or Kata via bcx) for untrusted code. It would reuse instances' admission, quota, IPAM, tunnels and IMDS, with no new placement or tenancy path. None of it is in the code yet |
 
@@ -271,7 +279,8 @@ from v0.5 disturbs no running allocation, with no open critical or high findings
 
 | Unblocked by | Moves |
 | --- | --- |
-| Installing Go 1.24+ | P0's Go code generation, W1, `bcd site` and `bcd ramdisk`, host runtimes, the WebSocket and A/B paths on the node, `bcd helper`, bcx on nodes, the TPM agent |
+| Writing more of bcd (Go is installed now; P0's code generation and W1's node agent are done) | `bcd site` and `bcd ramdisk`, host runtimes, tunnels and the `access` section on the node, the WebSocket and A/B paths, `bcd helper`, bcx on nodes, the TPM agent, NVML |
+| A bcd release | Installing real nodes with the install script |
 | A PostgreSQL 17 server | The concurrent capacity and torture suites, the IAM-lane gate, the 30-minute gateway gate, every v0.4 number |
 | The D15 hardware | Real inventory and CDI on an NVIDIA host, emulation CI on a KVM runner, the MIG and real-hardware nightlies |
 

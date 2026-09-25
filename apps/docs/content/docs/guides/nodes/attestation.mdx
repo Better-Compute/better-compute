@@ -121,7 +121,8 @@ neither a Renew proof nor an earlier `x509pop` proof can be replayed as one. The
 The result names the node, so JoinService reclaims it in place: it raises the identity generation, revokes every
 older certificate and keeps the node's state. A revoked certificate never re-joins; neither does one from before
 `nodes.revokeIdentity`. Agents build the evidence with `createX509popEvidence` (or `x509popProducer` for
-`FakeDaemon`).
+`FakeDaemon`). bcd does not produce this evidence yet: it joins with `join-token` only and answers no attestor
+challenge, so a bcd node whose certificate expired offline cannot re-join this way yet.
 
 ## provisioned
 
@@ -227,8 +228,8 @@ It then decides where the machine joins, keyed by the SHA-256 of the EK: the nod
 | `enrollment` | `{ tenantId, siteId, poolId?, pendingTtlSeconds?, retryAfterSeconds? }`: defer unknown EKs for approval. |
 | `challengeTtlMs` | Challenge lifetime, at most 5 minutes. |
 
-`tpmProducer(SoftwareTpm)` is the agent side for tests. How `bcd` will drive a real TPM (go-attestation) is still
-to be confirmed for v0.5.
+`tpmProducer(SoftwareTpm)` is the agent side for tests. bcd has no TPM code yet (its node key is a file); how it will
+drive a real TPM (go-attestation) is still to be confirmed for v0.5.
 
 ## Single-use evidence
 

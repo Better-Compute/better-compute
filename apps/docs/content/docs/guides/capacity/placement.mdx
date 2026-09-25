@@ -8,6 +8,8 @@ sources:
   - packages/capacity/src/placer.ts
   - packages/capacity/src/pipeline.ts
   - packages/capacity/src/eligibility.ts
+  - packages/capacity/src/node-lease.ts
+  - packages/server/src/nodes-module.ts
   - packages/capacity/src/selector.ts
   - packages/capacity/src/shortlist.ts
   - packages/capacity/src/store.ts
@@ -53,7 +55,7 @@ type PlacementOutcome =
     resources: { type: 'Record<string, number>', description: 'Scalar claims such as vcpu or memoryGiB, non-negative integers.' },
     during: { type: '{ start: number; end: number }', description: 'The booked interval in epoch milliseconds; must be non-empty.', required: true },
     excludeNodes: { type: 'string[]', description: 'Nodes to leave out, as after a lost race.' },
-    nodeLabels: { type: 'Record<string, string>', description: 'Labels every candidate must carry with exactly these values, such as a runtime a daemon advertised (bc.dev/driver.kata). Absent: no label constraint.' },
+    nodeLabels: { type: 'Record<string, string>', description: "Labels every candidate must carry with exactly these values, or with any value for '*', such as a runtime a daemon advertised (bc.dev/driver.kata: '*'). Absent: no label constraint." },
   }}
 />
 
@@ -138,9 +140,13 @@ checked in this order:
 `NoSchedule` reasons come from `nodes.no_schedule_reasons`, which conditions, taints and liveness
 maintain in the same transaction as their cause (see [inventory and health](/docs/guides/nodes/inventory-and-health)).
 The one reason a request can tolerate is a dedication to its own tenant: a node tainted `dedicated=acme` places
-`acme`'s work and no one else's (see [operating nodes](/docs/guides/nodes/operating-nodes)). The schedulability
-check exists twice, as `ineligibility(node, pool, tenantId?)` in TypeScript and as the SQL predicate the commit locks
-with (`schedulableSqlTolerating`), and a test keeps the two in agreement.
+`acme`'s work and no one else's (see [operating nodes](/docs/guides/nodes/operating-nodes)). Whole-node leases,
+which ignore every other NoSchedule reason, honour dedications too (`leasableSqlFor`), in their candidate query, at
+commit and in BookingRepair. The schedulability check exists twice, as `ineligibility(node, pool, tenantId?)` in
+TypeScript and as the SQL predicate the commit locks with (`schedulableSqlTolerating`), and a test keeps the two in
+agreement. A third form, `mayBeSchedulableSql` (schedulable for some tenant: no reason, or one dedication alone),
+drives the node controller's wake edge, so a node that becomes schedulable only for its dedicated tenant still
+wakes that tenant's pending reservations.
 
 Scalar room is `floor(allocatable × ratio) − allocated` from the node's `node_resources` row.
 
@@ -150,9 +156,12 @@ its rankings per label set. The labels a request usually needs are the ones the 
 each driver the daemon advertises becomes the system label `bc.dev/driver.<id>=<version>` (see
 [inventory and health](/docs/guides/nodes/inventory-and-health)). Labels are read at planning time, not locked at
 commit, so a `Hello` that drops a driver at that moment races like any inventory change, and the daemon refuses a
-runtime it does not have. The capacity API does not take `nodeLabels` from callers, and no built-in module sets it
-yet; a module sets it on the requests it builds through the capacity port (PLAN.md's walkthrough 4, a Kata
-runtime, is the intended user).
+runtime it does not have. A value of `'*'` (`anyLabelValue`) asks only for the label to exist, whatever its value,
+on every path. The capacity API does not take `nodeLabels` from callers; a module sets it on the requests it builds
+through the capacity port. The vps module does (PLAN.md's walkthrough 4): a hosted instance whose runtime `bcd` does
+not build in (anything but `libvirt-kvm` and `cloud-hypervisor`) asks for `bc.dev/driver.<runtime>: '*'`
+(`runtimeNodeLabels`), so a plugin runtime such as `firecracker` lands only on hosts whose daemon advertised that
+driver, in any version.
 
 ## Device fit and selectors
 

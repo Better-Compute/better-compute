@@ -1124,7 +1124,8 @@ export function MetalLifecycle() {
               Simulated in your browser from core&rsquo;s provision state table and metal&rsquo;s built-in profiles,
               expanded and run the way the workflow engine does. The control-plane side is implemented; the Go agents
               that answer these commands (<span className="font-mono">bcd site</span>,{' '}
-              <span className="font-mono">bcd ramdisk</span>) are written but not built yet.
+              <span className="font-mono">bcd ramdisk</span>) are not implemented yet: today only{' '}
+              <span className="font-mono">bcd node</span> runs.
             </>
           }
         >

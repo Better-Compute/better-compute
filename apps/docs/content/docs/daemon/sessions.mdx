@@ -17,6 +17,7 @@ sources:
   - packages/testing/src/daemon/fake-daemon.ts
   - daemon/internal/session/session.go
   - daemon/internal/journal/rules.go
+  - daemon/internal/agent/conn.go
   - bench/gateway-streams/README.md
   - PLAN.md
 ---
@@ -83,9 +84,10 @@ itself (see `bench/gateway-streams`).
 | `last_event_seq` | The highest event sequence written in this journal |
 | `inventory_hashes` | Inventory section name to the SHA-256 of its content |
 
-In Go, `session.NewHello` builds it from the journal: done results not yet acked, and entries of the current
-daemon process that are not done. After a daemon restart the process is new, so `running_command_ids` is empty and
-the crash rules below apply instead.
+bcd builds it from the journal (the rules of `session.NewHello`): done results not yet acked, and entries of the
+current daemon process that are not done. After a daemon restart the process is new, so `running_command_ids` is
+empty and the crash rules below apply instead. On a node with GPUs, bcd advertises the capabilities `cdi` and
+`nvml` and the driver `nvidia`.
 
 ### The Hello transaction
 
@@ -151,6 +153,13 @@ spec and the daemon reported no spec hash), then the replay. Commands the certif
 The daemon applies `Welcome` (`session.ApplyWelcome`): it records the epoch as `last_epoch`, forgets events up to
 `acked_event_seq`, keeps the clock offset, sets its lane credits, and sends the requested inventory sections, its
 unacked events and its latest status. It evaluates every `not_after` in server time through that offset.
+
+`server_time` is not signed, so the daemon never lets it move far backwards. The journal keeps a server time mark,
+advanced at every `Welcome` and heartbeat; a `Welcome` whose `server_time` lies more than 5 minutes before the mark
+ends the session ("server time went backwards"). Otherwise a gateway could set the daemon's clock back into an
+expired worker certificate's window and replay old signed commands. bcd and the FakeDaemon both enforce it, and bcd
+also keeps the mark in `identity.json` so that a lost journal does not reset it. A `trust` bundle is accepted only
+when it verifies under the pinned join-signing key and its version is newer than the one held.
 
 ## Epochs and fencing
 

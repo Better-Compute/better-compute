@@ -29,6 +29,9 @@ sources:
   - packages/cli/src/host/tunnels.ts
   - packages/cli/src/host/findings.ts
   - packages/cli/src/commands/serve.ts
+  - daemon/internal/agent/commands.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/pki/intent.go
 ---
 
 Better Compute runs commands as root on your machines, so its security model starts from one question: who can make
@@ -58,15 +61,17 @@ are built, and ends with a hardening checklist.
 | Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
 | Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
 | Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited | Built; fleet-wide quorum is v1.0 |
-| Replay | Command-id journal, `not_after`, epoch fencing, ticket `jti` sets, a Renew replay cache | Built in the control plane and FakeDaemon; `bcd` not built |
+| Replay | Command-id journal, `not_after`, epoch fencing, a server time mark against rewound `Welcome`s, ticket `jti` sets, a Renew replay cache | Built in the control plane, the FakeDaemon and `bcd`, except the daemon's ticket `jti` set, which only the FakeDaemon has (bcd has no tunnels yet) |
 | Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
 | PXE and DHCP spoofing | One lease-holding boot server per site, isolated VLANs, signed images | Partly built (v0.2) |
 | Cross-tenant residue on bare metal | BMC-driven teardown: attested erase, DCGM, a firmware baseline check, a new identity generation | Built in `metal` (v0.2, v0.5) |
 
-<Callout type="warn" title="The daemon is not built">
-  Every guarantee that ends in "the daemon checks" (signature requirements per kind, ticket re-verification, the
-  journal) is implemented in the TypeScript `FakeDaemon` and specified for `bcd`, which is written but not built. See
-  [the daemon](/docs/daemon).
+<Callout type="warn" title="What the real daemon checks today">
+  `bcd` is built and tested but not released. It implements the journal, the pinned join and TLS, `JoinResponse`
+  verification, signed commands and specs (once its trust bundle holds command-signing roots), node-signed attested
+  results and allocation reports, and the server time mark. It does not answer `OpenTunnel`, so ticket
+  re-verification on the node, and the SSH `access` section, exist only in the TypeScript `FakeDaemon` and in the
+  design. Its node key is a 0600 file, not a TPM key. See [the daemon](/docs/daemon#what-bcd-does-today).
 </Callout>
 
 ## Gateway processes
@@ -121,9 +126,11 @@ and so is every NodeSpec generation (v0.4): the NodeSpec controller signs the ex
 new generation (purpose `desired-state`) and stores them in `nodes.spec_body` and `nodes.spec_signature`. The gateway
 relays those signatures verbatim; it cannot produce them. A daemon requires a signature for the kinds its own table
 marks destructive and checks any that is present. For desired state, the FakeDaemon with command-signing roots
-requires a signature on every spec by default (`signedSpecs: 'always'`, v0.4), as bcd must, since an unsigned spec
-with a high generation would freeze all later ones; `signedSpecs: 'access'` requires one only on a spec that changes
-the `access` section (v0.2). See
+requires a signature on every spec by default (`signedSpecs: 'always'`, v0.4), and so does bcd, since an unsigned
+spec with a high generation would freeze all later ones; `signedSpecs: 'access'` requires one only on a spec that
+changes the `access` section (v0.2). Because `Welcome.server_time` is unsigned, both daemons also refuse a `Welcome`
+more than 5 minutes before the highest server time they have seen, so a gateway cannot replay an expired worker's
+signed command by rewinding the daemon's clock. See
 [PKI](/docs/operations/pki#signed-intent).
 
 ### Attested results
@@ -177,6 +184,10 @@ forwarded requests are refused. See [workload identity](/docs/guides/vps/instanc
 - Break-glass shells use `nodes.issueSshCert`: `compute:nodes:ssh-root` on the node and, by default, an MFA session.
   Certificates last at most 1 h and never beyond the session, name `<account>@<nodeId>`, and grant only
   `permit-pty`. Each issuance is recorded; `nodes.revokeSshCert` puts the serial in the node's key revocation list.
+  With `host.iam`, a role deactivation, an identity's offboarding, expiry or deletion, and its session revocations
+  revoke its certificates too, and the `tunnels.ssh-certificates-reauthorize` reconciler re-decides every live
+  certificate for its issuing session each minute. When IAM is unreachable a certificate stays valid until it
+  expires, on purpose: break-glass is for outages.
 - Per identity and per api replica: 10 tunnels a minute and 20 certificates an hour, then `RATE_LIMITED`.
 
 See [interactive access](/docs/guides/access).
@@ -192,6 +203,11 @@ See [interactive access](/docs/guides/access).
 - **Idempotency keys** are scoped to `(tenant, identity)`, so one tenant cannot replay another's request.
 - **Tenant-controlled machines.** Under a dedicated-root lease the node's identity is reissued as `node-tenant`,
   and its inventory becomes advisory.
+- **Suspended and deleted tenants.** Once the IAM bridge's `tenant` reaction (`tenantStateHandler`) mirrors a
+  tenant's state, the envelope refuses a suspended tenant's mutations and every call of a deleted one with
+  `TENANT_SUSPENDED`, root callers exempt, within 5 seconds in every process. A deleted tenant is then torn down:
+  its reservations end, offers to it are withdrawn, its pools archived, its workflows aborted, its private images
+  soft deleted, its image signers revoked, and its bare-metal machines retired (deployed ones wiped first).
 
 See [tenancy](/docs/guides/iam/tenancy).
 

@@ -83,9 +83,13 @@ operator taints: conditions, `unreachable` and `draining` belong to their contro
 
 **Dedicating a node to a tenant.** The taint `dedicated=<tenantId>` (stored as `taint:dedicated=acme`) keeps every
 other tenant off the node but not that tenant: placement for `acme` tolerates a dedication to `acme` and nothing
-else, on every placement path (inline, shortlist, pool-lease index, bulk commits and BookingRepair). A dedication
-together with any other reason, or dedications to two tenants, blocks everyone. Capacity rollups still count a
-dedicated node as NoSchedule (bucket `unhealthy`).
+else, on every placement path (inline, shortlist, pool-lease index, bulk commits and BookingRepair) and for
+whole-node leases (`binding: 'node'` reservations in a `tenantRoot` pool, see
+[dedicated-root metal](/docs/guides/bare-metal/dedicated-root)), which ignore every other NoSchedule reason: a node
+dedicated to `acme` is never leased by another tenant. A dedication together with any other reason, or
+dedications to two tenants, blocks everyone. Capacity rollups still count a dedicated node as NoSchedule (bucket
+`unhealthy`). A node that becomes schedulable for its one dedicated tenant still fires the wake edge, so that
+tenant's pending reservations are placed at once instead of on their 30-second retry.
 
 ```ts
 await client.nodes.taint({ tenantId, nodeId, add: ['dedicated=acme'] });

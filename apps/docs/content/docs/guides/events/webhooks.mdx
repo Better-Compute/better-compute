@@ -127,6 +127,10 @@ curl -X POST https://compute.example.com/api/compute/webhooks/create \
 A tenant can have 20 webhooks (`maxPerTenant`); the 21st is `QUOTA_EXCEEDED`. Every webhooks method is decided as
 `compute:webhooks:manage` on `compute-tenant/{tenantId}`.
 
+`webhooks.create` takes no idempotency key, so retrying a create whose answer was lost makes a second webhook with
+its own secret, and both receive every matching event. Before retrying, check
+[`webhooks.list`](/docs/reference/api/webhooks#list) and [delete](#test-pause-and-delete) the one you do not keep.
+
 ### Choosing events
 
 A pattern is `*` (everything), a family ending in `.*`, or one exact type. `reservation.*` matches

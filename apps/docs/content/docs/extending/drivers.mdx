@@ -53,7 +53,8 @@ each kind is data: a binding on the node, inherited from its pool's hardware pro
 - **Declarations work.** `defineDriver`, the driver kinds, `drivers.list`, hardware profiles and per-node bindings are
   implemented and tested.
 - **The built-in drivers do not run yet.** Redfish, IPMI and vendor BMCs (through bmclib), iPXE, image streaming and
-  kexec run inside `bcd site` and `bcd ramdisk`, which are written in Go for v0.2 but not built.
+  kexec run inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2 modes, which are not written yet (both exit 2
+  with `NOT_IMPLEMENTED`; only bcd's node agent exists).
 - **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
   instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
 - **bcx works in TypeScript.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to end, with
@@ -232,7 +233,8 @@ power and deploy), not retry-safe, roles `node`, `site` and `ramdisk`, payload `
 default timeout (each step's own timeout sets `notAfter`). `tests/e2e/bcx.test.ts` runs such steps end to end: a
 module profile binds `power.getPower` and `power.setPower` to a bcx plugin's driver, and both go out as
 `driver.invoke` through the real engine, queue and gateway to a FakeDaemon that runs them in the plugin process
-(`fakeDriverInvoke` from `@better-compute/testing`). bcd's side needs Go. Metal's own steps
+(`fakeDriverInvoke` from `@better-compute/testing`). bcd has no `driver.invoke` kind yet and answers it
+`UNSUPPORTED`. Metal's own steps
 (`power.setPower`, `media.insert`, ...) are registered control-plane steps that relay typed commands instead; see
 [workflows](/docs/guides/bare-metal/workflows).
 

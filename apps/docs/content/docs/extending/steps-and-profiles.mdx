@@ -48,7 +48,8 @@ page is about writing the pieces.
 <Callout type="warn" title="Where this runs today">
 The engine, `defineStep`, `defineProfile` and every metal step run in the control plane and are tested on PGlite,
 including the Ubuntu and Talos walkthroughs. Steps that send commands wait for agents: `bcd site` and `bcd ramdisk`
-are written but not built, so in tests simulated agents (or FakeDaemon site agents) answer the commands.
+are not written yet (only bcd's node agent is), so in tests simulated agents (or FakeDaemon site agents) answer the
+commands.
 </Callout>
 
 ## Three kinds of step

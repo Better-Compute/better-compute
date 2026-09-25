@@ -13,6 +13,7 @@ sources:
   - packages/provision/src/command-step.ts
   - packages/provision/src/builtin-steps.ts
   - packages/provision/src/api.ts
+  - packages/provision/src/findings.ts
   - packages/core/src/states.ts
   - packages/metal/src/reconcile.ts
   - tests/provision-engine.test.ts
@@ -204,6 +205,12 @@ The error a failed step records says why:
 | `INVALID_INPUT` | the step's input no longer passes its manifest |
 
 The workflow's own error is `<stepId> (<action>): <message>` with the step's code.
+
+`better-compute doctor` reports two provision findings (`provisionFindings`): `workflows-stuck` (warning) for
+active workflows with a step more than 5 minutes past its deadline, since the engine fails an overdue step as soon
+as it looks and so no worker is running their `workflow` reconciler; and `workflows-failed` (info) for workflows
+that failed in the last day. Metal adds `metal-failed` and `metal-stalled`; see
+[observability](/docs/operations/observability#doctor).
 
 ## The workflows API
 

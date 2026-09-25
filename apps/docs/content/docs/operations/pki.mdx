@@ -76,7 +76,12 @@ better-compute pki init --trust-domain compute.example.com
 
 It creates every key above and writes one JSON file, mode 0600, never overwriting an existing one. The private keys
 are sealed with AES-256-GCM under a key derived (HKDF-SHA256) from `BETTER_COMPUTE_SECRET`, with the trust domain in
-the authenticated data. It prints the pins, like `pki show`.
+the authenticated data. The sealed payload also carries a SHA-256 over every public field (certificates, trust
+anchors, the trust version), so whoever can write the file but lacks the secret cannot add a command-signing root or
+pin a trust version: loading refuses a sealed bundle whose public parts changed (`INVALID_CONFIG`; restore it from a
+backup), while reformatting the JSON is harmless. A bundle sealed before this check still loads unless it carries
+rotation fields, which cannot be trusted there; restore the copy from before the rotation and run
+`pki rotate-command-root` again. Any CLI write-back re-seals in the new format. `pki init` prints the pins, like `pki show`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -103,6 +108,7 @@ servers: it is needed only to replace a CA.
 | `execTicketKeyId` | The `kid` of the exec ticket key (its RFC 7638 thumbprint) |
 | `sshCaPublicKey` | The OpenSSH public key sshd trusts |
 | `commandSigningRootSha256` | The command-signing root, as trust bundles list it |
+| `commandSigningNextRootSha256`, `commandSigningPreviousRootSha256`, `trustVersion` | During a root rotation: the root published but not signing yet, the former root still trusted, and the trust bundle's version |
 | `expires` | When the root, node, serving, internal and command-signing certificates expire |
 
 Pins have `bcd`'s form, `sha256/<base64 of SHA-256(SPKI)>`. `better-compute daemon install-script` reads the bundle
@@ -125,6 +131,28 @@ earlier files atomically.
 | `--name NAME` | `gateway` | File name stem |
 | `--days N` | 30 | Lifetime, from 1 to 30 days |
 | `--pki PATH` | `.better-compute/pki.json` | The bundle |
+
+### pki renew-ca
+
+```bash
+better-compute pki renew-ca --ca node
+better-compute pki renew-ca --ca serving --root-key /media/usb/root-ca.key
+```
+
+It issues a new certificate for the node, serving or internal CA from the root, for the same key and subject, and
+writes the bundle back (sealed when `BETTER_COMPUTE_SECRET` is set). Certificates the CA already issued stay valid and
+the serving CA's SPKI pin does not change, so nothing is re-pinned and no node rejoins. Roll the bundle out to every
+process before the old certificate expires. It prints the CA, the new `notAfter` and serial, and for `serving` the
+unchanged pin.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--ca CA` | required | `node`, `serving` or `internal` |
+| `--root-key PATH` | none | The offline root key (`pki init --offline-root`), when the bundle has none; it is not written into the bundle |
+| `--days N` | 365 | Lifetime of the new certificate, 1 to 3650 days, capped by the root |
+| `--pki PATH` | `.better-compute/pki.json` | The bundle |
+
+### Reloading gateway certificates
 
 A running gateway picks a reissued certificate up without a restart when it reads it from files. Point
 `host.gateway.tlsFiles` at them (and `host.gateway.internal.tlsFiles` at the internal-CA pair of the control API):
@@ -198,8 +226,10 @@ Bundles made before a key existed still load; they lack that key (`auditSigning`
 `commandSigning` are optional), and `execTicketIssuer` then fails with `INVALID_CONFIG`.
 
 `doctor` checks the bundle at `--pki`: `pki.unreadable` when it cannot be parsed, `pki.unseal` when it does not
-open with this deployment's secret, `pki.ca-expired` for an expired CA, and `pki.ca-expiring` for one that expires
-within 30 days.
+open with this deployment's secret, `pki.ca-expired` for an expired CA, `pki.ca-expiring` for one that expires
+within 30 days, and `pki.rotation` (info) while a command-signing root rotation is half done: a new root published
+but not signing yet (run `--stage switch` once every daemon has the trust version), or a former root still trusted
+(run `--stage drop` at least 24 hours after the switch).
 
 ## Trust domain and SPIFFE IDs
 
@@ -285,9 +315,21 @@ Rotating the root takes three steps, gated on the fleet:
 2. once every daemon has acknowledged that version, switch `pki.commandSigning` to the new root;
 3. once nothing is signed under the old root any more, remove it and bump the version again.
 
-`addTrustRoot`, `trustVersionAcknowledged` and `removeTrustRoot` in `better-compute/pki` implement the gates; the
-control plane does not run them for you yet. In production the design keeps this root in KMS or Vault transit; the
-bundle form is for development and small deployments.
+`better-compute pki rotate-command-root --stage add|switch|drop` runs one step on the bundle and writes it back
+(sealed when `BETTER_COMPUTE_SECRET` is set), printing the roots and trust version daemons will trust:
+
+```bash
+better-compute pki rotate-command-root --stage add     # a new root beside the current one; trust version up
+# roll the bundle out to every process; daemons get the new version in Welcome.trust
+better-compute pki rotate-command-root --stage switch  # workers sign under the new root; the old one stays trusted
+# at least 24 hours later (worker keys live at most 24 h)
+better-compute pki rotate-command-root --stage drop    # the old root is no longer trusted; version up again
+```
+
+A step out of order is `INVALID_STATE`, and `doctor` reminds you of a rotation left half done (`pki.rotation`). The
+command does not check which trust version the fleet acknowledged; `addTrustRoot`, `trustVersionAcknowledged` and
+`removeTrustRoot` in `better-compute/pki` implement those gates for your own tooling. In production the design keeps
+this root in KMS or Vault transit; the bundle form is for development and small deployments.
 
 ## Exec tickets and the SSH CA
 
@@ -339,11 +381,11 @@ broker checks is in [VPS instances](/docs/guides/vps/instances#workload-identity
 | Node certificates | Automatically: daemons renew at about 60% of their 24 h lifetime |
 | Worker signing keys | Automatically, at 60% of their 24 h lifetime |
 | Gateway serving certificates | `pki issue-gateway` before the 30 days run out; gateways with `host.gateway.tlsFiles` hot-reload it, others need a restart one at a time |
-| Command-signing root | The three steps above |
+| Command-signing root | `pki rotate-command-root`, the three steps above |
 | Exec ticket key | `rotate()` on the issuer; the previous key stays in the JWKS |
 | Workload issuer keys | `addKey()`, `promote(kid)`, then `retire(kid)` once the old key's tokens expired |
 | Sealed secrets | `localSealedSecretStore` with several keys, then `reseal()` (see [configuration](/docs/operations/configuration#the-deployment-secret)) |
-| Node, serving and internal CAs (1 year) | Not automated: no CLI command reissues a CA from the root yet. `doctor` warns 30 days ahead. |
+| Node, serving and internal CAs (1 year) | `pki renew-ca --ca node` (or `serving`, `internal`) before they expire (`doctor` warns 30 days ahead); see [pki renew-ca](#pki-renew-ca) |
 | JoinService keys | Not automated. Daemons pin them, so new keys mean new pins in every machine's configuration. |
 
 <Callout type="warn" title="Losing the bundle">

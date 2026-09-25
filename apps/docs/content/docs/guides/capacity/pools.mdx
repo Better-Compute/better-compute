@@ -119,22 +119,27 @@ for in each mode.
       type: 'boolean',
       description: "Dedicated-root pools (v0.5): reservations may use binding 'node' to lease whole machines.",
     },
+    singleTenant: {
+      type: 'boolean',
+      description: "Offered to at most one tenant besides the owner, never with includeDescendants (a second offer is INVALID_STATE). VPS container runtimes, which share the host kernel, require it. pools.update refuses to turn it on while more than one other tenant, or an includeDescendants offer, holds the pool.",
+    },
     workloadIdentity: {
       type: 'boolean',
       description: "VPS pools (v0.5): hosted instances may get workload identity tokens from their host's metadata service. Off by default. See /docs/guides/vps/instances#workload-identity.",
     },
     admission: {
       type: "{ budgetCheck?: 'none' | 'meter' }",
-      description: 'Declared for a per-admission billing check. The admission path does not call it yet.',
+      description: "'meter': reservations.create and extend call IAM billing.check after the decision and refuse a spent budget with SPEND_LIMIT_REACHED. An offer's onBudgetExceeded stop-new or drain turns the same check on.",
     },
   }}
 />
 
-Two of these are declared ahead of the code that honours them. `overcommit` describes the intended
-ratio, but the placer reads the ratio stored on each `node_resources` row, and nothing in this
-release fills those rows from the pool policy. `admission.budgetCheck: 'meter'` is part of the type
-and the `IamPort` has `billingCheck`, but no admission calls it yet; budgets are enforced through the
-IAM policy described in [quotas and usage](/docs/guides/capacity/quotas-and-usage).
+The placer reads the overcommit ratio stored on each `node_resources` row, not the policy. Only the
+vps module fills those rows from `overcommit`: for `vps-host` pools, its `vps.hosts` work writes
+`vcpu`, `memoryGiB` and `diskGiB` from each host's inventory with the pool's ratio (default 1, clamped
+to 0.1 to 100); on other pool classes the field has no effect. `admission.budgetCheck: 'meter'` adds a Better IAM
+`billing.check` to every reservation admission in the pool, on top of the IAM policy described in
+[quotas and usage](/docs/guides/capacity/quotas-and-usage).
 
 ## Create a pool
 
@@ -194,8 +199,9 @@ await compute.api.pools.offer(rootCredential, {
   round-trip through fleet config. In this release the capacity module matches the offered tenant
   exactly and the placer does not read `priority`.
 - The **offering validator** refuses, with `INVALID_STATE`, to offer a `timeslice` or `mps` pool, or a
-  pool that holds `tenant-owned` nodes, to anyone but its owner. An archived pool cannot be offered
-  either.
+  pool that holds `tenant-owned` nodes, to anyone but its owner. A `policy.singleTenant` pool can be
+  offered to one tenant besides its owner, and never with `includeDescendants`. An archived pool cannot
+  be offered either.
 
 The offered tenant then sees the pool in [`pools.list`](/docs/reference/api/pools#list) and
 [`pools.get`](/docs/reference/api/pools#get), each pool with `owned`, `archived` and the tenant's own
@@ -250,6 +256,12 @@ pool without disturbing what runs on it:
 - only the owner still sees the pool, with `archived: true`.
 
 Archiving is idempotent and emits `pool.archived` with the list of unoffered tenants.
+
+When Better IAM deletes a tenant, compute's tenancy teardown (`capacityTenantDeleted`) archives the pools
+it owns the same way (`pool.archived` with `reason: 'tenant deleted'`, quotas of the offered tenants
+zeroed), withdraws every offer made to it (`pool.unoffered` to the owner) and ends its reservations. Other
+tenants' live bookings in an archived pool run to their end. See
+[tenancy](/docs/guides/iam/tenancy#suspended-and-deleted-tenants).
 
 ## The pools API
 

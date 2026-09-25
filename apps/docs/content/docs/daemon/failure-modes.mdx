@@ -22,6 +22,9 @@ sources:
   - tests/sim/multi-gateway.test.ts
   - daemon/internal/journal/rules.go
   - daemon/internal/session/session.go
+  - daemon/internal/journal/bolt.go
+  - daemon/internal/agent/conn.go
+  - tests/e2e/bcd.test.ts
   - bench/gateway-streams/README.md
   - bench/multi-gateway/README.md
 ---
@@ -150,7 +153,9 @@ they were already delivered.
 ## Journal loss
 
 A ramdisk reboot, a reinstall or corruption loses the journal. The daemon starts a new one with a new `journal_id`;
-its identity stays with its key, so it reconnects as the same node.
+its identity stays with its key, so it reconnects as the same node. bcd moves a journal file that does not open aside
+(`journal.db.corrupt-<unix time>`) rather than deleting it, and starts its server time mark from the copy in
+`identity.json`, so a lost journal does not reopen the clock-rewind window.
 
 - The server sees the new `journal_id` in `Hello` and fails every in-flight command that is not retry-safe with
   reason `journal-lost`, instead of replaying it into a journal that cannot deduplicate. Controllers re-decide
@@ -203,6 +208,9 @@ No component trusts another's wall clock.
 - **Daemons use server time.** `Welcome.server_time` gives the daemon the offset between its clock and
   `compute_now()`, and it evaluates `not_after` through that offset. Conditions carry `age_ms` on the daemon's
   monotonic clock, and the control plane derives `since` itself; event and inventory timestamps are advisory.
+  Because `server_time` is unsigned, the daemon keeps a server time mark that only moves forward and refuses a
+  `Welcome` more than 5 minutes before it, so a gateway cannot rewind the daemon into an expired signer's window
+  (see [Welcome](/docs/daemon/sessions#welcome)).
 - **Control-plane processes** anchor their business clock to `compute_now()`, re-sampled at every lease renewal. A
   process more than 1 second off raises `ClockSkew`: a log warning and a `selfCheck` finding, and the
   `clock_offset_seconds` metric shows the offset.
@@ -291,6 +299,9 @@ keep running (nothing is released, I5); an operator re-joins it with a new token
 better-compute sim --nodes 100 --chaos heavy --seed 7
 ```
 
-The real Go daemon joins this testing once it is built: PLAN.md plans a protocol and skew suite running
-`bcd -tags fakehw` against an in-process gateway, and `bcd sim --nodes 10000` against real gateways and PostgreSQL
-through Toxiproxy in v0.4.
+The real Go daemon is tested at a smaller scale. Its unit tests cover the journal rules, crash recovery, the server
+time mark and the session handling against scripted streams, and `tests/e2e/bcd.test.ts` runs the fakehw build
+against a real gateway through a join, commands, a GPU binding and a reboot (see
+[testing](/docs/operations/testing#the-go-daemon)). It does not run under chaos yet: PLAN.md's protocol and skew suite
+over lossy links and `bcd sim --nodes 10000` against real gateways and PostgreSQL through Toxiproxy (v0.4) are not
+built, and `bcd sim` exits 2.

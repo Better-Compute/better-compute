@@ -154,6 +154,22 @@ const rotateInput = manifest({
 so a malformed request never costs an IAM call. Another validator works too, but wrap its failures in
 `ComputeError('INVALID_INPUT', …)`: any other error thrown from `validate` reaches the caller as `INTERNAL_ERROR`.
 
+A `validate` function may carry its input's JSON Schema as a `jsonSchema` property; the generated API reference and
+tool schemas read it. For a manifest, attach `m.jsonSchema()` to `m.parse`. For a hand-written validator,
+`describedBy(schema, validate)` from `@better-compute/core` checks the schema's structure first (field types,
+required and unknown fields, enums), reporting every structural issue at once as `INVALID_INPUT` with
+`details.issues` (`{ message, path }[]`), then runs your validator for the domain rules; `strictObject(properties,
+required)` builds an object schema that refuses unknown fields:
+
+```ts
+import { describedBy, strictObject } from '@better-compute/core';
+
+const validate = describedBy(
+  strictObject({ tenantId: { type: 'string' }, count: { type: 'integer' } }, ['tenantId']),
+  (raw) => parseCount(raw), // ranges, patterns, "exactly one of"
+);
+```
+
 ## The method context
 
 The handler's `MethodContext` is the [module context](/docs/extending/modules#the-module-context) plus the call:

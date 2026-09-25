@@ -26,10 +26,12 @@ This section covers the node from an operator's point of view: how a machine joi
 what inventory and health say about it, how you take it out of service, and how you send it commands.
 
 <Callout type="info" title="The daemon today">
-The Go daemon `bcd` is written in `daemon/` but not built or released yet. The TypeScript `FakeDaemon` in
-`@better-compute/testing` speaks the same protocol, and it is what the tests, the simulator and
-`better-compute dev --sim N` run. Everything on these pages describes the control plane, which behaves the
-same for both.
+The Go daemon `bcd` in `daemon/` is built and tested but not released yet. Its node agent joins, holds a session,
+runs `inventory.refresh`, `diag.nvml`, `logs.collect` and `node.reboot`, and binds GPUs through the `devices`
+section; `tests/e2e/bcd.test.ts` runs it against a real control plane. The TypeScript `FakeDaemon` in
+`@better-compute/testing` speaks the same protocol, and it is what the simulator, most tests and
+`better-compute dev --sim N` run. Everything on these pages describes the control plane, which behaves the same
+for both. See [what bcd does today](/docs/daemon#what-bcd-does-today).
 </Callout>
 
 ## State is several axes, not one status

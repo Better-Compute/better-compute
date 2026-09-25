@@ -2289,8 +2289,8 @@ export function CommandLanes() {
           <>
             A faithful model of the gateway (<span className="font-mono">@better-compute/gateway</span>) and of the
             FakeDaemon in <span className="font-mono">@better-compute/testing</span>, which speaks the real protocol;
-            the Go daemon <span className="font-mono">bcd</span> is written but not released yet. Idle time is
-            compressed.
+            the Go daemon <span className="font-mono">bcd node</span> follows the same rules and is tested end to
+            end against the gateway, but is not released yet. Idle time is compressed.
           </>
         }
       >

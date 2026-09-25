@@ -10,6 +10,9 @@ sources:
   - packages/cli/src/config.ts
   - packages/testing/src/dev/stack.ts
   - packages/testing/src/sim/fleet-sim.ts
+  - daemon/internal/config/config.go
+  - scripts/daemon-test.mjs
+  - tests/e2e/bcd.test.ts
   - packages/iam/src/testing.ts
   - packages/postgres/src/pglite.ts
   - examples/dev/README.md
@@ -30,11 +33,11 @@ all run end to end on your laptop. `better-compute sim` is the other tool: a see
 simulation that checks the fleet invariants and prints a digest you can reproduce.
 
 <Callout type="warn" title="Simulated machines, real control plane">
-The Go daemon `bcd` is written but not built yet (no Go toolchain on the build machine), so no physical server can
-join a local control plane today. The simulated machines are `FakeDaemon`s from `@better-compute/testing`: the
-daemon side of the protocol in TypeScript. Everything above the daemon is the real code: JoinService, the gateway,
-the runtime, the reconcilers, capacity and Better IAM. The dev gateway authenticates sessions by a header over
-cleartext HTTP/2 and listens on loopback only; never expose it.
+The simulated machines are `FakeDaemon`s from `@better-compute/testing`: the daemon side of the protocol in
+TypeScript. Everything above the daemon is the real code: JoinService, the gateway, the runtime, the reconcilers,
+capacity and Better IAM. The dev gateway authenticates sessions by a header over cleartext HTTP/2 and listens on
+loopback only; never expose it. The Go daemon `bcd` is built and tested but not released, and `better-compute dev`
+has no flag to join it; the dev stack in code can (see [a real bcd](#a-real-bcd)).
 </Callout>
 
 ## Start a server
@@ -222,6 +225,21 @@ A `DevFleet` has `createPool({ gpuModel?, key?, expectGpuCount? })`, `join({ poo
 `daemons`, the `gatewayUrl`, and `close()`. `createDevStack()` takes `database`, `iam`, `modules`, `baseURL`,
 `secret`, `trustDomain`, `worker` (default `pollMs` 100), `region`, `gateway` and `daemon` options.
 
+### A real bcd
+
+Two options let a daemon outside the process, such as a real `bcd`, join the dev stack:
+
+| Option | What it adds |
+| --- | --- |
+| `externalTls: { host?, port?, dnsNames? }` | A second gateway listener authenticated as in production: HTTP/2 over mTLS, a serving certificate from a dev serving CA (`servingCaCertificate`, what the daemon pins; names `localhost` and `gw.dev.local` by default), client certificates checked against the dev node CA. Its URL is `externalGatewayUrl`. Safe to bind beyond loopback |
+| `admitExternalJoins: true` | On the loopback h2c listener, also accepts the `x-bc-test-node` header of nodes that joined on their own, once their current certificate is in `node_certs` (polled every 250 ms, or `admit(nodeId)` at once). bcd reaches it only as a fakehw build with `dev_insecure_h2c = true` |
+
+For `externalTls`, write a `config.toml` with `gateway_url` set to the listener, `serving_ca_spki_pin` from
+`servingCaCertificate`, the join pins from `pins`, and `gateway_server_name = "gw.dev.local"` when you dial an IP
+address; put `pins.joinEncryptionJwk` next to it as `join-encryption.jwk`. Then pipe a join token into `bcd join`
+and start `bcd node`. `tests/e2e/bcd.test.ts` does exactly this from WSL; see
+[testing](/docs/operations/testing#the-go-daemon).
+
 ## The example
 
 `examples/dev` is the whole deployment every example shares (`examples/shared/compose.ts`: provision and metal,
@@ -297,7 +315,9 @@ The repository is a pnpm workspace; `docs/development.md` is the full guide.
   `node node_modules/pnpm/bin/pnpm.mjs <args>`.
 - **No database server.** PGlite backs the tests. Suites that need real Postgres skip unless
   `BETTER_COMPUTE_POSTGRES_URL` is set.
-- **Go** only for `daemon/`: `go test -tags nonvml,fakehw ./...` builds without cgo or GPUs.
+- **Go 1.26 or later** only for `daemon/`: `node scripts/daemon-test.mjs` runs `go test -tags nonvml,fakehw`
+  without cgo or GPUs, natively on Linux and through WSL on Windows. The bcd end-to-end suite is opt-in on Windows
+  (`BCD_E2E=1`); see [testing](/docs/operations/testing#the-go-daemon).
 
 | `pnpm …` | What it does |
 | --- | --- |

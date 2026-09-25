@@ -118,16 +118,18 @@ breaking. PLAN.md §5.1 keeps every `define*` helper **experimental until v1.0**
 | Reconcilers, command kinds, NodeSpec sections, migrations | Built, with the v0.1 worker runtime. |
 | Scheduler plugins | Built: filters, scorers, atom pickers and admission hooks run in both placers. |
 | Sinks | Built: event sinks on OutboxDispatch with durable cursors and dead letters; audit sinks on the built-in `audit-sinks` module. Usage sinks are refused with `INVALID_CONFIG` (usage goes to IAM billing through the bridge); see [sinks](/docs/extending/sinks#usage). Sinks and scheduler plugins a module lists in `extensions` run like those in the options. |
-| Attestors | Built: `join-token`, `x509pop`, `provisioned`, `discovery`, `cloud-iid` and `tpm` are all `defineAttestor` values. The Go producers in bcd are written but not built. |
-| Drivers, steps, profiles | Built in TypeScript (`metal`, `provision`). The bcd side that runs agent commands is written but not built: Go is not installed on the build machine. |
+| Attestors | Built: `join-token`, `x509pop`, `provisioned`, `discovery`, `cloud-iid` and `tpm` are all `defineAttestor` values. bcd produces only `join-token` joins; its producers for the others are not written. |
+| Drivers, steps, profiles | Built in TypeScript (`metal`, `provision`). bcd runs only the four v0.1 node kinds; the site-agent and ramdisk modes that run driver operations and steps are not written. |
 | Providers | Built: `hetzner` and `proxmox` provider packages, checked by `providerConformanceCases()`. |
 | bcx out-of-process drivers | A v0.5 draft. `@better-compute/driver-sdk` works for TypeScript plugins; the proto is unstable until v0.5 ships. |
 
-<Callout type="warn" title="The daemon half is not built">
+<Callout type="warn" title="The daemon half is mostly missing">
 Several extension points end in a command that a <Term id="bcd">bcd</Term> agent runs: driver operations on a site
-agent, steps on a ramdisk, NodeSpec sections on a node. The Go daemon is written in `daemon/` but not built yet. The
-TypeScript `FakeDaemon` in `@better-compute/testing` speaks the real protocol and runs these paths in tests and in
-`better-compute dev --sim N`. See [the daemon overview](/docs/daemon).
+agent, steps on a ramdisk, NodeSpec sections on a node. The Go daemon's v0.1 node agent is built and tested (not
+released), but it converges only the `devices` section, runs only `inventory.refresh`, `diag.nvml`, `logs.collect`
+and `node.reboot`, and has no site-agent or ramdisk mode. The TypeScript `FakeDaemon` in `@better-compute/testing`
+speaks the real protocol and runs the other paths in tests and in `better-compute dev --sim N`. See
+[what bcd does today](/docs/daemon#what-bcd-does-today).
 </Callout>
 
 ## Rules every extension follows

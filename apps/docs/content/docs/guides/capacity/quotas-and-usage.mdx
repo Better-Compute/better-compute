@@ -198,9 +198,10 @@ policy `gpu-user` that `better-compute iam setup` prints includes
 
 Every create and extend is decided by Better IAM, so once a tenant's spend passes its budget no new
 reservation or extension is allowed. Reservations that are already running continue until they end.
-The per-pool check at admission from PLAN.md is not implemented yet
-(`policy.admission.budgetCheck: 'meter'` is declared but not called). An offering's `onBudgetExceeded`
-reaction works in part: on an exceeded budget, `serve`'s default IAM handler publishes
-`quota.budget-exceeded` for `notify`, `stop-new` and `drain`, and `drain` also cancels the tenant's
-unstarted reservations in that pool; `stop-new` does not refuse admissions yet. See
+On top of the decision, `reservations.create` and `reservations.extend` run a per-pool budget check after
+it (`budgetAdmissionCheck`): when the pool's `policy.admission.budgetCheck` is `'meter'`, or the tenant's
+offering has `onBudgetExceeded: 'stop-new'` or `'drain'`, they call Better IAM's `billing.check` and refuse a
+spent budget with [`SPEND_LIMIT_REACHED`](/docs/reference/errors#spend_limit_reached) (402). On an exceeded
+budget alert, `serve`'s default IAM handler also publishes `quota.budget-exceeded` for `notify`, `stop-new` and
+`drain`, and `drain` cancels the tenant's unstarted reservations in that pool. See
 [budgets](/docs/guides/iam/billing-and-usage#budgets) and [policies](/docs/guides/iam/policies).

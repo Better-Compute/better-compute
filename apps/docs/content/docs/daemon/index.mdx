@@ -7,14 +7,33 @@ status: experimental
 packages: ['@better-compute/testing', '@better-compute/protocol', '@better-compute/gateway']
 sources:
   - daemon/README.md
+  - daemon/go.mod
   - daemon/cmd/bcd/main.go
+  - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/status.go
+  - daemon/cmd/bcd/hardware_host.go
+  - daemon/cmd/bcd/hardware_fakehw.go
+  - daemon/internal/agent/agent.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/agent/kinds.go
+  - daemon/internal/agent/spec.go
+  - daemon/internal/agent/devices.go
+  - daemon/internal/agent/join.go
+  - daemon/internal/agent/logs.go
+  - daemon/internal/agent/status.go
   - daemon/internal/config/config.go
   - daemon/internal/journal/journal.go
+  - daemon/internal/journal/bolt.go
   - daemon/internal/dispatch/dispatch.go
   - daemon/internal/dispatch/lane.go
   - daemon/internal/session/session.go
   - daemon/internal/converge/converge.go
+  - daemon/internal/inventory/collect.go
+  - daemon/internal/nvml/nvml.go
+  - daemon/internal/transport/transport.go
   - daemon/.goreleaser.yaml
+  - scripts/daemon-test.mjs
+  - tests/e2e/bcd.test.ts
   - packages/testing/README.md
   - packages/testing/src/daemon/fake-daemon.ts
   - packages/cli/src/install-script.ts
@@ -33,12 +52,13 @@ The daemon holds no policy. It never decides who gets a GPU or when a machine is
 does. What bcd decides on its own is about safety: refusing a command meant for another node or past its deadline,
 never running a side effect twice, and never dropping a device assignment because it lost its connection.
 
-<Callout type="warn" title="Written, not built">
-bcd is written in `daemon/` as its own Go module, but it is not built or released yet: Go is not installed on the
-build machine. In the current skeleton `bcd version` and `bcd doctor` work, and every other command parses its
-flags and exits 2 with `NOT_IMPLEMENTED`, naming the phase it arrives in. The TypeScript `FakeDaemon` in
-`@better-compute/testing` speaks the real protocol today. Tests, the fleet simulator and `better-compute dev --sim N`
-all run it.
+<Callout type="warn" title="Built and tested, not released">
+The v0.1 node agent is implemented: `bcd join`, `bcd node`, `bcd status`, `bcd doctor` and `bcd version` work, and
+`tests/e2e/bcd.test.ts` runs the Linux binary (fake-hardware build) against a real control plane and gateway over
+mTLS. bcd is not released: no goreleaser run has published a binary, so the install script has nothing to download
+yet. `bcd site`, `bcd ramdisk` and `bcd sim` still exit 2 with `NOT_IMPLEMENTED`, and tunnels, VM runtimes,
+self-update and the WebSocket fallback are missing (see [what bcd does today](#what-bcd-does-today)). The TypeScript
+`FakeDaemon` covers those in tests, the simulator and `better-compute dev --sim N`.
 </Callout>
 
 ## Where bcd sits
@@ -74,26 +94,26 @@ flight, and the daemon's <Term id="journal">journal</Term> makes sure nothing ru
 The same binary runs in several modes. The mode decides which command kinds the daemon accepts and which role its
 certificate carries.
 
-| Mode | Runs on | Does | Certificate | Arrives |
-| --- | --- | --- | --- | --- |
-| `node` | every server | the session, the journal, inventory (sysfs, netlink, NVML), health (NVML events, kernel XIDs, EDAC, SMART, from v0.2), NodeSpec convergence (CDI holds, MIG layout, host config, runtimes), commands, tunnels (v0.3), OTLP telemetry, self-update (v0.4) | `node`, 24 h | v0.1 |
-| `site` | one or two per site, as a node with role `site` | proxy DHCP, TFTP and iPXE over HTTPS, and discovery vouching while it holds the site boot lease; the image cache and BMC access through bmclib at all times | `site`, 24 h | v0.2 |
-| `ramdisk` | the PXE initramfs | inspection, DCGM diagnostics, wipes (`quick`, `secure-erase`, `crypto-erase`), image streaming, `boot.kexec` | `ramdisk`, at most 2 h | v0.2 |
-| `sim` | test hosts | N daemons on fake hardware with real TLS and gRPC | a test CA | v0.4 |
-| `helper` | beside `node`, as root | typed privileged operations over a local socket | none | v0.4 |
+| Mode | Runs on | Does (PLAN.md) | Certificate | Planned | In the code |
+| --- | --- | --- | --- | --- | --- |
+| `node` | every server | the session, the journal, inventory, health (NVML events, kernel XIDs, EDAC, SMART, from v0.2), NodeSpec convergence (CDI holds, MIG layout, host config, runtimes), commands, tunnels (v0.3), OTLP telemetry, self-update (v0.4) | `node`, 24 h | v0.1 | works for the v0.1 scope; see below |
+| `site` | one or two per site, as a node with role `site` | proxy DHCP, TFTP and iPXE over HTTPS, and discovery vouching while it holds the site boot lease; the image cache and BMC access through bmclib at all times | `site`, 24 h | v0.2 | exits 2 `NOT_IMPLEMENTED` |
+| `ramdisk` | the PXE initramfs | inspection, DCGM diagnostics, wipes (`quick`, `secure-erase`, `crypto-erase`), image streaming, `boot.kexec` | `ramdisk`, at most 2 h | v0.2 | exits 2 `NOT_IMPLEMENTED` |
+| `sim` | test hosts | N daemons on fake hardware with real TLS and gRPC | a test CA | v0.4 | exits 2 `NOT_IMPLEMENTED` |
+| `helper` | beside `node`, as root | typed privileged operations over a local socket | none | v0.4 | not a command yet |
 
 A <Term id="site-agent">site agent</Term> and the <Term id="ramdisk">ramdisk</Term> speak the same session protocol
 as a node; only their command kinds differ. [Sites](/docs/guides/bare-metal/sites) and
 [deploying](/docs/guides/bare-metal/deploying) cover what they do for bare metal.
 
-Beside the modes, bcd has four local commands:
+Beside the modes, bcd has four local commands, all of which work:
 
-| Command | Does | State in the skeleton |
-| --- | --- | --- |
-| `bcd join` | joins the fleet with a join token read from `BCD_JOIN_TOKEN` or standard input, never from arguments | exits 2, arrives in v0.1 |
-| `bcd status` | shows the running agent's state over its root-only unix socket (`--socket`, default `/run/bcd/bcd.sock`) | exits 2, arrives in v0.1 |
-| `bcd doctor` | checks the configuration file, NVML and the hardware backend | works |
-| `bcd version` | prints the version, platform, Go version and build tags | works |
+| Command | Does |
+| --- | --- |
+| `bcd join` | Joins the fleet with a join token read from `BCD_JOIN_TOKEN` or standard input, never from arguments. It seals the token to the key in `join-encryption.jwk` next to the config (refused unless it matches `join_encryption_key_pin`), verifies the signed `JoinResponse`, writes `node.key` and `identity.json` under `data_dir`, and prints `joined as <node> (site <site>, role <role>)` |
+| `bcd status` | Asks the running node agent over its root-only unix socket (`--socket`, default `/run/bcd/bcd.sock`; `--json` for JSON) for its node, site and role, boot, session epoch and clock offset, applied and observed generations with each section's state, running and deferred commands, the event backlog, certificate expiry, trust bundle version and whether signed intent is enforced |
+| `bcd doctor` | Checks the configuration file, NVML and the hardware backend |
+| `bcd version` | Prints the version, platform, Go version and build tags |
 
 Exit codes are 0 for success, 1 for a failure and 2 for a usage error or a command that is not implemented yet. bcd
 never echoes a positional argument, so a join token pasted into the command line does not end up in logs:
@@ -104,16 +124,32 @@ bcd join: takes no positional arguments
 bcd join reads the join token from BCD_JOIN_TOKEN or stdin, never from arguments
 ```
 
-`bcd doctor` prints one line per check, with a status of `ok`, `warn`, `fail` or `skip`:
+`bcd doctor` prints one line per check, with a status of `ok`, `warn`, `fail` or `skip`. NVML is still a stub, so it
+always warns, and the host checks are still skipped:
 
 ```text
 ok    config    /etc/bcd/config.toml: gateway https://gw.eu-1.example.com, site fsn1
 warn  nvml      nvml: not available in this build
-ok    hardware  fakehw: 8 GPUs, … inventory sections hashed
+ok    hardware  host: 8 GPUs, … inventory sections hashed
 skip  host      IOMMU, KVM, clock and gateway reachability checks arrive in v0.1
 ```
 
 It also warns when `config.toml` is readable by anyone but its owner, and exits 1 when any check fails.
+
+## What bcd does today
+
+`bcd node` is the v0.1 node agent (`daemon/internal/agent`). What it implements and what is still missing:
+
+| Area | Implemented | Missing |
+| --- | --- | --- |
+| Identity | Join with a sealed `join-token`, a retried deferral with the same CSR, `JoinResponse` verification (pinned signer, CSR binding, leaf key, SPIFFE id, role); renewal at 60% of the lifetime with proof of possession and a new key | TPM keys (the key is a 0600 `node.key` file), attestor challenges, the `.well-known` key fallback |
+| Transport | gRPC over HTTP/2 with connect-go, TLS 1.3 pinned to the serving CA's SPKI (never system roots), mTLS with the node certificate, HTTP/2 pings every 20 s; `gateway_server_name` for a gateway reached by IP | The WebSocket fallback |
+| Session | Hello from the journal, Welcome (epoch, event ack, clock offset, requested sections, signed trust bundle), heartbeats with lane credits (inventory hashes every 10th), `Ack`, `Cancel`, `Drain`, `RevocationNotice`, full-jitter redial; a Welcome more than 5 minutes before the server time mark is refused | `OpenTunnel`, `SecretRequest`, `WorkloadTokenRequest` (ignored or never sent) |
+| Journal | bbolt, every write fsynced; the command rules, results with their `boot_id`, the `cancelled` outcome, the TTL sweep; a corrupt file is moved aside | |
+| Commands | `inventory.refresh`, `diag.nvml`, `logs.collect` (redacted bundle to a presigned https URL), `node.reboot` (self-terminating); the acceptance order; signed commands verified once the trust bundle holds command-signing roots; attested results node-signed | `gpu.reset`, `daemon.upgrade`, `driver.invoke` and every v0.2+ kind (answered `UNSUPPORTED`) |
+| Desired state | Full specs and patches, signature checks with command-signing roots, stored and enforced offline; `devices` (CDI holds and env files, node-signed `AllocationBound` and `AllocationReleased`, `AllocationFailed`); `telemetry` accepted | `host`, `instances`, `access`, `daemon` and `site` converge only when empty, else `SectionUnsupported` |
+| Inventory | `inventory.Collector` from procfs and sysfs without cgo: DMI, UEFI and Secure Boot, TPM presence, CPU and NUMA, memory, disks, NICs with SR-IOV and RDMA, NVIDIA GPUs from `/proc/driver/nvidia`, OS, cgroups, KVM, IOMMU | NVML (`internal/nvml` returns `ErrNotBuilt`), so no ECC, row-remap or XID data on a real host; netlink |
+| Local | `bcd status` over the unix socket | `doctor` and `support-bundle` against the running agent |
 
 ## Outbound only
 
@@ -122,8 +158,9 @@ the gateway, so a server needs no inbound port, no public address and no firewal
 plane wants from a node travels down the session the node opened: commands, desired state, requests to open a
 [tunnel](/docs/guides/access/tunnels), revocation notices.
 
-`bcd node` opens no TCP listeners. The only local endpoint is a root-only unix socket that serves `bcd status`
-(and, as planned, `doctor` and `support-bundle` against the running agent).
+`bcd node` opens no TCP listeners. The only local endpoint is a root-only unix socket (mode 0600 in a 0700
+directory) that serves `bcd status`; PLAN.md also plans `doctor` and `support-bundle` against the running agent on it.
+If the socket cannot be created, the agent logs it and runs without.
 
 ## Privilege separation
 
@@ -136,39 +173,44 @@ typed operations on a socket whose caller it checks with `SO_PEERCRED`: `runtime
 
 Other limits already hold in the design regardless of the split:
 
-- **Keys.** The node key lives in the TPM when there is one, else in a 0600 file under `/var/lib/bcd`, and is never
-  exported. It signs only statements of the form "this node says": the mTLS handshake, renewal proofs of possession,
-  attested results and secret requests.
+- **Keys.** PLAN.md keeps the node key in the TPM when there is one; bcd today always keeps it in a 0600 file under
+  `/var/lib/bcd` and never exports it. It signs only statements of the form "this node says": the mTLS handshake,
+  renewal proofs of possession, attested results and (once implemented) secret requests.
 - **Allowlists.** Each role accepts only its own command kinds; anything else is rejected `UNSUPPORTED`.
 - **Bounds.** A command body is at most 1 MiB and a desired-state body at most 4 MiB. The journal is capped at 64
   MiB and 10,000 unacked events.
-- **Secrets.** Commands carry references, never values. The daemon fetches a value sealed to a fresh one-time key,
-  keeps it in memory only, and zeroes it after use.
+- **Secrets.** Commands carry references, never values. The design fetches a value sealed to a fresh one-time key,
+  keeps it in memory only, and zeroes it after use; bcd does not send `SecretRequest` yet. `logs.collect` redacts
+  tokens, JWTs, private keys and URL passwords from its bundle before the upload.
 
 ## Inside bcd
 
-The Go module is laid out by concern. Each package holds a contract with unit tests; the pieces that need
-third-party modules (connect-go, protobuf, go-nvml, bbolt) arrive once a Go toolchain can produce `go.sum`.
+The Go module (`github.com/better-compute/better-compute/daemon`, Go 1.26 or later per `go.mod`) is laid out by
+concern. Its third-party modules are connect-go, protobuf and bbolt; go-nvml is not added yet.
 
 | Package | What | State |
 | --- | --- | --- |
-| `cmd/bcd` | subcommands and flags | skeleton |
+| `cmd/bcd` | subcommands and flags | `join`, `node`, `status`, `doctor`, `version` work; `site`, `ramdisk`, `sim` exit 2 |
+| `internal/agent` | the node agent: join, session, dispatcher, the `devices` converger, the four kinds, renewal, status | done for v0.1 |
 | `internal/config` | `/etc/bcd/config.toml` in a strict TOML subset | done |
-| `internal/journal` | the journal contract and the command rules (duplicates, crash recovery, self-terminating kinds), with an in-memory store | contract and memory store; bbolt in v0.1 |
-| `internal/dispatch` | lanes with credits and worker pools, per-resource locks, the kind registry, the acceptance checks | contract and primitives |
-| `internal/session` | Hello and Welcome, the epoch, resume, reconnect back-off | contract |
-| `internal/converge` | the NodeSpec sections and the observed-generation rule | contract and runner |
-| `internal/inventory` | NodeInventory v1, canonicalization, section encoding and hashes | done |
+| `internal/journal` | the journal contract and the command rules (duplicates, crash recovery, self-terminating kinds), an in-memory store and the bbolt store | done |
+| `internal/dispatch` | lanes with credits and worker pools, per-resource locks, the kind registry, the acceptance checks | done |
+| `internal/session` | Hello and Welcome, the epoch, resume, reconnect back-off | done |
+| `internal/converge` | the NodeSpec sections and the observed-generation rule | done; section convergers live in `internal/agent` |
+| `internal/pki` | purpose-framed ES256, keys and pins, the join JWE, CSRs, `JoinResponse` and signed-intent verification, trust bundles | done; interop fixtures from `@better-compute/pki` |
+| `internal/transport` | the `AgentGateway` client over connect-go | done |
+| `internal/inventory` | NodeInventory v1, canonicalization, section encoding and hashes, the procfs/sysfs `Collector` | done |
+| `internal/support` | the secret scanner of `@better-compute/pki` for log bundles | done |
 | `internal/fakehw` | a deterministic 8x H100 SXM5 80GB HGX node | done |
 | `internal/nvml` | the NVML boundary | stub: `ErrNotBuilt` in every build |
-| `gen/` | Go code generated from `proto/` | empty until Go is installed |
+| `gen/` | Go code generated from `proto/` (protoc-gen-go, protoc-gen-connect-go) | done; `node scripts/daemon-proto-gen.mjs [--check]` |
 
 Two numbers shape everything the daemon runs. Commands go to one of three lanes, and each lane has a fixed worker
 pool, never a goroutine per command: `control` 4 workers, `provision` 2, `bulk` 1. The converger runs NodeSpec
 sections in a fixed order (`host`, `devices`, `instances`, `access`, `telemetry`, `daemon`), each as an idempotent
 plan and apply, and advances its observed generation only when every section has converged or failed terminally.
 
-Contributors build and test the module from `daemon/` with Go 1.24 or later:
+Contributors build and test the module from `daemon/`:
 
 ```bash
 go test -tags nonvml,fakehw ./...   # logic tests: no cgo, no NVIDIA driver, fake HGX H100 hardware
@@ -176,20 +218,25 @@ go vet -tags nonvml,fakehw ./...
 go build -ldflags "-X main.version=0.1.0" -o bin/bcd ./cmd/bcd
 ```
 
+From the repository root, `node scripts/daemon-test.mjs` runs the same tests on any OS.
+
 The `nonvml` tag builds without cgo and never loads `libnvidia-ml`; `fakehw` reports the fake HGX node instead of
-reading the host. bcd targets Linux on amd64 and arm64 (for Grace and GB200), but its logic tests run on any OS.
+reading the host, keeps its boot id in `data_dir`, "reboots" by re-executing itself, and is the only build that
+accepts `dev_insecure_h2c`. bcd targets Linux on amd64 and arm64 (for Grace and GB200). On Windows,
+`scripts/daemon-test.mjs` cross-compiles each package's test binary for linux/amd64 and runs it in WSL, since
+Application Control may refuse locally built executables. See [testing](/docs/operations/testing#the-go-daemon).
 
 ## The FakeDaemon
 
 `FakeDaemon` in `@better-compute/testing` is the daemon side of the protocol in TypeScript. It mirrors the Go
-packages above rule for rule: the same journal rules, the same acceptance checks, the same lane credits and worker
-pools, the same converger order. Its fake hardware produces the same inventory section hashes as Go's `fakehw` for the
-same seed. It runs over any frame transport: an in-memory link with fault injection, real HTTP/2 to a real gateway,
-or the WebSocket fallback.
+packages rule for rule: the same journal rules, the same acceptance checks, the same lane credits and worker pools,
+the same converger order, the same server time mark. Its fake hardware produces the same inventory section hashes as
+Go's `fakehw` for the same seed. It runs over any frame transport: an in-memory link with fault injection, real
+HTTP/2 to a real gateway, or the WebSocket fallback.
 
-It is what runs today wherever a daemon is needed:
+It is what runs wherever many daemons, or features bcd lacks, are needed:
 
-- `better-compute dev --sim N` joins N simulated machines through a loopback gateway, the way bcd will: a join token
+- `better-compute dev --sim N` joins N simulated machines through a loopback gateway, the way bcd does: a join token
   sealed to JoinService's key, the `Join` RPC, a session, `diag.nvml` acceptance and adoption. See
   [local development](/docs/operations/local-development).
 - `better-compute sim` runs the deterministic fleet simulator with crashes, reboots, journal loss, partitions and
@@ -202,8 +249,9 @@ better-compute dev --memory --sim 8
 better-compute sim --nodes 100 --chaos heavy --seed 7
 ```
 
-Where the two differ, the FakeDaemon is ahead: it already verifies signed commands, answers `OpenTunnel`, and dials
-the WebSocket fallback, all of which bcd must match when it is built.
+Where the two differ, the FakeDaemon is ahead: it answers `OpenTunnel`, dials the WebSocket fallback, plays VPS hosts
+and their metadata service, site agents and self-update, and runs `driver.invoke`. bcd matches it on joining,
+sessions, the journal, signed intent, the four v0.1 kinds and the `devices` section.
 
 <Cards>
   <Card title="Installing bcd" href="/docs/daemon/install" icon={<Install />}>The install script, the files it writes and upgrades.</Card>
