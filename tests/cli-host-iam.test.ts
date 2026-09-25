@@ -71,6 +71,56 @@ describe('host.iam', () => {
     );
   });
 
+  it('a deactivated role binding revokes the holder’s break-glass SSH certificates', async () => {
+    const { compute } = await deploy([{ name: 'iam', migrations: [successorsMigration] } as never]);
+    const sql = compute.context.sql;
+    await sql.query(
+      `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_b', 'ten_a', 'shared', 'eu', 1)`,
+    );
+    await sql.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+         trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ('node_b', 'site_b', 'ten_a', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
+    );
+    const cert = (serial: string, identityId: string, expiresIn: string) =>
+      sql.query(
+        `INSERT INTO ssh_certificates (serial, node_id, tenant_id, identity_id, principal, key_id, expires_at)
+         VALUES ($1, 'node_b', 'ten_a', $2, 'root@node_b', $3, compute_now() + $4::interval)`,
+        [serial, identityId, `key-${serial}`, expiresIn],
+      );
+    await cert('1', 'idn_holder', '15 minutes');
+    await cert('2', 'idn_holder', '-1 minute');
+    await cert('3', 'idn_other', '15 minutes');
+    let installed: IamEventHandlers = {};
+    installIamHandlers(compute, { bridge: { setHandlers: (handlers) => (installed = handlers) } });
+    const tx = sql as never;
+    // A pending activation cancelled by its requester never granted anything.
+    await installed.binding!(tx, {
+      ...event('binding:deactivate', 'bnd_1', { cancelled: true }),
+      actorId: 'idn_holder',
+    });
+    // An administrator revokes the holder's activation.
+    await installed.binding!(tx, {
+      ...event('binding:deactivate', 'bnd_1', { identityId: 'idn_holder', revoked: true }),
+      actorId: 'idn_admin',
+    });
+    const { rows } = await sql.query<{ serial: string; revoked: boolean }>(
+      'SELECT serial, revoked_at IS NOT NULL AS revoked FROM ssh_certificates ORDER BY serial',
+    );
+    expect(rows).toEqual([
+      { serial: '1', revoked: true },
+      { serial: '2', revoked: false },
+      { serial: '3', revoked: false },
+    ]);
+    // The node's spec is recomputed (its KRL) and the revocation is an event.
+    const work = await sql.query<{ key: string }>(`SELECT key FROM work_queue WHERE kind = 'nodespec'`);
+    expect(work.rows.map((row) => row.key)).toContain('node_b');
+    const events = await sql.query<{ topic: string }>(
+      `SELECT topic FROM outbox WHERE topic = 'node.ssh-cert.revoked'`,
+    );
+    expect(events.rows).toHaveLength(1);
+  });
+
   it('doctor warns about remote IAM without admission refresh', async () => {
     const { compute, options } = await deploy([{ name: 'iam' }]);
     const checks = (iam: object) =>

@@ -21,6 +21,7 @@ import {
   type IamEventHandlers,
   type IamInboxEvent,
 } from '@better-compute/iam';
+import { revokeIdentitySshCertificates } from '@better-compute/server';
 import type { AnyCompute } from '../config.js';
 
 // Compute's reactions to IAM events (PLAN.md §12.8), installed by the host because it is the one place that
@@ -225,6 +226,25 @@ export function installIamHandlers(
         if (end) await reassignReservations(tx, compute.context, { ...end, reason: event.action });
         // An identity that is gone keeps no streams (an update, such as a rename, keeps them).
         if (end || identityEnds.has(event.action)) closeFor(event, 'end');
+      }),
+    // A role activation ended (the holder deactivated it, or an administrator revoked it): break-glass access
+    // granted through it ends too (§12.8). better-iam names the binding as the subject and the holder as the actor
+    // (or `metadata.identityId` when revoked). Its SSH certificates in the tenant are revoked, and every gateway
+    // re-checks its tunnels. An activation only grants: certificates issued under it are already clamped to the
+    // session at issuance, so `binding:activate` needs nothing here.
+    binding:
+      own.binding ??
+      (async (tx, event) => {
+        if (event.action !== 'binding:deactivate' || event.metadata?.cancelled === true) return;
+        const holder = text(event.metadata?.identityId) ?? text(event.actorId);
+        if (!holder) return;
+        await revokeIdentitySshCertificates(tx, compute.context, {
+          tenantId: event.tenantId,
+          identityId: holder,
+          reason: event.action,
+          by: 'iam',
+        });
+        closeFor({ ...event, subjectId: holder }, 'sessions');
       }),
     // A budget spent: the offerings' onBudgetExceeded (stop-new, drain) for the alert's tenant.
     budget:
