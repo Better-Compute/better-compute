@@ -29,7 +29,7 @@ const input = protocol.approverSetInput(set);
 const version = 9n;
 const out = {
   version: String(version),
-  keys: keys.map((key) => ({ kid: key.kid, spkiDer: hex(key.spkiDer) })),
+  approverKeys: keys.map((key) => ({ kid: key.kid, spkiDer: hex(key.spkiDer) })),
   approverThreshold: set.approverThreshold,
   quorumTiers: set.quorumTiers,
   unbatchedDestructivePerHour: set.unbatchedDestructivePerHour,

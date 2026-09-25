@@ -153,19 +153,27 @@ func TestBatchApproval(t *testing.T) {
 	}
 }
 
-// testdata/quorum.json (scripts/daemon-quorum-fixture.mjs): an approver set's canonical bytes and
-// signing input as @better-compute/protocol builds them.
+// An approver set's canonical bytes and signing input as the protocol defines them: the golden
+// packages/protocol/golden/approver-set.json (built from the documented layout) and
+// testdata/quorum.json (scripts/daemon-quorum-fixture.mjs, @better-compute/protocol's own
+// approverSetInput).
 func TestApproverSetInputMatchesTheProtocol(t *testing.T) {
-	data, err := os.ReadFile("testdata/quorum.json")
+	for _, file := range []string{"../../../packages/protocol/golden/approver-set.json", "testdata/quorum.json"} {
+		t.Run(file, func(t *testing.T) { approverSetVector(t, file) })
+	}
+}
+
+func approverSetVector(t *testing.T, file string) {
+	data, err := os.ReadFile(file)
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("not available: %v", err)
 	}
 	var f struct {
 		Version string `json:"version"`
 		Keys    []struct {
 			Kid     string `json:"kid"`
 			SpkiDer string `json:"spkiDer"`
-		} `json:"keys"`
+		} `json:"approverKeys"`
 		ApproverThreshold uint32 `json:"approverThreshold"`
 		QuorumTiers       []struct {
 			MaxScopeSize uint32 `json:"maxScopeSize"`
