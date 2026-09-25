@@ -5,6 +5,7 @@ import {
   AGENT_GATEWAY_SERVICE,
   frameMessage,
   gatewayControlClient,
+  gatewayTunnelRelay,
   GrpcCode,
   MessageDecoder,
   serveGateway,
@@ -383,6 +384,72 @@ describe('tunnels end to end over HTTP/2', () => {
       });
     });
     expect(status).toBe(GrpcCode.NOT_FOUND);
+  });
+
+  describe('gatewayTunnelRelay', () => {
+    /** f.db, counting the internal_url lookups. */
+    const counted = () => {
+      const lookups = { n: 0 };
+      const sql = {
+        query: ((text: string, params?: unknown[]) => {
+          if (text.includes('internal_url')) lookups.n++;
+          return f.db.query(text, params);
+        }) as typeof f.db.query,
+      };
+      return { sql, lookups };
+    };
+    const register = () =>
+      f.db.query('UPDATE gateways SET internal_url = $2 WHERE id = $1', [f.gateway.id, `http://127.0.0.1:${internal.port}`]);
+
+    it('opens through the gateway named by gatewayId and relays both ways', async () => {
+      await register();
+      const node = await f.addNode();
+      await daemon(node);
+      const relay = gatewayTunnelRelay({ sql: f.db });
+      const ticket = issuer.issue({ nodeId: node, sid: 'tun_relay', op: 'exec', subject: 'user_1' });
+      const tunnel = await relay.open({ ticket: ticket.token, nodeId: node, tunnelId: 'tun_relay', gatewayId: f.gateway.id });
+      const frames = tunnel.frames[Symbol.asyncIterator]();
+      tunnel.send(data('ping'));
+      expect(text((await frames.next()).value)).toBe('PING');
+      tunnel.close();
+      relay.close();
+    });
+
+    it('rejects an unregistered gateway UNAVAILABLE and passes the gateway refusal through', async () => {
+      await register();
+      const node = await f.addNode();
+      await daemon(node);
+      const relay = gatewayTunnelRelay({ sql: f.db });
+      const ticket = issuer.issue({ nodeId: node, sid: 'tun_x', op: 'exec', subject: 'user_1' });
+      await expect(
+        relay.open({ ticket: ticket.token, nodeId: node, tunnelId: 'tun_x', gatewayId: 'gw_unknown' }),
+      ).rejects.toMatchObject({ code: 'UNAVAILABLE', message: 'gateway gw_unknown is not registered' });
+      (await relay.open({ ticket: ticket.token, nodeId: node, tunnelId: 'tun_x', gatewayId: f.gateway.id })).close();
+      await expect(
+        relay.open({ ticket: ticket.token, nodeId: node, tunnelId: 'tun_x', gatewayId: f.gateway.id }),
+      ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+      relay.close();
+    });
+
+    it('reuses the looked-up client within cacheMs and looks again after', async () => {
+      await register();
+      const node = await f.addNode();
+      await daemon(node);
+      let now = 0;
+      const { sql, lookups } = counted();
+      const relay = gatewayTunnelRelay({ sql, cacheMs: 1_000, now: () => now });
+      const open = async (sid: string) => {
+        const ticket = issuer.issue({ nodeId: node, sid, op: 'exec', subject: 'user_1' });
+        (await relay.open({ ticket: ticket.token, nodeId: node, tunnelId: sid, gatewayId: f.gateway.id })).close();
+      };
+      await open('tun_a');
+      await open('tun_b');
+      expect(lookups.n).toBe(1);
+      now = 1_001;
+      await open('tun_c');
+      expect(lookups.n).toBe(2);
+      relay.close();
+    });
   });
 });
 

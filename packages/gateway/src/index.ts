@@ -63,11 +63,15 @@ export {
   wsClientKey,
 } from './websocket.js';
 export type { WsConnectionOptions, WsFrame } from './websocket.js';
-export { gatewayControlClient, gatewayNotifier, internalHandler, serveInternal } from './internal.js';
+export { gatewayControlClient, gatewayNotifier, gatewayTunnelRelay, internalHandler, serveInternal } from './internal.js';
 export type {
+  ClientTunnel,
   ControlClientOptions,
   GatewayControlClient,
   GatewayNotifierOptions,
+  GatewayTunnelRelay,
+  GatewayTunnelRelayOptions,
+  RelayedTunnel,
   ServedInternal,
   ServeInternalOptions,
 } from './internal.js';

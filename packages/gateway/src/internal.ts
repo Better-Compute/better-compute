@@ -468,28 +468,9 @@ export interface GatewayNotifierOptions {
  * and `subscribe` are delivered in-process only. Publishing never throws: pokes are accelerators.
  */
 export function gatewayNotifier(options: GatewayNotifierOptions): Notifier {
-  const cacheMs = options.cacheMs ?? 30_000;
-  const now = options.now ?? Date.now;
-  const clients = new Map<string, { client: GatewayControlClient; until: number }>();
+  const clients = controlClients({ ...options, timeoutMs: 1_000 });
   const listeners = new Map<string, Set<(message: string) => void>>();
-
-  async function clientFor(gatewayId: string): Promise<GatewayControlClient | undefined> {
-    const cached = clients.get(gatewayId);
-    if (cached && cached.until > now()) return cached.client;
-    cached?.client.close();
-    const { rows } = await options.sql.query<{ internal_url: string }>(
-      'SELECT internal_url FROM gateways WHERE id = $1',
-      [gatewayId],
-    );
-    const url = rows[0]?.internal_url;
-    if (!url) {
-      clients.delete(gatewayId);
-      return undefined;
-    }
-    const client = gatewayControlClient({ baseUrl: url, tls: options.tls, timeoutMs: 1_000 });
-    clients.set(gatewayId, { client, until: now() + cacheMs });
-    return client;
-  }
+  const clientFor = clients.get;
 
   return {
     async publish(channel, message) {
@@ -516,8 +497,7 @@ export function gatewayNotifier(options: GatewayNotifierOptions): Notifier {
         }
         await client.poke(nodeIds);
       } catch (error) {
-        clients.get(gatewayId)?.client.close();
-        clients.delete(gatewayId);
+        clients.evict(gatewayId);
         options.onError?.(channel, error);
       }
     },
@@ -531,9 +511,111 @@ export function gatewayNotifier(options: GatewayNotifierOptions): Notifier {
     },
     async close() {
       listeners.clear();
+      clients.close();
+    },
+  };
+}
+
+/**
+ * Control clients per gateway id, found through `gateways.internal_url` and cached for `cacheMs`.
+ * An expired client is closed gracefully: HTTP/2 lets its open streams (tunnels) finish.
+ */
+function controlClients(options: {
+  sql: Pick<SqlTx, 'query'>;
+  tls?: ControlClientOptions['tls'];
+  cacheMs?: number;
+  timeoutMs?: number;
+  now?: () => number;
+}) {
+  const cacheMs = options.cacheMs ?? 30_000;
+  const now = options.now ?? Date.now;
+  const clients = new Map<string, { client: GatewayControlClient; until: number }>();
+  return {
+    async get(gatewayId: string): Promise<GatewayControlClient | undefined> {
+      const cached = clients.get(gatewayId);
+      if (cached && cached.until > now()) return cached.client;
+      cached?.client.close();
+      const { rows } = await options.sql.query<{ internal_url: string }>(
+        'SELECT internal_url FROM gateways WHERE id = $1',
+        [gatewayId],
+      );
+      const url = rows[0]?.internal_url;
+      if (!url) {
+        clients.delete(gatewayId);
+        return undefined;
+      }
+      const client = gatewayControlClient({ baseUrl: url, tls: options.tls, timeoutMs: options.timeoutMs });
+      clients.set(gatewayId, { client, until: now() + cacheMs });
+      return client;
+    },
+    evict(gatewayId: string) {
+      clients.get(gatewayId)?.client.close();
+      clients.delete(gatewayId);
+    },
+    close() {
       for (const { client } of clients.values()) client.close();
       clients.clear();
     },
+  };
+}
+
+/** The api's side of a relayed tunnel; `ClientTunnel` satisfies it (server's `RelayedTunnel`). */
+export interface RelayedTunnel {
+  readonly frames: AsyncIterable<TunnelFrame>;
+  send(frame: TunnelFrame): boolean;
+  drained(): Promise<void>;
+  close(): void;
+}
+
+/** Structurally the server's `TunnelRelay` (tunnels/handler.ts), so neither package imports the other. */
+export interface GatewayTunnelRelay {
+  open(input: { ticket: string; nodeId: string; tunnelId: string; gatewayId: string }): Promise<RelayedTunnel>;
+  close(): void;
+}
+
+export interface GatewayTunnelRelayOptions {
+  /** Where `gateways.internal_url` is read (the compute store). */
+  sql: Pick<SqlTx, 'query'>;
+  tls?: ControlClientOptions['tls'];
+  /** How long a gateway's URL is cached (default 30 s). */
+  cacheMs?: number;
+  /** How long the gateway may take to open the tunnel (default 10 s: it asks the node first). */
+  timeoutMs?: number;
+  now?: () => number;
+}
+
+/**
+ * The `TunnelRelay` for `handleTunnel` (§7.6): opens the tunnel through the gateway holding the
+ * node's session, over that gateway's control API. An unregistered gateway is `UNAVAILABLE`; a
+ * refusal carries the gateway's code; a transport failure evicts the cached client.
+ */
+export function gatewayTunnelRelay(options: GatewayTunnelRelayOptions): GatewayTunnelRelay {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const clients = controlClients(options);
+  return {
+    async open({ ticket, nodeId, gatewayId }) {
+      const client = await clients.get(gatewayId);
+      if (!client) throw new ComputeError('UNAVAILABLE', `gateway ${gatewayId} is not registered`);
+      const opening = client.openTunnel({ ticket, nodeId });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          // A tunnel that opens after we gave up has nobody to relay to.
+          void opening.then((late) => late.close(), () => {});
+          clients.evict(gatewayId);
+          reject(new ComputeError('UNAVAILABLE', `gateway ${gatewayId} did not open the tunnel in time`));
+        }, timeoutMs);
+      });
+      try {
+        return await Promise.race([opening, timedOut]);
+      } catch (error) {
+        if (!isComputeError(error)) clients.evict(gatewayId);
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    close: () => clients.close(),
   };
 }
 
