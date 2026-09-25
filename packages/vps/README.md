@@ -150,10 +150,12 @@ show it.
   - The snapshot is `pending` until the command settles, then `ready` or `failed`
     (`sandbox.snapshot.ready` and `.failed`).
   - Snapshots live in vps's `sandbox_snapshots` table as their own IAM resource
-    (`compute-sandbox-snapshot`, owned by whoever took it). They cannot be promoted.
+    (`compute-sandbox-snapshot`), owned by the sandbox's owner whoever took them. They cannot be
+    promoted.
   - `sandboxSnapshots.list/get/delete` manage them, including kept ones whose sandbox is gone.
   - Snapshots are deleted with their sandbox unless kept, and all of them go at tenant teardown.
-  - Objects are deleted by the reconciler, outside request transactions. A pending upload's object
+  - Objects are deleted by the reconciler, outside request transactions, once no live restore still
+    needs them. A pending upload's object
     waits until its command settles.
   - `create({ fromSnapshot })` restores the caller's own ready snapshot, taken on the same runtime.
     Another identity's or tenant's snapshot is `NOT_FOUND`.
@@ -175,11 +177,15 @@ show it.
   - sshd presents it through `HostKey` and `HostCertificate`;
   - `sandboxes.exec` answers `hostPrincipal` and `hostCertified`, so clients pin guests with
     `@cert-authority` and `StrictHostKeyChecking=yes`;
-  - a memory restore keeps its source guest's key and principal.
+  - a memory restore keeps its source guest's key and principal;
+  - `hostCertified` is reported only while the certificate is still valid (30 days).
 
 - **Network.** A template's `network` becomes the instance's `InstanceSpec.networkPolicy`. bcd
   enforces it on the instance's taps with nftables and fails closed without NIC addresses, so
-  `private` and `none` need the pool's IP range.
+  `private` and `none` need the pool's IP range. They place only on hosts labelled
+  `bc.dev/cap.instance.network-policy` (the bcd capability), never on an older bcd that would drop the
+  policy. `private` means the pool's whole IPAM subnet, so on a pool offered to several tenants it
+  includes theirs.
 - **Secrets.** Secrets are write-only, but a sandbox reads whatever its template names. A template's
   env and `secret://` user data must therefore be secrets the tenant wrote with `secrets.put` (a
   `secret_refs` row), so platform-minted ones are refused. Writing such a template also decides
