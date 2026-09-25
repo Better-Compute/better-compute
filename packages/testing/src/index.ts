@@ -143,6 +143,16 @@ export { ScriptedServer, createDaemonHarness } from './daemon/harness.js';
 export type { AgentFrameValue, DaemonHarness, DaemonHarnessOptions } from './daemon/harness.js';
 export { runAgentJoin, type AgentJoinOptions, type AgentJoinResult } from './daemon/join.js';
 export { createWsDialer, type WsDialOptions } from './daemon/ws-dial.js';
+export {
+  echoShell,
+  startTunnel,
+  type FakeTunnelOptions,
+  type TunnelConn,
+  type TunnelOutcome,
+  type TunnelProgram,
+  type TunnelProgramContext,
+  type TunnelProgramFactory,
+} from './daemon/tunnels.js';
 
 export * from './sim/index.js';
 export * from './realtime/index.js';

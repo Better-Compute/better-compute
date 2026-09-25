@@ -1,7 +1,7 @@
 import type { KeyObject } from 'node:crypto';
 import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
-import { signCommandUpdate } from '@better-compute/pki';
+import { signCommandUpdate, type ReplayCache } from '@better-compute/pki';
 import {
   AccessSectionSchema,
   AgentFrameSchema,
@@ -58,6 +58,12 @@ import type { AgentConn, CloseInfo } from '../frame-conn.js';
 import { createRng, type Rng } from '../rng.js';
 import type { Scheduler, Timer } from '../scheduler.js';
 import type { DaemonFact, FactSink } from './facts.js';
+import {
+  newTunnelJtiCache,
+  startTunnel,
+  type FakeTunnelOptions,
+  type TunnelOutcome,
+} from './tunnels.js';
 import {
   COMMAND_TTL_MS,
   JournalError,
@@ -133,6 +139,11 @@ export interface FakeDaemonOptions {
    * `node_sig` made with it, as bcd signs wipe and diagnostics results. Without a key they go unsigned.
    */
   nodeKey?: KeyObject;
+  /**
+   * Tunnels (v0.3, §7.6): how the daemon opens its `Tunnel` stream and what runs in it. Without it
+   * an `OpenTunnel` is ignored (the gateway's open times out), as a daemon without tunnels would.
+   */
+  tunnels?: FakeTunnelOptions;
 }
 
 interface Session {
@@ -250,6 +261,10 @@ export class FakeDaemon {
   nodeKey: KeyObject | undefined;
   /** Commands whose result is node-signed, also when a journal replay reports it again. */
   private readonly attestedResults = new Set<string>();
+  /** Every `OpenTunnel` this node answered, in order: opened, or refused and why. */
+  readonly tunnelOutcomes: TunnelOutcome[] = [];
+  /** The daemon's jti set (survives reconnects, like bcd's in-memory set). */
+  private readonly tunnelJti: ReplayCache;
 
   private readonly scheduler: Scheduler;
   private readonly rng: Rng;
@@ -288,6 +303,7 @@ export class FakeDaemon {
     this.bootIdValue = this.rng.uuid();
     this.journalValue = this.newJournal();
     this.nodeKey = options.nodeKey;
+    this.tunnelJti = options.tunnels?.jtiCache ?? newTunnelJtiCache();
   }
 
   // ---- observation ------------------------------------------------------------------------------
@@ -696,6 +712,30 @@ export class FakeDaemon {
         this.revokedValue = true;
         session.conn.close('revoked');
         return;
+      case 'openTunnel': {
+        const tunnels = this.options.tunnels;
+        if (!tunnels) {
+          this.log('frame.ignored', { case: 'openTunnel', why: 'no tunnels' });
+          return;
+        }
+        const outcome = startTunnel({
+          nodeId: this.nodeId,
+          tunnelId: msg.value.tunnelId,
+          ticket: msg.value.ticket,
+          jwksJson: proc.spec?.access?.execTicketJwksJson ?? '',
+          now: this.serverNow(),
+          jtiCache: this.tunnelJti,
+          options: tunnels,
+        });
+        this.tunnelOutcomes.push(outcome);
+        this.log(
+          outcome.opened ? 'tunnel.opened' : 'tunnel.refused',
+          outcome.opened
+            ? { tunnelId: outcome.tunnelId }
+            : { tunnelId: outcome.tunnelId, reason: outcome.reason },
+        );
+        return;
+      }
       default:
         this.log('frame.ignored', { case: msg.case ?? null });
     }
