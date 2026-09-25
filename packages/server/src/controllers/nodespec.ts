@@ -269,8 +269,20 @@ export async function wireNodeSpec(tx: SqlTx, spec: NodeSpec): Promise<JsonObjec
     if (spec.daemon.signature) daemon.signature = bytesField(spec.daemon.signature);
     wire.daemon = daemon;
   }
-  if (spec.site)
-    wire.site = { boot: { active: spec.site.boot.active, epoch: String(spec.site.boot.epoch) } };
+  if (spec.site) {
+    const site: JsonObject = {
+      boot: { active: spec.site.boot.active, epoch: String(spec.site.boot.epoch) },
+    };
+    // Sorted by URL so equal specs serialize equally.
+    const images = [...(spec.site.cacheImages ?? [])].sort((a, b) => a.url.localeCompare(b.url));
+    if (images.length)
+      site.cacheImages = images.map((image) => ({
+        url: image.url,
+        sha256: bytesField(image.sha256),
+        format: image.format,
+      }));
+    wire.site = site;
+  }
   return wire;
 }
 

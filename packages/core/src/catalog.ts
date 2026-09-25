@@ -461,6 +461,8 @@ group('workflows', 'provision', [
   ['list', 'read', 'workflows:read', 'node', 'v0.2'],
   ['abort', 'mutation', 'workflows:manage', 'node', 'v0.2'],
   ['retry', 'mutation', 'workflows:manage', 'node', 'v0.2'],
+  ['pause', 'mutation', 'workflows:manage', 'node', 'v0.2'],
+  ['resume', 'mutation', 'workflows:manage', 'node', 'v0.2'],
 ]);
 group('instances', 'vps', [
   ['create', 'mutation', 'instances:create', 'instance', 'v0.3'],

@@ -222,12 +222,14 @@ Every call is authenticated (except public methods), refused before any database
 
 ### `workflows` (provision)
 
-| Method            | Kind     | Authorization                               | Phase | Status  |
-| ----------------- | -------- | ------------------------------------------- | ----- | ------- |
-| `workflows.get`   | read     | `compute:workflows:read` @ `compute-node`   | v0.2  | planned |
-| `workflows.list`  | read     | `compute:workflows:read` @ `compute-node`   | v0.2  | planned |
-| `workflows.abort` | mutation | `compute:workflows:manage` @ `compute-node` | v0.2  | planned |
-| `workflows.retry` | mutation | `compute:workflows:manage` @ `compute-node` | v0.2  | planned |
+| Method             | Kind     | Authorization                               | Phase | Status  |
+| ------------------ | -------- | ------------------------------------------- | ----- | ------- |
+| `workflows.get`    | read     | `compute:workflows:read` @ `compute-node`   | v0.2  | planned |
+| `workflows.list`   | read     | `compute:workflows:read` @ `compute-node`   | v0.2  | planned |
+| `workflows.abort`  | mutation | `compute:workflows:manage` @ `compute-node` | v0.2  | planned |
+| `workflows.retry`  | mutation | `compute:workflows:manage` @ `compute-node` | v0.2  | planned |
+| `workflows.pause`  | mutation | `compute:workflows:manage` @ `compute-node` | v0.2  | planned |
+| `workflows.resume` | mutation | `compute:workflows:manage` @ `compute-node` | v0.2  | planned |
 
 ### `instances` (vps)
 

@@ -611,6 +611,8 @@ export interface DaemonSpec {
 /** Site agents: whether this agent holds the site's boot lease. */
 export interface SiteSpec {
   boot: { active: boolean; epoch: number };
+  /** (v0.2 §11.5) Verified catalog images the site cache pre-warms; `sha256` is hex. */
+  cacheImages?: { url: string; sha256: string; format: ImageFormat }[];
 }
 
 /** Generation-numbered desired state; the daemon converges each section idempotently. */

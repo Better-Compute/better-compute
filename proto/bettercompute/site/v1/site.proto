@@ -16,6 +16,18 @@ option go_package = "github.com/better-compute/better-compute/daemon/gen/betterc
 // The `site` section of a site agent's NodeSpec.
 message SiteSpec {
   BootLeaseState boot = 1;
+  // Images the site cache pre-warms (§11.5), from its pools' policy. The agent pulls each one and
+  // re-verifies its digest before serving it.
+  repeated CacheImage cache_images = 2;
+}
+
+// A verified catalog image the site cache holds.
+message CacheImage {
+  string url = 1;
+  // SHA-256 of the image bytes.
+  bytes sha256 = 2;
+  // "qcow2", "raw", "iso", …
+  string format = 3;
 }
 
 // The site:<id>:boot lease as published by the SiteBoot controller. Only the active holder answers

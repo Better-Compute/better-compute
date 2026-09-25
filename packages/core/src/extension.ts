@@ -180,6 +180,11 @@ export interface PlacementRequest {
   priority?: number;
   /** Nodes to leave out (a replan after a conflict). */
   excludeNodes?: readonly string[];
+  /**
+   * Labels every candidate node must carry with exactly these values (e.g. a runtime a host's bcd
+   * advertised in Hello.drivers, `bc.dev/driver.kata`); absent: no label constraint.
+   */
+  nodeLabels?: Readonly<Record<string, string>>;
 }
 
 /** A scalar resource of a node (`node_resources`). */
