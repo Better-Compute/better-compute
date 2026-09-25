@@ -375,7 +375,14 @@ describe('apiSurface (§9.2)', () => {
 
   it('assigns each group to the module and phase the plan names', () => {
     const modules: Record<string, string> = {};
+    // The one method another module contributes to a group: break-glass SSH certificates.
+    const contributed: Record<string, string> = { 'nodes.issueSshCert': 'tunnels' };
     for (const row of apiSurface) {
+      const path = `${row.group}.${row.method}`;
+      if (contributed[path]) {
+        expect(row.module, path).toBe(contributed[path]);
+        continue;
+      }
       modules[row.group] ??= row.module;
       expect(row.module, row.group).toBe(modules[row.group]);
     }
@@ -393,7 +400,7 @@ describe('apiSurface (§9.2)', () => {
       instances: 'vps',
       flavors: 'vps',
       providerAccounts: 'vps',
-      tunnels: 'server',
+      tunnels: 'tunnels',
       // Injected modules outside the plan's original table: `@better-compute/fleet`, `@better-compute/events`.
       fleet: 'fleet',
       webhooks: 'events',

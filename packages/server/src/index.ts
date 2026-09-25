@@ -31,6 +31,7 @@ import {
   type Job,
 } from './runtime/index.js';
 import { createSelfCheck, type SelfCheckReport } from './self-check.js';
+import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
 
 export type * from './api.js';
@@ -73,6 +74,7 @@ export type { ServerInfo, WellKnownJoinKeys } from './version.js';
 export * from './join/index.js';
 export * from './controllers/index.js';
 export * from './nodes-module.js';
+export * from './tunnels/index.js';
 
 /** One `authz_projection` row as the resolver reads it (PLAN.md §12.4). */
 export interface AuthzProjectionRow extends AuthzRow {
@@ -177,6 +179,7 @@ export function betterCompute<
     }),
     inventoryModule,
     capacityModule(resolved.capacity),
+    ...(options.tunnels ? [tunnelsModule(options.tunnels)] : []),
     ...(options.modules ?? []),
   ];
   const plugins: readonly ComputePlugin[] = [...(options.plugins ?? [])];
@@ -292,6 +295,8 @@ export function betterCompute<
       attestors: registry.extensions,
       authz: moduleContext.authz,
       log: resolved.log,
+      // `security.join.refused` lands in the root tenant unless a verified token names another.
+      rootTenantId: resolved.rootTenantId,
     }),
     initialize,
     async start(startOptions = {}) {

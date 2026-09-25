@@ -249,7 +249,9 @@ export type ApiModule =
   /** `@better-compute/fleet` (FleetConfig as code); an injected module. */
   | 'fleet'
   /** `@better-compute/rollout` (daemon releases and staged rollouts, v0.4); an injected module. */
-  | 'rollout';
+  | 'rollout'
+  /** The server's tunnels module (`tunnels.open`, `nodes.issueSshCert`), hosted when `tunnels` is configured. */
+  | 'tunnels';
 
 export interface ApiTarget {
   action: ComputeAction;
@@ -279,7 +281,12 @@ type Entry = readonly [
   action: ComputeActionName | null,
   resource: ComputeResourceKind | null,
   phase: ApiPhase,
-  options?: { list?: true; or?: readonly (readonly [ComputeActionName, ComputeResourceKind])[] },
+  options?: {
+    list?: true;
+    or?: readonly (readonly [ComputeActionName, ComputeResourceKind])[];
+    /** A method another module contributes to this group (`nodes.issueSshCert` from `tunnels`). */
+    module?: ApiModule;
+  },
 ];
 
 const rows: ApiSurfaceRow[] = [];
@@ -292,7 +299,7 @@ function group(name: string, module: ApiModule, entries: readonly Entry[]): void
       resource,
       kind,
       phase,
-      module,
+      module: options?.module ?? module,
     };
     if (options?.list) row.list = true;
     if (options?.or)
@@ -360,7 +367,7 @@ group('nodes', 'server', [
   ['adopt', 'mutation', 'nodes:provision', 'node', 'v0.1'],
   ['revokeIdentity', 'mutation', 'nodes:revoke-identity', 'node', 'v0.1'],
   ['delete', 'mutation', 'nodes:delete', 'node', 'v0.2'],
-  ['issueSshCert', 'mutation', 'nodes:ssh-root', 'node', 'v0.3'],
+  ['issueSshCert', 'mutation', 'nodes:ssh-root', 'node', 'v0.3', { module: 'tunnels' }],
 ]);
 group('inventory', 'inventory', [
   ['get', 'read', 'nodes:read', 'node', 'v0.1'],
@@ -484,7 +491,7 @@ group('providerAccounts', 'vps', [
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['delete', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
 ]);
-group('tunnels', 'server', [
+group('tunnels', 'tunnels', [
   ['open', 'mutation', 'instances:exec', 'instance', 'v0.3', { or: [['nodes:console', 'node']] }],
 ]);
 group('fleet', 'fleet', [

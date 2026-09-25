@@ -23,6 +23,7 @@ import {
 } from '@better-compute/core';
 import type { CapacityModuleOptions } from '@better-compute/capacity';
 import type { JoinCrypto } from './join/crypto.js';
+import type { TunnelsOptions } from './tunnels/module.js';
 import { anchoredClock } from './runtime/clock.js';
 import { withCommitHooks, type CommitHook } from './runtime/commit-hooks.js';
 
@@ -131,6 +132,12 @@ export interface ComputeOptions<
     join?: JoinCrypto;
   };
   secrets?: SecretStore[];
+  /**
+   * v0.3 tunnels and break-glass SSH (`tunnels.open`, `nodes.issueSshCert`): pki's exec ticket
+   * issuer (its JWKS also goes to the gateway's `tunnels.jwks`), the SSH CA and the re-authorizer.
+   * Without it neither method is registered.
+   */
+  tunnels?: TunnelsOptions;
   notifier?: Notifier;
   sinks?: SinkOptions;
   downloads?: { dir?: string; blob?: BlobStore };

@@ -940,6 +940,12 @@ export interface MethodResource {
   /** A compute resource kind (`pool`, `reservation`, …) or a module/plugin catalog type. */
   type: ComputeResourceKind | (string & {});
   id: string;
+  /**
+   * For inputs decided on one of the row's "… or @ …" alternatives with its own action
+   * (`tunnels.open` on a node: `compute:nodes:console`). The envelope decides on
+   * `action ?? MethodDefinition.action` and refuses (`INVALID_CONFIG`) a pair §9.2 does not list.
+   */
+  action?: `compute:${string}`;
 }
 
 /**

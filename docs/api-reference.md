@@ -260,7 +260,7 @@ Every call is authenticated (except public methods), refused before any database
 | `providerAccounts.update` | mutation | `compute:providers:manage` @ `compute-provider-account`                                       | v0.3  | planned |
 | `providerAccounts.delete` | mutation | `compute:providers:manage` @ `compute-provider-account`                                       | v0.3  | planned |
 
-### `tunnels` (server)
+### `tunnels` (tunnels)
 
 | Method         | Kind     | Authorization                                                                             | Phase | Status  |
 | -------------- | -------- | ----------------------------------------------------------------------------------------- | ----- | ------- |

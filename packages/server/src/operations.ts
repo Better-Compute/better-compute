@@ -19,7 +19,12 @@ import { cachesFor, publicCaches, type ComputeCaches } from './caches.js';
 import { checkPlan, createComposites, outsideComposite, type CompositeCall } from './composite.js';
 import { createListRecipe, readOnlyExecutor, runsOutsideTransaction } from './list.js';
 import type { ResolvedOptions } from './options.js';
-import { rowResourceKinds, type RegisteredMethod, type Registry } from './registry.js';
+import {
+  actionPattern,
+  rowResourceKinds,
+  type RegisteredMethod,
+  type Registry,
+} from './registry.js';
 
 /** Per-call details the transport supplies. */
 export interface CallOptions {
@@ -176,16 +181,42 @@ function admissionOf(
   return admission;
 }
 
-/** The resource a method decides on, checked against its §9.2 row. */
+/**
+ * The resource a method decides on, checked against its §9.2 row: the pair `(action, type)`, with
+ * `action` the resource's own (an alternative's action) or the method's, must be the row's or one
+ * of its alternatives. A method without a row may not override its action.
+ */
 function checkResource(entry: RegisteredMethod, resource: unknown): MethodResource {
   if (!isRecord(resource) || typeof resource.type !== 'string' || typeof resource.id !== 'string')
     throw new ComputeError('INVALID_CONFIG', `${entry.path} names no resource to decide on`);
-  if (entry.row && !(rowResourceKinds(entry.row) as string[]).includes(resource.type))
+  const { type, id } = resource;
+  const override = resource.action;
+  if (override !== undefined && (typeof override !== 'string' || !actionPattern.test(override)))
+    throw new ComputeError('INVALID_CONFIG', `${entry.path} names an invalid action to decide`);
+  const action = (override as `compute:${string}` | undefined) ?? entry.action;
+  const row = entry.row;
+  if (row) {
+    if (!(rowResourceKinds(row) as string[]).includes(type))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `${entry.path} decides on ${type}, not its §9.2 resource`,
+      );
+    const listed =
+      (row.action === action && row.resource === type) ||
+      (row.alternatives ?? []).some((pair) => pair.action === action && pair.resource === type);
+    if (!listed)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `${entry.path} decides ${action} on ${type}, a pair its §9.2 row does not list`,
+      );
+  } else if (override !== undefined && override !== entry.action)
     throw new ComputeError(
       'INVALID_CONFIG',
-      `${entry.path} decides on ${resource.type}, not its §9.2 resource`,
+      `${entry.path} has no §9.2 row to decide ${override} by`,
     );
-  return { type: resource.type, id: resource.id };
+  return override === undefined || override === entry.action
+    ? { type, id }
+    : { type, id, action: override as `compute:${string}` };
 }
 
 /** Whether IAM refused the decision (as opposed to failing to make one). */
@@ -268,9 +299,10 @@ export function createOperations(
   /** Fleet-wide resources resolve only in the root tenant (§9.2 scope types). */
   const decisionTenant = (resource: MethodResource | undefined, inputTenant?: string) =>
     resource?.type === 'fleet' ? rootTenantId : inputTenant;
+  /** `resource.action` is an alternative's action, already checked against §9.2 by checkResource. */
   const decisionOf = (tenantId: string, action: string, resource: MethodResource): Decision => ({
     tenantId,
-    action,
+    action: resource.action ?? action,
     resource: { type: `${typePrefix}${resource.type}`, id: resource.id },
   });
   /** §3.4 step 3; root callers go on to IAM, which decides ROOT_OVERRIDE and audits it. */

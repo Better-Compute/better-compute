@@ -92,7 +92,7 @@ export interface RegistryInput {
 
 const namePattern = /^[a-z][a-z0-9-]{0,63}$/;
 const segmentPattern = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
-const actionPattern = /^compute:[a-z][a-z0-9-]{0,63}:[a-z][a-z0-9-]{0,63}$/;
+export const actionPattern = /^compute:[a-z][a-z0-9-]{0,63}:[a-z][a-z0-9-]{0,63}$/;
 /** Segments a JavaScript object or the client's Proxy cannot carry, and the plugin mount point. */
 const reservedSegments = new Set([
   'then',
