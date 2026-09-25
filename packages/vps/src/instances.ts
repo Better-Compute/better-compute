@@ -841,17 +841,32 @@ export function instanceAttributes(
  * write-only (§6), so the caller also needs `compute:secrets:manage` (the admission check).
  */
 async function assertTenantPutSecret(tx: SqlTx, tenantId: string, ref: string): Promise<void> {
-  const present = await tx.query<{ found: string | null }>(
-    `SELECT to_regclass('secret_refs')::text AS found`,
+  const present = await tx.query<{ found: string | null; scoped: boolean }>(
+    `SELECT to_regclass('secret_refs')::text AS found,
+            EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_name = 'secret_refs' AND column_name = 'scope'
+                       AND table_schema = current_schema()) AS scoped`,
   );
-  const known =
-    present.rows[0]?.found &&
-    (await tx.query(`SELECT 1 FROM secret_refs WHERE tenant_id = $1 AND ref = $2`, [tenantId, ref]))
-      .rows.length > 0;
-  if (!known)
+  const row = present.rows[0]?.found
+    ? (
+        await tx.query<{ scope: string }>(
+          `SELECT ${present.rows[0].scoped ? 'scope' : `'tenant'`} AS scope
+             FROM secret_refs WHERE tenant_id = $1 AND ref = $2`,
+          [tenantId, ref],
+        )
+      ).rows[0]
+    : undefined;
+  if (!row)
     throw new ComputeError(
       'INVALID_INPUT',
       `${ref} is not a secret this tenant put (secrets.put); user data refs name only those`,
+    );
+  // A fleet secret (BMC credentials of shared sites, in the root tenant) never becomes a guest's
+  // user data: the guest reads what it is given.
+  if (row.scope === 'fleet')
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${ref} is a fleet secret; instances take tenant secrets only as user data`,
     );
 }
 

@@ -298,6 +298,28 @@ describe('hosted user data (§6 Secrets)', () => {
       idempotencyKey: 'victim-1',
     })) as { id: string };
     const { user_data: victims } = await stored(first.id);
+    // A fleet secret (secrets.put decided on the fleet) is never a guest's user data.
+    const scoped = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'secret_refs' AND column_name = 'scope'`,
+    );
+    if (scoped.rows[0]!.n > 0) {
+      const fleet = await broker.put('acme', 'bmc-password');
+      await db.query(
+        `INSERT INTO secret_refs (ref, tenant_id, name, version, store, last_idempotency_key, scope)
+         VALUES ($1, 'acme', 'bmc', 1, 'local', 'put-fleet', 'fleet')`,
+        [fleet],
+      );
+      await expect(
+        call('instances', 'create', {
+          tenantId: 'acme',
+          poolId,
+          flavor: 's',
+          imageId: 'base',
+          userData: fleet,
+          idempotencyKey: 'fleet-1',
+        }),
+      ).rejects.toThrow(/fleet secret/);
+    }
     await expect(
       call('instances', 'create', {
         tenantId: 'acme',
