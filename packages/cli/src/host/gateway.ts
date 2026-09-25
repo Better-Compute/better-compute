@@ -145,6 +145,8 @@ export function gatewayOptions(
   config: HostGatewayConfig,
   identity?: GatewayIdentity,
   metrics?: MetricsRegistry,
+  /** The signed trust bundle this process publishes (`compute.gatewayServices.trustBundle()`, resolved once). */
+  trustBundle?: unknown,
 ): Record<string, unknown> {
   const extra = config.options ?? {};
   const issuer = ticketIssuer(options);
@@ -215,6 +217,9 @@ export function gatewayOptions(
       : {}),
     // Live sessions whose certificate is revoked get a RevocationNotice and are closed (§16: ≤ 5 s).
     ...(identity ? { revocations: identity.revocations } : {}),
+    // Welcome.trust: daemons that joined before a root rotation, an approver-set change or a new epoch learn it on
+    // their next session (the bundle only changes with a restart of this process, so it is resolved once).
+    ...(trustBundle ? { trustBundle: () => trustBundle } : {}),
     ...extra,
     region: config.region,
     database: options.database,
@@ -268,8 +273,14 @@ export async function startGateway(
   };
   const identity = gatewayIdentity(options, config);
   const pkg = gatewayPackage as unknown as GatewayPackage;
+  // The signed trust bundle (its version settled against the deployment's record first).
+  const services = compute.gatewayServices as { trustBundle?: () => Promise<unknown> };
+  const trustBundle = await services.trustBundle?.().catch((error: unknown) => {
+    note(`Trust bundle: not relayed in Welcome (${error instanceof Error ? error.message : String(error)})`);
+    return undefined;
+  });
   const gateway = pkg.createGateway(
-    gatewayOptions(pkg, compute, options, config, identity, metrics),
+    gatewayOptions(pkg, compute, options, config, identity, metrics, trustBundle),
   );
   await gateway.start();
   // Revocations reach this gateway within about a second (§16: a revoked node is out within 5 s):

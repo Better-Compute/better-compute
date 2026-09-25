@@ -49,7 +49,7 @@ import {
 } from '@better-compute/pki';
 import { retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
-import { AgentRole, type JoinRequest, type TunnelFrame } from '@better-compute/protocol';
+import { type SignedTrustBundle, AgentRole, type JoinRequest, type TunnelFrame } from '@better-compute/protocol';
 import {
   betterCompute,
   builtinJobNames,
@@ -486,8 +486,12 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   const internalPort = options.tunnels ? await freePort() : undefined;
   const tunnelIssuer = options.tunnels?.issuer;
   const { tunnels: tunnelProgram, ...daemonOptions } = options.daemon ?? {};
+  // Welcome.trust, as `serve` relays it: the signed bundle of this control plane (when it signs intent).
+  const services = compute.gatewayServices as { trustBundle?: () => Promise<SignedTrustBundle | undefined> };
+  const signedTrust = await services.trustBundle?.().catch(() => undefined);
   try {
     gateway = createGateway({
+      ...(signedTrust ? { trustBundle: () => signedTrust } : {}),
       ...(tunnelIssuer
         ? {
             internalUrl: `http://127.0.0.1:${internalPort}`,

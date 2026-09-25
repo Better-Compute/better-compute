@@ -292,6 +292,13 @@ describe('serve composition audit', () => {
     );
     expect(composed).toMatchObject({ maxStreams: 10, region: 'eu-1' });
     expect(composed).not.toHaveProperty('tunnels');
+    // Without a trust bundle nothing is relayed; with one, every Welcome carries it (roots, quorum, epoch).
+    expect(composed).not.toHaveProperty('trustBundle');
+    const signed = { body: new Uint8Array([1]) };
+    const withTrust = gatewayOptions({ xidStatusHandler: xid }, fake, { database: {} } as any, { region: 'eu-1', tls: {} }, undefined, undefined, signed) as {
+      trustBundle: () => unknown;
+    };
+    expect(withTrust.trustBundle()).toBe(signed);
   });
 
   it('re-checks tunnels at the gateway for the ticket’s session, and counts handshakes', async () => {
