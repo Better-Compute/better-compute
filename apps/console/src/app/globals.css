@@ -148,25 +148,49 @@ button:disabled {
   display: grid;
   gap: 4px;
 }
-pre.terminal {
-  background: #0b0d10;
-  color: #d8dee9;
-  padding: 12px;
-  border-radius: var(--radius);
-  min-height: 320px;
-  max-height: 60vh;
+.term {
+  --term-bg: #0b0d10;
+  --term-fg: #d8dee9;
+  position: relative;
+  height: 65vh;
+  min-height: 240px;
   overflow: auto;
-  white-space: pre-wrap;
+  padding: 8px;
+  border-radius: var(--radius);
+  background: var(--term-bg);
+  color: var(--term-fg);
   font:
     13px/17px ui-monospace,
     'SF Mono',
     Menlo,
     Consolas,
     monospace;
+  outline: none;
 }
-.terminal-input {
-  flex: 1;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+.term:focus {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.term-line {
+  height: 17px;
+  white-space: pre;
+}
+.term-screen {
+  position: relative;
+}
+.term-cursor {
+  position: absolute;
+  background: var(--term-fg);
+  opacity: 0.6;
+  pointer-events: none;
+}
+.term:not(:focus) .term-cursor {
+  background: none;
+  outline: 1px solid var(--term-fg);
+}
+.term-probe {
+  position: absolute;
+  visibility: hidden;
+  white-space: pre;
 }
 button.link {
   border: none;
