@@ -1,6 +1,7 @@
 import {
   ComputeError,
   defineMethod,
+  describedBy,
   isId,
   isSecretRef,
   newId,
@@ -20,6 +21,7 @@ import { siteAgentFor } from '@better-compute/provision';
 import type { HardwareProfile } from './module-types.js';
 import { unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
+import { schemas } from './schemas.js';
 import { bmcOperationJson } from './steps.js';
 import { applyProvisionVerb, readMetalNode, resolveDriverBindings, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
@@ -284,7 +286,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
       action: 'compute:nodes:provision',
       kind: 'mutation',
       resource: onNode,
-      validate: (raw) => nodeInput(raw),
+      validate: describedBy(schemas.node, (raw) => nodeInput(raw)),
       handler: (context, input) => verb(context, input, provisionVerb),
     });
 
@@ -294,7 +296,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         action: 'compute:nodes:provision',
         kind: 'mutation',
         resource: (input) => ({ type: 'pool', id: input.poolId }),
-        validate: validateEnroll,
+        validate: describedBy(schemas.enroll, validateEnroll),
         handler: (context, input) => enroll(context, hardwareProfiles, input),
       }),
       manage: simple('manage'),
@@ -304,12 +306,12 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         action: 'compute:nodes:provision',
         kind: 'mutation',
         resource: onNode,
-        validate(raw) {
+        validate: describedBy(schemas.deploy, (raw): DeployInput => {
           const input = nodeInput(raw, ['profileId', 'profileVersion']);
           const version = input.profileVersion;
           if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) fail('profileVersion must be a positive integer');
           return { tenantId: input.tenantId, nodeId: input.nodeId, profileId: text(input.profileId, 'profileId', 128), profileVersion: version };
-        },
+        }),
         handler: (context, input) =>
           verb(context, input, 'deploy', async (tx, node) => {
             await tx.query('UPDATE metal_nodes SET deploy_profile_id = $2, deploy_profile_version = $3 WHERE node_id = $1', [
@@ -323,12 +325,12 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         action: 'compute:nodes:provision',
         kind: 'mutation',
         resource: onNode,
-        validate(raw) {
+        validate: describedBy(schemas.undeploy, (raw): UndeployInput => {
           const input = nodeInput(raw, ['wipe']);
           const out: UndeployInput = { tenantId: input.tenantId, nodeId: input.nodeId };
           if (input.wipe !== undefined) out.wipe = wipeModes.includes(input.wipe as WipeMode) ? (input.wipe as WipeMode) : fail(`wipe must be one of ${wipeModes.join(', ')}`);
           return out;
-        },
+        }),
         handler: (context, input) =>
           verb(context, input, 'release', async (tx, node) => {
             await tx.query('UPDATE metal_nodes SET release_wipe = $2 WHERE node_id = $1', [node.node_id, input.wipe ?? 'quick']);
@@ -339,7 +341,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         action: 'compute:nodes:provision',
         kind: 'mutation',
         resource: onNode,
-        validate: (raw) => nodeInput(raw),
+        validate: describedBy(schemas.node, (raw) => nodeInput(raw)),
         handler: (context, input) =>
           context.sql.transaction(async (tx) => {
             const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId, lock: true });
@@ -375,12 +377,12 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         action: 'compute:nodes:provision',
         kind: 'mutation',
         resource: onNode,
-        validate(raw) {
+        validate: describedBy(schemas.abort, (raw): AbortInput => {
           const input = nodeInput(raw, ['reason']);
           const out: AbortInput = { tenantId: input.tenantId, nodeId: input.nodeId };
           if (input.reason !== undefined) out.reason = text(input.reason, 'reason', 512);
           return out;
-        },
+        }),
         handler: (context, input) =>
           verb(context, input, 'abort', async (tx, node) => {
             if (node.workflow_id && context.workflows) await context.workflows.abort(tx, node.workflow_id);
@@ -394,7 +396,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         action: 'compute:nodes:provision',
         kind: 'mutation',
         resource: onNode,
-        validate: (raw) => nodeInput(raw),
+        validate: describedBy(schemas.node, (raw) => nodeInput(raw)),
         handler: (context, input) =>
           verb(context, input, 'recover', async (_tx, node) => {
             if (node.provision_state !== 'failed' || !node.failed_from)
@@ -407,11 +409,11 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         action: 'compute:nodes:power',
         kind: 'mutation',
         resource: onNode,
-        validate(raw) {
+        validate: describedBy(schemas.power, (raw): PowerInput => {
           const input = nodeInput(raw, ['action']);
           if (!powerActions.includes(input.action as PowerAction)) fail(`action must be one of ${powerActions.join(', ')}`);
           return { tenantId: input.tenantId, nodeId: input.nodeId, action: input.action as PowerAction };
-        },
+        }),
         handler: (context, input) =>
           context.sql.transaction(async (tx) => {
             const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId });
