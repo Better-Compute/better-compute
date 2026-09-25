@@ -237,6 +237,65 @@ describe('tunnels.open', () => {
     await db.query(`DELETE FROM authz_projection WHERE type = 'node' AND id = $1`, [OFFLINE]);
   });
 
+  it('answers a node of another tenant exactly like a missing node (no oracle)', async () => {
+    const FOREIGN = 'node_01jz00000000000000000000nd';
+    const MISSING = 'node_01jz00000000000000000000ne';
+    await db.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+                          trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($1, 'site_01jz00000000000000000000aa', 'root', 'host', 'adopted', false, false, 'connected',
+               'platform', 1, 1, 1, 1, 0, 1)`,
+      [FOREIGN],
+    );
+    await db.query(
+      `INSERT INTO authz_projection (type, id, tenant_id, attributes) VALUES ('node', $1, 'other', '{}')`,
+      [FOREIGN],
+    );
+    const refusal = (nodeId: string) =>
+      open({ tenantId: 'acme', nodeId, op: 'console' }).then(
+        () => undefined,
+        (error: { code: string; message: string }) => ({
+          code: error.code,
+          message: error.message.replace(nodeId, '<node>'),
+        }),
+      );
+    const foreign = await refusal(FOREIGN);
+    expect(foreign).toEqual({ code: 'NOT_FOUND', message: 'Node <node> not found' });
+    expect(await refusal(MISSING)).toEqual(foreign);
+  });
+
+  it('names the agent and delegation of a delegated caller in the ticket', async () => {
+    const input = api.tunnels.open.validate({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+    const opened = (await db.transaction(async (tx) =>
+      api.tunnels.open.handler(
+        {
+          sql: within(tx),
+          clock: manualClock(T0),
+          caller: { ...alice, agentId: 'agt_1', delegationId: 'dlg_1', sessionKind: 'delegated' },
+          requestId: 'r',
+          events: { publish: async () => undefined },
+        } as unknown as MethodContext,
+        input,
+      ),
+    )) as OpenedTunnel;
+    const claims = verifyExecTicket(opened.ticket, {
+      jwks: issuer.jwksJson(),
+      nodeId: NODE,
+      now: Date.now(),
+      jtiCache: createReplayCache(),
+    });
+    expect(claims).toMatchObject({ sub: 'usr_alice', agt: 'agt_1', dlg: 'dlg_1' });
+    const own = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+    const ownClaims = verifyExecTicket(own.ticket, {
+      jwks: issuer.jwksJson(),
+      nodeId: NODE,
+      now: Date.now(),
+      jtiCache: createReplayCache(),
+    });
+    expect(ownClaims).not.toHaveProperty('agt');
+    expect(ownClaims).not.toHaveProperty('dlg');
+  });
+
   it('puts the issuer’s JWKS into every node’s access section', async () => {
     const spec = await module.nodeSpec!({} as ModuleContext, {} as NodeRecord);
     expect(spec.access?.execTicketJwks).toEqual(JSON.parse(issuer.jwksJson()));
@@ -273,7 +332,13 @@ describe('nodes.issueSshCert', () => {
             },
           } as unknown as MethodContext,
           input,
-        )) as { certificate: string; principals: string[]; keyId: string; validBefore: number },
+        )) as {
+          certificate: string;
+          principals: string[];
+          account: string;
+          keyId: string;
+          validBefore: number;
+        },
     );
   };
 
@@ -285,22 +350,52 @@ describe('nodes.issueSshCert', () => {
     );
   });
 
-  it('issues a short, recorded user certificate for an MFA session', async () => {
-    const issued = await issue({ principal: 'ubuntu', ttlSeconds: 600 });
+  it('issues a short, recorded, node-bound user certificate for an MFA session', async () => {
+    const issued = await issue({ ttlSeconds: 600 });
     const parsed = parseSshCertificate(issued.certificate);
     expect(parsed).toMatchObject({
       certType: 'user',
-      principals: ['ubuntu'],
+      principals: [`root@${NODE}`],
       keyId: issued.keyId,
       signatureValid: true,
     });
+    expect(issued).toMatchObject({ account: 'root', principals: [`root@${NODE}`] });
     expect(issued.keyId).toMatch(new RegExp(`^bc:usr_alice:${NODE}:ssh_`));
     expect(parsed.validBefore - Date.now()).toBeLessThanOrEqual(600_000);
     expect(formatSshPublicKey(parsed.signatureKey)).toBe(
       ca.publicKey.split(' ').slice(0, 2).join(' '),
     );
     expect(events).toContain('node.ssh-cert.issued');
-    expect((await issue({})).principals).toEqual(['root']);
+  });
+
+  it('binds certificates to their node: node B does not accept a certificate for node A', async () => {
+    const OTHER = 'node_01jz00000000000000000000nc';
+    const specA = await withSsh.nodeSpec!({} as ModuleContext, { id: NODE } as NodeRecord);
+    const specB = await withSsh.nodeSpec!({} as ModuleContext, { id: OTHER } as NodeRecord);
+    expect(specA.access?.sshPrincipals).toEqual([`root@${NODE}`]);
+    expect(specB.access?.sshPrincipals).toEqual([`root@${OTHER}`]);
+    // Same CA on both nodes; only the principal lists differ.
+    expect(specA.access?.sshCaPublicKeys).toEqual(specB.access?.sshCaPublicKeys);
+    const issued = await issue({});
+    const principals = parseSshCertificate(issued.certificate).principals;
+    // sshd with AuthorizedPrincipalsFile admits a certificate only when a principal matches.
+    expect(principals.some((principal) => specA.access!.sshPrincipals!.includes(principal))).toBe(
+      true,
+    );
+    expect(principals.some((principal) => specB.access!.sshPrincipals!.includes(principal))).toBe(
+      false,
+    );
+  });
+
+  it('allows only the configured accounts', async () => {
+    await expect(issue({ principal: 'ubuntu' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const ubuntu = tunnelsModule({ issuer, ssh: ca, sshAccounts: ['root', 'ubuntu'] });
+    const spec = await ubuntu.nodeSpec!({} as ModuleContext, { id: NODE } as NodeRecord);
+    expect(spec.access?.sshPrincipals).toEqual([`root@${NODE}`, `ubuntu@${NODE}`]);
+    expect(() => tunnelsModule({ issuer, ssh: ca, sshAccounts: [] })).toThrow(/sshAccounts/);
+    expect(() => tunnelsModule({ issuer, ssh: ca, sshAccounts: ['root@x'] })).toThrow(
+      /sshAccounts/,
+    );
   });
 
   it('refuses without MFA, for unknown nodes, bad keys and long lifetimes; pins the CA', async () => {

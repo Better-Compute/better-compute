@@ -88,7 +88,8 @@ export interface HandleTunnelOptions {
 const jtiCaches = new WeakMap<ExecTicketIssuer, ReplayCache>();
 function defaultJtiCache(issuer: ExecTicketIssuer): ReplayCache {
   let cache = jtiCaches.get(issuer);
-  if (!cache) jtiCaches.set(issuer, (cache = createReplayCache()));
+  // Single-use tickets fail closed when the set is full, never evicting a live jti.
+  if (!cache) jtiCaches.set(issuer, (cache = createReplayCache({ whenFull: 'refuse' })));
   return cache;
 }
 

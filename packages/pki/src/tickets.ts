@@ -52,6 +52,12 @@ export interface ExecTicketClaims {
   ses?: string;
   /** The IAM action `tunnels.open` decided (`compute:instances:exec`, `compute:nodes:console`): re-decided as is. */
   act?: string;
+  /**
+   * An AI agent acting for `sub` (a delegated session or agent key), and its delegation: a revoked
+   * delegation closes exactly the tunnels it opened (the gateway's `closeTunnels` filters on them).
+   */
+  agt?: string;
+  dlg?: string;
 }
 
 export interface IssueExecTicketInput {
@@ -66,6 +72,9 @@ export interface IssueExecTicketInput {
   sessionId?: string;
   /** The decided IAM action (`act`). */
   action?: string;
+  /** The agent acting for the subject (`agt`) and its delegation (`dlg`). */
+  agentId?: string;
+  delegationId?: string;
   /** Default and maximum 60. */
   ttlSeconds?: number;
 }
@@ -150,6 +159,8 @@ export function createExecTicketIssuer(options: {
         ...(input.port !== undefined ? { port: input.port } : {}),
         ...(input.sessionId !== undefined ? { ses: input.sessionId } : {}),
         ...(input.action !== undefined ? { act: input.action } : {}),
+        ...(input.agentId !== undefined ? { agt: input.agentId } : {}),
+        ...(input.delegationId !== undefined ? { dlg: input.delegationId } : {}),
       };
       const current = keys[0]!;
       const signingInput = `${encode({ alg: 'ES256', typ: execTicketType, kid: current.kid })}.${encode(claims)}`;

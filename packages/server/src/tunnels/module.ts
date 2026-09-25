@@ -33,14 +33,23 @@ export interface TunnelsOptions {
   ssh?: SshCertificateAuthority;
   /** Require an MFA session for `nodes.issueSshCert` (default true, §13). */
   sshRequiresMfa?: boolean;
+  /**
+   * The Unix accounts break-glass certificates may log in as (default `['root']`). A certificate's
+   * principal is `<account>@<nodeId>` and each node accepts only its own (`access.sshPrincipals`),
+   * so a certificate for one node opens no other node that trusts the same CA.
+   */
+  sshAccounts?: readonly string[];
 }
+
+/** The certificate principal for `account` on `nodeId`: node-bound, never a bare account. */
+export const sshPrincipal = (account: string, nodeId: string): string => `${account}@${nodeId}`;
 
 export interface IssueSshCertInput {
   tenantId: string;
   nodeId: string;
   /** The caller's OpenSSH public key line (Ed25519 or ECDSA P-256). */
   publicKey: string;
-  /** The Unix account (default `root`). */
+  /** The Unix account (default `root`); one of the module's `sshAccounts`. */
   principal?: string;
   /** At most 3600 (default 900). */
   ttlSeconds?: number;
@@ -52,7 +61,10 @@ export interface IssuedSshCert {
   certificate: string;
   serial: string;
   keyId: string;
+  /** Node-bound: `<account>@<nodeId>`. */
   principals: string[];
+  /** The account to log in as (`ssh <account>@<host>`). */
+  account: string;
   validBefore: number;
 }
 
@@ -99,7 +111,7 @@ export function parseIssueSshCert(raw: unknown): IssueSshCertInput {
     invalid('publicKey must be an OpenSSH public key line');
   if (
     input.principal !== undefined &&
-    (typeof input.principal !== 'string' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(input.principal))
+    (typeof input.principal !== 'string' || !accountPattern.test(input.principal))
   )
     invalid('principal must be a Unix account name');
   if (
@@ -119,6 +131,7 @@ export function parseIssueSshCert(raw: unknown): IssueSshCertInput {
 }
 
 const tenantPattern = /^[A-Za-z0-9._:-]{1,128}$/;
+const accountPattern = /^[a-z_][a-z0-9_-]{0,31}$/;
 const idPattern = (prefix: string) => new RegExp(`^${prefix}_[0-9a-z]{26,52}$`);
 const ops: readonly TunnelOp[] = ['exec', 'console', 'ssh', 'tcp'];
 
@@ -235,6 +248,9 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
       'INVALID_CONFIG',
       'tunnels needs an exec ticket issuer (pki createExecTicketIssuer)',
     );
+  const sshAccounts = [...(options.sshAccounts ?? ['root'])];
+  if (!sshAccounts.length || sshAccounts.some((account) => !accountPattern.test(account)))
+    throw new ComputeError('INVALID_CONFIG', 'tunnels.sshAccounts must list Unix account names');
   const api = (): TunnelsApi => ({
     tunnels: {
       open: defineMethod<OpenTunnelInput, OpenedTunnel>({
@@ -262,6 +278,9 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             sessionId: caller.sessionId,
             // What the envelope decided; re-authorization decides exactly this again.
             action: input.instanceId ? 'compute:instances:exec' : 'compute:nodes:console',
+            // An agent's tunnels close when its delegation is revoked (the gateway filters on these).
+            ...(caller.agentId ? { agentId: caller.agentId } : {}),
+            ...(caller.delegationId ? { delegationId: caller.delegationId } : {}),
             tenantId: input.tenantId,
             ...(input.instanceId ? { instanceId: input.instanceId } : {}),
             ...(input.port !== undefined ? { port: input.port } : {}),
@@ -318,9 +337,12 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
           } catch {
             invalid('publicKey must be an Ed25519 or ECDSA P-256 OpenSSH public key');
           }
+          const account = input.principal ?? 'root';
+          if (!sshAccounts.includes(account))
+            invalid(`principal must be one of ${sshAccounts.join(', ')}`);
           const tx = context.sql as SqlTx;
           await visibleNode(tx, input.tenantId, input.nodeId);
-          const principal = input.principal ?? 'root';
+          const principal = sshPrincipal(account, input.nodeId);
           const keyId = `bc:${caller.identityId}:${input.nodeId}:${newId('ssh')}`;
           const issued = ca.issueUserCertificate({
             publicKey: input.publicKey,
@@ -347,6 +369,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             serial: issued.serial.toString(),
             keyId,
             principals: [principal],
+            account,
             validBefore: issued.validBefore,
           };
         },
@@ -357,12 +380,17 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
     name: 'tunnels',
     api,
     // Every node pins the issuer's JWKS (the daemon verifies each ticket against it, P14) and
-    // trusts the compute SSH CA for break-glass certificates.
-    async nodeSpec() {
+    // trusts the compute SSH CA for break-glass certificates naming this node only.
+    async nodeSpec(_context, node) {
       return {
         access: {
           execTicketJwks: JSON.parse(options.issuer.jwksJson()),
-          ...(options.ssh ? { sshCaPublicKeys: [options.ssh.publicKey] } : {}),
+          ...(options.ssh
+            ? {
+                sshCaPublicKeys: [options.ssh.publicKey],
+                sshPrincipals: sshAccounts.map((account) => sshPrincipal(account, node.id)),
+              }
+            : {}),
         },
       };
     },

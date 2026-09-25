@@ -177,4 +177,4 @@ export function startTunnel(input: {
 }
 
 /** A daemon's own jti set. */
-export const newTunnelJtiCache = (): ReplayCache => createReplayCache();
+export const newTunnelJtiCache = (): ReplayCache => createReplayCache({ whenFull: 'refuse' });

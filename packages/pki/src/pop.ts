@@ -24,9 +24,17 @@ export interface ReplayCache {
   readonly size: number;
 }
 
-/** An in-memory replay cache bounded to `maxEntries` (oldest dropped first; default 100 000). */
-export function createReplayCache(options: { maxEntries?: number } = {}): ReplayCache {
+/**
+ * An in-memory replay cache bounded to `maxEntries` (default 100 000). Expired entries go first.
+ * When it is still full of live entries, `whenFull: 'evict'` (default) drops the oldest live one,
+ * which makes that key replayable until it expires; `'refuse'` fails closed instead: `add` answers
+ * false (treated as a replay) until entries expire. Single-use credentials (exec tickets) refuse.
+ */
+export function createReplayCache(
+  options: { maxEntries?: number; whenFull?: 'evict' | 'refuse' } = {},
+): ReplayCache {
   const maxEntries = options.maxEntries ?? 100_000;
+  const refuse = options.whenFull === 'refuse';
   const entries = new Map<string, number>();
   return {
     add(key, expiresAt, now) {
@@ -35,8 +43,13 @@ export function createReplayCache(options: { maxEntries?: number } = {}): Replay
       entries.delete(key);
       for (const [stored, expiry] of entries) {
         // Insertion order approximates expiry order; stop at the first live entry.
-        if (expiry > now && entries.size < maxEntries) break;
+        if (expiry > now && (refuse || entries.size < maxEntries)) break;
         entries.delete(stored);
+      }
+      if (refuse && entries.size >= maxEntries) {
+        // Purge every expired entry (not only a leading run) before refusing.
+        for (const [stored, expiry] of entries) if (expiry <= now) entries.delete(stored);
+        if (entries.size >= maxEntries) return false;
       }
       entries.set(key, expiresAt);
       return true;

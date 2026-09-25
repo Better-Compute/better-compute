@@ -7,7 +7,9 @@ import { ErrorLine } from './ui';
 interface IssuedSshCert {
   certificate: string;
   keyId: string;
+  /** Node-bound (`root@node_…`): the certificate opens this node only. */
   principals: string[];
+  account: string;
   validBefore: number;
 }
 
@@ -99,7 +101,7 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
             Valid until {new Date(issued.validBefore).toLocaleString()} for{' '}
             {issued.principals.join(', ')} ({issued.keyId}). Save it next to your key as{' '}
             <code>&lt;key&gt;-cert.pub</code>, then connect with{' '}
-            <code>ssh {principal}@&lt;node&gt;</code>.
+            <code>ssh {issued.account}@&lt;node&gt;</code>. It opens this node only.
           </p>
           <textarea readOnly rows={4} style={{ width: '100%' }} value={issued.certificate} />
           <button

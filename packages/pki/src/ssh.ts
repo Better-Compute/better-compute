@@ -339,7 +339,9 @@ export interface SshCertificateAuthority {
   export(): { privateKeyPem: string };
 }
 
-const principalPattern = /^[a-z_][a-z0-9_-]{0,31}$/;
+// A Unix account, optionally bound to one host (`root@node_…`, what break-glass certificates use so
+// a certificate opens only the node it names). No commas or whitespace: sshd splits on them.
+const principalPattern = /^[a-z_][a-z0-9_-]{0,31}(@[A-Za-z0-9._-]{1,128})?$/;
 
 /**
  * The compute SSH CA for break-glass access (§13). Ed25519 by default; ECDSA P-256 for FIPS-style
