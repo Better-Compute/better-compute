@@ -1,5 +1,4 @@
-// Checks apps/docs/content without the site's dependencies (mirrors ../better-iam/apps/docs/scripts/
-// check-content.mjs, minus MDX compilation, which phase 2 adds with fumadocs-mdx):
+// Checks apps/docs/content (mirrors ../better-iam/apps/docs/scripts/check-content.mjs):
 //
 //   node apps/docs/scripts/check-content.mjs
 //
@@ -7,11 +6,14 @@
 // - every meta.json parses, and each of its `pages` names a page or folder next to it (or a `---Section---`);
 // - every internal link `/docs/...` names a page, and its `#anchor` a heading of that page (github-slugger
 //   rules: lower case, punctuation dropped, spaces to hyphens; `[#custom-id]` wins);
-// - code fences are closed.
+// - code fences are closed;
+// - every .mdx page compiles with @mdx-js/mdx + remark-gfm (a stray `<x>` or `{x}` in prose takes the
+//   whole site down in `next dev`), when the site's dependencies are installed; skipped otherwise.
 import { existsSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { dirname, join, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const docs = join(dirname(fileURLToPath(import.meta.url)), '..');
 const content = join(docs, 'content', 'docs');
@@ -87,6 +89,33 @@ for (const path of files.filter((file) => /\.mdx?$/.test(file))) {
   pages.set(routeOf(path), { path, body, anchors });
 }
 
+/** @mdx-js/mdx's `compile` and remark-gfm, through fumadocs-mdx (the site's MDX pipeline); or undefined. */
+async function mdxCompiler() {
+  try {
+    const site = createRequire(join(docs, 'package.json'));
+    const fumadocs = createRequire(site.resolve('fumadocs-mdx/package.json'));
+    const load = (name) => import(pathToFileURL(fumadocs.resolve(name)).href);
+    const [{ compile }, gfm] = await Promise.all([load('@mdx-js/mdx'), load('remark-gfm')]);
+    return (text) => compile(text, { remarkPlugins: [gfm.default] });
+  } catch {
+    return undefined;
+  }
+}
+
+const compileMdx = await mdxCompiler();
+let compiled = 0;
+if (compileMdx)
+  for (const { path, body } of pages.values()) {
+    if (!path.endsWith('.mdx')) continue;
+    try {
+      await compileMdx(body);
+      compiled++;
+    } catch (error) {
+      const at = error.line ? ` (line ${error.line} after the frontmatter)` : '';
+      problem(path, `does not compile as MDX${at}: ${error.reason ?? error.message}`);
+    }
+  }
+
 for (const { path, body } of pages.values()) {
   const withoutCode = body.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
   for (const match of withoutCode.matchAll(/\]\((\/docs[^)\s]*)\)|href="(\/docs[^"]*)"/g)) {
@@ -122,4 +151,8 @@ if (problems.length) {
   for (const line of problems) console.error(line);
   console.error(`${problems.length} problem(s) in apps/docs/content.`);
   process.exitCode = 1;
-} else console.log(`apps/docs/content: ${pages.size} pages checked, no problems.`);
+} else
+  console.log(
+    `apps/docs/content: ${pages.size} pages checked, no problems` +
+      (compileMdx ? ` (${compiled} compiled as MDX).` : ' (MDX compile skipped: apps/docs dependencies not installed).'),
+  );

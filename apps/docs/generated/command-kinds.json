@@ -55,6 +55,17 @@
     "payload": "bettercompute.site.v1.BmcOperationRequest"
   },
   {
+    "kind": "bmc.storage",
+    "lane": "control",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": true,
+    "timeout": "1h",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.BmcOperationRequest"
+  },
+  {
     "kind": "boot.cleanUp",
     "lane": "control",
     "retrySafe": true,

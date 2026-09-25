@@ -10,6 +10,7 @@ The built-ins (the node controllers, `inventory`, `capacity`) are always registe
 | Module             | API groups                                                                                                                                                                   | Migrations                                                                                         |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `node-controllers` |                                                                                                                                                                              |                                                                                                    |
+| `site-boot`        |                                                                                                                                                                              |                                                                                                    |
 | `inventory`        | [`inventory`](/docs/reference/api/inventory)                                                                                                                                 |                                                                                                    |
 | `capacity`         | [`capacity`](/docs/reference/api/capacity), [`pools`](/docs/reference/api/pools), [`quotas`](/docs/reference/api/quotas), [`reservations`](/docs/reference/api/reservations) | `capacity/0001_device_links`, `capacity/0002_lease_health`                                         |
 | `pki`              |                                                                                                                                                                              | `pki/0001_sealed_secrets`                                                                          |
@@ -43,6 +44,7 @@ Each is one reconciler or runtime loop; `compute.jobs[name].tick()` runs one pas
 - `nodespec`
 - `outbox-dispatch`
 - `rollout`
+- `site-boot`
 - `vps.instances`
 - `vps.usage`
 - `workflow`

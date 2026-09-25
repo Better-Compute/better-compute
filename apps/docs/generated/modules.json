@@ -6,6 +6,11 @@
       "migrations": []
     },
     {
+      "name": "site-boot",
+      "groups": [],
+      "migrations": []
+    },
+    {
       "name": "inventory",
       "groups": ["inventory"],
       "migrations": []
@@ -84,6 +89,7 @@
     "nodespec",
     "outbox-dispatch",
     "rollout",
+    "site-boot",
     "vps.instances",
     "vps.usage",
     "workflow"

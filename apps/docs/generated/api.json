@@ -959,6 +959,20 @@
         "status": "planned",
         "summary": "",
         "description": ""
+      },
+      {
+        "method": "revokeSshCert",
+        "route": "POST /api/compute/nodes/revokeSshCert",
+        "kind": "mutation",
+        "action": "compute:nodes:ssh-root",
+        "resource": "compute-node",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.3",
+        "module": "tunnels",
+        "status": "planned",
+        "summary": "",
+        "description": ""
       }
     ]
   },

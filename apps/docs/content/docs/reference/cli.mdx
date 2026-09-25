@@ -38,9 +38,9 @@ better-compute migrate [--config PATH]
 
 migrate runs compute.initialize(): it checks every method's IAM action against the merged catalog and the normative method table (INVALID_CONFIG on a mismatch), then creates or upgrades the compute schema and applies every module's and plugin's migrations. Run it on every deploy before the application starts; it is idempotent.
 
-| Flag            | Description                                                                      | Default | Environment             |
-| --------------- | -------------------------------------------------------------------------------- | ------- | ----------------------- |
-| `--config PATH` | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts} |         | `BETTER_COMPUTE_CONFIG` |
+| Flag            | Description                                                                        | Default | Environment             |
+| --------------- | ---------------------------------------------------------------------------------- | ------- | ----------------------- |
+| `--config PATH` | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\} |         | `BETTER_COMPUTE_CONFIG` |
 
 ```sh
 better-compute migrate
@@ -61,7 +61,7 @@ doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() a
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- | ----------------------- |
 | `--strict`        | Exit non-zero when any error or warning is found                                         |                            |                         |
 | `--pki PATH`      | The PKI bundle written by pki init                                                       | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`    |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}         |                            | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}       |                            | `BETTER_COMPUTE_CONFIG` |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                         |                            |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw) |                            |                         |
 
@@ -90,13 +90,13 @@ better-compute serve [--host HOST] [--port PORT] [--roles ROLES] [--no-migrate] 
 
 serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener; --roles gateway runs the daemon gateway over mTLS from the configuration's host.gateway (all includes it when configured), with the report hooks of the built-in modules and tunnels when the deployment issues exec tickets. Beside the API the listener answers /healthz, /readyz, /.well-known/better-compute (the server's document, with JoinService's public keys when pki.join publishes them: the fallback bcd checks against its pins) and the host export's own routes (for example GET /watch and GET /metrics). SIGINT or SIGTERM drains the gateway first, then stops the listener and the workers, releasing their leases.
 
-| Flag            | Description                                                                      | Default   | Environment             |
-| --------------- | -------------------------------------------------------------------------------- | --------- | ----------------------- |
-| `--host HOST`   | The address to listen on                                                         | `0.0.0.0` | `HOST`                  |
-| `--port PORT`   | The port to listen on (0 picks a free one)                                       | `3000`    | `PORT`                  |
-| `--roles ROLES` | all, or a comma list of api, gateway and controllers, scheduler, sinks, iam      | `all`     | `BETTER_COMPUTE_ROLES`  |
-| `--no-migrate`  | Do not run migrations first                                                      |           |                         |
-| `--config PATH` | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts} |           | `BETTER_COMPUTE_CONFIG` |
+| Flag            | Description                                                                        | Default   | Environment             |
+| --------------- | ---------------------------------------------------------------------------------- | --------- | ----------------------- |
+| `--host HOST`   | The address to listen on                                                           | `0.0.0.0` | `HOST`                  |
+| `--port PORT`   | The port to listen on (0 picks a free one)                                         | `3000`    | `PORT`                  |
+| `--roles ROLES` | all, or a comma list of api, gateway and controllers, scheduler, sinks, iam        | `all`     | `BETTER_COMPUTE_ROLES`  |
+| `--no-migrate`  | Do not run migrations first                                                        |           |                         |
+| `--config PATH` | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\} |           | `BETTER_COMPUTE_CONFIG` |
 
 ```sh
 better-compute serve
@@ -168,13 +168,13 @@ Call any compute API method as the current token
 better-compute api GROUP.METHOD [key=value ...] [--data JSON|@FILE|-] [--list] [--config PATH] [--url URL]
 ```
 
-api calls any method of the HTTP API (the same routes, envelope and permission checks as POST {basePath}/{group}/{method}) as BETTER_COMPUTE_TOKEN, in process through the configuration or against --url, and prints the result. Public methods (system.version, system.whoami) need no token; system.whoami reports the token when one is set. Build the input with --data (JSON, @file.json, or - for standard input) and key=value items: name=gpu-a sets a string, limit:=10 or labels:='["a","b"]' sets JSON, spec:=@spec.json reads a JSON file, notes=@notes.md reads a text file, resource.type=pool nests, and ids[]=a appends. Plugin methods are plugins.ID.GROUP.METHOD. api --list [GROUP] lists every route with whether it needs a token and the IAM action it is decided on.
+api calls any method of the HTTP API (the same routes, envelope and permission checks as POST \{basePath\}/\{group\}/\{method\}) as BETTER_COMPUTE_TOKEN, in process through the configuration or against --url, and prints the result. Public methods (system.version, system.whoami) need no token; system.whoami reports the token when one is set. Build the input with --data (JSON, @file.json, or - for standard input) and key=value items: name=gpu-a sets a string, limit:=10 or labels:='["a","b"]' sets JSON, spec:=@spec.json reads a JSON file, notes=@notes.md reads a text file, resource.type=pool nests, and ids[]=a appends. Plugin methods are plugins.ID.GROUP.METHOD. api --list [GROUP] lists every route with whether it needs a token and the IAM action it is decided on.
 
 | Flag              | Description                                                                                                   | Default | Environment                                          |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ---------------------------------------------------- | --- | --- |
 | `--data JSON      | @FILE                                                                                                         | -`      | Request body as JSON, a JSON file, or standard input |     |     |
 | `--list`          | List routes (optionally of one group) instead of calling one                                                  |         |                                                      |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG`                              |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG`                              |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`                                 |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                                                      |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                                                      |
@@ -215,7 +215,7 @@ reserve asks for --gpus whole GPUs from --pool for --for, decided by better-iam 
 | `--lease SECONDS`   | Renewable lease: released unless renewed within this many seconds                                             |         |                         |
 | `--key KEY`         | Idempotency key, to retry an earlier request                                                                  |         |                         |
 | `--wait SECONDS`    | How long to wait for the placement                                                                            | `20`    |                         |
-| `--config PATH`     | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`     | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`         | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT`   | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`      | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -240,7 +240,7 @@ release ends an active or placed reservation now: its bookings are truncated, th
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--cancel`        | Withdraw a reservation that has not started                                                                   |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -267,7 +267,7 @@ extend moves the end of a reservation later, by --by or to --until. It is admitt
 | `--until TIME`    | Extend to this time: ISO 8601 or +DURATION                                                                    |         |                         |
 | `--renew`         | Renew the lease of a renewable reservation instead                                                            |         |                         |
 | `--key KEY`       | Idempotency key, to retry an earlier request                                                                  |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -294,7 +294,7 @@ List the tenant’s reservations (reservations.list)
 | `--pool ID`       | Only this pool                                                                                                |         |                         |
 | `--limit N`       | Page size                                                                                                     |         |                         |
 | `--cursor ID`     | Continue after this reservation                                                                               |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -317,7 +317,7 @@ Show one reservation, with its binding (reservations.get)
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -339,7 +339,7 @@ List the pools the tenant owns or is offered (pools.list)
 | Flag              | Description                                                                                                   | Default | Environment             |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -366,7 +366,7 @@ capacity prints what the tenant can see: per pool and per GPU model, total, allo
 | `--gpus N`        | GPUs for --preview                                                                                            |         |                         |
 | `--for DURATION`  | Duration for --preview                                                                                        |         |                         |
 | `--selector EXPR` | Selector shorthand for --preview                                                                              |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -393,7 +393,7 @@ fleet export prints (or writes with --out) the sites, provider accounts, pools w
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--out PATH`      | Write the document to a new file                                                                              |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -418,7 +418,7 @@ fleet plan diffs the document against the tenant's current objects and prints ea
 | `--prune`         | Also delete what the document no longer lists (pools are archived)                                            |         |                         |
 | `--fail-on-drift` | Exit FLEET_DRIFTED when the plan is not empty                                                                 |         |                         |
 | `--calls`         | Also print the API calls apply would make                                                                     |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -442,7 +442,7 @@ fleet status shows the planHash, author and time of the tenant's last fleet appl
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant acting (the caller’s organization)                                                                 |         | `BETTER_COMPUTE_TENANT` |
 | `--fail-on-drift` | Exit FLEET_DRIFTED while the fleet drifted                                                                    |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`       | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -468,7 +468,7 @@ fleet apply plans the document, prints the changes, then applies exactly that pl
 | `--prune`          | Also delete what the document no longer lists (pools are archived)                                            |         |                         |
 | `--plan-hash HASH` | Apply only if the plan still has this hash (from fleet plan)                                                  |         |                         |
 | `--yes`            | Apply without stopping after the plan                                                                         |         |                         |
-| `--config PATH`    | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                              |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`    | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}                            |         | `BETTER_COMPUTE_CONFIG` |
 | `--url URL`        | Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration |         | `BETTER_COMPUTE_URL`    |
 | `--format FORMAT`  | Output as json (indented, default), compact (one line), or table                                              |         |                         |
 | `--query PATH`     | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)                      |         |                         |
@@ -486,22 +486,22 @@ Write the POSIX sh script that installs bcd on a server and joins it to a pool
 better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--pki PATH] [--out PATH]
 ```
 
-daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band.
+daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from \{base-url\}\{base-path\}/downloads/bcd/\{version\}/linux-\{arch\}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/\<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band.
 
-| Flag                      | Description                                                                                | Default                    | Environment                  |
-| ------------------------- | ------------------------------------------------------------------------------------------ | -------------------------- | ---------------------------- |
-| `--pool ID`               | The pool the node joins (named in the script)                                              |                            |                              |
-| `--site ID`               | The pool's site id (config.toml site)                                                      |                            |                              |
-| `--gateway-url URL`       | The regional gateway bcd dials, https://…                                                  |                            | `BETTER_COMPUTE_GATEWAY_URL` |
-| `--base-url URL`          | The control plane serving the bcd downloads, https://…                                     |                            | `BETTER_COMPUTE_BASE_URL`    |
-| `--base-path PATH`        | The API's base path                                                                        | `/api/compute`             |                              |
-| `--bcd-version VERSION`   | The bcd release to install, e.g. 0.1.0                                                     |                            | `BETTER_COMPUTE_BCD_VERSION` |
-| `--sha256 ARCH=HEX,…`     | SHA-256 of each architecture’s binary: amd64=<hex>,arm64=<hex> (or use --release-manifest) |                            |                              |
-| `--release-manifest PATH` | A signed bcd release manifest: its verified digests are pinned instead                     |                            |                              |
-| `--release-pins PINS`     | Comma-separated sha256/… pins of the release keys                                          |                            | `BCD_RELEASE_PINS`           |
-| `--release-threshold N`   | Release keys that must have signed (default 1)                                             |                            |                              |
-| `--pki PATH`              | The PKI bundle written by pki init                                                         | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`         |
-| `--out PATH`              | Write the script to a new file (mode 0755) instead of standard output                      |                            |                              |
+| Flag                      | Description                                                                                  | Default                    | Environment                  |
+| ------------------------- | -------------------------------------------------------------------------------------------- | -------------------------- | ---------------------------- |
+| `--pool ID`               | The pool the node joins (named in the script)                                                |                            |                              |
+| `--site ID`               | The pool's site id (config.toml site)                                                        |                            |                              |
+| `--gateway-url URL`       | The regional gateway bcd dials, https://…                                                    |                            | `BETTER_COMPUTE_GATEWAY_URL` |
+| `--base-url URL`          | The control plane serving the bcd downloads, https://…                                       |                            | `BETTER_COMPUTE_BASE_URL`    |
+| `--base-path PATH`        | The API's base path                                                                          | `/api/compute`             |                              |
+| `--bcd-version VERSION`   | The bcd release to install, e.g. 0.1.0                                                       |                            | `BETTER_COMPUTE_BCD_VERSION` |
+| `--sha256 ARCH=HEX,…`     | SHA-256 of each architecture’s binary: amd64=\<hex>,arm64=\<hex> (or use --release-manifest) |                            |                              |
+| `--release-manifest PATH` | A signed bcd release manifest: its verified digests are pinned instead                       |                            |                              |
+| `--release-pins PINS`     | Comma-separated sha256/… pins of the release keys                                            |                            | `BCD_RELEASE_PINS`           |
+| `--release-threshold N`   | Release keys that must have signed (default 1)                                               |                            |                              |
+| `--pki PATH`              | The PKI bundle written by pki init                                                           | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`         |
+| `--out PATH`              | Write the script to a new file (mode 0755) instead of standard output                        |                            |                              |
 
 ```sh
 better-compute daemon install-script --pool pool_h100 --site fsn1 --gateway-url https://gw.eu.example.com --base-url https://compute.example.com --bcd-version 0.1.0 --sha256 amd64=<hex> > install-bcd.sh
@@ -544,7 +544,7 @@ Print the pins install scripts and bcd need, and the CA expiry dates
 better-compute pki show [--pki PATH]
 ```
 
-pki show reads only the public half of the bundle (no secret needed) and prints the trust domain, the gateway serving CA's SPKI pin, the JoinService signing and encryption key pins in bcd's sha256/<base64> form, the encryption key as a JWK, and when each CA expires.
+pki show reads only the public half of the bundle (no secret needed) and prints the trust domain, the gateway serving CA's SPKI pin, the JoinService signing and encryption key pins in bcd's sha256/\<base64> form, the encryption key as a JWK, and when each CA expires.
 
 | Flag              | Description                                                                              | Default                    | Environment          |
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- | -------------------- |
@@ -565,7 +565,7 @@ Issue a gateway serving certificate and key from the serving CA
 better-compute pki issue-gateway --san NAMES [--out DIR] [--name NAME] [--days N] [--pki PATH]
 ```
 
-pki issue-gateway generates a P-256 key and issues a serving certificate for it from the bundle's gateway serving CA (PLAN.md §7.1): DNS SANs from --san (comma-separated), serverAuth, 30 days by default. It writes <name>.key (mode 0600) and <name>.crt (the certificate followed by the serving CA's chain) into --out, replacing earlier files atomically so a running gateway can hot-reload them. Daemons trust the certificate through the serving CA pin (pki show).
+pki issue-gateway generates a P-256 key and issues a serving certificate for it from the bundle's gateway serving CA (PLAN.md §7.1): DNS SANs from --san (comma-separated), serverAuth, 30 days by default. It writes \<name>.key (mode 0600) and \<name>.crt (the certificate followed by the serving CA's chain) into --out, replacing earlier files atomically so a running gateway can hot-reload them. Daemons trust the certificate through the serving CA pin (pki show).
 
 | Flag              | Description                                                                              | Default                    | Environment          |
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- | -------------------- |
@@ -592,7 +592,7 @@ Print the example compute policies and create the root billing meters in better-
 better-compute iam setup --audience URL [--gpu-model MODEL] [--regions LIST] [--max-gpus N] [--max-hours N] [--feature FLAG] [--meters] [--iam-url URL] [--iam-base-path PATH] [--root-tenant ID] [--gpu-models LIST]
 ```
 
-iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardrails, for an organization administrator to apply: compute cannot write organization policies. The policies are parameterized by the session JWT audience (the compute API's URL), the GPU model, regions and limits of the bounded-reservation statement. With --meters it also creates the §12.7 root meters in better-iam: one gpu.<model>.hours per GPU model family, plus node.metal.hours, vps.vcpu.hours and vps.memory.gib.hours. Meters that already exist are left alone, so re-running is safe. Creating meters calls better-iam at --iam-url as BETTER_IAM_TOKEN, which must be a root credential, through the optional peer @better-iam/client. It sets no prices: pricing is an operator decision (billing.setPrice).
+iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardrails, for an organization administrator to apply: compute cannot write organization policies. The policies are parameterized by the session JWT audience (the compute API's URL), the GPU model, regions and limits of the bounded-reservation statement. With --meters it also creates the §12.7 root meters in better-iam: one gpu.\<model>.hours per GPU model family, plus node.metal.hours, vps.vcpu.hours and vps.memory.gib.hours. Meters that already exist are left alone, so re-running is safe. Creating meters calls better-iam at --iam-url as BETTER_IAM_TOKEN, which must be a root credential, through the optional peer @better-iam/client. It sets no prices: pricing is an operator decision (billing.setPrice).
 
 | Flag                   | Description                                                                              | Default    | Environment                  |
 | ---------------------- | ---------------------------------------------------------------------------------------- | ---------- | ---------------------------- |
@@ -601,7 +601,7 @@ iam setup prints the PLAN.md §12.6 example policies, gpu-user and agent-guardra
 | `--regions LIST`       | Regions the bounded-reservation statement allows, comma-separated                        |            |                              |
 | `--max-gpus N`         | GPUs per reservation                                                                     | `8`        |                              |
 | `--max-hours N`        | Hours per reservation, extensions included                                               | `72`       |                              |
-| `--feature FLAG`       | Tenant feature the reservation statement requires (default compute.<model>)              |            |                              |
+| `--feature FLAG`       | Tenant feature the reservation statement requires (default compute.\<model>)             |            |                              |
 | `--meters`             | Also create the root billing meters in better-iam                                        |            |                              |
 | `--iam-url URL`        | better-iam base URL for --meters                                                         |            | `BETTER_IAM_URL`             |
 | `--iam-base-path PATH` | better-iam's API base path                                                               | `/api/iam` |                              |
@@ -631,7 +631,7 @@ audit checkpoint runs what the audit module's hourly job does: it seals every au
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- | ----------------------- |
 | `--pki PATH`      | The PKI bundle written by pki init                                                       | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`    |
 | `--limit N`       | Events per pass (default 50000)                                                          |                            |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}         |                            | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}       |                            | `BETTER_COMPUTE_CONFIG` |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                         |                            |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw) |                            |                         |
 
@@ -654,7 +654,7 @@ audit verify recomputes every checkpoint of --tenant from the audit events as th
 | `--tenant ID`     | The tenant                                                                               |                            | `BETTER_COMPUTE_TENANT`    |
 | `--pin PIN`       | The audit signing key pin (sha256/…); default: from the PKI bundle                       |                            | `BETTER_COMPUTE_AUDIT_PIN` |
 | `--pki PATH`      | The PKI bundle written by pki init                                                       | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`       |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}         |                            | `BETTER_COMPUTE_CONFIG`    |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}       |                            | `BETTER_COMPUTE_CONFIG`    |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                         |                            |                            |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw) |                            |                            |
 
@@ -677,7 +677,7 @@ audit prove writes a self-contained proof that the event is in a signed checkpoi
 | ----------------- | ---------------------------------------------------------------------------------------- | ------- | ----------------------- |
 | `--tenant ID`     | The tenant                                                                               |         | `BETTER_COMPUTE_TENANT` |
 | `--out PATH`      | Write the proof to a file instead of printing it                                         |         |                         |
-| `--config PATH`   | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}         |         | `BETTER_COMPUTE_CONFIG` |
+| `--config PATH`   | Configuration module; default: the nearest better-compute.config.\{mjs,js,ts,mts\}       |         | `BETTER_COMPUTE_CONFIG` |
 | `--format FORMAT` | Output as json (indented, default), compact (one line), or table                         |         |                         |
 | `--query PATH`    | Print only part of the result, e.g. protocol.max or findings[].check (strings print raw) |         |                         |
 
@@ -716,7 +716,7 @@ Create an offline release signing key and print its pin
 better-compute release keygen --out PATH
 ```
 
-release keygen writes a new P-256 release signing key to --out (owner-only, never overwritten) and its public half to <out>.pub.pem, and prints the key's pin. Keep the key offline. Give the pin to installers (BCD_RELEASE_PINS) and daemons; give the .pub.pem to whoever builds manifests that you will cosign.
+release keygen writes a new P-256 release signing key to --out (owner-only, never overwritten) and its public half to \<out>.pub.pem, and prints the key's pin. Keep the key offline. Give the pin to installers (BCD_RELEASE_PINS) and daemons; give the .pub.pem to whoever builds manifests that you will cosign.
 
 | Flag              | Description                                                                              | Default | Environment |
 | ----------------- | ---------------------------------------------------------------------------------------- | ------- | ----------- |
