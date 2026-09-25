@@ -158,6 +158,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0022_ssh_certificate_sessions',
       'core/0023_session_trust_version',
       'core/0024_session_capabilities',
+      'core/0025_secret_scope',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });

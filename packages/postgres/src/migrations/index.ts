@@ -23,6 +23,7 @@ import { signedSpecsMigration } from './0021_signed_specs.js';
 import { sshCertificateSessionsMigration } from './0022_ssh_certificate_sessions.js';
 import { sessionTrustVersionMigration } from './0023_session_trust_version.js';
 import { sessionCapabilitiesMigration } from './0024_session_capabilities.js';
+import { secretScopeMigration } from './0025_secret_scope.js';
 
 /**
  * Every table the base schema creates, in creation order. Partitions of the history tables
@@ -59,6 +60,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   sshCertificateSessionsMigration,
   sessionTrustVersionMigration,
   sessionCapabilitiesMigration,
+  secretScopeMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

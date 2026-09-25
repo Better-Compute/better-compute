@@ -84,6 +84,7 @@ describe('migrate', () => {
       'core/0022_ssh_certificate_sessions',
       'core/0023_session_trust_version',
       'core/0024_session_capabilities',
+      'core/0025_secret_scope',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -374,6 +375,18 @@ describe('outbox dead letters and command latency (core/0019, core/0020)', () =>
     );
     expect(rows).toEqual([{ is_nullable: 'NO', column_default: 'compute_now()' }]);
     expect(await indexDefinition('commands_settled')).toMatch(/\(updated_at\) WHERE \(state = ANY/);
+  });
+
+  it('scopes stored secrets to a tenant or the fleet, tenant by default (core/0025)', async () => {
+    const { rows } = await db.query<{ column_default: string; is_nullable: string }>(
+      `SELECT column_default, is_nullable FROM information_schema.columns WHERE table_name = 'secret_refs' AND column_name = 'scope'`,
+    );
+    expect(rows).toEqual([{ column_default: "'tenant'::text", is_nullable: 'NO' }]);
+    const { rows: checks } = await db.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(c.oid) AS definition FROM pg_constraint c
+        WHERE c.conrelid = 'secret_refs'::regclass AND c.contype = 'c' AND pg_get_constraintdef(c.oid) LIKE '%scope%'`,
+    );
+    expect(checks[0]?.definition).toMatch(/tenant.*fleet/);
   });
 
   it("keeps the current session's daemon capabilities (core/0024)", async () => {
