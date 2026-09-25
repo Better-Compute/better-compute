@@ -1,0 +1,23 @@
+{
+  "suite": "quorum-batches",
+  "time": "2026-09-25T08:51:32.114Z",
+  "database": "pglite",
+  "leaves": 10000,
+  "host": {
+    "cpus": 64,
+    "memoryGiB": 255
+  },
+  "createBatchMs": 446,
+  "enqueue": {
+    "count": 10000,
+    "totalMs": 19487,
+    "perSecond": 513,
+    "p50Ms": 1.83,
+    "p99Ms": 3.24
+  },
+  "approveMs": 252,
+  "gate": {
+    "createBatchUnderMs": 1000,
+    "met": true
+  }
+}

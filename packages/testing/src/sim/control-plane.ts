@@ -24,6 +24,9 @@ import {
   type StatusHandler,
 } from '@better-compute/gateway';
 import {
+  createApproverKey,
+  createCommandSigningAuthority,
+  type ApproverKey,
   createCsr,
   createNodeCa,
   createRevocationFeed,
@@ -268,6 +271,13 @@ export interface ControlPlaneSimOptions
   extraPools?: readonly ExtraPoolOptions[];
   /** Status report handlers run after the XID health handler, e.g. vps's `instanceStatusHandler()`. */
   statusHandlers?: readonly StatusHandler[];
+  /**
+   * (v1.0 §13) Turns the destructive-batch quorum on: `count` approver keys (default 2), `threshold` of them per
+   * batch (default 1), `unbatchedDestructivePerHour` (default 0). Workers sign commands (a command-signing
+   * authority), and every daemon enforces signed intent and the quorum from its join's trust bundle.
+   * `ControlPlaneSim.approvers` holds the private keys that sign approvals.
+   */
+  approvers?: { count?: number; threshold?: number; unbatchedDestructivePerHour?: number };
 }
 
 export interface ExtraPoolOptions {
@@ -312,6 +322,8 @@ export interface ControlPlaneSim {
   siteId: string;
   poolId: string;
   nodes: readonly { nodeId: string; hardware: FakeHardware }[];
+  /** With `approvers`: the approver keys (sign approvals with `signBatchApproval`) and the trust domain approvals name. */
+  approvers?: { keys: readonly { privateKey: KeyObject; key: ApproverKey }[]; trustDomain: string };
   /** The `extraPools`, in order, with the nodes that joined each. */
   pools: readonly { poolId: string; class: string; nodeIds: readonly string[] }[];
   /** The first gateway slot's current process. */
@@ -522,6 +534,15 @@ export async function createControlPlaneSim(
       };
     },
   });
+  // The quorum (§13), only when asked for: without it nothing here changes (seed digests stay).
+  const quorum = options.approvers
+    ? {
+        keys: Array.from({ length: Math.max(1, options.approvers.count ?? 2) }, () => createApproverKey()),
+        threshold: options.approvers.threshold ?? 1,
+        unbatched: options.approvers.unbatchedDestructivePerHour ?? 0,
+        signing: createCommandSigningAuthority({ clock: { now: () => start - 60_000 } }),
+      }
+    : undefined;
   const compute = betterCompute({
     database: reachable,
     iam: options.iam ? options.iam(fake) : fake,
@@ -538,6 +559,16 @@ export async function createControlPlaneSim(
         signingKey,
         encryptionKey: encryption.privateKey,
       }),
+      ...(quorum
+        ? {
+            commandSigning: quorum.signing,
+            approvers: {
+              keys: quorum.keys.map((approver) => approver.key.spkiDer),
+              threshold: quorum.threshold,
+              unbatchedDestructivePerHour: quorum.unbatched,
+            },
+          }
+        : {}),
     },
   });
   let slots: GatewaySlot[] = [];
@@ -747,8 +778,25 @@ export async function createControlPlaneSim(
       gatewayClockSkewMs: _gatewayClockSkewMs,
       extraPools: _extraPools,
       statusHandlers: _statusHandlers,
+      approvers: _approvers,
       ...fleetOptions
     } = options;
+    // With the quorum on, daemons enforce signed intent and the quorum, as bcd does from its join's trust bundle.
+    if (quorum)
+      fleetOptions.daemon = {
+        ...fleetOptions.daemon,
+        intent: {
+          roots: [quorum.signing.certificate],
+          version: 1n,
+          trustDomain,
+          quorum: {
+            approverKeys: quorum.keys.map((approver) => approver.key),
+            trustDomain,
+            threshold: quorum.threshold,
+            unbatchedPerHour: quorum.unbatched,
+          },
+        },
+      };
     const workerPasses = Math.max(1, options.workerPasses ?? 1);
     sim = createFleetSim({
       ...fleetOptions,
@@ -834,6 +882,7 @@ export async function createControlPlaneSim(
       poolId: pool.id,
       nodes,
       pools,
+      ...(quorum ? { approvers: { keys: quorum.keys, trustDomain } } : {}),
       get gateway() {
         return slots[0]!.gateway;
       },
