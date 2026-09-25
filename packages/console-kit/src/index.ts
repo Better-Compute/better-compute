@@ -17,3 +17,4 @@ export * from './timeline.js';
 export * from './usage.js';
 export * from './webhooks.js';
 export * from './ssh-access.js';
+export * from './sandboxes.js';

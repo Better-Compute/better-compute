@@ -8,6 +8,7 @@ const areas = [
   { href: '/', label: 'Overview' },
   { href: '/reservations', label: 'Reservations' },
   { href: '/instances', label: 'Instances' },
+  { href: '/sandboxes', label: 'Sandboxes' },
   { href: '/nodes', label: 'Nodes' },
   { href: '/pools', label: 'Pools & capacity' },
   { href: '/quotas', label: 'Quotas' },
