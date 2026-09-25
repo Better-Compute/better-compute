@@ -2354,6 +2354,128 @@ describe('exec trust', () => {
     }
   });
 
+  it('gives a memory restore its own identity, which exec signs for once the host installed it', async () => {
+    const ca = createSshCertificateAuthority();
+    const rebinding = vps({
+      runtimes: ['cloud-hypervisor'],
+      images,
+      snapshots: {
+        presign: async ({ snapshotId }: { snapshotId: string }) => ({
+          uploadUrl: `https://store.example/put/${snapshotId}`,
+          url: `https://store.example/${snapshotId}`,
+        }),
+      },
+      sandboxExec: {
+        caPublicKey,
+        certifyHostKey: ({ instanceId, principals, publicKey, validBefore }) =>
+          ca.issueHostCertificate({
+            publicKey,
+            principals,
+            keyId: `host/${instanceId}`,
+            validBefore,
+          }).certificate,
+      },
+    });
+    const rebindingApi = rebinding.api!(moduleContext(db)) as VpsApi;
+    const callRebinding = (method: string, raw: unknown) =>
+      run((rebindingApi.sandboxes as Record<string, Definition>)[method]!, raw, alice);
+    const sealed = new Map<string, string>();
+    broker = {
+      resolve: async (ref) => sealed.get(ref) ?? `value:${ref}`,
+      put: async (tenantId, value) => {
+        const ref = `secret://${tenantId}/sealed-${sealed.size + 1}`;
+        sealed.set(ref, value);
+        return ref;
+      },
+      delete: async () => {},
+    };
+    try {
+      const template = await createTemplate();
+      const source = (await callRebinding('create', {
+        tenantId: 'acme',
+        templateId: template.id,
+        idempotencyKey: 'source',
+      })) as SandboxView;
+      await hostsReport('running');
+      const snapshot = (await callRebinding('snapshot', {
+        tenantId: 'acme',
+        sandboxId: source.id,
+      })) as { id: string };
+      const result = encodeMessage(
+        InstanceSnapshotResultSchema,
+        create(InstanceSnapshotResultSchema, {
+          uploadedBytes: 1n,
+          sha256: new Uint8Array(32).fill(0xab),
+          runtime: 'cloud-hypervisor',
+          cpuModel: '',
+        }),
+      );
+      await db.query(`UPDATE commands SET state = 'succeeded', result = $2 WHERE id = $1`, [
+        recorded.commands.at(-1)!.id,
+        result,
+      ]);
+      await rebinding
+        .reconcilers!.find((entry) => entry.name === sandboxWork)!
+        .run({ ...moduleContext(db), signal: new AbortController().signal }, snapshot.id);
+      const restored = (await callRebinding('create', {
+        tenantId: 'acme',
+        templateId: template.id,
+        fromSnapshot: snapshot.id,
+        idempotencyKey: 'restore',
+      })) as SandboxView;
+
+      // Its own identity, sealed: its principal and a fresh host key certified for it alone.
+      const { rows } = await db.query<{ identity_rebind_ref: string; node_id: string }>(
+        `SELECT identity_rebind_ref, node_id FROM instances WHERE id = $1`,
+        [restored.instanceId],
+      );
+      const ref = rows[0]!.identity_rebind_ref;
+      const bundle = JSON.parse(sealed.get(ref)!);
+      expect(bundle).toMatchObject({
+        v: 1,
+        account: 'sandbox',
+        principals: `sandbox@${restored.instanceId}\n`,
+      });
+      expect(parseSshCertificate(bundle.hostCertificate).principals).toEqual([restored.instanceId]);
+      // The host is told to install it; every sandbox guest takes ssh from its host only.
+      await reconcileInstance(restored.instanceId);
+      const specs = await db.transaction((tx) => instanceSpecs(tx, rows[0]!.node_id));
+      expect(specs.find((spec) => spec.id === restored.instanceId)).toMatchObject({
+        identityRebindRef: ref,
+        sshFromHostOnly: true,
+      });
+      expect(specs.find((spec) => spec.id === source.instanceId)).toMatchObject({
+        sshFromHostOnly: true,
+      });
+      expect(
+        specs.find((spec) => spec.id === source.instanceId)?.identityRebindRef,
+      ).toBeUndefined();
+
+      const principal = async () =>
+        (
+          await db.query<{ principal: string; host_certified: boolean }>(
+            `SELECT restore_from->>'principalInstanceId' AS principal, host_certified
+               FROM instances WHERE id = $1`,
+            [restored.instanceId],
+          )
+        ).rows[0]!;
+      // Until the guest confirms this very bundle, it still answers to its source's principal.
+      expect((await principal()).principal).toBe(source.instanceId);
+      const report = (identityReboundRef: string) =>
+        db.transaction((tx) =>
+          reportInstances(tx, moduleContext(db).work, rows[0]!.node_id, [
+            { id: restored.instanceId, state: 'running', identityReboundRef },
+          ]),
+        );
+      await report('secret://acme/some-other-bundle');
+      expect((await principal()).principal).toBe(source.instanceId);
+      await report(ref);
+      expect(await principal()).toEqual({ principal: restored.instanceId, host_certified: true });
+    } finally {
+      broker = undefined;
+    }
+  });
+
   it('refuses a secret:// user data it would have to render without a broker', async () => {
     await expect(
       run(

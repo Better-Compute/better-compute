@@ -313,6 +313,7 @@ interface RawInstance {
   host_certified: boolean | null;
   host_cert_valid_ms: number | null;
   network_policy: 'private' | 'none' | null;
+  identity_rebind_ref: string | null;
 }
 
 /** The sandbox snapshot an instance boots from (§3.7), verified by the host against `sha256`. */
@@ -407,6 +408,8 @@ export interface InstanceRow {
   hostCertValidBefore?: number;
   /** A sandbox template's network (§3.7); absent: egress. */
   networkPolicy?: 'private' | 'none';
+  /** A memory restore's own guest identity, sealed for the host to install (deleted with the row). */
+  identityRebindRef?: string;
 }
 
 const json = <T>(value: T | string): T =>
@@ -454,6 +457,8 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.restore_from !== null) row.restoreFrom = json(raw.restore_from);
   if (raw.network_policy !== null && raw.network_policy !== undefined)
     row.networkPolicy = raw.network_policy;
+  if (raw.identity_rebind_ref !== null && raw.identity_rebind_ref !== undefined)
+    row.identityRebindRef = raw.identity_rebind_ref;
   return row;
 }
 
@@ -463,7 +468,8 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   i.owner_identity_id, i.agent_id, i.delegation_id, i.idempotency_key,
   encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class,
   i.sandbox_id, i.warm_template_id, i.restore_from, i.host_certified,
-  (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy`;
+  (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms, i.network_policy,
+  i.identity_rebind_ref`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -665,17 +671,25 @@ export async function sealUserData(
   return { ...row, userData: ref, userDataSealed: true };
 }
 
-/** Deletes the user data vps sealed for a deleted instance (best effort: the ref dies with the row). */
+/**
+ * Deletes what vps sealed for a deleted instance: its user data and a restore's rebind bundle (best
+ * effort: the refs die with the row).
+ */
 export async function dropSealedUserData(deps: InstanceDeps, row: InstanceRow): Promise<void> {
-  if (!row.userDataSealed || !isSecretRef(row.userData) || !deps.broker?.delete) return;
-  try {
-    await deps.broker.delete(row.userData);
-  } catch (error) {
-    deps.log.warn('vps: could not delete sealed user data', {
-      instanceId: row.id,
-      error: String((error as Error)?.message ?? error),
-    });
-  }
+  if (!deps.broker?.delete) return;
+  const refs = [
+    ...(row.userDataSealed && isSecretRef(row.userData) ? [row.userData] : []),
+    ...(isSecretRef(row.identityRebindRef) ? [row.identityRebindRef] : []),
+  ];
+  for (const ref of refs)
+    try {
+      await deps.broker.delete(ref);
+    } catch (error) {
+      deps.log.warn('vps: could not delete sealed user data', {
+        instanceId: row.id,
+        error: String((error as Error)?.message ?? error),
+      });
+    }
 }
 
 // --- Admission -----------------------------------------------------------------------------------

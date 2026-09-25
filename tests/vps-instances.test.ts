@@ -406,6 +406,7 @@ describe('vps() API surface', () => {
       'vps/0014_sandbox_extending',
       'vps/0015_snapshot_agent',
       'vps/0016_warm_secret_versions',
+      'vps/0017_identity_rebind',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

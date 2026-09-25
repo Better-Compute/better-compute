@@ -457,6 +457,8 @@ export interface InstanceReport {
   state: 'running' | 'stopped' | 'paused' | 'error';
   addresses?: readonly string[];
   message?: string;
+  /** The rebind ref the guest confirmed it applied (`InstanceStatus.identity_rebound_ref`). */
+  identityReboundRef?: string;
 }
 
 /**
@@ -476,8 +478,10 @@ export async function reportInstances(
     id: string;
     reported_state: string | null;
     addresses: string[];
+    identity_rebind_ref: string | null;
+    identity_rebound_ref: string | null;
   }>(
-    `SELECT id, reported_state, addresses FROM instances
+    `SELECT id, reported_state, addresses, identity_rebind_ref, identity_rebound_ref FROM instances
       WHERE node_id = $1 AND state <> 'deleted' AND NOT draft FOR UPDATE`,
     [nodeId],
   );
@@ -492,6 +496,16 @@ export async function reportInstances(
       continue;
     }
     seen.add(report.id);
+    // The guest confirmed it installed the identity this spec sends: exec signs for it alone now.
+    if (
+      report.identityReboundRef !== undefined &&
+      row.identity_rebind_ref !== null &&
+      report.identityReboundRef === row.identity_rebind_ref &&
+      row.identity_rebound_ref !== row.identity_rebind_ref
+    ) {
+      await applyIdentityRebind(tx, report.id, row.identity_rebind_ref);
+      updated++;
+    }
     const addresses = [...new Set([...(row.addresses ?? []), ...(report.addresses ?? [])])];
     if (row.reported_state === report.state && addresses.length === (row.addresses ?? []).length)
       continue;
@@ -516,6 +530,24 @@ export async function reportInstances(
       updated++;
     }
   return { updated, orphans: orphans.sort() };
+}
+
+/**
+ * A memory restore's guest installed its own identity (principals, host key and certificate from the
+ * sealed bundle): its exec principal becomes the instance itself, and its host certificate the one
+ * the bundle carried. Only the ref the spec sent counts, once.
+ */
+async function applyIdentityRebind(tx: SqlTx, instanceId: string, ref: string): Promise<void> {
+  await tx.query(
+    `UPDATE instances
+        SET identity_rebound_ref = $2,
+            restore_from = jsonb_set(restore_from, '{principalInstanceId}', to_jsonb(id)),
+            host_certified = rebind_cert_valid_before IS NOT NULL,
+            host_cert_valid_before = rebind_cert_valid_before,
+            version = version + 1
+      WHERE id = $1 AND identity_rebind_ref = $2 AND restore_from IS NOT NULL`,
+    [instanceId, ref],
+  );
 }
 
 /** The host bridge hosted instances' NIC attaches to, unless `vps({ hostNetwork })` names another. */
@@ -547,9 +579,13 @@ export async function instanceSpecs(
     mac: string;
     restore_from: { snapshotId: string; url: string; sha256: string } | string | null;
     network_policy: 'private' | 'none' | null;
+    identity_rebind_ref: string | null;
+    sandboxed: boolean;
   }>(
     `SELECT i.id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
-            i.allocation_id, a.atoms, i.restore_from, i.network_policy, host(l.address) || '/' || masklen(p.cidr) AS address,
+            i.allocation_id, a.atoms, i.restore_from, i.network_policy, i.identity_rebind_ref,
+            (i.sandbox_id IS NOT NULL OR i.warm_template_id IS NOT NULL) AS sandboxed,
+            host(l.address) || '/' || masklen(p.cidr) AS address,
             regexp_replace('02' || substr(encode(sha256(convert_to(i.id, 'UTF8')), 'hex'), 1, 10),
                            '(..)(?=.)', '\\1:', 'g') AS mac
        FROM instances i
@@ -591,6 +627,10 @@ export async function instanceSpecs(
       spec.restoreFrom = { url: restore.url, sha256: restore.sha256, imageId: restore.snapshotId };
     // A sandbox template's network (§3.7): the host enforces it on the instance's taps.
     if (row.network_policy) spec.networkPolicy = row.network_policy;
+    // Sandbox guests take ssh only from their host (the exec tunnel's dial), never from each other.
+    if (row.sandboxed) spec.sshFromHostOnly = true;
+    // A memory restore's own identity, which the host installs into the resumed guest (§3.7).
+    if (row.identity_rebind_ref) spec.identityRebindRef = row.identity_rebind_ref;
     spec.nics = [{ network, mac: row.mac, addresses: row.address ? [row.address] : [] }];
     return [spec];
   });

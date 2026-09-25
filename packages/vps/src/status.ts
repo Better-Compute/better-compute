@@ -34,6 +34,9 @@ export function instanceReportsOf(report: Pick<StatusReport, 'instances'>): Inst
       state,
       ...(instance.addresses.length ? { addresses: [...instance.addresses] } : {}),
       ...(instance.message ? { message: instance.message.slice(0, 512) } : {}),
+      ...(instance.identityReboundRef
+        ? { identityReboundRef: instance.identityReboundRef.slice(0, 512) }
+        : {}),
     });
   }
   return reports;

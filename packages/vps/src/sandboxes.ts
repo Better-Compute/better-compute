@@ -200,6 +200,19 @@ export const vpsWarmSecretVersionsMigration: Migration = {
   sql: `ALTER TABLE instances ADD COLUMN warm_secret_versions jsonb;`,
 };
 
+/**
+ * A memory restore's own guest identity (review 13 H2): the sealed bundle the host installs, the
+ * validity of the host certificate in it, and the bundle the host confirmed it applied.
+ */
+export const vpsIdentityRebindMigration: Migration = {
+  name: 'vps/0017_identity_rebind',
+  sql: `
+ALTER TABLE instances ADD COLUMN identity_rebind_ref text;
+ALTER TABLE instances ADD COLUMN rebind_cert_valid_before timestamptz;
+ALTER TABLE instances ADD COLUMN identity_rebound_ref text;
+`,
+};
+
 /** When a sandbox claimed a warm instance: its warm capacity metering ends there (`vps.sandbox.warm`). */
 export const vpsWarmClaimsMigration: Migration = {
   name: 'vps/0006_warm_claims',
@@ -1369,6 +1382,7 @@ async function createManagedInstance(
       hostCertValidBefore === undefined ? null : new Date(hostCertValidBefore).toISOString(),
     ],
   );
+  if (memoryRestore) await sealIdentityRebind(deps, tx, template.tenantId, spec.instanceId);
   if (secretsAt && Object.keys(secretsAt).length > 0)
     await tx.query(`UPDATE instances SET warm_secret_versions = $2::jsonb WHERE id = $1`, [
       spec.instanceId,
@@ -1392,6 +1406,38 @@ async function createManagedInstance(
     ...(spec.warmTemplateId ? { warmTemplateId: spec.warmTemplateId } : {}),
   });
   return row;
+}
+
+/**
+ * A memory restore resumes its source guest, principal and host key included, so every restore of
+ * one snapshot would accept the same exec certificate (review 13 H2). With exec configured and a
+ * broker, vps seals the restore's own identity: the principals file for `<account>@<instance>` and,
+ * with `certifyHostKey`, a fresh certified host key. The host installs it into the resumed guest
+ * (`InstanceSpec.identityRebindRef`) and reports `identity_rebound_ref`; only then does exec sign
+ * for the instance itself (`applyIdentityRebind`). Bundle: `{ v: 1, account, principals, hostKey?,
+ * hostCertificate? }` (JSON).
+ */
+async function sealIdentityRebind(
+  deps: InstanceDeps,
+  tx: SqlTx,
+  tenantId: string,
+  instanceId: string,
+): Promise<void> {
+  const exec = deps.sandboxExec;
+  if (!exec || !deps.broker) return;
+  const hostKey = await certifiedHostKey(deps, instanceId);
+  const bundle = {
+    v: 1,
+    account: exec.account,
+    principals: `${sandboxPrincipal(exec.account, instanceId)}\n`,
+    ...(hostKey ? { hostKey: hostKey.privateKeyPem, hostCertificate: hostKey.certificate } : {}),
+  };
+  const ref = await deps.broker.put(tenantId, JSON.stringify(bundle));
+  await tx.query(
+    `UPDATE instances SET identity_rebind_ref = $2, rebind_cert_valid_before = $3::timestamptz
+      WHERE id = $1`,
+    [instanceId, ref, hostKey ? new Date(hostKey.validBefore).toISOString() : null],
+  );
 }
 
 /** The certificate principal `sandboxes.exec` signs for an instance: bound to it, never bare. */
