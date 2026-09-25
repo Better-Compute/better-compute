@@ -41,8 +41,14 @@ const capacity = capacityModule({ plugins: [], weights: { spread: 0.5 }, topN: 5
   - Transaction 2 charges quota, then places the reservation. The result is `placed`, or
     `pending` with `Unschedulable`.
 - **`reservations.extend`** writes the pending change (`durationHours` after the change, for
-  `BoundedExtend`) before the decision. It then raises every allocation's end all-or-nothing. On a
-  conflict it answers `{ extended: false, availableUntil }`.
+  `BoundedExtend`) before the decision. It then raises every allocation's end all-or-nothing, under
+  the pool lock. On a conflict it answers `{ extended: false, availableUntil }`.
+  - The projection holds one pending value per reservation, so one extend at a time is decided
+    (`capacity_extend_holds`, keyed by the request id). A concurrent one gets `CONFLICT`
+    (`extend-in-flight`) and doesn't replace the duration being decided. A stalled hold is taken
+    over after 60 s.
+  - A refusal, a budget refusal, or a handler that throws after the allow (`admission.abandoned`)
+    clears the pending change, but only its own.
 - **`reservations.renew`** moves the lease deadline.
 - **`release`** ends a reservation at `compute_now()`.
 - **`cancel`** withdraws a reservation that has not started.
