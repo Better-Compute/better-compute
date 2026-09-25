@@ -18,6 +18,8 @@ export type CloseInitiator = 'local' | 'remote' | 'fault';
 export interface CloseInfo {
   reason: string;
   by: CloseInitiator;
+  /** A refusal's server-provided retry delay (gRPC `grpc-retry-pushback-ms`): redial after exactly this. */
+  retryAfterMs?: number;
 }
 
 /**
@@ -41,7 +43,7 @@ export interface FrameConn<Out, In> {
   /** Adds a handler called once when this end closes, for any reason. */
   onClose(handler: (info: CloseInfo) => void | Promise<void>): void;
   /** Graceful close: frames already sent are still delivered, then the peer sees the close. */
-  close(reason?: string): void;
+  close(reason?: string, info?: { retryAfterMs?: number }): void;
   /** Reset: frames in flight are discarded and the peer sees the close after one latency. */
   abort(reason?: string): void;
   /**
@@ -173,7 +175,7 @@ export interface FramePair<A, B> {
 
 type Item =
   | { type: 'data'; wire: unknown; dueAt: number }
-  | { type: 'fin' | 'rst'; reason: string; dueAt: number }
+  | { type: 'fin' | 'rst'; reason: string; retryAfterMs?: number; dueAt: number }
   | { type: 'ping' | 'pong'; probe: number; dueAt: number };
 
 /** How one direction puts frames on the wire: bytes through a codec, or a structured clone. */
@@ -453,7 +455,12 @@ class Link {
       }
       case 'fin':
       case 'rst':
-        if (!end.closed) this.markClosed(end, { reason: item.reason, by: 'remote' });
+        if (!end.closed)
+          this.markClosed(end, {
+            reason: item.reason,
+            by: 'remote',
+            ...(item.retryAfterMs === undefined ? {} : { retryAfterMs: item.retryAfterMs }),
+          });
         return;
       case 'ping':
         if (!end.closed)
@@ -519,7 +526,7 @@ class Link {
       });
   }
 
-  close(end: End, reason: string): void {
+  close(end: End, reason: string, retryAfterMs?: number): void {
     if (end.closed) return;
     this.markClosed(end, { reason, by: 'local' });
     if (this.dead) return;
@@ -528,6 +535,7 @@ class Link {
     this.enqueue(dir, {
       type: 'fin',
       reason,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       dueAt: Math.max(this.now() + this.latency(dir), last?.dueAt ?? 0),
     });
   }
@@ -656,8 +664,8 @@ class Conn implements FrameConn<unknown, unknown> {
     if (info) this.link.scheduler.after(0, () => handler(info));
     else this.end.closeHandlers.push(handler);
   }
-  close(reason = 'closed'): void {
-    this.link.close(this.end, reason);
+  close(reason = 'closed', info?: { retryAfterMs?: number }): void {
+    this.link.close(this.end, reason, info?.retryAfterMs);
   }
   abort(reason = 'aborted'): void {
     this.link.abort(this.end, reason);
