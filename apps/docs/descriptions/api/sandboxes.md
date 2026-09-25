@@ -18,13 +18,15 @@ Publishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows
 
 Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.
 
-`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed.
+`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed. Each item carries `identityRebound` as `get` describes.
 
 ## get
 
 Returns one sandbox of the tenant with its state, its instance's state, addresses and node, and its `expiresAt`.
 
 `readyAt` is set once the reconciler saw the instance run, and `expiredAt` when the sandbox ended by reaching `expiresAt`. `snapshots` lists the sandbox's snapshots with their state. Drafts and sandboxes of other tenants are `NOT_FOUND`.
+
+`identityRebound` appears only on a memory restore that was given its own guest identity. It is `false` until the host has installed that identity; until then the guest still answers to its source's identity, and `exec` is refused with `restore-shares-identity` while another guest shares it. It is `true` once the identity is installed, from which point `exec` signs for this sandbox alone. It is absent when there is nothing to install: the sandbox is not a memory restore, or exec is not configured.
 
 ## extend
 
