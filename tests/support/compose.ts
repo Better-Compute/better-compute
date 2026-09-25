@@ -1,7 +1,7 @@
 import type { ComputeModule } from '@better-compute/core';
 import { auditModule } from '@better-compute/audit';
 import { defineHost, watchAuthorizer } from '@better-compute/cli';
-import { eventsModule, handleWatch } from '@better-compute/events';
+import { createWatchRegistry, eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { computeMcpEndpoint, gateTools } from '@better-compute/mcp';
@@ -101,7 +101,7 @@ export async function composedConfig() {
     state.compute = compute;
     return hostConfig(compute);
   });
-  const hostConfig = (compute: BetterCompute<any, any>) => ({
+  const hostConfig = (compute: BetterCompute<any, any>, watches = createWatchRegistry()) => ({
     http: {
       routes: [
         {
@@ -112,6 +112,8 @@ export async function composedConfig() {
               sql: compute.context.sql,
               // Decided like events.list: compute:events:read on the caller's (or ?tenantId=) tenant.
               authorize: watchAuthorizer(compute),
+              // Revocations close open streams at once (host.iam.streams below).
+              registry: watches,
               pollMs: 50,
             }),
         },
@@ -122,7 +124,7 @@ export async function composedConfig() {
     // The test IAM has no sessionReviewer (so no authorizeSession): tunnels re-authorize explicitly.
     tunnels: { authorize: async () => false },
     // IAM events reach compute: a revoked delegation closes its tunnels on every gateway.
-    iam: { bridge: iam.bridge },
+    iam: { bridge: iam.bridge, streams: [watches] },
     // MCP for agents at /mcp: better-iam's gate (decided in the platform's tenant), then the compute tools
     // as the caller, waiting inside the call for people to confirm held-back actions.
     mcp: {

@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { IamPort } from 'better-compute/core';
+import type { WatchRegistry } from 'better-compute/events';
 
 // One IAM + compute stack per process, kept across Next.js dev reloads. The configuration and the libraries it
 // imports are loaded by Node at runtime (never bundled): better-compute and better-iam run native stores.
@@ -22,6 +23,8 @@ export interface ConsoleStack {
   };
   rootTenantId: string;
   origin: string;
+  /** The open watch streams of this process (IAM revocations close them). */
+  watches?: WatchRegistry;
 }
 
 const shared = globalThis as typeof globalThis & { __betterComputeConsole?: Promise<ConsoleStack> };

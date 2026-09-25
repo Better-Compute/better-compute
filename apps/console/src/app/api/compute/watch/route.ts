@@ -12,9 +12,11 @@ export const dynamic = 'force-dynamic';
  * `?tenantId=` lets a platform administrator follow another organization.
  */
 export async function GET(request: Request): Promise<Response> {
-  const { compute, origin } = await getStack();
+  const { compute, origin, watches } = await getStack();
   return handleWatch(request, {
     sql: compute.context.sql as SqlExecutor,
+    // Registered, so a revoked session, offboarded identity or revoked delegation closes the stream at once.
+    ...(watches ? { registry: watches } : {}),
     authorize: async (watch) => {
       // Browsers omit Origin on same-origin GETs, so the custom header is the CSRF guard (a cross-origin request
       // carrying it needs a preflight nothing here approves); Sec-Fetch-Site and Origin are checked when sent.
@@ -27,12 +29,29 @@ export async function GET(request: Request): Promise<Response> {
       const credential = { headers: watch.headers };
       const caller = await compute.context.iam.authenticate(credential);
       const tenantId = new URL(watch.url).searchParams.get('tenantId') ?? caller.tenantId;
-      await compute.context.iam.require(credential, {
+      const decision = {
         tenantId,
         action: 'compute:events:read',
         resource: { type: resourceType('tenant'), id: tenantId },
-      });
-      return { tenantId };
+      };
+      await compute.context.iam.require(credential, decision);
+      const iam = compute.context.iam;
+      const session = caller.sessionId
+        ? { identityId: caller.identityId, sessionId: caller.sessionId }
+        : undefined;
+      return {
+        tenantId,
+        subject: {
+          identityId: caller.identityId,
+          ...(caller.sessionId ? { sessionId: caller.sessionId } : {}),
+          ...(caller.agentId ? { agentId: caller.agentId } : {}),
+          ...(caller.delegationId ? { delegationId: caller.delegationId } : {}),
+        },
+        // Re-decided for the recorded session while the stream stays open (the cookie is not re-sent).
+        ...(iam.authorizeSession && session
+          ? { reauthorize: () => iam.authorizeSession!(session, decision) }
+          : {}),
+      };
     },
   });
 }

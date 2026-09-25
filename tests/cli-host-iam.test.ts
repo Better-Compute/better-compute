@@ -136,6 +136,29 @@ describe('host.iam', () => {
       'dropIdentity:agt_1',
       'dropIdentity:agt_2',
     ]);
+    // Local streams close by exact session or identity only; revoke-others and updates are left to re-checks.
+    const closed: [object, string][] = [];
+    const registry = {
+      closeWhere(filter: object, reason: string) {
+        closed.push([filter, reason]);
+        return 1;
+      },
+    };
+    installIamHandlers(compute, {
+      bridge: { setHandlers: (handlers) => (installed = handlers) },
+      streams: [registry],
+    });
+    await installed.sessions!(tx, event('auth:session:revoke', 'ses_9'));
+    await installed.sessions!(tx, event('auth:session:revoke-others', 'ses_keep'));
+    await installed.sessions!(tx, event('identity:revoke-sessions', 'idn_9'));
+    await installed.identity!(tx, event('identity:offboard', 'idn_8'));
+    await installed.identity!(tx, event('iam:identities:update', 'idn_7'));
+    await installed.sessions!(tx, event('auth:session:revoke'));
+    expect(closed).toEqual([
+      [{ sessionId: 'ses_9' }, 'auth:session:revoke'],
+      [{ identityId: 'idn_9' }, 'identity:revoke-sessions'],
+      [{ identityId: 'idn_8' }, 'identity:offboard'],
+    ]);
     // Your own agent handler replaces the default one.
     const agent = async () => void calls.push('mine');
     installIamHandlers(compute, {

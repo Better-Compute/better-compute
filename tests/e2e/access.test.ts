@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { create } from '@bufbuild/protobuf';
 import type { Credential } from '@better-compute/core';
-import { installIamHandlers } from '@better-compute/cli';
+import { installIamHandlers, watchAuthorizer } from '@better-compute/cli';
+import { createWatchRegistry, handleWatch } from '@better-compute/events';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import { createReplayCache, type ReplayCache } from '@better-compute/pki';
 import { TunnelFrameSchema } from '@better-compute/protocol';
@@ -142,10 +143,13 @@ describe('v0.3 access exit', () => {
           modules: t.bridge.modules,
         },
       });
-      // What `serve` does with host.iam: the inbox's `agent` reaction closes tunnels on every live gateway.
+      // What `serve` does with host.iam: the inbox's `agent` reaction closes tunnels on every live gateway, and
+      // this process's /watch streams (the registry the host's GET /watch mount shares).
       const errors: unknown[] = [];
+      const watches = createWatchRegistry();
       handlers = installIamHandlers(stack.compute, {
         bridge: t.bridge,
+        streams: [watches],
         onError: (error) => errors.push(error),
       });
       const { poolId } = await stack.createPool();
@@ -166,7 +170,7 @@ describe('v0.3 access exit', () => {
       const delegation = await t.iam.api.delegations.grant(t.root.credential, {
         tenantId,
         agentId: agent.id,
-        scopes: ['compute:nodes:*'],
+        scopes: ['compute:nodes:*', 'compute:events:read'],
       });
       const acting: Credential = {
         token: (
@@ -191,6 +195,26 @@ describe('v0.3 access exit', () => {
       // The gateway knows whose tunnel is whose (the ticket's agt/dlg claims).
       agents.tunnel.send(typed(agents.ticket.tunnelId, 'ping\r'));
       await agents.session.until('echo: ping');
+      // The agent also follows the tenant's events over SSE, as the host's GET /watch serves them.
+      const watch = await handleWatch(
+        new Request(`http://127.0.0.1:3000/watch?tenantId=${tenantId}`, {
+          headers: { authorization: `Bearer ${acting.token}` },
+        }),
+        { sql: stack.database, authorize: watchAuthorizer(stack.compute), registry: watches, pollMs: 50 },
+      );
+      expect(watch.status).toBe(200);
+      expect(watches.size).toBe(1);
+      const sse = { closed: false, closedAt: 0 };
+      void (async () => {
+        const reader = watch.body!.getReader();
+        try {
+          while (!(await reader.read()).done);
+        } catch {
+          // Cancelled.
+        }
+        sse.closed = true;
+        sse.closedAt = Date.now();
+      })();
 
       const revokedAt = Date.now();
       await t.iam.api.delegations.revoke(t.root.credential, {
@@ -203,6 +227,11 @@ describe('v0.3 access exit', () => {
       expect(agents.session.state.closedAt - revokedAt).toBeLessThan(5_000);
       // Closed by the gateway on the revocation (the event's reason), not by anything else.
       expect(agents.session.state.reason).toBe('incident closed');
+      // The agent's event stream too, within the same 5 s.
+      while (!sse.closed && Date.now() - revokedAt < 5_000) await sleep(25);
+      expect(sse.closed).toBe(true);
+      expect(sse.closedAt - revokedAt).toBeLessThan(5_000);
+      expect(watches.size).toBe(0);
       expect(errors).toEqual([]);
 
       // Only the delegation's tunnel closed: the administrator's own console still echoes.

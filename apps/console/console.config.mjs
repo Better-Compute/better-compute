@@ -140,7 +140,9 @@ export async function createStack() {
   const { vps } = await import('better-compute/vps');
   const { fleetModule } = await import('better-compute/fleet');
 
-  const { eventsModule } = await import('better-compute/events');
+  const { createWatchRegistry, eventsModule } = await import('better-compute/events');
+  // The open /api/compute/watch streams of this process, so IAM revocations close them at once.
+  const watches = createWatchRegistry();
   const { retentionModule } = await import('better-compute/postgres');
   // Webhooks (the events module), and the store's housekeeping (outbox, authz changes, spent attestations).
   const modules = [vps(), fleetModule(), eventsModule({ secret }), retentionModule()];
@@ -213,7 +215,7 @@ export async function createStack() {
   // its tunnels on every gateway, and revocations drop the IAM caches (what `serve` does with host.iam).
   const { installIamHandlers } = await import('better-compute/cli');
   const tls = tunnels ? await gatewayTls() : undefined;
-  installIamHandlers(compute, { bridge }, tls ? { tls } : {});
+  installIamHandlers(compute, { bridge, streams: [watches] }, tls ? { tls } : {});
   await compute.start();
 
   // What `server.mjs` needs to serve `GET /api/compute/tunnels/{ticket}` upgrades (Next route handlers cannot).
@@ -233,7 +235,7 @@ export async function createStack() {
       authenticate: (credential) => compute.context.iam.authenticate(credential),
     };
   }
-  return { iam, compute, rootTenantId, origin, tunnels: tunnelHost };
+  return { iam, compute, rootTenantId, origin, tunnels: tunnelHost, watches };
 }
 
 /** The root tenant: bootstrapped once, then read back from `.console-data/root.json`. */

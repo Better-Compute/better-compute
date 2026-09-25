@@ -6,8 +6,11 @@ import {
 } from '@better-compute/gateway';
 import {
   agentStreamCloser,
+  combineStreamClosers,
   gatewayStreamCloser,
+  localStreamCloser,
   type AgentStreamFilter,
+  type LocalStreamRegistry,
   type ComputeIamBridge,
   type GatewayTunnelCloser,
   type IamEventHandlers,
@@ -21,6 +24,17 @@ import type { AnyCompute } from '../config.js';
 // live gateway (§16 v0.3 exit: "delegation:revoke closes the agent's stream within 5 s"), and the others drop
 // this process's authentication and decision caches. The periodic tunnel re-authorization stays the backstop.
 
+/**
+ * A process-local stream registry that also closes by session or identity (@better-compute/events'
+ * `WatchRegistry` is one).
+ */
+export interface HostStreamRegistry extends LocalStreamRegistry {
+  closeWhere(
+    filter: Parameters<LocalStreamRegistry['closeWhere']>[0] & { sessionId?: string; identityId?: string },
+    reason: string,
+  ): number;
+}
+
 /** `host.iam`: the IAM bridge whose inbox this deployment drains. */
 export interface HostIamConfig {
   /** The bridge from `createComputeIamBridge()` (the one whose `modules` and port the configuration uses). */
@@ -33,6 +47,11 @@ export interface HostIamConfig {
   handlers?: IamEventHandlers;
   /** Gateways whose heartbeat is older than this are not asked (default 120 000 ms: they hold no streams). */
   gatewayStaleMs?: number;
+  /**
+   * This process's own streams, e.g. the `createWatchRegistry()` (@better-compute/events) that your `GET /watch`
+   * mount passes to `handleWatch({ registry })`: revocations close them at once, like the gateways' tunnels.
+   */
+  streams?: readonly HostStreamRegistry[];
   /** Close failures of the default `agent` handler and handler errors (never thrown). */
   onError?(error: unknown, context: { filter?: AgentStreamFilter; event?: IamInboxEvent }): void;
 }
@@ -48,7 +67,7 @@ export interface LiveGatewaysOptions {
 
 /** The control clients of every gateway that heartbeated recently, one cached client per URL. */
 export interface LiveGateways {
-  list(): Promise<GatewayTunnelCloser[]>;
+  list(): Promise<GatewayControlClient[]>;
   close(): void;
 }
 
@@ -97,6 +116,14 @@ export function liveGateways(options: LiveGatewaysOptions): LiveGateways {
 const text = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
 
+/** Events after which an identity has no business holding a stream. */
+const identityEnds = new Set([
+  'identity:offboard',
+  'identity:expire',
+  'identity:delete',
+  'iam:identities:delete',
+]);
+
 /**
  * Installs compute's IAM event handlers on `config.bridge` (see `HostIamConfig.handlers` for the defaults).
  * Returns `close()` for the gateway clients the `agent` handler opened.
@@ -118,9 +145,35 @@ export function installIamHandlers(
       // A broken reporter changes nothing.
     }
   };
-  const closeStreams = agentStreamCloser(gatewayStreamCloser(() => gateways.list()), {
-    onError: (error, filter) => report(error, { filter }),
-  });
+  const streams = config.streams ?? [];
+  const closeStreams = agentStreamCloser(
+    combineStreamClosers(gatewayStreamCloser(() => gateways.list()), ...streams.map(localStreamCloser)),
+    { onError: (error, filter) => report(error, { filter }) },
+  );
+  /**
+   * A revoked session or offboarded identity: its SSE streams in this process at once, and (for an identity) the
+   * tunnels its tickets opened on every gateway. Never without an id: a bare filter would close too much.
+   */
+  const closeFor = (event: IamInboxEvent, by: 'session' | 'identity') => {
+    const id = text(event.subjectId);
+    if (!id) return;
+    for (const registry of streams)
+      try {
+        registry.closeWhere(by === 'session' ? { sessionId: id } : { identityId: id }, event.action);
+      } catch (error) {
+        report(error, { event });
+      }
+    if (by === 'identity')
+      void gateways
+        .list()
+        .then((clients) =>
+          Promise.allSettled(clients.map((client) => client.closeTunnels({ subject: id }, event.action))),
+        )
+        .then((results) => {
+          for (const result of results) if (result.status === 'rejected') report(result.reason, { event });
+        })
+        .catch((error: unknown) => report(error, { event }));
+  };
   const caches = compute.caches;
   const own = config.handlers ?? {};
   const handlers: IamEventHandlers = {
@@ -141,10 +194,20 @@ export function installIamHandlers(
         const identityId = text(event.subjectId);
         if (identityId) caches.dropIdentity(identityId);
         else caches.clear();
+        // An identity that is gone keeps no streams (an update, such as a rename, keeps them).
+        if (identityEnds.has(event.action)) closeFor(event, 'identity');
       }),
     // Session revocations name a session, an identity, a role or a tenant; dropping every cached
-    // authentication is exact for all of them and costs one IAM call per caller.
-    sessions: own.sessions ?? (async () => caches.clear()),
+    // authentication is exact for all of them and costs one IAM call per caller. Streams close where the event
+    // names the session or identity exactly; the others (revoke-others, role- and tenant-wide) are left to the
+    // streams' periodic re-authorization.
+    sessions:
+      own.sessions ??
+      (async (_tx, event) => {
+        caches.clear();
+        if (event.action === 'auth:session:revoke') closeFor(event, 'session');
+        else if (event.action === 'identity:revoke-sessions') closeFor(event, 'identity');
+      }),
     authz: own.authz ?? (async () => caches.dropDecisions()),
     onError(error, event, reaction) {
       if (own.onError) own.onError(error, event, reaction);
