@@ -12,7 +12,17 @@ export class FleetFacts implements FactSink {
   readonly bindings: NodeBinding[] = [];
   /** Process starts and stops. */
   readonly processes: Extract<DaemonFact, { type: 'process.started' | 'process.stopped' }>[] = [];
+  /** I4 ground truth: per node, when a gateway received one of its frames (sim time, ascending). */
+  readonly heard = new Map<string, number[]>();
   private readonly open = new Map<string, NodeBinding>();
+
+  /** A gateway received a frame from `nodeId` at `at` (called by the simulator's links). */
+  heardFrom(nodeId: string, at: number): void {
+    const times = this.heard.get(nodeId);
+    if (!times) this.heard.set(nodeId, [at]);
+    // One entry per instant is enough; frames arrive in time order.
+    else if (times.at(-1) !== at) times.push(at);
+  }
 
   record(fact: DaemonFact): void {
     switch (fact.type) {

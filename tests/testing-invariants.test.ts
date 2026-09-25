@@ -5,6 +5,7 @@ import {
   atomMilliseconds,
   checkI1,
   checkI2,
+  checkI4,
   checkI5,
   checkI8,
   type ExecutionFact,
@@ -176,6 +177,40 @@ describe('I5: no allocation released only because a node disconnected', () => {
       'b was released (reaped) while node n was unreachable',
       'c was released for a cause that is not allowed: mystery',
     ]);
+  });
+});
+
+describe('I4: no liveness false positives', () => {
+  it('flags an unreachable or lost mark shortly after a gateway heard the node, and nothing else', () => {
+    const heard = new Map([
+      ['n1', [1_000, 11_000, 21_000]],
+      ['n2', [1_000]],
+      ['n3', [50_000]],
+    ]);
+    const violations = checkI4({
+      heard,
+      connectivity: [
+        // n1 was heard 4 s before being marked: a false positive.
+        { nodeId: 'n1', at: 25_000, state: 'unreachable' },
+        // n2 went quiet at 1 s; marked 60 s later: a true positive.
+        { nodeId: 'n2', at: 61_000, state: 'unreachable' },
+        // n3 is heard only after the mark (it came back): not a false positive.
+        { nodeId: 'n3', at: 40_000, state: 'lost' },
+        // Connected/disconnected transitions are not liveness verdicts.
+        { nodeId: 'n1', at: 21_500, state: 'disconnected' },
+        // A node never heard from cannot be a false positive.
+        { nodeId: 'n4', at: 5_000, state: 'unreachable' },
+      ],
+    });
+    expect(violations.map((v) => [v.invariant, v.subject])).toEqual([['I4', 'n1']]);
+    expect(violations[0]!.message).toMatch(/4000 ms after a gateway heard/);
+    expect(
+      checkI4({
+        heard,
+        connectivity: [{ nodeId: 'n1', at: 25_000, state: 'unreachable' }],
+        windowMs: 3_000,
+      }),
+    ).toEqual([]);
   });
 });
 

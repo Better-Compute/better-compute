@@ -33,8 +33,10 @@ export {
   atomMilliseconds,
   checkI1,
   checkI2,
+  checkI4,
   checkI5,
   checkI8,
+  LIVENESS_WINDOW_MS,
 } from './invariants.js';
 export type {
   BilledAllocation,

@@ -15,7 +15,14 @@ import { createRng, type Rng } from '../rng.js';
 import { createSimScheduler, type SimScheduler, type Timer } from '../scheduler.js';
 import { FleetFacts } from './facts.js';
 import { GatewayStub, type GatewayStubOptions } from './gateway-stub.js';
-import { checkI1, checkI2, checkI5, checkI8, type InvariantViolation } from './invariants.js';
+import {
+  checkI1,
+  checkI2,
+  checkI4,
+  checkI5,
+  checkI8,
+  type InvariantViolation,
+} from './invariants.js';
 import type { GatewayContext, GatewayFacts, GatewayPort } from './port.js';
 
 /** One simulated node. */
@@ -235,6 +242,9 @@ export function createFleetSim(options: FleetSimOptions): FleetSim {
       case 'drop':
       case 'duplicate':
       case 'reorder': {
+        // I4's ground truth: the gateway side received a frame from this node now.
+        if (event.type === 'deliver' && event.dir === 'a->b')
+          facts.heardFrom(nodeId, scheduler.now());
         if (!logFrames) return;
         const up = event.dir === 'a->b';
         const detail = up
@@ -424,6 +434,7 @@ export function createFleetSim(options: FleetSimOptions): FleetSim {
         }),
       ];
       if (g) {
+        violations.push(...checkI4({ connectivity: g.connectivity, heard: facts.heard }));
         violations.push(...checkI5({ releases: g.releases, connectivity: g.connectivity }));
         violations.push(
           ...checkI8({

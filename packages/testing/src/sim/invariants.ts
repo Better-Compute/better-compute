@@ -3,7 +3,7 @@
 // Postgres snapshot (bookings) plus daemon reports (bindings).
 
 /** Invariant ids of PLAN.md §15 that this module checks. */
-export type InvariantId = 'I1' | 'I2' | 'I5' | 'I8';
+export type InvariantId = 'I1' | 'I2' | 'I4' | 'I5' | 'I8';
 
 export interface InvariantViolation {
   invariant: InvariantId;
@@ -307,6 +307,50 @@ export function checkI5(input: {
           ? `${release.allocationId} was released (${release.reason}) while node ${release.nodeId} was ${state}`
           : `${release.allocationId} was released for a cause that is not allowed: ${release.reason}`,
     });
+  }
+  return violations;
+}
+
+// ---------------------------------------------------------------------------------------------
+// I4: no liveness false positives.
+
+/** Default I4 window: a node heard this recently was alive (liveness gives up only after ≥ 3 missed 10 s beats). */
+export const LIVENESS_WINDOW_MS = 20_000;
+
+/**
+ * I4: the control plane never marks a node unreachable (or lost) that a gateway heard from within `windowMs`
+ * before the mark. `heard` is ground truth from the transport: per node, the sorted times at which a gateway
+ * received one of its frames. Gateway clock skew is covered because the check uses the simulator's clock, not the
+ * gateway's.
+ */
+export function checkI4(input: {
+  connectivity: readonly ConnectivityFact[];
+  heard: ReadonlyMap<string, readonly number[]>;
+  windowMs?: number;
+}): InvariantViolation[] {
+  const windowMs = input.windowMs ?? LIVENESS_WINDOW_MS;
+  const violations: InvariantViolation[] = [];
+  for (const fact of input.connectivity) {
+    if (fact.state !== 'unreachable' && fact.state !== 'lost') continue;
+    const times = input.heard.get(fact.nodeId);
+    if (!times?.length) continue;
+    // The last time heard at or before the mark (binary search over the sorted times).
+    let low = 0;
+    let high = times.length - 1;
+    let last: number | undefined;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (times[middle]! <= fact.at) {
+        last = times[middle];
+        low = middle + 1;
+      } else high = middle - 1;
+    }
+    if (last !== undefined && fact.at - last < windowMs)
+      violations.push({
+        invariant: 'I4',
+        subject: fact.nodeId,
+        message: `node ${fact.nodeId} was marked ${fact.state} at ${fact.at}, ${fact.at - last} ms after a gateway heard from it`,
+      });
   }
   return violations;
 }
