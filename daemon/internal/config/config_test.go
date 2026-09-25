@@ -253,6 +253,18 @@ func TestWebSocketSection(t *testing.T) {
 	}
 }
 
+func TestHelperSection(t *testing.T) {
+	cfg, err := Parse([]byte(required() + "[helper]\nsocket = \"/run/bcd/helper.sock\"\nuser = \"bcd\"\n"))
+	if err != nil || cfg.Helper.Socket != "/run/bcd/helper.sock" || cfg.Helper.User != "bcd" {
+		t.Fatalf("helper = %+v, %v", cfg.Helper, err)
+	}
+	for _, bad := range []string{"socket = \"/run/bcd/helper.sock\"\n", "socket = \"helper.sock\"\nuser = \"bcd\"\n", "socket = \"/run/h.sock\"\nuser = \"root\"\n"} {
+		if _, err := Parse([]byte(required() + "[helper]\n" + bad)); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
 func TestDecodePin(t *testing.T) {
 	digest, err := DecodePin(testPin)
 	if err != nil {

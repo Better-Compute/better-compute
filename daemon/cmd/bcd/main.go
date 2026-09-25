@@ -71,6 +71,7 @@ func commands() []command {
 		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN, stdin or --token-file", flags: joinFlags, run: runJoin},
 		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: runStatus},
 		{name: "doctor", summary: "check this host: configuration, NVML, hardware, KVM, IOMMU, gateway, identity", flags: withConfig, run: runDoctor},
+		{name: "helper", summary: "run as root beside an unprivileged bcd node: typed privileged operations on [helper] socket", flags: withConfig, run: runHelper},
 		{name: "update", summary: "show self-update state; --clear-failed lets failed versions be tried again", flags: updateFlags, run: runUpdate},
 		{name: "version", summary: "print the version", flags: noFlags, run: runVersion},
 	}

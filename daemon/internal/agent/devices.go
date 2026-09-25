@@ -103,7 +103,7 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 			Description: "release " + id,
 			Apply: func(context.Context) error {
 				for _, p := range []string{cdiSpecPath(id), envFilePath(id)} {
-					if err := os.Remove(host.Path(p)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					if err := host.RemoveFile(p); err != nil {
 						return err
 					}
 				}
@@ -146,7 +146,7 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 				actions = append(actions, converge.Action{
 					Description: "rewrite the env file of " + id,
 					Apply: func(context.Context) error {
-						return writeFile(host.Path(envFilePath(id)), envFile(as), 0o644)
+						return host.WriteFile(envFilePath(id), envFile(as), 0o644)
 					},
 				})
 			}
@@ -184,10 +184,10 @@ func (d *devicesConverger) Plan(_ context.Context, desired []byte) ([]converge.A
 				if err != nil {
 					return err
 				}
-				if err := writeFile(host.Path(cdiSpecPath(id)), spec, 0o644); err != nil {
+				if err := host.WriteFile(cdiSpecPath(id), spec, 0o644); err != nil {
 					return err
 				}
-				if err := writeFile(host.Path(envFilePath(id)), envFile(as), 0o644); err != nil {
+				if err := host.WriteFile(envFilePath(id), envFile(as), 0o644); err != nil {
 					return err
 				}
 				delete(d.failed, id)

@@ -119,6 +119,10 @@ type Config struct {
 	// WebSocket is the WebSocket fallback ([websocket]); a URL turns it on.
 	WebSocket WebSocket
 
+	// Helper is privilege separation ([helper], v0.4): bcd node runs as User and bcd helper, as root,
+	// does the privileged work on Socket. An empty socket: bcd node does it itself (as root).
+	Helper Helper
+
 	// BMCNetworks are the CIDRs of the site's BMC networks ([site] bmc_networks, comma-separated): a
 	// site agent never proxies a request into them, whatever the control plane asks.
 	BMCNetworks string
@@ -184,6 +188,14 @@ type Plugins struct {
 	Cgroup    string
 	MemoryMax int64
 	PidsMax   int64
+}
+
+// Helper configures bcd helper and the node's use of it.
+type Helper struct {
+	// Socket is the helper's unix socket (e.g. /run/bcd/helper.sock); empty: no helper.
+	Socket string
+	// User is the account bcd node runs as: the only peer the helper serves besides root.
+	User string
 }
 
 // WebSocket is the session's WebSocket fallback (PLAN.md §7.1) for networks whose TLS-inspecting
@@ -372,6 +384,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("websocket.url must be a wss:// URL without credentials, got %q", c.WebSocket.URL)
 		}
 	}
+	if c.Helper.Socket != "" && (!path.IsAbs(c.Helper.Socket) || c.Helper.User == "" || c.Helper.User == "root") {
+		return errors.New("helper.socket needs an absolute path and helper.user, the unprivileged account bcd node runs as")
+	}
 	if c.WebSocket.ProxyCAFile != "" && !path.IsAbs(c.WebSocket.ProxyCAFile) {
 		return fmt.Errorf("websocket.proxy_ca_file must be an absolute path, got %q", c.WebSocket.ProxyCAFile)
 	}
@@ -491,6 +506,8 @@ var fields = []field{
 	{section: "update", key: "release_threshold", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseThreshold = v.num }},
 	{section: "update", key: "release_sequence", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseSequence = v.num }},
 	{section: "update", key: "entrypoint", kind: kindString, set: func(c *Config, v value) { c.Update.Entrypoint = v.str }},
+	{section: "helper", key: "socket", kind: kindString, set: func(c *Config, v value) { c.Helper.Socket = v.str }},
+	{section: "helper", key: "user", kind: kindString, set: func(c *Config, v value) { c.Helper.User = v.str }},
 	{section: "websocket", key: "url", kind: kindString, set: func(c *Config, v value) { c.WebSocket.URL = v.str }},
 	{section: "websocket", key: "proxy_ca_file", kind: kindString, set: func(c *Config, v value) { c.WebSocket.ProxyCAFile = v.str }},
 	{section: "websocket", key: "audience", kind: kindString, set: func(c *Config, v value) { c.WebSocket.Audience = v.str }},

@@ -214,6 +214,17 @@ func (h *fakeHost) Kexec(ctx context.Context, d *inventory.Disk, kernel, initrd 
 func (h *fakeHost) RunDCGM(ctx context.Context, level uint32, uuids []string, gpus []*inventory.Gpu) (*agentv1.DiagDcgmResult, error) {
 	return h.real().RunDCGM(ctx, level, uuids, gpus)
 }
+func (h *fakeHost) WriteFile(abs string, data []byte, mode os.FileMode) error {
+	return writeFile(h.Path(abs), data, mode)
+}
+
+func (h *fakeHost) RemoveFile(abs string) error {
+	if err := os.Remove(h.Path(abs)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (h *fakeHost) ReloadSSH() error {
 	h.mu.Lock()
 	h.sshReloads++

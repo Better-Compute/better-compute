@@ -97,7 +97,7 @@ func (c *accessConverger) Plan(_ context.Context, desired []byte) ([]converge.Ac
 		}
 		actions = append(actions, converge.Action{
 			Description: "write " + p,
-			Apply:       func(context.Context) error { return writeFile(host.Path(p), content, 0o644) },
+			Apply:       func(context.Context) error { return host.WriteFile(p, content, 0o644) },
 		})
 	}
 	// Remove what is no longer desired: stale principal files, and everything when the section is empty.
@@ -124,10 +124,7 @@ func (c *accessConverger) Plan(_ context.Context, desired []byte) ([]converge.Ac
 		actions = append(actions, converge.Action{
 			Description: "remove " + p,
 			Apply: func(context.Context) error {
-				if err := os.Remove(host.Path(p)); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				return nil
+				return host.RemoveFile(p)
 			},
 		})
 	}

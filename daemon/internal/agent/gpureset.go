@@ -10,12 +10,16 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
+	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 )
 
 // ResetGPU resets one GPU (nvidia-smi --gpu-reset), unless ResetGPUFunc replaces it; a host under a
 // fake root has no GPUs to reset and succeeds.
 func (h *RealHost) ResetGPU(ctx context.Context, uuid string) error {
+	if h.Helper != nil {
+		return h.Helper.Do(ctx, helper.Request{Op: "gpu.reset", GPU: uuid})
+	}
 	if h.ResetGPUFunc != nil {
 		return h.ResetGPUFunc(ctx, uuid)
 	}

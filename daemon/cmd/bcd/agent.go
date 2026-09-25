@@ -22,6 +22,7 @@ import (
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/config"
+	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
@@ -343,6 +344,13 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
+	underHelper := cfg.Helper.Socket != "" && mode == "node"
+	if underHelper {
+		// Privilege separation: bcd helper (root) does the privileged work this unprivileged node asks for.
+		if rh, ok := host.(*agent.RealHost); ok {
+			rh.Helper = &helper.Client{Socket: cfg.Helper.Socket}
+		}
+	}
 	plugins := startPlugins(context.Background(), cfg.PluginsDir, cfg.Plugins, log)
 	defer func() {
 		for _, p := range plugins {
@@ -366,7 +374,9 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	approverSetPin, _ := cfg.ApproverSetPin() // validated when the file was loaded
 	bmcNetworks, _ := cfg.BMCNets()
 	var update *agent.UpdateOptions
-	if mode == "node" || mode == "site" {
+	if underHelper {
+		log.Warn("self-update is off under bcd helper: swapping the installed binary needs root")
+	} else if mode == "node" || mode == "site" {
 		if update, err = updateOptions(cfg); err != nil {
 			fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 			return exitFailure

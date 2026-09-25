@@ -506,6 +506,7 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       audiences: ['gw.dev.local'],
       serving: { key: servingKey.privateKey, chain },
     });
+    const original = readFileSync(config, 'utf8');
     try {
       const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
       sh(`pkill -f '[n]ode --config ${toLinux(config)}' ; true`);
@@ -549,6 +550,61 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       });
     } finally {
       await ws.close();
+      writeFileSync(config, original);
+    }
+  }, 240_000);
+
+  it('runs unprivileged beside bcd helper, which writes the CDI spec of a GPU hold', async () => {
+    const socket = `${dataDir}/helper.sock`;
+    const entry = sh(`test -x '${dataDir}/entry/bcd' && echo yes`) === 'yes' ? `${dataDir}/entry/bcd` : toLinux(binary);
+    sh(`pkill -f '[n]ode --config ${toLinux(config)}' ; true`);
+    await until('the node to stop', async () => sh(`pgrep -f '[n]ode --config ${toLinux(config)}' || echo gone`) === 'gone', 30_000);
+    const original = readFileSync(config, 'utf8');
+    writeFileSync(config, `${original}\n[helper]\nsocket = "${socket}"\nuser = "${sh('id -un')}"\n`);
+    let helperLog = '';
+    const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=41', entry, 'helper', '--config', toLinux(config)]);
+    const helperProcess = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    helperProcess.stderr!.on('data', (chunk: Buffer) => (helperLog += chunk.toString()));
+    try {
+      await until('the helper socket', async () => sh(`test -S '${socket}' && echo up`) === 'up', 30_000);
+      const restarted = new Date();
+      startNode(entry);
+      await until(
+        'the node to reconnect',
+        async () =>
+          (await dev.database.query('SELECT 1 FROM node_sessions WHERE node_id = $1 AND connected_at > $2', [nodeId, restarted])).rows.length > 0,
+        90_000,
+      );
+      const created = await api.reservations.create(dev.root, {
+        tenantId: dev.rootTenantId,
+        poolId,
+        devices: [{ class: 'gpu', count: 1 }],
+        duration: '1h',
+        idempotencyKey: 'bcd-e2e-helper-reserve',
+      });
+      await until('the reservation to become active', async () => {
+        const current = await api.reservations.get(dev.root, { tenantId: dev.rootTenantId, reservationId: created.id });
+        return current.state === 'active' ? current : undefined;
+      }).catch((error) => {
+        throw new Error(`${error}\n--- helper log ---\n${helperLog.slice(-2000)}\n--- bcd log ---\n${nodeLog.slice(-3000)}`);
+      });
+      const { rows } = await dev.database.query<{ id: string }>(
+        `SELECT id FROM allocations WHERE owner_kind = 'reservation' AND owner_id = $1`,
+        [created.id],
+      );
+      const allocationId = rows[0]!.id;
+      expect(sh(`cat '${dataDir}/fakehw-root/etc/cdi/bcd-${allocationId}.json'`)).toContain(allocationId);
+      // The helper did the writes: each checked, logged operation names the file kind and id.
+      expect(helperLog).toContain('op=file.write kind=cdi name=' + allocationId);
+      await api.reservations.release(dev.root, { tenantId: dev.rootTenantId, reservationId: created.id });
+      await until('the hold to be released through the helper', async () =>
+        sh(`test -e '${dataDir}/fakehw-root/etc/cdi/bcd-${allocationId}.json' && echo held || echo gone`) === 'gone',
+      );
+      expect(helperLog).toContain('op=file.remove kind=cdi');
+    } finally {
+      sh(`pkill -f '[h]elper --config ${toLinux(config)}' ; true`);
+      helperProcess.kill();
+      writeFileSync(config, original);
     }
   }, 240_000);
 });

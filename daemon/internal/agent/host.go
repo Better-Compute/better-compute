@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	"github.com/better-compute/better-compute/daemon/internal/helper"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 )
 
@@ -44,6 +46,10 @@ type Host interface {
 	// CheckFirewall reports whether bcd's table is still loaded with its rules (an nftables reload,
 	// "flush ruleset" or a flushed table or chain changes it): rules is how many bcd loaded.
 	CheckFirewall(ctx context.Context, rules int) error
+	// WriteFile replaces a root-owned file bcd owns (CDI specs, allocation env files, the SSH files);
+	// RemoveFile removes one (absent is fine). Under bcd helper, the helper does both.
+	WriteFile(abs string, data []byte, mode os.FileMode) error
+	RemoveFile(abs string) error
 
 	// The ramdisk's operations (ramdisk.go, ramdisk_host.go).
 	SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (method string, verified bool, err error)
@@ -73,6 +79,28 @@ type RealHost struct {
 	LogsFunc func(ctx context.Context, unit string, since time.Duration) ([]byte, error)
 	// FirewallFunc overrides nft -f.
 	FirewallFunc func(ctx context.Context, ruleset string) error
+	// Helper, when set, performs the privileged operations: bcd node runs unprivileged and asks
+	// bcd helper (reboot, GPU resets, the firewall, sshd reloads and the files bcd owns).
+	Helper *helper.Client
+}
+
+// WriteFile writes a file bcd owns, through the helper when there is one.
+func (h *RealHost) WriteFile(abs string, data []byte, mode os.FileMode) error {
+	if h.Helper != nil {
+		return h.Helper.WriteFile(context.Background(), abs, data)
+	}
+	return writeFile(h.Path(abs), data, mode)
+}
+
+// RemoveFile removes a file bcd owns, through the helper when there is one.
+func (h *RealHost) RemoveFile(abs string) error {
+	if h.Helper != nil {
+		return h.Helper.RemoveFile(context.Background(), abs)
+	}
+	if err := os.Remove(h.Path(abs)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // FirewallFile is where a host under a fake root keeps the ruleset it was asked to load.
@@ -81,6 +109,9 @@ const FirewallFile = "/run/bcd/instances.nft"
 // CheckFirewall lists bcd's table as JSON (nft -j list table bridge bcd_instances) and counts its
 // rules; a host under a fake root checks its ruleset file.
 func (h *RealHost) CheckFirewall(ctx context.Context, rules int) error {
+	if h.Helper != nil {
+		return h.Helper.Do(ctx, helper.Request{Op: "firewall.check", Rules: rules})
+	}
 	if h.FirewallFunc != nil {
 		return nil
 	}
@@ -113,6 +144,9 @@ func (h *RealHost) CheckFirewall(ctx context.Context, rules int) error {
 // ApplyFirewall runs nft -f with the ruleset on its standard input. A host under a fake root (fakehw)
 // writes it to FirewallFile instead.
 func (h *RealHost) ApplyFirewall(ctx context.Context, ruleset string) error {
+	if h.Helper != nil {
+		return h.Helper.Do(ctx, helper.Request{Op: "firewall.apply", Ruleset: ruleset})
+	}
 	if h.FirewallFunc != nil {
 		return h.FirewallFunc(ctx, ruleset)
 	}
@@ -150,11 +184,19 @@ func (h *RealHost) Hostname() string {
 
 func (h *RealHost) Inventory() (*inventory.NodeInventory, error) { return h.Collect() }
 
-func (h *RealHost) Reboot(reason string) error { return h.RebootFunc(reason) }
+func (h *RealHost) Reboot(reason string) error {
+	if h.Helper != nil {
+		return h.Helper.Do(context.Background(), helper.Request{Op: "reboot", Reason: reason})
+	}
+	return h.RebootFunc(reason)
+}
 
 // ReloadSSH reloads sshd through systemd (Debian names the unit ssh, others sshd). A host under a
 // fake root has no sshd to reload.
 func (h *RealHost) ReloadSSH() error {
+	if h.Helper != nil {
+		return h.Helper.Do(context.Background(), helper.Request{Op: "ssh.reload"})
+	}
 	if h.Root != "" && h.Root != "/" {
 		return nil
 	}
