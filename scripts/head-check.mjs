@@ -4,6 +4,12 @@
 // progress):
 //
 //   node scripts/head-check.mjs [--ref <commit>] [--no-build] [vitest filters...]
+//   node scripts/head-check.mjs [--ref <commit>] [--no-build] --run <repo-relative .mjs> [args...]
+//
+// `--run` runs `node <tree>/<script> [args...]` in the worktree after the build, instead of vitest,
+// while this run still holds the tree (the docs generator writes the reference from committed code
+// this way; the caller copies what changed from the printed worktree path). It exits with the
+// script's status.
 //
 // It keeps a git worktree at `<tmp>/bc-head-check` (or `-2`, `-3`… while another run holds the
 // first; see claimTree), moves it to the commit (default: HEAD of this
@@ -26,7 +32,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,7 +50,18 @@ const gitPath = process.env.GIT ?? (existsSync(defaultGit) ? defaultGit : 'git')
 const git = (args, cwd = root) =>
   execFileSync(gitPath, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
-const argv = process.argv.slice(2);
+let argv = process.argv.slice(2);
+// `--run <script> [args...]`: everything after the script is its own arguments.
+const runAt = argv.indexOf('--run');
+const script = runAt < 0 ? undefined : argv[runAt + 1];
+const scriptArgs = runAt < 0 ? [] : argv.slice(runAt + 2);
+if (runAt >= 0) {
+  if (!script || isAbsolute(script) || normalize(script).split(/[\\/]/).includes('..') || !script.endsWith('.mjs')) {
+    console.error('head-check: --run takes a repo-relative .mjs path inside the tree');
+    process.exit(2);
+  }
+  argv = argv.slice(0, runAt);
+}
 const take = (flag) => {
   const at = argv.indexOf(flag);
   if (at < 0) return undefined;
@@ -178,7 +195,15 @@ if (build)
     '--pretty',
     'false',
   ]);
-if (status === 0 || !build)
+if (script) {
+  // Resolved inside the tree, and refused if it would leave it.
+  const target = resolve(tree, script);
+  const inside = relative(tree, target);
+  if (!inside || inside.startsWith('..') || isAbsolute(inside) || !existsSync(target)) {
+    console.error(`head-check: ${script} is not a file inside the worktree`);
+    status = 2;
+  } else if (status === 0 || !build) status = run(`node ${script} ${scriptArgs.join(' ')}`.trim(), [target, ...scriptArgs]);
+} else if (status === 0 || !build)
   status = run(`vitest run ${filters.join(' ')}`.trim(), [
     join(tree, 'node_modules', 'vitest', 'vitest.mjs'),
     'run',
