@@ -51,8 +51,8 @@ export interface HostStreamRegistry extends LocalStreamRegistry {
 /**
  * A module's own reactions to IAM (§12.8), beside capacity's built-in ones: what an agent or delegation created is
  * withdrawn when it is suspended or revoked, and an owner's resources go to their successor when they leave. vps's
- * `{ agent: withdrawAgentSandboxes, identity: reassignSandboxes }` is one. Both run in the inbox transaction; a throw
- * retries the event.
+ * `sandboxIamReactions` is one. Each runs in the inbox transaction under its own savepoint, after the event's
+ * revocations: a failure is reported (onError) and undone without undoing them; IamReconcile (identityHolders) retries.
  */
 export interface HostIamReaction {
   agent?(
@@ -264,23 +264,39 @@ export function installIamHandlers(
   const caches = compute.caches;
   const own = config.handlers ?? {};
   const reactions = config.reactions ?? [];
+  /**
+   * A module's reaction under its own savepoint: a failure is reported and undone, never the revocations of the same
+   * event (they ran first, in the same transaction). What it missed, the IamReconcile sweep catches (identityHolders).
+   */
+  const react = async (tx: SqlTx, event: IamInboxEvent, run: () => Promise<unknown>) => {
+    await tx.query('SAVEPOINT host_iam_reaction');
+    try {
+      await run();
+      await tx.query('RELEASE SAVEPOINT host_iam_reaction');
+    } catch (error) {
+      await tx.query('ROLLBACK TO SAVEPOINT host_iam_reaction');
+      report(error, { event });
+    }
+  };
   const handlers: IamEventHandlers = {
     ...own,
     agent:
       own.agent ??
       (async (tx, event) => {
-        await closeStreams(tx, event);
-        // The reservations the agent or delegation created that have not started are cancelled (§12.8).
-        const filter = agentStreamFilter(event);
-        if (filter) {
-          await withdrawAgentReservations(tx, compute.context, { ...filter, reason: event.action });
-          for (const reaction of reactions) await reaction.agent?.(tx, compute.context, { ...filter, reason: event.action });
-        }
-        // The agent's cached authentications and decisions, where the event names it.
+        // Revocation first: the agent's cached authentications and decisions, and its streams and tunnels.
         const agentId =
           event.action === 'delegation:revoke' ? text(event.metadata?.agentId) : text(event.subjectId);
         if (agentId) caches.dropIdentity(agentId);
         else if (event.action === 'agent:suspend-all') caches.clear();
+        await closeStreams(tx, event);
+        // The reservations the agent or delegation created that have not started are cancelled (§12.8); then the
+        // modules' own reactions (sandboxes), each under a savepoint.
+        const filter = agentStreamFilter(event);
+        if (filter) {
+          await withdrawAgentReservations(tx, compute.context, { ...filter, reason: event.action });
+          for (const reaction of reactions)
+            if (reaction.agent) await react(tx, event, () => reaction.agent!(tx, compute.context, { ...filter, reason: event.action }));
+        }
       }),
     identity:
       own.identity ??
@@ -291,15 +307,16 @@ export function installIamHandlers(
         // An owner gone for good (offboarded, expired, deleted, or found so by IamReconcile): its reservations go
         // to the successor, else the unstarted ones are cancelled (§12.8).
         const end = await identityEndOf(event, successorLookup(compute.context.sql));
-        if (end) {
-          await reassignReservations(tx, compute.context, { ...end, reason: event.action });
-          for (const reaction of reactions) await reaction.identity?.(tx, compute.context, { ...end, reason: event.action });
-        }
-        // An identity that is gone keeps no streams and no break-glass SSH (an update, such as a rename, keeps
-        // them): a certificate would otherwise open its node until it expires.
+        // Revocation first. An identity that is gone keeps no streams and no break-glass SSH (an update, such as a
+        // rename, keeps them): a certificate would otherwise open its node until it expires.
         if (end || identityEnds.has(event.action)) {
           if (identityId) await revokeSshFor(tx, identityId, event);
           closeFor(event, 'end');
+        }
+        if (end) {
+          await reassignReservations(tx, compute.context, { ...end, reason: event.action });
+          for (const reaction of reactions)
+            if (reaction.identity) await react(tx, event, () => reaction.identity!(tx, compute.context, { ...end, reason: event.action }));
         }
       }),
     // A role activation ended (the holder deactivated it, or an administrator revoked it): break-glass access

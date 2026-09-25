@@ -329,15 +329,40 @@ describe('host.iam', () => {
         {},
       ],
     });
-    const tx = compute.context.sql as never;
-    await installed.agent!(tx, event('delegation:revoke', 'dlg_1', { agentId: 'agt_1' }));
-    await installed.identity!(tx, event('identity:offboard', 'idn_8'));
+    // (The inbox runs each handler in its transaction.)
+    const inTx = (run: (tx: never) => Promise<unknown>) => compute.context.sql.transaction((tx) => run(tx as never));
+    await inTx((tx) => installed.agent!(tx, event('delegation:revoke', 'dlg_1', { agentId: 'agt_1' })));
+    await inTx((tx) => installed.identity!(tx, event('identity:offboard', 'idn_8')));
     // An update (a rename) ends nothing.
-    await installed.identity!(tx, event('iam:identities:update', 'idn_7'));
+    await inTx((tx) => installed.identity!(tx, event('iam:identities:update', 'idn_7')));
     expect(seen).toEqual([
       ['agent', expect.objectContaining({ tenantId: 'ten_a', delegationId: 'dlg_1', reason: 'delegation:revoke', context: true })],
       ['identity', expect.objectContaining({ tenantId: 'ten_a', identityId: 'idn_8', reason: 'identity:offboard', context: true })],
     ]);
+
+    // A failing reaction is reported and undone, and never undoes the event's revocations (review 7 M3).
+    const errors: unknown[] = [];
+    await compute.context.sql.query(`CREATE TABLE reaction_probe (id text)`);
+    installIamHandlers(compute, {
+      bridge: { setHandlers: (handlers) => (installed = handlers) },
+      onError: (error) => errors.push(error),
+      reactions: [
+        {
+          identity: async (tx) => {
+            await tx.query(`INSERT INTO reaction_probe VALUES ('half-done')`);
+            throw new Error('sandbox store down');
+          },
+        },
+        { identity: async (tx) => void (await tx.query(`INSERT INTO reaction_probe VALUES ('second')`)) },
+      ],
+    });
+    await inTx(async (tx) => {
+      await (tx as { query(text: string): Promise<unknown> }).query(`INSERT INTO reaction_probe VALUES ('revoked')`);
+      await installed.identity!(tx, event('identity:offboard', 'idn_9'));
+    });
+    expect(errors.map((error) => (error as Error).message)).toEqual(['sandbox store down']);
+    const { rows } = await compute.context.sql.query<{ id: string }>(`SELECT id FROM reaction_probe ORDER BY id`);
+    expect(rows.map((row) => row.id)).toEqual(['revoked', 'second']);
     const context = { compute: {} as never, options: {} as never, env: {}, cwd: '.' };
     await expect(resolveHost({ iamReactions: [{ agent: 'x' }] }, context)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     const reaction = { identity: async () => undefined };
