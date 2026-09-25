@@ -640,6 +640,48 @@ export function computeTools(
           by: args.by,
         }),
     },
+    {
+      name: 'list_sandbox_snapshots',
+      title: 'List sandbox snapshots',
+      description:
+        'Lists sandbox snapshots in this tenant: your own by default, or every one you may see with scope "all". Kept snapshots stay listed after their sandbox is deleted; filter by sandbox.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['mine', 'all'], description: 'Default mine' },
+          sandboxId: id('sbx', 'Only this sandbox'),
+          limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Page size' },
+          cursor: id('snap', 'The cursor a previous page returned'),
+        },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('sandboxSnapshots/list', { tenantId: context.tenantId, ...args }),
+    },
+    {
+      name: 'delete_sandbox_snapshot',
+      title: 'Delete a sandbox snapshot',
+      description:
+        'Deletes a sandbox snapshot (disk and memory state) for good; a kept snapshot otherwise outlives its sandbox.',
+      inputSchema: {
+        type: 'object',
+        required: ['snapshotId'],
+        properties: { snapshotId: id('snap', 'The snapshot') },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      run: (args, context) =>
+        context.api.$request('sandboxSnapshots/delete', {
+          tenantId: context.tenantId,
+          snapshotId: args.snapshotId,
+        }),
+    },
     ...(['get', 'delete'] as const).map(
       (verb): ComputeTool => ({
         name: `${verb}_sandbox`,

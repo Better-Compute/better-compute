@@ -238,7 +238,12 @@ const refused = (error: unknown) =>
   (isRecord(error) && (error as { code?: unknown }).code === 'ACCESS_DENIED');
 
 /** Kinds listed by owner (§9.2 list recipe step 3): `scope: 'mine'` needs no per-item checks. */
-const ownerScopedKinds: ReadonlySet<string> = new Set(['reservation', 'instance', 'sandbox']);
+const ownerScopedKinds: ReadonlySet<string> = new Set([
+  'reservation',
+  'instance',
+  'sandbox',
+  'sandbox-snapshot',
+]);
 
 /**
  * The item kind of a §9.2 "+ items" list row: the resource its group's `get` decides on

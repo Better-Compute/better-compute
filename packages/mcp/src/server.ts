@@ -307,6 +307,8 @@ export function gateTools(
     extend_sandbox: { public: true },
     get_sandbox: { public: true },
     delete_sandbox: { public: true },
+    list_sandbox_snapshots: { public: true },
+    delete_sandbox_snapshot: { public: true },
   };
   if (options.execCommand) rules.exec_command = nodeRead;
   if (options.fleet) {

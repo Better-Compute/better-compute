@@ -96,6 +96,8 @@ describe('JSON-RPC over Streamable HTTP', () => {
       'create_sandbox',
       'list_sandboxes',
       'extend_sandbox',
+      'list_sandbox_snapshots',
+      'delete_sandbox_snapshot',
       'get_sandbox',
       'delete_sandbox',
     ]);
@@ -137,6 +139,15 @@ describe('sandbox tools (v0.5, §3.7)', () => {
     });
     for (const verb of ['get', 'delete'])
       await rpc(mcp, 'tools/call', { name: `${verb}_sandbox`, arguments: { sandboxId: SANDBOX } });
+    const SNAPSHOT = 'snap_01k5w0000000000000000000dd';
+    await rpc(mcp, 'tools/call', {
+      name: 'list_sandbox_snapshots',
+      arguments: { sandboxId: SANDBOX },
+    });
+    await rpc(mcp, 'tools/call', {
+      name: 'delete_sandbox_snapshot',
+      arguments: { snapshotId: SNAPSHOT },
+    });
     expect(calls).toEqual([
       {
         path: 'sandboxes/create',
@@ -153,6 +164,11 @@ describe('sandbox tools (v0.5, §3.7)', () => {
       { path: 'sandboxes/extend', input: { tenantId: 'org_acme', sandboxId: SANDBOX, by: '30m' } },
       { path: 'sandboxes/get', input: { tenantId: 'org_acme', sandboxId: SANDBOX } },
       { path: 'sandboxes/delete', input: { tenantId: 'org_acme', sandboxId: SANDBOX } },
+      { path: 'sandboxSnapshots/list', input: { tenantId: 'org_acme', sandboxId: SANDBOX } },
+      {
+        path: 'sandboxSnapshots/delete',
+        input: { tenantId: 'org_acme', snapshotId: 'snap_01k5w0000000000000000000dd' },
+      },
     ]);
   });
 });
@@ -266,7 +282,9 @@ describe('fleet tools (opt-in, read-only)', () => {
 
   it('has a rule for every tool, so a gate with unlisted: deny hides none of them', () => {
     const { api } = recorder();
-    const everyTool = mcpWith(api, { execCommand: true, fleet: true }).tools.map((tool) => tool.name);
+    const everyTool = mcpWith(api, { execCommand: true, fleet: true }).tools.map(
+      (tool) => tool.name,
+    );
     const rules = gateTools({ execCommand: true, fleet: true });
     expect(everyTool.filter((name) => !(name in rules))).toEqual([]);
     const template = 'sbxt_01k5w0000000000000000000dd';
