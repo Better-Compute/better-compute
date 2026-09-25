@@ -10,6 +10,7 @@ import {
   type AdmissionContext,
   type CapacityPort,
   type ComputeModule,
+  type Finding,
   type Json,
   type MethodContext,
   type MethodDefinition,
@@ -33,6 +34,7 @@ import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
 import { inlinePlacer, poolLeasePlacer, type PlacementObserver } from './placer.js';
 import { freezeMigLayouts, migGateWork, runMigGate } from './mig.js';
+import { dedicatedTaintPrefix } from './eligibility.js';
 import { leaseCandidates, leaseGroups } from './node-lease.js';
 import { PoolIndexCache } from './pool-index.js';
 import { defaultSpotNoticeMs, planPreemption, readSpotAllocations } from './spot.js';
@@ -1425,22 +1427,68 @@ export function capacityModule(
       return { devices: { assignments } };
     },
     async selfCheck(context) {
-      const { rows } = await context.sql.query<{ count: string | number }>(
+      const count = async (sql: string) =>
+        Number((await context.sql.query<{ count: string | number }>(sql)).rows[0]?.count ?? 0);
+      const findings: Finding[] = [];
+      const stale = await count(
         `SELECT count(*) AS count FROM reservations
           WHERE state IN ('placed', 'binding', 'active') AND upper(during) < compute_now() - interval '10 minutes'`,
       );
-      const stale = Number(rows[0]?.count ?? 0);
-      return stale > 0
-        ? [
-            {
-              check: 'capacity.reservations.stale',
-              severity: 'warning',
-              message: `${stale} reservations are past their end but not released`,
-              fix: 'Check that a worker runs the capacity.reservations reconciler',
-              count: stale,
-            },
-          ]
-        : [];
+      if (stale > 0)
+        findings.push({
+          check: 'capacity.reservations.stale',
+          severity: 'warning',
+          message: `${stale} reservations are past their end but not released`,
+          fix: 'Check that a worker runs the capacity.reservations reconciler',
+          count: stale,
+        });
+      const stuck = await count(
+        `SELECT count(*) AS count FROM capacity_mig_layouts
+          WHERE (pending_layout IS NOT NULL OR granted_generation IS NOT NULL)
+            AND updated_at < compute_now() - interval '24 hours'`,
+      );
+      if (stuck > 0)
+        findings.push({
+          check: 'capacity.mig.stuck',
+          severity: 'warning',
+          message: `${stuck} nodes have waited over 24 h for a MIG layout change (booked GPUs, or a node that never converged)`,
+          fix: 'Look at the nodes in capacity_mig_layouts: their GPUs stay held from the change time until the node converges',
+          count: stuck,
+        });
+      const orphaned = await count(
+        `SELECT count(*) AS count
+           FROM nodes n JOIN pools p ON p.id = n.pool_id, unnest(n.no_schedule_reasons) AS r(reason)
+          WHERE n.deleted_at IS NULL AND r.reason LIKE '${dedicatedTaintPrefix}%'
+            AND substr(r.reason, ${dedicatedTaintPrefix.length + 1}) <> p.owner_tenant_id
+            AND NOT EXISTS (SELECT 1 FROM pool_offers o
+                             WHERE o.pool_id = p.id AND o.tenant_id = substr(r.reason, ${dedicatedTaintPrefix.length + 1}))`,
+      );
+      if (orphaned > 0)
+        findings.push({
+          check: 'capacity.dedicated.unoffered',
+          severity: 'warning',
+          message: `${orphaned} nodes are dedicated to a tenant their pool is not offered to: nobody can use them`,
+          fix: 'Offer the pool to that tenant (pools.offer), or remove the dedicated=<tenant> taint',
+          count: orphaned,
+        });
+      const drift = await count(
+        `WITH agg AS (
+           SELECT node_id, class, count(*) AS bookable, count(*) FILTER (WHERE healthy) AS healthy
+             FROM devices WHERE bookable GROUP BY node_id, class)
+         SELECT count(*) AS count
+           FROM agg a FULL JOIN capacity_device_counts c ON c.node_id = a.node_id AND c.class = a.class
+          WHERE COALESCE(a.bookable, 0) <> COALESCE(c.bookable, 0)
+             OR COALESCE(a.healthy, 0) <> COALESCE(c.healthy, 0)`,
+      );
+      if (drift > 0)
+        findings.push({
+          check: 'capacity.device_counts.drift',
+          severity: 'error',
+          message: `${drift} node/class device counts disagree with the devices table; placement shortlists rank on them`,
+          fix: 'Check the capacity_device_counts trigger on devices (capacity/0003); a TRUNCATE bypasses it',
+          count: drift,
+        });
+      return findings;
     },
   });
 }

@@ -179,6 +179,45 @@ describe('the MIG layout gate', () => {
     ]);
   });
 
+  it('reports stuck changes, unusable dedications and count drift to doctor (selfCheck)', async () => {
+    const check = () =>
+      capacityModule().selfCheck!({ ...context, sql: db } as unknown as ModuleContext);
+    const checks = async () => (await check()).map((finding) => [finding.check, finding.count]);
+    const before = await checks();
+    expect(before.filter(([name]) => name !== 'capacity.reservations.stale')).toEqual([]);
+
+    await db.query(
+      `UPDATE nodes SET no_schedule_reasons = ARRAY['taint:dedicated=beta'] WHERE id = $1`,
+      [NODE],
+    );
+    await db.query(
+      `UPDATE capacity_mig_layouts SET pending_layout = 'all-7g.80gb', updated_at = compute_now() - interval '25 hours' WHERE node_id = $1`,
+      [NODE],
+    );
+    await db.query(
+      `UPDATE capacity_device_counts SET bookable = bookable + 1 WHERE node_id = $1 AND class = 'gpu.mig'`,
+      [NODE],
+    );
+    expect(await checks()).toEqual(
+      expect.arrayContaining([
+        ['capacity.mig.stuck', 1],
+        ['capacity.dedicated.unoffered', 1],
+        ['capacity.device_counts.drift', 1],
+      ]),
+    );
+    // Offered to beta (or dedicated to the owner), the dedication is usable again.
+    await db.query(`INSERT INTO pool_offers (pool_id, tenant_id) VALUES ($1, 'beta')`, [POOL]);
+    expect((await checks()).map(([name]) => name)).not.toContain('capacity.dedicated.unoffered');
+    await db.query(
+      `UPDATE capacity_device_counts SET bookable = bookable - 1 WHERE node_id = $1 AND class = 'gpu.mig'`,
+      [NODE],
+    );
+    await db.query(`UPDATE capacity_mig_layouts SET pending_layout = NULL WHERE node_id = $1`, [
+      NODE,
+    ]);
+    await db.query(`UPDATE nodes SET no_schedule_reasons = '{}' WHERE id = $1`, [NODE]);
+  });
+
   it('releases after a settle time when the node spec never carried the layout', async () => {
     recorded.events = [];
     await db.query(`UPDATE pools SET policy = '{"migLayout": "all-1g.10gb"}' WHERE id = $1`, [
