@@ -87,6 +87,11 @@ describe('JSON-RPC over Streamable HTTP', () => {
       'node_status',
       'run_diagnostic',
       'create_instance',
+      'list_instances',
+      'get_instance',
+      'start_instance',
+      'stop_instance',
+      'delete_instance',
     ]);
     expect(
       tools.find((tool: { name: string }) => tool.name === 'release_reservation').annotations,
@@ -132,6 +137,39 @@ describe('create_instance', () => {
         idempotencyKey: expect.any(String),
       },
     });
+  });
+
+  it('lists, reads, starts, stops and deletes instances in the caller’s tenant', async () => {
+    const { api, calls } = recorder(() => ({ ok: true }));
+    const mcp = mcpWith(api);
+    const INSTANCE = 'inst_01k5w0000000000000000000dd';
+    await rpc(mcp, 'tools/call', { name: 'list_instances', arguments: { scope: 'all' } });
+    for (const verb of ['get', 'start', 'stop', 'delete'])
+      await rpc(mcp, 'tools/call', {
+        name: `${verb}_instance`,
+        arguments: { instanceId: INSTANCE },
+      });
+    expect(calls).toEqual([
+      { path: 'instances/list', input: { tenantId: 'org_acme', scope: 'all' } },
+      ...['get', 'start', 'stop', 'delete'].map((verb) => ({
+        path: `instances/${verb}`,
+        input: { tenantId: 'org_acme', instanceId: INSTANCE },
+      })),
+    ]);
+    const tools = mcp.listTools();
+    expect(tools.find((tool) => tool.name === 'delete_instance')!.annotations).toMatchObject({
+      destructiveHint: true,
+    });
+    expect(tools.find((tool) => tool.name === 'start_instance')!.annotations).toMatchObject({
+      destructiveHint: false,
+    });
+    // A malformed id never reaches compute.
+    const refused = await rpc(mcp, 'tools/call', {
+      name: 'delete_instance',
+      arguments: { instanceId: 'pool_x' },
+    });
+    expect(refused.body.result.isError).toBe(true);
+    expect(calls).toHaveLength(5);
   });
 });
 

@@ -288,6 +288,12 @@ export function gateTools(
     node_status: nodeRead,
     run_diagnostic: nodeRead,
     create_instance: poolRead,
+    // Compute decides each on the instance.
+    list_instances: { public: true },
+    get_instance: { public: true },
+    start_instance: { public: true },
+    stop_instance: { public: true },
+    delete_instance: { public: true },
   };
   if (options.execCommand) rules.exec_command = nodeRead;
   if (options.fleet) {

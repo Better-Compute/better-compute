@@ -36,6 +36,8 @@ export default {
 | `node_status` | `nodes.get` | `compute:nodes:read` on the node |
 | `run_diagnostic` | `commands.run` (`diag.nvml`) | `compute:nodes:read` on the node |
 | `create_instance` | `instances.create` | `compute:pools:read` on the pool |
+| `list_instances` | `instances.list` (own by default, `scope: 'all'`) | any authenticated caller |
+| `get_instance`, `start_instance`, `stop_instance`, `delete_instance` | `instances.get/start/stop/delete` | any authenticated caller |
 | `exec_command` (only with `execCommand: true`) | `commands.run` (allowlisted kinds) | `compute:nodes:read` on the node |
 | `fleet_export`, `fleet_plan` (only with `fleet: true`) | `fleet.export`, `fleet.plan` (read-only) | `compute:fleet:admin` on the fleet |
 

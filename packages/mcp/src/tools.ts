@@ -476,6 +476,63 @@ export function computeTools(
         return { idempotencyKey: key, instance };
       },
     },
+    {
+      name: 'list_instances',
+      title: 'List VPS instances',
+      description:
+        'Lists VPS instances in this tenant: your own by default, or every one you may see with scope "all". Filter by pool; pass the returned cursor for the next page.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['mine', 'all'], description: 'Default mine' },
+          poolId: id('pool', 'Only this pool'),
+          limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Page size' },
+          cursor: id('inst', 'The cursor a previous page returned'),
+        },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('instances/list', { tenantId: context.tenantId, ...args }),
+    },
+    ...(['get', 'start', 'stop', 'delete'] as const).map(
+      (verb): ComputeTool => ({
+        name: `${verb}_instance`,
+        title: {
+          get: 'Show a VPS instance',
+          start: 'Start a VPS instance',
+          stop: 'Stop a VPS instance',
+          delete: 'Delete a VPS instance',
+        }[verb],
+        description: {
+          get: 'Shows one instance: state, flavor, image, addresses and conditions.',
+          start: 'Starts a stopped instance; it runs again with the same disk and addresses.',
+          stop: 'Stops an instance (a graceful shutdown); its disk and addresses are kept.',
+          delete:
+            'Deletes an instance and its disk for good, and returns its capacity and addresses to the pool.',
+        }[verb],
+        inputSchema: {
+          type: 'object',
+          required: ['instanceId'],
+          properties: { instanceId: id('inst', 'The instance') },
+          additionalProperties: false,
+        },
+        annotations:
+          verb === 'get'
+            ? { readOnlyHint: true, openWorldHint: false }
+            : {
+                readOnlyHint: false,
+                destructiveHint: verb !== 'start',
+                idempotentHint: true,
+                openWorldHint: false,
+              },
+        run: (args, context) =>
+          context.api.$request(`instances/${verb}`, {
+            tenantId: context.tenantId,
+            instanceId: args.instanceId,
+          }),
+      }),
+    ),
   ];
   if (options.execCommand)
     tools.push({
