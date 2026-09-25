@@ -235,6 +235,8 @@ export async function wireNodeSpec(tx: SqlTx, spec: NodeSpec): Promise<JsonObjec
       access.execTicketJwksJson = canonicalJson(spec.access.execTicketJwks);
     if (spec.access.sshCaPublicKeys?.length)
       access.sshCaPublicKeys = [...spec.access.sshCaPublicKeys].sort();
+    if (spec.access.sshPrincipals?.length)
+      access.sshPrincipals = [...spec.access.sshPrincipals].sort();
     wire.access = access;
   }
   if (spec.telemetry) {

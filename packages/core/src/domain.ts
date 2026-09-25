@@ -573,6 +573,8 @@ export interface InstanceSpec {
 /** Empty in v0.1; from v0.3 the SSH CA principals and exec-ticket JWKS. */
 export interface AccessSpec {
   sshCaPublicKeys?: string[];
+  /** Certificate principals this node accepts (`<account>@<nodeId>`), so a certificate is node-bound. */
+  sshPrincipals?: string[];
   execTicketJwks?: Json;
 }
 export interface TelemetrySpec {
