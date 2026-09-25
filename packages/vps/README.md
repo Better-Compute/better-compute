@@ -134,8 +134,11 @@ show it.
   `ttlSeconds`, and is bounded by `maxTtlSeconds`. Like `create`, it runs capacity's budget check
   where the pool asks for one (`budgetCheck: 'meter'`, or an offer's `stop-new`/`drain`): a spent
   budget is `SPEND_LIMIT_REACHED` and clears the pending lifetime. `delete` and expiry are both an
-  ordinary instance delete. Events: `sandbox.created`, `ready` (stamped when the instance first runs), `extended`,
-  `expired`, `deleted`.
+  ordinary instance delete.
+
+  Events: `sandbox.created`, `ready` (stamped when the instance first runs), `extended`, `expiring`,
+  `expired`, `deleted`. `expiring` is published once, 5 minutes (or a quarter of the lifetime, if
+  shorter) before `expiresAt`, so an agent can extend in time; an extend re-arms it.
 - **Warm pools.** The `vps.sandboxes` reconciler runs every 15 s. It keeps `warm.min` instances per
   template:
   - they are `paused` when `RuntimeTraits.pause` is set, otherwise `stopped`;

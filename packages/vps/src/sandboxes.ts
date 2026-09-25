@@ -171,6 +171,12 @@ ALTER TABLE sandbox_templates ADD COLUMN instance_version bigint NOT NULL DEFAUL
 `,
 };
 
+/** When `sandbox.expiring` was published for the current expiry (an extend clears it). */
+export const vpsSandboxExpiringMigration: Migration = {
+  name: 'vps/0013_sandbox_expiring',
+  sql: `ALTER TABLE sandboxes ADD COLUMN expiring_at timestamptz;`,
+};
+
 /** When a sandbox claimed a warm instance: its warm capacity metering ends there (`vps.sandbox.warm`). */
 export const vpsWarmClaimsMigration: Migration = {
   name: 'vps/0006_warm_claims',
@@ -2101,7 +2107,8 @@ export async function extendSandbox(
   );
   if (expires <= Number(raw.expires_ms)) return sandboxView(raw);
   await tx.query(
-    `UPDATE sandboxes SET expires_at = $2::timestamptz, ttl_seconds = $3, version = version + 1
+    `UPDATE sandboxes SET expires_at = $2::timestamptz, ttl_seconds = $3, expiring_at = NULL,
+                          version = version + 1
       WHERE id = $1`,
     [raw.id, new Date(expires).toISOString(), lifetime],
   );
@@ -2127,8 +2134,16 @@ export async function extendSandbox(
 
 // --- The sandbox reconciler ----------------------------------------------------------------------
 
+/**
+ * How long before `expiresAt` a sandbox gets `sandbox.expiring`: five minutes, or a quarter of its
+ * lifetime when that is shorter (a 60 s sandbox is warned 15 s ahead, one reconciler pass).
+ */
+export const sandboxExpiringLeadSeconds = 300;
+
 /** What one reconciler pass did. */
 export interface SandboxPass {
+  /** `sandbox.expiring` published. */
+  expiring: number;
   expired: number;
   ready: number;
   deleted: number;
@@ -2139,6 +2154,8 @@ export interface SandboxPass {
 
 /**
  * One pass of the `vps.sandboxes` reconciler:
+ * - warning: `sandbox.expiring { expiresAt }` once, `sandboxExpiringLeadSeconds` (or a quarter of
+ *   the lifetime) before the expiry, so an agent can extend in time; an extend re-arms it;
  * - expiry: sandboxes past `expiresAt` get `sandbox.expired` and an ordinary instance delete;
  * - events: `sandbox.ready` once the instance first runs, `sandbox.deleted` once it is gone;
  * - warm pools: each live template keeps `warm.min` warm instances (stopped until claimed),
@@ -2154,6 +2171,7 @@ export async function reconcileSandboxes(
   const now = deps.clock.now();
   const at = new Date(now).toISOString();
   const pass: SandboxPass = {
+    expiring: 0,
     expired: 0,
     ready: 0,
     deleted: 0,
@@ -2164,6 +2182,25 @@ export async function reconcileSandboxes(
   const dropped: DroppedSnapshot[] = [];
 
   await sql.transaction(async (tx) => {
+    const expiring = await tx.query<RawSandbox>(
+      `SELECT ${sandboxColumns} FROM ${sandboxFrom}
+        WHERE NOT s.draft AND s.deleting_at IS NULL AND s.expiring_at IS NULL
+          AND s.expires_at > $1::timestamptz
+          AND s.expires_at <= $1::timestamptz + make_interval(secs => least($2::float8, s.ttl_seconds / 4.0))
+        ORDER BY s.expires_at, s.id LIMIT $3 FOR UPDATE OF s SKIP LOCKED`,
+      [at, sandboxExpiringLeadSeconds, batch],
+    );
+    for (const raw of expiring.rows) {
+      await tx.query(`UPDATE sandboxes SET expiring_at = $2::timestamptz WHERE id = $1`, [
+        raw.id,
+        at,
+      ]);
+      await publishSandbox(deps, tx, raw, 'sandbox.expiring', {
+        expiresAt: Number(raw.expires_ms),
+      });
+      pass.expiring++;
+    }
+
     const expired = await tx.query<RawSandbox>(
       `SELECT ${sandboxColumns} FROM ${sandboxFrom}
         WHERE NOT s.draft AND s.deleting_at IS NULL AND s.expires_at <= $1::timestamptz

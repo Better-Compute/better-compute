@@ -673,6 +673,42 @@ describe('sandboxes', () => {
     });
   });
 
+  it('warn once before expiry (sandbox.expiring), and again after an extend', async () => {
+    const template = await createTemplate({ defaultTtlSeconds: 1200, maxTtlSeconds: 3600 });
+    const sandbox = await createSandbox(template.id);
+    const warnings = () => recorded.events.filter((event) => event.type === 'sandbox.expiring');
+    await advance(1200_000 - 301_000);
+    await reconcileSandboxes();
+    expect(warnings()).toEqual([]);
+    await advance(2_000);
+    await reconcileSandboxes();
+    await reconcileSandboxes();
+    expect(warnings()).toEqual([
+      expect.objectContaining({
+        subject: `sandbox/${sandbox.id}`,
+        data: expect.objectContaining({ expiresAt: T0 + 1200_000 }),
+      }),
+    ]);
+    await call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: sandbox.id, by: '10m' });
+    await reconcileSandboxes();
+    expect(warnings()).toHaveLength(1);
+    await advance(600_000);
+    await reconcileSandboxes();
+    expect(warnings()).toHaveLength(2);
+    expect(warnings()[1]!.data).toMatchObject({ expiresAt: T0 + 1800_000 });
+  });
+
+  it('warn a short sandbox a quarter of its lifetime ahead', async () => {
+    const template = await createTemplate({ defaultTtlSeconds: 60 });
+    await createSandbox(template.id);
+    await advance(44_000);
+    await reconcileSandboxes();
+    expect(eventTypes()).not.toContain('sandbox.expiring');
+    await advance(2_000);
+    await reconcileSandboxes();
+    expect(eventTypes()).toContain('sandbox.expiring');
+  });
+
   it('extend only within budget where the pool checks it, and clear the refused lifetime', async () => {
     const template = await createTemplate({ defaultTtlSeconds: 600, maxTtlSeconds: 3600 });
     const sandbox = await createSandbox(template.id);

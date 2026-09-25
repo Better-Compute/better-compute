@@ -402,6 +402,7 @@ describe('vps() API surface', () => {
       'vps/0010_sandbox_metric_indexes',
       'vps/0011_host_certificates',
       'vps/0012_host_cert_validity',
+      'vps/0013_sandbox_expiring',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);
