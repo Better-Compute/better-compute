@@ -18,7 +18,7 @@ import {
   type WipeMode,
 } from '@better-compute/core';
 import { builtinSteps, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
-import { verbBatchScope } from './batch.js';
+import { batchSubject, verbBatchScope } from './batch.js';
 import type { HardwareProfile } from './module-types.js';
 import { unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
@@ -132,7 +132,8 @@ export type MetalApi = {
     abort: MethodDefinition<AbortInput, MetalNodeView>;
     recover: MethodDefinition<MetalNodeInput, MetalNodeView>;
     retire: MethodDefinition<MetalNodeInput, MetalNodeView>;
-    power: MethodDefinition<PowerInput, { commandId: string }>;
+    /** With a quorum, the command waits for its one-leaf batch (`batchId`) to be approved (§13). */
+    power: MethodDefinition<PowerInput, PowerOutput>;
     /**
      * (v1.0 §13) One verb on many nodes as one destructive-command batch: every node is decided as its
      * own call (`compute:nodes:provision` on it), then the batch is created over the destructive
@@ -142,6 +143,13 @@ export type MetalApi = {
     bulk: MethodDefinition<BulkInput, BulkOutput>;
   };
 };
+
+export interface PowerOutput {
+  commandId: string;
+  /** The batch the power action runs under, when the deployment keeps batches; `held` until approved. */
+  batchId?: string;
+  held?: boolean;
+}
 
 export type BulkVerb = 'manage' | 'inspect' | 'provide' | 'undeploy' | 'rescue' | 'retire';
 const bulkVerbs: Readonly<Record<BulkVerb, ProvisionVerb>> = {
@@ -448,7 +456,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           }),
       }),
       retire: simple('retire'),
-      power: defineMethod<PowerInput, { commandId: string }>({
+      power: defineMethod<PowerInput, PowerOutput>({
         action: 'compute:nodes:power',
         kind: 'mutation',
         resource: onNode,
@@ -466,14 +474,23 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
             const agent = await siteAgentFor(tx, node.node_id);
             if (!agent) throw new ComputeError('INVALID_STATE', `No site agent serves site ${node.site_id}`);
             const { rows } = await tx.query<{ now: Date }>('SELECT compute_now() AS now');
+            // Destructive (§13): a batch of one leaf, this machine's BMC through this agent.
+            const batch = context.commands.createBatch
+              ? await context.commands.createBatch(tx, {
+                  tenantId: node.tenant_id,
+                  scope: [{ subject: batchSubject('bmc.power', { nodeId: node.node_id, bmcAddress: node.bmc_address }, agent), kind: 'bmc.power' }],
+                  reason: `power ${input.action} ${node.node_id}`,
+                })
+              : undefined;
             const command = await context.commands.enqueue(tx, {
               nodeId: agent,
               kind: 'bmc.power',
               payload: bmcOperationJson(node, 'power.setPower', { action: input.action }),
               idempotencyKey: `metal:power:${context.requestId}`,
               notAfter: rows[0]!.now.getTime() + 5 * 60_000,
+              ...(batch ? { batchId: batch.batchId } : {}),
             });
-            return { commandId: command.id };
+            return { commandId: command.id, ...(batch ? { batchId: batch.batchId, held: batch.held } : {}) };
           }),
       }),
       bulk: defineMethod<BulkInput, BulkOutput>({
