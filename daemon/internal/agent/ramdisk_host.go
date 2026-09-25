@@ -217,6 +217,16 @@ func (h *RealHost) InstallUserData(ctx context.Context, d *inventory.Disk, kind 
 				boot = append(boot, p)
 			}
 		}
+		// ext (Fedora CoreOS) and FAT boot partitions are written in userspace; others are mounted.
+		ign := map[string][]byte{"/ignition/config.ign": data}
+		for _, p := range boot {
+			switch {
+			case isExtFS(p.FSType) && haveTool(debugfsPath):
+				return extWrite(ctx, "/dev/"+p.Name, ign)
+			case isFatFS(p.FSType) && haveTool(mtool("mcopy")):
+				return fatWrite(ctx, "/dev/"+p.Name, ign)
+			}
+		}
 		dir, _, unmount, err := h.mountFirst(ctx, boot, false, func(string) bool { return true })
 		if err != nil {
 			return errors.New("no partition labelled boot for the Ignition config")
@@ -311,6 +321,43 @@ func (h *RealHost) Kexec(ctx context.Context, d *inventory.Disk, kernel, initrd 
 	parts, err := h.diskPartitions(ctx, d)
 	if err != nil {
 		return err
+	}
+	// ext root filesystems are read in userspace: the kernel and initrd are copied out with debugfs
+	// (symlinks resolved inside the image), and the image is never mounted.
+	if haveTool(debugfsPath) {
+		for _, p := range parts {
+			if !isExtFS(p.FSType) {
+				continue
+			}
+			dev := "/dev/" + p.Name
+			k, i := extBootFiles(ctx, dev, kernel, initrd)
+			if k == "" {
+				continue
+			}
+			tmp, err := os.MkdirTemp("", "bcd-kexec-")
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(tmp)
+			args := []string{"-l", filepath.Join(tmp, "vmlinuz"), "--command-line=" + strings.Join(append([]string{"root=UUID=" + p.UUID, "ro"}, cmdline...), " ")}
+			if err := extRead(ctx, dev, k, args[1]); err != nil {
+				return err
+			}
+			if i != "" {
+				if err := extRead(ctx, dev, i, filepath.Join(tmp, "initrd")); err != nil {
+					return err
+				}
+				args = append(args, "--initrd="+filepath.Join(tmp, "initrd"))
+			}
+			if _, err := run(ctx, "kexec", args...); err != nil {
+				return err
+			}
+			if _, err := run(ctx, "systemctl", "kexec"); err == nil {
+				return nil
+			}
+			_, err = run(ctx, "kexec", "-e")
+			return err
+		}
 	}
 	var k, i string
 	dir, root, unmount, err := h.mountFirst(ctx, parts, true, func(dir string) bool {
