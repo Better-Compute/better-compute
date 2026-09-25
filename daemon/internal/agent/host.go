@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
@@ -25,6 +27,8 @@ type Host interface {
 	Reboot(reason string) error
 	// Path maps an absolute host path (/etc/cdi/..., /run/bcd/...) to where this host keeps it.
 	Path(abs string) string
+	// Logs returns a systemd unit's log lines of the last since (logs.collect).
+	Logs(ctx context.Context, unit string, since time.Duration) ([]byte, error)
 }
 
 // RealHost is the machine bcd runs on.
@@ -37,6 +41,8 @@ type RealHost struct {
 	Root string
 	// BootIDFile overrides /proc/sys/kernel/random/boot_id.
 	BootIDFile string
+	// LogsFunc overrides journalctl.
+	LogsFunc func(ctx context.Context, unit string, since time.Duration) ([]byte, error)
 }
 
 func (h *RealHost) BootID() (string, error) {

@@ -12,6 +12,8 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,6 +153,9 @@ func (h *fakeHost) Reboot(reason string) error {
 	return nil
 }
 func (h *fakeHost) Path(abs string) string { return filepath.Join(h.root, filepath.FromSlash(abs)) }
+func (h *fakeHost) Logs(_ context.Context, unit string, _ time.Duration) ([]byte, error) {
+	return []byte(unit + ": started\nenv: BCD_JOIN_TOKEN=bcjt_join_01k5w0000000000000000000000.secretsecret\n"), nil
+}
 
 type harness struct {
 	t      *testing.T
@@ -630,4 +635,54 @@ func TestWelcomeCannotMoveServerTimeBack(t *testing.T) {
 	s3, _ := h.open()
 	s3.push(command(body("ok", "inventory.refresh", nil)))
 	s3.update(t, "ok", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+}
+
+func TestLogsCollectUploadsARedactedBundle(t *testing.T) {
+	var got []byte
+	var contentType string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.Header.Get("X-Upload") != "yes" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		got, _ = io.ReadAll(r.Body)
+		contentType = r.Header.Get("Content-Type")
+	}))
+	defer srv.Close()
+	h := newHarness(t, func(o *Options) { o.HTTPClient = srv.Client() })
+	s, _ := h.open()
+	req := &agentv1.LogsCollectRequest{
+		UploadUrl:     srv.URL + "/bundle",
+		UploadHeaders: []*agentv1.HttpHeader{{Name: "X-Upload", Value: "yes"}},
+		Units:         []string{"bcd.service", "containerd.service"},
+		SupportBundle: true,
+	}
+	logs := body("cmd_logs", "logs.collect", req)
+	logs.Lane = commonv1.Lane_LANE_BULK
+	s.push(command(logs))
+	done := s.update(t, "cmd_logs", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	res := &agentv1.LogsCollectResult{}
+	_ = proto.Unmarshal(done.GetResult(), res)
+	text := string(got)
+	if strings.Contains(text, "secretsecret") || !strings.Contains(text, "bcjt_[redacted]") ||
+		!strings.Contains(text, "containerd.service: started") || !strings.Contains(text, "==> support <==") {
+		t.Fatalf("bundle:\n%s", text)
+	}
+	if sum := sha256.Sum256(got); res.GetUploadedBytes() != uint64(len(got)) || string(res.GetSha256()) != string(sum[:]) || contentType != "text/plain" {
+		t.Fatalf("result = %v", res)
+	}
+	// Truncated oldest first to max_bytes; plain http is refused.
+	req.MaxBytes = 64
+	small := body("cmd_small", "logs.collect", req)
+	s.push(command(small))
+	done = s.update(t, "cmd_small", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	_ = proto.Unmarshal(done.GetResult(), res)
+	if !res.GetTruncated() || len(got) > 64 {
+		t.Fatalf("truncated = %v, %d bytes", res.GetTruncated(), len(got))
+	}
+	req.UploadUrl = "http://example.com/x"
+	s.push(command(body("cmd_http", "logs.collect", req)))
+	if u := s.update(t, "cmd_http", commonv1.CommandState_COMMAND_STATE_FAILED); u.GetError().GetCode() != "invalid-payload" {
+		t.Fatalf("http upload = %v", u)
+	}
 }

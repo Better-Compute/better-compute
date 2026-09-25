@@ -31,6 +31,12 @@ func builtinKinds(a *Agent) []*Kind {
 			Exec:  a.runDiagNvml,
 		},
 		{
+			Name:  "logs.collect",
+			Lane:  dispatch.LaneBulk,
+			Roles: []dispatch.Role{dispatch.RoleNode, dispatch.RoleSite, dispatch.RoleRamdisk},
+			Exec:  a.runLogsCollect,
+		},
+		{
 			Name:            "node.reboot",
 			Lane:            dispatch.LaneControl,
 			Roles:           []dispatch.Role{dispatch.RoleNode, dispatch.RoleSite},

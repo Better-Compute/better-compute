@@ -240,6 +240,13 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 		}
 		a.offset = serverTime.Sub(time.Now())
 		a.advanceServerTimeLocked()
+		next := *a.state
+		next.ServerTime = a.serverNowLocked()
+		if err := SaveState(a.o.DataDir, &next); err != nil {
+			a.log.Error("store the server time", "error", err.Error())
+		} else {
+			a.state = &next
+		}
 	}
 	if err := session.ApplyWelcome(a.j, session.Welcome{Epoch: w.GetEpoch(), AckedEventSeq: w.GetAckedEventSeq()}); err != nil {
 		a.log.Error("journal: apply Welcome", "error", err.Error())

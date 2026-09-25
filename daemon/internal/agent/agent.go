@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,8 @@ type Options struct {
 	WelcomeTimeout time.Duration
 	// Kinds replaces the built-in command kinds (tests).
 	Kinds []*Kind
+	// HTTPClient uploads logs.collect bundles (default: a client with a 5 minute timeout).
+	HTTPClient *http.Client
 }
 
 // Agent is the node agent.
@@ -146,8 +149,10 @@ func New(o Options) (*Agent, error) {
 	if meta.NodeID != "" && meta.NodeID != o.State.NodeID {
 		return nil, fmt.Errorf("agent: the journal belongs to node %s, not %s", meta.NodeID, o.State.NodeID)
 	}
-	if meta.NodeID == "" {
+	if meta.NodeID == "" || meta.ServerTime.Before(o.State.ServerTime) {
+		// A new (or lost) journal: it belongs to this node, and the server time never goes back.
 		meta.NodeID = o.State.NodeID
+		meta.ServerTime = o.State.ServerTime
 		if err := o.Journal.SaveMeta(meta); err != nil {
 			return nil, err
 		}
