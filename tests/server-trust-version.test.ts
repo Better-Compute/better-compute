@@ -106,7 +106,7 @@ describe('trust bundle version (review #6 M5)', () => {
     const all = approvers.map((approver) => approver.key);
     const nextSet = { approverKeys: all, approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
     const setSignatures = approvers.slice(0, 2).map((approver) => {
-      const signature = signApproverSet({ version: 2n, set: nextSet }, approver.privateKey);
+      const signature = signApproverSet({ version: 2n, set: nextSet, trustDomain: 'compute.test' }, approver.privateKey);
       return { kid: signature.kid, sig: Buffer.from(signature.sig).toString('base64url') };
     });
     const next = { keys: all.map((key) => key.spkiDer), threshold: 2, setSignatures };
@@ -115,7 +115,12 @@ describe('trust bundle version (review #6 M5)', () => {
     expect(bundle.approverSetSignatures).toHaveLength(2);
     // What a daemon holding the first set checks.
     expect(
-      verifyApproverSetChange(firstSet, { ...approverSetOf(bundle), version: bundle.version, approverSetSignatures: bundle.approverSetSignatures }),
+      verifyApproverSetChange(firstSet, {
+        ...approverSetOf(bundle),
+        version: bundle.version,
+        approverSetSignatures: bundle.approverSetSignatures,
+        trustDomain: 'compute.test',
+      }),
     ).toHaveLength(2);
     expect(warnings).toEqual([]);
 

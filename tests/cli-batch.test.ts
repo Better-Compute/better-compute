@@ -99,10 +99,15 @@ describe('batch sign-approvers', () => {
     const argv = (signer: string) => [
       'batch', 'sign-approvers', '--key', `${signer}.pem`, '--version', '4',
       '--approvers', 'alice.pem.pub,bob.pem.pub,carol.pem.pub', '--threshold', '2', '--tiers', '5:1,100:2',
+      '--trust-domain', 'compute.test',
     ];
     const byAlice = await h.run(argv('alice'));
     const byBob = await h.run(argv('bob'));
-    expect(byAlice).toMatchObject({ version: 4, set: { approverKids: [alice.kid, bob.kid, carol.kid], threshold: 2 } });
+    expect(byAlice).toMatchObject({
+      version: 4,
+      trustDomain: 'compute.test',
+      set: { approverKids: [alice.kid, bob.kid, carol.kid], threshold: 2 },
+    });
     expect(byAlice.setSha256).toBe(byBob.setSha256);
     const next = {
       approverKeys: [alice, bob, carol],
@@ -113,15 +118,20 @@ describe('batch sign-approvers', () => {
       ],
       unbatchedDestructivePerHour: 0,
       version: 4n,
+      trustDomain: 'compute.test',
     };
     const signatures = [byAlice, byBob].map((out) => ({ kid: out.signature.kid, sig: fromBase64url(out.signature.sig) }));
     expect(verifyApproverSetChange(current, { ...next, approverSetSignatures: signatures })).toHaveLength(2);
     expect(() => verifyApproverSetChange(current, { ...next, approverSetSignatures: signatures.slice(0, 1) })).toThrow();
+    // Another deployment sharing these approver keys does not take it.
+    expect(() => verifyApproverSetChange(current, { ...next, approverSetSignatures: signatures, trustDomain: 'prod.test' })).toThrow();
+    // Without a PKI bundle to read the trust domain from, it must be given.
+    await expect(h.run(argv('alice').slice(0, -2))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT', message: /--trust-domain/ });
     // Removing the quorum is said out loud; bad thresholds and tier orders are refused.
-    await h.run(['batch', 'sign-approvers', '--key', 'alice.pem', '--version', '5']);
+    await h.run(['batch', 'sign-approvers', '--key', 'alice.pem', '--version', '5', '--trust-domain', 'compute.test']);
     expect(h.err.join('\n')).toMatch(/REMOVAL of the quorum/);
-    await expect(h.run([...argv('alice').slice(0, -4), '--threshold', '4'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    await expect(h.run([...argv('alice').slice(0, -2), '--tiers', '100:2,5:1'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(h.run([...argv('alice'), '--threshold', '4'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(h.run([...argv('alice'), '--tiers', '100:2,5:1'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 });
 

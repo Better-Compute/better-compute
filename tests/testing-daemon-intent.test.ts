@@ -430,7 +430,7 @@ describe('FakeDaemon signed intent', () => {
           version: 2,
           commandSigningRoots: [authority.certificate],
           ...lifted,
-          approverSetSignatures: signers.map((i) => signApproverSet({ version: 2, set: lifted }, approvers[i]!.privateKey)),
+          approverSetSignatures: signers.map((i) => signApproverSet({ version: 2, set: lifted, trustDomain: 'compute.test' }, approvers[i]!.privateKey)),
         },
         joinKey,
       );

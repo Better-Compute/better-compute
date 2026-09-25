@@ -102,7 +102,7 @@ export function trustBundleDigest(bundle: JoinTrustBundle): Uint8Array {
 export function trustVersionSettler(
   database: SqlExecutor,
   bundle: JoinTrustBundle,
-  options: { log?: Logger } = {},
+  options: { log?: Logger; trustDomain?: string | undefined } = {},
 ): () => Promise<void> {
   const configured = bundle.version;
   const signatures = bundle.approverSetSignatures ?? [];
@@ -194,6 +194,7 @@ export function trustVersionSettler(
         ...set,
         version: outcome.version,
         approverSetSignatures: bundle.approverSetSignatures,
+        trustDomain: options.trustDomain,
       });
     } catch (error) {
       options.log?.warn(

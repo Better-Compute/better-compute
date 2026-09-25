@@ -433,8 +433,12 @@ const signingVectors: {
   {
     name: 'approver-set',
     purpose: 'approver-set',
-    parts: [be(8, 7n), digest(approverSetInput(approverSet))],
-    built: approverSetSigningInput({ version: 7n, setSha256: digest(approverSetInput(approverSet)) }),
+    parts: [be(8, 7n), digest(approverSetInput(approverSet)), utf8('compute.acme.test')],
+    built: approverSetSigningInput({
+      version: 7n,
+      setSha256: digest(approverSetInput(approverSet)),
+      trustDomain: 'compute.acme.test',
+    }),
   },
   {
     name: 'renew-pop',
@@ -534,7 +538,10 @@ function approverSetGolden() {
     approverSetInput: hex(input),
     setSha256: hex(digest(input)),
     version: '7',
-    signingInput: hex(signingInput('approver-set', [new Uint8Array(be(8, 7n)), digest(input)])),
+    trustDomain: 'compute.acme.test',
+    signingInput: hex(
+      signingInput('approver-set', [new Uint8Array(be(8, 7n)), digest(input), utf8('compute.acme.test')]),
+    ),
   };
 }
 const signingJson = () =>
@@ -635,7 +642,7 @@ describe('protocol golden vectors', () => {
     expect(readJson(`${goldenDir}approver-set.json`)).toEqual(golden);
     expect(hex(approverSetInput(approverSet))).toBe(golden.approverSetInput);
     expect(
-      hex(approverSetSigningInput({ version: 7n, setSha256: fromHex(golden.setSha256) })),
+      hex(approverSetSigningInput({ version: 7n, setSha256: fromHex(golden.setSha256), trustDomain: golden.trustDomain })),
     ).toBe(golden.signingInput);
     expect(batchNodeInput(filled(32, 1), filled(32, 2))[0]).toBe(1);
     expect(() => batchNodeInput(filled(31, 1), filled(32, 2))).toThrow(/32-byte/);

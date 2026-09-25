@@ -121,6 +121,7 @@ async function setSignaturesOf(
   env: NodeJS.ProcessEnv,
   cwd: string,
   approvers: NonNullable<Awaited<ReturnType<typeof approversOf>>> | undefined,
+  trustDomain: string | undefined,
 ) {
   const floor = env.BETTER_COMPUTE_TRUST_VERSION ? Number(env.BETTER_COMPUTE_TRUST_VERSION) : undefined;
   if (floor !== undefined && !(Number.isInteger(floor) && floor >= 1))
@@ -135,6 +136,7 @@ async function setSignaturesOf(
       const value = JSON.parse(await readFile(resolve(cwd, path), 'utf8')) as {
         version?: unknown;
         setSha256?: unknown;
+        trustDomain?: unknown;
         signature?: { kid?: unknown; sig?: unknown };
       };
       if (
@@ -144,6 +146,8 @@ async function setSignaturesOf(
         typeof value.signature.sig !== 'string'
       )
         throw new Error(`${path} is not the output of better-compute batch sign-approvers`);
+      if (value.trustDomain !== trustDomain)
+        throw new Error(`${path} signs for trust domain ${String(value.trustDomain)}, not this deployment's ${String(trustDomain)}`);
       return { path, version: value.version, setSha256: value.setSha256, kid: value.signature.kid, sig: value.signature.sig };
     }),
   );
@@ -237,7 +241,7 @@ export async function exampleOptions(
   if (!secret) throw new Error('Set BETTER_COMPUTE_SECRET (at least 32 characters)');
   const bundle = await bundleOf(env, cwd);
   const approvers = await approversOf(env, cwd);
-  const trust = await setSignaturesOf(env, cwd, approvers);
+  const trust = await setSignaturesOf(env, cwd, approvers, bundle?.trustDomain);
   if (approvers && !bundle?.commandSigning)
     throw new Error('BETTER_COMPUTE_APPROVER_KEYS needs a PKI bundle with a command-signing root (pki init)');
   const iam: IamPort = unconfiguredIam();

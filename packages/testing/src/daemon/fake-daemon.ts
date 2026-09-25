@@ -1089,7 +1089,13 @@ export class FakeDaemon {
                 unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
               }
             : undefined,
-          { ...approverSetOf(bundle), version: bundle.version, approverSetSignatures: bundle.approverSetSignatures },
+          {
+            ...approverSetOf(bundle),
+            version: bundle.version,
+            approverSetSignatures: bundle.approverSetSignatures,
+            // The deployment's own trust domain, as for batch approvals.
+            trustDomain: held?.trustDomain ?? this.options.intent.trustDomain,
+          },
         );
         this.intentRoots = [...bundle.commandSigningRoots];
         this.intentVersion = bundle.version;

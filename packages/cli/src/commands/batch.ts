@@ -3,6 +3,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import {
   approverKeyOf,
   approverSetDigest,
+  readPkiPins,
   base64url,
   batchScope,
   createApproverKey,
@@ -15,6 +16,7 @@ import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
 import type { ApiTransport } from '../transport.js';
 import { tenantFlag } from './capacity.js';
+import { defaultPkiPath, pkiFlag } from './pki.js';
 
 // The destructive-batch quorum from an approver's terminal (PLAN.md §13). An approver key is a P-256 key pair held
 // by one operator, off the control plane: its public half goes into the deployment's `pki.approvers.keys` (and so
@@ -498,7 +500,7 @@ export const batchCommands = [
     group: 'Quorum',
     summary: 'Sign a change of the approver set with a current approver key',
     description:
-      "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version. Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
+      "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version of the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
     output: 'json',
     flags: {
       key: { type: 'string', value: 'PATH', required: true, description: 'Your CURRENT approver private key (PEM)' },
@@ -511,12 +513,27 @@ export const batchCommands = [
       threshold: { type: 'integer', value: 'K', min: 0, description: 'Approvals a batch needs in the new set' },
       tiers: { type: 'string', value: 'SIZE:K,…', description: 'Per-size thresholds, ascending, e.g. 5:1,100:2' },
       unbatched: { type: 'integer', value: 'N', min: 0, default: 0, description: 'Unbatched destructive commands per hour' },
+      'trust-domain': {
+        type: 'string',
+        value: 'DOMAIN',
+        description: "The deployment's trust domain (default: the PKI bundle's)",
+      },
+      pki: pkiFlag,
     },
     examples: [
       'better-compute batch sign-approvers --key alice.pem --version 4 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2',
     ],
     async run({ flags, env, path, note }) {
       const { privateKey, kid } = await loadApproverKey(path(flags.key!), env);
+      // The signature is for one deployment: its trust domain from the flag, else the (public) PKI bundle's.
+      let trustDomain = flags['trust-domain'];
+      if (trustDomain === undefined) {
+        try {
+          trustDomain = readPkiPins(await readFile(path(flags.pki ?? defaultPkiPath), 'utf8')).trustDomain;
+        } catch {
+          throw usageError("Pass --trust-domain: the deployment's (no PKI bundle here to read it from)");
+        }
+      }
       const files = (flags.approvers ?? '')
         .split(',')
         .map((item) => item.trim())
@@ -566,9 +583,11 @@ export const batchCommands = [
           : `Signing, as ${kid}, the REMOVAL of the quorum: destructive batches will no longer need approvals.`,
       );
       if (!approverKeys.some((key) => key.kid === kid)) note(`Your own key ${kid} is not in the new set.`);
-      const signature = signApproverSet({ version: flags.version!, set }, privateKey);
+      note(`For trust bundle version ${flags.version} of ${trustDomain}.`);
+      const signature = signApproverSet({ version: flags.version!, set, trustDomain }, privateKey);
       return {
         version: flags.version,
+        trustDomain,
         setSha256: hexOf(approverSetDigest(set)),
         set: {
           approverKids: approverKeys.map((key) => key.kid),
