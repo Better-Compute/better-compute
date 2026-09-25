@@ -31,7 +31,12 @@ import type { ComputeModule, IamPort, SqlExecutor } from '@better-compute/core';
 import { eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { metal } from '@better-compute/metal';
-import { createMetrics, eventCounter, standardMetrics } from '@better-compute/observability';
+import {
+  createMetrics,
+  eventCounter,
+  placementObserver,
+  standardMetrics,
+} from '@better-compute/observability';
 import type { PkiBundle } from '@better-compute/pki';
 import { postgres, retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
@@ -140,11 +145,8 @@ export async function exampleOptions(
     modules: [...everyModule(secret, bundle, env, context.metal), ...(context.modules ?? [])],
     capacity: {
       ...(context.placer ? { placer: context.placer } : {}),
-      // §14 placements_total{outcome} and booking_conflicts_total, from every placement (never throws).
-      onPlacement: (placement) => {
-        standard.placements.inc({ outcome: placement.outcome });
-        if (placement.conflicts) standard.bookingConflicts.inc({}, placement.conflicts);
-      },
+      // §14 placements_total{outcome}, booking_conflicts_total and placement_seconds{placer}, from every placement.
+      onPlacement: placementObserver(standard, metrics),
     },
     ...(bundle
       ? {
