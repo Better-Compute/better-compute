@@ -57,19 +57,13 @@ func TestHelpAndUsage(t *testing.T) {
 	}
 }
 
-func TestUnimplementedModesExitTwo(t *testing.T) {
-	phases := map[string]string{
-		"sim": "v0.4",
+func TestSimNeedsNodesAndAConfiguration(t *testing.T) {
+	if code, _, stderr := runBCD("sim", "--nodes", "0"); code != exitUsage || !strings.Contains(stderr, "at least 1") {
+		t.Fatalf("bcd sim --nodes 0 = %d, %q", code, stderr)
 	}
-	for name, phase := range phases {
-		code, _, stderr := runBCD(name)
-		if code != exitUsage || !strings.Contains(stderr, "NOT_IMPLEMENTED: bcd "+name+" arrives in "+phase) {
-			t.Errorf("bcd %s = %d, %q; want exit 2 naming %s", name, code, stderr, phase)
-		}
-	}
-	// Flags still parse first.
-	if code, _, stderr := runBCD("sim", "--nodes", "3", "--seed", "9"); code != exitUsage || !strings.Contains(stderr, "v0.4") {
-		t.Fatalf("bcd sim --nodes 3 = %d, %q", code, stderr)
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	if code, _, stderr := runBCD("sim", "--nodes", "3", "--seed", "9", "--config", missing); code != exitFailure || !strings.Contains(stderr, "bcd sim:") {
+		t.Fatalf("bcd sim without a configuration = %d, %q", code, stderr)
 	}
 	if code, _, _ := runBCD("node", "--no-such-flag"); code != exitUsage {
 		t.Fatalf("bcd node --no-such-flag = %d, want 2", code)

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os/exec"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
@@ -24,6 +25,11 @@ func collectInventory() (*inventory.NodeInventory, error) {
 // newRuntimes: the host build's instance runtimes (libvirt-kvm, cloud-hypervisor) are not built in
 // yet, so a host build runs no instances.
 func newRuntimes(string, string) []runtime.Runtime { return nil }
+
+// newSimHost: simulated machines exist only in fakehw builds.
+func newSimHost(string, uint64, func()) (agent.Host, error) {
+	return nil, errors.New("bcd sim needs a fakehw build (go build -tags fakehw)")
+}
 
 // newHost is the machine bcd runs on; a reboot goes through systemd so units stop cleanly.
 func newHost(string) (agent.Host, error) {

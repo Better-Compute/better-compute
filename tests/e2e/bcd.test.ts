@@ -320,6 +320,56 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
     }
   }, 240_000);
 
+  it('runs many real daemons in one process (bcd sim)', async () => {
+    const simData = `/tmp/bcd-e2e-sim-${randomBytes(6).toString('hex')}`;
+    const simConfig = join(configDir, 'sim.toml');
+    writeFileSync(
+      simConfig,
+      readFileSync(config, 'utf8')
+        .replace(/^data_dir = .*$/m, `data_dir = "${simData}"`)
+        .replace(/^socket_path = .*$/m, `socket_path = "${simData}/bcd.sock"`),
+      { mode: 0o600 },
+    );
+    const simToken = (
+      await api.joinTokens.create(dev.root, {
+        tenantId: dev.rootTenantId,
+        poolId,
+        ttlSeconds: 3600,
+        maxUses: 5,
+        idempotencyKey: `bcd-e2e-sim-${Date.now()}`,
+      })
+    ).token;
+    const { cmd, args } = linux([toLinux(binary), 'sim', '--config', toLinux(simConfig), '--nodes', '5', '--seed', '100']);
+    const sim = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let log = '';
+    sim.stdout!.on('data', (chunk: Buffer) => (log += chunk.toString()));
+    sim.stderr!.on('data', (chunk: Buffer) => (log += chunk.toString()));
+    sim.stdin!.end(`${simToken}\n`);
+    try {
+      const ids = await until(
+        'five simulated nodes to join',
+        async () => {
+          const joined = [...log.matchAll(/simulated node joined.*?node=(node_\w+)/g)].map((m) => m[1]!);
+          return new Set(joined).size === 5 ? [...new Set(joined)] : undefined;
+        },
+        120_000,
+      ).catch((error) => {
+        throw new Error(`${error}\n--- bcd sim log ---\n${log.slice(-4000)}`);
+      });
+      await dev.waitFor(ids, { timeoutMs: 120_000 });
+      const { rows } = await dev.database.query<{ n: number }>(
+        `SELECT count(DISTINCT hardware_key)::int AS n FROM nodes WHERE id = ANY($1)`,
+        [ids],
+      );
+      expect(rows[0]!.n).toBe(5); // five distinct machines
+      expect(log).not.toContain(simToken);
+    } finally {
+      sh(`pkill -f '${toLinux(simConfig)}' ; true`);
+      sim.kill();
+      sh(`rm -rf '${simData}'`);
+    }
+  }, 240_000);
+
   it('reboots and reports SUCCEEDED{rebooted} from the next boot', async () => {
     const before = sh(`cat '${dataDir}/fakehw-boot-id'`);
     const reboot = await api.commands.run(dev.root, {

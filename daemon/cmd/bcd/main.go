@@ -2,8 +2,7 @@
 // datacenter (site), inside the PXE ramdisk (ramdisk) and on test hosts (sim), plus the local
 // commands join, status, doctor and version (PLAN.md §6).
 //
-// node, site, ramdisk, join, status, doctor and version work; sim parses its flags and then exits
-// 2 with the phase it arrives in. The release version is set at link time:
+// sim runs in fakehw builds only. The release version is set at link time:
 //
 //	go build -ldflags "-X main.version=0.1.0" ./cmd/bcd
 package main
@@ -58,7 +57,7 @@ func commands() []command {
 		{name: "node", summary: "run the node agent: session, journal, inventory, convergence, commands", flags: withConfig, run: runNode},
 		{name: "site", summary: "run the site agent: proxy DHCP, iPXE, image cache, BMC", flags: withConfig, run: runSite},
 		{name: "ramdisk", summary: "run inside the PXE ramdisk: inspect, diag, wipe, image stream, kexec", flags: ramdiskFlags, run: runRamdisk},
-		{name: "sim", summary: "run simulated daemons on fakehw against a gateway", flags: simFlags, run: notYet("v0.4")},
+		{name: "sim", summary: "run simulated daemons on fakehw against a gateway", flags: simFlags, run: runSim},
 		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN, stdin or --token-file", flags: joinFlags, run: runJoin},
 		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: runStatus},
 		{name: "doctor", summary: "check this host: configuration, NVML, hardware, KVM, IOMMU, gateway, identity", flags: withConfig, run: runDoctor},
@@ -82,7 +81,7 @@ func joinFlags(fs *flag.FlagSet) {
 func simFlags(fs *flag.FlagSet) {
 	fs.Int("nodes", 1, "number of simulated daemons")
 	fs.Uint64("seed", 1, "fakehw seed of the first daemon; daemon i uses seed+i")
-	fs.String("config", "", "configuration file with the gateway URL and pins")
+	fs.String("config", config.DefaultPath, "configuration file with the gateway URL and pins; the nodes live under its data_dir/sim")
 }
 
 func statusFlags(fs *flag.FlagSet) {
@@ -171,15 +170,6 @@ func isCommandName(s string) bool {
 	return true
 }
 
-// notYet is the run function of a command the skeleton does not implement: it mirrors
-// ComputeError('NOT_IMPLEMENTED', '<feature> arrives in <phase>') and exits 2.
-func notYet(phase string) func(*flag.FlagSet, io.Writer, io.Writer) int {
-	return func(fs *flag.FlagSet, _, stderr io.Writer) int {
-		fmt.Fprintf(stderr, "bcd: NOT_IMPLEMENTED: bcd %s arrives in %s (this build is the P0 skeleton)\n", fs.Name(), phase)
-		return exitUsage
-	}
-}
-
 func runVersion(_ *flag.FlagSet, stdout, _ io.Writer) int {
 	fmt.Fprintf(stdout, "bcd %s %s/%s %s%s\n", version, runtime.GOOS, runtime.GOARCH, runtime.Version(), buildTags())
 	return exitOK
@@ -264,9 +254,4 @@ func permissionWarning(file string) string {
 		return fmt.Sprintf("%s has mode %04o; the install script writes 0600", file, perm)
 	}
 	return ""
-}
-
-// errNotImplemented mirrors ComputeError('NOT_IMPLEMENTED', '<feature> arrives in <phase>').
-func errNotImplemented(feature, phase string) error {
-	return fmt.Errorf("NOT_IMPLEMENTED: %s arrives in %s", feature, phase)
 }

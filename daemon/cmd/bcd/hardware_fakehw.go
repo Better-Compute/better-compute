@@ -58,6 +58,33 @@ func newHost(dataDir string) (agent.Host, error) {
 	}, nil
 }
 
+// newSimHost is one machine of bcd sim: the fakehw machine of seed, its files under dataDir. A reboot
+// writes a new boot id and calls onReboot: the simulator restarts that machine's agent, not the
+// process.
+func newSimHost(dataDir string, seed uint64, onReboot func()) (agent.Host, error) {
+	bootFile := filepath.Join(dataDir, "fakehw-boot-id")
+	if _, err := os.Stat(bootFile); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(bootFile, []byte(newUUID()+"\n"), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return &agent.RealHost{
+		Collect:    func() (*inventory.NodeInventory, error) { return fakehw.Inventory(seed), nil },
+		Root:       filepath.Join(dataDir, "fakehw-root"),
+		BootIDFile: bootFile,
+		RebootFunc: func(string) error {
+			if err := os.WriteFile(bootFile, []byte(newUUID()+"\n"), 0o600); err != nil {
+				return err
+			}
+			onReboot()
+			return nil
+		},
+	}, nil
+}
+
 // newRuntimes is the fake instance runtime of a fakehw VPS host (FakeHypervisor's default id).
 func newRuntimes(dataDir, bootID string) []runtime.Runtime {
 	return []runtime.Runtime{&runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(dataDir, "fakehw-runtime.json"), BootID: bootID}}
