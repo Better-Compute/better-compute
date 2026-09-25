@@ -15,6 +15,7 @@ export * from './steps.js';
 export * from './http-proxy.js';
 export * from './results.js';
 export * from './attestation.js';
+export * from './tenant-root.js';
 export { applyProvisionVerb, readMetalNode, resolveDriverBindings, type MetalNodeRow } from './store.js';
 
 export type { PowerAction, PowerState, WipeMode } from '@better-compute/core';
