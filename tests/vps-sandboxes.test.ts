@@ -12,7 +12,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { useSimClock, setSimClock } from '@better-compute/postgres';
+import { postgres, useSimClock, setSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
   capacityMigrations,
@@ -735,6 +735,35 @@ describe('warm pools', () => {
     ]);
   });
 
+  it('are claimed only after an allow: a denied create leaves the pool untouched', async () => {
+    const template = await createTemplate({ warm: { min: 1 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const warmState = async () =>
+      (
+        await db.query<{ warm_template_id: string | null; desired_state: string; owner: string }>(
+          `SELECT warm_template_id, desired_state, owner_identity_id AS owner FROM instances`,
+        )
+      ).rows;
+    const before = await warmState();
+    await expect(
+      call(
+        'sandboxes',
+        'create',
+        { tenantId: 'acme', templateId: template.id, idempotencyKey: 'denied' },
+        bob,
+        true,
+      ),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(await warmState()).toEqual(before);
+    expect(before).toEqual([
+      { warm_template_id: template.id, desired_state: 'paused', owner: 'usr_alice' },
+    ]);
+    expect((await db.query(`SELECT 1 FROM sandboxes`)).rows).toEqual([]);
+    // The next allowed create takes it.
+    expect((await createSandbox(template.id, {}, bob)).warm).toBe(true);
+  });
+
   it('keep instances stopped on a runtime that cannot pause', async () => {
     const template = await createTemplate({ warm: { min: 1 } });
     const noPause = vps({
@@ -1062,6 +1091,54 @@ describe('exec trust', () => {
     expect(() => vps({ images, sandboxExec: { caPublicKey, account: 'Root!' } })).toThrow(
       /Unix account/,
     );
+  });
+});
+
+const postgresUrl = process.env.BETTER_COMPUTE_POSTGRES_URL;
+
+/** The same database with search_path pinned to `schema` (then public, where btree_gist lives). */
+function inSchema(connection: string, schema: string): string {
+  const parsed = new URL(connection);
+  parsed.searchParams.set('options', `-c search_path=${schema},public`);
+  return parsed.toString();
+}
+
+// PGlite has one connection, so claims there never overlap; on PostgreSQL they do, and FOR UPDATE
+// SKIP LOCKED must hand concurrent creates different warm instances without waiting on each other.
+describe.skipIf(!postgresUrl)('warm claims under real concurrency (PostgreSQL)', () => {
+  let admin: SqlExecutor;
+  let local: SqlExecutor;
+  let schema: string;
+  beforeAll(async () => {
+    local = db;
+    admin = postgres({ url: postgresUrl! });
+    await admin.query('CREATE EXTENSION IF NOT EXISTS btree_gist');
+    schema = `bc_sandboxes_${globalThis.crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    db = postgres({ url: inSchema(postgresUrl!, schema), max: 20 });
+    await db.migrate([...capacityMigrations, ...vpsMigrations]);
+  });
+  afterAll(async () => {
+    await db?.close();
+    db = local;
+    await admin?.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await admin?.close();
+  });
+
+  it('gives concurrent creates different warm instances, and the rest cold ones', async () => {
+    const template = await createTemplate({ warm: { min: 2 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const who = (index: number): Caller => ({ ...alice, identityId: `usr_${index}` });
+    const created = await Promise.all(
+      [0, 1, 2].map((index) =>
+        createSandbox(template.id, { idempotencyKey: `race-${index}` }, who(index)),
+      ),
+    );
+    const warm = created.filter((sandbox) => sandbox.warm);
+    expect(warm).toHaveLength(2);
+    expect(new Set(warm.map((sandbox) => sandbox.instanceId)).size).toBe(2);
+    expect(new Set(created.map((sandbox) => sandbox.instanceId)).size).toBe(3);
   });
 });
 
