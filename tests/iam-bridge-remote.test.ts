@@ -65,6 +65,8 @@ describe('remoteIam', () => {
       sessionId: expect.any(String),
       sessionKind: 'user',
       mfa: false,
+      // Over real HTTP too: from sts.getCallerIdentity's expiresAt.
+      sessionExpiresAt: expect.any(Number),
     });
     expect(
       await port.authenticate({ headers: { authorization: `Bearer ${alice.credential.token}` } }),

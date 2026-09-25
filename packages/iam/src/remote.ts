@@ -51,6 +51,8 @@ export interface RemoteIamClient {
       sessionId: string;
       sessionKind: string;
       mfa: boolean;
+      /** When the session expires (epoch ms). */
+      expiresAt?: number;
       agentId?: string;
       delegationId?: string;
     }>;
@@ -305,6 +307,10 @@ export function remoteIam(options: RemoteIamOptions): RemoteIam {
             | 'session-token'
             | 'delegated',
           mfa: identity.mfa === true,
+          // When the session ends: credentials compute issues for the caller never outlive it.
+          ...(typeof identity.expiresAt === 'number'
+            ? { sessionExpiresAt: identity.expiresAt }
+            : {}),
           ...(agentId === undefined ? {} : { agentId }),
           ...(identity.delegationId === undefined ? {} : { delegationId: identity.delegationId }),
         };

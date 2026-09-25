@@ -96,6 +96,45 @@ describe('authorizeSession (embedded)', () => {
   });
 });
 
+describe('Caller.sessionExpiresAt', () => {
+  it('is the session expiry, or sooner its idle deadline when the host gives the idle timeout', async () => {
+    const f = await iamFixture();
+    await f.member('bob');
+    const credential = await f.signIn('bob');
+    const plain = await embeddedIam(f.iam).authenticate(credential);
+    // The fixture's sessions last 7 days.
+    expect(plain.sessionExpiresAt).toBeGreaterThan(f.now() + 6 * 86_400_000);
+    expect(plain.sessionExpiresAt).toBeLessThanOrEqual(f.now() + 7 * 86_400_000);
+    const idle = await embeddedIam(f.iam, { sessionIdleTimeoutMs: 15 * 60_000 }).authenticate(
+      credential,
+    );
+    expect(idle.sessionExpiresAt).toBeGreaterThan(f.now());
+    expect(idle.sessionExpiresAt).toBeLessThanOrEqual(f.now() + 15 * 60_000);
+  });
+
+  it('comes from sts.getCallerIdentity in remote mode', async () => {
+    const client = {
+      sts: {
+        getCallerIdentity: async () => ({
+          identityId: 'idn_1',
+          identityKind: 'user',
+          tenantId: 'ten_1',
+          sessionId: 'ses_1',
+          sessionKind: 'user',
+          mfa: false,
+          expiresAt: 1_900_000_000_000,
+        }),
+      },
+    } as unknown as RemoteIamClient;
+    const port = remoteIam({
+      baseURL: 'https://iam.test',
+      client,
+      serviceToken: 't',
+      rootTenantId: 'r',
+    });
+    expect((await port.authenticate({ token: 'x' })).sessionExpiresAt).toBe(1_900_000_000_000);
+  });
+});
 describe('tunnelAuthorizer', () => {
   const claims = (
     f: IamFixture,

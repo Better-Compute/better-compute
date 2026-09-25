@@ -48,6 +48,9 @@ export interface EmbeddedIamHost {
       tenantId?: string;
       kind: string;
       mfa: boolean;
+      /** When the session expires, and when it was last used (for the idle timeout), epoch ms. */
+      expiresAt?: number;
+      lastSeenAt?: number;
       agentId?: string;
       delegationId?: string;
     };
@@ -139,6 +142,11 @@ export interface EmbeddedIamOptions {
    * Without it the port has no `authorizeSession`.
    */
   sessionReviewer?: Credential | (() => Credential | Promise<Credential>);
+  /**
+   * better-iam's `authentication.sessionIdleTimeoutMs`: with it, `Caller.sessionExpiresAt` is the earlier of the
+   * session's expiry and its idle deadline (`lastSeenAt` + this); without it, the expiry alone.
+   */
+  sessionIdleTimeoutMs?: number;
 }
 
 /** The embedded port, with its flag cache exposed for invalidation. */
@@ -199,7 +207,10 @@ function credentialInput(credential: Credential): CredentialInput {
 }
 
 /** Maps better-iam's authenticated principal to compute's `Caller`, failing closed on unknown kinds. */
-export function toCaller(principal: Awaited<ReturnType<EmbeddedIamHost['authenticate']>>): Caller {
+export function toCaller(
+  principal: Awaited<ReturnType<EmbeddedIamHost['authenticate']>>,
+  options: { idleTimeoutMs?: number } = {},
+): Caller {
   const { identity, session } = principal;
   if (!identityKinds.has(identity.kind) || !sessionKinds.has(session.kind))
     throw new ComputeError(
@@ -215,6 +226,14 @@ export function toCaller(principal: Awaited<ReturnType<EmbeddedIamHost['authenti
     sessionKind: session.kind as Caller['sessionKind'],
     mfa: session.mfa === true,
   };
+  // When the session ends: its absolute expiry, or sooner its idle deadline (the deployment's idle timeout).
+  const ends = [
+    session.expiresAt,
+    options.idleTimeoutMs !== undefined && session.lastSeenAt !== undefined
+      ? session.lastSeenAt + options.idleTimeoutMs
+      : undefined,
+  ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (ends.length) caller.sessionExpiresAt = Math.min(...ends);
   const agentId = session.agentId ?? (identity.kind === 'agent' ? identity.id : undefined);
   if (agentId !== undefined) caller.agentId = agentId;
   if (session.delegationId !== undefined) caller.delegationId = session.delegationId;
@@ -248,7 +267,13 @@ export function embeddedIam(iam: EmbeddedIamHost, options: EmbeddedIamOptions = 
     ...(options.rootTenantId === undefined ? {} : { rootTenantId: options.rootTenantId }),
     flags,
     authenticate: (credential) =>
-      mapped(async () => toCaller(await iam.authenticate(credentialInput(credential)))),
+      mapped(async () =>
+        toCaller(await iam.authenticate(credentialInput(credential)), {
+          ...(options.sessionIdleTimeoutMs === undefined
+            ? {}
+            : { idleTimeoutMs: options.sessionIdleTimeoutMs }),
+        }),
+      ),
     require: (credential, decision) => mapped(() => iam.require(request(credential, decision))),
     authorize: (credential, decision) =>
       mapped(async () => (await iam.authorize(request(credential, decision))).allowed),

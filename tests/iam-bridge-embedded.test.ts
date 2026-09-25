@@ -80,6 +80,7 @@ describe('embeddedIam: identity and decisions', () => {
       sessionId: expect.any(String),
       sessionKind: 'user',
       mfa: false,
+      sessionExpiresAt: expect.any(Number),
     });
     expect(
       await port.authenticate({ headers: { authorization: `Bearer ${aliceSession.token}` } }),
