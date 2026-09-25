@@ -9,6 +9,7 @@ import {
   CommandBodySchema,
   CommandRejectReason,
   CommandState,
+  DriverManifestSchema,
   encodeMessage,
   GpusSectionSchema,
   Lane,
@@ -140,6 +141,52 @@ describe('Hello', () => {
     expect(await f.gateway.jobs.dispatch.tick()).toBe(1);
     expect(stream.commandIds()).toEqual([upgrade]);
     expect((await f.command(diag)).state).toBe('pending');
+  });
+
+  it("labels the node with the drivers its Hello advertises, replacing them on every Hello (§5.6)", async () => {
+    const node = await f.addNode();
+    await f.db.query(
+      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, 'team', 'ml', 'operator'),
+         ($1, 'bc.dev/gpu.count', '8', 'inventory')`,
+      [node],
+    );
+    const helloWith = (bootId: string, drivers: { id: string; version: string }[]) => {
+      const frame = helloFrame(node, { bootId });
+      if (frame.msg.case === 'hello')
+        frame.msg.value.drivers = drivers.map((driver) => create(DriverManifestSchema, driver));
+      return frame;
+    };
+    const labels = async () =>
+      (
+        await f.db.query<{ key: string; value: string; source: string }>(
+          'SELECT key, value, source FROM node_labels WHERE node_id = $1 ORDER BY key',
+          [node],
+        )
+      ).rows;
+
+    const first = new FakeStream();
+    await f.gateway.open({ nodeId: node }, first).receive(
+      helloWith('boot-1', [
+        { id: 'nvidia', version: '570.86' },
+        { id: 'redfish', version: '1.2.0' },
+        { id: 'Bad Id!', version: '9' },
+      ]),
+    );
+    expect(await labels()).toEqual([
+      { key: 'bc.dev/driver.nvidia', value: '570.86', source: 'system' },
+      { key: 'bc.dev/driver.redfish', value: '1.2.0', source: 'system' },
+      { key: 'bc.dev/gpu.count', value: '8', source: 'inventory' },
+      { key: 'team', value: 'ml', source: 'operator' },
+    ]);
+
+    // The next Hello no longer advertises redfish, and nvidia moved on.
+    const second = new FakeStream();
+    await f.gateway.open({ nodeId: node }, second).receive(helloWith('boot-2', [{ id: 'nvidia', version: '575.10' }]));
+    expect(await labels()).toEqual([
+      { key: 'bc.dev/driver.nvidia', value: '575.10', source: 'system' },
+      { key: 'bc.dev/gpu.count', value: '8', source: 'inventory' },
+      { key: 'team', value: 'ml', source: 'operator' },
+    ]);
   });
 
   it('supersedes an older session of the same node on this gateway', async () => {

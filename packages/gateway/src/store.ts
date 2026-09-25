@@ -81,6 +81,23 @@ export interface HelloInput {
   /** `Hello.daemon_version` / `proto_max`, stored on the session row for Rollout (v0.4). */
   daemonVersion?: string;
   protoMax?: number;
+  /** `Hello.drivers`: each becomes the node label `bc.dev/driver.<id>=<version>`. */
+  drivers?: readonly { id: string; version: string }[];
+}
+
+/** The prefix of the node labels Hello writes for advertised drivers (source `system`). */
+export const driverLabelPrefix = 'bc.dev/driver.';
+
+/**
+ * Hello's drivers as node labels. Ids outside `[a-z0-9._-]` (1-63) are skipped rather than trusted
+ * into a label key; a missing version is recorded as `unknown`; the last entry for an id wins.
+ */
+export function driverLabels(drivers: readonly { id: string; version: string }[]): { key: string; value: string }[] {
+  const labels = new Map<string, string>();
+  for (const driver of drivers.slice(0, 64))
+    if (/^[a-z0-9][a-z0-9._-]{0,62}$/.test(driver.id))
+      labels.set(`${driverLabelPrefix}${driver.id}`, (driver.version || 'unknown').slice(0, 63));
+  return [...labels].map(([key, value]) => ({ key, value }));
 }
 
 export interface HelloOptions {
@@ -906,6 +923,22 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           `UPDATE nodes SET connectivity = 'connected' WHERE id = $1 AND connectivity <> 'connected'
            RETURNING id`,
           [input.nodeId],
+        );
+        // The drivers the daemon advertises (§5.6 walkthrough 4: placement filters on them) as
+        // system labels `bc.dev/driver.<id>=<version>`, replaced on every Hello, in one statement
+        // that writes nothing when they did not change.
+        const drivers = driverLabels(input.drivers ?? []);
+        await tx.query(
+          `WITH wanted AS (SELECT * FROM unnest($2::text[], $3::text[]) AS w(key, value)),
+           gone AS (
+             DELETE FROM node_labels l WHERE l.node_id = $1 AND l.source = 'system'
+               AND starts_with(l.key, '${driverLabelPrefix}')
+               AND NOT EXISTS (SELECT 1 FROM wanted w WHERE w.key = l.key))
+           INSERT INTO node_labels (node_id, key, value, source)
+           SELECT $1, w.key, w.value, 'system' FROM wanted w
+           ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value
+             WHERE node_labels.source = 'system' AND node_labels.value <> EXCLUDED.value`,
+          [input.nodeId, drivers.map((label) => label.key), drivers.map((label) => label.value)],
         );
         await events.publish(tx, {
           type: 'node.connected',
