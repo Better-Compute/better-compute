@@ -199,6 +199,41 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
           fix: 'Run a worker with the iam.inbox reconciler',
           count: backlog,
         });
+      // §14 usage: dead letters, and unrecorded windows against IAM's period close.
+      const { rows: usage } = await sql.query<{ dead: string; stale: string; closing: string }>(
+        `SELECT (SELECT count(*) FROM usage_dead_letters WHERE resolved_at IS NULL)::text AS dead,
+                (SELECT count(*) FROM usage_windows WHERE recorded_at IS NULL
+                   AND window_end < compute_now() - interval '2 hours')::text AS stale,
+                (SELECT count(*) FROM usage_windows WHERE recorded_at IS NULL
+                   AND window_end <= date_trunc('month', compute_now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::text AS closing`,
+      );
+      const dead = Number(usage[0]?.dead ?? 0);
+      const stale = Number(usage[0]?.stale ?? 0);
+      const closing = Number(usage[0]?.closing ?? 0);
+      if (dead > 0)
+        findings.push({
+          check: 'iam.usage-dead-letters',
+          severity: 'warning',
+          message: `${dead} usage events could not be recorded in IAM billing`,
+          fix: 'Inspect usage_dead_letters; a closed period needs a root billing.createInvoiceItem (§12.7)',
+          count: dead,
+        });
+      if (closing > 0)
+        findings.push({
+          check: 'iam.usage-backlog',
+          severity: 'error',
+          message: `${closing} usage windows of a past month are not recorded; IAM's closePeriod will refuse them`,
+          fix: 'Run a worker with the iam.usage reconciler before the period closes',
+          count: closing,
+        });
+      else if (stale > 0)
+        findings.push({
+          check: 'iam.usage-backlog',
+          severity: 'warning',
+          message: `${stale} usage windows ended over 2 hours ago and are not recorded in IAM billing`,
+          fix: 'Run a worker with the iam.usage reconciler (hourly)',
+          count: stale,
+        });
     }
     return findings;
   };

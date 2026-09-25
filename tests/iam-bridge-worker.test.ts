@@ -325,6 +325,45 @@ describe('flushUsageWindows', () => {
     expect(await flushUsageWindows(db, iam)).toEqual({ sent: 0, deadLettered: 0, more: false });
   });
 
+  it('the doctor reports dead letters and unrecorded usage, stale or past the period close', async () => {
+    const bridge = createComputeIamBridge();
+    await bridge.bind({ sql: db });
+    try {
+      const [module] = bridge.modules;
+      const checks = async () =>
+        (await module.selfCheck!({} as never)).map((finding) => [
+          finding.check,
+          finding.severity,
+          finding.count,
+        ]);
+      expect(await checks()).toEqual([]);
+      // A window that ended 2 h ago, still in this month (skipped in a month's first hours, when it is not).
+      const now = new Date();
+      const intoMonthHours =
+        (now.getTime() - Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)) / 3_600_000;
+      if (intoMonthHours > 4) {
+        await window(3, 'idn_alice');
+        expect(await checks()).toEqual([['iam.usage-backlog', 'warning', 1]]);
+      }
+      // A window of last month: IAM's closePeriod will refuse it.
+      await window(24 * 40, 'idn_alice');
+      expect(await checks()).toEqual([['iam.usage-backlog', 'error', 1]]);
+      await db.query(
+        `INSERT INTO usage_dead_letters (idempotency_key, tenant_id, event, error_code, error_message)
+         VALUES ('cmp:x', 'ten_a', '{}', 'CONFLICT', 'key reused'), ('cmp:y', 'ten_a', '{}', 'CONFLICT', 'fixed')`,
+      );
+      await db.query(
+        `UPDATE usage_dead_letters SET resolved_at = compute_now() WHERE idempotency_key = 'cmp:y'`,
+      );
+      expect(await checks()).toEqual([
+        ['iam.usage-dead-letters', 'warning', 1],
+        ['iam.usage-backlog', 'error', 1],
+      ]);
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   it('leaves windows unrecorded when IAM fails, for the next pass', async () => {
     await window(3, 'idn_alice');
     await expect(
