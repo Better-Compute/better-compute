@@ -89,7 +89,9 @@ COMMIT WITH `node scripts/private-commit.mjs -F <msgfile> -- <paths>` (fe7f27e).
 (read-tree HEAD; add; commit) silently REVERTS a commit that lands between its read-tree and its commit (f069c84
 reverted core/0019-0021; fixed in 96b8812). The script builds the tree from HEAD + your paths in a throwaway index,
 commits with HEAD as parent and moves the branch by compare-and-swap (retrying on a moved HEAD), then resets the
-shared index for your paths. If you must commit by hand: record HEAD first and verify `git rev-parse HEAD~1` equals
+shared index for your paths. It commits WHOLE files: before committing a file others also edit (server index/
+options, core, coordination.md), run `git diff -- <file>` and make sure every hunk is yours (f5e1886 carried
+[402c97]'s uncommitted signer line). If you must commit by hand: record HEAD first and verify `git rev-parse HEAD~1` equals
 it afterwards; if not, `git diff --stat HEAD~1 HEAD` and restore every foreign path at once.
 
 All earlier rules apply: private-index commits (the pre-commit hook enforces it), orchestrator-only installs/lockfile/
