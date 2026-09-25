@@ -3021,8 +3021,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists the break-glass SSH certificates the tenant issued for one node, newest first, with each one's principal, issuer, lifetime and state; never the certificate itself.",
+        "description": "Lists the break-glass SSH certificates the tenant issued for one node, newest first, with each one's principal, issuer, lifetime and state; never the certificate itself.\n\nDecided as `compute:nodes:read` on `compute-node/{nodeId}` and hosted by the tunnels module. `state` is `active`, `expired` or `revoked`; a revoked certificate also carries `revokedAt`, `revokedBy` (an identity, or `iam` when re-authorization revoked it) and `revokeReason` when one was given.\n\nOnly unexpired certificates are listed unless `includeExpired` is true; expired certificates are kept for one day, then removed by an hourly clean-up. Pages hold 1 to 500 certificates (100 by default), and `nextCursor` is set while more remain. A node the tenant cannot see is `NOT_FOUND`, and a malformed `cursor` is `INVALID_INPUT`."
       }
     ]
   },
@@ -4951,7 +4951,7 @@
     "group": "sandboxTemplates",
     "slug": "sandbox-templates",
     "module": "vps",
-    "overview": "",
+    "overview": "A sandbox template belongs to one tenant and fixes what its sandboxes run: a hosted pool, a flavor, an image, the pool's runtime, optional user data, TTL bounds and a warm pool. For each live template the `vps.sandboxes` reconciler keeps `warm.min` instances with `desiredState` `paused`, or `stopped` when the runtime cannot pause, creating at most 4 per template in one pass and deleting those beyond `warm.max`, newest first. Warm instances are owned by the template's author, placed and charged to quota when they are created, and a refill that fails is logged and tried again on a later pass. See [Sandboxes](/docs/guides/vps/sandboxes).",
     "methods": [
       {
         "method": "create",
@@ -5045,8 +5045,8 @@
           "required": ["tenantId", "name", "poolId", "flavor", "imageId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Checks the pool, flavor, image and runtime once and stores a template under a name unique in the tenant; returns the template.",
+        "description": "Checks the pool, flavor, image and runtime once and stores a template under a name unique in the tenant; returns the template.\n\n- **Checks.** The pool must be owned by or offered to the tenant and not archived (`NOT_FOUND`), and be a hosted `vps-host` pool: a provider pool is `INVALID_INPUT`. A missing or archived flavor and an image that does not resolve are `NOT_FOUND`; `INVALID_CONFIG` when `vps()` has no `images`. The pool's runtime must boot the image's format and pass through the flavor's GPUs (`INVALID_INPUT`), and `runtime`, when given, must equal the pool's runtime (`INVALID_INPUT`). The template stores the pool's runtime.\n- **Lifetime.** `defaultTtlSeconds` defaults to 3,600 and `maxTtlSeconds` to 86,400 or the default TTL, whichever is larger; both lie between 60 seconds and 30 days, and a default above the maximum is `INVALID_INPUT`.\n- **Warm pool.** `warm.min` and `warm.max` are 0 to 64; `max` defaults to `min`, and a `max` below `min` is `INVALID_INPUT`.\n- **User data.** At most 32 KiB. A URI must be a `secret://` reference to a secret of the same tenant, otherwise `INVALID_INPUT`.\n\nA live template with the same name is `CONFLICT`. The caller becomes the template's owner in the authorization projection. Publishes no event."
       },
       {
         "method": "list",
@@ -5072,8 +5072,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns every live template of the tenant, ordered by name, in one answer.",
+        "description": "Returns every live template of the tenant, ordered by name, in one answer.\n\nEach template is checked for `compute:sandboxes:read` on `compute-sandbox-template`; those the caller may not read are left out. Deleted templates are never listed."
       },
       {
         "method": "get",
@@ -5105,8 +5105,8 @@
           "required": ["tenantId", "templateId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one live template of the tenant.",
+        "description": "Returns one live template of the tenant.\n\nA deleted template, or one of another tenant, is `NOT_FOUND`."
       },
       {
         "method": "update",
@@ -5186,8 +5186,8 @@
           "required": ["tenantId", "templateId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Changes a template's flavor, image, user data, TTL bounds or warm pool; returns the template with its version raised.",
+        "description": "Changes a template's flavor, image, user data, TTL bounds or warm pool; returns the template with its version raised.\n\nThe pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`.\n\nSandboxes that exist keep their instances, and warm instances already created stay claimable with the shape they were created with; new sandboxes and warm refills use the new values. A lower `warm.max` makes the reconciler delete the excess. Publishes no event."
       },
       {
         "method": "delete",
@@ -5219,8 +5219,8 @@
           "required": ["tenantId", "templateId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Deletes a template so that `get`, `list`, `update` and `sandboxes.create` no longer find it; returns `deleted: true`.",
+        "description": "Deletes a template so that `get`, `list`, `update` and `sandboxes.create` no longer find it; returns `deleted: true`.\n\nThe template leaves the authorization projection and its name is free for a new template. Its sandboxes live on until they are deleted or expire, and the `vps.sandboxes` reconciler deletes all of its warm instances. A template already deleted is `NOT_FOUND`. Publishes no event."
       }
     ]
   },
@@ -5228,7 +5228,7 @@
     "group": "sandboxes",
     "slug": "sandboxes",
     "module": "vps",
-    "overview": "",
+    "overview": "A sandbox is a hosted VPS instance with a template and a lifetime: `create` admits it after one IAM decision, then claims a warm instance of its template or creates one through the instance lifecycle, and the `vps.sandboxes` reconciler, which runs every 15 seconds, deletes it once `expiresAt` passes. A sandbox's `state` follows its instance: `starting`, `ready` while the instance runs, `failed` when it is in `error` or `lost`, `deleting` once deletion was asked, and `deleted` when the instance is gone. The instance belongs to the sandbox: `instances.start`, `stop`, `resize` and `delete` refuse it with `INVALID_STATE`, and `instances.get` still returns it. See [Sandboxes](/docs/guides/vps/sandboxes).",
     "methods": [
       {
         "method": "create",
@@ -5285,8 +5285,8 @@
           "required": ["tenantId", "templateId", "idempotencyKey"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.",
+        "description": "Starts a sandbox from a template after one IAM decision on the draft, claiming a warm instance when the template holds one and creating a new instance otherwise; the lifetime starts at once.\n\n- **Idempotency.** `idempotencyKey` is required. The sandbox id derives from the tenant, the caller's identity and the key: a retry of an admitted request returns the stored sandbox without a second decision, and a different request under the same key is `CONFLICT` with `details.sandboxId`. `wait` is not part of the compared request.\n- **IAM.** `compute:sandboxes:create` is decided on `compute-sandbox/` plus the draft id, whose parent is the template's pool. Policies can test `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds` and `warm` (true when the template keeps a warm pool). A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`. After an allow, the pool's budget check can answer `SPEND_LIMIT_REACHED` and keep the draft for a retry with the same key.\n- **Start.** The oldest stopped or paused warm instance of the template is claimed: it changes owner to the caller, is set to run, and publishes `instance.starting`; the claim places nothing new. Without one, a new instance is created and placed as `instances.create` would, publishing `instance.created` and, once placed, `instance.scheduled`; when no host fits it waits in scheduling and the sandbox stays `starting`. `warm` in the answer tells which path was taken.\n- **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.\n- **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.\n- **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.\n\nPublishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows from the reconciler once the instance first runs."
       },
       {
         "method": "list",
@@ -5338,8 +5338,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.",
+        "description": "Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own sandboxes; `all` lists every sandbox of the tenant. In both scopes each sandbox is then checked for `compute:sandboxes:read`, and those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed."
       },
       {
         "method": "get",
@@ -5371,8 +5371,8 @@
           "required": ["tenantId", "sandboxId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one sandbox of the tenant with its state, its instance's state, addresses and node, and its `expiresAt`.",
+        "description": "Returns one sandbox of the tenant with its state, its instance's state, addresses and node, and its `expiresAt`.\n\n`readyAt` is set once the reconciler saw the instance run, and `expiredAt` when the sandbox ended by reaching `expiresAt`. Drafts and sandboxes of other tenants are `NOT_FOUND`."
       },
       {
         "method": "extend",
@@ -5414,8 +5414,8 @@
           "required": ["tenantId", "sandboxId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Moves a sandbox's `expiresAt` later after one IAM decision, within its template's `maxTtlSeconds` counted from creation; returns the sandbox.",
+        "description": "Moves a sandbox's `expiresAt` later after one IAM decision, within its template's `maxTtlSeconds` counted from creation; returns the sandbox.\n\n- Give exactly one of `until` (the new expiry, epoch milliseconds) or `by` (added to the current expiry: `30m`, `8h`, `7d`, or milliseconds, at most 30 days); both or neither is `INVALID_INPUT`. A lifetime past the template's `maxTtlSeconds` is `INVALID_INPUT`, and a sandbox whose deletion has started, by `delete` or by expiry, is `INVALID_STATE`.\n- **IAM.** `compute:sandboxes:update` is decided on the sandbox with a pending `ttlSeconds` equal to the whole lifetime after the change, so a policy that caps `ttlSeconds` on `create` also caps extensions. A refusal is `ACCESS_DENIED` and clears the pending change.\n- **Idempotency.** An `until` that is not later than the current expiry returns the sandbox unchanged without a decision, so a retried `until` is safe. There is no `idempotencyKey`: a repeated `by` extends again.\n\nThe stored `ttlSeconds` becomes the new whole lifetime. Publishes `sandbox.extended` with the new `expiresAt`."
       },
       {
         "method": "snapshot",
@@ -5429,8 +5429,8 @@
         "module": "vps",
         "status": "planned",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Planned for v0.5 and not served by this release.",
+        "description": "Planned for v0.5 and not served by this release.\n\nThe catalog reserves it, decided as `compute:sandboxes:update` on `compute-sandbox`, but no handler is registered. PLAN.md §3.7 plans it to save a sandbox's disk and memory state as a private image through the host's runtime, and a runtime without snapshot support to answer `UNSUPPORTED`."
       },
       {
         "method": "exec",
@@ -5444,8 +5444,8 @@
         "module": "vps",
         "status": "planned",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Planned for v0.5 and not served by this release.",
+        "description": "Planned for v0.5 and not served by this release.\n\nThe catalog reserves it, decided as `compute:sandboxes:exec` on `compute-sandbox`, but no handler is registered. PLAN.md §3.7 plans it to return a tunnel ticket and a short-lived SSH certificate signed by the tenant's sandbox CA."
       },
       {
         "method": "delete",
@@ -5477,8 +5477,8 @@
           "required": ["tenantId", "sandboxId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Asks for the sandbox's instance to be deleted and marks the sandbox `deleting`; returns the sandbox at once.",
+        "description": "Asks for the sandbox's instance to be deleted and marks the sandbox `deleting`; returns the sandbox at once.\n\nThe instance's `desiredState` becomes `deleted` and the `vps.instances` reconciler releases its allocation, IP lease and quota as for any instance, publishing `instance.deleting` with the `sandboxId`. The call is idempotent: a sandbox already deleting is returned in its current state. Drafts and missing sandboxes are `NOT_FOUND`.\n\nWhen the instance is gone, the `vps.sandboxes` reconciler marks the sandbox deleted, removes it from the authorization projection and publishes `sandbox.deleted` with `expired: false`. Expiry takes the same path after publishing `sandbox.expired`, and its `sandbox.deleted` carries `expired: true`."
       }
     ]
   },
