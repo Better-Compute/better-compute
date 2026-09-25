@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { manualClock, type SqlExecutor } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
+  approverSetOf,
   createApproverKey,
   createCommandSigningAuthority,
   createNodeCa,
   createSigningKey,
   generateP256KeyPair,
+  signApproverSet,
+  verifyApproverSetChange,
   verifyTrustBundle,
 } from '@better-compute/pki';
 import { betterCompute, pkiJoinCrypto } from '@better-compute/server';
@@ -65,5 +68,80 @@ describe('trust bundle version (review #6 M5)', () => {
     expect(await published({ approvers: { keys, threshold: 1 }, trustVersion: 2 })).toBe(10n);
     // Removing the approvers is a change too.
     expect(await published({})).toBe(11n);
+  });
+
+  it('publishes approver-set signatures only for their version, and refuses a mismatched signed change', async () => {
+    db = pglite();
+    const authority = createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) });
+    const signingKey = createSigningKey({ clock: manualClock(T0 - 60_000) });
+    const join = pkiJoinCrypto({
+      trustDomain: 'compute.test',
+      nodeCa: createNodeCa({ clock: manualClock(T0 - 60_000) }),
+      signingKey,
+      encryptionKey: generateP256KeyPair().privateKey,
+    });
+    const approvers = [createApproverKey(), createApproverKey(), createApproverKey()];
+    const warnings: string[] = [];
+    const log = { debug() {}, info() {}, warn: (message: string) => warnings.push(message), error() {} };
+    const boot = async (pki: Record<string, unknown>) => {
+      const compute = betterCompute({
+        ...options(db!, fakeIam()),
+        clock: manualClock(T0),
+        log,
+        pki: { join, commandSigning: authority, ...pki },
+      } as never) as any;
+      await compute.initialize();
+      return verifyTrustBundle(await compute.gatewayServices.trustBundle(), {
+        publicKey: signingKey.publicKey,
+      });
+    };
+    const two = approvers.slice(0, 2).map((approver) => approver.key);
+    const first = { keys: two.map((key) => key.spkiDer), threshold: 2 };
+    const firstSet = { approverKeys: two, approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    expect((await boot({ approvers: first })).version).toBe(1n);
+
+    // Adding a third approver, signed by both current ones for version 2.
+    const all = approvers.map((approver) => approver.key);
+    const nextSet = { approverKeys: all, approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    const setSignatures = approvers.slice(0, 2).map((approver) => {
+      const signature = signApproverSet({ version: 2n, set: nextSet }, approver.privateKey);
+      return { kid: signature.kid, sig: Buffer.from(signature.sig).toString('base64url') };
+    });
+    const next = { keys: all.map((key) => key.spkiDer), threshold: 2, setSignatures };
+    const bundle = await boot({ approvers: next, trustVersion: 2 });
+    expect(bundle.version).toBe(2n);
+    expect(bundle.approverSetSignatures).toHaveLength(2);
+    // What a daemon holding the first set checks.
+    expect(
+      verifyApproverSetChange(firstSet, { ...approverSetOf(bundle), version: bundle.version, approverSetSignatures: bundle.approverSetSignatures }),
+    ).toHaveLength(2);
+    expect(warnings).toEqual([]);
+
+    // The same signatures for another quorum change under version 2 (already published): refused, and
+    // nothing is recorded.
+    await expect(
+      boot({ approvers: { ...next, threshold: 3 }, trustVersion: 2 }),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    // A root rotation with the quorum unchanged: the next version, without the stale signatures.
+    const rotated = await boot({
+      approvers: next,
+      trustVersion: 2,
+      commandSigningRoots: [createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) }).certificate],
+    });
+    expect(rotated.version).toBe(3n);
+    expect(rotated.approverSetSignatures).toEqual([]);
+    expect(warnings).toEqual([]);
+
+    // An unsigned quorum change is published, with a warning that key-holding daemons refuse it.
+    expect((await boot({ approvers: first })).version).toBe(4n);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/sign-approvers --version 4/);
+    // setSignatures without the version they were signed for: refused at configuration.
+    expect(() =>
+      betterCompute({
+        ...options(db!, fakeIam()),
+        pki: { join, commandSigning: authority, approvers: next },
+      } as never),
+    ).toThrow(/trustVersion/);
   });
 });

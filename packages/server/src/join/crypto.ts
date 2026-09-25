@@ -41,6 +41,12 @@ export interface JoinTrustBundle {
   approverThreshold?: number;
   quorumTiers?: readonly { maxScopeSize: number; threshold: number }[];
   unbatchedDestructivePerHour?: number;
+  /**
+   * (v1.0, review #6 H1) The current approvers' "approver-set" signatures over this bundle's quorum
+   * fields at `version` (`better-compute batch sign-approvers`): daemons that hold approver keys take a
+   * quorum change only with them. Published only when the settled version is the signed one.
+   */
+  approverSetSignatures?: readonly { kid: string; sig: Uint8Array }[];
 }
 
 /**

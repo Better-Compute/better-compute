@@ -143,6 +143,7 @@ export {
   type QuorumConfig,
 } from './quorum/quorum.js';
 export {
+  trustBundleApproverSetMigration,
   trustBundleDigest,
   trustBundleStateMigration,
   trustVersionSettler,
@@ -379,7 +380,7 @@ export function betterCompute<
   // The trust bundle's version follows its content (review #6 M5): settled at initialize, or before a
   // gateway-only process first serves it.
   const trustBundleReady = resolved.trustBundle
-    ? trustVersionSettler(resolved.database, resolved.trustBundle)
+    ? trustVersionSettler(resolved.database, resolved.trustBundle, { log: resolved.log })
     : undefined;
   const initialize = (): Promise<void> =>
     (initializing ??= (async () => {

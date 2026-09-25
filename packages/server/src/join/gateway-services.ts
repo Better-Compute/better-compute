@@ -130,6 +130,10 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
         approverThreshold: bundle.approverThreshold ?? 0,
         quorumTiers: (bundle.quorumTiers ?? []).map((tier) => ({ ...tier })),
         unbatchedDestructivePerHour: bundle.unbatchedDestructivePerHour ?? 0,
+        approverSetSignatures: (bundle.approverSetSignatures ?? []).map((signature) => ({
+          kid: signature.kid,
+          sig: signature.sig,
+        })),
       }),
     );
     const signature = await crypto.sign('trust-bundle', [body]);

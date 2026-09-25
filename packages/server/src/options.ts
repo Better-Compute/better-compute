@@ -162,13 +162,15 @@ export interface ComputeOptions<
     commandSigning?: Pick<CommandSigningAuthority, 'certificate' | 'issueWorkerKey'>;
     /**
      * Roots still trusted during a rotation (the old root while daemons move to the new one), and
-     * the trust bundle's version (default 1): bump it whenever the roots change.
+     * the trust bundle's lowest version (default 1). The published version follows the content
+     * on its own: a changed bundle takes the next one. Set it explicitly to the version
+     * `approvers.setSignatures` were signed for.
      */
     commandSigningRoots?: readonly Uint8Array[];
     trustVersion?: number | bigint;
     /**
-     * (v1.0, §13) The destructive-batch quorum, published in the trust bundle (bump
-     * `trustVersion` when it changes; needs `commandSigning`). `keys` are the operators' P-256
+     * (v1.0, §13) The destructive-batch quorum, published in the trust bundle (needs
+     * `commandSigning`; a change needs `setSignatures` for daemons that already hold keys). `keys` are the operators' P-256
      * approver public keys (SPKI DER), held off the control plane. A batch needs `threshold`
      * distinct approvals, or the first `tiers` entry whose `maxScopeSize` covers it. Tiers are
      * ascending by `maxScopeSize` with non-decreasing thresholds, none above `threshold`.
@@ -179,6 +181,13 @@ export interface ComputeOptions<
       threshold: number;
       tiers?: readonly { maxScopeSize: number; threshold: number }[];
       unbatchedDestructivePerHour?: number;
+      /**
+       * (review #6 H1) The CURRENT approvers' signatures over this quorum for bundle version
+       * `trustVersion` (`better-compute batch sign-approvers --version N`, `sig` as base64url or bytes).
+       * A daemon holding approver keys takes a quorum change only with k of them. Needs an explicit
+       * `pki.trustVersion`: the version they were signed for.
+       */
+      setSignatures?: readonly { kid: string; sig: string | Uint8Array }[];
     };
   };
   secrets?: SecretStore[];
@@ -525,7 +534,7 @@ function resolveCommandSigning(
     trustBundle: {
       version: BigInt(version),
       commandSigningRoots: [...commandSigner.roots],
-      ...resolveApprovers(pki?.approvers),
+      ...resolveApprovers(pki?.approvers, pki?.trustVersion !== undefined),
     },
   };
 }
@@ -533,10 +542,17 @@ function resolveCommandSigning(
 /** `pki.approvers` → the trust bundle's quorum fields (kid = base64url SHA-256 of the SPKI). */
 function resolveApprovers(
   approvers: NonNullable<ComputeOptions['pki']>['approvers'],
+  versionGiven: boolean,
 ): Partial<JoinTrustBundle> {
   if (approvers === undefined) return {};
   if (!isRecord(approvers)) throw invalid('pki.approvers must be an object');
-  const { keys, threshold, tiers = [], unbatchedDestructivePerHour = 0 } = approvers;
+  const {
+    keys,
+    threshold,
+    tiers = [],
+    unbatchedDestructivePerHour = 0,
+    setSignatures = [],
+  } = approvers;
   if (!Array.isArray(keys) || keys.length === 0 || !keys.every((key) => key instanceof Uint8Array))
     throw invalid('pki.approvers.keys must be approver public keys (SPKI DER)');
   const approverKeys = keys.map((spkiDer) => {
@@ -587,11 +603,29 @@ function resolveApprovers(
   });
   if (!Number.isInteger(unbatchedDestructivePerHour) || unbatchedDestructivePerHour < 0)
     throw invalid('pki.approvers.unbatchedDestructivePerHour must be a whole number ≥ 0');
+  if (!Array.isArray(setSignatures)) throw invalid('pki.approvers.setSignatures must be an array');
+  const approverSetSignatures = setSignatures.map((signature, index) => {
+    const sig =
+      isRecord(signature) && typeof signature.sig === 'string'
+        ? new Uint8Array(Buffer.from(signature.sig, 'base64url'))
+        : isRecord(signature) && signature.sig instanceof Uint8Array
+          ? new Uint8Array(signature.sig)
+          : undefined;
+    // P-256 r ‖ s is 64 bytes.
+    if (!isRecord(signature) || typeof signature.kid !== 'string' || !signature.kid || sig?.length !== 64)
+      throw invalid(`pki.approvers.setSignatures[${index}] must be { kid, sig } (a 64-byte P-256 signature)`);
+    return { kid: signature.kid, sig };
+  });
+  if (approverSetSignatures.length && !versionGiven)
+    throw invalid(
+      'pki.approvers.setSignatures need pki.trustVersion: the bundle version they were signed for',
+    );
   return {
     approverKeys,
     approverThreshold: threshold,
     quorumTiers,
     unbatchedDestructivePerHour,
+    ...(approverSetSignatures.length ? { approverSetSignatures } : {}),
   };
 }
 
