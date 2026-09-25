@@ -79,10 +79,14 @@ describe('revocation feed', () => {
 
   it('catches a revocation that commits late with an earlier timestamp (inside the lookback)', async () => {
     const revocations = createRevocationSet();
-    const feed = createRevocationFeed({ sql: db, revocations, lookbackMs: 60_000 });
+    // The feed's clock is the database's simulated one (never the wall clock: the certificates expire 20 h after
+    // this test's fixed time).
+    let clock = now;
+    const feed = createRevocationFeed({ sql: db, revocations, lookbackMs: 60_000, clock: { now: () => clock } });
     await feed.poll();
     const a = await cert();
     const b = await cert();
+    clock = now + 10_000;
     await setSimClock(db, now + 10_000);
     await revoke(a, now + 10_000);
     expect(await feed.poll()).toBe(1);
