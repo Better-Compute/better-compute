@@ -54,11 +54,15 @@ func (a *Agent) downloadVerified(ctx context.Context, rawURL string, digest []by
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
+	ctx, watch, stop := withProgress(ctx, transferIdle, transferMax)
+	defer stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", err
 	}
-	resp, err := a.imageClient().Do(req)
+	client := *a.imageClient()
+	client.CheckRedirect = httpsOnly
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +76,7 @@ func (a *Agent) downloadVerified(ctx context.Context, rawURL string, digest []by
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	_, err = io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	_, err = io.Copy(io.MultiWriter(tmp, h), progressReader{resp.Body, watch})
 	tmp.Close()
 	if err != nil {
 		return "", err
@@ -123,7 +127,9 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	h := sha256.New()
-	cpu, err := rt.Snapshot(ctx, req.GetInstanceId(), req.GetIncludeMemory(), a.cpuModel(), io.MultiWriter(tmp, h))
+	ctx, watch, stop := withProgress(ctx, transferIdle, transferMax)
+	defer stop()
+	cpu, err := rt.Snapshot(ctx, req.GetInstanceId(), req.GetIncludeMemory(), a.cpuModel(), io.MultiWriter(tmp, h, touchWriter{watch}))
 	if err != nil {
 		return journal.Result{}, &KindError{Code: "snapshot-failed", Message: err.Error()}
 	}
@@ -131,7 +137,7 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return journal.Result{}, err
 	}
-	put, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), tmp)
+	put, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), progressReader{tmp, watch})
 	if err != nil {
 		return journal.Result{}, err
 	}
@@ -140,9 +146,11 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	for _, hd := range req.GetUploadHeaders() {
 		put.Header.Set(hd.GetName(), hd.GetValue())
 	}
-	// No client timeout: a disk and memory image takes as long as it takes; the command's deadline
-	// bounds it.
-	resp, err := a.imageClient().Do(put)
+	// No client timeout: a disk and memory image takes as long as it takes, as long as it moves
+	// (withProgress). Redirects stay on https.
+	client := *a.imageClient()
+	client.CheckRedirect = httpsOnly
+	resp, err := client.Do(put)
 	if err != nil {
 		return journal.Result{}, &KindError{Code: "upload-failed", Message: err.Error()}
 	}

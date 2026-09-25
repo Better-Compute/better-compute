@@ -159,10 +159,12 @@ func (h *RealHost) mountFirst(ctx context.Context, parts []blockDevice, readOnly
 		if err != nil {
 			return "", p, nil, err
 		}
-		args := []string{"/dev/" + p.Name, dir}
+		// The image's device nodes and setuid binaries mean nothing to the ramdisk.
+		opts := "nodev,nosuid"
 		if readOnly {
-			args = append([]string{"-o", "ro"}, args...)
+			opts += ",ro"
 		}
+		args := []string{"-o", opts, "/dev/" + p.Name, dir}
 		if _, err := run(ctx, "mount", args...); err != nil {
 			os.Remove(dir)
 			continue
@@ -258,12 +260,17 @@ func writeInRoot(dir, name string, data []byte) error {
 	if err := root.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
-	if info, err := root.Lstat(name); err == nil && info.Mode()&os.ModeSymlink != 0 {
+	// Whatever the image has there (a symlink, a device node, a FIFO, a file) is replaced, and the new
+	// file is created exclusively: bcd never writes through something it did not create.
+	if info, err := root.Lstat(name); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("%s: a directory", name)
+		}
 		if err := root.Remove(name); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
-	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
