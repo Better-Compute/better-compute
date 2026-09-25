@@ -182,6 +182,33 @@ async function sandboxInstance(
   };
 }
 
+/**
+ * (Review 13 H2) How many other live guests accept the same SSH identity as `instanceId`: a memory restore resumes
+ * with its source's principal and host key, so the source, every sibling restore of the same snapshot and restores
+ * of restores (they inherit the original's principal) all accept a certificate for `principal`. Until the host
+ * gives a restored guest its own identity, a certificate for one of them would open the others.
+ */
+async function guestsSharingIdentity(
+  tx: SqlTx,
+  tenantId: string,
+  instanceId: string,
+  principal: string,
+): Promise<number> {
+  // desired_state where the table has it (a guest being deleted no longer counts).
+  const { rows: columns } = await tx.query<{ found: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('instances')
+                     AND attname = 'desired_state' AND NOT attisdropped) AS found`,
+  );
+  const desired = columns[0]?.found ? `AND i.desired_state <> 'deleted'` : '';
+  const { rows } = await tx.query<{ n: string | number }>(
+    `SELECT count(*) AS n FROM instances i
+      WHERE i.tenant_id = $1 AND i.id <> $2 AND i.state NOT IN ('deleting', 'deleted') ${desired}
+        AND (i.id = $3 OR i.restore_from->>'principalInstanceId' = $3)`,
+    [tenantId, instanceId, principal],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
 export interface SandboxExecDeps {
   issuer: ExecTicketIssuer;
   /** The sandbox SSH CA (`TunnelsOptions.sandboxSsh`); without it the method is `UNSUPPORTED`. */
@@ -232,6 +259,15 @@ export function sandboxExecMethod(
         hostCertValidBefore,
       } = await sandboxInstance(tx, input.tenantId, input.sandboxId);
       await deps.checkReachable(tx, nodeId, deps.instanceDialCapability);
+      // A certificate for this guest's principal would also open every other guest resumed from the same memory
+      // (review 13 H2): refused while any is alive, the source's exec included.
+      if (await guestsSharingIdentity(tx, input.tenantId, instanceId, principalInstanceId))
+        throw new ComputeError(
+          'INVALID_STATE',
+          `Sandbox ${input.sandboxId} shares its SSH identity with another running guest (a memory restore of the same snapshot, or its source); exec is refused until only one of them runs`,
+          undefined,
+          { reason: 'restore-shares-identity' },
+        );
       const now = context.clock.now();
       // Past its expiry a sandbox is on its way out, even before the reconciler deletes it; a
       // certificate never outlives the sandbox.

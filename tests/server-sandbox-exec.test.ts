@@ -267,6 +267,42 @@ describe('sandboxes.exec', () => {
     expect(issued.instanceId).toBe(INSTANCE);
   });
 
+  it('refuses exec while another guest shares the identity: the source, a sibling restore, a restore of a restore', async () => {
+    const ORIGINAL = 'inst_01jz00000000000000000000ib';
+    const SIBLING = 'inst_01jz00000000000000000000ic';
+    const OTHER_SANDBOX = 'sbx_01jz00000000000000000000sc';
+    const restoredFrom = JSON.stringify({ snapshotId: 'snap_x', principalInstanceId: ORIGINAL });
+    await db.query(`UPDATE instances SET restore_from = $1::jsonb`, [restoredFrom]);
+    const shared = { code: 'INVALID_STATE', details: { reason: 'restore-shares-identity' } };
+    // The source is still running: a certificate for sandbox@ORIGINAL would open it too.
+    await db.query(`INSERT INTO instances (id, tenant_id, node_id, state) VALUES ($1, 'acme', $2, 'running')`, [
+      ORIGINAL,
+      NODE,
+    ]);
+    await expect(exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).rejects.toMatchObject(shared);
+    // And exec into the source is refused while a restore of it runs (the same certificate opens both).
+    await db.query(`INSERT INTO sandboxes (id, tenant_id, instance_id) VALUES ($1, 'acme', $2)`, [OTHER_SANDBOX, ORIGINAL]);
+    await expect(exec({ tenantId: 'acme', sandboxId: OTHER_SANDBOX, publicKey })).rejects.toMatchObject(shared);
+    // The source gone: exec into the only guest with that identity works.
+    await db.query(`UPDATE instances SET state = 'deleted' WHERE id = $1`, [ORIGINAL]);
+    expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({ principal: `sandbox@${ORIGINAL}` });
+    // A sibling restore (or a restore of a restore: it carries the original's principal too).
+    await db.query(`INSERT INTO instances (id, tenant_id, node_id, state, restore_from) VALUES ($1, 'acme', $2, 'running', $3::jsonb)`, [
+      SIBLING,
+      NODE,
+      restoredFrom,
+    ]);
+    await expect(exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).rejects.toMatchObject(shared);
+    await db.query(`UPDATE instances SET state = 'deleting' WHERE id = $1`, [SIBLING]);
+    expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({ instanceId: INSTANCE });
+    // Another tenant's guest with the same claimed principal never counts (and never learns anything).
+    await db.query(`UPDATE instances SET tenant_id = 'globex', state = 'running' WHERE id = $1`, [SIBLING]);
+    expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({ instanceId: INSTANCE });
+    // A plain sandbox (no restore) is unaffected by an unrelated guest.
+    await db.query(`UPDATE instances SET restore_from = NULL WHERE id = $1`, [INSTANCE]);
+    expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({ principal: `sandbox@${INSTANCE}` });
+  });
+
   it('validates its configuration and input', () => {
     expect(() =>
       tunnelsModule({
