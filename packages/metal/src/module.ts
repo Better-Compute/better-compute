@@ -2,6 +2,7 @@ import { defineModule, type ComputeModule, type ReconcileContext, type Reconcile
 import type { ImageUseOptions } from '@better-compute/provision';
 import { metalApi, type MetalApi } from './api.js';
 import { metalCommandKinds } from './commands.js';
+import { metalFindings } from './findings.js';
 import { metalMigrations } from './migrations.js';
 import type { HardwareProfile } from './module-types.js';
 import { metalProfiles } from './profiles.js';
@@ -57,6 +58,7 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
       profiles: [...metalProfiles],
       commandKinds: [...metalCommandKinds],
       reconcilers: [reconciler],
+      selfCheck: (context) => metalFindings(context.sql),
       api: () => metalApi(hardwareProfiles),
     }),
   );

@@ -20,6 +20,7 @@ import {
   type EngineOptions,
 } from './engine.js';
 import { driverInvokeKind, stepRegistry } from './expand.js';
+import { provisionFindings } from './findings.js';
 import { provisionMigrations } from './migrations.js';
 import type { ImageSignatureVerifier } from './images.js';
 import { profileSource } from './profiles.js';
@@ -133,6 +134,7 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
       options.imageVerifier ? { verifier: options.imageVerifier } : undefined,
     ),
     commandKinds: [driverInvokeCommandKind],
+    selfCheck: (context: ModuleContext) => provisionFindings(context.sql),
     reconcilers: remediation
       ? [
           reconciler,
