@@ -337,6 +337,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         installedBinary ([6a20b8]).
       - Next for [6a20b8]: update.swap, so self-update works in helper mode.
     - Instance serial consoles over tunnels.open (798e710, compute:instances:exec; sandbox instances refused).
+    - bcx-ipmi on site agents: downloads route (97b2ac2) plus install-script --install-plugins (adf2ae9).
+    - Security review 12 ([402c97] over cloud-hypervisor 2598f0a), 2 HIGH, OPEN ([6a20b8]):
+      - taps come back off the policed bridge after a guest reboot;
+      - the root VMM follows a tenant qcow2 backing file (host or other-tenant disk).
+      libvirt-kvm is being checked for the same backing-file issue. The docs mark cloud-hypervisor not production-safe
+      until both are fixed.
     - Clock sweep after the fixed test dates passed: [097b34], [6a20b8], [c321a3], [31c64a] clean; [402c97] fixed
       6891ba1.
     - Security review 9 (subagent over bcd self-update, proxy and quorum parity), 3 HIGH:
