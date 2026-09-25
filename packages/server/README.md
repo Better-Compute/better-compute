@@ -64,7 +64,9 @@ modules, then `modules` and `plugins`. Configuration errors throw `INVALID_CONFI
 5. **Admission** (methods with `admission`: request-as-resource creates, `extend`): transaction 1
    runs `prepare` (idempotency lookup scoped to tenant + identity, draft and projection rows); a
    replay returns the stored result without a decision; otherwise one `require` on the resource
-   `prepare` returned. A refusal of a delegated session asks IAM for a confirmation:
+   `prepare` returned, after `IamPort.refreshResource` reloaded that row into the IAM resolver's
+   memory (§12.4: never a stale copy; `extend` decides on the pending total). A refusal of a
+   delegated session asks IAM for a confirmation:
    `CONFIRMATION_REQUIRED` (403, `details.confirmationId`) when the delegation holds the action
    back, `ACCESS_DENIED` otherwise (fail closed); `denied` runs with that error.
 6. **Other methods:** one decision, `require` for mutations (never cached), `authorize` for reads
@@ -102,9 +104,16 @@ modules, then `modules` and `plugins`. Configuration errors throw `INVALID_CONFI
   `INTERNAL_ERROR`, answer `500 Internal server error` and go to `log.error`.
 - `X-Request-Id` is echoed when it matches `^[A-Za-z0-9._:-]{1,128}$`; otherwise the server
   assigns one. IAM sees the same id.
-- `GET` serves only `{basePath}/health` (one store round trip; `503` when it fails) and
-  `{basePath}/.well-known/better-compute` (version, base path, agent protocol range). Other
-  methods answer `METHOD_NOT_ALLOWED`. Unknown routes answer `NOT_FOUND`.
+- A valid W3C `traceparent` (version `00`, non-zero ids) becomes `ctx.traceparent`, and the
+  commands the method enqueues carry it (`CommandBody.traceparent`) unless they set their own;
+  an invalid one is dropped.
+- `GET` serves only `{basePath}/health` (one store round trip; `503` when it fails),
+  `{basePath}/.well-known/better-compute` (version, base path, agent protocol range) and, with
+  `downloads: { dir?, blob? }`, `{basePath}/downloads/bcd/{version}/linux-{amd64|arm64}`:
+  goreleaser's bare binary `bcd_{version}_{os}_{arch}` from the blob store (key
+  `bcd/{version}/{file}`) or the directory, public and immutable-cached (the install script
+  checks the verified manifest's sha256). Other methods answer `METHOD_NOT_ALLOWED`. Unknown
+  routes answer `NOT_FOUND`.
 - When `pki.join` offers `publicKeys()` (`pkiJoinCrypto` does when its signing key carries its
   certificate), the well-known document adds a `join` section: `encryptionJwk` (public members
   only), `encryptionKeyPin`, `signingCertificate` (base64 DER) and `signingKeyPin` (`sha256/`
@@ -161,6 +170,14 @@ subject, data, time}`, topic = type), `authz` (`authz_projection` plus the `auth
   `outbox`, forward only) after every delivered batch and reloaded whenever this process takes
   the outbox-dispatch lease, so a new holder resumes where the last one saved. Sink ids must be
   unique. Without the table (before `core/0009_runtime`) cursors stay in memory.
+- **Sinks from modules**: event sinks and scheduler plugins a module or plugin lists in
+  `extensions` run like `sinks.events` and `scheduler.plugins`.
+- **Audit sinks** (`sinks.audit`, and `AuditSink`s in module `extensions`): the built-in
+  `audit-sinks` module (registered only when there are some) ticks every 5 s and gives each sink
+  the committed `audit_events` after its own cursor (`audit_sink_cursors`, module migration
+  `audit-sinks/0001_cursors`), in commit order, at least once, with per-sink back-off.
+- **Usage sinks** are refused (`INVALID_CONFIG`): usage windows go to IAM billing through the
+  IAM bridge's flush (§12.7), which owns `usage_windows.recorded_at`.
 - **`start({ roles })`** runs the same passes on timers: `controllers` (reconcilers, sweeper),
   `sinks` (outbox dispatch), `iam` (IAM jobs); `stop()` releases every lease and leaves `workers`.
 
@@ -180,12 +197,17 @@ subject, data, time}`, topic = type), `authz` (`authz_projection` plus the `auth
 - **`drain`**: after `nodes.drain`, waits until the node holds no live allocation (v0.1 releases
   nothing itself), then ends the drain (`node.drained`; the node stays cordoned).
 - **`liveness`** (every 5 s): connected → disconnected on a lapsed gateway lease, → unreachable
-  after 40 s (+120 s after a gateway loss, 5 min after an outage), → lost only for provider pools
-  with `lostAfter`. Nothing is released (P6).
+  after 40 s (+120 s after a gateway loss, 5 min after an outage), → lost only for provider and
+  vps-host pools with `lostAfter` (never metal). Nothing is released (P6).
+- The node reconciler runs lifecycle, liveness, the node's authz row and the schedulable-edge
+  wake-up in one transaction per pass.
+- **Gateway reports** (`gatewayReportHandlers`): a node reports only its own allocations. With
+  `pki.commandSigning`, capacity's `attestedBindings` defaults to `pkiAllocationBindingCheck()`:
+  a reservation goes active only on the node's own signed `AllocationBound` for exactly that
+  allocation (P14); the signed CDI devices are the ones that count.
 
 ## Not yet
 
-- `gatewayServices.secret` answers `NOT_IMPLEMENTED` until v0.2.
 - Reconciler back-off counts live in memory (`work_queue.attempts` is not used yet).
 - No runtime job prunes the outbox behind the stored cursors yet (`pruneBehindCursors` in
   `@better-compute/postgres` needs host wiring); in-process subscribers and SSE watch keep no
