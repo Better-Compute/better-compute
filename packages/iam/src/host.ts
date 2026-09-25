@@ -7,6 +7,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { ComputeError, systemClock, type Clock, type SqlExecutor } from '@better-compute/core';
+import { readBodyCapped } from './body.js';
 import type { ComputeCatalogOptions } from './catalog.js';
 import { sqlInbox, type InboxEvent, type InboxWriter } from './inbox.js';
 import { computeIamPlugin, type ComputeIamPlugin } from './iam-plugin.js';
@@ -229,8 +230,8 @@ export function createInboxHandler(
   return async (request) => {
     if (request.method !== 'POST')
       return json(405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'POST only' } });
-    const body = await request.text();
-    if (Buffer.byteLength(body) > maxBytes)
+    const body = await readBodyCapped(request, maxBytes);
+    if (body === undefined)
       return json(413, { error: { code: 'PAYLOAD_TOO_LARGE', message: 'Body too large' } });
     const match = /^t=(\d{1,16}),v1=([0-9a-f]{64})$/.exec(
       request.headers.get(signatureHeader) ?? '',
@@ -344,8 +345,8 @@ export function createRefreshHandler(
   return async (request) => {
     if (request.method !== 'POST')
       return json(405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'POST only' } });
-    const body = await request.text();
-    if (Buffer.byteLength(body) > 16_384)
+    const body = await readBodyCapped(request, 16_384);
+    if (body === undefined)
       return json(413, { error: { code: 'PAYLOAD_TOO_LARGE', message: 'Body too large' } });
     const match = /^t=(\d{1,16}),v1=([0-9a-f]{64})$/.exec(
       request.headers.get(signatureHeader) ?? '',

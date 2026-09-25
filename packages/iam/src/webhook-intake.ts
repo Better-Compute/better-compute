@@ -5,6 +5,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { systemClock, type Clock } from '@better-compute/core';
+import { readBodyCapped } from './body.js';
 import {
   inboxReactions,
   isInboxEvent,
@@ -84,8 +85,8 @@ export function createIamWebhookHandler(
   return async (request) => {
     if (request.method !== 'POST')
       return json(405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'POST only' } });
-    const body = await request.text();
-    if (Buffer.byteLength(body) > maxBytes)
+    const body = await readBodyCapped(request, maxBytes);
+    if (body === undefined)
       return json(413, { error: { code: 'PAYLOAD_TOO_LARGE', message: 'Body too large' } });
     if (
       !verified(

@@ -4,6 +4,7 @@ import type { SqlExecutor } from '@better-compute/core';
 import {
   computeIamEventPatterns,
   createIamWebhookHandler,
+  readBodyCapped,
   sqlInbox,
   successorsMigration,
 } from '@better-compute/iam';
@@ -40,6 +41,46 @@ const post = (delivery: Pick<Delivery, 'body' | 'headers'>) =>
     headers: delivery.headers,
     body: delivery.body,
   });
+
+describe('readBodyCapped (unauthenticated endpoints read at most maxBytes)', () => {
+  it('refuses a declared or streamed body over the cap without buffering it', async () => {
+    expect(
+      await readBodyCapped(new Request('https://x/', { method: 'POST', body: 'hello' }), 5),
+    ).toBe('hello');
+    expect(await readBodyCapped(new Request('https://x/', { method: 'POST' }), 5)).toBe('');
+    // A declared length over the cap: refused before reading.
+    const declared = new Request('https://x/', {
+      method: 'POST',
+      body: 'x',
+      headers: { 'content-length': '999999999' },
+    });
+    expect(await readBodyCapped(declared, 1024)).toBeUndefined();
+    // A stream that never ends: abandoned as soon as it passes the cap.
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        controller.enqueue(new Uint8Array(1024));
+      },
+    });
+    const streamed = new Request('https://x/', {
+      method: 'POST',
+      body: endless,
+      duplex: 'half',
+    } as RequestInit);
+    expect(await readBodyCapped(streamed, 4096)).toBeUndefined();
+    expect(pulled).toBeLessThan(10);
+
+    const handler = createIamWebhookHandler({
+      secret: 'a-webhook-secret-of-some-length',
+      inbox: sqlInbox(db),
+      maxBytes: 64,
+    });
+    expect(
+      (await handler(new Request('https://x/', { method: 'POST', body: 'y'.repeat(65) }))).status,
+    ).toBe(413);
+  });
+});
 
 describe('createIamWebhookHandler', () => {
   it('takes a real subtree subscription’s deliveries into the inbox, once, and ignores the rest', async () => {
