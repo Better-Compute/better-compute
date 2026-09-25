@@ -183,6 +183,7 @@ describe('help and the manifest', () => {
       'migrate',
       'doctor',
       'version',
+      'completion',
       'serve',
       'dev',
       'sim',

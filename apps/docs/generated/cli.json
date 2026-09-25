@@ -107,6 +107,28 @@
       "examples": []
     },
     {
+      "name": "completion",
+      "aliases": [],
+      "group": "Setup",
+      "summary": "Print a shell completion script (bash, zsh or fish)",
+      "description": "completion prints a script that completes commands, their flags and the values of flags with choices, generated from this program's commands (a configuration's project commands included). Load it in your shell's startup file.",
+      "usage": "better-compute completion SHELL",
+      "target": "none",
+      "args": [
+        {
+          "name": "shell",
+          "description": "bash, zsh or fish",
+          "required": true
+        }
+      ],
+      "flags": [],
+      "examples": [
+        "source <(better-compute completion bash)",
+        "source <(better-compute completion zsh)",
+        "better-compute completion fish | source"
+      ]
+    },
+    {
       "name": "serve",
       "aliases": [],
       "group": "Setup",

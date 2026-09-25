@@ -1,7 +1,8 @@
 import { access, writeFile } from 'node:fs/promises';
 import type { Finding } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
-import { defineCommand } from '../framework.js';
+import { completionScript } from '../completion.js';
+import { defineCommand, manifestOf } from '../framework.js';
 import { resolveHost } from '../host/config.js';
 import { hostFindings } from '../host/findings.js';
 import { isUnconfiguredIam } from '../iam.js';
@@ -163,5 +164,24 @@ export const setupCommands = [
     description: 'version prints the version of this command line (also --version or -v).',
     output: 'text',
     run: ({ program }) => program.version,
+  }),
+  defineCommand({
+    name: 'completion',
+    group: 'Setup',
+    summary: 'Print a shell completion script (bash, zsh or fish)',
+    description:
+      "completion prints a script that completes commands, their flags and the values of flags with choices, generated from this program's commands (a configuration's project commands included). Load it in your shell's startup file.",
+    output: 'text',
+    args: [{ name: 'shell', description: 'bash, zsh or fish', required: true }],
+    examples: [
+      'source <(better-compute completion bash)',
+      'source <(better-compute completion zsh)',
+      'better-compute completion fish | source',
+    ],
+    run({ args, program }) {
+      const shell = args[0];
+      if (shell !== 'bash' && shell !== 'zsh' && shell !== 'fish') throw usageError('completion takes bash, zsh or fish');
+      return completionScript(shell, manifestOf(program.commands, program.version));
+    },
   }),
 ];
