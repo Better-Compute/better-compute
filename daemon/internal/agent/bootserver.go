@@ -14,6 +14,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/bootparams"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"github.com/better-compute/better-compute/daemon/internal/pxe"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -36,6 +37,47 @@ type BootConfig struct {
 	Cmdline string
 	// Join are the gateway parameters the ramdisk joins with (token and assertion are per machine).
 	Join bootparams.Params
+	// URL is how machines reach this boot server (http://10.20.0.2:8080): iPXE chains to it.
+	URL string
+	// ServerIP is this agent's address on the provisioning network (proxyDHCP server id, TFTP).
+	ServerIP net.IP
+	// ProxyDHCP are the UDP addresses the proxyDHCP server listens on (":67", ":4011"); empty: none.
+	ProxyDHCP []string
+	// TFTP is the UDP address of the TFTP server (":69") and TFTPRoot its files (the iPXE builds).
+	TFTP     string
+	TFTPRoot string
+}
+
+// Bootfiles by client architecture: iPXE builds the site ships in TFTPRoot.
+var bootfiles = map[pxe.Arch]string{
+	pxe.ArchBIOS:       "undionly.kpxe",
+	pxe.ArchEFIx86_64:  "ipxe.efi",
+	pxe.ArchEFIx86_64b: "ipxe.efi",
+	pxe.ArchEFIArm64:   "ipxe-arm64.efi",
+	pxe.ArchHTTPx86_64: "ipxe.efi",
+	pxe.ArchHTTPArm64:  "ipxe-arm64.efi",
+}
+
+// pxeAnswer decides a PXE client's first stage: only prepared machines, only with the lease.
+func (a *Agent) pxeAnswer(cfg BootConfig, r pxe.Request) (pxe.Answer, bool) {
+	if _, active := a.bootActive(); !active {
+		return pxe.Answer{}, false
+	}
+	if a.boot.Get(r.MAC.String(), a.serverNow()) == nil {
+		return pxe.Answer{}, false
+	}
+	base := strings.TrimRight(cfg.URL, "/")
+	if r.IPXE {
+		return pxe.Answer{Bootfile: base + "/boot/chain.ipxe"}, true
+	}
+	file, ok := bootfiles[r.Arch]
+	if !ok {
+		return pxe.Answer{}, false
+	}
+	if r.Arch.HTTPBoot() {
+		return pxe.Answer{Bootfile: base + "/boot/files/" + file}, true
+	}
+	return pxe.Answer{NextServer: cfg.ServerIP, Bootfile: file}, true
 }
 
 // assertionTTL bounds a discovery assertion: the boot it vouches for, no more.
@@ -105,6 +147,26 @@ func (a *Agent) ServeBoot(ctx context.Context, cfg BootConfig) error {
 		return errors.New("boot: listen, kernel and initrd are required")
 	}
 	mux := a.BootHandler(cfg)
+	for _, addr := range cfg.ProxyDHCP {
+		conn, err := net.ListenPacket("udp4", addr)
+		if err != nil {
+			return fmt.Errorf("proxyDHCP %s: %w", addr, err)
+		}
+		go func() {
+			if err := pxe.ServeProxyDHCP(ctx, conn, cfg.ServerIP, func(r pxe.Request) (pxe.Answer, bool) { return a.pxeAnswer(cfg, r) }); err != nil {
+				a.log.Error("proxyDHCP stopped", "error", err.Error())
+			}
+		}()
+		a.log.Info("proxyDHCP listening", "addr", addr)
+	}
+	if cfg.TFTP != "" {
+		conn, err := net.ListenPacket("udp4", cfg.TFTP)
+		if err != nil {
+			return fmt.Errorf("tftp %s: %w", cfg.TFTP, err)
+		}
+		go func() { _ = (&pxe.TFTPServer{Root: cfg.TFTPRoot}).Serve(ctx, conn) }()
+		a.log.Info("tftp listening", "addr", cfg.TFTP, "root", cfg.TFTPRoot)
+	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
@@ -128,6 +190,17 @@ func (a *Agent) BootHandler(cfg BootConfig) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boot/ipxe", func(w http.ResponseWriter, r *http.Request) { a.serveIPXE(w, r, cfg) })
 	mux.HandleFunc("GET /cache/", a.cache.serve)
+	// iPXE's second stage: chain to this machine's script with what iPXE knows about it.
+	mux.HandleFunc("GET /boot/chain.ipxe", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = fmt.Fprintf(w, "#!ipxe\nchain %s/boot/ipxe?mac=${net0/mac}&uuid=${uuid}&ip=${net0/ip}&buildarch=${buildarch}&platform=${platform}\n",
+			strings.TrimRight(cfg.URL, "/"))
+	})
+	// UEFI HTTP boot fetches the iPXE build over HTTP instead of TFTP.
+	if cfg.TFTPRoot != "" {
+		files := http.StripPrefix("/boot/files/", http.FileServer(http.Dir(cfg.TFTPRoot)))
+		mux.Handle("GET /boot/files/", files)
+	}
 	return mux
 }
 

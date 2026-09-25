@@ -2,6 +2,7 @@ package agent
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	sitev1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/site/v1"
 	"github.com/better-compute/better-compute/daemon/internal/bootparams"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"github.com/better-compute/better-compute/daemon/internal/pxe"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -92,11 +94,39 @@ func TestBootServerRendersARamdiskScript(t *testing.T) {
 	if code, _ := get("mac=b8:3f:d2:00:00:01"); code != http.StatusOK {
 		t.Fatalf("refetch = %d", code)
 	}
+	// The PXE first stage answers the prepared machine only: firmware gets the iPXE build, iPXE the chain.
+	pxeCfg := cfg
+	pxeCfg.URL, pxeCfg.ServerIP = "http://10.20.0.2:8080", net.ParseIP("10.20.0.2")
+	mac, _ := net.ParseMAC("b8:3f:d2:00:00:01")
+	if ans, ok := h.agent.pxeAnswer(pxeCfg, pxe.Request{MAC: mac, Arch: pxe.ArchEFIx86_64}); !ok || ans.Bootfile != "ipxe.efi" || !ans.NextServer.Equal(pxeCfg.ServerIP) {
+		t.Fatalf("firmware answer = %+v %v", ans, ok)
+	}
+	if ans, _ := h.agent.pxeAnswer(pxeCfg, pxe.Request{MAC: mac, IPXE: true}); ans.Bootfile != "http://10.20.0.2:8080/boot/chain.ipxe" {
+		t.Fatalf("iPXE answer = %+v", ans)
+	}
+	if ans, _ := h.agent.pxeAnswer(pxeCfg, pxe.Request{MAC: mac, Arch: pxe.ArchHTTPx86_64}); ans.Bootfile != "http://10.20.0.2:8080/boot/files/ipxe.efi" {
+		t.Fatalf("HTTP boot answer = %+v", ans)
+	}
+	other, _ := net.ParseMAC("b8:3f:d2:00:00:99")
+	if _, ok := h.agent.pxeAnswer(pxeCfg, pxe.Request{MAC: other}); ok {
+		t.Fatal("answered an unprepared machine")
+	}
+	chainSrv := httptest.NewServer(h.agent.BootHandler(pxeCfg))
+	defer chainSrv.Close()
+	resp, _ := http.Get(chainSrv.URL + "/boot/chain.ipxe")
+	chain, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(chain), "chain http://10.20.0.2:8080/boot/ipxe?mac=${net0/mac}&uuid=${uuid}") {
+		t.Fatalf("chain script = %q", chain)
+	}
 	// Partitioned beyond the lease TTL: the agent fences itself.
 	h.agent.mu.Lock()
 	h.agent.lastContact = time.Now().Add(-time.Minute)
 	h.agent.mu.Unlock()
 	if code, _ := get("mac=b8:3f:d2:00:00:01"); code != http.StatusServiceUnavailable {
 		t.Fatalf("fenced agent = %d", code)
+	}
+	if _, ok := h.agent.pxeAnswer(pxeCfg, pxe.Request{MAC: mac, Arch: pxe.ArchEFIx86_64}); ok {
+		t.Fatal("a fenced agent answered PXE")
 	}
 }

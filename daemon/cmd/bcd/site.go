@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,8 +48,19 @@ func runSite(fs *flag.FlagSet, _, stderr io.Writer) int {
 			Cmdline: cfg.Boot.Cmdline,
 			Join:    joinParams(cfg, jwk),
 		}
+		boot.URL, boot.TFTP, boot.TFTPRoot = cfg.Boot.URL, cfg.Boot.TFTP, cfg.Boot.TFTPRoot
 		if cfg.Boot.URL != "" {
 			boot.Join.Cache = strings.TrimRight(cfg.Boot.URL, "/") + "/cache"
+		}
+		if cfg.Boot.ProxyDHCP || cfg.Boot.TFTP != "" {
+			boot.ServerIP = net.ParseIP(cfg.Boot.ServerIP)
+			if boot.ServerIP.To4() == nil || cfg.Boot.URL == "" {
+				fmt.Fprintln(stderr, "bcd site: proxy_dhcp and tftp need [boot] server_ip (IPv4) and url")
+				return exitUsage
+			}
+		}
+		if cfg.Boot.ProxyDHCP {
+			boot.ProxyDHCP = []string{":67", ":4011"}
 		}
 		serve = func(ctx context.Context, a *agent.Agent) {
 			if err := a.ServeBoot(ctx, boot); err != nil {

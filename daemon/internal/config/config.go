@@ -117,9 +117,16 @@ type Boot struct {
 	Initrd string
 	// Cmdline is appended to the ramdisk's kernel command line.
 	Cmdline string
-	// URL is how machines reach this boot server (e.g. http://10.20.0.2:8080): its image cache is
-	// passed to the ramdisks it boots.
+	// URL is how machines reach this boot server (e.g. http://10.20.0.2:8080): iPXE chains to it and
+	// its image cache is passed to the ramdisks it boots.
 	URL string
+	// ServerIP is this agent's address on the provisioning network (proxyDHCP, TFTP next-server).
+	ServerIP string
+	// ProxyDHCP turns on the proxyDHCP server on UDP 67 and 4011 (beside the site's DHCP server).
+	ProxyDHCP bool
+	// TFTP is the TFTP server's UDP address (e.g. ":69") and TFTPRoot the iPXE builds it serves.
+	TFTP     string
+	TFTPRoot string
 }
 
 // Journal bounds the journal. Values may lower the PLAN.md §6 caps but never raise them.
@@ -304,6 +311,10 @@ var fields = []field{
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
 	{section: "boot", key: "initrd", kind: kindString, set: func(c *Config, v value) { c.Boot.Initrd = v.str }},
+	{section: "boot", key: "server_ip", kind: kindString, set: func(c *Config, v value) { c.Boot.ServerIP = v.str }},
+	{section: "boot", key: "proxy_dhcp", kind: kindBool, set: func(c *Config, v value) { c.Boot.ProxyDHCP = v.boolean }},
+	{section: "boot", key: "tftp", kind: kindString, set: func(c *Config, v value) { c.Boot.TFTP = v.str }},
+	{section: "boot", key: "tftp_root", kind: kindString, set: func(c *Config, v value) { c.Boot.TFTPRoot = v.str }},
 	{section: "boot", key: "url", kind: kindString, set: func(c *Config, v value) { c.Boot.URL = v.str }},
 	{section: "boot", key: "cmdline", kind: kindString, set: func(c *Config, v value) { c.Boot.Cmdline = v.str }},
 	{key: "gateway_server_name", kind: kindString, set: func(c *Config, v value) { c.GatewayServerName = v.str }},
