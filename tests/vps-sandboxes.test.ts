@@ -1468,13 +1468,28 @@ describe('template network and versions', () => {
     } = await db.query<{ id: string }>(`SELECT id FROM instances WHERE warm_template_id = $1`, [
       template.id,
     ]);
-    // Its host's bcd is downgraded: the capability label goes, and the guest would get full egress.
+    // One claimed while the hosts enforce it; the pool refills.
+    const live = await createSandbox(template.id, { idempotencyKey: 'live' });
+    expect(live).toMatchObject({ warm: true, instanceId: warm!.id });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const {
+      rows: [refill],
+    } = await db.query<{ id: string }>(`SELECT id FROM instances WHERE warm_template_id = $1`, [
+      template.id,
+    ]);
+    // The hosts' bcd is downgraded: the capability label goes, and guests would get full egress.
     await db.query(`DELETE FROM node_labels WHERE key = 'bc.dev/cap.instance.network-policy'`);
+    const findings = await module.selfCheck!(moduleContext(db));
+    expect(findings.find((finding) => finding.check === 'vps.sandboxes.network')).toMatchObject({
+      severity: 'error',
+      count: 1,
+    });
     expect((await createSandbox(template.id)).warm).toBe(false);
     await reconcileSandboxes();
     const { rows } = await db.query<{ desired_state: string }>(
       `SELECT desired_state FROM instances WHERE id = $1`,
-      [warm!.id],
+      [refill!.id],
     );
     expect(rows[0]!.desired_state).toBe('deleted');
   });

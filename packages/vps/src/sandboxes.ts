@@ -2230,7 +2230,9 @@ export async function reconcileSandboxes(
  * - `vps.sandboxes.deleting`: sandboxes deleting for more than 10 minutes (their instance is stuck);
  * - `vps.sandboxes.warm`: templates below `warm.min` settled instances for over 10 minutes with no
  *   refill in that time (quota, capacity, or a vanished flavor or image), or warm instances that have
- *   not settled within 10 minutes.
+ *   not settled within 10 minutes;
+ * - `vps.sandboxes.network`: open sandboxes with a private or none network on a host that does not
+ *   say it enforces it (placed before the capability constraint, or its bcd since downgraded).
  */
 export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
   const findings: Finding[] = [];
@@ -2243,6 +2245,7 @@ export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
     deleting: string | number;
     stuck_templates: string[] | null;
     unsettled: string | number;
+    unenforced: string | number;
   }>(
     `SELECT
        (SELECT count(*) FROM sandboxes WHERE NOT draft AND deleting_at IS NULL
@@ -2258,7 +2261,10 @@ export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
                   AND i.created_at >= compute_now() - interval '10 minutes')) AS stuck_templates,
        (SELECT count(*) FROM instances WHERE warm_template_id IS NOT NULL AND desired_state <> 'deleted'
           AND state NOT IN ('paused', 'stopped', 'deleting', 'deleted')
-          AND created_at < compute_now() - interval '10 minutes') AS unsettled`,
+          AND created_at < compute_now() - interval '10 minutes') AS unsettled,
+       (SELECT count(*) FROM sandboxes s JOIN instances i ON i.id = s.instance_id
+         WHERE NOT s.draft AND s.deleting_at IS NULL AND i.state NOT IN ('deleting', 'deleted')
+           AND ${networkUnenforced('i.')}) AS unenforced`,
   );
   const row = rows[0]!;
   const expired = Number(row.expired);
@@ -2295,6 +2301,15 @@ export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
         .join('; '),
       fix: "Check the tenant's quota on the template's pool, host capacity, and that the template's flavor and image still exist",
       count: stuck.length + unsettled,
+    });
+  const unenforced = Number(row.unenforced);
+  if (unenforced > 0)
+    findings.push({
+      check: 'vps.sandboxes.network',
+      severity: 'error',
+      message: `${unenforced} sandbox(es) with a private or none network run on hosts that do not enforce it: their guests have full egress`,
+      fix: 'Upgrade bcd on those hosts (it must advertise instance.network-policy), or delete the sandboxes',
+      count: unenforced,
     });
   return findings;
 }
