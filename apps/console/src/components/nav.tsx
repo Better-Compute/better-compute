@@ -13,6 +13,7 @@ const areas = [
   { href: '/quotas', label: 'Quotas' },
   { href: '/usage', label: 'Usage & spend' },
   { href: '/activity', label: 'Activity' },
+  { href: '/webhooks', label: 'Webhooks' },
 ];
 const admin = [
   { href: '/admin/rollouts', label: 'Rollouts' },
