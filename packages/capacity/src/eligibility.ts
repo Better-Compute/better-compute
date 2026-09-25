@@ -158,3 +158,16 @@ export function schedulableSqlTolerating(tolerated: string): string {
     `n.no_schedule_reasons <@ ${tolerated}`,
   );
 }
+
+/**
+ * The SQL twin of `mayBeSchedulable`: schedulable for some tenant (blocked by nothing but
+ * dedications). For edges that wake pending work, so a node dedicated to a tenant wakes that
+ * tenant's reservations too.
+ */
+export const mayBeSchedulableSql = schedulableSql.replace(
+  'cardinality(n.no_schedule_reasons) = 0',
+  // No reason, or every reason is one and the same dedication (two tenants' block everyone).
+  `(cardinality(n.no_schedule_reasons) = 0
+     OR (n.no_schedule_reasons <@ ARRAY[n.no_schedule_reasons[1]]
+         AND n.no_schedule_reasons[1] LIKE '${dedicatedTaintPrefix}%'))`,
+);

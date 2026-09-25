@@ -19,6 +19,8 @@ import {
   inlinePlacer,
   isSchedulable,
   loadNodeViews,
+  mayBeSchedulable,
+  mayBeSchedulableSql,
   parseSelector,
   placeFromIndex,
   PoolIndex,
@@ -603,10 +605,20 @@ describe('rollups and eligibility SQL', () => {
     expect(forTenant('acme')).toEqual(['n4', 'n7', 'n8']);
     expect(forTenant('beta')).toEqual(['n10', 'n4', 'n7']);
     expect(forTenant('gamma')).toEqual(['n4', 'n7']);
-    // Generic checks (rollups, node edges) still see a dedication as NoSchedule.
+    // Generic checks (rollups) still see a dedication as NoSchedule.
     expect(
       all.filter((view) => isSchedulable(view, { ownerTenantId: 'root' })).map((v) => v.id),
     ).toEqual(['n4', 'n7']);
+    // Schedulable for someone (wake-up edges): one dedication counts, a dedication plus anything
+    // else or two tenants' do not; the SQL twin agrees.
+    const some = await db.query<{ id: string }>(
+      `SELECT n.id FROM nodes n JOIN pools p ON p.id = n.pool_id WHERE ${mayBeSchedulableSql} ORDER BY n.id`,
+    );
+    const someTs = all
+      .filter((view) => mayBeSchedulable(view, { ownerTenantId: 'root' }))
+      .map((view) => view.id);
+    expect(some.rows.map((row) => row.id)).toEqual(someTs);
+    expect(someTs).toEqual(['n10', 'n4', 'n7', 'n8']);
   });
 
   it('reports each placement to onPlacement: outcome, lost races, refusals; a throwing observer changes nothing', async () => {
