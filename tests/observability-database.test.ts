@@ -4,6 +4,7 @@ import { databaseCollector, createMetrics, standardMetrics } from '@better-compu
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { tenantStatesMigration } from '@better-compute/server';
+import { vpsMigrations } from '@better-compute/vps';
 
 // The §14 deployment gauges sampled from compute's tables (databaseCollector): due work by kind, backlogs, nodes by
 // connectivity and generation lag, GPUs by state, certificate expiry, clock offset and command latency.
@@ -264,6 +265,91 @@ describe('databaseCollector', () => {
     await collector.refresh();
     expect(registry.value('tenant_states', { state: 'suspended' })).toBe(0);
     expect(registry.value('tenant_teardowns_pending')).toBe(0);
+  });
+
+  it('observes sandbox readiness by source, expiry lag, warm refills and the warm pool (§3.7)', async () => {
+    await db.migrate([...vpsMigrations]);
+    const registry = createMetrics();
+    const collector = databaseCollector(standardMetrics(registry), {
+      sql: db,
+      latencyLease: false,
+    });
+    // The first poll anchors the sandbox cursors: history before it is not observed.
+    await collector.refresh();
+    const { rows: clock } = await db.query<{ ms: string | number }>(
+      'SELECT extract(epoch FROM compute_now()) * 1000 AS ms',
+    );
+    await setSimClock(db, Number(clock[0]!.ms) + 60_000);
+
+    await db.query(
+      `INSERT INTO flavors (id, pool_id, name, vcpu, memory_gib, disk_gib, version)
+       VALUES ('fl-1', 'pool-1', 'small', 2, 4, 20, 1)`,
+    );
+    await db.query(
+      `INSERT INTO sandbox_templates (id, tenant_id, name, pool_id, flavor, image_id, runtime, default_ttl_seconds,
+                                      max_ttl_seconds, warm_min, warm_max, created_by, deleted, version)
+       VALUES ('tpl-1', 't', 'py', 'pool-1', 'small', 'img', 'cloud-hypervisor', 3600, 86400, 3, 5, 'id-1', false, 1),
+              ('tpl-2', 't', 'old', 'pool-1', 'small', 'img', 'cloud-hypervisor', 3600, 86400, 2, 2, 'id-1', true, 1)`,
+    );
+    const instance = (id: string, warmTemplate: string | null, state: string, desired: string) =>
+      db.query(
+        `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, runtime, draft, state,
+                                desired_state, owner_identity_id, idempotency_key, request_hash, version,
+                                warm_template_id)
+         VALUES ($1, 't', 'pool-1', 'fl-1', '{}', 'img', 'cloud-hypervisor', false, $2, $3, 'id-1', $1, '\\x00', 1, $4)`,
+        [id, state, desired, warmTemplate],
+      );
+    // Two unclaimed warm instances of tpl-1 (warm.min 3), one claimed by a sandbox, one cold instance.
+    await instance('i-warm-1', 'tpl-1', 'paused', 'paused');
+    await instance('i-warm-2', 'tpl-1', 'provisioning', 'paused');
+    await instance('i-claimed', null, 'running', 'running');
+    await instance('i-cold', null, 'running', 'running');
+    const sandbox = (id: string, instanceId: string, warm: boolean, times: string) =>
+      db.query(
+        `INSERT INTO sandboxes (id, tenant_id, template_id, pool_id, instance_id, draft, ttl_seconds, warm,
+                                owner_identity_id, idempotency_key, request_hash, version,
+                                created_at, ready_at, expires_at, expired_at)
+         SELECT $1, 't', 'tpl-1', 'pool-1', $2, false, 3600, $3, 'id-1', $1, '\\x00', 1, ${times}`,
+        [id, instanceId, warm],
+      );
+    // A warm claim ready in 1 s, a cold create ready in 20 s, and one expired 30 s after its expiresAt.
+    await sandbox(
+      'sbx-warm',
+      'i-claimed',
+      true,
+      `compute_now() - '2s'::interval, compute_now() - '1s'::interval, NULL, NULL`,
+    );
+    await sandbox(
+      'sbx-cold',
+      'i-cold',
+      false,
+      `compute_now() - '20s'::interval, compute_now(), NULL, NULL`,
+    );
+    await sandbox(
+      'sbx-expired',
+      'i-gone',
+      false,
+      `compute_now() - '2h'::interval, NULL, compute_now() - '30s'::interval, compute_now()`,
+    );
+    await collector.refresh();
+    const value = (name: string, labels?: Record<string, string>) => registry.value(name, labels);
+    expect(value('sandbox_ready_seconds', { source: 'warm' })).toBe(1);
+    expect(value('sandbox_ready_seconds', { source: 'cold' })).toBe(1);
+    expect(registry.expose()).toContain(
+      'better_compute_sandbox_ready_seconds_sum{source="cold"} 20',
+    );
+    expect(value('sandbox_expiry_lag_seconds')).toBe(1);
+    expect(registry.expose()).toContain('better_compute_sandbox_expiry_lag_seconds_sum 30');
+    // Refills: the two unclaimed warm instances and the claimed one; not the cold instance.
+    expect(value('sandbox_warm_refills_total')).toBe(3);
+    expect(value('sandbox_warm_instances', { state: 'paused' })).toBe(1);
+    expect(value('sandbox_warm_instances', { state: 'provisioning' })).toBe(1);
+    // tpl-1 is one short of warm.min; the deleted tpl-2 wants none.
+    expect(value('sandbox_warm_deficit')).toBe(1);
+    // Each is observed once.
+    await collector.refresh();
+    expect(value('sandbox_ready_seconds', { source: 'cold' })).toBe(1);
+    expect(value('sandbox_warm_refills_total')).toBe(3);
   });
 
   it('polls on a timer and reports failures without throwing', async () => {

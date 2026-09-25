@@ -69,6 +69,8 @@ export function databaseCollector(
   /** Label sets each gauge was given last time, so ones that disappeared read 0 instead of going stale. */
   const lastSets = new Map<object, Map<string, Labels>>();
   let latencySince: string | undefined;
+  /** Where the sandbox series left off (timestamptz text): readiness, expiry and warm refills. */
+  let sandboxSince: { ready: string; expired: string; refilled: string } | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let running: Promise<void> | undefined;
   const intervalMs = options.intervalMs ?? 15_000;
@@ -216,6 +218,27 @@ export function databaseCollector(
     }
     setAll(metrics.backlog, backlog);
 
+    // §3.7 warm pools: unclaimed warm instances by state, and how many the templates are short of warm.min.
+    if (await exists('sandbox_templates')) {
+      const { rows: warm } = await sql.query<{ state: string; count: number }>(
+        `SELECT state, count(*)::int AS count FROM instances
+          WHERE warm_template_id IS NOT NULL AND desired_state <> 'deleted' GROUP BY state`,
+      );
+      setAll(
+        metrics.sandboxWarmInstances,
+        warm.map((row) => [{ state: labelValue(row.state) }, Number(row.count)]),
+      );
+      const { rows: deficit } = await sql.query<{ missing: number }>(
+        `SELECT coalesce(sum(greatest(0, t.warm_min - coalesce(w.n, 0))), 0)::int AS missing
+           FROM sandbox_templates t
+           LEFT JOIN (SELECT warm_template_id, count(*)::int AS n FROM instances
+                       WHERE warm_template_id IS NOT NULL AND desired_state <> 'deleted'
+                       GROUP BY warm_template_id) w ON w.warm_template_id = t.id
+          WHERE NOT t.deleted AND t.warm_min > 0`,
+      );
+      metrics.sandboxWarmDeficit.set(undefined, Number(deficit[0]?.missing ?? 0));
+    }
+
     // §12.8: tenants the envelope refuses, and deleted ones a module is still releasing.
     if (await exists('compute_tenant_states')) {
       const { rows: tenants } = await sql.query<{ state: string; count: number; pending: number }>(
@@ -256,10 +279,13 @@ export function databaseCollector(
       [...expiries].map(([kind, seconds]) => [{ kind }, seconds]),
     );
 
-    if (!(await holdsLatencyLease())) {
+    const observes = await holdsLatencyLease();
+    if (!observes) {
       // Another process observes; if this one takes over later, it starts from then.
       latencySince = undefined;
-    } else if (await hasColumn('commands', 'created_at')) {
+      sandboxSince = undefined;
+    } else await observeSandboxes(clock[0]!.now_text);
+    if (observes && (await hasColumn('commands', 'created_at'))) {
       if (latencySince === undefined) {
         // Start from now: history before the collector ran is not re-observed after a restart.
         latencySince = clock[0]!.now_text;
@@ -286,6 +312,52 @@ export function databaseCollector(
           );
         if (settled.length) latencySince = settled.at(-1)!.updated_text;
       }
+    }
+  }
+
+  /** Sandboxes that became ready or expired, and warm instances created, since the last poll (lease holder only). */
+  async function observeSandboxes(nowText: string): Promise<void> {
+    if (!(await exists('sandboxes'))) return;
+    if (sandboxSince === undefined) {
+      // Start from now, as the command histogram does.
+      sandboxSince = { ready: nowText, expired: nowText, refilled: nowText };
+      return;
+    }
+    const { rows: ready } = await sql.query<{
+      warm: boolean;
+      seconds: string | number;
+      at: string;
+    }>(
+      `SELECT warm, extract(epoch FROM ready_at - created_at) AS seconds, ready_at::text AS at FROM sandboxes
+        WHERE ready_at > $1::timestamptz ORDER BY ready_at LIMIT ${latencyBatch}`,
+      [sandboxSince.ready],
+    );
+    for (const row of ready)
+      metrics.sandboxReady.observe(
+        { source: row.warm ? 'warm' : 'cold' },
+        Math.max(0, Number(row.seconds)),
+      );
+    if (ready.length) sandboxSince.ready = ready.at(-1)!.at;
+    const { rows: expired } = await sql.query<{ seconds: string | number; at: string }>(
+      `SELECT extract(epoch FROM expired_at - expires_at) AS seconds, expired_at::text AS at FROM sandboxes
+        WHERE expired_at > $1::timestamptz ORDER BY expired_at LIMIT ${latencyBatch}`,
+      [sandboxSince.expired],
+    );
+    for (const row of expired)
+      metrics.sandboxExpiryLag.observe(undefined, Math.max(0, Number(row.seconds)));
+    if (expired.length) sandboxSince.expired = expired.at(-1)!.at;
+    // A warm instance keeps no mark once claimed but its sandbox's `warm`, so both count.
+    const { rows: refills } = await sql.query<{ count: number; at: string | null }>(
+      `SELECT count(*)::int AS count, max(i.created_at)::text AS at FROM instances i
+        WHERE i.created_at > $1::timestamptz
+          AND (i.warm_template_id IS NOT NULL
+               OR EXISTS (SELECT 1 FROM sandboxes s WHERE s.instance_id = i.id AND s.warm))`,
+      [sandboxSince.refilled],
+    );
+    const refilled = Number(refills[0]?.count ?? 0);
+    if (refilled > 0 && refills[0]!.at) {
+      metrics.sandboxWarmRefills.inc(undefined, refilled);
+      sandboxSince.refilled = refills[0]!.at;
     }
   }
 

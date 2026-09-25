@@ -60,6 +60,31 @@ export function standardMetrics(registry: MetricsRegistry) {
       'tenant_teardowns_pending',
       'Deleted tenants whose teardown has not finished (a module still releasing)',
     ),
+    sandboxReady: registry.histogram(
+      'sandbox_ready_seconds',
+      'Sandbox create to its instance first running (§3.7), by source: a warm claim or a cold create; the counts give the warm-pool hit ratio',
+      ['source'],
+      [0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300],
+    ),
+    sandboxExpiryLag: registry.histogram(
+      'sandbox_expiry_lag_seconds',
+      'How late a sandbox was expired after its expiresAt',
+      [],
+      [1, 5, 15, 30, 60, 120, 300, 900],
+    ),
+    sandboxWarmInstances: registry.gauge(
+      'sandbox_warm_instances',
+      'Unclaimed warm-pool instances, by instance state',
+      ['state'],
+    ),
+    sandboxWarmDeficit: registry.gauge(
+      'sandbox_warm_deficit',
+      'Warm instances missing below the templates’ warm.min, summed over live templates',
+    ),
+    sandboxWarmRefills: registry.counter(
+      'sandbox_warm_refills_total',
+      'Warm-pool instances created to refill templates',
+    ),
     certExpiry: registry.gauge('cert_expiry_seconds', 'Seconds until the soonest expiry', ['kind']),
     clockOffset: registry.gauge('clock_offset_seconds', 'Process clock minus compute_now()'),
     securityEvents: registry.counter('security_events_total', 'Security events recorded', ['type']),
