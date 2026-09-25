@@ -376,7 +376,10 @@ describe('apiSurface (§9.2)', () => {
   it('assigns each group to the module and phase the plan names', () => {
     const modules: Record<string, string> = {};
     // The one method another module contributes to a group: break-glass SSH certificates.
-    const contributed: Record<string, string> = { 'nodes.issueSshCert': 'tunnels' };
+    const contributed: Record<string, string> = {
+      'nodes.issueSshCert': 'tunnels',
+      'nodes.revokeSshCert': 'tunnels',
+    };
     for (const row of apiSurface) {
       const path = `${row.group}.${row.method}`;
       if (contributed[path]) {

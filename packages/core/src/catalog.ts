@@ -368,6 +368,7 @@ group('nodes', 'server', [
   ['revokeIdentity', 'mutation', 'nodes:revoke-identity', 'node', 'v0.1'],
   ['delete', 'mutation', 'nodes:delete', 'node', 'v0.2'],
   ['issueSshCert', 'mutation', 'nodes:ssh-root', 'node', 'v0.3', { module: 'tunnels' }],
+  ['revokeSshCert', 'mutation', 'nodes:ssh-root', 'node', 'v0.3', { module: 'tunnels' }],
 ]);
 group('inventory', 'inventory', [
   ['get', 'read', 'nodes:read', 'node', 'v0.1'],

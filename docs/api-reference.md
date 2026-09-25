@@ -96,6 +96,7 @@ Every call is authenticated (except public methods), refused before any database
 | `nodes.revokeIdentity` | mutation | `compute:nodes:revoke-identity` @ `compute-node` | v0.1  | registered |
 | `nodes.delete`         | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | registered |
 | `nodes.issueSshCert`   | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned    |
+| `nodes.revokeSshCert`  | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned    |
 
 ### `inventory` (inventory)
 
