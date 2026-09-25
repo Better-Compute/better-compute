@@ -40,13 +40,17 @@ export interface NodeLease {
   profileVersion: number;
 }
 
-/** The node's current node-binding allocation, if one is due and not released. */
+/**
+ * The node's current node-binding allocation, if capacity has started it (the reservation is
+ * `binding`: a placed-but-not-started booking is still capacity's to repair or move) and it is not
+ * released.
+ */
 export async function dueNodeLease(tx: SqlTx, nodeId: string): Promise<NodeLease | undefined> {
   const { rows } = await tx.query<{ id: string; owner_id: string; tenant_id: string; node: { profileId?: unknown; profileVersion?: unknown } | null }>(
     `SELECT a.id, a.owner_id, a.tenant_id, r.request->'node' AS node
        FROM allocations a JOIN reservations r ON r.id = a.owner_id
       WHERE a.node_id = $1 AND a.owner_kind = 'reservation' AND a.released_at IS NULL
-        AND r.request->>'binding' = 'node'
+        AND r.request->>'binding' = 'node' AND r.state = 'binding'
         AND lower(a.during) <= compute_now() AND upper(a.during) > compute_now()
       ORDER BY lower(a.during), a.id LIMIT 1`,
     [nodeId],

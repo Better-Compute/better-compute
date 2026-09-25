@@ -5,8 +5,10 @@ import type {
   ComputeModule,
   EventPublisher,
   MethodContext,
+  Migration,
   ModuleContext,
   ProfileDocument,
+  Reconciler,
   SqlExecutor,
   StepDefinition,
   WorkQueue,
@@ -61,6 +63,10 @@ export interface MetalSimOptions {
   profiles?: readonly ProfileDocument[];
   /** Called when a machine boots from its CD: return a boot id to join as `node`, or undefined. */
   install?: (nodeId: string, machine: SimMachine) => string | undefined;
+  /** More module migrations (another module running next to metal, e.g. capacity). */
+  migrations?: readonly Migration[];
+  /** Their reconcilers: `settle()` runs queued work of these kinds too. */
+  reconcilers?: readonly Reconciler[];
 }
 
 /** A stable, locally unique PXE MAC per machine. */
@@ -83,7 +89,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     steps: [...(options.steps ?? [])],
     profiles: [...(options.profiles ?? [])],
   });
-  await db.migrate([...provisionMigrations, ...metalMigrations]);
+  await db.migrate([...provisionMigrations, ...metalMigrations, ...(options.migrations ?? [])]);
   await db.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_a', 'root', 'shared', 'eu', 1), ('site_b', 'root', 'shared', 'eu', 1)`);
   await db.query(
     `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version)
@@ -134,9 +140,11 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     },
   };
   const secretsStore = new Map<string, string>();
+  // Refs are never reused, even after deletes (a reused ref would overwrite a live secret).
+  let secretSeq = 0;
   const secrets = {
     async put(tenantId: string, value: string) {
-      const ref = `secret://${tenantId}/${secretsStore.size + 1}` as const;
+      const ref = `secret://${tenantId}/${++secretSeq}` as const;
       secretsStore.set(ref, value);
       return ref;
     },
@@ -147,7 +155,13 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       secretsStore.delete(ref);
     },
   };
-  const base = { sql: db, work, events: eventLog, commands, pki, secrets, requestId: 'req_sim', iam: { rootTenantId: 'root' } };
+  // What other modules' reconcilers and methods also reach for (capacity: clock, authz, desired).
+  const ports = {
+    clock: { now: () => Date.now() },
+    authz: { async upsert() {}, async remove() {}, async setPending() {} },
+    desired: { async invalidate() {} },
+  };
+  const base = { sql: db, work, events: eventLog, commands, pki, secrets, requestId: 'req_sim', iam: { rootTenantId: 'root' }, ...ports };
   const context = { ...base, workflows: provision.workflowEngine(base as never) } as unknown as ModuleContext & MethodContext;
   const api: MetalApi = bareMetal.api!(context);
 
@@ -358,6 +372,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       for (const item of due) {
         if (item.kind === metalWorkKind) await reconcileMetalNode(context, item.key);
         else if (item.kind === 'workflow') await provision.reconcilers![0]!.run({ ...context, signal } as never, item.key);
+        else await options.reconcilers?.find((reconciler) => reconciler.name === item.kind)?.run({ ...context, signal } as never, item.key);
       }
       if (answered === 0 && due.length === 0) return;
     }
