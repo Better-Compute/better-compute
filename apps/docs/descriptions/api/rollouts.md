@@ -33,7 +33,7 @@ A rollout paused by the failure gate resumes the same way. A completed or aborte
 
 ## abort
 
-Ends a running or paused rollout: nodes not yet started are skipped, and with `rollback: true` upgraded nodes go back to the version they ran before; returns the rollout in `aborted`.
+Ends a running or paused rollout: nodes not yet started are skipped, and with `rollback: true` upgrades not yet confirmed go back to the version they ran before; returns the rollout in `aborted`.
 
-- With `rollback`, nodes `upgrading` or `succeeded` whose previous version is a registered release move to `rolling-back`, and the controller settles them. Without it, nodes still upgrading are marked `failed`.
+- With `rollback`, nodes still `upgrading` whose previous version is a registered release move to `rolling-back`, and the controller settles them. Nodes that `succeeded` keep the release: once a node confirmed it, bcd refuses every older binary, the one in its other slot included. Undo a bad release by publishing a newer one (a higher sequence) and rolling it out. Without `rollback`, nodes still upgrading are marked `failed`.
 - `reason` defaults to "aborted by an operator". A completed or aborted rollout is `INVALID_STATE`. Publishes `rollout.aborted`.
