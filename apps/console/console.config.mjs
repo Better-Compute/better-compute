@@ -163,8 +163,24 @@ export async function createStack() {
   // Webhooks (the events module), and the store's housekeeping (outbox, authz changes, spent attestations).
   const tunnels = await tunnelsFor(dataDir, origin);
   const modules = [
-    // Sandbox guests trust the sandbox CA for `sandboxes.exec` (no agent in the guest).
-    vps(tunnels?.sandboxSsh ? { sandboxExec: { caPublicKey: tunnels.sandboxSsh.publicKey } } : {}),
+    // Sandbox guests trust the sandbox CA for `sandboxes.exec` (no agent in the guest), and present a host key the
+    // same CA certifies, so `sandbox exec` pins them instead of trusting on first use.
+    vps(
+      tunnels?.sandboxSsh
+        ? {
+            sandboxExec: {
+              caPublicKey: tunnels.sandboxSsh.publicKey,
+              certifyHostKey: async ({ instanceId, principals, publicKey, validBefore }) =>
+                tunnels.sandboxSsh.issueHostCertificate({
+                  publicKey,
+                  principals,
+                  keyId: `host/${instanceId}`,
+                  validBefore,
+                }).certificate,
+            },
+          }
+        : {},
+    ),
     fleetModule(),
     eventsModule({ secret }),
     retentionModule(),
