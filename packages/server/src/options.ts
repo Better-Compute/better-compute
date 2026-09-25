@@ -32,6 +32,7 @@ import { createCommandSigner, type CommandSigner } from './runtime/command-signi
 import type { TunnelsOptions } from './tunnels/module.js';
 import type { WorkloadIdentityOptions } from './join/workload-broker.js';
 import { anchoredClock } from './runtime/clock.js';
+import type { ReconcileRun } from './runtime/reconcilers.js';
 import { withCommitHooks, type CommitHook } from './runtime/commit-hooks.js';
 
 /** Worker roles `start({ roles })` runs (PLAN.md §8.1); `api` and `gateway` processes run none. */
@@ -64,6 +65,18 @@ export interface WorkerOptions {
   claimTtlMs?: number;
   /** Level-trigger resync: owned keys are re-enqueued every `resyncMs` plus up to `resyncMs` of jitter (default 5 min). */
   resyncMs?: number;
+  /**
+   * Observers of the runtime's work, for metrics and spans (§14: `reconcile_duration_seconds`,
+   * `commands_swept_total`). Called after each reconciler run and each CommandSweeper pass; never
+   * awaited, and a throw is ignored, so they cannot affect the work.
+   */
+  observe?: WorkerObserver;
+}
+
+/** `WorkerOptions.observe`. */
+export interface WorkerObserver {
+  onRun?(run: ReconcileRun): void;
+  onSweep?(swept: { expired: number; failed: number }): void;
 }
 
 /** The worker settings the runtime runs with. */
@@ -85,6 +98,7 @@ export interface WorkerSettings {
   maxBackoffMs: number;
   /** The CommandSweeper's period (5 s). */
   sweepMs: number;
+  observe?: WorkerObserver;
 }
 
 /**
@@ -493,7 +507,15 @@ function resolveWorker(options: WorkerOptions | undefined): WorkerSettings {
   const id = options?.id ?? newId('wkr');
   if (typeof id !== 'string' || !workerIdPattern.test(id))
     throw invalid('worker.id must be 1-128 characters of [A-Za-z0-9._:-]');
+  const observe = options?.observe;
+  if (observe !== undefined) {
+    if (!isRecord(observe)) throw invalid('worker.observe must be an object');
+    for (const hook of ['onRun', 'onSweep'] as const)
+      if (observe[hook] !== undefined && typeof observe[hook] !== 'function')
+        throw invalid(`worker.observe.${hook} must be a function`);
+  }
   return {
+    ...(observe ? { observe } : {}),
     id,
     batchSize: whole('batchSize', 32, 1, 1000),
     concurrency: whole('concurrency', 4, 1, 64),

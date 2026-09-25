@@ -236,6 +236,15 @@ export function createRuntime(options: ResolvedOptions): Runtime {
         registered: (kind) => runners.has(kind),
       }),
     );
+    if (swept.length && settings.observe?.onSweep)
+      try {
+        settings.observe.onSweep({
+          expired: swept.filter((command) => command.state === 'expired').length,
+          failed: swept.filter((command) => command.state === 'failed').length,
+        });
+      } catch {
+        // Observers never affect the work.
+      }
     return swept.length;
   }
 
@@ -345,6 +354,7 @@ export function createRuntime(options: ResolvedOptions): Runtime {
             maxBackoffMs: settings.maxBackoffMs,
             resyncMs: settings.resyncMs,
           },
+          ...(settings.observe?.onRun ? { onRun: settings.observe.onRun.bind(settings.observe) } : {}),
           get signal() {
             return stopController.signal;
           },

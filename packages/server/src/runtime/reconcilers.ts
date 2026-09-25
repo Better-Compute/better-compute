@@ -154,6 +154,18 @@ export interface ReconcilerRunnerInput {
   singleton: SingletonLease;
   settings: ReconcilerSettings;
   signal: AbortSignal;
+  /** Told about every finished run (metrics, spans); never awaited, and a throw is ignored. */
+  onRun?: (run: ReconcileRun) => void;
+}
+
+/** One finished reconciler run, for `WorkerOptions.observe.onRun`. */
+export interface ReconcileRun {
+  reconciler: string;
+  key: string;
+  outcome: 'done' | 'sync-again' | 'error';
+  durationMs: number;
+  /** The ComputeError code of a failed run. */
+  code?: string;
 }
 
 export interface ReconcilerRunner {
@@ -240,6 +252,15 @@ export function createReconcilerRunner(input: ReconcilerRunnerInput): Reconciler
       signal: input.signal,
     };
     let outcome: 'DONE' | 'SYNC_AGAIN';
+    const started = performance.now();
+    const observe = (run: Pick<ReconcileRun, 'outcome' | 'code'>) => {
+      if (!input.onRun) return;
+      try {
+        input.onRun({ reconciler: name, key: item.key, durationMs: performance.now() - started, ...run });
+      } catch {
+        // Observers never affect the work.
+      }
+    };
     try {
       outcome = await reconciler.run(context, item.key);
       if (outcome !== 'DONE' && outcome !== 'SYNC_AGAIN')
@@ -248,6 +269,8 @@ export function createReconcilerRunner(input: ReconcilerRunnerInput): Reconciler
           `returned ${String(outcome)}, not DONE or SYNC_AGAIN`,
         );
     } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      observe({ outcome: 'error', ...(typeof code === 'string' ? { code } : {}) });
       const attempts = (failures.get(item.key) ?? 0) + 1;
       failures.set(item.key, attempts);
       const delay = Math.min(1000 * 2 ** (attempts - 1), settings.maxBackoffMs);
@@ -262,6 +285,7 @@ export function createReconcilerRunner(input: ReconcilerRunnerInput): Reconciler
       return;
     }
     failures.delete(item.key);
+    observe({ outcome: outcome === 'DONE' ? 'done' : 'sync-again' });
     const every = periodic.get(item.key);
     if (outcome === 'SYNC_AGAIN') await defer(item, settings.syncAgainMs, false);
     else if (every !== undefined) await defer(item, every, false);

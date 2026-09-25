@@ -228,6 +228,61 @@ describe('the scheduler role (§8.1, v0.4)', () => {
   });
 });
 
+describe('worker.observe (§14 metrics hooks)', () => {
+  it('reports every reconciler run with its outcome and duration; a throwing observer changes nothing', async () => {
+    const runs: { reconciler: string; key: string; outcome: string; code?: string; durationMs: number }[] = [];
+    const module = defineModule({
+      name: 'observed',
+      reconcilers: [
+        {
+          name: 'observed',
+          shardBy: 'none',
+          run: async (_context, key) => {
+            if (key === 'bad') throw Object.assign(new Error('nope'), { code: 'CONFLICT' });
+            return key === 'again' ? 'SYNC_AGAIN' : 'DONE';
+          },
+        },
+      ],
+    });
+    const fixture = await computeFixture();
+    const compute = await sibling(fixture, {
+      modules: [module],
+      worker: {
+        id: 'wkr-observed',
+        observe: {
+          onRun: (run) => {
+            runs.push(run);
+            throw new Error('a broken metrics hook');
+          },
+        },
+      },
+      log: { debug() {}, info() {}, warn() {}, error() {} },
+    });
+    await fixture.database.transaction(async (tx) => {
+      for (const key of ['ok', 'again', 'bad']) await compute.context.work.enqueue(tx, 'observed', key);
+    });
+    expect(await compute.jobs.observed!.tick()).toBe(3);
+    expect(runs.map(({ key, outcome, code }) => ({ key, outcome, ...(code ? { code } : {}) })).sort((a, b) => a.key.localeCompare(b.key))).toEqual([
+      { key: 'again', outcome: 'sync-again' },
+      { key: 'bad', outcome: 'error', code: 'CONFLICT' },
+      { key: 'ok', outcome: 'done' },
+    ]);
+    expect(runs.every((run) => run.reconciler === 'observed' && run.durationMs >= 0)).toBe(true);
+    // The throwing hook did not stop the runs from settling: `ok` is gone, the others remain queued.
+    const { rows } = await fixture.database.query<{ key: string }>(
+      "SELECT key FROM work_queue WHERE kind = 'observed' ORDER BY key",
+    );
+    expect(rows.map((row) => row.key)).toEqual(['again', 'bad']);
+  });
+
+  it('refuses observers that are not functions', async () => {
+    const fixture = await computeFixture();
+    await expect(sibling(fixture, { worker: { observe: { onRun: 'yes' as never } } })).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+  });
+});
+
 /** Live shard-lease holders of a membership group (`''` = the controllers). */
 async function owners(database: SqlTx, group = '') {
   const { rows } = await database.query<{ owner: string; n: number }>(

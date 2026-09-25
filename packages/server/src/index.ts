@@ -43,7 +43,8 @@ export { configOptions, defineConfig } from './define.js';
 export type { ComputeConfigContext, ComputeConfigFactory } from './define.js';
 export { maxBodyBytes } from './http.js';
 export { workerRoles } from './options.js';
-export type { ComputeOptions, IamJob, WorkerOptions, WorkerRole } from './options.js';
+export type { ComputeOptions, IamJob, WorkerObserver, WorkerOptions, WorkerRole } from './options.js';
+export type { ReconcileRun } from './runtime/reconcilers.js';
 export {
   anchoredClock,
   assignShards,
