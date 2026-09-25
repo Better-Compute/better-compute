@@ -12,11 +12,13 @@ import {
   awaitCommand,
   defineStep,
   pinImageForWorkflow,
+  releaseImagePins,
   renderedUserData,
   resolveImageRef,
   siteAgentFor,
   stepCommandKey,
   stepNotReady,
+  StepNotReady,
   verifyImageForUse,
   workflowProfile,
   type CommandOutcome,
@@ -488,19 +490,29 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       await context.sql.transaction((tx) =>
         pinImageForWorkflow(tx, context.desired, { workflowId: context.workflowId, imageId: image.id, siteId: node.site_id }),
       );
-      const outcome = await awaitCommand(context, {
-        nodeId: node.node_id,
-        kind: 'deploy.image',
-        payload: {
-          url: image.source,
-          sha256: Buffer.from(image.sha256, 'hex').toString('base64'),
-          format,
-          compression: compressionNames[pinned?.profile.image?.compression ?? image.compression]!,
-          uefi: node.uefi,
-          ...(userData ? { userDataRef: userData.userDataRef, userDataKind: userData.kind } : {}),
-        },
-        timeoutMs: 60 * 60_000,
-      });
+      // The pin lasts while the image streams: once deploy.image settles (or the step fails), the site
+      // may evict it again. "Not ready" (still streaming) keeps it.
+      const unpin = () => context.sql.transaction((tx) => releaseImagePins(tx, context.desired, context.workflowId));
+      let outcome: CommandOutcome;
+      try {
+        outcome = await awaitCommand(context, {
+          nodeId: node.node_id,
+          kind: 'deploy.image',
+          payload: {
+            url: image.source,
+            sha256: Buffer.from(image.sha256, 'hex').toString('base64'),
+            format,
+            compression: compressionNames[pinned?.profile.image?.compression ?? image.compression]!,
+            uefi: node.uefi,
+            ...(userData ? { userDataRef: userData.userDataRef, userDataKind: userData.kind } : {}),
+          },
+          timeoutMs: 60 * 60_000,
+        });
+      } catch (error) {
+        if (!(error instanceof StepNotReady)) await unpin();
+        throw error;
+      }
+      await unpin();
       const written = deployResult(outcome);
       const streamed = Buffer.from(written.sha256).toString('hex');
       if (streamed && streamed !== image.sha256)

@@ -43,14 +43,58 @@ export function renderTemplate(template: UserDataTemplate, variables: Readonly<R
 /** Where the built-in user data puts bcd and the embedded join token. */
 export const bcdPaths = Object.freeze({ binary: '/usr/local/bin/bcd', joinToken: '/etc/bcd/join-token' });
 
+/** An SPKI pin as bcd's config carries it: `sha256/` and the base64 of the SHA-256. */
+const spkiPinPattern = /^sha256\/[A-Za-z0-9+/]{43}=$/;
+
 /**
- * The `bcd join` an installed OS runs (the Go contract; scripts/daemon-fixtures.mjs dumps it for
- * bcd's tests): the control plane URL (its well-known join keys), the token file (bcd removes it once
- * joined) and the node the OS was installed for (a `provisioned` token; bcd refuses another identity).
- * bcd writes its config.toml; `bcdNodeArgv` then runs the agent.
+ * The trust anchors an installed bcd verifies the control plane's well-known document against, from
+ * the host's authenticated PKI bundle (`bootstrapPins`), never from that document: the gateway serving
+ * CA, the key that signs JoinResponse, and the JoinService key the token is sealed to (without that
+ * one, a forged document could swap the key, open the token and replay it). bcd needs all three to
+ * bootstrap without a config.toml.
  */
-export function bcdJoinArgv(variables: Pick<UserDataVariables, 'controlPlaneUrl' | 'nodeId'>): string[] {
-  return [bcdPaths.binary, 'join', '--server', variables.controlPlaneUrl, '--token-file', bcdPaths.joinToken, '--node-id', variables.nodeId];
+export interface BootstrapPins {
+  servingCaPin: string;
+  joinSigningPin: string;
+  joinEncryptionPin: string;
+}
+
+/**
+ * The `bcd join` an installed OS runs (the Go contract; scripts/daemon-install-contract.mjs dumps it
+ * for bcd's tests): the control plane URL (its well-known join keys), the token file (bcd removes it
+ * once joined) and the node the OS was installed for (a `provisioned` token; bcd refuses another
+ * identity). With `pins`, bcd trusts the well-known document only where it matches them (without,
+ * only Web PKI authenticates it). bcd writes its config.toml; `bcdNodeArgv` then runs the agent.
+ */
+export function bcdJoinArgv(
+  variables: Pick<UserDataVariables, 'controlPlaneUrl' | 'nodeId'> & { pins?: BootstrapPins },
+): string[] {
+  const argv = [bcdPaths.binary, 'join', '--server', variables.controlPlaneUrl, '--token-file', bcdPaths.joinToken, '--node-id', variables.nodeId];
+  const pins = variables.pins;
+  if (pins) {
+    for (const name of ['servingCaPin', 'joinSigningPin', 'joinEncryptionPin'] as const)
+      if (typeof pins[name] !== 'string' || !spkiPinPattern.test(pins[name]))
+        throw new ComputeError('INVALID_CONFIG', `userData pins.${name} must be sha256/<base64 of 32 bytes>`);
+    argv.push('--serving-ca-pin', pins.servingCaPin, '--join-signing-pin', pins.joinSigningPin, '--join-encryption-pin', pins.joinEncryptionPin);
+  }
+  return argv;
+}
+
+/**
+ * The pins among a template's variables (`servingCaPin`, `joinSigningPin`, `joinEncryptionPin`):
+ * all three, or none (a partial set is refused, as bcd refuses it).
+ */
+function pinsOf(v: Readonly<Record<string, string>>): BootstrapPins | undefined {
+  const given = [v.servingCaPin, v.joinSigningPin, v.joinEncryptionPin].filter((pin) => pin !== undefined && pin !== '');
+  if (given.length === 0) return undefined;
+  if (given.length !== 3) throw new ComputeError('INVALID_CONFIG', 'User data pins need servingCaPin, joinSigningPin and joinEncryptionPin together');
+  return { servingCaPin: v.servingCaPin!, joinSigningPin: v.joinSigningPin!, joinEncryptionPin: v.joinEncryptionPin! };
+}
+
+function need(v: Readonly<Record<string, string>>, name: string): string {
+  const value = v[name];
+  if (value === undefined) throw new ComputeError('INVALID_CONFIG', `The user data template uses ${name}, which has no value`);
+  return value;
 }
 
 /** The node agent the installed OS runs after joining (default config, written by `bcd join`). */
@@ -75,24 +119,30 @@ const bcdServiceUnit = [
 const yamlFlow = (argv: readonly string[]) => `[${argv.join(', ')}]`;
 
 /**
- * The built-in cloud-init: installs bcd (sha256 checked), joins with the embedded token, then enables
- * the node agent as `bcd.service`.
+ * The built-in cloud-init: installs bcd (sha256 checked), joins with the embedded token (and the
+ * bootstrap pins, when the variables carry `servingCaPin` and `joinSigningPin`), then enables the
+ * node agent as `bcd.service`. The download URL is single-quoted for `sh -c` (a presigned URL's `&`
+ * stays in the URL).
  */
-export const bcdHostCloudInit = `#cloud-config
-hostname: {{hostname}}
+export const bcdHostCloudInit: UserDataTemplate = (v) => {
+  const pins = pinsOf(v);
+  const join = bcdJoinArgv({ controlPlaneUrl: need(v, 'controlPlaneUrl'), nodeId: need(v, 'nodeId'), ...(pins ? { pins } : {}) });
+  return `#cloud-config
+hostname: ${need(v, 'hostname')}
 write_files:
   - path: ${bcdPaths.joinToken}
     permissions: '0600'
-    content: {{joinToken}}
+    content: ${need(v, 'joinToken')}
   - path: /etc/systemd/system/bcd.service
     permissions: '0644'
     content: |
 ${bcdServiceUnit.map((line) => `      ${line}`).join('\n')}
 runcmd:
-  - [sh, -c, "curl -fsSL {{bcdUrl}} -o ${bcdPaths.binary} && echo '{{bcdSha256}}  ${bcdPaths.binary}' | sha256sum -c - && chmod 0755 ${bcdPaths.binary}"]
-  - ${yamlFlow(bcdJoinArgv({ controlPlaneUrl: '{{controlPlaneUrl}}', nodeId: '{{nodeId}}' }))}
+  - [sh, -c, "curl -fsSL '${need(v, 'bcdUrl')}' -o ${bcdPaths.binary} && echo '${need(v, 'bcdSha256')}  ${bcdPaths.binary}' | sha256sum -c - && chmod 0755 ${bcdPaths.binary}"]
+  - ${yamlFlow(join)}
   - [systemctl, enable, --now, bcd.service]
 `;
+};
 
 /**
  * The built-in Ignition (spec 3.4) config: the token as a 0600 file, bcd downloaded with its
@@ -128,8 +178,8 @@ export const bcdHostIgnition: UserDataTemplate = (v) =>
             '[Service]',
             'Type=oneshot',
             'RemainAfterExit=yes',
-            // One token per argument: userDataStep refuses URLs with spaces, quotes or `%` (a systemd specifier).
-            `ExecStart=${bcdJoinArgv({ controlPlaneUrl: v.controlPlaneUrl!, nodeId: v.nodeId! }).join(' ')}`,
+            // One token per argument: userDataStep refuses a controlPlaneUrl with spaces, quotes or `%` (a systemd specifier).
+            `ExecStart=${bcdJoinArgv({ controlPlaneUrl: need(v, 'controlPlaneUrl'), nodeId: need(v, 'nodeId'), ...(pinsOf(v) ? { pins: pinsOf(v)! } : {}) }).join(' ')}`,
             '[Install]',
             'WantedBy=multi-user.target',
           ].join('\n'),
@@ -151,6 +201,12 @@ export interface UserDataOptions {
   controlPlaneUrl?: string;
   bcdUrl?: string;
   bcdSha256?: string;
+  /**
+   * The bootstrap pins (`bootstrapPins(bundle)` from the host's PKI bundle): rendered into `bcd join`
+   * so the installed bcd trusts the well-known document only where it matches them. A real bcd refuses
+   * to bootstrap without all three (only fakehw dev builds join with none); production hosts pass them.
+   */
+  pins?: BootstrapPins;
   /** How long the embedded join token stays valid (default 2 h). */
   tokenTtlSeconds?: number;
 }
@@ -163,12 +219,16 @@ export interface UserDataOptions {
  */
 export function userDataStep(options: UserDataOptions = {}): StepDefinition {
   const templates = { ...builtinUserDataTemplates, ...(options.templates ?? {}) };
-  // They land in argv lists (a YAML flow sequence, a systemd ExecStart): one plain token each.
-  for (const [name, url] of [['controlPlaneUrl', options.controlPlaneUrl], ['bcdUrl', options.bcdUrl]] as const)
-    if (url !== undefined && !/^https?:\/\/[^\s,[\]{}'"`\\%]+$/.test(url))
-      throw new ComputeError('INVALID_CONFIG', `userdata.render: ${name} must be an http(s) URL without spaces, quotes, commas, brackets or %`);
+  // The control plane URL lands in argv lists (a YAML flow sequence, a systemd ExecStart): one plain
+  // token, no shell or systemd specials. The download URL is single-quoted inside `sh -c` (so `&`,
+  // `%` and `?` of a presigned URL are fine), so it only may not break out of the quotes.
+  if (options.controlPlaneUrl !== undefined && !/^https?:\/\/[^\s,[\]{}'"`\\%&;|$()<>*!#]+$/.test(options.controlPlaneUrl))
+    throw new ComputeError('INVALID_CONFIG', 'userdata.render: controlPlaneUrl must be an http(s) URL without spaces, quotes or shell and systemd special characters');
+  if (options.bcdUrl !== undefined && !/^https?:\/\/[^\s'"`\\]+$/.test(options.bcdUrl))
+    throw new ComputeError('INVALID_CONFIG', 'userdata.render: bcdUrl must be an http(s) URL without spaces, quotes or backslashes');
   if (options.bcdSha256 !== undefined && !/^[0-9a-f]{64}$/.test(options.bcdSha256))
     throw new ComputeError('INVALID_CONFIG', 'userdata.render: bcdSha256 must be 64 lower-case hex digits');
+  if (options.pins) bcdJoinArgv({ controlPlaneUrl: 'https://check', nodeId: 'check', pins: options.pins });
   return defineStep({
     id: 'userdata.render',
     runsOn: 'control-plane',
@@ -210,6 +270,9 @@ export function userDataStep(options: UserDataOptions = {}): StepDefinition {
         controlPlaneUrl: options.controlPlaneUrl,
         bcdUrl: options.bcdUrl,
         bcdSha256: options.bcdSha256,
+        ...(options.pins
+          ? { servingCaPin: options.pins.servingCaPin, joinSigningPin: options.pins.joinSigningPin, joinEncryptionPin: options.pins.joinEncryptionPin }
+          : {}),
       });
       const ref: SecretRef = await context.secrets.put(node.owner_tenant_id, rendered);
       return { userDataRef: ref, kind: userData.kind, joinTokenId: token.id };

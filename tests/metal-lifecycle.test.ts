@@ -422,6 +422,8 @@ describe('deploy, release, retire', () => {
       compression: 'IMAGE_COMPRESSION_ZSTD',
     });
     expect(seen.find((c) => c.kind === 'boot.kexec')!.node).toBe(id);
+    // The image was pinned at the site only while it streamed: nothing is left once deploy.image settled.
+    expect((await db.query('SELECT 1 FROM provision_image_pins')).rowCount).toBe(0);
     // User data travels as a secret reference only; the stored document embeds a single-use token.
     const deployPayload = seen.find((c) => c.kind === 'deploy.image')!.payload;
     expect(deployPayload).toMatchObject({ userDataKind: 'cloud-init', userDataRef: expect.stringMatching(/^secret:\/\//) });

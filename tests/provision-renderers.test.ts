@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { bcdHostCloudInit, bcdJoinArgv, bcdNodeArgv, provisionModule, renderTemplate, userDataStep } from '@better-compute/provision';
+import {
+  bcdHostCloudInit,
+  bcdHostIgnition,
+  bcdJoinArgv,
+  bcdNodeArgv,
+  provisionModule,
+  renderTemplate,
+  userDataStep,
+} from '@better-compute/provision';
+
+/** A well-formed SPKI pin (sha256/ + base64 of 32 bytes). */
+const pin = (fill: string) => `sha256/${Buffer.alloc(32, fill).toString('base64')}`;
 
 // User data templates (PLAN.md §11.4): placeholders, and values that cannot inject lines.
 
@@ -41,18 +52,52 @@ describe('renderTemplate', () => {
     expect(rendered).toContain('      ExecStart=/usr/local/bin/bcd node');
   });
 
-  it('refuses URLs that would not stay one argument, and a malformed digest, when configured', () => {
+  it('refuses URLs that would not stay one argument, and a malformed digest or pin, when configured', () => {
     const good = { controlPlaneUrl: 'https://gw.example:8443/', bcdUrl: 'https://dl/bcd', bcdSha256: 'ab'.repeat(32) };
     expect(() => userDataStep(good)).not.toThrow();
     expect(() => userDataStep({})).not.toThrow();
+    // A presigned download URL is fine: it is single-quoted for sh -c.
+    expect(() => userDataStep({ ...good, bcdUrl: 'https://s3.example/bcd?X-Amz-Credential=a%2Fb&X-Amz-Signature=c' })).not.toThrow();
     for (const bad of [
       { ...good, controlPlaneUrl: 'https://gw, --evil' },
       { ...good, controlPlaneUrl: 'https://gw --server x' },
-      { ...good, bcdUrl: 'https://dl/%n' },
+      { ...good, controlPlaneUrl: 'https://gw/%n' },
+      { ...good, controlPlaneUrl: 'https://gw/a&b' },
+      { ...good, bcdUrl: "https://dl/bcd' ; rm -rf / ; '" },
       { ...good, bcdUrl: 'ftp://dl/bcd' },
       { ...good, bcdSha256: 'xyz' },
+      { ...good, pins: { servingCaPin: 'sha256/short=', joinSigningPin: pin('b'), joinEncryptionPin: pin('c') } },
+      { ...good, pins: { servingCaPin: pin('a'), joinSigningPin: pin('b') } as never },
     ])
       expect(() => userDataStep(bad), JSON.stringify(bad)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
+  });
+
+  it('quotes the download URL for sh -c', () => {
+    const presigned = 'https://s3.example/bcd?a=1&b=2';
+    const rendered = renderTemplate(bcdHostCloudInit, { ...vars, bcdUrl: presigned });
+    expect(rendered).toContain(`curl -fsSL '${presigned}' -o /usr/local/bin/bcd`);
+  });
+
+  it('renders the bootstrap pins into bcd join, in both templates, when the host has them', () => {
+    const pins = { servingCaPin: pin('a'), joinSigningPin: pin('b'), joinEncryptionPin: pin('c') };
+    const pinned = [
+      ...bcdJoinArgv(vars),
+      '--serving-ca-pin',
+      pins.servingCaPin,
+      '--join-signing-pin',
+      pins.joinSigningPin,
+      '--join-encryption-pin',
+      pins.joinEncryptionPin,
+    ];
+    expect(bcdJoinArgv({ ...vars, pins })).toEqual(pinned);
+    const withPins = { ...vars, ...pins };
+    expect(renderTemplate(bcdHostCloudInit, withPins)).toContain(`- [${pinned.join(', ')}]`);
+    const ignition = JSON.parse(renderTemplate(bcdHostIgnition, withPins));
+    const join = ignition.systemd.units.find((unit: { name: string }) => unit.name === 'bcd-join.service').contents;
+    expect(join).toContain(`ExecStart=${pinned.join(' ')}`);
+    // Without them, the unpinned form (dev stacks without a PKI bundle); a partial set is refused.
+    expect(renderTemplate(bcdHostCloudInit, vars)).not.toContain('--serving-ca-pin');
+    expect(() => renderTemplate(bcdHostCloudInit, { ...vars, servingCaPin: pins.servingCaPin })).toThrow(/together/);
   });
 
   it('refuses unknown placeholders and values that would add lines', () => {
