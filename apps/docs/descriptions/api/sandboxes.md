@@ -7,6 +7,7 @@ Starts a sandbox from a template after one IAM decision on the draft, claiming a
 - **Idempotency.** `idempotencyKey` is required. The sandbox id derives from the tenant, the caller's identity and the key: a retry of an admitted request returns the stored sandbox without a second decision, and a different request under the same key is `CONFLICT` with `details.sandboxId`. `wait` is not part of the compared request.
 - **IAM.** `compute:sandboxes:create` is decided on `compute-sandbox/` plus the draft id, whose parent is the template's pool. Policies can test `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds` and `warm` (true when the template keeps a warm pool). A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`. After an allow, the pool's budget check can answer `SPEND_LIMIT_REACHED` and keep the draft for a retry with the same key.
 - **Start.** The oldest stopped or paused warm instance of the template is claimed: it changes owner to the caller, is set to run, and publishes `instance.starting`; the claim places nothing new. Without one, a new instance is created and placed as `instances.create` would, publishing `instance.created` and, once placed, `instance.scheduled`; when no host fits it waits in scheduling and the sandbox stays `starting`. `warm` in the answer tells which path was taken.
+- **Restore.** `fromSnapshot` starts the sandbox from one of the tenant's own `ready` snapshots taken on the template's runtime (another tenant's is `NOT_FOUND`, one not ready is `INVALID_STATE`). A restore never claims a warm instance, and a snapshot that includes memory places only on nodes with the same `cpu.model`. Policies see it as the `fromSnapshot` attribute.
 - **Lifetime.** `ttlSeconds` defaults to the template's `defaultTtlSeconds` and may not exceed its `maxTtlSeconds` (`INVALID_INPUT`). `expiresAt` is set when the sandbox is admitted.
 - **Errors.** `NOT_FOUND` for a template missing or deleted in the tenant. `INVALID_STATE` when the template's flavor has been archived or removed. On the new-instance path the template's pool, flavor and image are checked again, with the errors of `sandboxTemplates.create`; `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota and `CAPACITY_UNAVAILABLE` when the pool has no free IP address, both keeping the draft.
 - **Waiting.** `wait.timeoutMs` (at most 30 seconds) holds the answer until the sandbox leaves `starting`; a timeout returns it still `starting`, not an error.
@@ -17,13 +18,13 @@ Publishes `sandbox.created` with `warm` and `expiresAt`. `sandbox.ready` follows
 
 Returns a page of the tenant's sandboxes, newest first, with a `cursor` when more remain.
 
-`scope` defaults to `mine`, the caller's own sandboxes; `all` lists every sandbox of the tenant. In both scopes each sandbox is then checked for `compute:sandboxes:read`, and those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed.
+`scope` defaults to `mine`, the caller's own sandboxes, which needs no per-item check. `all` lists every sandbox of the tenant, each one checked for `compute:sandboxes:read`; those the caller may not read are left out, so a page can hold fewer than `limit` items. Deleted sandboxes are left out unless `deleted` is true, and `templateId` keeps one template's sandboxes. `limit` is 1 to 200 (default 50); `cursor` is the last sandbox id of the previous page. Drafts are never listed.
 
 ## get
 
 Returns one sandbox of the tenant with its state, its instance's state, addresses and node, and its `expiresAt`.
 
-`readyAt` is set once the reconciler saw the instance run, and `expiredAt` when the sandbox ended by reaching `expiresAt`. Drafts and sandboxes of other tenants are `NOT_FOUND`.
+`readyAt` is set once the reconciler saw the instance run, and `expiredAt` when the sandbox ended by reaching `expiresAt`. `snapshots` lists the sandbox's snapshots with their state. Drafts and sandboxes of other tenants are `NOT_FOUND`.
 
 ## extend
 
@@ -37,9 +38,12 @@ The stored `ttlSeconds` becomes the new whole lifetime. Publishes `sandbox.exten
 
 ## snapshot
 
-Planned for v0.5 and not served by this release.
+Saves a running or paused sandbox's state (disk, and memory unless `includeMemory` is false) as a tenant-private snapshot; returns it `pending` until the host's `instance.snapshot` command settles.
 
-The catalog reserves it, decided as `compute:sandboxes:update` on `compute-sandbox`, but no handler is registered. PLAN.md §3.7 plans it to save a sandbox's disk and memory state as a private image through the host's runtime, and a runtime without snapshot support to answer `UNSUPPORTED`.
+- **Where.** The deployment's snapshot store (`vps({ snapshots })`) presigns an https upload URL, and the host uploads straight to it. Without a store the call is `INVALID_CONFIG`. A sandbox that is not running or paused, or whose deletion has started, is `INVALID_STATE`.
+- **Settling.** The `vps.sandboxes` reconciler, woken when the command settles, makes the snapshot `ready` (with its sha256, size, runtime and CPU model) and publishes `sandbox.snapshot.ready`, or makes it `failed` and publishes `sandbox.snapshot.failed`.
+- **Idempotency.** With `idempotencyKey`, a retry returns the same snapshot; the key used for another sandbox is `CONFLICT`. Without one, every call takes a new snapshot.
+- **Lifetime.** A snapshot is deleted with its sandbox unless `keep` is true. A tenant teardown deletes all of them, kept ones included. Snapshots are never promoted to shared images.
 
 ## exec
 
