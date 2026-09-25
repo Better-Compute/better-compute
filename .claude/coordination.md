@@ -119,7 +119,15 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   the gateway report hook into capacity (not only pki-intent).
 - [f02367]: deploy-time refusal of an unsigned/unverified image; site-agent failover mid-PXE (standby continues the
   boot step within 30 s, sim clock).
-- [402c97]: support-bundle token scan for TS-produced bundles; a packed-smoke vitest wrapper under `tests/`.
+- [402c97]: DONE: support-bundle token scan for TS-produced bundles (2daaa64); a packed-smoke vitest wrapper under
+  `tests/` (packed-smoke.test.ts). Later:
+  - CLI `console`/`exec`/`forward` (9f5272d, 89d3032); `sandbox *` incl. `sandbox exec` over ssh tunnels (e01394e).
+  - trust_version switch gate (b4551ff).
+  - Security reviews #2/#3, all fixed: c8295a9, 482dea8, ab99642, dc75f63, f438dbe, f1fbbf2, 7b9e9af (HIGH:
+    multi-line SSH CA line via legacy seal), 3238a5a.
+  - nodes.listSshCerts (f0bdc81) + console-kit createSshAccessView (ba442cb).
+  - pki sandboxSshCa + tunnelsOptions (b9debd5).
+  - console-kit sandboxes view + page (a545208); commandOwner in hosts (8b31b44).
 - [f85da7]: DONE: MCP → IAM confirmation → same-key retry as one flow (39b3eda); known-key replay matrix step
   (542885d); §12.6 policies incl. DelegatedSmall extend on real drafts (cc62e03, which also fixed stale-projection
   admissions); node-scoped gateway reports (6725423). Later: remote-IAM MCP remoteMcpIam (3afe9c1) + reservation
