@@ -85,6 +85,13 @@ owners: each area's new owner finishes (or discards) the orphan files in its are
 | mcp, fleet, rollout ([9ec62d]; unlisted until now) | [f85da7] | — |
 | apps/docs shell + hand-written pages ([ebe83b]) | "Docs app with better-iam styling" [731f14] | `apps/docs/**` untracked files |
 
+COMMIT WITH `node scripts/private-commit.mjs -F <msgfile> -- <paths>` (fe7f27e). The old private-index recipe
+(read-tree HEAD; add; commit) silently REVERTS a commit that lands between its read-tree and its commit (f069c84
+reverted core/0019-0021; fixed in 96b8812). The script builds the tree from HEAD + your paths in a throwaway index,
+commits with HEAD as parent and moves the branch by compare-and-swap (retrying on a moved HEAD), then resets the
+shared index for your paths. If you must commit by hand: record HEAD first and verify `git rev-parse HEAD~1` equals
+it afterwards; if not, `git diff --stat HEAD~1 HEAD` and restore every foreign path at once.
+
 All earlier rules apply: private-index commits (the pre-commit hook enforces it), orchestrator-only installs/lockfile/
 umbrella files, the migration writer is the only one adding `core/00NN`, message the owner before touching their files.
 
@@ -108,10 +115,14 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
 - [f02367]: deploy-time refusal of an unsigned/unverified image; site-agent failover mid-PXE (standby continues the
   boot step within 30 s, sim clock).
 - [402c97]: support-bundle token scan for TS-produced bundles; a packed-smoke vitest wrapper under `tests/`.
-- [f85da7]: cross-tenant replay of another tenant's known idempotency key (no data, no draft) as an authz-matrix
-  step; per-row guardrail denial + delegated extend > 4 GPUs negative. DONE: MCP → IAM confirmation → same-key
-  retry as one flow (39b3eda).
+- [f85da7]: DONE: MCP → IAM confirmation → same-key retry as one flow (39b3eda); known-key replay matrix step
+  (542885d); §12.6 policies incl. DelegatedSmall extend on real drafts (cc62e03, which also fixed stale-projection
+  admissions); node-scoped gateway reports (6725423). Next: v0.4 remote-IAM MCP (`McpIam` adapter).
 
+- [31c64a] round 4: orphan iam streams done (09e6514: agentStreamCloser/gatewayStreamCloser), bench results (e06ec34);
+  v0.4 sim scenarios gateway-kill/zombie/DB failover/10-min partition (8878e99, ControlPlaneSim.failDatabase/
+  cutGatewayDatabase). NOW: XID-storm breaker + canary-halt sim scenarios, then remote-mode projection staleness
+  (replicaProjection; [f85da7] does the embedded half), then the rest of the list above.
 - [c321a3] round 4: orphan store.ts done (d430815); tunnel filters tenantId/anyAgent + reauthorizeTunnels for [31c64a]/
   [402c97] (6aeb5c4); docs generator MDX escaping + check-content MDX compile (bd57184). NOW: v0.4 shard rebalancing
   (§8.5): `packages/server/src/runtime/{workers,leases,reconcilers}.ts`, `tests/server-runtime-*`. No core/migration
@@ -506,4 +517,7 @@ Rules for v0.1:
   [ebe83b] above plus `apps/docs/data/**`. Writing the ~41 missing pages other pages link to: daemon/{install,
   protocol,sessions,delivery,gateway,failure-modes}, extending/**, operations/**, guides/clients/**,
   guides/events/{webhooks,watch,audit}, reference/{index,meta.json,glossary,ai,roadmap,changelog} + glossary data.
-  The generator stays [c321a3]'s; lockfile commit by [f85da7] with apps/docs/package.json.
+  The generator stays [c321a3]'s; lockfile commit by [f85da7] with apps/docs/package.json. DONE 1d9d403 (226
+  files: shell + 123 pages, check-content clean, tsc clean, all routes 200 in next dev). Run the dev server with
+  cwd apps/docs (`.claude/launch.json` "docs"): fumadocs-mdx resolves source.config.ts from the cwd, and from the
+  repo root every page 500s with "getText('processed') requires includeProcessedMarkdown".
