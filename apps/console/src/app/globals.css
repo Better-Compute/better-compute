@@ -66,6 +66,40 @@ a {
 main {
   padding: 24px 32px;
   max-width: 1200px;
+  min-width: 0;
+}
+/* Phones and narrow windows: the navigation becomes a scrolling bar above the page. */
+@media (max-width: 760px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  .nav {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 4px;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding: 8px 16px;
+  }
+  .nav h1 {
+    margin: 0 8px 0 0;
+    white-space: nowrap;
+  }
+  .nav a {
+    white-space: nowrap;
+  }
+  .nav .section {
+    display: none;
+  }
+  main {
+    padding: 16px;
+  }
+  table {
+    display: block;
+    overflow-x: auto;
+  }
 }
 h2 {
   font-size: 18px;
