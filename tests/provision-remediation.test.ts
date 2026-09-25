@@ -215,8 +215,8 @@ describe('remediation', () => {
   });
 
   it('registers the health reconciler and its workflows, unless turned off', () => {
-    expect(provision.reconcilers!.map((r) => r.name)).toEqual(['workflow', 'health']);
+    expect(provision.reconcilers!.map((r) => r.name)).toEqual(['workflow', 'provision.site-cache', 'health']);
     expect(provision.engineOptions.steps.get('node.reboot')).toBeDefined();
-    expect(provisionModule({ remediation: false }).reconcilers!.map((r) => r.name)).toEqual(['workflow']);
+    expect(provisionModule({ remediation: false }).reconcilers!.map((r) => r.name)).toEqual(['workflow', 'provision.site-cache']);
   });
 });
