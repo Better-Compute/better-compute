@@ -334,25 +334,26 @@ describe('placements', () => {
 
   // End to end: the capacity.placer worker's placeQueued over queued reservation rows, with an event
   // and a work-queue write per reservation (one INSERT each, standing in for outbox and work_queue).
-  it(`places ${count} queued reservations through placeQueued`, async () => {
-    for (const table of ['device_bookings', 'allocations', 'pool_capacity_rollup', 'reservations'])
-      await db.query(`DELETE FROM ${table}`);
-    await db.query(`CREATE TABLE IF NOT EXISTS bench_side (kind text, key text)`);
-    await db.query(
+  /** Queued (pool-lease) reservation rows `from + 1 … from + n`, as admission leaves them. */
+  const queueReservations = (from: number, n: number) =>
+    db.query(
       `INSERT INTO reservations (id, tenant_id, pool_id, state, request, request_hash, owner_identity_id,
                                  idempotency_key, version, conditions)
-       SELECT 'rsv_q' || lpad(i::text, 6, '0'), 'acme', 'pool_bench', 'pending',
+       SELECT 'rsv_q' || lpad(i::text, 9, '0'), 'acme', 'pool_bench', 'pending',
               jsonb_build_object('poolId', 'pool_bench', 'devices', jsonb_build_array(
-                jsonb_build_object('class', 'gpu', 'count', $2::int)), 'duration', '3600000ms', 'binding', 'hold'),
+                jsonb_build_object('class', 'gpu', 'count', $3::int)), 'duration', '3600000ms', 'binding', 'hold'),
               '\\x00'::bytea, 'usr_bench', 'k' || i, 1,
               '[{"type": "Queued", "status": "true", "reason": "PoolPlacer", "since": 0}]'::jsonb
-         FROM generate_series(1, $1::int) i`,
-      [count, gpus],
+         FROM generate_series($1::int + 1, $1::int + $2::int) i`,
+      [from, n, gpus],
     );
+  /** The capacity.placer worker's deps, with an INSERT per event and work item (outbox, work_queue). */
+  const placerDeps = async (): Promise<ReservationDeps> => {
+    await db.query(`CREATE TABLE IF NOT EXISTS bench_side (kind text, key text)`);
     const side = async (tx: SqlTx, kind: string, key: string) => {
       await tx.query(`INSERT INTO bench_side VALUES ($1, $2)`, [kind, key]);
     };
-    const deps = {
+    return {
       clock: { now: () => T0 },
       events: {
         publish: (tx: SqlTx, event: { type: string; subject: string }) =>
@@ -365,6 +366,13 @@ describe('placements', () => {
       inline: inlinePlacer(),
       placement: { random: Math.random, plugins: [], weights: {}, topN: 5 },
     } as unknown as ReservationDeps;
+  };
+
+  it(`places ${count} queued reservations through placeQueued`, async () => {
+    for (const table of ['device_bookings', 'allocations', 'pool_capacity_rollup', 'reservations'])
+      await db.query(`DELETE FROM ${table}`);
+    await queueReservations(0, count);
+    const deps = await placerDeps();
     const indexes = new PoolIndexCache();
     let placed = 0;
     const batches: number[] = [];
@@ -403,4 +411,112 @@ describe('placements', () => {
     console.log(`placements gate ${gate.met ? 'MET' : 'NOT MET'}`, JSON.stringify(gate));
     if (gateEnforced) expect(step.placementsPerSecond).toBeGreaterThanOrEqual(gateTarget);
   });
+
+  // The v0.4 acceptance shape (§16: ≥200 placements/s for 30 min with I1 intact), opt-in with
+  // BENCH_PLACE_SUSTAIN_SECONDS (1800 for the real thing): reservations keep arriving through
+  // placeQueued while the oldest allocations are released to make room, and every 10 s window's
+  // rate is recorded. With a sustained run the gate is judged on the slowest window.
+  const sustainSeconds = Number(process.env.BENCH_PLACE_SUSTAIN_SECONDS ?? 0);
+  it.skipIf(!(sustainSeconds > 0))(
+    `sustains pool-lease placements for ${sustainSeconds} s`,
+    async () => {
+      for (const table of [
+        'device_bookings',
+        'allocations',
+        'pool_capacity_rollup',
+        'reservations',
+      ])
+        await db.query(`DELETE FROM ${table}`);
+      const deps = await placerDeps();
+      let indexes = new PoolIndexCache();
+      // Keep at most half the pool's GPUs booked: release the oldest allocations beyond that.
+      const keepLive = Math.floor((nodes * 8) / 2 / gpus);
+      const wave = 256;
+      let queued = 0;
+      let placed = 0;
+      let live = 0;
+      const windows: number[] = [];
+      let windowStart = performance.now();
+      let windowPlaced = 0;
+      const started = performance.now();
+      const deadline = started + sustainSeconds * 1000;
+      while (performance.now() < deadline) {
+        await queueReservations(queued, wave);
+        queued += wave;
+        for (let more = true; more; ) {
+          const result = await db.transaction((tx) =>
+            placeQueued(deps, tx, 'pool_bench', { cache: indexes }),
+          );
+          placed += result.placed;
+          live += result.placed;
+          windowPlaced += result.placed;
+          more = result.more;
+          result.keep?.();
+        }
+        if (live > keepLive) {
+          // Early release, set-based (the bench stands in for many releaseReservation calls): the
+          // bookings go, the allocations and reservations are marked released.
+          const excess = live - keepLive;
+          await db.transaction(async (tx) => {
+            const { rows } = await tx.query<{ id: string; owner_id: string }>(
+              `SELECT id, owner_id FROM allocations WHERE released_at IS NULL ORDER BY id LIMIT $1`,
+              [excess],
+            );
+            const ids = rows.map((row) => row.id);
+            await tx.query(`DELETE FROM device_bookings WHERE allocation_id = ANY($1::text[])`, [
+              ids,
+            ]);
+            await tx.query(
+              `UPDATE allocations SET released_at = compute_now() WHERE id = ANY($1::text[])`,
+              [ids],
+            );
+            await tx.query(
+              `UPDATE reservations SET state = 'released' WHERE id = ANY($1::text[])`,
+              [rows.map((row) => row.owner_id)],
+            );
+          });
+          live = keepLive;
+          // The cached index never saw these releases, and the bench clock never ages it: rebuild
+          // (the worker's does at 5 s).
+          indexes = new PoolIndexCache();
+        }
+        const now = performance.now();
+        if (now - windowStart >= 10_000) {
+          windows.push(Math.round((windowPlaced / ((now - windowStart) / 1000)) * 10) / 10);
+          windowStart = now;
+          windowPlaced = 0;
+        }
+      }
+      const seconds = (performance.now() - started) / 1000;
+      const sorted = [...windows].sort((a, b) => a - b);
+      const step: Step = {
+        concurrency: -2,
+        placements: placed,
+        pending: queued - placed,
+        errors: 0,
+        seconds: Math.round(seconds * 100) / 100,
+        placementsPerSecond: Math.round((placed / seconds) * 10) / 10,
+        latencyMs: summary([]),
+        lockHeldMs: summary([]),
+      };
+      steps.push(step);
+      console.log(
+        'placements sustained',
+        JSON.stringify(step),
+        'windows/s',
+        JSON.stringify({ min: sorted[0] ?? 0, p50: percentile(sorted, 50), count: windows.length }),
+      );
+      await assertI1(db, 'sustained placeQueued');
+      const slowest = sorted[0] ?? step.placementsPerSecond;
+      gate = {
+        placementsPerSecond: gateTarget,
+        step: `sustained ${sustainSeconds} s (slowest 10 s window)`,
+        measured: slowest,
+        met: slowest >= gateTarget,
+      };
+      console.log(`placements gate ${gate.met ? 'MET' : 'NOT MET'}`, JSON.stringify(gate));
+      if (gateEnforced) expect(slowest).toBeGreaterThanOrEqual(gateTarget);
+    },
+    (sustainSeconds + 600) * 1000,
+  );
 });
