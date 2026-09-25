@@ -138,6 +138,7 @@ type fakeHost struct {
 	onBoot     func()
 	sshReloads int
 	kmsg       io.ReadCloser
+	resets     []string
 }
 
 func (h *fakeHost) BootID() (string, error) { return h.boot, nil }
@@ -160,6 +161,12 @@ func (h *fakeHost) Kmsg() (io.ReadCloser, error) {
 		return nil, os.ErrNotExist
 	}
 	return h.kmsg, nil
+}
+func (h *fakeHost) ResetGPU(_ context.Context, uuid string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.resets = append(h.resets, uuid)
+	return nil
 }
 func (h *fakeHost) ReloadSSH() error {
 	h.mu.Lock()
@@ -781,5 +788,37 @@ func TestXidBecomesADeviceCondition(t *testing.T) {
 	again := s.next(t, "next status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 2 }).GetStatus()
 	if len(again.GetConditions()) != 1 {
 		t.Fatalf("conditions = %v", again.GetConditions())
+	}
+}
+
+func TestGpuResetRefusesHeldGPUs(t *testing.T) {
+	h := newHarness(t, nil)
+	s, _ := h.open()
+	gpus := fakehw.Inventory(1).Gpus.Gpus
+	s.push(desired(1, &agentv1.NodeSpec{Devices: &agentv1.DevicesSection{Assignments: []*agentv1.DeviceAssignment{{
+		AllocationId: "alloc_1", Binding: agentv1.Binding_BINDING_HOLD, Devices: []*agentv1.AssignedDevice{{Id: gpus[0].Uuid}},
+	}}}}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil })
+	held := body("r_held", "gpu.reset", &agentv1.GpuResetRequest{GpuUuids: []string{gpus[0].Uuid}})
+	s.push(command(held))
+	if u := s.update(t, "r_held", commonv1.CommandState_COMMAND_STATE_FAILED); u.GetError().GetCode() != "gpu-busy" {
+		t.Fatalf("held = %v", u)
+	}
+	free := body("r_free", "gpu.reset", &agentv1.GpuResetRequest{GpuUuids: []string{gpus[3].Uuid, "GPU-missing"}})
+	free.Attested = true
+	s.push(command(free))
+	done := s.update(t, "r_free", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	res := &agentv1.GpuResetResult{}
+	_ = proto.Unmarshal(done.GetResult(), res)
+	if len(res.GetGpus()) != 2 || done.GetNodeSig() == nil {
+		t.Fatalf("result = %v", res)
+	}
+	for _, o := range res.GetGpus() {
+		if o.GetUuid() == gpus[3].Uuid && (!o.GetReset_() || !o.GetHealthy()) || o.GetUuid() == "GPU-missing" && o.GetReset_() {
+			t.Fatalf("outcome = %v", o)
+		}
+	}
+	if len(h.host.resets) != 1 || h.host.resets[0] != gpus[3].Uuid {
+		t.Fatalf("resets = %v", h.host.resets)
 	}
 }

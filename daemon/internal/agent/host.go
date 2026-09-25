@@ -36,6 +36,8 @@ type Host interface {
 	ReloadSSH() error
 	// Kmsg opens the kernel log after its last record (NVIDIA XIDs).
 	Kmsg() (io.ReadCloser, error)
+	// ResetGPU resets one GPU (gpu.reset).
+	ResetGPU(ctx context.Context, uuid string) error
 }
 
 // RealHost is the machine bcd runs on.
@@ -48,6 +50,8 @@ type RealHost struct {
 	Root string
 	// BootIDFile overrides /proc/sys/kernel/random/boot_id.
 	BootIDFile string
+	// ResetGPUFunc overrides nvidia-smi --gpu-reset.
+	ResetGPUFunc func(ctx context.Context, uuid string) error
 	// LogsFunc overrides journalctl.
 	LogsFunc func(ctx context.Context, unit string, since time.Duration) ([]byte, error)
 }

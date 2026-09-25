@@ -37,6 +37,13 @@ func builtinKinds(a *Agent) []*Kind {
 			Exec:  a.runLogsCollect,
 		},
 		{
+			Name:        "gpu.reset",
+			Lane:        dispatch.LaneControl,
+			Roles:       []dispatch.Role{dispatch.RoleNode},
+			Destructive: true,
+			Exec:        a.runGpuReset,
+		},
+		{
 			Name:            "node.reboot",
 			Lane:            dispatch.LaneControl,
 			Roles:           []dispatch.Role{dispatch.RoleNode, dispatch.RoleSite},
