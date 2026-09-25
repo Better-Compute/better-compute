@@ -122,6 +122,20 @@
     "source": "standardMetrics"
   },
   {
+    "name": "better_compute_tenant_states",
+    "kind": "gauge",
+    "help": "IAM tenants compute refuses (§12.8), by state: suspended, deleted",
+    "labels": ["state"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_tenant_teardowns_pending",
+    "kind": "gauge",
+    "help": "Deleted tenants whose teardown has not finished (a module still releasing)",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
     "name": "better_compute_cert_expiry_seconds",
     "kind": "gauge",
     "help": "Seconds until the soonest expiry",
