@@ -14,7 +14,10 @@ import {
 } from '@better-compute/core';
 import {
   AgentRole as WireRole,
+  BatchApprovalSchema,
+  BatchProofSchema,
   commandKinds,
+  decodeMessage,
   isCommandKind,
   Lane,
   PROTOCOL_VERSION,
@@ -22,6 +25,8 @@ import {
   WelcomeSchema,
   negotiateProtocolVersion,
   type AgentFrame,
+  type BatchApproval,
+  type BatchProof,
   type CommandUpdate,
   type DesiredState,
   type EventBatch,
@@ -503,10 +508,30 @@ export function createGateway(options: GatewayOptions): Gateway {
   }
 
   function sendCommand(session: Session, command: StoredCommand) {
+    // (v1.0 §13) A batched destructive command travels with the batch's approval and its proof,
+    // verbatim from the quorum module; the daemon verifies both against its trust bundle.
+    let batch: { batchApproval?: BatchApproval; batchProof?: BatchProof } = {};
+    if (command.batchApproval && command.batchProof)
+      try {
+        batch = {
+          batchApproval: decodeMessage(BatchApprovalSchema, command.batchApproval),
+          batchProof: decodeMessage(BatchProofSchema, command.batchProof),
+        };
+      } catch (error) {
+        log.warn('A stored batch approval or proof does not decode; sending the command without it', {
+          commandId: command.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     session.sink.send(
       frame({
         case: 'command',
-        value: { body: command.body, signature: command.signature, attempt: Math.max(1, command.attempt) },
+        value: {
+          body: command.body,
+          signature: command.signature,
+          attempt: Math.max(1, command.attempt),
+          ...batch,
+        },
       }),
     );
   }

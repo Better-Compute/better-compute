@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { fromBinary } from '@bufbuild/protobuf';
 import { afterEach, describe, expect, it } from 'vitest';
 import { manualClock, shardOf, type SqlExecutor } from '@better-compute/core';
@@ -72,7 +73,11 @@ async function setup(withApprovers: boolean) {
   await node('node_b');
   await node('node_x', 'site_b', OTHER);
   const commands = compute.context.commands;
-  const batch = (tenantId: string, scope: { subject: string; kind: string }[], notAfterMs = T0 + 3_600_000) =>
+  const batch = (
+    tenantId: string,
+    scope: { subject: string; kind: string; payloadSha256?: Uint8Array }[],
+    notAfterMs = T0 + 3_600_000,
+  ) =>
     db!.transaction((tx) => commands.createBatch(tx, { tenantId, scope, reason: 'reboot rack 7', notAfterMs }));
   const enqueue = (nodeId: string, batchId: string | undefined, key: string, kind = 'node.reboot') =>
     db!.transaction((tx) =>
@@ -143,6 +148,22 @@ describe('CommandQueue batches (v1.0 quorum, §13)', () => {
     // Past its end (the state still reads pending until the sweep): no longer admits commands.
     await setSimClock(db!, T0 + 3_600_001);
     await expect(s.enqueue('node_a', created.batchId, 'k5')).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+
+  it('admits a command into a payload-bound leaf only with that exact payload, and records the leaf', async () => {
+    const s = await setup(true);
+    // node.reboot has an empty payload: its digest is SHA-256 of no bytes.
+    const empty = createHash('sha256').update(new Uint8Array()).digest();
+    const bound = await s.batch(ACME, [{ subject: 'node_a', kind: 'node.reboot', payloadSha256: empty }]);
+    const { id } = await s.enqueue('node_a', bound.batchId, 'bound-a');
+    const member = await db!.query<{ payload_sha256: Uint8Array }>(
+      'SELECT payload_sha256 FROM command_batch_members WHERE command_id = $1',
+      [id],
+    );
+    expect(Buffer.from(member.rows[0]!.payload_sha256).equals(empty)).toBe(true);
+    // A leaf bound to another payload does not admit this one.
+    const other = await s.batch(ACME, [{ subject: 'node_a', kind: 'node.reboot', payloadSha256: new Uint8Array(32).fill(1) }]);
+    await expect(s.enqueue('node_a', other.batchId, 'bound-b')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 
   it('records batches for audit only without approver keys: members are sent at once', async () => {

@@ -58,6 +58,11 @@ export interface StoredCommand {
   attempt: number;
   /** The body decodes, carries `not_after`, and names this row's command and node. */
   valid: boolean;
+  /** (v1.0 §13) The signed body's `batch_id`, when the command belongs to a destructive batch. */
+  batchId?: string;
+  /** The batch's encoded BatchApproval and this command's encoded BatchProof, sent with it. */
+  batchApproval?: Uint8Array;
+  batchProof?: Uint8Array;
 }
 
 /** A command that reached a terminal state in a gateway transaction. */
@@ -377,9 +382,11 @@ function storedCommand(row: Record<string, unknown>): StoredCommand {
   const body = bytesOf(row.body);
   let lane = Lane.CONTROL;
   let valid = false;
+  let batchId = '';
   try {
     const decoded = decodeMessage(CommandBodySchema, body);
     lane = decoded.lane || Lane.CONTROL;
+    batchId = decoded.batchId;
     // PLAN §6: a command without not_after is EXPIRED on arrival, so one is never sent; nor is a
     // body naming another command or node than its row.
     valid =
@@ -399,8 +406,28 @@ function storedCommand(row: Record<string, unknown>): StoredCommand {
     lane,
     attempt: Number(row.attempt ?? 0),
     valid,
+    ...(batchId ? { batchId } : {}),
+    ...batchAttachment(row),
   };
 }
+
+/** A quorum batch's approval and the command's proof, when the row carries them (required > 0). */
+function batchAttachment(row: Record<string, unknown>): Pick<StoredCommand, 'batchApproval' | 'batchProof'> {
+  if (!(Number(row.batch_required ?? 0) > 0) || row.batch_approval == null || row.batch_proof == null) return {};
+  return { batchApproval: bytesOf(row.batch_approval), batchProof: bytesOf(row.batch_proof) };
+}
+
+/**
+ * (v1.0 §13) Joins a dispatch candidate to its batch: a member of a batch that needs approvals is sent
+ * only once the batch is approved and its leaf's proof exists (the command queue holds it until then;
+ * this is the gateway's own guard, so a released-too-early row never goes out bare).
+ */
+const batchJoin = `LEFT JOIN command_batch_members m ON m.command_id = c.id
+           LEFT JOIN command_batches b ON b.id = m.batch_id
+           LEFT JOIN command_batch_scope sc ON sc.batch_id = m.batch_id AND sc.subject = m.subject AND sc.kind = m.kind
+             AND sc.payload_sha256 = m.payload_sha256`;
+const batchSendable = `(m.command_id IS NULL OR b.required = 0
+             OR (b.state = 'approved' AND b.approval IS NOT NULL AND sc.proof IS NOT NULL))`;
 
 /**
  * A node's full DesiredState (v0.4, signed specs). When the spec writer stored the encoded body
@@ -447,6 +474,37 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     const owner = options.commandOwner?.(idempotencyKey);
     return owner && owner.kind !== 'node' ? owner : undefined;
   };
+
+  /**
+   * Whether the quorum module's tables exist (a compute host always migrates them; a bare gateway
+   * store may not). Once present they stay; absent is re-checked every 30 s.
+   */
+  let quorumTables: { present: boolean; checkedAt: number } | undefined;
+  async function hasQuorumTables(tx: SqlTx): Promise<boolean> {
+    const now = Date.now();
+    if (quorumTables?.present || (quorumTables && now - quorumTables.checkedAt < 30_000)) return quorumTables.present;
+    const { rows } = await tx.query<{ present: boolean }>(
+      `SELECT to_regclass('command_batch_members') IS NOT NULL AS present`,
+    );
+    quorumTables = { present: Boolean(rows[0]?.present), checkedAt: now };
+    return quorumTables.present;
+  }
+
+  /** Re-attaches batch approvals to replayed commands whose signed body names a batch. */
+  async function withBatchAttachments(tx: SqlTx, commands: StoredCommand[]): Promise<StoredCommand[]> {
+    const batched = commands.filter((command) => command.batchId);
+    if (!batched.length || !(await hasQuorumTables(tx))) return commands;
+    const { rows } = await tx.query(
+      `SELECT m.command_id, b.required AS batch_required, b.approval AS batch_approval, sc.proof AS batch_proof
+         FROM command_batch_members m JOIN command_batches b ON b.id = m.batch_id
+         LEFT JOIN command_batch_scope sc ON sc.batch_id = m.batch_id AND sc.subject = m.subject AND sc.kind = m.kind
+           AND sc.payload_sha256 = m.payload_sha256
+        WHERE m.command_id = ANY($1::text[])`,
+      [batched.map((command) => command.id)],
+    );
+    const attachments = new Map(rows.map((row) => [String(row.command_id), batchAttachment(row)]));
+    return commands.map((command) => ({ ...command, ...(attachments.get(command.id) ?? {}) }));
+  }
 
   /** First statement of every routing transaction (§8.5): a zombie aborts, a takeover waits. */
   async function fence(tx: SqlTx): Promise<void> {
@@ -1012,7 +1070,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
            RETURNING id, node_id, seq, kind, body, signature, state, attempt`,
           [input.nodeId, inFlight, epoch, running],
         );
-        const held = inFlightRows.rows.map(storedCommand).sort((a, b) => a.seq - b.seq);
+        const held = (await withBatchAttachments(tx, inFlightRows.rows.map(storedCommand))).sort(
+          (a, b) => a.seq - b.seq,
+        );
         const replay = held.filter((command) => !running.includes(command.id));
         const runningCommands = held.filter((command) => running.includes(command.id));
 
@@ -1106,13 +1166,17 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     ): Promise<(StoredCommand & { epoch: number })[]> {
       return db.transaction(async (tx) => {
         await fence(tx);
+        const quorum = await hasQuorumTables(tx);
         const { rows } = await tx.query(
           `SELECT c.id, c.node_id, c.seq, c.kind, c.body, c.signature, c.state, c.attempt,
              c.cancel_requested_at IS NOT NULL AS cancel_requested, c.cancel_reason,
              s.session_epoch, n.owner_tenant_id AS tenant_id
+             ${quorum ? ', b.required AS batch_required, b.approval AS batch_approval, sc.proof AS batch_proof' : ''}
            FROM commands c JOIN node_sessions s USING (node_id) JOIN nodes n ON n.id = c.node_id
+           ${quorum ? batchJoin : ''}
            WHERE s.gateway_id = $1 AND c.state = 'pending'
              AND c.not_before <= compute_now() AND c.not_after > compute_now()
+             ${quorum ? `AND ${batchSendable}` : ''}
            ORDER BY c.node_id, c.seq LIMIT $2
            FOR UPDATE OF c SKIP LOCKED FOR SHARE OF s`,
           [gatewayId, limit],

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ComputeError,
   newId,
@@ -311,20 +312,24 @@ export interface CommandQueueInput {
  */
 async function batchMembership(
   tx: SqlTx,
-  input: { batchId: string; nodeTenantId: string | null; subject: string; kind: string },
-): Promise<{ held: boolean }> {
+  input: { batchId: string; nodeTenantId: string | null; subject: string; kind: string; payloadSha256: Uint8Array },
+): Promise<{ held: boolean; leafSha256: Uint8Array }> {
+  // The leaf bound to this exact payload first, else the unbound leaf (empty digest) for the pair:
+  // the daemon accepts a proof from either, and the member row records which one it is.
   const { rows } = await tx.query<{
     tenant_id: string;
     state: string;
     required: number;
     live: boolean;
-    in_scope: boolean;
+    leaf_sha256: Uint8Array | null;
   }>(
     `SELECT b.tenant_id, b.state, b.required, b.not_after > compute_now() AS live,
-            EXISTS (SELECT 1 FROM command_batch_scope s
-                     WHERE s.batch_id = b.id AND s.subject = $2 AND s.kind = $3) AS in_scope
+            (SELECT s.payload_sha256 FROM command_batch_scope s
+              WHERE s.batch_id = b.id AND s.subject = $2 AND s.kind = $3
+                AND (s.payload_sha256 = $4 OR s.payload_sha256 = '\\x'::bytea)
+              ORDER BY length(s.payload_sha256) DESC LIMIT 1) AS leaf_sha256
        FROM command_batches b WHERE b.id = $1 FOR SHARE`,
-    [input.batchId, input.subject, input.kind],
+    [input.batchId, input.subject, input.kind, Buffer.from(input.payloadSha256)],
   );
   const batch = rows[0];
   // Another tenant's batch reads as missing.
@@ -332,12 +337,15 @@ async function batchMembership(
     throw new ComputeError('NOT_FOUND', `Batch ${input.batchId} not found`);
   if ((batch.state !== 'pending' && batch.state !== 'approved') || !batch.live)
     throw new ComputeError('INVALID_STATE', `Batch ${input.batchId} no longer admits commands`);
-  if (!batch.in_scope)
+  if (batch.leaf_sha256 == null)
     throw new ComputeError(
       'INVALID_INPUT',
-      `${input.kind} on ${input.subject} is not in the scope of batch ${input.batchId}`,
+      `${input.kind} on ${input.subject} (with this payload) is not in the scope of batch ${input.batchId}`,
     );
-  return { held: Number(batch.required) > 0 && batch.state !== 'approved' };
+  return {
+    held: Number(batch.required) > 0 && batch.state !== 'approved',
+    leafSha256: new Uint8Array(batch.leaf_sha256),
+  };
 }
 
 /** `ctx.commands`. */
@@ -386,7 +394,7 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       const seq = Number(node.seq);
       const id = newId('cmd');
       // (v1.0 §13) A batched command: its subject is computed from the payload the agent will see.
-      let batch: { id: string; subject: string; held: boolean } | undefined;
+      let batch: { id: string; subject: string; held: boolean; leafSha256: Uint8Array } | undefined;
       if (command.batchId !== undefined) {
         if (typeof command.batchId !== 'string' || !command.batchId)
           throw new ComputeError('INVALID_INPUT', 'batchId must be a batch id');
@@ -399,13 +407,14 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
             value: payload,
           },
         });
-        const { held } = await batchMembership(tx, {
+        const { held, leafSha256 } = await batchMembership(tx, {
           batchId: command.batchId,
           nodeTenantId: node.owner_tenant_id,
           subject,
           kind: spec.kind,
+          payloadSha256: createHash('sha256').update(payload).digest(),
         });
-        batch = { id: command.batchId, subject, held };
+        batch = { id: command.batchId, subject, held, leafSha256 };
       }
       const body = encodeCommandBody({
         id,
@@ -453,8 +462,9 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       }
       if (batch)
         await tx.query(
-          `INSERT INTO command_batch_members (command_id, batch_id, subject, kind) VALUES ($1, $2, $3, $4)`,
-          [id, batch.id, batch.subject, spec.kind],
+          `INSERT INTO command_batch_members (command_id, batch_id, subject, kind, payload_sha256)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, batch.id, batch.subject, spec.kind, Buffer.from(batch.leafSha256)],
         );
       if (!batch?.held) poke(node.gateway_id, command.nodeId);
       return { id, seq };
