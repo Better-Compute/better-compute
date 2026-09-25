@@ -30,6 +30,7 @@ import {
   type InventorySection,
   type JoinRequest,
   type JoinResponse,
+  type ProtocolRange,
   type RenewRequest,
   type RenewResponse,
   type SecretRequest,
@@ -157,6 +158,12 @@ export interface GatewayOptions {
    * to starve the gateway's own lease renewal.
    */
   maxPendingHellos?: number;
+  /**
+   * The protocol versions this gateway speaks (default the protocol package's `PROTOCOL_VERSION`).
+   * A daemon whose range does not overlap is welcomed with `upgrade_required` and takes only
+   * `daemon.upgrade` (§7.6). For version-skew tests (v1.0's N−2 matrix) and staged protocol bumps.
+   */
+  protocol?: ProtocolRange;
   /**
    * Observers for metrics (§14 `gateway_handshakes_total{outcome}`): told how every session
    * handshake ended. Never awaited; a throw is ignored.
@@ -408,6 +415,14 @@ export function createGateway(options: GatewayOptions): Gateway {
   const credits: LaneCreditLimits = { control: 8, provision: 4, bulk: 2, ...options.credits };
   const handshakes = new TokenBucket(options.handshakesPerSecond ?? 200, clock);
   const maxPendingHellos = options.maxPendingHellos ?? 64;
+  const protocol: ProtocolRange = options.protocol ?? PROTOCOL_VERSION;
+  if (
+    !Number.isSafeInteger(protocol.min) ||
+    !Number.isSafeInteger(protocol.max) ||
+    protocol.min < 1 ||
+    protocol.max < protocol.min
+  )
+    throw new ComputeError('INVALID_CONFIG', 'protocol must be { min, max } with 1 <= min <= max');
   /** Sessions' update frames per group-commit transaction. */
   const maxUpdateBatch = 500;
   let pendingHellos = 0;
@@ -545,7 +560,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       throw new GrpcError(GrpcCode.PERMISSION_DENIED, `the certificate is not valid for role ${role}`);
     if (!hello.bootId || !hello.journalId)
       throw new GrpcError(GrpcCode.INVALID_ARGUMENT, 'Hello.boot_id and journal_id are required');
-    const version = negotiateProtocolVersion({ min: hello.protoMin, max: hello.protoMax });
+    const version = negotiateProtocolVersion({ min: hello.protoMin, max: hello.protoMax }, protocol);
 
     // Admission control (§8.6 reconnect storms): Hello transactions queue on the database; past
     // `maxPendingHellos` the daemon retries with jitter instead of growing a queue that would starve
@@ -647,7 +662,7 @@ export function createGateway(options: GatewayOptions): Gateway {
           epoch: BigInt(result.epoch),
           sessionId,
           gatewayId: id,
-          protocolVersion: version ?? PROTOCOL_VERSION.min,
+          protocolVersion: version ?? protocol.min,
           heartbeatIntervalMs,
           leaseTtlMs: sessionLeaseTtlMs,
           credits: [...lanes].map(([lane, counter]) => ({ lane, credits: counter.limit })),
