@@ -7,14 +7,14 @@ description: 'The projects API group (server): 4 methods.'
 
 Methods of the `projects` group, contributed by `server`.
 
-3 of 4 methods are served by this release; the others are planned for the phase shown.
+4 of 4 methods are served by this release; the others are planned for the phase shown.
 
 | Method                | Kind     | Authorization                                      | Phase | Status     |
 | --------------------- | -------- | -------------------------------------------------- | ----- | ---------- |
 | [`create`](#create)   | mutation | `compute:projects:manage` @ `compute-tenant`       | v0.1  | registered |
 | [`get`](#get)         | read     | `compute:projects:read` @ `compute-project`        | v0.1  | registered |
 | [`list`](#list)       | read     | `compute:projects:read` @ `compute-tenant` + items | v0.1  | registered |
-| [`archive`](#archive) | mutation | `compute:projects:manage` @ `compute-project`      | v0.2  | planned    |
+| [`archive`](#archive) | mutation | `compute:projects:manage` @ `compute-project`      | v0.2  | registered |
 
 ## create
 
@@ -25,6 +25,14 @@ Methods of the `projects` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field            | Type   | Required | Constraints                                                             |
+| ---------------- | ------ | -------- | ----------------------------------------------------------------------- |
+| `tenantId`       | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `name`           | string | yes      | at most 63 characters; matches `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$` |
+| `idempotencyKey` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$`          |
+
 ## get
 
 `POST /api/compute/projects/get`
@@ -33,6 +41,13 @@ Methods of the `projects` group, contributed by `server`.
 - **Authorization:** `compute:projects:read` @ `compute-project`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                      |
+| ----------- | ------ | -------- | ---------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `projectId` | string | yes      | at most 64 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## list
 
@@ -43,6 +58,15 @@ Methods of the `projects` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type                        | Required | Constraints                                                |
+| ---------- | --------------------------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `state`    | one of `active`, `archived` |          |                                                            |
+| `limit`    | integer                     |          | 1-50; default `50`                                         |
+| `cursor`   | string                      |          | at most 256 characters; matches `^[A-Za-z0-9._:-]{1,256}$` |
+
 ## archive
 
 `POST /api/compute/projects/archive`
@@ -50,4 +74,11 @@ Methods of the `projects` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:projects:manage` @ `compute-project`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                      |
+| ----------- | ------ | -------- | ---------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `projectId` | string | yes      | at most 64 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$` |

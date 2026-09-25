@@ -26,6 +26,16 @@ Methods of the `sites` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type                                   | Required | Constraints                                                |
+| ---------- | -------------------------------------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string                                 | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `kind`     | one of `shared`, `dedicated`, `custom` |          |                                                            |
+| `region`   | string                                 |          | at most 63 characters; matches `^[a-z][a-z0-9-]{0,62}$`    |
+| `limit`    | integer                                |          | 1-50; default `50`                                         |
+| `cursor`   | string                                 |          | at most 256 characters; matches `^[A-Za-z0-9._:-]{1,256}$` |
+
 ## get
 
 `POST /api/compute/sites/get`
@@ -35,6 +45,13 @@ Methods of the `sites` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `siteId`   | string | yes      | at most 64 characters; matches `^site_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## create
 
 `POST /api/compute/sites/create`
@@ -43,6 +60,16 @@ Methods of the `sites` group, contributed by `server`.
 - **Authorization:** `compute:sites:manage` @ `compute-fleet` or `compute:sites:manage` @ `compute-tenant`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field            | Type                                   | Required | Constraints                                                    |
+| ---------------- | -------------------------------------- | -------- | -------------------------------------------------------------- |
+| `tenantId`       | string                                 | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`     |
+| `kind`           | one of `shared`, `dedicated`, `custom` | yes      |                                                                |
+| `region`         | string                                 | yes      | at most 63 characters; matches `^[a-z][a-z0-9-]{0,62}$`        |
+| `iamRegion`      | string                                 |          | at most 63 characters; matches `^[a-z][a-z0-9-]{0,62}$`        |
+| `idempotencyKey` | string                                 | yes      | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$` |
 
 ## update
 
@@ -61,3 +88,11 @@ Methods of the `sites` group, contributed by `server`.
 - **Authorization:** `compute:sites:manage` @ `compute-site`
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `siteId`   | string  | yes      | at most 64 characters; matches `^site_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `version`  | integer |          | at least 1                                                        |

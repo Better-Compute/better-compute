@@ -33,6 +33,16 @@ Methods of the `joinTokens` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field             | Type    | Required | Constraints                                                           |
+| ----------------- | ------- | -------- | --------------------------------------------------------------------- |
+| `tenantId`        | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`            |
+| `poolId`          | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` |
+| `includeInactive` | boolean |          | default `false`                                                       |
+| `limit`           | integer |          | 1-200; default `100`                                                  |
+| `cursor`          | string  |          | at most 64 characters; matches `^jt_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+
 ## revoke
 
 `POST /api/compute/joinTokens/revoke`
@@ -41,3 +51,11 @@ Methods of the `joinTokens` group, contributed by `server`.
 - **Authorization:** `compute:join-tokens:revoke` @ `compute-pool`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                           |
+| ---------- | ------ | -------- | --------------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`            |
+| `poolId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` |
+| `tokenId`  | string | yes      | at most 64 characters; matches `^jt_[0-9a-hjkmnp-tv-z]{26,52}$`       |

@@ -23,6 +23,16 @@ Methods of the `siteTokens` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field            | Type    | Required | Constraints                                                       |
+| ---------------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `siteId`         | string  | yes      | at most 64 characters; matches `^site_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `ttlSeconds`     | integer | yes      | 60-86400                                                          |
+| `maxUses`        | integer |          | 1-16; default `1`                                                 |
+| `idempotencyKey` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$`    |
+
 ## revoke
 
 `POST /api/compute/siteTokens/revoke`
@@ -31,3 +41,11 @@ Methods of the `siteTokens` group, contributed by `server`.
 - **Authorization:** `compute:sites:manage` @ `compute-site`
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `siteId`   | string | yes      | at most 64 characters; matches `^site_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `tokenId`  | string | yes      | at most 64 characters; matches `^jt_[0-9a-hjkmnp-tv-z]{26,52}$`   |

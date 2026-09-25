@@ -21,7 +21,8 @@
       "migrations": [
         "capacity/0001_device_links",
         "capacity/0002_lease_health",
-        "capacity/0003_device_counts"
+        "capacity/0003_device_counts",
+        "capacity/0004_mig_layouts"
       ]
     },
     {
@@ -35,7 +36,8 @@
       "migrations": [
         "provision/0001_workflows",
         "provision/0002_images",
-        "provision/0003_workflow_owner"
+        "provision/0003_workflow_owner",
+        "provision/0004_gated_mig_layout"
       ]
     },
     {
@@ -80,6 +82,7 @@
   ],
   "jobs": [
     "audit.checkpoint",
+    "capacity.mig",
     "capacity.reservations",
     "capacity.rollup",
     "capacity.usage",
@@ -92,6 +95,7 @@
     "fleet.drift",
     "health",
     "inventory",
+    "inventory.hygiene",
     "liveness",
     "metal",
     "node",

@@ -16,6 +16,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -30,6 +31,7 @@
         "phase": "v0.2",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -44,6 +46,7 @@
         "phase": "v0.2",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -58,6 +61,7 @@
         "phase": "v0.2",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -80,6 +84,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -94,6 +99,28 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "commandId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^cmd_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "nodeId", "commandId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -108,6 +135,48 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "dispatched",
+                "acked",
+                "running",
+                "succeeded",
+                "failed",
+                "rejected",
+                "expired",
+                "cancelled"
+              ]
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 19,
+              "pattern": "^\\d{1,19}$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -121,7 +190,29 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "commandId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^cmd_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "nodeId", "commandId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -144,6 +235,23 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "kind": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9-]{0,63}$"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -166,6 +274,34 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "type": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 41,
+              "pattern": "^\\d{1,20}:\\d{1,20}$"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -188,6 +324,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -202,6 +339,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -216,6 +354,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -230,6 +369,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -252,6 +392,7 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -266,6 +407,7 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -280,6 +422,7 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -294,6 +437,7 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -321,6 +465,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -335,6 +480,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -349,6 +495,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -363,6 +510,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -385,6 +533,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -399,6 +548,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -413,6 +563,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -427,6 +578,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -441,6 +593,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -455,6 +608,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -469,6 +623,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -491,6 +646,7 @@
         "phase": "v0.1",
         "module": "inventory",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -505,6 +661,7 @@
         "phase": "v0.2",
         "module": "inventory",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -519,6 +676,7 @@
         "phase": "v0.2",
         "module": "inventory",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -541,6 +699,39 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "poolId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "state": {
+              "type": "string",
+              "enum": ["pending", "approved", "rejected", "expired", "consumed", "all"],
+              "default": "pending"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^jreq_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "poolId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -555,6 +746,39 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "poolId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "requestId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^jreq_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "ttlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 3600
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "poolId", "requestId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -569,6 +793,33 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "poolId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "requestId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^jreq_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "poolId", "requestId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -591,6 +842,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -605,6 +857,38 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "poolId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "includeInactive": {
+              "type": "boolean",
+              "default": false
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^jt_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "poolId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -619,6 +903,28 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "poolId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "tokenId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^jt_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "poolId", "tokenId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -641,6 +947,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -655,6 +962,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -669,6 +977,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -683,6 +992,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -697,6 +1007,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -711,6 +1022,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -725,6 +1037,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -739,6 +1052,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -753,6 +1067,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -767,6 +1082,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -781,6 +1097,7 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -803,6 +1120,60 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "poolId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "siteId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "cordoned": {
+              "type": "boolean"
+            },
+            "provisionState": {
+              "type": "string",
+              "enum": [
+                "adopting",
+                "adopted",
+                "enrolling",
+                "inspecting",
+                "commissioning",
+                "ready",
+                "deploying",
+                "deployed",
+                "releasing",
+                "rescue",
+                "failed",
+                "retiring",
+                "retired"
+              ]
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -817,6 +1188,23 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -831,6 +1219,39 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "type": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 41,
+              "pattern": "^\\d{1,20}:\\d{1,20}$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -845,6 +1266,32 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -859,6 +1306,32 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -873,6 +1346,32 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -887,6 +1386,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -901,6 +1401,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -915,6 +1416,32 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -929,6 +1456,32 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -943,6 +1496,32 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -957,6 +1536,7 @@
         "phase": "v0.3",
         "module": "tunnels",
         "status": "planned",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -971,6 +1551,7 @@
         "phase": "v0.3",
         "module": "tunnels",
         "status": "planned",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -993,6 +1574,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1007,6 +1589,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1026,6 +1609,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1040,6 +1624,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1054,6 +1639,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1068,6 +1654,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1082,6 +1669,7 @@
         "phase": "v0.2",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1096,6 +1684,7 @@
         "phase": "v0.2",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1118,6 +1707,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1132,6 +1722,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1146,6 +1737,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1160,6 +1752,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1174,6 +1767,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1188,6 +1782,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1202,6 +1797,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1224,6 +1820,28 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            }
+          },
+          "required": ["tenantId", "name", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -1238,6 +1856,23 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "projectId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "projectId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -1252,6 +1887,33 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "state": {
+              "type": "string",
+              "enum": ["active", "archived"]
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -1265,7 +1927,24 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "projectId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "projectId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -1293,6 +1972,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1307,6 +1987,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1321,6 +2002,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1335,6 +2017,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1349,6 +2032,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1363,6 +2047,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1377,6 +2062,7 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1399,6 +2085,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1413,6 +2100,7 @@
         "phase": "v0.2",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1435,6 +2123,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1449,6 +2138,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1471,6 +2161,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1485,6 +2176,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1499,6 +2191,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1513,6 +2206,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1527,6 +2221,7 @@
         "phase": "v0.2",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1541,6 +2236,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1555,6 +2251,7 @@
         "phase": "v0.1",
         "module": "capacity",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1577,6 +2274,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1591,6 +2289,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1605,6 +2304,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1619,6 +2319,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1633,6 +2334,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1647,6 +2349,7 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1674,6 +2377,7 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1693,6 +2397,28 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            "scope": {
+              "type": "string",
+              "enum": ["tenant", "fleet"],
+              "default": "tenant"
+            }
+          },
+          "required": ["tenantId", "name"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -1715,6 +2441,39 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "siteId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "ttlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400
+            },
+            "maxUses": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16,
+              "default": 1
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            }
+          },
+          "required": ["tenantId", "siteId", "ttlSeconds", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -1729,6 +2488,28 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "siteId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "tokenId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^jt_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "siteId", "tokenId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -1751,6 +2532,38 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "kind": {
+              "type": "string",
+              "enum": ["shared", "dedicated", "custom"]
+            },
+            "region": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -1765,6 +2578,23 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "siteId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+            }
+          },
+          "required": ["tenantId", "siteId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -1784,6 +2614,37 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "kind": {
+              "type": "string",
+              "enum": ["shared", "dedicated", "custom"]
+            },
+            "region": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            },
+            "iamRegion": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            }
+          },
+          "required": ["tenantId", "kind", "region", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -1798,6 +2659,7 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1812,6 +2674,27 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "siteId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": ["tenantId", "siteId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -1834,6 +2717,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1848,6 +2732,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1862,6 +2747,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1889,6 +2775,7 @@
         "phase": "v0.3",
         "module": "tunnels",
         "status": "planned",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1916,6 +2803,7 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1934,7 +2822,8 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -1957,6 +2846,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1971,6 +2861,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1985,6 +2876,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -1999,6 +2891,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2013,6 +2906,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2027,6 +2921,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2041,6 +2936,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2055,6 +2951,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2069,6 +2966,7 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2083,6 +2981,7 @@
         "phase": null,
         "module": "events",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }
@@ -2105,6 +3004,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2119,6 +3019,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2133,6 +3034,7 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       },
@@ -2147,6 +3049,37 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "pause",
+        "route": "POST /api/compute/workflows/pause",
+        "kind": "mutation",
+        "action": "compute:workflows:manage",
+        "resource": "compute-node",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.2",
+        "module": "provision",
+        "status": "registered",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "resume",
+        "route": "POST /api/compute/workflows/resume",
+        "kind": "mutation",
+        "action": "compute:workflows:manage",
+        "resource": "compute-node",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.2",
+        "module": "provision",
+        "status": "registered",
+        "input": null,
         "summary": "",
         "description": ""
       }

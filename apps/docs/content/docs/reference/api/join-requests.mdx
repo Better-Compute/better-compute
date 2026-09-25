@@ -24,6 +24,16 @@ Methods of the `joinRequests` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type                                                                   | Required | Constraints                                                           |
+| ---------- | ---------------------------------------------------------------------- | -------- | --------------------------------------------------------------------- |
+| `tenantId` | string                                                                 | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`            |
+| `poolId`   | string                                                                 | yes      | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` |
+| `state`    | one of `pending`, `approved`, `rejected`, `expired`, `consumed`, `all` |          | default `"pending"`                                                   |
+| `limit`    | integer                                                                |          | 1-200; default `100`                                                  |
+| `cursor`   | string                                                                 |          | at most 64 characters; matches `^jreq_[0-9a-hjkmnp-tv-z]{26,52}$`     |
+
 ## approve
 
 `POST /api/compute/joinRequests/approve`
@@ -33,6 +43,16 @@ Methods of the `joinRequests` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field        | Type    | Required | Constraints                                                           |
+| ------------ | ------- | -------- | --------------------------------------------------------------------- |
+| `tenantId`   | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`            |
+| `poolId`     | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` |
+| `requestId`  | string  | yes      | at most 64 characters; matches `^jreq_[0-9a-hjkmnp-tv-z]{26,52}$`     |
+| `ttlSeconds` | integer |          | 60-86400; default `3600`                                              |
+| `reason`     | string  |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`           |
+
 ## reject
 
 `POST /api/compute/joinRequests/reject`
@@ -41,3 +61,12 @@ Methods of the `joinRequests` group, contributed by `server`.
 - **Authorization:** `compute:join-tokens:create` @ `compute-pool`
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                           |
+| ----------- | ------ | -------- | --------------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`            |
+| `poolId`    | string | yes      | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` |
+| `requestId` | string | yes      | at most 64 characters; matches `^jreq_[0-9a-hjkmnp-tv-z]{26,52}$`     |
+| `reason`    | string |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`           |

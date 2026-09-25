@@ -131,6 +131,7 @@ for (const row of core.apiSurface) {
     phase: row.phase,
     module: registered?.module ?? row.module,
     status: registered ? 'registered' : 'planned',
+    input: registered?.definition?.validate?.jsonSchema ?? null,
   });
 }
 for (const method of registry.methods) {
@@ -146,6 +147,7 @@ for (const method of registry.methods) {
     phase: null,
     module: method.module,
     status: 'registered',
+    input: method.definition?.validate?.jsonSchema ?? null,
   });
 }
 
@@ -238,6 +240,62 @@ const frontmatter = (fields) =>
     .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
     .join('\n')}\n---\n`;
 
+/** A JSON Schema node as a short type: `string`, `integer`, `one of a, b`, `list of string`, `map of integer`. */
+const typeName = (schema) => {
+  if (!schema || typeof schema !== 'object') return 'any';
+  if (Array.isArray(schema.enum)) return `one of ${schema.enum.map((value) => code(value)).join(', ')}`;
+  if (schema.type === 'array') return `list of ${typeName(schema.items)}`;
+  if (schema.type === 'object' && schema.additionalProperties && typeof schema.additionalProperties === 'object')
+    return `map of ${typeName(schema.additionalProperties)}`;
+  return schema.type ?? 'any';
+};
+
+/** The limits a JSON Schema node states, in words. */
+const constraints = (schema) => {
+  if (!schema || typeof schema !== 'object') return '';
+  const parts = [];
+  if (schema.minLength !== undefined && schema.maxLength !== undefined)
+    parts.push(`${schema.minLength}-${schema.maxLength} characters`);
+  else if (schema.maxLength !== undefined) parts.push(`at most ${schema.maxLength} characters`);
+  if (schema.pattern) parts.push(`matches ${code(schema.pattern)}`);
+  if (schema.minimum !== undefined && schema.maximum !== undefined) parts.push(`${schema.minimum}-${schema.maximum}`);
+  else if (schema.minimum !== undefined) parts.push(`at least ${schema.minimum}`);
+  else if (schema.maximum !== undefined) parts.push(`at most ${schema.maximum}`);
+  if (schema.maxItems !== undefined) parts.push(`${schema.minItems ?? 0}-${schema.maxItems} items`);
+  if (schema.uniqueItems) parts.push('no repeats');
+  if (schema.maxProperties !== undefined) parts.push(`at most ${schema.maxProperties} entries`);
+  if (schema.propertyNames?.pattern) parts.push(`keys match ${code(schema.propertyNames.pattern)}`);
+  if (schema.default !== undefined) parts.push(`default ${code(JSON.stringify(schema.default))}`);
+  return parts.join('; ');
+};
+
+/** Input rows of an object schema, nested objects (and lists of objects) flattened to dotted names. */
+function inputRows(schema, prefix = '', depth = 0) {
+  if (!schema || schema.type !== 'object' || !schema.properties || depth > 3) return [];
+  const required = new Set(schema.required ?? []);
+  return Object.entries(schema.properties).flatMap(([key, field]) => {
+    const name = `${prefix}${key}`;
+    const row = { name, type: typeName(field), required: required.has(key), constraints: constraints(field) };
+    const nested =
+      field?.type === 'object' && field.properties
+        ? inputRows(field, `${name}.`, depth + 1)
+        : field?.type === 'array' && field.items?.type === 'object' && field.items.properties
+          ? inputRows(field.items, `${name}[].`, depth + 1)
+          : [];
+    return [row, ...nested];
+  });
+}
+
+const inputTable = (schema) => {
+  const rows = inputRows(schema);
+  if (!rows.length) return ['Takes an empty object: `{}`.'];
+  return [
+    '| Field | Type | Required | Constraints |',
+    '| --- | --- | --- | --- |',
+    ...rows.map((row) => `| ${code(row.name)} | ${cell(row.type)} | ${row.required ? 'yes' : ''} | ${cell(row.constraints)} |`),
+  ];
+};
+
 const authorization = (method) => {
   if (method.action === null) return 'public';
   const pairs = [{ action: method.action, resource: method.resource }, ...method.alternatives];
@@ -282,6 +340,8 @@ for (const entry of api) {
       `- **Module:** ${code(method.module)}`,
       `- **Phase:** ${method.phase ?? 'not in PLAN.md §9.2'} (${method.status})`,
     );
+    // Unknown fields are refused (INVALID_INPUT), so the table is the whole input.
+    if (method.input) lines.push('', '**Input**', '', ...inputTable(method.input));
   }
   files.set(`${reference}/api/${entry.slug}.mdx`, lines.join('\n'));
 }

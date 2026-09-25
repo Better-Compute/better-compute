@@ -21,3 +21,12 @@ Methods of the `events` group, contributed by `server`.
 - **Authorization:** `compute:events:read` @ `compute-tenant`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                |
+| ---------- | ------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `type`     | string  |          | at most 64 characters; matches `^[a-z][a-z0-9.-]{0,63}$`   |
+| `limit`    | integer |          | 1-500; default `100`                                       |
+| `cursor`   | string  |          | at most 41 characters; matches `^\d{1,20}:\d{1,20}$`       |

@@ -7,14 +7,14 @@ description: 'The commands API group (server): 4 methods.'
 
 Methods of the `commands` group, contributed by `server`.
 
-3 of 4 methods are served by this release; the others are planned for the phase shown.
+4 of 4 methods are served by this release; the others are planned for the phase shown.
 
 | Method              | Kind     | Authorization                         | Phase | Status     |
 | ------------------- | -------- | ------------------------------------- | ----- | ---------- |
 | [`run`](#run)       | mutation | `compute:nodes:exec` @ `compute-node` | v0.1  | registered |
 | [`get`](#get)       | read     | `compute:nodes:read` @ `compute-node` | v0.1  | registered |
 | [`list`](#list)     | read     | `compute:nodes:read` @ `compute-node` | v0.1  | registered |
-| [`cancel`](#cancel) | mutation | `compute:nodes:exec` @ `compute-node` | v0.2  | planned    |
+| [`cancel`](#cancel) | mutation | `compute:nodes:exec` @ `compute-node` | v0.2  | registered |
 
 ## run
 
@@ -34,6 +34,14 @@ Methods of the `commands` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field       | Type   | Required | Constraints                                                       |
+| ----------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`    | string | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `commandId` | string | yes      | at most 64 characters; matches `^cmd_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+
 ## list
 
 `POST /api/compute/commands/list`
@@ -43,6 +51,16 @@ Methods of the `commands` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type                                                                                                          | Required | Constraints                                                       |
+| ---------- | ------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string                                                                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string                                                                                                        | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `state`    | one of `pending`, `dispatched`, `acked`, `running`, `succeeded`, `failed`, `rejected`, `expired`, `cancelled` |          |                                                                   |
+| `limit`    | integer                                                                                                       |          | 1-200; default `100`                                              |
+| `cursor`   | string                                                                                                        |          | at most 19 characters; matches `^\d{1,19}$`                       |
+
 ## cancel
 
 `POST /api/compute/commands/cancel`
@@ -50,4 +68,12 @@ Methods of the `commands` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:nodes:exec` @ `compute-node`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                       |
+| ----------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`    | string | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `commandId` | string | yes      | at most 64 characters; matches `^cmd_[0-9a-hjkmnp-tv-z]{26,52}$`  |

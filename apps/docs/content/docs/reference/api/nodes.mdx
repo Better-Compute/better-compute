@@ -34,6 +34,18 @@ Methods of the `nodes` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field            | Type                                                                                                                                                               | Required | Constraints                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | --------------------------------------------------------------------- |
+| `tenantId`       | string                                                                                                                                                             | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`            |
+| `poolId`         | string                                                                                                                                                             |          | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` |
+| `siteId`         | string                                                                                                                                                             |          | at most 64 characters; matches `^site_[0-9a-hjkmnp-tv-z]{26,52}$`     |
+| `cordoned`       | boolean                                                                                                                                                            |          |                                                                       |
+| `provisionState` | one of `adopting`, `adopted`, `enrolling`, `inspecting`, `commissioning`, `ready`, `deploying`, `deployed`, `releasing`, `rescue`, `failed`, `retiring`, `retired` |          |                                                                       |
+| `limit`          | integer                                                                                                                                                            |          | 1-50; default `50`                                                    |
+| `cursor`         | string                                                                                                                                                             |          | at most 256 characters; matches `^[A-Za-z0-9._:-]{1,256}$`            |
+
 ## get
 
 `POST /api/compute/nodes/get`
@@ -42,6 +54,13 @@ Methods of the `nodes` group, contributed by `server`.
 - **Authorization:** `compute:nodes:read` @ `compute-node`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## events
 
@@ -52,6 +71,16 @@ Methods of the `nodes` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `type`     | string  |          | at most 64 characters; matches `^[a-z][a-z0-9.-]{0,63}$`          |
+| `limit`    | integer |          | 1-200; default `100`                                              |
+| `cursor`   | string  |          | at most 41 characters; matches `^\d{1,20}:\d{1,20}$`              |
+
 ## cordon
 
 `POST /api/compute/nodes/cordon`
@@ -60,6 +89,15 @@ Methods of the `nodes` group, contributed by `server`.
 - **Authorization:** `compute:nodes:cordon` @ `compute-node`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `version`  | integer |          | at least 1                                                        |
+| `reason`   | string  |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`       |
 
 ## uncordon
 
@@ -70,6 +108,15 @@ Methods of the `nodes` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `version`  | integer |          | at least 1                                                        |
+| `reason`   | string  |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`       |
+
 ## drain
 
 `POST /api/compute/nodes/drain`
@@ -78,6 +125,15 @@ Methods of the `nodes` group, contributed by `server`.
 - **Authorization:** `compute:nodes:drain` @ `compute-node`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `version`  | integer |          | at least 1                                                        |
+| `reason`   | string  |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`       |
 
 ## label
 
@@ -106,6 +162,15 @@ Methods of the `nodes` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `version`  | integer |          | at least 1                                                        |
+| `reason`   | string  |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`       |
+
 ## revokeIdentity
 
 `POST /api/compute/nodes/revokeIdentity`
@@ -115,6 +180,15 @@ Methods of the `nodes` group, contributed by `server`.
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `version`  | integer |          | at least 1                                                        |
+| `reason`   | string  |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`       |
+
 ## delete
 
 `POST /api/compute/nodes/delete`
@@ -123,6 +197,15 @@ Methods of the `nodes` group, contributed by `server`.
 - **Authorization:** `compute:nodes:delete` @ `compute-node`
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `version`  | integer |          | at least 1                                                        |
+| `reason`   | string  |          | at most 256 characters; matches `^[^\u0000-\u001f\u007f]*$`       |
 
 ## issueSshCert
 
