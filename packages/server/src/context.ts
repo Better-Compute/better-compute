@@ -45,6 +45,7 @@ export function createModuleContext(
     inventory: ports.inventory,
     afterCommit: (hook: () => void | Promise<void>) => options.afterCommit(hook),
     caches,
+    typePrefix: options.typePrefix,
     secrets: secretBroker(options.secretStores),
     pki: pkiPort(),
     ...(workflows ? { workflows } : {}),

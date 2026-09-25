@@ -928,6 +928,12 @@ export interface ModuleContext {
   afterCommit?(hook: () => void | Promise<void>): void;
   /** The envelope's caches, for invalidation from IAM events (the IAM bridge's inbox handlers). */
   caches?: ComputeCaches;
+  /**
+   * The IAM resource type prefix of this deployment (`ComputeOptions.typePrefix`, default
+   * `compute-`), for modules that decide on compute resources themselves (e.g. vps deciding
+   * `compute:secrets:manage` on `${typePrefix}tenant/{t}`). Always set by betterCompute().
+   */
+  typePrefix?: string;
 }
 
 /** Invalidation handles of the envelope's authentication and read-decision caches (§3.4, §9.2). */
