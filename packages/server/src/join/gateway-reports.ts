@@ -50,15 +50,38 @@ export interface GatewayReportHandlers {
  * ```
  */
 export const gatewayReportHandlers: GatewayReportHandlers = Object.freeze({
-  allocationBound: (tx: SqlTx, context: GatewayReportContext, report: AllocationBound) =>
+  allocationBound: async (tx: SqlTx, context: GatewayReportContext, report: AllocationBound) =>
+    (await onReportingNode(tx, context, report.allocationId)) &&
     markAllocationBound(tx, context.work, report.allocationId, {
       cdiDevices: report.cdiDevices,
       ...(report.envFile ? { envFile: report.envFile } : {}),
     }),
-  allocationReleased: (tx: SqlTx, context: GatewayReportContext, report: AllocationReleased) =>
+  allocationReleased: async (
+    tx: SqlTx,
+    context: GatewayReportContext,
+    report: AllocationReleased,
+  ) =>
+    (await onReportingNode(tx, context, report.allocationId)) &&
     markAllocationReleased(tx, context.work, report.allocationId),
-  allocationFailed: (tx: SqlTx, context: GatewayReportContext, report: AllocationFailed) =>
+  allocationFailed: async (tx: SqlTx, context: GatewayReportContext, report: AllocationFailed) =>
+    (await onReportingNode(tx, context, report.allocationId)) &&
     markAllocationFailed(tx, context.work, report.allocationId, {
       reason: report.reason || 'failed',
     }),
 });
+
+/**
+ * A node reports only its own allocations: node A's session can neither bind, release nor fail
+ * an allocation placed on node B (the report is ignored, as an unknown allocation is).
+ */
+async function onReportingNode(
+  tx: SqlTx,
+  context: GatewayReportContext,
+  allocationId: string,
+): Promise<boolean> {
+  const { rows } = await tx.query('SELECT 1 FROM allocations WHERE id = $1 AND node_id = $2', [
+    allocationId,
+    context.nodeId,
+  ]);
+  return rows.length > 0;
+}
