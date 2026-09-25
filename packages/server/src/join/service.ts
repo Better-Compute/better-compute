@@ -271,6 +271,7 @@ interface ExistingNode {
   site_id: string;
   role: NodeRole;
   identity_gen: number;
+  trust: NodeTrust;
 }
 
 /** Builds JoinService over the store, the clock and the crypto port. */
@@ -315,7 +316,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
     input: {
       nodeId: string;
       siteId: string;
-      role: AgentRole;
+      role: AgentRole | 'node-tenant';
       identityGen: number;
       csr: Uint8Array;
       spkiSha256: Uint8Array;
@@ -574,7 +575,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       if (result.nodeId) {
         existing = (
           await tx.query<ExistingNode>(
-            `SELECT id, owner_tenant_id, pool_id, site_id, role, identity_gen FROM nodes
+            `SELECT id, owner_tenant_id, pool_id, site_id, role, identity_gen, trust FROM nodes
               WHERE id = $1 FOR UPDATE`,
             [result.nodeId],
           )
@@ -583,7 +584,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       } else if (key?.trusted) {
         existing = (
           await tx.query<ExistingNode>(
-            `SELECT id, owner_tenant_id, pool_id, site_id, role, identity_gen FROM nodes
+            `SELECT id, owner_tenant_id, pool_id, site_id, role, identity_gen, trust FROM nodes
               WHERE hardware_key = decode($1, 'hex') AND hardware_key_trusted FOR UPDATE`,
             [key.key],
           )
@@ -665,10 +666,16 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         result.certTtlSeconds ?? certTtlSeconds,
         role === 'ramdisk' ? ramdiskMaxTtlS : certTtlSeconds,
       );
+      // A dedicated-root lease (§13): the lessee's OS on a tenant-controlled node gets a
+      // `node-tenant` certificate (telemetry and `leave`, never secrets). Metal sets the trust and
+      // revokes the platform identity before that OS runs, so this is where the role is decided.
+      // The platform ramdisk (teardown, wipe attestation) keeps its own role.
+      const tenantControlled =
+        role === 'node' && (existing ? existing.trust : trust) === 'tenant-controlled';
       const certificate = await issue(crypto, tx, {
         nodeId,
         siteId,
-        role,
+        role: tenantControlled ? 'node-tenant' : role,
         identityGen,
         csr: request.csr,
         spkiSha256: csr.spkiSha256,

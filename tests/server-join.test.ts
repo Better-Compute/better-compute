@@ -929,6 +929,64 @@ describe('JoinService security.join.refused', () => {
   });
 });
 
+describe('JoinService dedicated-root leases (tenant-controlled nodes, §13)', () => {
+  it("issues the lessee's OS a node-tenant certificate; the platform ramdisk keeps its role", async () => {
+    const s = await setup();
+    const host = machine(51);
+    const joined = await join(s, (await mintToken(s)).token, host);
+    const nodeId = joined.body.nodeId;
+    // Metal starts the lease: trust becomes tenant-controlled (the platform identity is revoked).
+    await s.fixture.database.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [
+      nodeId,
+    ]);
+    const service = createJoinService({
+      database: s.fixture.database,
+      clock: s.fixture.clock,
+      work: s.fixture.compute.context.work,
+      events: s.fixture.compute.context.events,
+      crypto: s.crypto,
+      attestors: [
+        defineAttestor({
+          id: 'lease',
+          version: '1.0.0',
+          roles: ['node', 'ramdisk'],
+          async verify(_evidence, { role }) {
+            return { tenantId: s.fixture.tenants.root.id, role, poolId: POOL, nodeId };
+          },
+        }),
+      ],
+    });
+    const joinAs = async (role: AgentRole) => {
+      const key = generateP256KeyPair().privateKey;
+      const csr = createCsr(key);
+      const response = await service.join(
+        create(JoinRequestSchema, {
+          csr,
+          attestor: 'lease',
+          claims: create(HardwareClaimsSchema, host.claims),
+          role,
+        }),
+      );
+      // The agent's own check accepts it (a node-tenant leaf answers a NODE join).
+      return verifyJoinResponse(response, {
+        signer: { publicKey: s.signingKey.publicKey },
+        csr,
+        nodeCaRoots: [s.nodeCa.certificate],
+        now: s.fixture.clock.now(),
+      });
+    };
+    const lessee = await joinAs(AgentRole.NODE);
+    expect(parseCertificate(lessee.certChain[0]!).role).toBe('node-tenant');
+    const ramdisk = await joinAs(AgentRole.RAMDISK);
+    expect(parseCertificate(ramdisk.certChain[0]!).role).toBe('ramdisk');
+    const roles = await s.fixture.database.query<{ role: string }>(
+      'SELECT role FROM node_certs WHERE node_id = $1 ORDER BY issued_at, serial',
+      [nodeId],
+    );
+    expect(roles.rows.map((row) => row.role).sort()).toEqual(['node', 'node-tenant', 'ramdisk']);
+  });
+});
+
 describe('JoinService node bindings (AttestationResult.bind)', () => {
   it('binds a proven hardware subject to one node and refuses it for any other', async () => {
     const s = await setup();

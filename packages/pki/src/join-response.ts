@@ -132,7 +132,9 @@ export function verifyJoinResponse(
     spiffe.siteId !== body.siteId
   )
     throw deny('certificate identity does not match the response');
-  if (leaf.role !== agentRoleFromWire(body.role)) throw deny('certificate role mismatch');
+  // A lessee's OS on a dedicated-root lease holds a `node-tenant` certificate for a NODE join (§13).
+  const leafRole = leaf.role === 'node-tenant' ? 'node' : leaf.role;
+  if (leafRole !== agentRoleFromWire(body.role)) throw deny('certificate role mismatch');
   if (options.nodeCaRoots)
     verifyCertificateChain(body.certChain, options.nodeCaRoots, {
       now: options.now ?? Date.now(),
