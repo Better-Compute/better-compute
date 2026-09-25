@@ -54,7 +54,7 @@ const pki = await load('pki');
 const { provisionModule } = await load('provision');
 const { metal } = await load('metal');
 const { vps } = await load('vps');
-const { eventsModule } = await load('events');
+const { eventsModule, eventCatalog } = await load('events');
 const { fleetModule } = await load('fleet');
 const { rolloutModule } = await load('rollout');
 const { auditModule } = await load('audit');
@@ -430,6 +430,27 @@ files.set(
   ].join('\n'),
 );
 
+const events = eventCatalog.map((family) => ({ ...family }));
+files.set(
+  `${reference}/events.mdx`,
+  [
+    frontmatter({
+      title: 'Events',
+      description: `The ${events.length} event families the control plane publishes to webhooks, the SSE watch stream and sinks.`,
+    }),
+    generatedNote("the events module's eventCatalog"),
+    '',
+    'Every event is `{ id, type, tenantId, subject, data, time }`, delivered at least once in commit order. Subscriptions name a type or a family (`node.*`); a pattern nothing in this catalog can match is refused, and `webhooks.eventTypes` returns the same list.',
+    '',
+    '| Type | Subject | Module | Description |',
+    '| --- | --- | --- | --- |',
+    ...events.map(
+      (family) =>
+        `| ${code(family.type)} | ${code(family.subject)} | ${code(family.module)} | ${cell(family.description)} |`,
+    ),
+  ].join('\n'),
+);
+
 // The reference section's own meta.json and index are hand-written; the generated pages are listed there.
 
 const data = {
@@ -437,6 +458,7 @@ const data = {
   'generated/errors.json': errors,
   'generated/cli.json': cli,
   'generated/command-kinds.json': commandKinds,
+  'generated/events.json': events,
   'generated/modules.json': { modules, jobs },
   'generated/packages.json': packages,
 };

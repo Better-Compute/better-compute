@@ -87,7 +87,7 @@ describe('generated reference', () => {
   });
 
   it('every other generated page exists with frontmatter', async () => {
-    for (const name of ['cli', 'command-kinds', 'errors', 'modules', 'packages']) {
+    for (const name of ['cli', 'command-kinds', 'errors', 'events', 'modules', 'packages']) {
       const page = await readFile(join(docs, `content/docs/reference/${name}.mdx`), 'utf8');
       expect(page.replace(/\r\n/g, '\n'), name).toMatch(/^---\ntitle: .+\ndescription: .+\n---\n/);
     }
