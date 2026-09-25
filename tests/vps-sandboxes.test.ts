@@ -54,8 +54,11 @@ interface Recorded {
     payload: unknown;
     idempotencyKey: string;
   }[];
+  decisions: string[];
 }
 let recorded: Recorded;
+/** Actions the fake IAM refuses (the extra decisions vps makes). */
+const denied = new Set<string>();
 /** The secret broker, for the tests that need one (sealed user data, template env). */
 let broker:
   | {
@@ -64,7 +67,14 @@ let broker:
       delete(ref: string): Promise<void>;
     }
   | undefined;
-const fresh = (): Recorded => ({ authz: [], removed: [], pending: [], events: [], commands: [] });
+const fresh = (): Recorded => ({
+  authz: [],
+  removed: [],
+  pending: [],
+  events: [],
+  commands: [],
+  decisions: [],
+});
 
 const alice: Caller = {
   identityId: 'usr_alice',
@@ -118,6 +128,13 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     },
     work: { async enqueue() {} },
     desired: { async invalidate() {} },
+    // IAM decisions vps adds itself (secrets:manage for templates that use secrets).
+    iam: {
+      async require(_credential: unknown, decision: { action: string }) {
+        recorded.decisions.push(decision.action);
+        if (denied.has(decision.action)) throw new ComputeError('ACCESS_DENIED', 'Access denied');
+      },
+    },
     // A real `commands` row, so settling reads its state and result like the gateway leaves them.
     commands: {
       async enqueue(tx, command) {
@@ -201,7 +218,12 @@ async function run(
       throw new ComputeError('ACCESS_DENIED', 'Access denied');
     }
     await definition.admission.check?.(
-      { ...moduleContext(db), caller: who, requestId: 'req' } as MethodContext,
+      {
+        ...moduleContext(db),
+        caller: who,
+        credential: { kind: 'session', token: `ses:${who.identityId}` },
+        requestId: 'req',
+      } as unknown as MethodContext,
       input,
     );
   }
@@ -1330,11 +1352,53 @@ describe('selfCheck', () => {
 });
 
 describe('template env', () => {
-  afterEach(() => {
+  afterEach(async () => {
     broker = undefined;
+    denied.clear();
+    await db.query(`DELETE FROM secret_refs`);
+  });
+  const putSecret = (ref: string, name: string) =>
+    db.query(
+      `INSERT INTO secret_refs (ref, tenant_id, name, version, store, last_idempotency_key)
+       VALUES ($1, 'acme', $2, 1, 'local', 'k')`,
+      [ref, name],
+    );
+
+  it('uses only secrets the tenant put, and decides secrets:manage for the template author', async () => {
+    broker = {
+      resolve: async (ref) => `value:${ref}`,
+      put: async (tenantId) => `secret://${tenantId}/sealed`,
+      delete: async () => {},
+    };
+    // A platform-minted secret (sealed user data, a join token) is not the tenant's to hand out.
+    await expect(
+      createTemplate({ env: { TOKEN: 'secret://acme/minted-by-the-platform' } }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('secrets.put'),
+    });
+    await putSecret('secret://acme/api-token', 'api-token');
+    denied.add('compute:secrets:manage');
+    await expect(
+      createTemplate({ env: { TOKEN: 'secret://acme/api-token' } }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    denied.clear();
+    recorded.decisions = [];
+    const template = await createTemplate({ env: { TOKEN: 'secret://acme/api-token' } });
+    expect(recorded.decisions).toEqual(['compute:secrets:manage']);
+    // A template without secrets needs no extra decision.
+    recorded.decisions = [];
+    await call('sandboxTemplates', 'update', {
+      tenantId: 'acme',
+      templateId: template.id,
+      maxTtlSeconds: 7200,
+    });
+    expect(recorded.decisions).toEqual([]);
   });
 
   it("resolves the tenant's secrets into /etc/sandbox/env, sealed by the broker, never inline", async () => {
+    await putSecret('secret://acme/api-token', 'api-token');
+    await putSecret('secret://acme/db', 'db');
     const sealed: { tenantId: string; value: string }[] = [];
     broker = {
       resolve: async (ref) =>

@@ -105,6 +105,20 @@ ALTER TABLE sandbox_snapshots ADD COLUMN purged bool NOT NULL DEFAULT false;
 `,
 };
 
+/**
+ * Indexes for the §14 sandbox metrics ([31c64a]'s collector scans them every 15 s): readiness and
+ * expiry times, and when warm (or warm-claimed) instances were made.
+ */
+export const vpsSandboxMetricIndexesMigration: Migration = {
+  name: 'vps/0010_sandbox_metric_indexes',
+  sql: `
+CREATE INDEX sandboxes_ready_at ON sandboxes (ready_at) WHERE ready_at IS NOT NULL;
+CREATE INDEX sandboxes_expired_at ON sandboxes (expired_at) WHERE expired_at IS NOT NULL;
+CREATE INDEX instances_warm_created ON instances (created_at)
+  WHERE warm_template_id IS NOT NULL OR claimed_at IS NOT NULL;
+`,
+};
+
 export type SnapshotState = 'pending' | 'ready' | 'failed' | 'deleted';
 
 export interface SandboxSnapshot {

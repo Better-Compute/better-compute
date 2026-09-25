@@ -8,6 +8,7 @@ import {
   type ComputeModule,
   type Duration,
   type Instance,
+  type MethodContext,
   type MethodDefinition,
   type ModuleContext,
   type Offer,
@@ -109,6 +110,7 @@ import {
   sandboxSettled,
   sandboxWork,
   templatePool,
+  templateSecretRefs,
   updateTemplate,
   type CreateSandboxInput,
   type ExtendSandboxInput,
@@ -175,6 +177,8 @@ export interface VpsOptions {
    * tunnels module's `sandboxSsh` CA) for `<account>@<instanceId>`, `account` default `sandbox`.
    */
   sandboxExec?: { caPublicKey: string; account?: string };
+  /** The IAM resource-type prefix (`ComputeOptions.typePrefix`, default `compute-`), for decisions vps adds. */
+  typePrefix?: string;
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -347,6 +351,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         'INVALID_CONFIG',
         'vps({ bootstrap }).controlPlaneUrl must be an https URL without spaces, quotes, % or $',
       );
+    const { pins } = options.bootstrap;
+    if (
+      pins !== undefined &&
+      ![pins.servingCa, pins.joinSigning, pins.joinEncryption].every((pin) =>
+        /^sha256\/[A-Za-z0-9+/]{43}=$/.test(pin),
+      )
+    )
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'vps({ bootstrap }).pins must be sha256/<base64> SPKI pins (servingCa, joinSigning, joinEncryption)',
+      );
   }
   const bootstrapDeps = (context: ModuleContext): BootstrapDeps => ({
     clock: context.clock,
@@ -372,6 +387,31 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     providers.set(provider.id, provider);
   }
   const clients = new ProviderClients(providers);
+  const typePrefix = options.typePrefix ?? 'compute-';
+  /**
+   * A template that names secrets hands them to every sandbox's guest, which can read them: the
+   * caller must also hold `compute:secrets:manage` on the tenant (secrets are write-only, §6).
+   * Decided outside any transaction (admission `check`), with the caller's own credential.
+   */
+  const secretsCheck = async (
+    context: MethodContext,
+    tenantId: string,
+    input: { env?: Readonly<Record<string, string>>; userData?: string | null },
+  ): Promise<void> => {
+    if (templateSecretRefs(input).length === 0) return;
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'A sandbox template that uses secrets is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    await context.iam.require(context.credential, {
+      tenantId,
+      action: 'compute:secrets:manage',
+      resource: { type: `${typePrefix}tenant`, id: tenantId },
+    });
+  };
   let sandboxExec: { caPublicKey: string; account: string } | undefined;
   if (options.sandboxExec) {
     const { caPublicKey, account = 'sandbox' } = options.sandboxExec;
@@ -725,6 +765,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         resource: tenantResource,
         validate: describedBy(schemas.createTemplate, parseTemplateInput),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: tenantResource(input),
+          }),
+          check: (context, input) => secretsCheck(context, input.tenantId, input),
+        },
         handler: (context, input) => createTemplate(depsOf(context), context, input),
       }),
       list: defineMethod({
@@ -748,6 +795,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         resource: templateResource,
         validate: describedBy(schemas.updateTemplate, parseTemplateUpdate),
+        admission: {
+          prepare: async (_context, input) => ({
+            status: 'decide',
+            resource: templateResource(input),
+          }),
+          check: (context, input) => secretsCheck(context, input.tenantId, input),
+        },
         handler: (context, input) => updateTemplate(depsOf(context), context.sql, input),
       }),
       delete: defineMethod({

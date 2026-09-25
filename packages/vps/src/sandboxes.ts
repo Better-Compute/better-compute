@@ -553,6 +553,7 @@ export async function createTemplate(
   assertEnvDeliverable(deps, input.env, input.userData);
   const { runtime } = await resolveTemplate(deps, tx, input);
   await assertNetworkDeliverable(tx, input.poolId, input.network);
+  await assertTenantSecrets(tx, input.tenantId, templateSecretRefs(input));
   const { defaultTtl, maxTtl } = ttlBounds(input.defaultTtlSeconds, input.maxTtlSeconds);
   const taken = await tx.query(
     `SELECT 1 FROM sandbox_templates WHERE tenant_id = $1 AND name = $2 AND NOT deleted`,
@@ -592,6 +593,43 @@ export async function createTemplate(
     ownerId: caller.identityId,
   });
   return templateView(toTemplate(rows[0]!));
+}
+
+/** The `secret://` refs a template write names (env values, and user data given as a ref). */
+export function templateSecretRefs(input: {
+  env?: Readonly<Record<string, string>>;
+  userData?: string | null;
+}): string[] {
+  const refs = Object.values(input.env ?? {});
+  if (isSecretRef(input.userData ?? undefined)) refs.push(input.userData!);
+  return [...new Set(refs)];
+}
+
+/**
+ * Secrets a template may use: ones the tenant wrote through `secrets.put` (`secret_refs`), never
+ * platform-minted ones (join tokens, BMC credentials, sealed user data), which live in the same store
+ * under the root tenant. Secrets are write-only (§6): a sandbox that gets one in its env or user data
+ * reads it, so `sandboxTemplates.create/update` also decide `compute:secrets:manage` for them.
+ */
+async function assertTenantSecrets(tx: SqlTx, tenantId: string, refs: readonly string[]) {
+  if (refs.length === 0) return;
+  const present = await tx.query<{ found: string | null }>(
+    `SELECT to_regclass('secret_refs')::text AS found`,
+  );
+  const known = present.rows[0]?.found
+    ? (
+        await tx.query<{ ref: string }>(
+          `SELECT ref FROM secret_refs WHERE tenant_id = $1 AND ref = ANY($2::text[])`,
+          [tenantId, [...refs]],
+        )
+      ).rows.map((row) => row.ref)
+    : [];
+  const unknown = refs.filter((ref) => !known.includes(ref));
+  if (unknown.length > 0)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${unknown[0]} is not a secret this tenant put (secrets.put); templates use only those`,
+    );
 }
 
 /**
@@ -651,6 +689,7 @@ export async function updateTemplate(
         })
       : current;
   await assertNetworkDeliverable(tx, current.poolId, input.network);
+  await assertTenantSecrets(tx, current.tenantId, templateSecretRefs(input));
   const { defaultTtl, maxTtl } = ttlBounds(input.defaultTtlSeconds, input.maxTtlSeconds, current);
   const warmPool = input.warm
     ? { min: input.warm.min, max: input.warm.max ?? input.warm.min }
