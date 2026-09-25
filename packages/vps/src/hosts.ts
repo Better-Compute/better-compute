@@ -1,5 +1,11 @@
-import { ComputeError, type ModuleContext, type SqlExecutor } from '@better-compute/core';
+import {
+  ComputeError,
+  type Finding,
+  type ModuleContext,
+  type SqlExecutor,
+} from '@better-compute/core';
 import { instanceWork } from './instances.js';
+import type { RuntimeTraits } from './runtime.js';
 
 // Host capacity (PLAN.md §10.2): a VPS host's scalar resources come from its inventory.
 //   allocatable = capacity − systemReserved, per resource; available = allocatable × ratio − allocated
@@ -121,6 +127,79 @@ export async function staleHostResources(
     allocatable: Number(row.allocatable),
     ratio: Number(row.ratio),
   }));
+}
+
+/**
+ * `selfCheck` (doctor) for hosted VPS: pools whose runtime this deployment does not run, container
+ * pools not marked single-tenant, pools without an IP range, and adopted hosts without capacity rows
+ * (no inventory yet, or `vps.hosts` not running).
+ */
+export async function vpsSelfCheck(
+  sql: SqlExecutor,
+  runtimes: ReadonlyMap<string, RuntimeTraits>,
+  defaultRuntime: string,
+): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const { rows: pools } = await sql.query<{
+    id: string;
+    runtime: string | null;
+    single_tenant: boolean;
+    has_range: boolean;
+  }>(
+    `SELECT p.id, p.policy->>'runtime' AS runtime,
+            COALESCE(p.policy->>'singleTenant', 'false') = 'true' AS single_tenant,
+            EXISTS (SELECT 1 FROM ip_pools i WHERE i.pool_id = p.id) AS has_range
+       FROM pools p WHERE p.class = 'vps-host' AND p.archived_at IS NULL ORDER BY p.id`,
+  );
+  const unknown = pools.filter((pool) => !runtimes.has(pool.runtime ?? defaultRuntime));
+  if (unknown.length)
+    findings.push({
+      check: 'vps.pools.runtime',
+      severity: 'error',
+      message: `${unknown.length} vps-host pool(s) run a runtime this deployment does not list: ${unknown
+        .slice(0, 5)
+        .map((pool) => `${pool.id} (${pool.runtime})`)
+        .join(', ')}`,
+      fix: 'Add the runtime to vps({ runtimes }) (with vps({ runtimeTraits }) for bcx runtimes) or change policy.runtime',
+      count: unknown.length,
+    });
+  const shared = pools.filter((pool) => {
+    const traits = runtimes.get(pool.runtime ?? defaultRuntime);
+    return traits && !traits.multiTenant && !pool.single_tenant;
+  });
+  if (shared.length)
+    findings.push({
+      check: 'vps.pools.single-tenant',
+      severity: 'error',
+      message: `${shared.length} container pool(s) are not marked single-tenant and cannot run instances`,
+      fix: 'Set policy.singleTenant: true on pools that run a container runtime (§13)',
+      count: shared.length,
+    });
+  const rangeless = pools.filter((pool) => !pool.has_range);
+  if (rangeless.length)
+    findings.push({
+      check: 'vps.pools.ipam',
+      severity: 'warning',
+      message: `${rangeless.length} vps-host pool(s) have no IP range: their instances get no address`,
+      fix: 'Give each vps-host pool a range with setIpPool({ poolId, cidr, gateway })',
+      count: rangeless.length,
+    });
+  const { rows } = await sql.query<{ count: string | number }>(
+    `SELECT count(*) AS count FROM nodes n JOIN pools p ON p.id = n.pool_id AND p.class = 'vps-host'
+      WHERE n.provision_state IN ('adopted', 'deployed') AND n.trust <> 'tenant-controlled'
+        AND n.deleted_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM node_resources r WHERE r.node_id = n.id AND r.resource = 'vcpu')`,
+  );
+  const hostless = Number(rows[0]?.count ?? 0);
+  if (hostless > 0)
+    findings.push({
+      check: 'vps.hosts.capacity',
+      severity: 'warning',
+      message: `${hostless} adopted VPS host(s) have no vCPU/memory/disk capacity yet`,
+      fix: 'Check that the hosts reported inventory and that a worker runs the vps.hosts reconciler',
+      count: hostless,
+    });
+  return findings;
 }
 
 /**

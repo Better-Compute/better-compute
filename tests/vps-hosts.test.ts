@@ -3,10 +3,12 @@ import type { SqlExecutor } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations } from '@better-compute/capacity';
 import {
+  builtinRuntimeTraits,
   hostReserve,
   staleHostResources,
   syncHostResources,
   vpsMigrations,
+  vpsSelfCheck,
 } from '@better-compute/vps';
 
 // Host capacity from inventory (PLAN.md §10.2): vcpu/memoryGiB/diskGiB rows for vps-host nodes, the
@@ -183,6 +185,25 @@ describe('VPS host capacity from inventory (§10.2)', () => {
     await db.query(`UPDATE node_resources SET allocated = 0 WHERE node_id = $1`, [id]);
     await syncHostResources(db);
     expect((await resources(id)).vcpu).toEqual({ allocatable: 30, ratio: 2, allocated: 0 });
+  });
+
+  it('reports misconfigured VPS pools and hosts without capacity (selfCheck)', async () => {
+    await pool('pool_01jz0000000000000000000h03', 'vps-host', { runtime: 'containerd' });
+    await pool('pool_01jz0000000000000000000h04', 'vps-host', { runtime: 'kata' });
+    await node('node_01jz0000000000000000000h05', 'pool_01jz0000000000000000000h03');
+    const runtimes = new Map(
+      ['libvirt-kvm', 'containerd'].map((runtime) => [runtime, builtinRuntimeTraits[runtime]!]),
+    );
+    const findings = await vpsSelfCheck(db, runtimes, 'libvirt-kvm');
+    expect(Object.fromEntries(findings.map((finding) => [finding.check, finding.count]))).toEqual({
+      'vps.pools.runtime': 1,
+      'vps.pools.single-tenant': 1,
+      'vps.pools.ipam': 3,
+      'vps.hosts.capacity': 1,
+    });
+    expect(findings.find((finding) => finding.check === 'vps.pools.runtime')?.message).toContain(
+      'kata',
+    );
   });
 
   it('takes a configured reserve and refuses a bad one', async () => {

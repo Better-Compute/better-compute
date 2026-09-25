@@ -74,6 +74,7 @@ import {
   hostReserve,
   hostResourcesWork,
   syncHostResources,
+  vpsSelfCheck,
   wakeInstancesOnLostHosts,
   type HostReserve,
 } from './hosts.js';
@@ -575,6 +576,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         },
       },
     ],
+    selfCheck: (context) => vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!),
     async nodeSpec(context, node) {
       const instances = await instanceSpecs(
         context.sql,
