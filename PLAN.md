@@ -986,7 +986,7 @@ What breaks first, with the mitigation already built in:
 **List recipe** (P7, P11):
 1. **Coarse gate:** one `authorize` for `compute:<kind>:read` on the input scope (`compute-tenant/{t}` or `compute-project/{id}`).
 2. **SQL pre-filter:** SQL scopes rows to the caller's tenant and keeps only rows the caller can plausibly read (owner, project member, pool offer or relation, via the projection). This keeps per-item checks mostly allows.
-3. **Owner-scoped kinds** (reservations, instances) with `scope:'mine'`, the default: the coarse decision plus `owner_identity_id = caller` in SQL, with no per-item checks.
+3. **Owner-scoped kinds** (reservations, instances, sandboxes) with `scope:'mine'`, the default: the coarse decision plus `owner_identity_id = caller` in SQL, with no per-item checks.
 4. **Everything else** (`scope:'tenant'`, pools, nodes, sites, …): one `authorizeMany` per page (≤50 items), built only from rows the local projection already holds.
    - A resolver `NOT_FOUND` aborts the whole batch, because resolution precedes the decision. The page is retried once after the projection catches up.
    - Any other batch error fails the request.
