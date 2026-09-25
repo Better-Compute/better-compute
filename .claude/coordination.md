@@ -173,8 +173,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   export + stop-new admission are [097b34]'s; host wiring [402c97]'s), runtimeObserver (5e6f8b1), writers for
   gateway_sessions/security_events_total/resolver_lookups_total (423b180).
   Tenancy §12.8 DONE (ae9a7bb; hooks: capacity 2e91167, provision/metal f7df0ec; host default handler 7790748;
-  iamTenantReader a6485c8). Cold start DONE at CI size (033cb78: runColdStart, tests/sim/cold-start.test.ts,
-  tests/nightly/cold-start.nightly.ts). NOW: the 10k cold-start run + report; bisecting the nightly I8 fix.
+  iamTenantReader a6485c8; security fix, IAM reads moved out of the inbox tx: 6670778). 10k cold start DONE (033cb78,
+  8af096c workerPasses; 1cc354b: 10k ready in 80 s simulated, back in 40 s after a power cycle, 0 violations).
+  Nightly I8 is intermittent (~50%, not fixed by any commit): [f02367] is chasing it (f791008 logs i8Details).
 - [c321a3] round 4 (gateway, server runtime, docs generator): orphan store.ts (d430815); tunnel filters tenantId/anyAgent +
   reauthorizeTunnels (6aeb5c4); generator MDX escaping + MDX compile check (bd57184), events page (c563de7); ramdisk
   exit test + ReportContext.attested (56f8cc1); FakeDaemon signs attested reports (f7fbba7); v0.4 scheduler worker role
