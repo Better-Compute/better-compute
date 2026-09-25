@@ -34,6 +34,18 @@ export const trustBundleApproverSetMigration: Migration = {
   sql: `ALTER TABLE trust_bundle_state ADD COLUMN approver_set jsonb;`,
 };
 
+/** Every bundle digest published, with its (latest) version: a stale replica never bumps one again. */
+export const trustBundleHistoryMigration: Migration = {
+  name: 'quorum/0006_trust_bundle_history',
+  sql: `
+CREATE TABLE trust_bundle_history (
+  digest bytea PRIMARY KEY,
+  version numeric(20, 0) NOT NULL,
+  published_at timestamptz NOT NULL DEFAULT now()
+);
+`,
+};
+
 /** The quorum fields of a bundle (TrustBundle 3-6). */
 const approverSetOf = (bundle: JoinTrustBundle): ApproverSet => ({
   approverKeys: bundle.approverKeys ?? [],
@@ -120,6 +132,24 @@ export function trustVersionSettler(
       const row = rows[0]!;
       const recorded = BigInt(row.version);
       const same = Buffer.from(row.digest).equals(Buffer.from(digest));
+      // Every bundle published so far (the record seeds it where it predates the history).
+      await tx.query(
+        `INSERT INTO trust_bundle_history (digest, version) VALUES ($1, $2::numeric)
+           ON CONFLICT (digest) DO NOTHING`,
+        [row.digest, row.version],
+      );
+      // A bundle published before and since replaced (an old replica restarting with its old
+      // config) keeps its old version, which daemons ignore: bumping it would roll them back, e.g.
+      // to a command-signing root that was removed. Only an explicit pki.trustVersion above the
+      // record republishes it.
+      if (!same && configured <= recorded) {
+        const past = await tx.query<{ version: string }>(
+          'SELECT version::text AS version FROM trust_bundle_history WHERE digest = $1',
+          [digest],
+        );
+        if (past.rows[0])
+          return { version: BigInt(past.rows[0].version), stale: recorded, previous: undefined, quorumChanged: false };
+      }
       const floor = same ? recorded : recorded + 1n;
       const version = configured > floor ? configured : floor;
       const previous = row.approver_set ? loadSet(row.approver_set) : undefined;
@@ -140,11 +170,23 @@ export function trustVersionSettler(
             WHERE id = 'current'`,
           [version.toString(), digest, JSON.stringify(storeSet(set))],
         );
-      return { version, previous, quorumChanged };
+      await tx.query(
+        `INSERT INTO trust_bundle_history (digest, version) VALUES ($1, $2::numeric)
+           ON CONFLICT (digest) DO UPDATE SET version = EXCLUDED.version, published_at = now()`,
+        [digest, version.toString()],
+      );
+      return { version, stale: undefined, previous, quorumChanged };
     });
     bundle.version = outcome.version;
     // Published only for the version they sign (an unchanged quorum needs none).
     bundle.approverSetSignatures = outcome.version === configured ? signatures : [];
+    if (outcome.stale !== undefined) {
+      options.log?.warn(
+        `This process's trust bundle is the one published as version ${outcome.version}, since replaced by version ${outcome.stale}: it serves version ${outcome.version}, which daemons ignore. Update its configuration, or set pki.trustVersion above ${outcome.stale} to publish this bundle again on purpose.`,
+        { version: outcome.version.toString(), current: outcome.stale.toString() },
+      );
+      return;
+    }
     if (!outcome.quorumChanged || !outcome.previous?.approverKeys.length) return;
     // A quorum change that daemons holding keys will refuse: say so loudly, once per process.
     try {

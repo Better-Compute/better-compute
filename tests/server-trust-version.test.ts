@@ -66,8 +66,10 @@ describe('trust bundle version (review #6 M5)', () => {
     // pki.trustVersion is a floor: above the record it wins; below it, the record stands.
     expect(await published({ approvers: { keys, threshold: 1 }, trustVersion: 10 })).toBe(10n);
     expect(await published({ approvers: { keys, threshold: 1 }, trustVersion: 2 })).toBe(10n);
-    // Removing the approvers is a change too.
-    expect(await published({})).toBe(11n);
+    // Removing the approvers brings back the bundle published as version 1: a stale config keeps
+    // its old version (review 7 #4); only an explicit trustVersion publishes it again.
+    expect(await published({})).toBe(1n);
+    expect(await published({ trustVersion: 11 })).toBe(11n);
   });
 
   it('publishes approver-set signatures only for their version, and refuses a mismatched signed change', async () => {
@@ -133,7 +135,7 @@ describe('trust bundle version (review #6 M5)', () => {
     expect(warnings).toEqual([]);
 
     // An unsigned quorum change is published, with a warning that key-holding daemons refuse it.
-    expect((await boot({ approvers: first })).version).toBe(4n);
+    expect((await boot({ approvers: { ...first, threshold: 1 } })).version).toBe(4n);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/sign-approvers --version 4/);
     // setSignatures without the version they were signed for: refused at configuration.

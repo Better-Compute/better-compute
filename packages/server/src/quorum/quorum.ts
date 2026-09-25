@@ -26,7 +26,11 @@ import {
   type Signature,
 } from '@better-compute/protocol';
 import { derivedId } from '../api/common.js';
-import { trustBundleApproverSetMigration, trustBundleStateMigration } from './trust-version.js';
+import {
+  trustBundleApproverSetMigration,
+  trustBundleHistoryMigration,
+  trustBundleStateMigration,
+} from './trust-version.js';
 
 // The destructive-batch quorum, server side (PLAN.md §13, v1.0). A batch is a set of (subject, kind)
 // leaves, fixed when it is created: its Merkle root, size and every leaf's inclusion proof are
@@ -860,6 +864,7 @@ export function createQuorumModule(options: {
         trustBundleStateMigration,
         trustBundleApproverSetMigration,
         quorumRequestMigration,
+        trustBundleHistoryMigration,
       ],
       api: () => commandBatchesApi(options),
       reconcilers: [expiryReconciler()],
