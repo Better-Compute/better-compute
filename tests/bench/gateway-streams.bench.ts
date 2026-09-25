@@ -17,6 +17,14 @@ import {
   type Gateway,
   type ServedGateway,
 } from '@better-compute/gateway';
+import {
+  createNodeCa,
+  createServingCa,
+  generateP256KeyPair,
+  nodeSpiffeId,
+  privateKeyPem,
+  toPem,
+} from '@better-compute/pki';
 import { postgres } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
@@ -50,7 +58,10 @@ const postgresUrl = process.env.BETTER_COMPUTE_POSTGRES_URL;
 const sessions = Number(process.env.BENCH_GW_SESSIONS ?? 5_000);
 const durationMs = Number(process.env.BENCH_GW_DURATION_MS ?? 60_000);
 const commandsPerSecond = Number(process.env.BENCH_GW_COMMANDS_PER_S ?? 50);
-const streamsPerConnection = Number(process.env.BENCH_GW_STREAMS_PER_CONNECTION ?? 100);
+// mTLS as in production (`BENCH_GW_TLS=1`): every daemon holds its own node certificate, so its own
+// TLS connection (one stream each), and the gateway authenticates with `certificateAuthenticate`.
+const tls = process.env.BENCH_GW_TLS === '1';
+const streamsPerConnection = tls ? 1 : Number(process.env.BENCH_GW_STREAMS_PER_CONNECTION ?? 100);
 const heartbeatMs = Number(process.env.BENCH_GW_HEARTBEAT_MS ?? 10_000);
 const storm = process.env.BENCH_GW_STORM !== '0';
 const TENANT = 'tenant-bench';
@@ -154,6 +165,7 @@ class Daemon {
   stream: ClientHttp2Stream | undefined;
   unexpectedCloses = 0;
   handshakeRetries = 0;
+  dialRetries = 0;
   reconnects = 0;
   readonly executed = new Map<string, number>();
   private readonly unacked = new Set<string>();
@@ -217,6 +229,14 @@ class Daemon {
         setTimeout(() => this.open(), 200 + Math.random() * 1_000);
         return;
       }
+      if (!welcomed) {
+        // Never a session (a refused dial, a full accept queue): redial with back-off, not a drop.
+        this.dialRetries++;
+        const delay = Math.random() * this.backoffMs;
+        this.backoffMs = Math.min(30_000, this.backoffMs * 2);
+        setTimeout(() => this.open(), delay);
+        return;
+      }
       this.unexpectedCloses++;
       this.reconnects++;
       // Full jitter, doubling to 30 s.
@@ -271,7 +291,55 @@ const services = {
   secret: () => Promise.reject(new ComputeError('NOT_IMPLEMENTED', 'bench')),
 };
 
-async function startGateway(db: SqlExecutor): Promise<{ gateway: Gateway; served: ServedGateway }> {
+const TRUST_DOMAIN = 'bench.local';
+const SERVER_NAME = 'gw.bench.local';
+
+/** The node CA, the gateway's serving certificate and one node certificate per daemon (PEM). */
+interface BenchPki {
+  nodeCa: Uint8Array;
+  servingCaPem: string;
+  serving: { key: string; cert: string };
+  nodes: Map<string, { key: string; cert: string }>;
+  issueMs: number;
+}
+
+async function benchPki(ids: readonly string[]): Promise<BenchPki> {
+  const started = performance.now();
+  const nodeCa = createNodeCa({ trustDomain: TRUST_DOMAIN });
+  const servingCa = createServingCa();
+  const servingKey = generateP256KeyPair();
+  const serving = await servingCa.issue(servingKey.publicKey, {
+    usage: 'server',
+    dnsSans: [SERVER_NAME],
+    ttlSeconds: 86_400,
+  });
+  const nodes = new Map<string, { key: string; cert: string }>();
+  for (const nodeId of ids) {
+    const pair = generateP256KeyPair();
+    const issued = await nodeCa.issue(pair.publicKey, {
+      usage: 'client',
+      role: 'node',
+      uriSans: [nodeSpiffeId({ trustDomain: TRUST_DOMAIN, siteId: SITE, nodeId })],
+      ttlSeconds: 86_400,
+    });
+    nodes.set(nodeId, {
+      key: privateKeyPem(pair.privateKey),
+      cert: [issued.certificate, ...issued.chain].map((der) => toPem(der)).join(''),
+    });
+  }
+  return {
+    nodeCa: nodeCa.certificate,
+    servingCaPem: toPem(servingCa.certificate),
+    serving: {
+      key: privateKeyPem(servingKey.privateKey),
+      cert: [serving.certificate, ...serving.chain].map((der) => toPem(der)).join(''),
+    },
+    nodes,
+    issueMs: Math.round(performance.now() - started),
+  };
+}
+
+async function startGateway(db: SqlExecutor, pki?: BenchPki): Promise<{ gateway: Gateway; served: ServedGateway }> {
   const gateway = createGateway({
     region: 'bench',
     database: db,
@@ -280,13 +348,23 @@ async function startGateway(db: SqlExecutor): Promise<{ gateway: Gateway; served
     heartbeatIntervalMs: heartbeatMs,
   });
   await gateway.start();
-  const served = await serveGateway(gateway, {
-    insecure: true,
-    authenticate: (peer) => {
-      const nodeId = peer.headers['x-bench-node'];
-      return typeof nodeId === 'string' ? { nodeId, role: 'node' } : undefined;
-    },
-  });
+  const served = await serveGateway(
+    gateway,
+    pki
+      ? {
+          tls: { key: pki.serving.key, cert: pki.serving.cert, ca: toPem(pki.nodeCa), minVersion: 'TLSv1.3' },
+          // The production authenticator: chain to the node CA, trust domain, role, serial.
+          nodeRoots: [pki.nodeCa],
+          trustDomain: TRUST_DOMAIN,
+        }
+      : {
+          insecure: true,
+          authenticate: (peer) => {
+            const nodeId = peer.headers['x-bench-node'];
+            return typeof nodeId === 'string' ? { nodeId, role: 'node' } : undefined;
+          },
+        },
+  );
   return { gateway, served };
 }
 
@@ -298,16 +376,26 @@ describe('gateway-streams gate', () => {
     const run = newId('req').slice(-8);
     const ids = Array.from({ length: sessions }, (_, i) => `node_bench_${run}_${i}`);
     await seed(db, ids);
+    const pki = tls ? await benchPki(ids) : undefined;
 
-    let current = await startGateway(db);
+    let current = await startGateway(db, pki);
     const retired: { gateway: Gateway; served: ServedGateway }[] = [];
     const clients = new Map<string, ClientHttp2Session>();
     const clientFor = (index: number) => () => {
       const key = `${current.served.port}:${Math.floor(index / streamsPerConnection)}`;
       let client = clients.get(key);
       if (!client || client.destroyed || client.closed) {
-        client = connect(`http://127.0.0.1:${current.served.port}`);
-        client.on('error', () => {});
+        const own = pki?.nodes.get(ids[index]!);
+        client =
+          pki && own
+            ? connect(`https://127.0.0.1:${current.served.port}`, {
+                ca: pki.servingCaPem,
+                key: own.key,
+                cert: own.cert,
+                servername: SERVER_NAME,
+                minVersion: 'TLSv1.3',
+              })
+            : connect(`http://127.0.0.1:${current.served.port}`);        client.on('error', () => {});
         clients.set(key, client);
       }
       return client;
@@ -385,7 +473,7 @@ describe('gateway-streams gate', () => {
     let stormResult: Record<string, unknown> | undefined;
     if (storm) {
       const old = current;
-      current = await startGateway(db);
+      current = await startGateway(db, pki);
       const driving = drive(15_000);
       await sleep(1_000);
       stormStart = performance.now();
@@ -432,12 +520,22 @@ describe('gateway-streams gate', () => {
       machine: { cpus: cpus().length, cpuModel: cpus()[0]?.model?.trim(), memoryBytes: totalmem() },
       node: process.version,
       adapter,
-      config: { sessions, durationMs, commandsPerSecond, streamsPerConnection, heartbeatMs, transport: 'h2c', storm },
+      config: {
+        sessions,
+        durationMs,
+        commandsPerSecond,
+        streamsPerConnection,
+        heartbeatMs,
+        transport: tls ? 'mtls' : 'h2c',
+        storm,
+      },
+      ...(pki ? { certificatesIssuedMs: pki.issueMs } : {}),
       loadGeneratorInProcess: true,
       ramp: {
         established,
         ms: Math.round(rampMs || performance.now() - rampStart),
         handshakeRetries: daemons.reduce((sum, daemon) => sum + daemon.handshakeRetries, 0),
+        dialRetries: daemons.reduce((sum, daemon) => sum + daemon.dialRetries, 0),
       },
       steady: {
         heldSessions: heldAfterSteady,

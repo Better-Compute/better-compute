@@ -81,6 +81,12 @@ export interface ServeGatewayOptions {
   trustDomain?: string;
   /** HTTP/2 PING period (default 20 000 ms, §7.5). */
   pingIntervalMs?: number;
+  /**
+   * The listen backlog (default 4096; the kernel caps it at its own limit, e.g. `somaxconn`). A
+   * reconnect storm (§7.8) dials thousands of connections at once, and Node's default of 511 refuses
+   * the rest, sending those daemons into back-off.
+   */
+  backlog?: number;
 }
 
 export interface ServedGateway {
@@ -394,7 +400,7 @@ export async function serveGateway(
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(options.port ?? 0, options.host ?? '127.0.0.1', () => {
+    server.listen(options.port ?? 0, options.host ?? '127.0.0.1', options.backlog ?? 4096, () => {
       server.off('error', reject);
       resolve();
     });
