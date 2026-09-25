@@ -1,6 +1,7 @@
+import { sign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { create } from '@bufbuild/protobuf';
-import { anyPack, timestampFromMs } from '@bufbuild/protobuf/wkt';
+import { anyPack, timestampFromMs, TimestampSchema } from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 import {
   approverKeyOf,
@@ -17,7 +18,13 @@ import {
   verifyBatchProof,
   verifyTrustBundle,
 } from '@better-compute/pki';
-import { BatchApprovalSchema, BatchProofSchema, signingInput, site } from '@better-compute/protocol';
+import {
+  batchApprovalSigningInput,
+  BatchApprovalSchema,
+  BatchProofSchema,
+  signingInput,
+  site,
+} from '@better-compute/protocol';
 
 // The v1.0 destructive-batch quorum, pki half (PLAN.md §13): the scope tree must reproduce the protocol's golden
 // tree byte for byte (bcd reproduces it too), proofs verify only for their own leaf, and approvals count distinct
@@ -202,6 +209,20 @@ describe('batch approvals', () => {
     expect(requiredApprovals(3, 2, [{ maxScopeSize: 5, threshold: 1 }])).toBe(1);
     expect(requiredApprovals(50, 2, [{ maxScopeSize: 5, threshold: 1 }])).toBe(2);
     expect(reason(approvalWith([0]), { tiers: [{ maxScopeSize: 5, threshold: 1 }] })).toBe('ok');
+  });
+
+  it('verifies over the timestamp as it travels, sub-millisecond nanos included (as bcd does)', () => {
+    const notAfter = { seconds: BigInt(Math.floor(NOW / 1000) + 3600), nanos: 123_456_789 };
+    const bytes = batchApprovalSigningInput({ batchId: input.batchId, scopeRoot: input.scopeRoot, scopeSize: input.scopeSize, notAfter: create(TimestampSchema, notAfter) });
+    const sig = new Uint8Array(sign('sha256', bytes, { key: approvers[0]!.privateKey, dsaEncoding: 'ieee-p1363' }));
+    const approval = create(BatchApprovalSchema, {
+      batchId: input.batchId,
+      scopeRoot: input.scopeRoot,
+      scopeSize: input.scopeSize,
+      notAfter: create(TimestampSchema, notAfter),
+      signatures: [{ kid: approverKeys[0]!.kid, sig }],
+    });
+    expect(verifyBatchApproval(approval, { approverKeys, threshold: 1, now: NOW })).toEqual([approverKeys[0]!.kid]);
   });
 
   it('admits a command only for its own batch and scope', () => {

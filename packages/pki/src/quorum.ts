@@ -182,19 +182,30 @@ const signingInputOf = (approval: BatchApprovalInput) => ({
 export function signBatchApproval(approval: BatchApprovalInput, privateKey: KeyObject): Signature {
   const { kid } = approverKeyOf(toPublicKey(privateKey));
   // The same bytes as protocol's batchApprovalSigningInput (checked in tests/pki-quorum).
-  const sig = signPurpose(privateKey, 'batch-approval', batchApprovalParts(approval));
+  const sig = signPurpose(
+    privateKey,
+    'batch-approval',
+    batchApprovalParts(approval.batchId, approval.scopeRoot, approval.scopeSize, timestampFromMs(approval.notAfter)),
+  );
   return create(SignatureSchema, { kid, sig });
 }
 
-/** The parts of the 'batch-approval' signing input (see protocol's batchApprovalSigningInput). */
-function batchApprovalParts(approval: BatchApprovalInput): Uint8Array[] {
+/**
+ * The parts of the 'batch-approval' signing input (see protocol's batchApprovalSigningInput), over the timestamp as
+ * it travels (seconds, nanos): a verifier never rounds it through milliseconds, as bcd does not.
+ */
+function batchApprovalParts(
+  batchId: string,
+  scopeRoot: Uint8Array,
+  scopeSize: number,
+  notAfter: { seconds: bigint; nanos: number },
+): Uint8Array[] {
   const size = new Uint8Array(4);
-  new DataView(size.buffer).setUint32(0, approval.scopeSize);
-  const notAfter = timestampFromMs(approval.notAfter);
+  new DataView(size.buffer).setUint32(0, scopeSize);
   const time = new Uint8Array(12);
   new DataView(time.buffer).setBigInt64(0, notAfter.seconds);
   new DataView(time.buffer).setInt32(8, notAfter.nanos);
-  return [new TextEncoder().encode(approval.batchId), approval.scopeRoot, size, time];
+  return [new TextEncoder().encode(batchId), scopeRoot, size, time];
 }
 
 /** Approvals a batch of `size` needs: the first tier that covers it, else the threshold. */
@@ -232,13 +243,7 @@ export function verifyBatchApproval(
   const required = requiredApprovals(approval.scopeSize, options.threshold, options.tiers);
   if (!(required >= 1)) throw deny('no-threshold');
   const keys = new Map(options.approverKeys.map((key) => [key.kid, key]));
-  const input: BatchApprovalInput = {
-    batchId: approval.batchId,
-    scopeRoot: approval.scopeRoot,
-    scopeSize: approval.scopeSize,
-    notAfter: timestampMs(approval.notAfter),
-  };
-  const parts = batchApprovalParts(input);
+  const parts = batchApprovalParts(approval.batchId, approval.scopeRoot, approval.scopeSize, approval.notAfter);
   const approvers = new Set<string>();
   for (const signature of approval.signatures) {
     const key = keys.get(signature.kid);
