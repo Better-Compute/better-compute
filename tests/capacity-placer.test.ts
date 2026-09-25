@@ -346,9 +346,9 @@ describe('inlinePlacer', () => {
       devices: [{ class: 'gpu', count: 1 }],
       during: { start: T0, end: T0 + HOUR },
     };
-    await expect(
-      db.transaction((tx) => port.reserve(tx, instance, { admission })),
-    ).rejects.toThrow(/refuses/);
+    await expect(db.transaction((tx) => port.reserve(tx, instance, { admission }))).rejects.toThrow(
+      /refuses/,
+    );
     expect((await readQuotas(db, 'acme', 'pool_1'))[0]!.used).toBe(0);
     await setQuota(db, 'acme', 'pool_1', 'gpu', 8);
     const node = await addNode('node_b', { gpus: 1 });
