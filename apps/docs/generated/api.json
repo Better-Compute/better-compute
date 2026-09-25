@@ -3,7 +3,7 @@
     "group": "capacity",
     "slug": "capacity",
     "module": "capacity",
-    "overview": "",
+    "overview": "The capacity methods report what the pools a tenant can see hold, book and have free, without booking anything. `summary` and `byPool` read the per-pool rollup, which the booking transactions update and a periodic rebuild corrects. `preview` asks the placer whether a request fits, and `timeline` counts booked GPUs over time. All four are decided as `compute:capacity:read`. See [Capacity](/docs/guides/capacity).",
     "methods": [
       {
         "method": "summary",
@@ -29,8 +29,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns every pool the tenant owns or is offered, each with its rollup rows, plus whole-GPU totals per GPU model.",
+        "description": "Returns every pool the tenant owns or is offered, each with its rollup rows, plus whole-GPU totals per GPU model.\n\nArchived pools appear only for their owner. `byGpuModel` sums only each pool's `gpu` row (`total`, `allocatable`, `allocated`, `reserved`, `available`), and a pool without a GPU model is counted under `other`. The `gpu.mig`, `gpu.slot` and scalar rows are in `pools[].capacity`. The decision is made on the tenant."
       },
       {
         "method": "byPool",
@@ -62,8 +62,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one pool's rollup rows, one per resource, ordered by resource name.",
+        "description": "Returns one pool's rollup rows, one per resource, ordered by resource name.\n\nEach row carries `total`, `allocatable`, `allocated`, `reserved`, `available`, the `provisioning`, `unhealthy`, `maintenance` and `unreachable` buckets, and `updatedAt`. `available` is conservative: an atom booked now and again later counts in both `allocated` and `reserved`. The call is `NOT_FOUND` when the pool is not owned by or offered to the tenant, or is archived and the tenant is not its owner. `pools.capacity` returns the same rows."
       },
       {
         "method": "preview",
@@ -208,8 +208,8 @@
           "required": ["tenantId", "poolId", "devices", "duration", "idempotencyKey"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Runs the placer on a reservation request without booking anything and returns whether it fits now, the candidate nodes with the atoms each would take, and a reason when it does not fit.",
+        "description": "Runs the placer on a reservation request without booking anything and returns whether it fits now, the candidate nodes with the atoms each would take, and a reason when it does not fit.\n\n- The input is the `reservations.create` input, validated the same way, `idempotencyKey` included. Nothing is written and no quota is checked.\n- Up to 10 ranked candidates are returned, each with `nodeId`, `atoms` and `score`. With `gang`, the candidates are the members of the best gang. With `binding: 'node'`, they are the whole nodes a lease would take.\n- When a regular (not `spot`) request does not fit, `preemptible` says how many spot reservations would get a notice and when the request would start. It gives a count only, never the other reservations' ids.\n- `NOT_FOUND` when the pool is not visible to the tenant."
       },
       {
         "method": "timeline",
@@ -258,8 +258,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns, for one pool, the number of whole GPUs booked in each time bucket and how many of the pool's allocatable GPUs remain free.",
+        "description": "Returns, for one pool, the number of whole GPUs booked in each time bucket and how many of the pool's allocatable GPUs remain free.\n\n`from` defaults to the start of the current hour, `to` to 24 hours after `from`, and `stepMinutes` to 60. A timeline spans at most 7 days and 336 buckets, and `to` must be after `from`; otherwise the call is `INVALID_INPUT`. `allocatable` comes from the pool's current `gpu` rollup row, and each bucket's `free` is `allocatable` minus `booked`, never below 0. MIG and slot atoms are not counted. `NOT_FOUND` when the pool is not visible to the tenant."
       }
     ]
   },
@@ -267,7 +267,7 @@
     "group": "commands",
     "slug": "commands",
     "module": "server",
-    "overview": "",
+    "overview": "One-shot actions on one node, queued as durable rows in the node's command queue and delivered in order over its session. Every method is decided on `compute-node/{nodeId}`: `run` and `cancel` with `compute:nodes:exec`, `get` and `list` with `compute:nodes:read`. See [Commands](/docs/guides/nodes/commands).",
     "methods": [
       {
         "method": "run",
@@ -281,8 +281,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Queues a command of an allowlisted kind (`diag.nvml`, `inventory.refresh`, `logs.collect`, `node.reboot`) on a node the tenant can see; returns the command, `pending` when first queued.",
+        "description": "Queues a command of an allowlisted kind (`diag.nvml`, `inventory.refresh`, `logs.collect`, `node.reboot`) on a node the tenant can see; returns the command, `pending` when first queued.\n\n- Idempotent per tenant, caller identity and `idempotencyKey`: a retry with the same key returns the command already queued. The same key with a different `kind` is `CONFLICT`.\n- `notAfterSeconds` (10 to 3600, default 600) sets how long the command may wait for the node before it expires.\n- Any other kind is `UNSUPPORTED`; a payload that does not match the kind's schema is `INVALID_INPUT`; a node outside the tenant's view is `NOT_FOUND`.\n- For `logs.collect`, when the server has `supportBundles` with a presigning blob store, the daemon receives a presigned upload URL and the response carries the bundle's `bundleKey`.\n- Emits `node.command.queued` when the command is first queued, not on a replay."
       },
       {
         "method": "get",
@@ -317,8 +317,8 @@
           "required": ["tenantId", "nodeId", "commandId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one command of a node by id, with its state, deadlines and safety flags.",
+        "description": "Returns one command of a node by id, with its state, deadlines and safety flags.\n\n`NOT_FOUND` when the command is not on that node or the node is outside the tenant's view."
       },
       {
         "method": "list",
@@ -373,8 +373,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists a node's commands newest first (by queue sequence), optionally filtered by `state`; returns a page with a cursor.",
+        "description": "Lists a node's commands newest first (by queue sequence), optionally filtered by `state`; returns a page with a cursor.\n\n`limit` is at most 200 (100 by default). The cursor is the sequence of the last command returned."
       },
       {
         "method": "cancel",
@@ -409,8 +409,8 @@
           "required": ["tenantId", "nodeId", "commandId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Cancels a command: a `pending` one becomes `cancelled` and never runs, an in-flight one (`dispatched`, `acked`, `running`) is asked to stop through its gateway; returns the command as it stands after the request.",
+        "description": "Cancels a command: a `pending` one becomes `cancelled` and never runs, an in-flight one (`dispatched`, `acked`, `running`) is asked to stop through its gateway; returns the command as it stands after the request.\n\n- A command already in a terminal state (`succeeded`, `failed`, `rejected`, `expired`, `cancelled`) is returned unchanged and no event is emitted.\n- An in-flight command keeps its state until the node reports; the request is recorded on the row.\n- Emits `node.command.cancel-requested`. `NOT_FOUND` when the command is not on that node or the node is outside the tenant's view."
       }
     ]
   },
@@ -418,7 +418,7 @@
     "group": "drivers",
     "slug": "drivers",
     "module": "server",
-    "overview": "",
+    "overview": "The drivers this deployment registered through its options, modules and plugins, so `metal.enroll` callers and the console can offer valid choices. The group returns declarations only, never a driver's configuration or credentials. See [Drivers](/docs/extending/drivers).",
     "methods": [
       {
         "method": "list",
@@ -448,8 +448,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists the registered drivers with their id, version, `runsOn`, implemented kinds, capabilities and the operations safe to retry per kind; `kind` keeps only drivers that implement it.",
+        "description": "Lists the registered drivers with their id, version, `runsOn`, implemented kinds, capabilities and the operations safe to retry per kind; `kind` keeps only drivers that implement it.\n\nDecided with `compute:drivers:read` on `compute-tenant/{tenantId}`. Items are sorted by id, then version, and the result is not paged."
       }
     ]
   },
@@ -457,7 +457,7 @@
     "group": "events",
     "slug": "events",
     "module": "server",
-    "overview": "",
+    "overview": "A tenant's CloudEvents-style events, read from the transactional outbox that every change writes to in its own transaction. Pages follow the outbox's `txid:seq` position, so no event ever appears behind a cursor already handed out. See [Events](/docs/guides/events).",
     "methods": [
       {
         "method": "list",
@@ -498,8 +498,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns a page of the tenant's committed events after `cursor`, oldest first, optionally only those whose type starts with `type` (for example `node.` or `reservation.`).",
+        "description": "Returns a page of the tenant's committed events after `cursor`, oldest first, optionally only those whose type starts with `type` (for example `node.` or `reservation.`).\n\n- Decided with `compute:events:read` on `compute-tenant/{tenantId}`.\n- The cursor is an event's `sequence` in the form `txid:seq`; without one the page starts at the oldest event still in the outbox.\n- Only events whose transaction is older than every transaction still open are returned, so a later page never gains an event that sorts before its cursor.\n- `limit` is at most 500 (100 by default)."
       }
     ]
   },
@@ -507,7 +507,7 @@
     "group": "flavors",
     "slug": "flavors",
     "module": "vps",
-    "overview": "",
+    "overview": "Flavors are the named instance shapes of a VPS pool: vCPU, memory, disk and GPU count, plus the provider offer a provider pool creates. The pool's owner manages them, and tenants the pool is offered to can list them. An instance keeps the shape it was admitted with, so changing or deleting a flavor never changes a live instance. See [Flavors](/docs/guides/vps/flavors).",
     "methods": [
       {
         "method": "list",
@@ -521,8 +521,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the pool's flavors that are not archived, sorted by name.",
+        "description": "Returns the pool's flavors that are not archived, sorted by name.\n\nThe pool must be owned by or offered to the tenant; otherwise the call is `NOT_FOUND`."
       },
       {
         "method": "create",
@@ -536,8 +536,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.",
+        "description": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.\n\n- `gpus` defaults to 0. A flavor of a provider pool needs `offerId`, the provider offer it creates; without it the call is `INVALID_INPUT`.\n- `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.\n- `CONFLICT` when the pool already has a flavor with that name, archived ones included."
       },
       {
         "method": "update",
@@ -551,8 +551,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Replaces the shape of the named flavor and increments its version; an archived flavor becomes active again.",
+        "description": "Replaces the shape of the named flavor and increments its version; an archived flavor becomes active again.\n\nThe input is the full shape, as for `create`. An omitted `offerId` keeps the stored one. Instances already admitted keep their old shape; only new instances and resizes use the new one. The call is `NOT_FOUND` when the tenant does not own the pool or the flavor does not exist."
       },
       {
         "method": "delete",
@@ -566,8 +566,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Deletes the named flavor, or archives it when any instance, deleted ones included, still references it; returns `deleted` and `archived` to say which.",
+        "description": "Deletes the named flavor, or archives it when any instance, deleted ones included, still references it; returns `deleted` and `archived` to say which.\n\nAn archived flavor disappears from `list` and can no longer be used to create or resize instances. `update` makes it active again. The call is `NOT_FOUND` when the tenant does not own the pool or the flavor does not exist."
       }
     ]
   },
@@ -575,7 +575,7 @@
     "group": "fleet",
     "slug": "fleet",
     "module": "fleet",
-    "overview": "",
+    "overview": "The fleet group manages a tenant's platform objects as one FleetConfig document: sites, provider accounts, pools, owner quotas, offers and flavors. `plan` diffs a document against what exists, `apply` runs the plan through the owning modules' own methods, and the applied document is kept so that drift from it is reported. Every method decides `compute:fleet:admin` on the fleet scope. See [Fleet configuration](/docs/guides/fleet-config).",
     "methods": [
       {
         "method": "export",
@@ -589,8 +589,8 @@
         "module": "fleet",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the tenant's current sites, provider accounts, pools, owner quotas, offers and flavors as a FleetConfig document, with `missing` listing the tables of modules this deployment does not run.",
+        "description": "Returns the tenant's current sites, provider accounts, pools, owner quotas, offers and flavors as a FleetConfig document, with `missing` listing the tables of modules this deployment does not run.\n\nObjects that fleet never named appear under their ids. Archived pools and archived flavors are left out."
       },
       {
         "method": "plan",
@@ -604,8 +604,8 @@
         "module": "fleet",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Diffs a FleetConfig document against the tenant's current state; returns the changes for people, the exact API calls `apply` would make, a summary, `blocked`, and a `planHash`.",
+        "description": "Diffs a FleetConfig document against the tenant's current state; returns the changes for people, the exact API calls `apply` would make, a summary, `blocked`, and a `planHash`.\n\n- The call changes nothing. With `prune: true` the plan also deletes what the document no longer lists: flavors and offers are removed, pools archived, and unused provider accounts deleted. Sites are never changed or pruned.\n- A change that cannot be applied (an immutable field such as a pool's class or an account's provider, an unknown reference, an offer to the pool's owner) is marked `blocked` with the reason.\n- The ids of planned creates derive from the caller's identity, so the call needs an authenticated caller (`UNAUTHENTICATED` otherwise)."
       },
       {
         "method": "apply",
@@ -619,8 +619,8 @@
         "module": "fleet",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Plans the document again and runs every planned call as the caller, all in one transaction; returns the plan and the number of calls applied.",
+        "description": "Plans the document again and runs every planned call as the caller, all in one transaction; returns the plan and the number of calls applied.\n\n- **Decisions.** Each call is authorized first, as the caller and with no transaction open, by the method it invokes; a refusal stops the apply before anything changes.\n- **Consistency.** Pass the `planHash` from `plan` to apply exactly that plan: if the plan has changed, the call is `CONFIG_DRIFT`. The plan is made once more inside the transaction, and a change there is also `CONFIG_DRIFT`, with nothing applied.\n- **Idempotency.** Creates carry keys derived from the tenant, the kind and the name, so repeating an apply creates nothing twice. A plan with no calls still records the document.\n- **Errors.** `INVALID_STATE` with `details.blocked` when any change is blocked. `UNSUPPORTED` when the host cannot run composite methods. Errors of the invoked methods pass through.\n- The document becomes the one that `status` and the `fleet.drift` reconciler compare against."
       },
       {
         "method": "status",
@@ -634,8 +634,8 @@
         "module": "fleet",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the tenant's last applied document's plan hash, who applied it and when, and, while the fleet differs from it, the drift found at the last check.",
+        "description": "Returns the tenant's last applied document's plan hash, who applied it and when, and, while the fleet differs from it, the drift found at the last check.\n\n`applied` is absent when the tenant never applied a document. The `fleet.drift` reconciler re-plans each applied document every 15 minutes by default and publishes `fleet.drifted` or `fleet.converged` when the answer changes."
       }
     ]
   },
@@ -643,7 +643,7 @@
     "group": "images",
     "slug": "images",
     "module": "provision",
-    "overview": "",
+    "overview": "The images group is the catalog of OS images and ramdisks that deploys write to disk. An image is registered by its digest and source URL, never uploaded, and a signature from a signer on the tenant's or the platform's allowlist marks it verified. Unsigned images stay private to their tenant; only verified images can be made public. See [Profiles and images](/docs/guides/bare-metal/profiles-and-images).",
     "methods": [
       {
         "method": "register",
@@ -662,8 +662,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Records an image by `ref` (`name@version`), format, digest and `https://` or `oci://` source in the tenant's catalog; with a valid signature it is marked verified.",
+        "description": "Records an image by `ref` (`name@version`), format, digest and `https://` or `oci://` source in the tenant's catalog; with a valid signature it is marked verified.\n\n- Decided as `compute:images:publish` on the tenant.\n- `signature` and `signerId` go together. The signature must verify against that signer on the tenant's allowlist or the platform's, else `INVALID_INPUT`.\n- A `ramdisk` must be signed by a platform signer (`INVALID_INPUT` otherwise).\n- `CONFLICT` when the tenant already has that `ref`, so a repeated call does not create a second image.\n\nThe new image is private. Site agents whose pools pre-warm this ref (`policy.prewarmImages`) get their desired state refreshed."
       },
       {
         "method": "get",
@@ -677,8 +677,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns one image the tenant owns, or a public one, by its `img_` id.",
+        "description": "Returns one image the tenant owns, or a public one, by its `img_` id.\n\n`NOT_FOUND` when the image does not exist, is deleted, or belongs to another tenant and is not public."
       },
       {
         "method": "list",
@@ -692,8 +692,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns a page of the tenant's own images and public ones, ordered by `ref`, optionally filtered by `kind` (`os` or `ramdisk`).",
+        "description": "Returns a page of the tenant's own images and public ones, ordered by `ref`, optionally filtered by `kind` (`os` or `ramdisk`).\n\n`limit` defaults to 50 and is at most 200; pass the returned `cursor` to read the next page."
       },
       {
         "method": "promote",
@@ -707,8 +707,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Makes a verified image the tenant owns public, so every tenant can read and deploy it.",
+        "description": "Makes a verified image the tenant owns public, so every tenant can read and deploy it.\n\nDecided as `compute:images:publish` on the image. An unsigned image is `INVALID_STATE`; an image the tenant does not own is `NOT_FOUND`. Promoting an image that is already public returns it unchanged. Site agents whose pools pre-warm this ref get their desired state refreshed."
       }
     ]
   },
@@ -716,7 +716,7 @@
     "group": "instances",
     "slug": "instances",
     "module": "vps",
-    "overview": "",
+    "overview": "Instances are VMs in a VPS pool: hosted pools place them on a host through capacity, and provider pools create them through the pool's provider account. After `create`, every call only changes `desiredState`; the `vps.instances` reconciler converges the instance and publishes `instance.*` events as its `state` moves. Instances are also the sandbox primitive today. See [Instances](/docs/guides/vps/instances).",
     "methods": [
       {
         "method": "create",
@@ -730,8 +730,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.",
+        "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds."
       },
       {
         "method": "list",
@@ -745,8 +745,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.",
+        "description": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read. `state` and `poolId` filter the list, and `limit` is 1 to 200 (default 50). Drafts are never listed."
       },
       {
         "method": "get",
@@ -760,8 +760,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns one instance of the tenant, deleted instances included.",
+        "description": "Returns one instance of the tenant, deleted instances included.\n\nDrafts and instances of other tenants are `NOT_FOUND`."
       },
       {
         "method": "start",
@@ -775,8 +775,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Sets `desiredState` to `running` and wakes the reconciler; returns the instance before anything has changed on the host or provider.",
+        "description": "Sets `desiredState` to `running` and wakes the reconciler; returns the instance before anything has changed on the host or provider.\n\nAn instance in `error` that has a host or a provider machine moves to `starting` and is tried again. An instance being deleted is `INVALID_STATE`. Publishes `instance.starting`."
       },
       {
         "method": "stop",
@@ -790,8 +790,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Sets `desiredState` to `stopped` and wakes the reconciler; returns the instance before anything has changed on the host or provider.",
+        "description": "Sets `desiredState` to `stopped` and wakes the reconciler; returns the instance before anything has changed on the host or provider.\n\nAn instance being deleted is `INVALID_STATE`. Publishes `instance.stopping`."
       },
       {
         "method": "resize",
@@ -805,8 +805,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a stopped hosted instance to another flavor of its pool, in place on the same host; returns the instance `stopped` with the new flavor.",
+        "description": "Moves a stopped hosted instance to another flavor of its pool, in place on the same host; returns the instance `stopped` with the new flavor.\n\nGrowth is charged to quota first and shrinkage refunded after; if the host lacks room the charge is undone and the call is `CAPACITY_UNAVAILABLE` with `details.resource`. Other errors: `UNSUPPORTED` for a provider instance or a flavor with a different GPU count, `INVALID_STATE` when the instance is not stopped (both `state` and `desiredState`) or holds no allocation, `NOT_FOUND` for a missing or archived flavor, `QUOTA_EXCEEDED` when the growth does not fit. Publishes `instance.resized`."
       },
       {
         "method": "delete",
@@ -820,8 +820,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Sets `desiredState` to `deleted` and wakes the reconciler, which releases the allocation, IP lease and quota; returns the instance at once.",
+        "description": "Sets `desiredState` to `deleted` and wakes the reconciler, which releases the allocation, IP lease and quota; returns the instance at once.\n\nThe call is idempotent: an instance already `deleted` is returned unchanged, and stays readable through `get`. Publishes `instance.deleting`; `instance.deleted` follows when everything is released."
       }
     ]
   },
@@ -829,7 +829,7 @@
     "group": "inventory",
     "slug": "inventory",
     "module": "inventory",
-    "overview": "",
+    "overview": "A node's hardware and software inventory as the daemon reports it, kept as an append-only history of snapshots: a new snapshot is stored each time the node's reported section set changes. Every method decides `compute:nodes:read` on `compute-node/{nodeId}` and only answers for nodes the calling tenant owns. See [Inventory and health](/docs/guides/nodes/inventory-and-health).",
     "methods": [
       {
         "method": "get",
@@ -843,8 +843,8 @@
         "module": "inventory",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the node's latest inventory snapshot: its hash, its sections and when it was collected.",
+        "description": "Returns the node's latest inventory snapshot: its hash, its sections and when it was collected.\n\n`NOT_FOUND` when the node has no inventory yet or is not owned by the tenant."
       },
       {
         "method": "history",
@@ -858,8 +858,8 @@
         "module": "inventory",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Lists the node's inventory snapshots newest first; returns a page with a cursor.",
+        "description": "Lists the node's inventory snapshots newest first; returns a page with a cursor.\n\n`limit` is at most 100 (20 by default). The cursor is the id of the last snapshot returned. `NOT_FOUND` when the node is not owned by the tenant."
       },
       {
         "method": "diff",
@@ -873,8 +873,8 @@
         "module": "inventory",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Compares two of the node's snapshots, named by snapshot id or hash, and returns the changes between them with their stable device ids (GPU UUID, disk WWN or MAC).",
+        "description": "Compares two of the node's snapshots, named by snapshot id or hash, and returns the changes between them with their stable device ids (GPU UUID, disk WWN or MAC).\n\n- Without `to`, the latest snapshot is used; without `from`, the snapshot before `to`. A node with a single snapshot diffs against nothing: `from` is empty and there are no changes.\n- Change types are `gpu.missing`, `gpu.added`, `disk.replaced`, `driver.changed` and `mig.layout.changed`, each with `before` and `after` values where they apply.\n- `NOT_FOUND` when the node has no inventory, a named snapshot does not exist for the node, or the node is not owned by the tenant."
       }
     ]
   },
@@ -882,7 +882,7 @@
     "group": "joinRequests",
     "slug": "join-requests",
     "module": "server",
-    "overview": "",
+    "overview": "Join requests are the approval queue for joins an attestor deferred: a machine with placeholder hardware identifiers, a machine the `discovery` attestor did not know, or a TPM whose endorsement key is on no allow-list. An approval admits exactly one join, which the machine's retry with the same CSR consumes. The group is decided on `compute-pool/{poolId}` with the join-token actions. See [Joining nodes](/docs/guides/nodes/joining).",
     "methods": [
       {
         "method": "list",
@@ -928,8 +928,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists the join requests a pool can decide: its own, and its site's requests that no pool has claimed yet.",
+        "description": "Lists the join requests a pool can decide: its own, and its site's requests that no pool has claimed yet.\n\nDecided as `compute:join-tokens:read`. `state` defaults to `pending`; `all` lists every state. A pending or approved request past its expiry reads as `expired`, whether or not retention has marked it yet. Pages hold up to 200 requests (100 by default). A pool the tenant does not own is `NOT_FOUND`."
       },
       {
         "method": "approve",
@@ -975,8 +975,8 @@
           "required": ["tenantId", "poolId", "requestId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Approves a pending join request, assigns it to the pool and returns it with a new expiry of `ttlSeconds` (60 to 86,400, one hour by default).",
+        "description": "Approves a pending join request, assigns it to the pool and returns it with a new expiry of `ttlSeconds` (60 to 86,400, one hour by default).\n\nDecided as `compute:join-tokens:create`. Approving a request that is already approved for this pool returns the approval unchanged. Any other decided state (`rejected`, `expired`, `consumed`) is `INVALID_STATE`, and so is an archived pool. A pool the tenant does not own, or a request the pool cannot see, is `NOT_FOUND`.\n\nPublishes `security.join-request.approved` with the new `expiresAt`."
       },
       {
         "method": "reject",
@@ -1016,8 +1016,8 @@
           "required": ["tenantId", "poolId", "requestId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Rejects a pending join request, or withdraws an approval the machine has not used yet, and returns the request.",
+        "description": "Rejects a pending join request, or withdraws an approval the machine has not used yet, and returns the request.\n\nDecided as `compute:join-tokens:create`. Rejecting a request that is already rejected returns it unchanged. An `expired` or `consumed` request is `INVALID_STATE`. A later retry with the request's CSR fails.\n\nPublishes `security.join-request.rejected`, with `reason` when one is given."
       }
     ]
   },
@@ -1025,7 +1025,7 @@
     "group": "joinTokens",
     "slug": "join-tokens",
     "module": "server",
-    "overview": "",
+    "overview": "Join tokens are single-purpose credentials that let a limited number of daemons join one pool for a limited time. The bearer form `bcjt_<id>.<secret>` is returned once, when the token is created; the control plane stores only the SHA-256 of the secret. Every method is decided on `compute-pool/{poolId}`. See [Joining nodes](/docs/guides/nodes/joining).",
     "methods": [
       {
         "method": "create",
@@ -1039,8 +1039,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Mints a role-`node` join token for one pool and returns its record with the bearer `token`, which is never shown again.",
+        "description": "Mints a role-`node` join token for one pool and returns its record with the bearer `token`, which is never shown again.\n\nOnly the pool's owner tenant can mint tokens for it; another tenant gets `NOT_FOUND`. A pool whose machines run no daemon (its `agent` is not `bcd`) answers `INVALID_STATE`. `expect` pins the token to one machine and must name at least one identifier, otherwise the call is `INVALID_INPUT`. `ttlSeconds` runs from 60 to 86,400 and `maxUses` defaults to 1.\n\nThe token id derives from the tenant, the calling identity and `idempotencyKey`. A retry with the same key returns the stored record without `token` and without a new IAM decision. The same key with a different pool, `expect` or `allowReclaim` is `CONFLICT`.\n\nPublishes `security.join-token.created`, whose `pinned` field says whether the token has an `expect` binding."
       },
       {
         "method": "list",
@@ -1085,8 +1085,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists a pool's join tokens in id order, never with their secrets.",
+        "description": "Lists a pool's join tokens in id order, never with their secrets.\n\nBy default only live tokens appear: not revoked, with uses left and not expired. `includeInactive: true` adds used-up, expired and revoked tokens. Pages hold up to 200 tokens (100 by default); pass the returned `cursor` to read the next page."
       },
       {
         "method": "revoke",
@@ -1121,8 +1121,8 @@
           "required": ["tenantId", "poolId", "tokenId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Revokes a join token at once and returns its record with `revokedAt` set.",
+        "description": "Revokes a join token at once and returns its record with `revokedAt` set.\n\nRevoking a token that is already revoked returns it unchanged and publishes nothing. A token that does not exist in the tenant and pool is `NOT_FOUND`. A first revocation publishes `security.join-token.revoked`."
       }
     ]
   },
@@ -1130,7 +1130,7 @@
     "group": "metal",
     "slug": "metal",
     "module": "metal",
-    "overview": "",
+    "overview": "The metal group enrolls machines by their BMCs and moves them through the provision state machine: inspect, commission, deploy, rescue, release and retire. Each verb checks the move against the provision state table, records it in one transaction and queues the metal reconciler, which runs the workflow of the new state; no verb touches the machine itself. Every method returns the node's metal view, which reports whether BMC credentials are set but never returns them. See [Bare metal](/docs/guides/bare-metal) and [BMC drivers and credentials](/docs/guides/bare-metal/bmc).",
     "methods": [
       {
         "method": "enroll",
@@ -1144,8 +1144,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Creates a metal node from a BMC address, driver and credentials in the given pool, in provision state `enrolling`, and queues the reconciler to verify BMC access and inspect the machine out of band.",
+        "description": "Creates a metal node from a BMC address, driver and credentials in the given pool, in provision state `enrolling`, and queues the reconciler to verify BMC access and inspect the machine out of band.\n\n- Decided as `compute:nodes:provision` on the pool, since the node does not exist yet.\n- `bmc.credentials` is a `secret://` reference or an inline username and password. Inline credentials go to the secret broker before anything is written, and only the reference is stored; without a secret broker they are `INVALID_CONFIG`.\n- The node's driver bindings come from the BMC (power, management, virtual media), then the hardware profile (`hardwareProfile`, else the pool's `policy.hardwareProfile`). An unknown hardware profile is `INVALID_INPUT`.\n- `NOT_FOUND` when the pool does not exist or the tenant does not own it; `INVALID_INPUT` when the pool is not in `siteId`.\n\nEach call creates a new node; there is no idempotency key. Publishes `node.enrolled`."
       },
       {
         "method": "manage",
@@ -1159,8 +1159,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a `ready` node back to `enrolling` to re-verify BMC access; the reconciler then chains re-inspection and re-commissioning back to `ready`.",
+        "description": "Moves a `ready` node back to `enrolling` to re-verify BMC access; the reconciler then chains re-inspection and re-commissioning back to `ready`.\n\n`INVALID_STATE` from any state but `ready`, `NOT_FOUND` when the tenant has no such metal node, and `CONFLICT` when the node changed concurrently. Publishes `node.provision.enrolling`."
       },
       {
         "method": "inspect",
@@ -1174,8 +1174,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a `ready` node to `inspecting`, where the machine boots the ramdisk and reports its inventory; commissioning follows, and the node returns to `ready`.",
+        "description": "Moves a `ready` node to `inspecting`, where the machine boots the ramdisk and reports its inventory; commissioning follows, and the node returns to `ready`.\n\n`INVALID_STATE` from any state but `ready`; `CONFLICT` when the node changed concurrently. Publishes `node.provision.inspecting`."
       },
       {
         "method": "provide",
@@ -1189,8 +1189,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a `ready` node to `commissioning`, which runs DCGM diagnostics, a quick wipe and a power-off before the node returns to `ready`.",
+        "description": "Moves a `ready` node to `commissioning`, which runs DCGM diagnostics, a quick wipe and a power-off before the node returns to `ready`.\n\n`INVALID_STATE` from any state but `ready`; `CONFLICT` when the node changed concurrently. Publishes `node.provision.commissioning`."
       },
       {
         "method": "deploy",
@@ -1204,8 +1204,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a `ready` node to `deploying` with the given profile version recorded on it; the metal reconciler then starts a workflow of that profile.",
+        "description": "Moves a `ready` node to `deploying` with the given profile version recorded on it; the metal reconciler then starts a workflow of that profile.\n\nThe call records `profileId` and `profileVersion` without running the profile; run `profiles.validate` first to catch problems before the workflow starts. When the workflow succeeds the node becomes `deployed` and takes the profile's `role`. `INVALID_STATE` from any state but `ready`; `CONFLICT` when the node changed concurrently. Publishes `node.provision.deploying`."
       },
       {
         "method": "undeploy",
@@ -1219,8 +1219,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a `deployed` or `rescue` node to `releasing`, which wipes its disks with the chosen mode and powers it off before it returns to `ready`.",
+        "description": "Moves a `deployed` or `rescue` node to `releasing`, which wipes its disks with the chosen mode and powers it off before it returns to `ready`.\n\n`wipe` is `none`, `quick` (the default), `secure-erase` or `crypto-erase`. Unless the mode is `none`, the node reaches `ready` only when the wipe result is attested; otherwise it fails with `UNVERIFIED_WIPE`. `INVALID_STATE` from other states. Publishes `node.provision.releasing`."
       },
       {
         "method": "rescue",
@@ -1234,8 +1234,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a `deployed` node to `rescue`, whose workflow boots the rescue ramdisk for repairs from outside the installed OS.",
+        "description": "Moves a `deployed` node to `rescue`, whose workflow boots the rescue ramdisk for repairs from outside the installed OS.\n\n`INVALID_STATE` from any state but `deployed`. On a pool with `agent: 'none'` the node fails with `UNSUPPORTED`, since such a machine cannot boot the ramdisk. Publishes `node.provision.rescue`."
       },
       {
         "method": "unrescue",
@@ -1249,8 +1249,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Starts the `metal-unrescue` workflow, which boots a rescued node back into its installed OS; the node stays in `rescue` until that workflow succeeds, then becomes `deployed`.",
+        "description": "Starts the `metal-unrescue` workflow, which boots a rescued node back into its installed OS; the node stays in `rescue` until that workflow succeeds, then becomes `deployed`.\n\n- `INVALID_STATE` outside `rescue`.\n- A second call while the unrescue workflow runs returns the node unchanged.\n- `CONFLICT` while the rescue ramdisk is still booting.\n- `INVALID_CONFIG` when the provision module is not registered.\n\nPublishes `node.provision.unrescuing` with the `workflowId`. If the workflow fails, the node goes to `failed`, and `recover` returns it to `deployed`."
       },
       {
         "method": "abort",
@@ -1264,8 +1264,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Stops the node's running workflow and moves the node to `failed`, recording where it failed, an `ABORTED` error with the optional `reason`, and maintenance on.",
+        "description": "Stops the node's running workflow and moves the node to `failed`, recording where it failed, an `ABORTED` error with the optional `reason`, and maintenance on.\n\nLegal from `enrolling`, `inspecting`, `commissioning`, `deploying` and `releasing`; `INVALID_STATE` otherwise. The aborted workflow still runs its cleanup steps. Publishes `node.provision.failed`."
       },
       {
         "method": "recover",
@@ -1279,8 +1279,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a `failed` node to the last stable point for the state it failed in: `enrolling` after enrolling, inspecting or commissioning, `releasing` after deploying or releasing, `deployed` after rescue, and `retiring` after retiring.",
+        "description": "Moves a `failed` node to the last stable point for the state it failed in: `enrolling` after enrolling, inspecting or commissioning, `releasing` after deploying or releasing, `deployed` after rescue, and `retiring` after retiring.\n\nIt clears `failedFrom` and `lastError` but leaves maintenance on. `INVALID_STATE` when the node is not `failed`. Publishes `node.provision.enrolling`, `node.provision.releasing`, `node.provision.deployed` or `node.provision.retiring`."
       },
       {
         "method": "retire",
@@ -1294,8 +1294,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Moves a node to `retiring`, whose workflow crypto-erases the disks (on pools whose machines run `bcd`), powers the machine off and revokes its identity before the node becomes `retired`, which is terminal.",
+        "description": "Moves a node to `retiring`, whose workflow crypto-erases the disks (on pools whose machines run `bcd`), powers the machine off and revokes its identity before the node becomes `retired`, which is terminal.\n\nLegal from `adopting`, `adopted`, `enrolling`, `ready` and `failed`; `INVALID_STATE` otherwise, so undeploy a deployed machine first. Publishes `node.provision.retiring`."
       },
       {
         "method": "power",
@@ -1309,8 +1309,8 @@
         "module": "metal",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Queues a `bmc.power` command to the site agent of the node's site and returns its `commandId`; the provision state does not change.",
+        "description": "Queues a `bmc.power` command to the site agent of the node's site and returns its `commandId`; the provision state does not change.\n\n- Decided as `compute:nodes:power` on the node.\n- `action` is `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle` or `nmi`.\n- `INVALID_STATE` when the node has no BMC credentials, while it is `inspecting`, `commissioning`, `deploying` or `releasing` (a workflow controls its power then), or when no site agent serves its site.\n\nThe command expires five minutes after it is queued. Its idempotency key derives from the request id, so a retry with the same `X-Request-Id` header returns the same command."
       }
     ]
   },
@@ -1318,7 +1318,7 @@
     "group": "nodes",
     "slug": "nodes",
     "module": "server",
-    "overview": "",
+    "overview": "Nodes are machines that joined the control plane, as their tenant sees them: a tenant sees the nodes the authorization projection holds for it. Every method except `list` is decided on `compute-node/{nodeId}`. Mutations take an optional `version`; when the node has moved past it, the call is `CONFLICT`. See [Operating nodes](/docs/guides/nodes/operating-nodes).",
     "methods": [
       {
         "method": "list",
@@ -1385,8 +1385,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists the nodes visible to the tenant in id order, filtered by pool, site, `cordoned` or `provisionState`.",
+        "description": "Lists the nodes visible to the tenant in id order, filtered by pool, site, `cordoned` or `provisionState`.\n\nThe call is decided once on `compute-tenant/{tenantId}`, then each node is checked for `compute:nodes:read`; nodes the caller may not read are left out, so a page can hold fewer than `limit` items. Pages hold up to 50 nodes."
       },
       {
         "method": "get",
@@ -1416,8 +1416,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one node with its labels, conditions and session (epoch, gateway and connection times).",
+        "description": "Returns one node with its labels, conditions and session (epoch, gateway and connection times).\n\nA node the tenant cannot see is `NOT_FOUND`."
       },
       {
         "method": "events",
@@ -1463,8 +1463,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns a node's events from the event outbox, oldest first.",
+        "description": "Returns a node's events from the event outbox, oldest first.\n\n`type` keeps only events whose type starts with the given prefix, such as `node.` or `security.`. Pages hold up to 200 events (100 by default). A node the tenant cannot see is `NOT_FOUND`."
       },
       {
         "method": "cordon",
@@ -1503,8 +1503,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Marks the node cordoned so placement puts no new work on it; existing allocations stay.",
+        "description": "Marks the node cordoned so placement puts no new work on it; existing allocations stay.\n\nCordoning a cordoned node returns it unchanged and publishes nothing. Otherwise the node's version goes up, its reconciler is queued, and `node.cordoned` is published."
       },
       {
         "method": "uncordon",
@@ -1543,8 +1543,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Clears `cordoned` and ends a drain in progress, so the node is placeable again.",
+        "description": "Clears `cordoned` and ends a drain in progress, so the node is placeable again.\n\nDecided as `compute:nodes:cordon`. A node that is neither cordoned nor draining is returned unchanged. Otherwise the `draining` reason is removed and `node.uncordoned` is published."
       },
       {
         "method": "drain",
@@ -1583,8 +1583,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Cordons the node, adds the `draining` NoSchedule reason and hands the node to the Drain controller.",
+        "description": "Cordons the node, adds the `draining` NoSchedule reason and hands the node to the Drain controller.\n\nThe Drain controller releases nothing in this release: it waits until the node holds no live allocation, then removes `draining` and publishes `node.drained`. The node stays cordoned until `uncordon`. Draining a node that is already draining returns it unchanged. A new drain publishes `node.draining`."
       },
       {
         "method": "label",
@@ -1598,8 +1598,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Sets and removes operator labels on the node and returns the node with its labels.",
+        "description": "Sets and removes operator labels on the node and returns the node with its labels.\n\n`set` takes up to 64 labels and `remove` up to 64 keys. The call is `INVALID_INPUT` when it names nothing, names a key in both `set` and `remove`, or sets a key that inventory or the system owns. `remove` removes only operator labels. The node's version goes up and `node.labeled` is published."
       },
       {
         "method": "taint",
@@ -1613,8 +1613,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Adds and removes operator NoSchedule taints, stored in `noScheduleReasons` as `taint:<key>`.",
+        "description": "Adds and removes operator NoSchedule taints, stored in `noScheduleReasons` as `taint:<key>`.\n\n`add` and `remove` take up to 32 keys each. The call is `INVALID_INPUT` when it names nothing or names a key in both lists. Only operator taints change; conditions, `unreachable` and `draining` belong to their controllers. When the result equals the current reasons the node is returned unchanged; otherwise `node.tainted` is published."
       },
       {
         "method": "adopt",
@@ -1653,8 +1653,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Re-runs acceptance checks on a node in `adopting` or `adopted`, moving it to `adopting`.",
+        "description": "Re-runs acceptance checks on a node in `adopting` or `adopted`, moving it to `adopting`.\n\nDecided as `compute:nodes:provision`. Any other provision state is `INVALID_STATE`. The node leaves placement until acceptance passes. Publishes `node.adopting`."
       },
       {
         "method": "revokeIdentity",
@@ -1693,8 +1693,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Revokes every live certificate of the node and raises its identity generation, so no certificate of the old generation can renew.",
+        "description": "Revokes every live certificate of the node and raises its identity generation, so no certificate of the old generation can renew.\n\nReturns the node and `revokedCertificates`, the number of certificates revoked; the revocation reason is `reason`, or `identity revoked`. Each call raises the generation again. The machine comes back only by joining again. Publishes `security.node.identity-revoked`."
       },
       {
         "method": "delete",
@@ -1733,8 +1733,8 @@
           "required": ["tenantId", "nodeId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Tombstones a node that is `retired`, `adopting` or `enrolling` (or failed from `adopting` or `enrolling`) and has no open allocation.",
+        "description": "Tombstones a node that is `retired`, `adopting` or `enrolling` (or failed from `adopting` or `enrolling`) and has no open allocation.\n\nAny other state, or an open allocation, is `INVALID_STATE`; a node that changed pools during the call is `CONFLICT`. The node's devices stop being bookable, its scalar resources are removed, its certificates are revoked, its hardware key and attestor bindings are freed so the machine can join again as a new node, and its pending commands are cancelled. The node leaves its pool and the projection, so nobody sees it; audit rows and past allocations keep referencing it.\n\nA retry after the delete returns `deleted: false`. Publishes `node.deleted`."
       },
       {
         "method": "issueSshCert",
@@ -1748,8 +1748,8 @@
         "module": "tunnels",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Issues a short-lived break-glass OpenSSH user certificate for one node, bound to the principal `<account>@<nodeId>`.",
+        "description": "Issues a short-lived break-glass OpenSSH user certificate for one node, bound to the principal `<account>@<nodeId>`.\n\nDecided as `compute:nodes:ssh-root`. The method comes from the tunnels module (v0.3) and is `UNSUPPORTED` when no compute SSH CA is configured. It needs an MFA session by default (`ACCESS_DENIED` with reason `mfa-required`), and a session that ends within a minute is `ACCESS_DENIED`. `publicKey` must be an Ed25519 or ECDSA P-256 key, and `principal` (default `root`) one of the configured accounts; otherwise `INVALID_INPUT`.\n\nThe lifetime is `ttlSeconds` (60 to 3,600, default 900), never past the caller's session. Issuance is rate-limited per identity (20 per hour by default, then `RATE_LIMITED`). Every certificate is recorded and `node.ssh-cert.issued` is published."
       },
       {
         "method": "revokeSshCert",
@@ -1763,8 +1763,8 @@
         "module": "tunnels",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Revokes a break-glass SSH certificate before it expires; the node's revocation list carries it from the next NodeSpec on.",
+        "description": "Revokes a break-glass SSH certificate before it expires; the node's revocation list carries it from the next NodeSpec on.\n\nDecided as `compute:nodes:ssh-root` and hosted by the tunnels module (v0.3). Revoking again returns the same revocation. A serial not issued for this node is `NOT_FOUND`. Publishes `node.ssh-cert.revoked`."
       }
     ]
   },
@@ -1772,7 +1772,7 @@
     "group": "pools",
     "slug": "pools",
     "module": "capacity",
-    "overview": "",
+    "overview": "A pool groups the nodes of one site under one GPU model, one sharing mode and one policy, and every reservation and quota belongs to exactly one pool. The tenant that creates a pool owns it; other tenants see it only once the owner offers it to them with a quota. Only the owner can offer, unoffer, update or archive a pool; anyone else gets `NOT_FOUND`. See [Pools](/docs/guides/capacity/pools).",
     "methods": [
       {
         "method": "list",
@@ -1798,8 +1798,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns the pools the tenant owns or is offered, each with `owned`, `archived` and the tenant's own quota rows.",
+        "description": "Returns the pools the tenant owns or is offered, each with `owned`, `archived` and the tenant's own quota rows.\n\nArchived pools appear only for their owner. After the coarse decision on the tenant, each pool is checked as `compute:pools:read` on the pool, and only the allowed ones are returned."
       },
       {
         "method": "get",
@@ -1831,8 +1831,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one pool as the tenant sees it, with `owned`, `archived` and the tenant's own quota rows.",
+        "description": "Returns one pool as the tenant sees it, with `owned`, `archived` and the tenant's own quota rows.\n\nThe call is `NOT_FOUND` when the pool is not owned by or offered to the tenant, or is archived and the tenant is not its owner."
       },
       {
         "method": "create",
@@ -1912,8 +1912,8 @@
           "required": ["tenantId", "siteId", "class"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Creates a pool on a site the tenant owns, with the owner's quota rows and an empty rollup; returns the pool at version 1.",
+        "description": "Creates a pool on a site the tenant owns, with the owner's quota rows and an empty rollup; returns the pool at version 1.\n\n- It is decided as `compute:pools:create` on the tenant (`compute-tenant`), the alternative its catalog row lists next to `compute-fleet`.\n- `sharing` defaults to `exclusive` and `agent` to `bcd` (`none` for `provider` pools). A `provider` pool needs `providerAccountId` and `agent: 'none'`, and other classes refuse `providerAccountId`; both are `INVALID_INPUT`.\n- `ownerQuota` defaults to `gpu` at 2,147,483,647. Owners of `mig`, `timeslice` or `mps` pools add `gpu.mig` or `gpu.slot` rows themselves, because a missing row grants 0.\n- With `idempotencyKey`, the pool id is derived from the tenant, the caller and the key. A retry returns the stored pool without a second IAM decision; the same key with a different site, class, sharing mode, agent or provider account is `CONFLICT`.\n- A site the tenant does not own is `NOT_FOUND`.\n\nEmits `pool.created`."
       },
       {
         "method": "capacity",
@@ -1945,8 +1945,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one pool's rollup rows, one per resource; the same answer as `capacity.byPool`.",
+        "description": "Returns one pool's rollup rows, one per resource; the same answer as `capacity.byPool`.\n\nThe call is `NOT_FOUND` when the pool is not visible to the tenant."
       },
       {
         "method": "offer",
@@ -2004,8 +2004,8 @@
           "required": ["tenantId", "poolId", "toTenantId", "quota"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Offers a pool the tenant owns to another tenant with a quota, or updates an existing offer and its quota; returns the pool as that tenant sees it.",
+        "description": "Offers a pool the tenant owns to another tenant with a quota, or updates an existing offer and its quota; returns the pool as that tenant sees it.\n\n- `quota` creates or resizes the offered tenant's quota rows. A new maximum below what is in use is raised to the amount in use.\n- `includeDescendants` and `priority` (default 0) are stored with the offer.\n- `INVALID_STATE` when the pool is archived, when a `timeslice` or `mps` pool or a pool holding `tenant-owned` nodes is offered to anyone but its owner, or when a `policy.singleTenant` pool is offered with `includeDescendants` or is already offered to another tenant.\n- The pool's IAM authz row is written for the offered tenant, with the attributes `gpuModel`, `class`, `sharing`, `region` and `owned`.\n\nEmits `pool.offered`."
       },
       {
         "method": "unoffer",
@@ -2043,8 +2043,8 @@
           "required": ["tenantId", "poolId", "toTenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Withdraws a pool's offer from a tenant and returns whether an offer was removed.",
+        "description": "Withdraws a pool's offer from a tenant and returns whether an offer was removed.\n\nThat tenant's quota rows on the pool drop to what is in use, so live reservations keep their bookings while nothing new fits, and its authz row for the pool is removed. A pool cannot be unoffered from its owner (`INVALID_INPUT`). Calling it again answers `removed: false`. Emits `pool.unoffered` only when an offer was removed."
       },
       {
         "method": "update",
@@ -2085,8 +2085,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Replaces the policy, the GPU model, or both, of a pool the tenant owns, and returns the pool with its version incremented.",
+        "description": "Replaces the policy, the GPU model, or both, of a pool the tenant owns, and returns the pool with its version incremented.\n\n- The new `policy` replaces the old one as a whole. A request with neither field is `INVALID_INPUT`. Class, site, sharing mode and agent cannot change.\n- Turning `policy.singleTenant` on is `INVALID_STATE` while more than one tenant, or any tenant with `includeDescendants`, holds an offer.\n- A new `migLayout` in a `mig` pool never repartitions booked GPUs; each node takes the new layout once its GPUs are idle. A change to `prewarmImages` refreshes the desired state of the site's agents.\n- The pool's authz rows are refreshed for the owner and every offered tenant.\n\nEmits `pool.updated`."
       },
       {
         "method": "archive",
@@ -2118,8 +2118,8 @@
           "required": ["tenantId", "poolId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Retires a pool the tenant owns: it removes every offer and stops new work, while live reservations keep their bookings until they end.",
+        "description": "Retires a pool the tenant owns: it removes every offer and stops new work, while live reservations keep their bookings until they end.\n\nEach offered tenant's quota rows drop to what is in use and its authz row for the pool is removed. After archiving, only the owner sees the pool, with `archived: true`. Archiving an archived pool returns it unchanged. Emits `pool.archived` with the list of tenants whose offers were removed."
       }
     ]
   },
@@ -2127,7 +2127,7 @@
     "group": "profiles",
     "slug": "profiles",
     "module": "provision",
-    "overview": "",
+    "overview": "The profiles group stores and checks the versioned recipes that provisioning workflows run: steps, drivers, an image, user data and host config. A version becomes immutable the first time a workflow uses it. Lookups see the tenant's own profiles, public ones, and the read-only profiles that modules ship under the tenant `builtin`. See [Profiles and images](/docs/guides/bare-metal/profiles-and-images).",
     "methods": [
       {
         "method": "create",
@@ -2141,8 +2141,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Stores a new profile version from a profile document, `private` unless `visibility` says `public`.",
+        "description": "Stores a new profile version from a profile document, `private` unless `visibility` says `public`.\n\n- Decided as `compute:profiles:manage` on the tenant.\n- The document is checked like `defineProfile`; any problem is `INVALID_INPUT`, with `details.path` naming the first offending field.\n- `CONFLICT` when that id and version already exist; create the next version instead."
       },
       {
         "method": "get",
@@ -2156,8 +2156,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns one profile version, the latest when `profileVersion` is omitted.",
+        "description": "Returns one profile version, the latest when `profileVersion` is omitted.\n\nThe lookup prefers the tenant's own profile, then a public stored one, then one a module ships. `NOT_FOUND` when none matches."
       },
       {
         "method": "validate",
@@ -2171,8 +2171,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Expands a profile version against the registered steps and returns `valid` with every issue found, such as a `use` that does not resolve or a `with` its step rejects.",
+        "description": "Expands a profile version against the registered steps and returns `valid` with every issue found, such as a `use` that does not resolve or a `with` its step rejects.\n\nProblems in the profile are returned as `issues` rather than thrown; an unknown profile is `NOT_FOUND`."
       },
       {
         "method": "render",
@@ -2186,8 +2186,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the profile document and the expanded steps a workflow of this version would run, with their phases.",
+        "description": "Returns the profile document and the expanded steps a workflow of this version would run, with their phases.\n\n`INVALID_INPUT` when the profile does not resolve, with the problems in `details.issues`; `NOT_FOUND` for an unknown profile."
       },
       {
         "method": "list",
@@ -2201,8 +2201,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns a page of the tenant's stored profiles, public ones and those modules ship, ordered by id and version.",
+        "description": "Returns a page of the tenant's stored profiles, public ones and those modules ship, ordered by id and version.\n\n`limit` defaults to 50 and is at most 200; pass the returned `cursor` to read the next page."
       },
       {
         "method": "update",
@@ -2216,8 +2216,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Replaces the document of one of the tenant's profile versions, or changes its visibility, and returns the profile.",
+        "description": "Replaces the document of one of the tenant's profile versions, or changes its visibility, and returns the profile.\n\n- Pass `document`, `visibility` or both; neither is `INVALID_INPUT`.\n- A version a workflow has used keeps its document: `INVALID_STATE`. Its visibility can still change.\n- A new document must keep the profile's id and version (`INVALID_INPUT`).\n- `expectedVersion` is the profile's row `version`; a mismatch is `CONFLICT`.\n- `NOT_FOUND` when the tenant has no such version."
       },
       {
         "method": "delete",
@@ -2231,8 +2231,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Hides one version, or every version when `profileVersion` is omitted, from new workflows and returns the number deleted.",
+        "description": "Hides one version, or every version when `profileVersion` is omitted, from new workflows and returns the number deleted.\n\nWorkflows already started keep the profile document they snapshotted. Profiles that modules ship are not stored, so deleting one is `NOT_FOUND`, as is a profile the tenant does not have."
       }
     ]
   },
@@ -2240,7 +2240,7 @@
     "group": "projects",
     "slug": "projects",
     "module": "server",
-    "overview": "",
+    "overview": "Projects group a tenant's work without creating more tenants. A project is app-owned, lives in one tenant, and its creator becomes its owner in the authorization projection; membership is a Better IAM relationship on `compute-project/{id}`. See [Tenancy](/docs/guides/iam/tenancy).",
     "methods": [
       {
         "method": "create",
@@ -2275,8 +2275,8 @@
           "required": ["tenantId", "name", "idempotencyKey"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Creates an `active` project with a DNS-label name that is unique in the tenant; returns the project.",
+        "description": "Creates an `active` project with a DNS-label name that is unique in the tenant; returns the project.\n\n- Decided with `compute:projects:manage` on `compute-tenant/{tenantId}`.\n- Idempotent per tenant, caller identity and `idempotencyKey`: the project id derives from them, and the same request again returns the existing project without a second IAM decision. The same key with a different name is `CONFLICT`.\n- A second project with the same name in the tenant is `CONFLICT`.\n- Emits `project.created`."
       },
       {
         "method": "get",
@@ -2306,8 +2306,8 @@
           "required": ["tenantId", "projectId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one project of the tenant by id.",
+        "description": "Returns one project of the tenant by id.\n\nDecided with `compute:projects:read` on `compute-project/{projectId}`. `NOT_FOUND` when the project is not in the tenant."
       },
       {
         "method": "list",
@@ -2347,8 +2347,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists the tenant's projects the caller may read, ordered by id, optionally filtered by `state` (`active` or `archived`); returns a page with a cursor.",
+        "description": "Lists the tenant's projects the caller may read, ordered by id, optionally filtered by `state` (`active` or `archived`); returns a page with a cursor.\n\nDecided with `compute:projects:read` on the tenant, then per project. Items the caller may not read are dropped from the page, so a page can hold fewer than `limit` items (at most 50, the default) while a cursor is still returned."
       },
       {
         "method": "archive",
@@ -2378,8 +2378,8 @@
           "required": ["tenantId", "projectId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Marks a project `archived` and increments its version; returns the project.",
+        "description": "Marks a project `archived` and increments its version; returns the project.\n\n- Decided with `compute:projects:manage` on `compute-project/{projectId}`.\n- Archiving an archived project returns it unchanged and emits nothing.\n- Emits `project.archived`. `NOT_FOUND` when the project is not in the tenant."
       }
     ]
   },
@@ -2387,7 +2387,7 @@
     "group": "providerAccounts",
     "slug": "provider-accounts",
     "module": "vps",
-    "overview": "",
+    "overview": "Provider accounts connect a tenant to an external provider registered with `vps({ providers })`, such as a cloud or a dedicated-server host. Each account's `config` is validated by its provider's manifest and holds secret references, never secret values. Provider pools create instances through an account, and `bootstrap` turns one of its machines into a bcd host. See [Providers](/docs/guides/vps/providers).",
     "methods": [
       {
         "method": "create",
@@ -2406,8 +2406,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Stores a provider account for the tenant after validating its `config` with the provider's manifest; returns the account.",
+        "description": "Stores a provider account for the tenant after validating its `config` with the provider's manifest; returns the account.\n\n- **Idempotency.** `idempotencyKey` is optional. With a key, the account id derives from the tenant, the caller and the key, and a repeat returns the stored account without a second IAM decision; a different `provider` or `name` under the same key is `CONFLICT`. A name the tenant already uses for another account is also `CONFLICT`.\n- **IAM.** Decided as `compute:providers:manage` on the tenant.\n- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference."
       },
       {
         "method": "list",
@@ -2421,8 +2421,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the tenant's provider accounts, sorted by name.",
+        "description": "Returns the tenant's provider accounts, sorted by name.\n\nEach `config` holds only secret references."
       },
       {
         "method": "get",
@@ -2436,8 +2436,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns one provider account of the tenant.",
+        "description": "Returns one provider account of the tenant.\n\nAn account of another tenant, or none, is `NOT_FOUND`."
       },
       {
         "method": "offers",
@@ -2451,8 +2451,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Asks the provider, through the account, for the machine types it offers; returns them as `items`.",
+        "description": "Asks the provider, through the account, for the machine types it offers; returns them as `items`.\n\nThe optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`, `minGpus`, `minVcpu` and `minMemoryGiB`. The call reaches the provider live. A missing account is `NOT_FOUND`."
       },
       {
         "method": "update",
@@ -2466,8 +2466,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Replaces the account's `config`, validated as in `create`, and increments its version; returns the account.",
+        "description": "Replaces the account's `config`, validated as in `create`, and increments its version; returns the account.\n\nThe provider and the name cannot change. The next provider call builds a new client from the new config. A missing account is `NOT_FOUND`; an invalid config is `INVALID_INPUT`."
       },
       {
         "method": "delete",
@@ -2481,8 +2481,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Deletes a provider account that no pool and no instance uses; returns `deleted: true`.",
+        "description": "Deletes a provider account that no pool and no instance uses; returns `deleted: true`.\n\nArchived pools and deleted instances do not count: deleted instances keep their history but drop the reference. A pool that is not archived, or an instance that is not deleted, on the account makes the call `INVALID_STATE`. A missing account is `NOT_FOUND`."
       },
       {
         "method": "bootstrap",
@@ -2496,8 +2496,8 @@
         "module": "vps",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Records a request to turn one of the account's machines into a bcd host of a `vps-host` or `metal-host` pool; returns the bootstrap, which the `vps.bootstraps` reconciler then drives to `joined` or `failed`.",
+        "description": "Records a request to turn one of the account's machines into a bcd host of a `vps-host` or `metal-host` pool; returns the bootstrap, which the `vps.bootstraps` reconciler then drives to `joined` or `failed`.\n\n- **Input.** Name exactly one of `machineId` (a machine the account already has; starts in `identifying`) or `offerId` (a machine to claim or order; starts in `claiming`). The pool must be owned by the tenant, not archived, and run the `bcd` agent.\n- **Idempotency.** `idempotencyKey` is required. A repeat returns the bootstrap's current status; a different request under the same key is `CONFLICT`.\n- **Errors.** `INVALID_CONFIG` when `vps()` has no `bootstrap` options or the host has no PKI. `UNSUPPORTED` when the provider cannot identify and bootstrap machines. `NOT_FOUND` for a missing account or a pool the tenant does not own, `INVALID_STATE` for an archived pool, `INVALID_INPUT` for a pool of another class or agent.\n- **Events.** `provider.bootstrap.started`; the reconciler later publishes `provider.bootstrap.installed`, `provider.bootstrap.joined` or `provider.bootstrap.failed`. The join token it mints is single-use, bound to the machine, and never returned or stored."
       }
     ]
   },
@@ -2505,7 +2505,7 @@
     "group": "quotas",
     "slug": "quotas",
     "module": "capacity",
-    "overview": "",
+    "overview": "A quota caps how much of one resource a tenant may hold in one pool at the same time, as a `max` and a `used` counter per tenant, pool and resource. A missing row grants 0; `pools.create` and `pools.offer` create the rows, and admissions charge them with `QUOTA_EXCEEDED` when a request does not fit. See [Quotas and usage](/docs/guides/capacity/quotas-and-usage).",
     "methods": [
       {
         "method": "get",
@@ -2537,8 +2537,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns the tenant's quota rows, each with `max`, `used` and `available`, optionally only those of one pool.",
+        "description": "Returns the tenant's quota rows, each with `max`, `used` and `available`, optionally only those of one pool.\n\nRows are ordered by pool, then resource. `available` is `max` minus `used`, never below 0."
       },
       {
         "method": "set",
@@ -2579,8 +2579,8 @@
           "required": ["tenantId", "poolId", "resource", "max"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Sets one tenant's maximum for one resource in one pool, creating the row if needed, and returns the row with the maximum that took effect.",
+        "description": "Sets one tenant's maximum for one resource in one pool, creating the row if needed, and returns the row with the maximum that took effect.\n\n- It is decided as `compute:quotas:manage` on `compute-fleet`, which resolves only in the root tenant, so only callers in the root tenant get past the tenant pre-check. `tenantId` names the tenant whose quota is set.\n- A maximum below the current `used` is raised to `used`. To shrink a quota under live reservations, set it again once they have released.\n- `NOT_FOUND` when the pool does not exist.\n\nEmits `quota.updated` with the resource and the requested `max`."
       }
     ]
   },
@@ -2588,7 +2588,7 @@
     "group": "releases",
     "slug": "releases",
     "module": "rollout",
-    "overview": "",
+    "overview": "Releases are signed bcd builds the platform may roll out to its nodes. A release is registered from a signed manifest, which must verify under the release key pins given to `rolloutModule`, and rollouts can then target its version. Both methods decide `compute:fleet:admin` on the fleet scope. See [Rollouts](/docs/guides/rollouts).",
     "methods": [
       {
         "method": "register",
@@ -2602,8 +2602,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Verifies a signed bcd release manifest under the configured release pins and records the release; returns it with its per-platform binaries.",
+        "description": "Verifies a signed bcd release manifest under the configured release pins and records the release; returns it with its per-platform binaries.\n\n- **Replay.** Registering a manifest whose version is already recorded with the same sequence returns the stored release; the same version with another sequence is `CONFLICT`.\n- **Errors.** `INVALID_INPUT` when the manifest does not verify (`details.reason` says why), when its sequence is not above the latest registered one (a rollback of the release channel, `details.reason` is `rollback`), when it lists several binaries for one platform, or when it lists no Linux binary."
       },
       {
         "method": "list",
@@ -2617,8 +2617,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns every registered release, highest sequence first.",
+        "description": "Returns every registered release, highest sequence first.\n\nThe list is not filtered by tenant: releases belong to the platform."
       }
     ]
   },
@@ -2626,7 +2626,7 @@
     "group": "reservations",
     "slug": "reservations",
     "module": "capacity",
-    "overview": "",
+    "overview": "A reservation is a tenant's claim on devices of one pool for a time window. `create` first writes the request as a draft, Better IAM decides once on that draft with the request as attributes, and only an allowed draft is charged against quota and placed. A reservation holds its quota charge until it reaches a terminal state, and the `capacity.reservations` reconciler drives it through `placed`, `binding` and `active` to `released`. See [Reservations](/docs/guides/capacity/reservations).",
     "methods": [
       {
         "method": "create",
@@ -2771,8 +2771,8 @@
           "required": ["tenantId", "poolId", "devices", "duration", "idempotencyKey"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Books devices of one pool for a time window after one IAM decision on the draft; returns the reservation, `placed` or `pending`.",
+        "description": "Books devices of one pool for a time window after one IAM decision on the draft; returns the reservation, `placed` or `pending`.\n\n- **Idempotency.** The reservation id is derived from the tenant, the caller's identity and `idempotencyKey`. The same key with the same request returns the stored reservation without a second decision once it is past the draft stage, and decides the same draft again while it is still a draft. The same key with a different request is `CONFLICT`, with `details.reservationId`; a key whose request was refused stays `ACCESS_DENIED`. `wait` is not part of the compared request.\n- **Decision.** `compute:reservations:create` is decided on the draft (`compute-reservation`), with attributes such as `gpuModel`, `gpuCount`, `durationHours` and `region`. When an agent in a delegated session is refused and IAM opens a confirmation request, the call fails with `CONFIRMATION_REQUIRED` and the draft waits in `awaiting-confirmation` for at most 30 minutes; a retry with the same key after approval continues it.\n- **Errors.** `NOT_FOUND` when the pool is not owned by or offered to the tenant, or is archived. `INVALID_INPUT` when a device class or sharing mode does not match the pool's, or `binding: 'node'` names a pool without `policy.tenantRoot`. `UNSUPPORTED` for any binding other than `hold` or `node`. `QUOTA_EXCEEDED` when the charge does not fit; the draft stays, so the same key can be retried. `SPEND_LIMIT_REACHED` when the pool or the tenant's offer asks for a budget check and the budget is spent.\n- **Placement.** A request that does not fit, and is not spot, may preempt spot work. Otherwise it is `pending` with an `Unschedulable` condition and retried every 30 seconds, or, with the pool-lease placer, `pending` with a `Queued` condition. `wait.timeoutMs` (at most 30 seconds) holds the answer while the reservation is queued; a timeout returns the reservation still queued, not an error.\n\nEmits `reservation.placed`, `reservation.pending`, `reservation.queued` or `reservation.awaiting-confirmation`."
       },
       {
         "method": "get",
@@ -2804,8 +2804,8 @@
           "required": ["tenantId", "reservationId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one reservation of the tenant with its `operation` and, once a node reported its devices bound, its `binding`.",
+        "description": "Returns one reservation of the tenant with its `operation` and, once a node reported its devices bound, its `binding`.\n\nDrafts are internal: the call is `NOT_FOUND` for them, as for a reservation that does not exist in the tenant."
       },
       {
         "method": "list",
@@ -2868,8 +2868,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns the tenant's reservations newest first, skipping drafts, filtered by `state` and `poolId`, one page at a time.",
+        "description": "Returns the tenant's reservations newest first, skipping drafts, filtered by `state` and `poolId`, one page at a time.\n\nWith `scope: 'mine'` (the default) only the caller's own reservations are listed. With `scope: 'all'` the tenant's reservations are loaded and each one is checked as `compute:reservations:read` on the reservation, so only the allowed ones are returned. `limit` is 1 to 200, default 50; `cursor` is the id of the last reservation of the previous page, and the answer carries the next `cursor` while more remain."
       },
       {
         "method": "release",
@@ -2901,8 +2901,8 @@
           "required": ["tenantId", "reservationId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Ends a reservation now: its bookings are released at `compute_now()`, its quota is refunded, and it becomes `released`; returns the reservation.",
+        "description": "Ends a reservation now: its bookings are released at `compute_now()`, its quota is refunded, and it becomes `released`; returns the reservation.\n\nA `pending` reservation is `cancelled` instead. A reservation already in a terminal state is returned unchanged. A request still in `draft` or `awaiting-confirmation` is `INVALID_STATE`. Freed capacity wakes the pool's pending reservations. Emits `reservation.released` or `reservation.cancelled`, with `reason: 'release'`."
       },
       {
         "method": "cancel",
@@ -2934,8 +2934,8 @@
           "required": ["tenantId", "reservationId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Withdraws a reservation that has not started (`pending` or `placed`): its bookings are released, its quota is refunded, and it becomes `cancelled`; returns the reservation.",
+        "description": "Withdraws a reservation that has not started (`pending` or `placed`): its bookings are released, its quota is refunded, and it becomes `cancelled`; returns the reservation.\n\nA reservation already `cancelled` is returned unchanged. Any other state is `INVALID_STATE`; use `release` for a reservation that has started. Drafts are `NOT_FOUND`. It is decided as `compute:reservations:release`. Emits `reservation.cancelled`."
       },
       {
         "method": "extend",
@@ -2983,8 +2983,8 @@
           "required": ["tenantId", "reservationId", "idempotencyKey"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Moves the end of a `placed`, `binding` or `active` reservation later, all or nothing, after one IAM decision; returns the reservation and whether it was extended.",
+        "description": "Moves the end of a `placed`, `binding` or `active` reservation later, all or nothing, after one IAM decision; returns the reservation and whether it was extended.\n\n- Give exactly one of `until` (a new end, epoch milliseconds) or `by` (a duration); both or neither is `INVALID_INPUT`. Other states are `INVALID_STATE`.\n- It is admitted like `create`: the pending change goes into the reservation's authz row with `durationHours` set to the total after the change, so a policy that caps duration also caps extensions. A refusal is `ACCESS_DENIED` and clears the pending change. `SPEND_LIMIT_REACHED` applies as for `create`.\n- When another booking starts before the new end, nothing moves and the answer is `extended: false` with `availableUntil`, the latest end the bookings can reach.\n- **Idempotency.** An `until` the reservation already reaches answers `extended: false` without a decision, so a retried `until` is safe. `idempotencyKey` does not replay: a repeated `by` extends again from the new end.\n\nEmits `reservation.extended` with the new `end`."
       },
       {
         "method": "renew",
@@ -3016,8 +3016,8 @@
           "required": ["tenantId", "reservationId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Moves the lease deadline of a renewable reservation to now plus its `leaseSeconds`, without changing its window; returns the reservation.",
+        "description": "Moves the lease deadline of a renewable reservation to now plus its `leaseSeconds`, without changing its window; returns the reservation.\n\nA reservation created without `leaseSeconds` is `INVALID_STATE`, as is one not in `placed`, `binding` or `active`. A lease that lapses without renewal releases the reservation with reason `lease-lapsed`. It is decided as `compute:reservations:extend`. Renewing emits no event."
       }
     ]
   },
@@ -3025,7 +3025,7 @@
     "group": "rollouts",
     "slug": "rollouts",
     "module": "rollout",
-    "overview": "",
+    "overview": "Rollouts take a registered bcd release to the nodes of the tenant's pools in waves, within each pool's disruption budget. A controller settles nodes as they report the new version, pauses the rollout when a wave's failure ratio exceeds its limit, and soaks between waves. Every method decides `compute:fleet:admin` on the fleet scope. See [Rollouts](/docs/guides/rollouts).",
     "methods": [
       {
         "method": "create",
@@ -3039,8 +3039,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Plans a rollout of a registered release to every node that runs bcd in the tenant's pools, or in `poolIds`, and starts it; returns the rollout in `running`.",
+        "description": "Plans a rollout of a registered release to every node that runs bcd in the tenant's pools, or in `poolIds`, and starts it; returns the rollout in `running`.\n\n- **Plan.** Nodes are shuffled by a hash of the rollout id and assigned to `waves`, cumulative percentages that must increase and end at 100 (default 1, 10, 50, 100). The other gates default to `maxFailureRatio` 0.05, `soakSeconds` 600 and `upgradeTimeoutSeconds` 900. Nodes that already report the version start as `succeeded`.\n- **Idempotency.** `idempotencyKey` is optional. With a key, the rollout id derives from the tenant, the caller and the key: a repeat for the same version returns the existing rollout, and another version under the key is `CONFLICT`.\n- **Errors.** `NOT_FOUND` when the version is not registered or a listed pool is not an unarchived pool of the tenant. `INVALID_STATE` when no node in scope runs bcd yet. `CONFLICT` with `details.rolloutId` when a node in scope is in another running or paused rollout. `INVALID_INPUT` for gates out of range.\n- **Events.** `rollout.started`; the controller later publishes `rollout.wave`, `rollout.paused` and `rollout.completed`."
       },
       {
         "method": "list",
@@ -3054,8 +3054,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the tenant's 100 most recent rollouts, newest first, each with its node counts by state.",
+        "description": "Returns the tenant's 100 most recent rollouts, newest first, each with its node counts by state."
       },
       {
         "method": "get",
@@ -3069,8 +3069,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns one rollout of the tenant with `nodeList`, each node's wave, state, previous version, timings and error, in rollout order.",
+        "description": "Returns one rollout of the tenant with `nodeList`, each node's wave, state, previous version, timings and error, in rollout order.\n\nA rollout of another tenant, or none, is `NOT_FOUND`."
       },
       {
         "method": "pause",
@@ -3084,8 +3084,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Stops a running or paused rollout from starting more nodes and records `reason` (default \"paused by an operator\"); returns the rollout in `paused`.",
+        "description": "Stops a running or paused rollout from starting more nodes and records `reason` (default \"paused by an operator\"); returns the rollout in `paused`.\n\nNodes already upgrading still settle. A completed or aborted rollout is `INVALID_STATE`. Publishes `rollout.paused`."
       },
       {
         "method": "resume",
@@ -3099,8 +3099,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Sets a running or paused rollout back to `running`, clears its reason and wakes the controller; returns the rollout.",
+        "description": "Sets a running or paused rollout back to `running`, clears its reason and wakes the controller; returns the rollout.\n\nA rollout paused by the failure gate resumes the same way. A completed or aborted rollout is `INVALID_STATE`. Publishes `rollout.resumed`."
       },
       {
         "method": "abort",
@@ -3114,8 +3114,8 @@
         "module": "rollout",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Ends a running or paused rollout: nodes not yet started are skipped, and with `rollback: true` upgraded nodes go back to the version they ran before; returns the rollout in `aborted`.",
+        "description": "Ends a running or paused rollout: nodes not yet started are skipped, and with `rollback: true` upgraded nodes go back to the version they ran before; returns the rollout in `aborted`.\n\n- With `rollback`, nodes `upgrading` or `succeeded` whose previous version is a registered release move to `rolling-back`, and the controller settles them. Without it, nodes still upgrading are marked `failed`.\n- `reason` defaults to \"aborted by an operator\". A completed or aborted rollout is `INVALID_STATE`. Publishes `rollout.aborted`."
       }
     ]
   },
@@ -3123,7 +3123,7 @@
     "group": "secrets",
     "slug": "secrets",
     "module": "server",
-    "overview": "",
+    "overview": "Secrets are write-only: `put` hands a value to the configured secret store and returns its `secret://` reference and version, and no method ever reads a value back. Events and audit rows carry only the reference, name and version; values reach agents through the secret broker, never through the API. Methods are decided on `compute-tenant/{tenantId}`, or on `compute-fleet/global` for platform secrets with `scope: 'fleet'` in the root tenant. See [Security](/docs/operations/security) and [BMC credentials](/docs/guides/bare-metal/bmc).",
     "methods": [
       {
         "method": "put",
@@ -3142,8 +3142,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Stores a secret value under a name and returns its reference and version; a second put with the same name writes a new version.",
+        "description": "Stores a secret value under a name and returns its reference and version; a second put with the same name writes a new version.\n\nThe value is at most 64 KiB. A retry whose `idempotencyKey` equals the key of the put that wrote the current version returns that version and writes nothing; the key is not scoped to the calling identity. `scope: 'fleet'` outside the root tenant is `INVALID_INPUT`. The call is `UNAVAILABLE` when no secret store is configured, and `INVALID_STATE` when the existing secret lives in another store than the configured one.\n\nPublishes `security.secret.put` with the reference, name and version, never the value."
       },
       {
         "method": "delete",
@@ -3183,8 +3183,8 @@
           "required": ["tenantId", "name"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Deletes a secret's value from the store and its reference, returning `deleted: true`, or `deleted: false` when no such secret exists.",
+        "description": "Deletes a secret's value from the store and its reference, returning `deleted: true`, or `deleted: false` when no such secret exists.\n\n`scope: 'fleet'` outside the root tenant is `INVALID_INPUT`. The call is `UNAVAILABLE` when no secret store is configured, and `INVALID_STATE` when the secret lives in another store than the configured one. Publishes `security.secret.deleted`."
       }
     ]
   },
@@ -3192,7 +3192,7 @@
     "group": "siteTokens",
     "slug": "site-tokens",
     "module": "server",
-    "overview": "",
+    "overview": "Site tokens are join tokens with the role `site`: they enroll `bcd site` agents on one site, which then contend for the site's boot lease. They share the join-token bearer format `bcjt_<id>.<secret>` and storage, so the secret is shown once and only its hash is kept. Both methods are decided as `compute:sites:manage` on `compute-site/{siteId}`. See [Sites](/docs/guides/bare-metal/sites).",
     "methods": [
       {
         "method": "create",
@@ -3238,8 +3238,8 @@
           "required": ["tenantId", "siteId", "ttlSeconds", "idempotencyKey"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Mints a role-`site` join token for one site and returns its record with the bearer `token`, which is never shown again.",
+        "description": "Mints a role-`site` join token for one site and returns its record with the bearer `token`, which is never shown again.\n\nOnly the site's owner tenant can mint tokens (the root tenant for platform sites); another tenant gets `NOT_FOUND`, and a deleted site is `INVALID_STATE`. `ttlSeconds` runs from 60 to 86,400, and `maxUses` from 1 to 16 (default 1).\n\nThe token id derives from the tenant, the calling identity and `idempotencyKey`. A retry with the same key returns the stored record without `token` and without a new IAM decision; the same key for a different site is `CONFLICT`. Publishes `security.site-token.created`."
       },
       {
         "method": "revoke",
@@ -3274,8 +3274,8 @@
           "required": ["tenantId", "siteId", "tokenId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Revokes a site token at once and returns its record with `revokedAt` set.",
+        "description": "Revokes a site token at once and returns its record with `revokedAt` set.\n\nRevoking a token that is already revoked returns it unchanged and publishes nothing. A token that is not a site token of this tenant and site is `NOT_FOUND`. A first revocation publishes `security.site-token.revoked`."
       }
     ]
   },
@@ -3283,7 +3283,7 @@
     "group": "sites",
     "slug": "sites",
     "module": "server",
-    "overview": "",
+    "overview": "Sites are boot and failure domains: every pool and node belongs to one site. Platform sites (`shared`, `dedicated`) belong to the root tenant; a tenant's own hardware lives on its `custom` sites. A tenant sees the sites the authorization projection holds for it. See [Sites](/docs/guides/bare-metal/sites).",
     "methods": [
       {
         "method": "list",
@@ -3328,8 +3328,8 @@
           "required": ["tenantId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Lists the sites visible to the tenant in id order, filtered by `kind` or `region`.",
+        "description": "Lists the sites visible to the tenant in id order, filtered by `kind` or `region`.\n\nThe call is decided once on `compute-tenant/{tenantId}`, then each site is checked for `compute:sites:read`; sites the caller may not read are left out, so a page can hold fewer than `limit` items. Pages hold up to 50 sites."
       },
       {
         "method": "get",
@@ -3359,8 +3359,8 @@
           "required": ["tenantId", "siteId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Returns one site: its kind, region, IAM region and version.",
+        "description": "Returns one site: its kind, region, IAM region and version.\n\nA site the tenant cannot see is `NOT_FOUND`."
       },
       {
         "method": "create",
@@ -3409,8 +3409,8 @@
           "required": ["tenantId", "kind", "region", "idempotencyKey"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Creates a site and adds it to the authorization projection with its region and kind as IAM attributes.",
+        "description": "Creates a site and adds it to the authorization projection with its region and kind as IAM attributes.\n\nA `custom` site is decided on `compute-tenant/{tenantId}`; a `shared` or `dedicated` site on `compute-fleet/global`, and its `tenantId` must be the root tenant, otherwise the call is `INVALID_INPUT`. `iamRegion` names the IAM region when it differs from `region`.\n\nThe site id derives from the tenant, the calling identity and `idempotencyKey`. A retry with the same key returns the site without a new IAM decision; the same key with a different kind, region or IAM region is `CONFLICT`. Publishes `site.created`."
       },
       {
         "method": "update",
@@ -3424,8 +3424,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Changes a site's `region` or `iamRegion`, or clears `iamRegion` so IAM uses `region`, and returns the site.",
+        "description": "Changes a site's `region` or `iamRegion`, or clears `iamRegion` so IAM uses `region`, and returns the site.\n\nOnly the owner tenant can update a site; a deleted site is `NOT_FOUND`. Naming no change, or both `iamRegion` and `clearIamRegion`, is `INVALID_INPUT`, and a stale `version` is `CONFLICT`. An update that changes nothing returns the site unchanged. Otherwise the new attributes reach every tenant that sees the site, and `site.updated` is published."
       },
       {
         "method": "delete",
@@ -3459,8 +3459,8 @@
           "required": ["tenantId", "siteId"],
           "additionalProperties": false
         },
-        "summary": "",
-        "description": ""
+        "summary": "Deletes a site that has no unarchived pool and no undeleted node.",
+        "description": "Deletes a site that has no unarchived pool and no undeleted node.\n\nOnly the owner tenant can delete a site. A site with live pools or nodes is `INVALID_STATE`, and a stale `version` is `CONFLICT`. The call revokes the site's join and site tokens, expires its pending and approved join requests, drops its boot lease and removes it from the projection. The row is removed when nothing references it and tombstoned otherwise (`tombstoned: true`).\n\nA retry after the delete returns `deleted: false`. Publishes `site.deleted`."
       }
     ]
   },
@@ -3468,7 +3468,7 @@
     "group": "system",
     "slug": "system",
     "module": "server",
-    "overview": "",
+    "overview": "The `system` group answers questions about the deployment itself. `whoami` and `version` are public and answer without a credential, which makes them a quick connectivity and credential check; `selfCheck` is a fleet administrator's health report. See [Observability](/docs/operations/observability).",
     "methods": [
       {
         "method": "whoami",
@@ -3482,8 +3482,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Reports who is calling: `authenticated: false` without a credential, or the authenticated identity.",
+        "description": "Reports who is calling: `authenticated: false` without a credential, or the authenticated identity.\n\nPublic; no IAM decision. When the call carries a credential, IAM authenticates it once and the answer holds the identity id and kind, the tenant, the session kind, whether the session used MFA, and the agent and delegation ids when present. The session id is never returned."
       },
       {
         "method": "version",
@@ -3497,8 +3497,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the server's name, release version, API base path and the agent protocol versions it speaks.",
+        "description": "Returns the server's name, release version, API base path and the agent protocol versions it speaks.\n\nPublic; no IAM decision and no input. The JoinService public keys appear only in the `.well-known/better-compute` document, not in this answer."
       },
       {
         "method": "selfCheck",
@@ -3512,8 +3512,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.",
+        "description": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.\n\nDecided as `compute:fleet:admin` on `compute-fleet/global`, which resolves only in the root tenant. The report covers the method catalog, applied migrations, the `btree_gist` extension, `compute_now()` against the database clock, the operations checks (overdue work, command sweeper lag, usage dead letters and backlog, gateway headroom, stale heartbeats, daemon protocol skew, expiring node certificates) and every module's own `selfCheck`. A failing check becomes an `error` finding rather than a failed call."
       }
     ]
   },
@@ -3521,7 +3521,7 @@
     "group": "tunnels",
     "slug": "tunnels",
     "module": "tunnels",
-    "overview": "",
+    "overview": "Interactive access to an instance or a node through its gateway and daemon: exec, SSH and TCP into an instance, or the console of a node. The server's tunnels module hosts this group when the deployment configures `tunnels` with an exec ticket issuer. See [Tunnels](/docs/guides/access/tunnels).",
     "methods": [
       {
         "method": "open",
@@ -3540,8 +3540,8 @@
         "module": "tunnels",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Issues a single-use exec ticket, valid for 60 seconds, for a tunnel to an instance or a node; returns the ticket, the tunnel id, the node and the `path` (`tunnels/<ticket>`, relative to the API base path) the caller then opens.",
+        "description": "Issues a single-use exec ticket, valid for 60 seconds, for a tunnel to an instance or a node; returns the ticket, the tunnel id, the node and the `path` (`tunnels/<ticket>`, relative to the API base path) the caller then opens.\n\n- Give exactly one of `instanceId` or `nodeId`. An instance takes `exec`, `ssh` or `tcp` (with a `port` from 1 to 65535) and is decided with `compute:instances:exec` on `compute-instance/{instanceId}`; a node takes `console` and is decided with `compute:nodes:console` on `compute-node/{nodeId}`. Any other combination is `INVALID_INPUT`.\n- `NOT_FOUND` when the instance is not the tenant's or is still a draft, or the node is outside the tenant's view. `UNSUPPORTED` for a provider instance, which has no node agent to tunnel through.\n- `INVALID_STATE` when the instance is not `running` or its node is not connected to a gateway.\n- `RATE_LIMITED` (with `retryAfterMs`) beyond the per-identity limit of each API replica, 10 tunnels per minute by default.\n- Emits `tunnel.issued`."
       }
     ]
   },
@@ -3549,7 +3549,7 @@
     "group": "usage",
     "slug": "usage",
     "module": "server",
-    "overview": "",
+    "overview": "The hourly usage windows compute meters per allocation and hands to Better IAM billing, as the tenant can read them. Both methods decide `compute:usage:read` on `compute-tenant/{tenantId}`, or on `compute-project/{projectId}` when the call names a project, since windows carry their project as a tag. See [Billing and usage](/docs/guides/iam/billing-and-usage).",
     "methods": [
       {
         "method": "list",
@@ -3568,8 +3568,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Lists the tenant's usage windows ordered by window start, optionally for one project, one meter and a time range; returns a page with a cursor.",
+        "description": "Lists the tenant's usage windows ordered by window start, optionally for one project, one meter and a time range; returns a page with a cursor.\n\n- Each window carries its billing idempotency key (`cmp:<allocationId>:<windowStartMs>`), meter, quantity, bounds and tags, and, once the usage sink has handed it to IAM billing, `recordedAt` and the `outcome` (`recorded`, `duplicate`, `reattributed` or `dead-lettered`).\n- `from` and `to` (epoch milliseconds) select windows that end after `from` and start before `to`; `to` not after `from` is `INVALID_INPUT`.\n- `limit` is at most 500 (100 by default). A cursor this method did not return is `INVALID_INPUT`."
       },
       {
         "method": "export",
@@ -3588,8 +3588,8 @@
         "module": "server",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Exports every usage window of a time range as CSV (the default) or JSON Lines, with the window count and the summed quantity per meter.",
+        "description": "Exports every usage window of a time range as CSV (the default) or JSON Lines, with the window count and the summed quantity per meter.\n\n- `from` and `to` are required, and the range is at most 93 days; `to` not after `from`, or a longer range, is `INVALID_INPUT`.\n- One export returns at most 50,000 windows; when more match, `truncated` is `true` and the range or meter should be narrowed.\n- CSV has a header row and ISO 8601 timestamps; JSON Lines has one window object per line."
       }
     ]
   },
@@ -3597,7 +3597,7 @@
     "group": "webhooks",
     "slug": "webhooks",
     "module": "events",
-    "overview": "",
+    "overview": "Per-tenant subscriptions that POST every matching committed event to an HTTPS endpoint, signed with a secret only the tenant and Better Compute know, with at-least-once delivery, retries with backoff, dead letters and redelivery. The events module hosts this group, and every method decides `compute:webhooks:manage` on `compute-tenant/{tenantId}`. See [Webhooks](/docs/guides/events/webhooks).",
     "methods": [
       {
         "method": "create",
@@ -3611,8 +3611,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Creates an active webhook for a URL and 1 to 20 event type patterns; returns the webhook and its signing secret, which is shown this once.",
+        "description": "Creates an active webhook for a URL and 1 to 20 event type patterns; returns the webhook and its signing secret, which is shown this once.\n\n- A pattern is an exact event type, a family such as `reservation.*`, or `*`; a pattern that matches nothing in the event catalog is `INVALID_INPUT` (see `eventTypes`), unless the deployment is configured to accept any pattern.\n- The URL must be absolute, use `https`, carry no credentials and not point at a private, loopback or other non-public address; otherwise `INVALID_INPUT`.\n- A tenant has at most 20 webhooks by default; one more is `QUOTA_EXCEEDED`.\n- The webhook receives events committed after it was created; earlier history is not replayed. The method takes no idempotency key, so a retry creates a second webhook."
       },
       {
         "method": "list",
@@ -3626,8 +3626,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Lists the tenant's webhooks, oldest first, without their secrets.",
+        "description": "Lists the tenant's webhooks, oldest first, without their secrets."
       },
       {
         "method": "get",
@@ -3641,8 +3641,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns one webhook of the tenant by id, without its secret.",
+        "description": "Returns one webhook of the tenant by id, without its secret.\n\n`NOT_FOUND` when the webhook is not the tenant's."
       },
       {
         "method": "update",
@@ -3656,8 +3656,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Changes a webhook's URL, event patterns, description or `active` flag and increments its version; returns the webhook.",
+        "description": "Changes a webhook's URL, event patterns, description or `active` flag and increments its version; returns the webhook.\n\n- URL and patterns are checked as in `create` (`INVALID_INPUT`).\n- Setting `active` to `false` pauses the webhook and cancels its pending deliveries.\n- `NOT_FOUND` when the webhook is not the tenant's."
       },
       {
         "method": "rotateSecret",
@@ -3671,8 +3671,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Replaces a webhook's signing secret with a new one; returns the webhook and the new secret, shown this once.",
+        "description": "Replaces a webhook's signing secret with a new one; returns the webhook and the new secret, shown this once.\n\n- With `keepPreviousSeconds` (0 to 86,400, default 0), the old secret keeps signing deliveries alongside the new one until then, so receivers can switch without rejecting any; with 0 the old secret stops at once.\n- `NOT_FOUND` when the webhook is not the tenant's."
       },
       {
         "method": "delete",
@@ -3686,8 +3686,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Deletes a webhook together with its delivery queue and history; returns `deleted: true`.",
+        "description": "Deletes a webhook together with its delivery queue and history; returns `deleted: true`.\n\n`NOT_FOUND` when the webhook is not the tenant's."
       },
       {
         "method": "ping",
@@ -3701,8 +3701,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Queues a `webhook.ping` delivery to the webhook, due now; returns the delivery.",
+        "description": "Queues a `webhook.ping` delivery to the webhook, due now; returns the delivery.\n\nThe ping is a delivery only: it is not written to the outbox, so `events.list` does not show it. A ping to a paused webhook is cancelled when the delivery worker picks it up. `NOT_FOUND` when the webhook is not the tenant's."
       },
       {
         "method": "deliveries",
@@ -3716,8 +3716,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Lists a webhook's deliveries newest first, optionally filtered by `state` (`pending`, `delivered`, `dead` or `cancelled`), with attempts, the next attempt time and the last status or error.",
+        "description": "Lists a webhook's deliveries newest first, optionally filtered by `state` (`pending`, `delivered`, `dead` or `cancelled`), with attempts, the next attempt time and the last status or error.\n\n`limit` is at most 200 (50 by default). `NOT_FOUND` when the webhook is not the tenant's."
       },
       {
         "method": "redeliver",
@@ -3731,8 +3731,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Puts a delivery back in the queue, due now, with its attempt count reset; returns the delivery.",
+        "description": "Puts a delivery back in the queue, due now, with its attempt count reset; returns the delivery.\n\n- Meant for `dead`, `cancelled` or `delivered` deliveries, for example once a failing endpoint is fixed.\n- The delivery keeps its id, so the `X-Better-Compute-Delivery` header carries the same value as before.\n- `NOT_FOUND` when the delivery is not the tenant's or its webhook is paused."
       },
       {
         "method": "eventTypes",
@@ -3746,8 +3746,8 @@
         "module": "events",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns the event catalog that webhook patterns are checked against: the built-in event families plus any plugin families the deployment configured, each with its type, subject, publishing module and description.",
+        "description": "Returns the event catalog that webhook patterns are checked against: the built-in event families plus any plugin families the deployment configured, each with its type, subject, publishing module and description.\n\nDecided like the rest of the group, with `compute:webhooks:manage` on `compute-tenant/{tenantId}`. The method comes from the events module and is not in core's API catalog, so it has no phase."
       }
     ]
   },
@@ -3755,7 +3755,7 @@
     "group": "workflows",
     "slug": "workflows",
     "module": "provision",
-    "overview": "",
+    "overview": "The workflows group reads the provisioning workflows of a node and lets an operator abort, retry, pause or resume one. Workflows are started by other modules, such as metal for each workflow-driven provision state, not through this group. Every method is decided on the node (`compute-node`): reads as `compute:workflows:read`, the others as `compute:workflows:manage`. See [Provisioning workflows](/docs/guides/bare-metal/workflows).",
     "methods": [
       {
         "method": "get",
@@ -3769,8 +3769,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns one workflow of the node with all its steps, including each step's phase, state, attempt, command, deadline, result and error.",
+        "description": "Returns one workflow of the node with all its steps, including each step's phase, state, attempt, command, deadline, result and error.\n\n`NOT_FOUND` unless the workflow belongs to the tenant and the node."
       },
       {
         "method": "list",
@@ -3784,8 +3784,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Returns a page of the node's workflows with their steps, newest first.",
+        "description": "Returns a page of the node's workflows with their steps, newest first.\n\n`limit` defaults to 20 and is at most 100; pass the returned `cursor` to read the next page."
       },
       {
         "method": "abort",
@@ -3799,8 +3799,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Cancels a workflow: pending steps are cancelled, the in-flight step's command is cancelled, and the cleanup phase runs before the workflow ends `cancelled`.",
+        "description": "Cancels a workflow: pending steps are cancelled, the in-flight step's command is cancelled, and the cleanup phase runs before the workflow ends `cancelled`.\n\n- A `pending` or `failed` workflow is cancelled at once, with no cleanup, and publishes `workflow.cancelled`.\n- Aborting a workflow that is already cancelled or cancelling does nothing; aborting a succeeded one is `INVALID_STATE`.\n- The optional `reason` (at most 512 characters) is recorded in the workflow's error.\n\nAborting a workflow that metal owns fails the node; steer metal nodes with `metal.abort` and `metal.recover` instead."
       },
       {
         "method": "retry",
@@ -3814,8 +3814,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Runs a failed workflow again from `fromStep`, by default the first main step that did not succeed; that step and every later main step return to `pending` with the next attempt number, and on-failure and cleanup steps are re-armed.",
+        "description": "Runs a failed workflow again from `fromStep`, by default the first main step that did not succeed; that step and every later main step return to `pending` with the next attempt number, and on-failure and cleanup steps are re-armed.\n\n- `INVALID_STATE` unless the workflow is `failed`.\n- `INVALID_INPUT` when `fromStep` is not a main step, or when every main step succeeded.\n- `CONFLICT` when the node has another active workflow.\n\nPublishes `workflow.retried` with the `fromStep`."
       },
       {
         "method": "pause",
@@ -3829,8 +3829,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Pauses a running workflow: the step in flight finishes, but no further step starts until `resume`.",
+        "description": "Pauses a running workflow: the step in flight finishes, but no further step starts until `resume`.\n\n`INVALID_STATE` when the workflow is not `running`, or when it is in its cleanup phase after a failure or abort. Publishes `workflow.paused`."
       },
       {
         "method": "resume",
@@ -3844,8 +3844,8 @@
         "module": "provision",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Puts a paused workflow back to `running` and queues it to continue with its next step.",
+        "description": "Puts a paused workflow back to `running` and queues it to continue with its next step.\n\n`INVALID_STATE` when the workflow is not `paused`. Publishes `workflow.resumed`."
       }
     ]
   }
