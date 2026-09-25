@@ -196,6 +196,8 @@ describe('help and the manifest', () => {
       'instances stop',
       'instances delete',
       'instances resize',
+      'events list',
+      'events watch',
       'fleet export',
       'fleet plan',
       'fleet status',

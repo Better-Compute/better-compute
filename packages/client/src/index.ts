@@ -116,6 +116,8 @@ export interface ComputeWatchEvent {
 export interface ComputeWatchOptions {
   /** Event type patterns (`reservation.*`, `node.connected`); every type when absent. */
   types?: readonly string[];
+  /** The tenant whose events to follow (`?tenantId=`); the caller's own when absent. */
+  tenantId?: string;
   /** Resume after this cursor (an event's `sequence`, the SSE `id`). */
   lastEventId?: string;
   /** Ends the iteration; so does `break` or `return()` on it. */
@@ -445,6 +447,7 @@ export function createComputeClient<T extends { api: unknown }>(
       while (!controller.signal.aborted) {
         const url = new URL(path, base.origin);
         if (watchOptions.types?.length) url.searchParams.set('types', watchOptions.types.join(','));
+        if (watchOptions.tenantId) url.searchParams.set('tenantId', watchOptions.tenantId);
         const configured =
           typeof options.headers === 'function' ? await options.headers() : options.headers;
         const headers = new Headers(configured);

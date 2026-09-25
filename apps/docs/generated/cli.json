@@ -3330,6 +3330,136 @@
       "examples": ["better-compute instances resize inst_01k5w… --flavor g1.large"]
     },
     {
+      "name": "events list",
+      "aliases": [],
+      "group": "Events",
+      "summary": "List the tenant’s events, newest first (events.list)",
+      "description": "List the tenant’s events, newest first (events.list)",
+      "usage": "better-compute events list --tenant ID [--type TYPE] [--limit N] [--cursor CURSOR] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--type",
+          "value": "TYPE",
+          "optional": true,
+          "description": "Only events of this type (node.cordoned, reservation.placed, …)"
+        },
+        {
+          "flag": "--limit",
+          "value": "N",
+          "optional": true,
+          "description": "Page size (at most 500)"
+        },
+        {
+          "flag": "--cursor",
+          "value": "CURSOR",
+          "optional": true,
+          "description": "The cursor of the previous page"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute events list --type node.draining",
+        "better-compute events list --query \"items[*].type\""
+      ]
+    },
+    {
+      "name": "events watch",
+      "aliases": [],
+      "group": "Events",
+      "summary": "Follow the tenant’s events as they happen, one JSON line each (GET /watch)",
+      "description": "events watch follows the host's server-sent events route (--path, default /watch; the console app serves /api/compute/watch) as BETTER_COMPUTE_TOKEN, so it needs --url. Each event is printed as one line of JSON with its `sequence`, the cursor: pass the last one to --since to resume where a previous run stopped. It reconnects after a broken connection, resuming from the last event, until Ctrl-C, --count events, or a refusal: a revoked session or a withdrawn compute:events:read ends it.",
+      "usage": "better-compute events watch --tenant ID [--types PATTERN,…] [--since CURSOR] [--count N] [--path PATH] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--types",
+          "value": "PATTERN,…",
+          "optional": true,
+          "description": "Event type patterns, comma-separated (node.*, reservation.placed); default all"
+        },
+        {
+          "flag": "--since",
+          "value": "CURSOR",
+          "optional": true,
+          "description": "Resume after this event (a printed sequence)"
+        },
+        {
+          "flag": "--count",
+          "value": "N",
+          "optional": true,
+          "description": "Stop after N events"
+        },
+        {
+          "flag": "--path",
+          "value": "PATH",
+          "optional": true,
+          "description": "The watch route on the server",
+          "default": "/watch"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        }
+      ],
+      "examples": [
+        "better-compute events watch --url https://compute.example.com --types \"node.*,reservation.*\"",
+        "better-compute events watch --url https://compute.example.com --since 184467:12 --count 100"
+      ]
+    },
+    {
       "name": "fleet export",
       "aliases": [],
       "group": "Fleet",
