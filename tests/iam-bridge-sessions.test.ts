@@ -185,10 +185,12 @@ describe('tunnelAuthorizer actions', () => {
     const { f, port, alice, caller } = await setup();
     f.project('compute-node', 'node_1');
     f.project('compute-instance', 'inst_1');
+    f.project('compute-sandbox', 'sbx_1');
     await f.grant(alice.id, {
       version: 1,
       statements: [
         { effect: 'allow', actions: ['compute:nodes:console'], resources: ['compute-node/*'] },
+        { effect: 'allow', actions: ['compute:sandboxes:exec'], resources: ['compute-sandbox/*'] },
       ],
     });
     const authorize = tunnelAuthorizer(port);
@@ -208,6 +210,15 @@ describe('tunnelAuthorizer actions', () => {
     // A stamped action that does not match the target, or is unknown, fails closed.
     expect(await authorize({ claims: ticket({ act: 'compute:instances:exec' }) })).toBe(false);
     expect(await authorize({ claims: ticket({ act: 'compute:nodes:delete' }) })).toBe(false);
+    // A sandbox's exec ticket is decided on the sandbox (Alice may exec into it, not into its instance).
+    const sandbox = { inst: 'inst_1', sbx: 'sbx_1', op: 'ssh', act: 'compute:sandboxes:exec' };
+    expect(await authorize({ claims: ticket(sandbox) })).toBe(true);
+    expect(await authorize({ claims: ticket({ ...sandbox, sbx: undefined }) })).toBe(false);
+    expect(await authorize({ claims: ticket({ ...sandbox, inst: undefined }) })).toBe(false);
+    expect(await authorize({ claims: ticket({ ...sandbox, act: 'compute:instances:exec' }) })).toBe(
+      false,
+    );
+    expect(await authorize({ claims: ticket({ ...sandbox, act: undefined }) })).toBe(false);
   });
 });
 describe('authorizeSession (remote)', () => {

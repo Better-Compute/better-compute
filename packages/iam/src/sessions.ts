@@ -76,11 +76,16 @@ export function sessionAuthorization(
   };
 }
 
-/** The actions a tunnel ticket may be re-decided for: exec into an instance, the console of a node. */
+/**
+ * The actions a tunnel ticket may be re-decided for: exec into an instance, the console of a node, exec into a
+ * sandbox (§3.7).
+ */
 const tunnelActions: ReadonlySet<string> = new Set([
   'compute:instances:exec',
   'compute:nodes:console',
+  'compute:sandboxes:exec',
 ]);
+const sandboxExec = 'compute:sandboxes:exec';
 
 /** What `tunnels.authorize` receives (`@better-compute/server`'s `TunnelReauthorization`, structurally). */
 export interface TunnelReauthorizationLike {
@@ -89,6 +94,8 @@ export interface TunnelReauthorizationLike {
     ses?: string;
     tnt?: string;
     inst?: string;
+    /** A sandbox's exec ticket: the sandbox (its instance is `inst`). */
+    sbx?: string;
     aud: string;
     op: string;
     act?: string;
@@ -102,7 +109,9 @@ export interface TunnelAuthorizerOptions {
   /**
    * The decision re-checked for a ticket. Default: the action the ticket was issued for, from its `act` claim or
    * else by target: `compute:instances:exec` on the instance (`inst`), `compute:nodes:console` on the node
-   * (`aud` = `node:<id>`), in the ticket's tenant (`tnt`). An unknown or mismatched action fails closed.
+   * (`aud` = `node:<id>`), in the ticket's tenant (`tnt`). A sandbox's ticket (`sbx`, with `inst` its instance)
+   * is `compute:sandboxes:exec` on the sandbox, never a decision on the instance it drives. An unknown or
+   * mismatched action fails closed.
    */
   decisionFor?(claims: TunnelReauthorizationLike['claims']): Decision | undefined;
 }
@@ -122,6 +131,15 @@ export function tunnelAuthorizer(
     options.decisionFor ??
     ((claims: TunnelReauthorizationLike['claims']): Decision | undefined => {
       if (!claims.tnt) return undefined;
+      // A sandbox's exec ticket (§3.7): re-decided on the sandbox; any other combination fails closed.
+      if (claims.sbx !== undefined || claims.act === sandboxExec) {
+        if (claims.act !== sandboxExec || !claims.sbx || !claims.inst) return undefined;
+        return {
+          tenantId: claims.tnt,
+          action: sandboxExec,
+          resource: { type: `${prefix}sandbox`, id: claims.sbx },
+        };
+      }
       const node = claims.aud.startsWith('node:') ? claims.aud.slice('node:'.length) : undefined;
       const resource = claims.inst
         ? { type: `${prefix}instance`, id: claims.inst }
