@@ -78,6 +78,9 @@ func TestInstallContract(t *testing.T) {
 	if name != "join" || join["server"] != v["controlPlaneUrl"] || join["node-id"] != v["nodeId"] || join["token-file"] != "/etc/bcd/join-token" {
 		t.Fatalf("provision join = %s %v", name, join)
 	}
+	if join["serving-ca-pin"] != ic.Pins.ServingCA || join["join-signing-pin"] != ic.Pins.JoinSigning || join["join-encryption-pin"] != ic.Pins.JoinEncryption {
+		t.Fatalf("provision join pins = %v", join)
+	}
 	name, node := parseInstalled(t, ic.Provision.Node)
 	if name != "node" || node["config"] != join["config"] || node["config"] != config.DefaultPath {
 		t.Fatalf("provision node = %s %v; bcd join writes %s", name, node, join["config"])

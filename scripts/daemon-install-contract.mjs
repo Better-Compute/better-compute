@@ -14,15 +14,6 @@ const provision = await import('@better-compute/provision');
 const hetzner = await import('@better-compute/provider-hetzner');
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const variables = {
-  nodeId: 'node_01k5w00000000000000000inst',
-  hostname: 'gpu-7',
-  joinToken: 'bcjt_01k5w0000000000000000000000.contract',
-  controlPlaneUrl: 'https://compute.example.com/api/compute',
-  bcdUrl: 'https://compute.example.com/api/compute/downloads/bcd/0.5.0/linux-amd64',
-  bcdSha256: 'ab'.repeat(32),
-};
-
 // Pins as the PKI bundle gives them (`sha256/<base64>` SPKI digests).
 const pins = {
   servingCa: `sha256/${Buffer.alloc(32, 1).toString('base64')}`,
@@ -30,11 +21,26 @@ const pins = {
   joinEncryption: `sha256/${Buffer.alloc(32, 3).toString('base64')}`,
 };
 
+const variables = {
+  nodeId: 'node_01k5w00000000000000000inst',
+  hostname: 'gpu-7',
+  joinToken: 'bcjt_01k5w0000000000000000000000.contract',
+  controlPlaneUrl: 'https://compute.example.com/api/compute',
+  bcdUrl: 'https://compute.example.com/api/compute/downloads/bcd/0.5.0/linux-amd64',
+  bcdSha256: 'ab'.repeat(32),
+  servingCaPin: pins.servingCa,
+  joinSigningPin: pins.joinSigning,
+  joinEncryptionPin: pins.joinEncryption,
+};
+
 const out = {
   variables,
   pins,
   provision: {
-    join: provision.bcdJoinArgv(variables),
+    join: provision.bcdJoinArgv({
+      ...variables,
+      pins: { servingCaPin: pins.servingCa, joinSigningPin: pins.joinSigning, joinEncryptionPin: pins.joinEncryption },
+    }),
     node: provision.bcdNodeArgv(),
     cloudInit: provision.renderTemplate(provision.bcdHostCloudInit, variables),
     ignition: provision.renderTemplate(provision.bcdHostIgnition, variables),

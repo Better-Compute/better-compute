@@ -113,11 +113,13 @@ type Agent struct {
 	devices     *devicesConverger
 	boot        *BootEntries
 	instances   *instancesConverger
-	cache       *imageCache
-	access      *accessConverger
-	convergeCh  chan struct{}
-	rng         *rand.Rand
-	ctx         context.Context
+	// uploads are the snapshot files instance.snapshot is uploading (collectSnapshots keeps them).
+	uploads    sync.Map
+	cache      *imageCache
+	access     *accessConverger
+	convergeCh chan struct{}
+	rng        *rand.Rand
+	ctx        context.Context
 	// key is the node key (read without mu: attested results are signed under it).
 	key atomic.Pointer[ecdsa.PrivateKey]
 

@@ -5,7 +5,10 @@
     "joinToken": "bcjt_01k5w0000000000000000000000.contract",
     "controlPlaneUrl": "https://compute.example.com/api/compute",
     "bcdUrl": "https://compute.example.com/api/compute/downloads/bcd/0.5.0/linux-amd64",
-    "bcdSha256": "abababababababababababababababababababababababababababababababab"
+    "bcdSha256": "abababababababababababababababababababababababababababababababab",
+    "servingCaPin": "sha256/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "joinSigningPin": "sha256/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    "joinEncryptionPin": "sha256/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
   },
   "pins": {
     "servingCa": "sha256/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
@@ -21,14 +24,20 @@
       "--token-file",
       "/etc/bcd/join-token",
       "--node-id",
-      "node_01k5w00000000000000000inst"
+      "node_01k5w00000000000000000inst",
+      "--serving-ca-pin",
+      "sha256/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+      "--join-signing-pin",
+      "sha256/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+      "--join-encryption-pin",
+      "sha256/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
     ],
     "node": [
       "/usr/local/bin/bcd",
       "node"
     ],
-    "cloudInit": "#cloud-config\nhostname: gpu-7\nwrite_files:\n  - path: /etc/bcd/join-token\n    permissions: '0600'\n    content: bcjt_01k5w0000000000000000000000.contract\n  - path: /etc/systemd/system/bcd.service\n    permissions: '0644'\n    content: |\n      [Unit]\n      Description=better-compute node agent\n      After=network-online.target bcd-join.service\n      Wants=network-online.target\n      [Service]\n      ExecStart=/usr/local/bin/bcd node\n      Restart=always\n      RestartSec=5\n      [Install]\n      WantedBy=multi-user.target\nruncmd:\n  - [sh, -c, \"curl -fsSL 'https://compute.example.com/api/compute/downloads/bcd/0.5.0/linux-amd64' -o /usr/local/bin/bcd && echo 'abababababababababababababababababababababababababababababababab  /usr/local/bin/bcd' | sha256sum -c - && chmod 0755 /usr/local/bin/bcd\"]\n  - [/usr/local/bin/bcd, join, --server, https://compute.example.com/api/compute, --token-file, /etc/bcd/join-token, --node-id, node_01k5w00000000000000000inst]\n  - [systemctl, enable, --now, bcd.service]\n",
-    "ignition": "{\"ignition\":{\"version\":\"3.4.0\"},\"storage\":{\"files\":[{\"path\":\"/etc/bcd/join-token\",\"mode\":384,\"contents\":{\"source\":\"data:,bcjt_01k5w0000000000000000000000.contract\"}},{\"path\":\"/usr/local/bin/bcd\",\"mode\":493,\"contents\":{\"source\":\"https://compute.example.com/api/compute/downloads/bcd/0.5.0/linux-amd64\",\"verification\":{\"hash\":\"sha256-abababababababababababababababababababababababababababababababab\"}}},{\"path\":\"/etc/hostname\",\"mode\":420,\"contents\":{\"source\":\"data:,gpu-7\"}}]},\"systemd\":{\"units\":[{\"name\":\"bcd-join.service\",\"enabled\":true,\"contents\":\"[Unit]\\nDescription=Join better-compute\\nAfter=network-online.target\\nWants=network-online.target\\nConditionPathExists=/etc/bcd/join-token\\n[Service]\\nType=oneshot\\nRemainAfterExit=yes\\nExecStart=/usr/local/bin/bcd join --server https://compute.example.com/api/compute --token-file /etc/bcd/join-token --node-id node_01k5w00000000000000000inst\\n[Install]\\nWantedBy=multi-user.target\"},{\"name\":\"bcd.service\",\"enabled\":true,\"contents\":\"[Unit]\\nDescription=better-compute node agent\\nAfter=network-online.target bcd-join.service\\nWants=network-online.target\\n[Service]\\nExecStart=/usr/local/bin/bcd node\\nRestart=always\\nRestartSec=5\\n[Install]\\nWantedBy=multi-user.target\"}]}}"
+    "cloudInit": "#cloud-config\nhostname: gpu-7\nwrite_files:\n  - path: /etc/bcd/join-token\n    permissions: '0600'\n    content: bcjt_01k5w0000000000000000000000.contract\n  - path: /etc/systemd/system/bcd.service\n    permissions: '0644'\n    content: |\n      [Unit]\n      Description=better-compute node agent\n      After=network-online.target bcd-join.service\n      Wants=network-online.target\n      [Service]\n      ExecStart=/usr/local/bin/bcd node\n      Restart=always\n      RestartSec=5\n      [Install]\n      WantedBy=multi-user.target\nruncmd:\n  - [sh, -c, \"curl -fsSL 'https://compute.example.com/api/compute/downloads/bcd/0.5.0/linux-amd64' -o /usr/local/bin/bcd && echo 'abababababababababababababababababababababababababababababababab  /usr/local/bin/bcd' | sha256sum -c - && chmod 0755 /usr/local/bin/bcd\"]\n  - [/usr/local/bin/bcd, join, --server, https://compute.example.com/api/compute, --token-file, /etc/bcd/join-token, --node-id, node_01k5w00000000000000000inst, --serving-ca-pin, sha256/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=, --join-signing-pin, sha256/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=, --join-encryption-pin, sha256/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=]\n  - [systemctl, enable, --now, bcd.service]\n",
+    "ignition": "{\"ignition\":{\"version\":\"3.4.0\"},\"storage\":{\"files\":[{\"path\":\"/etc/bcd/join-token\",\"mode\":384,\"contents\":{\"source\":\"data:,bcjt_01k5w0000000000000000000000.contract\"}},{\"path\":\"/usr/local/bin/bcd\",\"mode\":493,\"contents\":{\"source\":\"https://compute.example.com/api/compute/downloads/bcd/0.5.0/linux-amd64\",\"verification\":{\"hash\":\"sha256-abababababababababababababababababababababababababababababababab\"}}},{\"path\":\"/etc/hostname\",\"mode\":420,\"contents\":{\"source\":\"data:,gpu-7\"}}]},\"systemd\":{\"units\":[{\"name\":\"bcd-join.service\",\"enabled\":true,\"contents\":\"[Unit]\\nDescription=Join better-compute\\nAfter=network-online.target\\nWants=network-online.target\\nConditionPathExists=/etc/bcd/join-token\\n[Service]\\nType=oneshot\\nRemainAfterExit=yes\\nExecStart=/usr/local/bin/bcd join --server https://compute.example.com/api/compute --token-file /etc/bcd/join-token --node-id node_01k5w00000000000000000inst --serving-ca-pin sha256/AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE= --join-signing-pin sha256/AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI= --join-encryption-pin sha256/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\\n[Install]\\nWantedBy=multi-user.target\"},{\"name\":\"bcd.service\",\"enabled\":true,\"contents\":\"[Unit]\\nDescription=better-compute node agent\\nAfter=network-online.target bcd-join.service\\nWants=network-online.target\\n[Service]\\nExecStart=/usr/local/bin/bcd node\\nRestart=always\\nRestartSec=5\\n[Install]\\nWantedBy=multi-user.target\"}]}}"
   },
   "robot": {
     "join": [

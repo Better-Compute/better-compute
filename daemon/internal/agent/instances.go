@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -212,6 +213,13 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 	}
 	c.specErrors = specErrors
+	keep := map[string]bool{}
+	for _, spec := range section.GetInstances() {
+		if d := spec.GetRestoreFrom().GetSha256(); len(d) == 32 && spec.GetDesiredState() != agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
+			keep[hex.EncodeToString(d)] = true
+		}
+	}
+	c.a.collectSnapshots(keep)
 	if len(waiting) > 0 {
 		return fmt.Errorf("waiting for the user data of %s", strings.Join(waiting, ", "))
 	}

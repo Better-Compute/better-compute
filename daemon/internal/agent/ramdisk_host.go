@@ -196,14 +196,10 @@ func (h *RealHost) InstallUserData(ctx context.Context, d *inventory.Disk, kind 
 			return err
 		}
 		defer unmount()
-		seed := filepath.Join(dir, "var/lib/cloud/seed/nocloud")
-		if err := os.MkdirAll(seed, 0o700); err != nil {
+		if err := writeInRoot(dir, "var/lib/cloud/seed/nocloud/user-data", data); err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(seed, "user-data"), data, 0o600); err != nil {
-			return err
-		}
-		return os.WriteFile(filepath.Join(seed, "meta-data"), []byte("instance-id: "+d.Name+"\n"), 0o600)
+		return writeInRoot(dir, "var/lib/cloud/seed/nocloud/meta-data", []byte("instance-id: "+d.Name+"\n"))
 	case "ignition":
 		boot := parts[:0:0]
 		for _, p := range parts {
@@ -216,10 +212,7 @@ func (h *RealHost) InstallUserData(ctx context.Context, d *inventory.Disk, kind 
 			return errors.New("no partition labelled boot for the Ignition config")
 		}
 		defer unmount()
-		if err := os.MkdirAll(filepath.Join(dir, "ignition"), 0o700); err != nil {
-			return err
-		}
-		return os.WriteFile(filepath.Join(dir, "ignition/config.ign"), data, 0o600)
+		return writeInRoot(dir, "ignition/config.ign", data)
 	}
 	return fmt.Errorf("user data kind %q is not supported by the ramdisk", kind)
 }
@@ -244,15 +237,41 @@ func (h *RealHost) InstallFiles(ctx context.Context, d *inventory.Disk, files ma
 	}
 	defer unmount()
 	for p, data := range files {
-		full := filepath.Join(root, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(full, data, 0o600); err != nil {
+		if err := writeInRoot(root, strings.TrimPrefix(p, "/"), data); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// writeInRoot writes name (slash-separated, relative) under dir, mode 0600, without leaving dir: the
+// filesystem is the deployed image's, which may hold symlinks aimed anywhere (/etc/bcd/config.toml
+// -> /dev/sdb). os.Root refuses any path that resolves outside dir, and a symlink in the final
+// component is replaced, never followed.
+func writeInRoot(dir, name string, data []byte) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	name = filepath.FromSlash(name)
+	if err := root.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if info, err := root.Lstat(name); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if err := root.Remove(name); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func exists(p string) bool {

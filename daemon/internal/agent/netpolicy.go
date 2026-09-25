@@ -23,6 +23,10 @@ import (
 // onwards), forward (to another port of the bridge) and output (from the host). Taps are matched by
 // name (runtime.TapName), so the rules exist before a runtime creates the tap.
 
+// NetworkPolicyCapability (Hello.capabilities) says this bcd enforces InstanceSpec.network_policy:
+// an older one drops the field as unknown, so a private or none instance must never be placed there.
+const NetworkPolicyCapability = "instance.network-policy"
+
 // firewallTable is the nftables table bcd owns.
 const firewallTable = "bcd_instances"
 

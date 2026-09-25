@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
@@ -33,17 +34,22 @@ func (a *Agent) cpuModel() string {
 	return a.inv.Cpu.Model
 }
 
+// snapshotDir holds downloaded snapshots (<sha256 hex>) and snapshots being uploaded: on the data
+// disk, never in a tmpfs, since they are the size of an instance's disk and memory.
+func (a *Agent) snapshotDir() string { return filepath.Join(a.o.DataDir, "snapshots") }
+
 // downloadVerified fetches url into <data_dir>/snapshots/<sha256 hex>, verifying its digest before
-// the file becomes visible; an already verified copy is reused.
+// the file becomes visible; an already verified copy is reused. Only https: a snapshot may hold a
+// tenant's memory.
 func (a *Agent) downloadVerified(ctx context.Context, rawURL string, digest []byte) (string, error) {
-	dir := filepath.Join(a.o.DataDir, "snapshots")
+	dir := a.snapshotDir()
 	dst := filepath.Join(dir, hex.EncodeToString(digest))
 	if _, err := os.Stat(dst); err == nil {
 		return dst, nil
 	}
 	u, err := url.Parse(rawURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
-		return "", errors.New("not an http(s) URL")
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return "", errors.New("not an https URL")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -105,10 +111,15 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	if rt == nil {
 		return journal.Result{}, &KindError{Code: "not-found", Message: "instance " + req.GetInstanceId() + " is not on this host"}
 	}
-	tmp, err := os.CreateTemp("", "bcd-snapshot-*")
+	if err := os.MkdirAll(a.snapshotDir(), 0o700); err != nil {
+		return journal.Result{}, err
+	}
+	tmp, err := os.CreateTemp(a.snapshotDir(), ".upload-*")
 	if err != nil {
 		return journal.Result{}, err
 	}
+	a.uploads.Store(filepath.Base(tmp.Name()), true)
+	defer a.uploads.Delete(filepath.Base(tmp.Name()))
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	h := sha256.New()
@@ -129,7 +140,9 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	for _, hd := range req.GetUploadHeaders() {
 		put.Header.Set(hd.GetName(), hd.GetValue())
 	}
-	resp, err := a.uploadClient().Do(put)
+	// No client timeout: a disk and memory image takes as long as it takes; the command's deadline
+	// bounds it.
+	resp, err := a.imageClient().Do(put)
 	if err != nil {
 		return journal.Result{}, &KindError{Code: "upload-failed", Message: err.Error()}
 	}
@@ -139,4 +152,24 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	}
 	a.log.Info("instance snapshot", "instance", req.GetInstanceId(), "bytes", size, "memory", req.GetIncludeMemory())
 	return succeeded(&agentv1.InstanceSnapshotResult{UploadedBytes: uint64(size), Sha256: h.Sum(nil), Runtime: rt.Name(), CpuModel: cpu})
+}
+
+// collectSnapshots deletes downloaded snapshots no spec restores from any more (an instance's
+// snapshot goes with the instance), and uploads a crash left behind.
+func (a *Agent) collectSnapshots(keep map[string]bool) {
+	entries, err := os.ReadDir(a.snapshotDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		// Pulls run on the converger's goroutine, which is the one collecting: none is in flight.
+		_, uploading := a.uploads.Load(name)
+		stale := (strings.HasPrefix(name, ".upload-") && !uploading) || strings.HasPrefix(name, ".pull-")
+		if (len(name) == 64 && !keep[name]) || stale {
+			if err := os.Remove(filepath.Join(a.snapshotDir(), name)); err == nil {
+				a.log.Info("snapshot file removed", "file", name)
+			}
+		}
+	}
 }

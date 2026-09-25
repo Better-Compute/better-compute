@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
@@ -85,5 +87,25 @@ func TestSnapshotAndRestore(t *testing.T) {
 	status = s.next(t, "cpu mismatch", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 3 }).GetStatus()
 	if instanceStates(status)["inst_migrant"] != agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR {
 		t.Fatalf("migrant = %v", status.GetInstances())
+	}
+	restored := filepath.Join(h.agent.o.DataDir, "snapshots", hex.EncodeToString(sum[:]))
+	if _, err := os.Stat(restored); err != nil {
+		t.Fatalf("the clone's snapshot is gone while the clone exists: %v", err)
+	}
+
+	// The snapshot goes with the last instance restored from it; http:// is never fetched.
+	plain := vm("inst_plain", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
+	plain.Image = nil
+	plain.RestoreFrom = &agentv1.ImageRef{Url: "http://" + strings.TrimPrefix(store.URL, "https://") + "/snap", Sha256: sum[:]}
+	_ = os.Remove(restored)
+	s.push(desired(4, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web, plain}}}))
+	status = s.next(t, "clone dropped", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 4 }).GetStatus()
+	if st := instanceStates(status)["inst_plain"]; st != agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR {
+		t.Fatalf("a snapshot over http = %v", status.GetInstances())
+	}
+	s.push(desired(5, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web}}}))
+	s.next(t, "only web", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 5 })
+	if entries, _ := os.ReadDir(filepath.Join(h.agent.o.DataDir, "snapshots")); len(entries) != 0 {
+		t.Fatalf("snapshot files left: %v", entries)
 	}
 }

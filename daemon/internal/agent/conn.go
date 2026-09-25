@@ -154,7 +154,7 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 	gpus := len(gpuUUIDs(a.inv))
 	a.invMu.Unlock()
 	if len(a.o.Runtimes) > 0 {
-		h.Capabilities = append(h.Capabilities, InstanceDialCapability)
+		h.Capabilities = append(h.Capabilities, InstanceDialCapability, NetworkPolicyCapability)
 	}
 	for _, d := range a.o.Drivers {
 		h.Drivers = append(h.Drivers, d.Manifest)
