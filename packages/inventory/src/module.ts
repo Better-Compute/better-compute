@@ -84,14 +84,15 @@ const diffInput = manifest({
 });
 
 function readMethod<I extends InventoryNodeInput, O>(
-  validate: (input: unknown) => I,
+  schema: { parse(input: unknown): unknown; jsonSchema(): object },
   handler: MethodDefinition<I, O>['handler'],
 ): MethodDefinition<I, O> {
   return defineMethod<I, O>({
     action: 'compute:nodes:read',
     kind: 'read',
     resource: (input) => ({ type: 'node', id: input.nodeId }),
-    validate,
+    // `jsonSchema` describes the input for the API reference and tool schemas.
+    validate: Object.assign((input: unknown) => schema.parse(input) as I, { jsonSchema: schema.jsonSchema() }),
     async handler(context, input) {
       // The node must be the caller's tenant's; the resolver already decided on it, and this keeps
       // an allow rule on another tenant's node id from reading it.
@@ -108,7 +109,7 @@ function readMethod<I extends InventoryNodeInput, O>(
 const api: InventoryApi = Object.freeze({
   inventory: Object.freeze({
     get: readMethod<InventoryNodeInput, InventorySnapshot>(
-      (input) => nodeInput.parse(input),
+      nodeInput,
       async (context, input) => {
         const snapshot = await latestInventory(context.sql, input.nodeId);
         if (!snapshot) throw new ComputeError('NOT_FOUND', `Node ${input.nodeId} has no inventory yet`);
@@ -116,12 +117,12 @@ const api: InventoryApi = Object.freeze({
       },
     ),
     history: readMethod<InventoryHistoryInput, InventoryHistory>(
-      (input) => historyInput.parse(input) as InventoryHistoryInput,
+      historyInput,
       (context, input) =>
         inventoryHistory(context.sql, input.nodeId, { limit: input.limit ?? 20, ...(input.cursor ? { cursor: input.cursor } : {}) }),
     ),
     diff: readMethod<InventoryDiffInput, InventoryDiff>(
-      (input) => diffInput.parse(input) as InventoryDiffInput,
+      diffInput,
       (context, input) =>
         inventoryDiff(context.sql, input.nodeId, { ...(input.from ? { from: input.from } : {}), ...(input.to ? { to: input.to } : {}) }),
     ),
