@@ -157,6 +157,10 @@ message BmcOperationRequest {
   string args_json = 5;
   // SHA-256 of the BMC certificate's SubjectPublicKeyInfo, when pinned.
   bytes tls_spki_sha256 = 6;
+  // Per-BMC driver options set at enrollment, canonical JSON (e.g. bcx-ipmi {"cipherSuite": 3} for
+  // old BMCs). The site agent hands them to the driver as they are; the driver validates them and
+  // refuses unknown keys. Never credentials: those travel only as credentials_ref.
+  string driver_options_json = 7;
 }
 
 message BmcOperationResult {

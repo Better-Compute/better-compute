@@ -900,8 +900,12 @@ type BmcOperationRequest struct {
 	ArgsJson string `protobuf:"bytes,5,opt,name=args_json,json=argsJson,proto3" json:"args_json,omitempty"`
 	// SHA-256 of the BMC certificate's SubjectPublicKeyInfo, when pinned.
 	TlsSpkiSha256 []byte `protobuf:"bytes,6,opt,name=tls_spki_sha256,json=tlsSpkiSha256,proto3" json:"tls_spki_sha256,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Per-BMC driver options set at enrollment, canonical JSON (e.g. bcx-ipmi {"cipherSuite": 3} for
+	// old BMCs). The site agent hands them to the driver as they are; the driver validates them and
+	// refuses unknown keys. Never credentials: those travel only as credentials_ref.
+	DriverOptionsJson string `protobuf:"bytes,7,opt,name=driver_options_json,json=driverOptionsJson,proto3" json:"driver_options_json,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *BmcOperationRequest) Reset() {
@@ -974,6 +978,13 @@ func (x *BmcOperationRequest) GetTlsSpkiSha256() []byte {
 		return x.TlsSpkiSha256
 	}
 	return nil
+}
+
+func (x *BmcOperationRequest) GetDriverOptionsJson() string {
+	if x != nil {
+		return x.DriverOptionsJson
+	}
+	return ""
 }
 
 type BmcOperationResult struct {
@@ -1276,14 +1287,15 @@ const file_bettercompute_site_v1_site_proto_rawDesc = "" +
 	"\n" +
 	"IpxeScript\x12\x16\n" +
 	"\x06script\x18\x01 \x01(\tR\x06script\x127\n" +
-	"\tnot_after\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\bnotAfter\"\xd3\x01\n" +
+	"\tnot_after\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\bnotAfter\"\x83\x02\n" +
 	"\x13BmcOperationRequest\x12\x16\n" +
 	"\x06driver\x18\x01 \x01(\tR\x06driver\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12'\n" +
 	"\x0fcredentials_ref\x18\x03 \x01(\tR\x0ecredentialsRef\x12\x1c\n" +
 	"\toperation\x18\x04 \x01(\tR\toperation\x12\x1b\n" +
 	"\targs_json\x18\x05 \x01(\tR\bargsJson\x12&\n" +
-	"\x0ftls_spki_sha256\x18\x06 \x01(\fR\rtlsSpkiSha256\"~\n" +
+	"\x0ftls_spki_sha256\x18\x06 \x01(\fR\rtlsSpkiSha256\x12.\n" +
+	"\x13driver_options_json\x18\a \x01(\tR\x11driverOptionsJson\"~\n" +
 	"\x12BmcOperationResult\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x1f\n" +
 	"\vresult_json\x18\x02 \x01(\tR\n" +
