@@ -1,0 +1,285 @@
+---
+title: Watch
+description: Stream a tenant's events live over Server-Sent Events with handleWatch, resume from any cursor with Last-Event-ID, filter by type, and authorize every stream.
+metaTitle: Live events over SSE
+icon: Activity
+packages: ['@better-compute/events', '@better-compute/console-kit']
+sources:
+  - packages/events/src/watch.ts
+  - packages/events/src/outbox.ts
+  - packages/events/README.md
+  - packages/console-kit/src/events.ts
+  - packages/console-kit/src/live.ts
+  - packages/cli/src/host/http.ts
+  - packages/cli/src/host/config.ts
+  - examples/shared/compose.ts
+  - apps/console/src/app/api/compute/watch/route.ts
+  - apps/console/src/components/console-provider.tsx
+  - tests/events-watch.test.ts
+  - .claude/coordination.md
+  - PLAN.md
+---
+
+`handleWatch` streams one tenant's events as [Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html),
+read straight from the <Term id="outbox">outbox</Term>. A client opens one long `GET`, receives each committed event
+as it becomes visible, and, when the connection drops, reconnects with the id of the last event it saw and continues
+exactly after it: no gap, no duplicate from the server's side.
+
+It is the right tool for anything that follows events while it runs: the console's live stores, a dashboard, a
+script that waits for a reservation to become active. For a service that must see every event even while it is
+down, use [webhooks](/docs/guides/events/webhooks), which keep the position on the server.
+
+## Mount the endpoint
+
+`handleWatch(request, options)` is a Fetch-style handler from `better-compute/events`. The compute server does not
+mount it: the host that serves the API does, next to it, and supplies the authorization. That keeps the long-lived
+stream out of the JSON API's envelope and lets each host choose how streams are authenticated.
+
+<Tabs items={['serve (host export)', 'Next.js route', 'Any Fetch server']}>
+<Tab value="serve (host export)">
+
+```ts title="better-compute.config.ts"
+import { defineHost } from 'better-compute/cli';
+import { resourceType } from 'better-compute/core';
+import { handleWatch } from 'better-compute/events';
+
+export const host = defineHost(({ compute }) => ({
+  http: {
+    routes: [
+      {
+        path: '/watch',
+        method: 'GET',
+        handler: (request: Request) =>
+          handleWatch(request, {
+            sql: compute.context.sql,
+            authorize: async (watch) => {
+              const credential = { headers: watch.headers };
+              const caller = await compute.context.iam.authenticate(credential);
+              const tenantId = new URL(watch.url).searchParams.get('tenantId') ?? caller.tenantId;
+              await compute.context.iam.require(credential, {
+                tenantId,
+                action: 'compute:events:read',
+                resource: { type: resourceType('tenant'), id: tenantId },
+              });
+              return { tenantId };
+            },
+          }),
+      },
+    ],
+  },
+}));
+```
+
+`better-compute serve` answers the host export's routes beside the API, so this serves `GET /watch` on the API's
+listener.
+
+</Tab>
+<Tab value="Next.js route">
+
+```ts title="app/api/compute/watch/route.ts"
+import { ComputeError, resourceType } from 'better-compute/core';
+import { handleWatch } from 'better-compute/events';
+import { compute, origin } from '@/lib/compute';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+export async function GET(request: Request): Promise<Response> {
+  return handleWatch(request, {
+    sql: compute.context.sql,
+    authorize: async (watch) => {
+      // Cookie-authenticated streams need a CSRF guard: require the custom header, check the origin.
+      if (watch.headers.get('x-better-compute') !== '1')
+        throw new ComputeError('CSRF_REJECTED', 'Send X-Better-Compute: 1');
+      const site = watch.headers.get('sec-fetch-site');
+      const from = watch.headers.get('origin');
+      if ((site && site !== 'same-origin') || (from && from !== origin))
+        throw new ComputeError('UNTRUSTED_ORIGIN', 'Origin is not trusted');
+      const credential = { headers: watch.headers };
+      const caller = await compute.context.iam.authenticate(credential);
+      const tenantId = new URL(watch.url).searchParams.get('tenantId') ?? caller.tenantId;
+      await compute.context.iam.require(credential, {
+        tenantId,
+        action: 'compute:events:read',
+        resource: { type: resourceType('tenant'), id: tenantId },
+      });
+      return { tenantId };
+    },
+  });
+}
+```
+
+This is how the console serves `/api/compute/watch`.
+
+</Tab>
+<Tab value="Any Fetch server">
+
+```ts
+import { handleWatch } from 'better-compute/events';
+
+const watch = (request: Request) =>
+  handleWatch(request, { sql: compute.context.sql, authorize: authorizeWatch });
+
+// Bun, Deno, Hono, or anything that maps a Request to a Response:
+if (new URL(request.url).pathname === '/watch') return watch(request);
+```
+
+</Tab>
+</Tabs>
+
+<TypeTable
+  type={{
+    sql: { type: 'SqlExecutor', description: "The control plane's database executor: compute.context.sql.", required: true },
+    authorize: {
+      type: '(request: Request) => Promise<{ tenantId: string }>',
+      description: 'Authenticates and authorizes the request and names the one tenant whose events it may read. Throw a ComputeError to refuse.',
+      required: true,
+    },
+    pollMs: { type: 'number', description: 'How often to look for new events when the last read found none.', default: '1000' },
+    heartbeatMs: { type: 'number', description: 'How often to send a comment line that keeps proxies from closing an idle stream.', default: '15000' },
+    batch: { type: 'number', description: 'Events per outbox read.', default: '200' },
+    retryMs: { type: 'number', description: 'The reconnect delay sent to the client as retry:.', default: '2000' },
+    maxDurationMs: { type: 'number', description: 'Close the stream after this long; clients reconnect with Last-Event-ID.', default: '3600000 (1 h)' },
+  }}
+/>
+
+## Authorization
+
+`authorize` is the whole security boundary of the stream, so decide it the way the API decides `events.list`:
+`compute:events:read` on `compute-tenant/{tenantId}`. The stream then carries only rows whose `tenantId` is the one
+`authorize` returned; the filter is part of the outbox query, not applied after it.
+
+- Authenticate with the same credentials the API accepts (a bearer token, a session JWT, or on the same origin the
+  IAM cookie) by passing the request's headers to `compute.context.iam.authenticate`.
+- Default to the caller's own tenant. Accepting `?tenantId=` lets a platform administrator follow another tenant,
+  and the `require` call decides whether they may.
+- When the stream accepts a cookie, add a CSRF guard like the Next.js tab above. `GET` requests carry no custom
+  header by default, and browsers omit `Origin` on same-origin `GET`s, so the console requires
+  `X-Better-Compute: 1`, which a cross-origin page cannot send without a preflight nothing approves.
+
+<Callout type="warn" title="The examples only authenticate">
+  The example deployments' host export (`examples/shared/compose.ts`) authenticates the bearer token and returns the
+  caller's tenant, without an IAM decision on `compute:events:read`. Any authenticated identity of a tenant can then
+  follow all of that tenant's events. Add the `require` call above in your own deployment.
+</Callout>
+
+A refusal, or any error before the stream starts, is a JSON error with the code's status, like the API's:
+`{ "error": { "code": "ACCESS_DENIED", "message": "…" } }` with 403, `INVALID_INPUT` with 400 for a bad cursor or
+type list, and `METHOD_NOT_ALLOWED` with 405 for anything but `GET`.
+
+## The stream
+
+```text
+GET /watch?types=reservation.*,node.connected
+Accept: text/event-stream
+Authorization: Bearer biam_…
+Last-Event-ID: 88213.51119
+
+retry: 2000
+
+id: 88213.51120
+event: reservation.active
+data: {"id":"evt_01k5y3v0m6y8x7w5t4s3r2p1n0","type":"reservation.active","tenantId":"acme","subject":"reservation/rsv_01k5y3a0b1c2d3e4f5g6h7j8k9","time":"2026-09-24T10:15:02.114Z","sequence":"88213.51120","data":{"state":"active","poolId":"pool_01k5y1z2x3w4v5t6s7r8q9p0n1"}}
+
+: keep-alive 88213.51187
+```
+
+The response is `text/event-stream` with `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`, so
+nginx-style proxies do not buffer it. It opens with `retry:`, then sends one block per event:
+
+| Field | Value |
+| --- | --- |
+| `id` | the event's outbox position, `txid.seq`, equal to its `sequence` |
+| `event` | the event type, so `EventSource.addEventListener('reservation.active', …)` works |
+| `data` | the whole event as one line of JSON, the [event shape](/docs/guides/events#event-shape) |
+
+A comment line `: keep-alive <cursor>` goes out every `heartbeatMs`. If reading the outbox fails mid-stream, the
+server sends `event: error` with `data: {"message": …}` and closes; the client reconnects and resumes. After
+`maxDurationMs` the server closes the stream on purpose, which also makes clients re-authenticate at least once an
+hour.
+
+## Cursors and resume
+
+The stream's cursor is the outbox position `<txid>.<seq>`, with a dot. It is every event's `sequence` and every
+SSE `id:`.
+
+| Request | Starts after |
+| --- | --- |
+| no cursor | the current tail: only events committed from now on; history is not replayed |
+| `Last-Event-ID: 88213.51119` header | that event |
+| `?lastEventId=88213.51119` | that event (for clients that cannot set the header, such as a first `EventSource` connection) |
+| `?lastEventId=0.0` | the start of the outbox: everything retention has kept |
+
+The header wins when both are sent. A cursor that is not two groups of 1 to 20 digits joined by a dot is
+`INVALID_INPUT`. Note that `events.list` writes the same position with a colon (`88213:51119`); replace the colon
+with a dot to move from history to the live stream.
+
+The outbox is read with the xmin rule: only transactions older than the snapshot's xmin, in `(txid, seq)` order. No
+event can therefore commit behind a cursor the stream has already handed out, which is what makes resuming exact.
+The cost is that an event becomes visible only when every older transaction has finished; see
+[commit order](/docs/guides/events#commit-order-and-the-xmin-cursor). A cursor older than what
+[retention](/docs/operations/retention) has pruned continues with the oldest row still there, without an error.
+
+To backfill and then follow without a gap, page history with `events.list`, then open the stream with the last
+item's `sequence`, colon replaced by a dot, as `Last-Event-ID`.
+
+## Filters
+
+`?types=` takes 1 to 20 comma-separated patterns of up to 128 characters, with the same matching as webhooks: `*`
+(the default), a family such as `reservation.*` or `node.gpu.*`, or an exact type. An empty list is
+`INVALID_INPUT`. Unlike webhooks, patterns are not checked against the event catalog, so a typo matches nothing:
+take family names from the [event reference](/docs/reference/events).
+
+Filtering happens after the tenant filter, and the cursor still advances past events that do not match, so a
+filtered stream resumes correctly too.
+
+## Consume it
+
+**Browsers and Node.js: console-kit.** `watchEvents` from `@better-compute/console-kit` reads the stream over
+`fetch`, so it can send an `Authorization` header, which `EventSource` cannot. It keeps the last `id`, reconnects
+after the server's `retry:` delay when the server closes the stream, backs off (doubling, up to 60 seconds) after
+failures, and sends `Last-Event-ID` on every reconnect.
+
+```ts
+import { watchEvents } from '@better-compute/console-kit';
+
+const watcher = watchEvents({
+  url: 'https://compute.example.com/watch',
+  types: ['reservation.*'],
+  lastEventId: savedCursor, // optional: resume across restarts
+  headers: async () => ({ authorization: `Bearer ${await getToken()}` }), // fresh per connection
+  onEvent: (event) => {
+    handle(event);
+    savedCursor = event.sequence as string;
+  },
+  onStatus: (status, detail) => console.log(status, detail?.retryInMs),
+});
+```
+
+`startLiveConsole(client, { tenantId, watchUrl, headers, permissions })` goes further: it loads the tenant's
+stores and routes every event to them. See [console](/docs/guides/clients/console#live-updates).
+
+**The console** uses `watchEvents` against its own `/api/compute/watch` with the IAM cookie and
+`X-Better-Compute: 1`, shows a "live" badge while the stream is open, and falls back to refreshing loaded stores
+every 20 seconds while it is not.
+
+**`EventSource`** works when the stream accepts a cookie and needs no custom header, or when you put the credential
+somewhere your `authorize` reads other than a header. It reconnects with `Last-Event-ID` by itself.
+
+**curl** is enough to look at a stream:
+
+```bash
+curl -N https://compute.example.com/watch?types=node.* \
+  -H "Authorization: Bearer $BETTER_COMPUTE_TOKEN" -H "Accept: text/event-stream"
+```
+
+## Delivery guarantees
+
+- **At least once across reconnects.** The server never skips or repeats an event after the cursor it was given.
+  A client that crashes between handling an event and saving its cursor sees it again, so deduplicate on `id`.
+- **In commit order**, within one stream.
+- **One tenant per stream.** A platform view of several tenants opens several streams, or uses an
+  [event sink](/docs/extending/sinks).
+- **No back-pressure on the database.** Each open stream polls the outbox every `pollMs` while idle and reads in
+  batches of `batch` while behind. Many idle streams mean many small queries; put the watch route on processes
+  sized for it.

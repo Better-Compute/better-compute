@@ -1,0 +1,7 @@
+{
+  "title": "Daemon and protocol",
+  "description": "bcd, the gateway, and the session protocol between them",
+  "root": true,
+  "icon": "SignalTower",
+  "pages": ["index", "install", "protocol", "sessions", "delivery", "gateway", "failure-modes"]
+}

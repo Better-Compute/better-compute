@@ -1,0 +1,348 @@
+---
+title: Testing
+description: The testing kit - a control plane on PGlite, the FakeDaemon, faulty links, the fleet simulator and its invariants, real-time harnesses and benchmarks.
+icon: ClipboardCheck
+packages: ['@better-compute/testing', '@better-compute/iam', '@better-compute/postgres']
+sources:
+  - packages/testing/README.md
+  - packages/testing/src/index.ts
+  - packages/testing/src/fixture.ts
+  - packages/testing/src/fake-iam.ts
+  - packages/testing/src/fake-hw.ts
+  - packages/testing/src/frame-conn.ts
+  - packages/testing/src/daemon/fake-daemon.ts
+  - packages/testing/src/daemon/kinds.ts
+  - packages/testing/src/sim/fleet-sim.ts
+  - packages/testing/src/sim/invariants.ts
+  - packages/testing/src/sim/control-plane.ts
+  - packages/testing/src/sim/nightly.ts
+  - packages/testing/src/realtime/harness.ts
+  - packages/testing/src/realtime/fleet.ts
+  - packages/iam/src/testing.ts
+  - packages/iam/src/spy.ts
+  - packages/core/src/conformance.ts
+  - tests/sim/iam-negative.test.ts
+  - tests/sim/nightly.test.ts
+  - tests/nightly/sim.nightly.ts
+  - tests/postgres-conformance.test.ts
+  - vitest.bench.config.ts
+  - vitest.nightly.config.ts
+  - bench/REFERENCE.md
+  - docs/development.md
+  - package.json
+  - PLAN.md
+---
+
+import { Activity, Scale, Terminal } from '@/lib/icons';
+
+`@better-compute/testing` (also `better-compute/testing`) is the kit the repository's own tests run on, and the
+one you use to test modules, plugins and policies. It gives you a migrated control plane on PGlite with a clock
+you can move, a scripted IAM, the daemon side of the agent protocol (`FakeDaemon`), in-memory links with fault
+injection, a deterministic fleet simulator with invariant checkers, and real-time harnesses for latency
+measurements. No database server is needed.
+
+| Layer | Exports | Clock |
+| --- | --- | --- |
+| Control plane fixture | `computeFixture`, `closeFixtures`, `fakeIam` | sim or wall |
+| Daemon side | `FakeDaemon`, `createDaemonHarness`, `fakeHardware`, `MemoryJournal` and the journal rules | sim |
+| Links | `createAgentLink`, `createFramePair`, `FrameConn` | sim |
+| Fleet simulator | `createFleetSim`, `GatewayStub`, `checkI1`, `checkI2`, `checkI5`, `checkI8`, `assertInvariants` | sim |
+| Real control plane under the simulator | `createControlPlaneSim`, `controlPlaneFacts`, `runNightly` | sim |
+| Wall-clock harnesses | `createRealtimeHarness`, `createRealtimeFleet`, `probeLeases`, `createH2cClient` | wall |
+| Local stack | `createDevStack`, `attachDevFleet` (see [local development](/docs/operations/local-development#the-dev-stack-in-code)) | wall |
+| Plumbing | `createSimScheduler`, `createRealtimeScheduler`, `createRng`, `EventLog` | either |
+
+The kit needs the optional peer `@electric-sql/pglite` as a devDependency; without it `computeFixture()` fails
+with `MISSING_DEPENDENCY`. The embedded Better IAM of `@better-compute/iam/testing` needs the optional
+`@better-iam/adapter-sqlite` peer.
+
+## Test a module with computeFixture
+
+`computeFixture(options?)` builds `betterCompute()` on an in-memory PGlite, runs `compute.initialize()` (the
+registry check, the base schema and every module's migrations) and hands you the pieces. It does not start the
+workers: your test drives reconcilers one pass at a time with `compute.jobs[name].tick()`.
+
+```ts title="my-module.test.ts"
+import { afterEach, expect, it } from 'vitest';
+import { closeFixtures, computeFixture } from 'better-compute/testing';
+import { myModule } from '../src/module';
+
+afterEach(closeFixtures);
+
+it('asks IAM before listing, and reconciles', async () => {
+  const { request, iam, tenants, compute, advance } = await computeFixture({ modules: [myModule()] });
+  iam.allow({ token: tenants.acme.token, action: 'compute:nodes:read' });
+
+  const answer = await request('nodes', 'list', { tenantId: tenants.acme.id }, { token: tenants.acme.token });
+  expect(answer.ok).toBe(true);
+  expect(iam.calls.length).toBeGreaterThan(0); // authenticate, then the tenant decision
+
+  await advance(60_000); // compute's Clock and compute_now() move together
+  await compute.jobs['my.reconciler']!.tick(); // one deterministic pass
+});
+```
+
+| Field | What it is |
+| --- | --- |
+| `compute` | The initialized control plane, typed by `modules` and `plugins` |
+| `database` | The migrated PGlite `SqlExecutor` |
+| `clock`, `advance(ms)` | The fixture clock |
+| `iam` | The `fakeIam()` port compute calls |
+| `tenants` | `root`, `acme` and `other`, each `{ id, token, caller }`; ids `tenant-root`, `tenant-acme`, `tenant-other` |
+| `request(group, method, input?, options?)` | `POST {basePath}/{group}/{method}` through `compute.handler`, with the CSRF headers; `options.plugin` routes to `plugins/{plugin}/…`, `options.headers` replaces defaults |
+| `close()` | Stops compute and closes the store; idempotent |
+
+Options: `clock` (`'sim'`, the default, or `'system'`), `start` (default 2026-01-01T00:00:00Z), `iam` (extra
+`fakeIam()` options), `modules`, `plugins` and `log`. `request()` answers `{ ok, status, headers, requestId }` plus
+`data` or `error`.
+
+**The sim clock.** Under `clock: 'sim'`, compute's `Clock` and SQL's <Term id="compute-now">`compute_now()`</Term>
+read the same time (principle P9). `advance(ms)` and `clock.set(ms)` move the `compute_sim_clock` table first and the
+TypeScript clock second, so leases, `not_before`, column defaults and admission contexts all move together. Time
+never moves backwards. Under `'system'`, `advance` rejects with `INVALID_STATE`.
+
+**`fakeIam(options?)`** is a scripted `IamPort`. Bearer tokens map to callers (an unknown token is
+`UNAUTHENTICATED`). A decision is allowed only when an `allow` rule matches and no `deny` rule does; a rule matches
+on any of `token`, `tenantId`, `action`, `type` and `id`, and `{}` matches everything. Every call is recorded in
+`calls`; `count(method)` counts them. `billingCheck` allows, `recordUsage` records, `featureEnabled` is false and
+`requestConfirmation` answers `'not-held-back'`.
+
+Plugins, drivers and providers have **conformance suites**: functions that return `ConformanceCase[]`
+(`{ name, run(subject) }`, from `@better-compute/core`), such as `providerConformanceCases()` from
+`@better-compute/vps` and `storeConformanceCases()` from `@better-compute/postgres`. Run them from any runner:
+
+```ts
+for (const test of providerConformanceCases()) it(test.name, async () => test.run(await createSubject()));
+```
+
+## Real Better IAM in tests
+
+`computeFixture()` still uses the scripted `fakeIam()`. When a test must exercise real policies, use
+`createEmbeddedTestIam(options?)` from `better-compute/iam/testing`: a real better-iam on in-memory SQLite, carrying
+compute's plugin, resolver and inbox, bootstrapped with a root administrator (TOTP MFA) and two organizations,
+"Acme" and "Other". Pass its `port` to `betterCompute({ iam })` and call `bind(sql)` once the compute store is
+migrated.
+
+- Each organization (`acme`, `other`, or a new one from `tenant(name)`) offers `member(name)`, `signIn(name)`,
+  `policy(document)`, `grant(identityId, ...documents)` and `share(type, id, relation, subject)`.
+- Options: `now`, `sql`, `sessionJwts`, `runIamJobs`, `inbox` (`'store'` or `'memory'`), `iamOptions`, and the
+  catalog's `modules`, `plugins`, `extra` and `typePrefix`.
+- The secret is fixed and public. Never use it outside tests.
+
+`spyIamPort(port)` from `better-compute/iam` wraps any `IamPort` and records every call. Code paths tag themselves with
+`spy.path(name, fn)`; each call is attributed to the innermost path across awaits, so a test can assert that fleet
+paths never reach IAM. That is how the v0.1 security negative is tested: `tests/sim/iam-negative.test.ts` runs ten
+simulated minutes of heartbeats, inventory, commands and a reservation, and asserts that every IAM call came from an
+API admission. See [policies](/docs/guides/iam/policies).
+
+## The FakeDaemon
+
+`FakeDaemon` is the daemon side of the protocol in TypeScript, rule for rule with the Go packages in
+`daemon/internal/{journal,dispatch,session,converge,fakehw}`. See [the daemon](/docs/daemon).
+
+- **Journal.** `accepted` before any side effect; `running{boot_id}` right before a self-terminating one; done
+  results kept 7 days; unacked events capped at 64 MiB and 10,000. A crash keeps the journal, a reboot also changes
+  `boot_id` and clears `/run`, and `loseJournal()` starts a new `journal_id`.
+- **Duplicate delivery.** Done: resend the stored result. Running: re-attach. Accepted but not running after a
+  crash: re-execute if `retry_safe`, else `FAILED{interrupted}`. Self-terminating across a reboot:
+  `SUCCEEDED{rebooted}`.
+- **Acceptance order.** Another node's command or a disallowed kind is `UNSUPPORTED`; a `min_generation` above the
+  applied spec defers with a `SpecRequest`; past `not_after` is `EXPIRED`; no free lane credit is `BUSY`.
+- **Session.** Hello from the journal, Welcome, heartbeats, PING liveness, full-jitter reconnect, `Drain`,
+  `RevocationNotice`, `Cancel`.
+- **Desired state.** The devices converger writes the CDI spec and env file in an in-memory file map, reports
+  `AllocationBound`, `AllocationReleased` and `AllocationFailed`, and never drops a hold on its own.
+- **Kinds.** `diag.nvml`, `inventory.refresh`, `logs.collect` and `node.reboot`, plus the opt-in `fakeGpuReset`
+  (not retry-safe). `knobs` make them fail: `diag.nvmlInitFails`, `diag.failGpus`, `diag.error`,
+  `logs.uploadFails`, `cdiWriteFailures`.
+- **Beyond v0.1.** With `intent`, it verifies signed commands (`BAD_SIGNATURE`); with `tunnels`, it answers
+  `OpenTunnel`; with `nodeKey`, attested results carry `node_sig`. `createWsDialer()` dials the WebSocket fallback.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `nodeId`, `scheduler` | required | The certificate's node id; the scheduler that runs its timers |
+| `dial` | none | Opens a Session stream (`FrameConn`); `undefined` means unreachable |
+| `hardware` | `fakeHardware({ seed: nodeId })` | The board it reports |
+| `role` | node | `AgentRole` |
+| `kinds` | the four defaults | Merged over the defaults; `null` removes one |
+| `workers` | control 4, provision 2, bulk 1 | Worker pool per lane |
+| `journal` | 64 MiB, 10,000 events | Journal caps |
+| `backoff` | 1 s to 60 s | Reconnect back-off with full jitter |
+| `pingIntervalMs`, `pingTimeoutMs` | 20 s each | HTTP/2 PING |
+| `welcomeTimeoutMs` | 30 s | A session without Welcome is dropped |
+| `rebootDurationMs` | 60 s | How long a reboot keeps the node down |
+| `clockSkewMs` | 0 | The daemon's clock minus the server's |
+
+**Fake hardware.** `fakeHardware({ seed, variant, missingGpu? })` gives `hgx-h100` (8x H100 SXM5 80GB on NVSwitch,
+field for field the Go `fakehw`: the same seed gives the same section hashes), `hgx-h100-gpu-missing` (7 visible, so
+`GpuCountMismatch`), `l40s` (4x L40S 48GB on PCIe) and `cpu` (no `gpus` section). `encodeInventorySections()`
+reproduces the Go golden bytes.
+
+**Links.** `createAgentLink()` builds a daemon end and a gateway end whose frames cross as protobuf bytes, with
+faults per direction from the link's seeded RNG: `latencyMs` (default 1), `jitterMs`, `drop` with `dropMode`
+(`silent`, or `reset`, which breaks the stream as gRPC would), `duplicate`, and `reorder` within `reorderWindowMs`
+(default 50). Controls: `stall`, `partition` and `heal`, `halfOpen`, `reset`, `dropNext`, `duplicateNext` and
+`intercept`. `createDaemonHarness()` wires one daemon to scripted servers on a sim scheduler.
+
+## The fleet simulator
+
+`createFleetSim(options)` runs N FakeDaemons, a fresh faulty link per dial, a seeded chaos schedule and a pluggable
+`GatewayPort`. The default port is `GatewayStub`, a minimal in-memory control plane (Hello, Welcome, dispatch with
+credits, result ingestion, liveness, the command sweeper, bookings under an exclusion check, usage flushes). The
+stub is a test double for the daemon side, not a reference for the server.
+
+```ts
+import { assertInvariants, createFleetSim } from 'better-compute/testing';
+
+const sim = createFleetSim({
+  seed: 'fleet-100',
+  nodes: 100,
+  up: { latencyMs: 5, jitterMs: 20, drop: 0.0005, dropMode: 'reset' },
+  down: { latencyMs: 5, jitterMs: 20, reorder: 0.002 },
+  chaos: { everyMs: 5_000, crash: 0.3, reboot: 0.1, journalLoss: 0.05, partition: 0.3, gatewayKill: 0.02 },
+});
+await sim.start();
+await sim.run(10 * 60_000); // ten simulated minutes
+sim.quiesce();
+await sim.run(16 * 60_000);
+assertInvariants(sim.invariants());
+console.log(sim.digest()); // the same seed gives the same event log, byte for byte
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `seed` | required | Everything random derives from it |
+| `nodes` | 10 | A count, or one `{ nodeId?, hardware?, role?, daemon? }` per node |
+| `start` | 2026-01-01T00:00:00Z | Sim start time |
+| `gateway` | a `GatewayStub` | A factory for another `GatewayPort` |
+| `up`, `down` | none | Link faults in each direction |
+| `daemon` | none | FakeDaemon options for every node |
+| `tickMs` | 1 s | Period of `GatewayPort.tick` |
+| `startSpreadMs` | 5 s | Daemons start at random times within this window |
+| `logFrames` | true | Log every frame delivery, drop and duplicate |
+| `chaos` | none | `everyMs`, `forMs`, and per-draw probabilities `crash`, `reboot`, `journalLoss`, `partition`, `isolate`, `halfOpen`, `reset`, `stall`, `gatewayKill`, with their duration ranges |
+
+The simulator also exposes each fault as a method (`crash`, `reboot`, `loseJournal`, `partition`, `isolate`,
+`heal`, `halfOpen`, `resetLink`, `stall`, `killGateway`), `every(ms, fn)` for workloads, and `rng.fork(label)` for
+independent seeded streams: adding a node never shifts another node's draws. `better-compute sim` is this simulator
+with a built-in workload; see [local development](/docs/operations/local-development#the-fleet-simulator).
+
+## Invariants
+
+The checkers are pure functions over collected facts, so the same checks run over the fleet simulator, the real
+control plane or a database snapshot.
+
+| Id | Invariant | Checker |
+| --- | --- | --- |
+| I1 | No atom is booked by two allocations at one instant, and no node holds one device for two allocations at once (and only binds what its allocation booked) | `checkI1` |
+| I2 | A non-retry-safe or self-terminating command starts its side effect at most once; a retry-safe one re-runs only after a crash interrupted it; after a journal loss, in-flight non-retry-safe commands fail rather than replay | `checkI2` |
+| I5 | Every release has an allowed cause (end of booking, release, cancel, lapsed lease, failed bind); none is caused by a disconnect | `checkI5` |
+| I8 | Per allocation, usage windows do not overlap, stay inside the booking and add up to its duration times atoms, with no duplicate keys | `checkI8` |
+
+`assertInvariants(violations, limit?)` throws one error listing them. PLAN.md section 15 also names I3
+(convergence within T), I4 (no liveness false positives), I6 (latency SLOs) and I7 (nothing pending that an offline
+solver can place); the kit does not check those. The real-time benchmarks measure I6-style latencies instead.
+
+## The control-plane simulator
+
+`createControlPlaneSim(options)` puts the real control plane and real gateways behind the fleet simulator:
+`betterCompute` on the sim clock with `compute_now()` pinned to simulated time, `gateways` real gateways on manual
+jobs (default 1), and nodes that join through JoinService with sealed tokens bound to their CSRs. It sets up a site
+and an H100 pool with `diag.nvml` acceptance offered to `acme`; reconcilers and gateway jobs run on the simulator's
+ticks.
+
+| Option | Meaning |
+| --- | --- |
+| `seed`, `nodes` (default 4), `variant`, `start` | As for the fleet simulator |
+| `gateways` | Gateway processes behind the simulator (default 1) |
+| `iam` | Wraps the fake IAM, for example `(fake) => spyIamPort(fake)` |
+| `trace` | Runs each part of the loop under a name (`join`, `fleet`, `gateway`, `reconcilers`, `api`), for an IAM spy's `path` |
+| `restricted` | The last `count` nodes join with a certificate that allows only `allowedKinds` |
+| `modules` | Extra control-plane modules, ticked with the rest |
+| `gateway` | Extra gateway options, such as lease timings |
+
+The rig offers `run(ms)`, `api(fn)`, `killGateway(i)`, `reviveGateway(i)`, `stallGateway(i, stalled)`,
+`pauseWorkers(paused)`, `revokeNode(nodeId)`, `homeOf(nodeId)`, `serialOf(nodeId)` and `invariants()`, which reads
+the facts from compute's own tables (bookings, billed allocations and usage windows, command outcomes,
+connectivity) and checks I1, I2, I5 and I8. `tests/sim/multi-gateway.test.ts` uses it for a gateway killed
+mid-command and a zombie gateway fenced by its session epoch.
+
+### The nightly simulation
+
+`runNightly({ seed, nodes?, gateways?, minutes?, chaos?, stepMs?, modules?, inspect? })` runs one simulated night on
+the control-plane simulator: three minutes of start-up, then `minutes` (default 30) of tenants reserving with every
+placement feature (half and whole nodes, gangs of two, spot, calendar starts, early releases) and operators running
+commands, under chaos. Chaos adds gateway kills and revivals, worker outages and, at `heavy`, one certificate
+revocation per night. The report has the invariant violations, `kindLeaks` (commands queued outside a restricted
+certificate's kinds, which must be 0), place-to-active and command latencies in simulated time, and two digests:
+the workload (a function of the seed) and the id-free outcome. Compute mints random ids, so outcomes can differ
+between runs of one seed.
+
+```bash
+pnpm sim:nightly
+SIM_NIGHTLY_SEEDS=1,2,3,4 SIM_NIGHTLY_CHAOS=heavy SIM_NIGHTLY_NODES=32 SIM_NIGHTLY_MINUTES=120 pnpm sim:nightly
+```
+
+`pnpm sim:nightly` (`vitest.nightly.config.ts`, `tests/nightly/*.nightly.ts`) runs every seed times chaos level one
+after another, with `auditModule` checkpointing every 10 simulated minutes and every tenant's audit chain verified at
+the end. Defaults: seeds `1,2,3`, chaos `light,heavy`, 16 nodes, 3 gateways, 60 simulated minutes; reports land in
+`bench/sim-nightly/results`. A CI-sized night (4 nodes, 2 gateways, 6 minutes) runs in `tests/sim/nightly.test.ts`.
+The v0.4 exit asks for every section 15 scenario green on three consecutive nights.
+
+## Real-time harnesses
+
+The fake clock never measures latency. The real-time harnesses run on the wall clock over cleartext HTTP/2
+(`createH2cClient`), against PGlite by default or a Postgres you name with `postgresUrl` (it must be disposable: the
+harness migrates it).
+
+- **`createRealtimeHarness({ nodes?, postgresUrl?, gateway?, services?, daemon?, sharedConnection?, pollMs? })`**: a
+  real gateway and database with FakeDaemons on pre-registered nodes (default 50). `connectAll()`,
+  `dispatch({ kind, perNode })` (enqueue to acknowledgement and to terminal), `load({ ratePerSecond, durationMs })`
+  (steady state) and `storm({ fraction, mode: 'disconnect' | 'crash' })` (reconnect storms).
+- **`createRealtimeFleet({ postgresUrl?, variant?, pollMs?, worker?, gateway?, daemon?, joinConcurrency? })`**: the
+  whole v0.1 spine, a started control plane with JoinService on real PKI and a gateway wired to its services. `join(n)`
+  times each node from its Join call to adopted; `place(n, { gpus?, ratePerSecond?, concurrency? })` times
+  reservations from placed to active.
+- **`probeLeases(sql)`** samples the `leases` table: renewal gaps, the least headroom before expiry, lapses while
+  owned, and takeovers.
+
+Every result is a `LatencySummary` (`count`, `p50`, `p90`, `p99`, `max`). Small runs are in `tests/realtime/`; the
+1k runs belong to the benchmarks.
+
+## Postgres-only suites
+
+Everything about locking and fencing needs real PostgreSQL: PGlite is one serialized connection. These suites skip
+unless `BETTER_COMPUTE_POSTGRES_URL` is set:
+
+```bash
+BETTER_COMPUTE_POSTGRES_URL=postgres://postgres:postgres@localhost:5432/compute_test pnpm test:postgres
+```
+
+`pnpm test:postgres` runs `tests/postgres-conformance.test.ts` (the full store conformance suite, concurrency cases
+included, each case in a fresh schema; the database needs `btree_gist` or the right to create it) and
+`tests/postgres-schema.test.ts`. CI runs them against a `postgres:17` service. The benchmarks read the same variable.
+
+## Benchmarks
+
+`pnpm bench:scale` runs `tests/bench/**/*.bench.ts` with `vitest.bench.config.ts` (the test aliases, a 30-minute
+timeout), on demand only. Each suite writes `bench/<suite>/results/<date>-<database>-<n>.json` with the commit, the
+machine, the Node.js version and the configuration. Commit only runs on the reference hardware of
+`bench/REFERENCE.md`, or runs labeled `referenceHardware: false`.
+
+| Suite | Measures | Knobs |
+| --- | --- | --- |
+| `gateway-streams` | Sessions one gateway holds at 10 s heartbeats, dispatch latency, RSS, a reconnect storm | `BENCH_GW_SESSIONS` (5000), `BENCH_GW_DURATION_MS`, `BENCH_GW_COMMANDS_PER_S` (50), `BENCH_GW_STORM`, `BENCH_GW_GATE=1` |
+| `iam-lane` | Embedded better-iam admissions on adapter-postgres, lock wait | `BETTER_COMPUTE_IAM_POSTGRES_URL`, `BENCH_IAM_CONCURRENCY` (`1,4,16,32`), `BENCH_IAM_DENY_SHARE`, `BENCH_IAM_GATE=1` |
+| `placements` | Placements/s and lock hold, inline and pool-lease | `BENCH_PLACE_NODES` (1000), `BENCH_PLACE_COUNT` (300), `BENCH_PLACE_GPUS` (1), `BENCH_PLACE_CONCURRENCY` |
+| `realtime-fleet` | Command dispatch to ack and terminal, steady load, reconnect storms | `BENCH_RT_NODES` (1000), `BENCH_RT_PER_NODE`, `BENCH_RT_LOAD_RATE`, `BENCH_RT_STORM`, `BENCH_RT_GATE=1` |
+| `realtime-spine` | Join to adopted, place to active on the whole spine | `BENCH_SPINE_NODES` (1000), `BENCH_SPINE_RATE` (5), `BENCH_SPINE_RESERVATIONS` (200), `BENCH_SPINE_BURST` (100), `BENCH_SPINE_GATE=1` |
+| `multi-gateway` | Re-homing after a gateway kill, in simulated time | `BENCH_MG_NODES` (1000), `BENCH_MG_GATEWAYS` (3), `BENCH_MG_GATE=1` |
+| `postgres-spine` | The spine end to end on Postgres (skipped without a URL) | `BETTER_COMPUTE_POSTGRES_URL` |
+
+The numbers measured so far, and what they mean, are on [scaling](/docs/operations/scaling).
+
+<Cards>
+  <Card title="Local development" href="/docs/operations/local-development" icon={<Terminal />}>`dev --sim` and `better-compute sim`.</Card>
+  <Card title="Scaling" href="/docs/operations/scaling" icon={<Scale />}>The section 16 gates and the measured numbers.</Card>
+  <Card title="Observability" href="/docs/operations/observability" icon={<Activity />}>Metrics, spans and doctor.</Card>
+</Cards>

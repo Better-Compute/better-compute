@@ -1,0 +1,292 @@
+---
+title: Providers
+description: Provider accounts, the defineProvider contract, the Hetzner Cloud and Proxmox VE providers, conformance cases, and secret references for credentials.
+metaTitle: VPS providers and provider accounts
+icon: Cloud
+status: beta
+packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox']
+sources: ['packages/vps/src/accounts.ts', 'packages/vps/src/provider.ts', 'packages/vps/src/conformance.ts', 'packages/vps/src/module.ts', 'packages/vps/src/lifecycle.ts', 'packages/core/src/extension.ts', 'packages/core/src/manifest.ts', 'packages/provider-hetzner/README.md', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-hetzner/src/robot.ts', 'packages/provider-proxmox/README.md', 'packages/provider-proxmox/src/proxmox.ts', 'packages/server/src/api/secrets.ts', 'packages/server/src/ports.ts', 'packages/pki/src/secrets.ts', 'tests/vps-instances.test.ts', 'tests/vps-provider.test.ts', 'tests/provider-hetzner.test.ts', 'tests/provider-proxmox.test.ts']
+---
+
+A provider pool runs its instances on someone else's infrastructure: a public cloud, or a hypervisor cluster you
+operate but do not want to run bcd on. Better Compute splits this the way it splits every extension point: **code
+registers kinds, data configures instances**.
+
+- A <Term id="provider">provider</Term> is code: a `defineProvider()` definition such as `hetzner-cloud`, passed to
+  `vps({ providers })`.
+- A <Term id="provider-account">provider account</Term> is data: a row naming a provider, with a config validated by
+  that provider's manifest. Its credentials are secret references, never values.
+- A pool of class `provider` points at one account. Its instances are created, polled, powered and deleted through the
+  account's client by the `vps.instances` reconciler (see [instances](/docs/guides/vps/instances)).
+
+```ts title="compute.ts"
+import { vps } from 'better-compute/vps';
+import { hetznerCloud } from '@better-compute/provider-hetzner';
+import { proxmoxProvider } from '@better-compute/provider-proxmox';
+
+vps({ providers: [hetznerCloud, proxmoxProvider({ writeSnippet })] });
+```
+
+The provider packages are not on npm yet, like the rest of Better Compute, and sit outside the `better-compute`
+umbrella: use them from the workspace by their own names.
+
+## Provider accounts
+
+### Credentials first
+
+An account config never holds a credential. Fields declared with `field.secret()` accept only a `SecretRef`:
+`secret://…`, `vault://…` or `env://…`. On top of the manifest, vps refuses any string field whose name ends in
+`token`, `secret`, `password` or `key` that is not a reference, at any depth, with `INVALID_INPUT`.
+
+Store the value first. [secrets.put](/docs/reference/api/secrets#put) (`compute:secrets:manage`) writes it to the
+configured secret store and answers with its reference; nothing ever reads it back through the API:
+
+```ts
+const { ref } = await compute.api.secrets.put(
+  { token },
+  { tenantId: 'root', name: 'hcloud-token', value: process.env.HCLOUD_TOKEN!, idempotencyKey: 'hcloud-token-1' },
+);
+// ref: 'secret://root/sec_…'
+```
+
+References are resolved when a client needs them, through `vps({ secrets })` if you passed a resolver, otherwise the
+server's secret broker, which routes each reference to the store serving its scheme. The default store, pki's
+local-sealed store, serves `secret://` only. An `env://` or `vault://` reference resolves only if you configure a
+`SecretStore` for that scheme in `betterCompute({ secrets })` (the list replaces the default) or pass your own
+resolver to `vps()`.
+
+### Create an account
+
+```ts
+const account = await compute.api.providerAccounts.create(
+  { token },
+  { tenantId: 'root', provider: 'hetzner-cloud', name: 'main', config: { token: ref, location: 'fsn1' } },
+);
+// → { id: 'pacct_…', tenantId: 'root', provider: 'hetzner-cloud', name: 'main',
+//     config: { token: 'secret://root/sec_…', location: 'fsn1' }, version: 1 }
+```
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: 'The tenant that owns the account, usually the root (platform) tenant.', required: true },
+    provider: { type: 'string', description: 'The id of a provider passed to vps({ providers }). An unknown id is INVALID_INPUT, with details.known listing the registered ones.', required: true },
+    name: { type: 'string', description: '1 to 63 lower-case letters, digits, dots, underscores or hyphens. Unique in the tenant (CONFLICT otherwise).', required: true },
+    config: { type: 'object', description: "Validated by the provider's manifest; defaults are filled in. Issues come back as INVALID_INPUT with details.issues [{ message, path }].", default: '{}' },
+    idempotencyKey: { type: 'string', description: 'Makes the account id deterministic from the tenant, the caller and the key, as FleetConfig needs. A retry with the same provider and name returns the account; anything else under the key is CONFLICT.' },
+  }}
+/>
+
+The rest of the group:
+
+| Method                                                        | Action                     | What it does                                                                                             |
+| ------------------------------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------- |
+| [list](/docs/reference/api/provider-accounts#list)            | `compute:providers:read`   | The tenant's accounts, by name.                                                                          |
+| [get](/docs/reference/api/provider-accounts#get)              | `compute:providers:read`   | One account; another tenant's is `NOT_FOUND`.                                                            |
+| [offers](/docs/reference/api/provider-accounts#offers)        | `compute:providers:read`   | The provider's catalog through this account.                                                             |
+| [update](/docs/reference/api/provider-accounts#update)        | `compute:providers:manage` | Replaces `config` (validated again) and bumps `version`; the next call builds a fresh client.            |
+| [delete](/docs/reference/api/provider-accounts#delete)        | `compute:providers:manage` | Deletes the account, or `INVALID_STATE` while a non-archived pool or a non-deleted instance uses it.     |
+
+Clients are built on demand from the validated config and cached per account id and version. A failed build is not
+cached.
+
+`offers` takes an optional `query`:
+
+<TypeTable
+  type={{
+    kind: { type: "'metal' | 'vps'", description: 'Only offers of this kind.' },
+    region: { type: 'string', description: "A provider region, such as fsn1. Providers default to the account's own." },
+    gpuModel: { type: 'string', description: 'Only offers with this GPU model.' },
+    minGpus: { type: 'number', description: '0 to 64.' },
+    minVcpu: { type: 'number', description: '0 to 1024.' },
+    minMemoryGiB: { type: 'number', description: '0 to 16384.' },
+  }}
+/>
+
+Each offer is `{ id, kind, region, vcpu, memoryGiB, diskGiB?, gpus?, pricePerHour?, currency?, available }`. Its `id`
+is what a provider pool's [flavor](/docs/guides/vps/flavors) names as `offerId`.
+
+### A pool on the account
+
+```ts
+const pool = await compute.api.pools.create(
+  { token },
+  { tenantId: 'root', siteId, class: 'provider', providerAccountId: account.id },
+);
+// agent is 'none': a provider pool's machines are reached through the provider
+```
+
+A provider pool needs `providerAccountId`, and its `agent` must be `none`. Only provider pools take an account.
+
+## The provider contract
+
+`defineProvider` checks a definition's shape up front and returns it frozen with `extension: 'provider'`. Every
+refusal is `INVALID_CONFIG` with `details.path`:
+
+```ts title="acme-cloud.ts"
+import { ComputeError, field, manifest } from '@better-compute/core';
+import { defineProvider } from '@better-compute/vps';
+
+export const acmeCloud = defineProvider({
+  id: 'acme-cloud', // lower-case letters, digits, hyphens
+  version: '1.0.0',
+  provides: ['vps'], // 'metal', 'vps' or both
+  config: manifest({
+    token: field.secret().describe('API token'),
+    location: field.option(['fra', 'ams']).default('fra'),
+  }),
+  capabilities: ['power'],
+  create: (config, context) => acmeClient(config, context), // returns a ProviderImpl
+});
+```
+
+`create(config, context)` receives the validated config (secret fields still as references) and a
+`ProviderContext` of `{ clock, secrets, log }`. Resolve the token with `context.secrets.resolve(config.token)` when
+you call the API, not once up front.
+
+The client is a `ProviderImpl`:
+
+| Method                                                  | Contract                                                                                                                                  |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `listOffers(query)`                                     | Offers matching the query; an impossible query returns `[]`.                                                                              |
+| `create({ offerId, image, userData, name }, call)`      | Idempotent by `call.idempotencyKey` (vps passes the instance id): a retried create returns the same machine.                              |
+| `get(id, call)`                                         | The machine, or `undefined` when it does not exist.                                                                                       |
+| `delete(id, call)`                                      | A machine that is already gone counts as deleted: `NOT_FOUND` is success.                                                                 |
+| `power?(id, action, call)`                              | `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi`. vps uses `on` and `graceful-off`; without `power`, a stop or start is `UNSUPPORTED` and fails the instance. |
+| `reinstall?`, `rescue?`, `list?`, `bootstrap?`          | Optional. `bootstrap` delivers a single-use join token to machines that will run bcd, and never through user data.                        |
+
+A machine is an `ExternalMachine`: `{ id, name?, state, offerId?, region?, addresses }`, with `state` one of
+`pending`, `running`, `stopped`, `rescue`, `deleting`, `deleted`, `error` or `unknown`. Each call gets a
+`CallContext` with `idempotencyKey`, an abort `signal`, `clock`, `secrets` and `log`.
+
+Throw `ComputeError`s. The reconciler records any failure as a `ProviderError` condition; `UNSUPPORTED`,
+`INVALID_STATE` and `INVALID_CONFIG` fail the instance, everything else (use `PROVIDER_ERROR` and `RATE_LIMITED`) is
+retried. User data from vps carries only the tenant's SSH keys or the tenant's own cloud-init, so a provider never has
+to filter secrets out of it. [Providers](/docs/extending/providers) walks through writing one end to end.
+
+## Conformance
+
+`providerConformanceCases()` from `@better-compute/vps` turns the contract into cases you run with `runConformance`
+from `@better-compute/core/conformance`, in any test runner, against a live account, a recording or an emulator:
+
+```ts title="acme-cloud.test.ts"
+import { runConformance } from '@better-compute/core/conformance';
+import { providerConformanceCases } from '@better-compute/vps';
+
+const report = await runConformance(providerConformanceCases(), () => ({
+  provider: acmeCloud,
+  config: { token: 'env://ACME_TOKEN' },
+  offerId: 'small', // an offer create accepts
+  image: 'ubuntu-24.04', // an image create accepts
+  context: { secrets, clock },
+  prefix: `ci-${runId}`, // concurrent runs never share idempotency keys
+}));
+expect(report.failed).toEqual([]);
+```
+
+The cases check that the definition builds a client with the four required methods; that `listOffers` returns
+well-formed offers including the subject's and nothing for `minVcpu: 1_000_000`; that a retried `create` names the
+same machine; that `get` follows it, `delete` removes it and a second `delete` fails only with `NOT_FOUND`; and that
+`power`, when offered, stops and starts it. Set `powerObservable: false` for providers that can act on power but not
+report it. Every case cleans up the machines it made.
+
+## Hetzner Cloud
+
+`@better-compute/provider-hetzner` exports `hetznerCloud` (id `hetzner-cloud`, `provides: ['vps']`, capabilities
+`power`, `reinstall`, `list`). Servers become the instances of provider pools.
+
+<TypeTable
+  type={{
+    token: { type: 'SecretRef', description: 'A Hetzner Cloud API token with read and write access. Resolved on every request.', required: true },
+    location: { type: "'fsn1' | 'nbg1' | 'hel1' | 'ash' | 'hil' | 'sin'", description: 'Where servers are created.', default: "'fsn1'" },
+  }}
+/>
+
+- **Idempotent create.** The Hetzner API has no idempotency keys, so every server carries the labels
+  `better-compute.io/managed=true` and `better-compute.io/idempotency-key=<key>`. `create` looks the key up first; if a
+  concurrent create wins the unique server name, it returns the winner.
+- **Names** are hostname-safe: `inst_01…` becomes `inst-01…`, at most 63 characters.
+- **Offers** come from `/server_types` and `/datacenters`, following pagination: gross hourly prices in EUR for the
+  account's location (or the queried `region`), `available` from that location's datacenters, deprecated types
+  skipped. GPU and metal queries return nothing.
+- **Power:** `on` is `poweron`, `off` is `poweroff`, `graceful-off` is `shutdown`, `reset` and `cycle` are `reset`,
+  `graceful-restart` is `reboot`; `nmi` is `UNSUPPORTED`. `reinstall` is `rebuild`. `list` yields only managed
+  servers.
+- **Errors:** a 404 is absent (`get` answers `undefined`, `delete` and `power` throw `NOT_FOUND`); a 429 is
+  `RATE_LIMITED` with `retryAfterMs` from `RateLimit-Reset`; anything else is `PROVIDER_ERROR` with
+  `details: { status, code }`, and an unreachable API is `PROVIDER_ERROR` too.
+
+`hetznerCloudProvider({ fetch, endpoint, labelKey })` builds the same provider with another transport, endpoint
+(default `https://api.hetzner.cloud/v1`) or label key. `tests/provider-hetzner.test.ts` passes an in-memory emulator
+of the servers, server types, datacenters and actions endpoints as `fetch`, and runs the conformance cases plus the
+Hetzner specifics against it; the same hook can record or replay real traffic.
+
+The package also exports `hetznerRobot` (`provides: ['metal']`), which claims existing Hetzner Robot dedicated
+servers and bootstraps them into bcd hosts. That is platform hardware, not tenant VMs: see
+[bare metal](/docs/guides/bare-metal).
+
+## Proxmox VE
+
+`@better-compute/provider-proxmox` exports `proxmox` and `proxmoxProvider(options)` (id `proxmox`,
+`provides: ['vps']`, capabilities `power`, `reinstall`, `list`). It clones QEMU VMs from a template on your own
+cluster.
+
+<TypeTable
+  type={{
+    url: { type: 'string', description: 'The API endpoint, such as https://pve.example.com:8006.', required: true },
+    token: { type: 'SecretRef', description: 'A reference to a PVE API token user@realm!tokenid=secret.', required: true },
+    region: { type: 'string', description: 'The region offers and machines report.', default: "'pve'" },
+    node: { type: 'string', description: "The node to clone onto; default the template's node." },
+    pool: { type: 'string', description: 'A resource pool for new VMs.' },
+    storage: { type: 'string', description: 'Target storage for full clones.' },
+    fullClone: { type: 'boolean', description: 'false for linked clones, which need the template on the same node and storage that supports them.', default: 'true' },
+    disk: { type: 'string', description: "The boot disk an offer's size grows.", default: "'scsi0'" },
+    vmidMin: { type: 'number', description: 'Lowest VMID the account uses.', default: '100000000' },
+    vmidMax: { type: 'number', description: 'Highest VMID the account uses.', default: '999999999' },
+    offers: { type: 'string[]', description: 'The sizes offered, such as 2c-4g (vCPUs and GiB of memory) or 4c-16g-100d (plus GiB of boot disk). Each is an offer id.', default: "['1c-2g', '2c-4g', '4c-8g', '8c-32g']" },
+  }}
+/>
+
+The image is a template's VMID or name. The token needs `VM.Clone` on the templates, plus `VM.Allocate`,
+`VM.Config.*`, `VM.PowerMgmt`, `VM.Audit` and `Datastore.AllocateSpace` where VMs are created, and `Sys.Audit` for the
+node headroom that offers report.
+
+- **Idempotent create.** A key hashes (SHA-256) to a VMID slot in the account's range, and the clone records the key
+  in its description. A slot held under another key probes the next one, up to 64. Retried and concurrent creates
+  meet on one VMID, where PVE lets exactly one clone through; a clone interrupted before configuration is finished by
+  the next create. No free slot is `CAPACITY_UNAVAILABLE`.
+- **Configuration.** After cloning, create sets cores, memory and `ipconfig0=ip=dhcp`, grows the boot disk for sized
+  offers (never shrinks it), tags the VM `better-compute` last and starts it. It reports `pending` until `get` sees it
+  running.
+- **Shared clusters.** `delete` and `power` act only on VMs tagged `better-compute` and refuse others with
+  `ACCESS_DENIED`; `list` yields only tagged VMs; templates are never machines.
+- **Tasks.** Clone, stop, delete and power wait for their task; a failed task is `PROVIDER_ERROR`. `taskPollMs`
+  (default 1 s) and `taskTimeoutMs` (default 10 min) tune the wait.
+- **Addresses** come from the QEMU guest agent while the VM runs; without an agent the list is empty.
+- **Offers** are the configured sizes, `available` when an online node (or the pinned `node`) has the CPUs and free
+  memory.
+- **Power:** `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, and `cycle` as stop then start; `nmi` is
+  `UNSUPPORTED`. `reinstall` destroys the VM and clones the new template into the same VMID, keeping its key, name,
+  size, disk size and cloud-init volume.
+
+<Callout type="warn" title="Proxmox needs writeSnippet under vps">
+The PVE API cannot upload cloud-init snippets, so without `proxmoxProvider({ writeSnippet })` a create refuses any
+user data beyond an empty `#cloud-config` with `UNSUPPORTED`. vps always renders at least a hostname into user data,
+so an account used by vps needs `writeSnippet`; otherwise every instance ends in `error`.
+</Callout>
+
+```ts
+import { proxmoxProvider } from '@better-compute/provider-proxmox';
+
+export const proxmox = proxmoxProvider({
+  // Write the snippet where the cluster reads it (SFTP, a shared mount), and return its volume id.
+  writeSnippet: async (name, content, call) => {
+    await snippets.write(name, content); // your transport
+    return `local:snippets/${name}`;
+  },
+  // Self-signed cluster: a fetch bound to a dispatcher that pins the cluster CA.
+  fetch: pinnedFetch,
+});
+```
+
+`tests/provider-proxmox.test.ts` runs the conformance cases and the PVE specifics against an in-memory PVE emulator
+passed as `fetch`.

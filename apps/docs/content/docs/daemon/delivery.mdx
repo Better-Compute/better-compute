@@ -1,0 +1,317 @@
+---
+title: Delivery
+metaTitle: Desired state, commands and the bcd journal
+description: How NodeSpec generations and one-shot commands reach bcd, the acceptance checks, lanes and credits, cancellation, signatures, and the journal that makes delivery safe.
+icon: Route
+status: experimental
+packages: ['@better-compute/gateway', '@better-compute/protocol', '@better-compute/testing']
+sources:
+  - proto/bettercompute/agent/v1/session.proto
+  - proto/bettercompute/common/v1/common.proto
+  - packages/protocol/src/kinds.ts
+  - packages/protocol/src/frames.ts
+  - packages/protocol/src/sections.ts
+  - packages/gateway/src/gateway.ts
+  - packages/gateway/src/store.ts
+  - packages/server/src/controllers/nodespec.ts
+  - packages/server/src/runtime/commands.ts
+  - packages/server/src/runtime/command-signing.ts
+  - packages/server/src/options.ts
+  - packages/testing/src/daemon/fake-daemon.ts
+  - daemon/internal/journal/journal.go
+  - daemon/internal/journal/rules.go
+  - daemon/internal/dispatch/dispatch.go
+  - daemon/internal/dispatch/lane.go
+  - daemon/internal/converge/converge.go
+  - daemon/internal/session/session.go
+  - .claude/coordination.md
+  - PLAN.md
+---
+
+The control plane tells a node what to do in two ways, and the difference matters. **Desired state** is a
+standing fact: which devices are held for which allocation, which instances should run, which SSH CA to trust.
+**Commands** are one-shot actions: reboot, run diagnostics, collect logs. The rule from PLAN.md §7.3:
+
+> If losing it leaves the wrong steady state, it is desired state. If running it late could do harm, it is a
+> command with `not_after`, plus `min_generation` when it presupposes a spec.
+
+Both travel down the node's [session](/docs/daemon/sessions), and both are delivered at least once. The daemon's
+<Term id="journal">journal</Term> turns at-least-once delivery into at-most-once effect. The concepts are introduced
+in [desired state and commands](/docs/guides/concepts/desired-state-and-commands); this page is the wire-level
+detail.
+
+## Desired state
+
+### NodeSpec and its sections
+
+A <Term id="nodespec">NodeSpec</Term> is split into sections. The daemon converges them in this order, each with an
+idempotent `plan(desired, observed)` and `apply`:
+
+| Section | Holds | Phase |
+| --- | --- | --- |
+| `host` | Host configuration units (driver, container toolkit, MIG layout, fabric manager, sysctl), each a config driver id and canonical JSON | v0.2 |
+| `devices` | Device assignments: allocation, reservation, binding, devices, extra env lines | v0.1 |
+| `instances` | VPS instances with their runtime, size, image, NICs and GPUs | v0.3 |
+| `access` | The exec-ticket JWKS, SSH CA keys and principals, revoked certificate serials; empty in v0.1 | v0.3 |
+| `telemetry` | The OTLP endpoint, export interval, resource attributes and a secret reference for headers | v0.1 |
+| `daemon` | The self-update target: version, URL, SHA-256, signature | v0.4 |
+| `site` | The site agent's boot lease state (draft, site agents only) | v0.2 |
+
+The control plane builds the spec in the NodeSpec reconciler: the base sections plus every module's `nodeSpec()`
+contribution, stored in `nodes.spec` as protobuf JSON. It raises `nodes.generation` only when the canonical JSON
+(sorted keys) differs from the stored spec, so re-running the reconciler never produces a new generation for
+nothing. Desired state applies once a node is adopted or deployed.
+
+### Generations
+
+Three numbers describe where a node stands:
+
+| Number | Owner | Meaning |
+| --- | --- | --- |
+| `generation` | control plane, `nodes.generation` | The newest spec written |
+| `applied_generation` | daemon, in `Hello`, heartbeats and status | The newest spec the daemon holds, converged or not |
+| `observed_generation` | control plane, from status reports | The newest spec at which every section converged or failed terminally |
+
+`observed_generation` is written with `WHERE observed_generation < $g`, so it never moves backwards, whichever
+session a late report arrives on. Controllers that wait for the node to act on a spec wait for it.
+
+### How a spec reaches the node
+
+- **At Hello**, when `generation` is above `applied_generation`, the gateway sends a full `DesiredState` before
+  replaying commands.
+- **On change**, the transaction that wrote a new generation pokes the node's gateway, which pushes the spec to that
+  node's session at once.
+- **As a backstop**, every 10 seconds the gateway compares each open session with `nodes.generation` and sends a
+  full spec to any node that is behind both what it holds and what was already sent on this session.
+- **On request**, the daemon sends `SpecRequest{have_generation, reason}` and gets the full spec back.
+
+| SpecRequest reason | When |
+| --- | --- |
+| `PATCH_BASE_MISMATCH` | A patch's `base_generation` is not the applied generation |
+| `MIN_GENERATION` | A command's `min_generation` is above the applied generation |
+| `NO_SPEC` | The journal holds no usable spec (new journal, corruption, failed signature check) |
+
+A `DesiredStateBody` carries the node id, the generation, a `spec_hash` and either a `full` NodeSpec or a `patch`.
+A patch applies against `base_generation`: every section it sets replaces that section wholesale (an empty section
+clears it), unset sections stay. The daemon ignores a body for another node and any generation not above the one
+it holds. It never recomputes `spec_hash`; it echoes it back as `applied_spec_hash`. The FakeDaemon applies both
+forms. The gateway in this release sends full specs only (`base_generation` 0), rendered from `nodes.spec`.
+
+The daemon stores the last full spec, its hash and its signature in the journal, and enforces it while offline.
+
+### Convergence and status
+
+`observed_generation` advances to a spec's generation only when every section has converged or failed terminally;
+a retryable failure keeps the section `PROGRESSING` and it is retried on the next pass. A section the daemon has no
+converger for converges trivially when empty and is `UNSUPPORTED` otherwise, which counts as terminal, with
+condition `SectionUnsupported` (reason: the field number) so the rest of the spec still converges. Go's
+`converge.Run` implements the rule; the section convergers themselves arrive in v0.1 and later.
+
+The daemon reports progress in `StatusReport`: observed and applied generation, the spec hash, one
+`SectionStatus` per section (`CONVERGED`, `PROGRESSING`, `FAILED`, `UNSUPPORTED`, with the generation, a reason and
+a message), and its full condition set. Conditions carry `age_ms`, an age on the daemon's monotonic clock, and the
+control plane derives `since` from `compute_now()`: agents report ages, not timestamps. From v0.3 the report also
+lists every VM or container the host runtimes know. Status is coalesced latest-wins: the gateway keeps the last
+report per session and writes it about once a second, running the host's status handlers (XID health, VPS instance
+status), each under its own savepoint.
+
+### Device assignments
+
+The `devices` section is how a `hold` [reservation](/docs/guides/capacity/reservations) reaches a machine. For each
+assignment the daemon writes a CDI spec `/etc/cdi/bcd-<allocation_id>.json`, an env file under
+`/run/bcd/allocations/` and device ownership, then journals an attested `AllocationBound` event with the CDI device
+names (`bcd.dev/gpu=<id>`). Removing an assignment releases it (`AllocationReleased`). An assignment the daemon
+cannot honor (a device missing, a device already held by another allocation, an unsupported binding) produces an
+`AllocationFailed` event with a reason such as `overlap` or `device-missing`, and the section fails terminally at
+that generation. The daemon never drops an assignment on its own, not even while disconnected. The FakeDaemon
+implements this converger; bcd's arrives in v0.1.
+
+## Commands
+
+### The command body
+
+A `Command` is the serialized `CommandBody`, an optional signature, and the delivery `attempt` (informational,
+outside the signature). The control plane stores the body and signature bytes when it enqueues the command and
+the gateway resends exactly those bytes.
+
+| Field | Rule |
+| --- | --- |
+| `id` | A ULID; the journal's deduplication key |
+| `node_id` | Must be the session's node, or the command is `UNSUPPORTED` |
+| `seq` | Per-node, from `nodes.next_cmd_seq` in the enqueue transaction; replay order |
+| `kind`, `payload` | A registered kind and its request message, packed as `Any` |
+| `lane` | `control`, `provision` or `bulk` |
+| `not_after` | Mandatory, in server time: after it the command must not start |
+| `min_generation` | The spec generation the command presupposes; 0 for none |
+| `retry_safe` | May run again when a crash interrupted it before it finished |
+| `idempotency_key` | Unique per node; workflow steps use `wf:<id>:<stepId>` |
+| `self_terminating` | The side effect ends the daemon process |
+| `attested` | The result must be node-signed (verified from v0.2) |
+| `workflow_id`, `step_id` | The workflow step this command executes; secrets bind to it (v0.2) |
+| `traceparent` | W3C trace context, from the api through the worker and gateway to the daemon and driver |
+
+The gateway also guards the stored body before sending it: a body that does not decode, lacks `not_after`, or names
+another command or node is cancelled with reason `invalid-body` instead of sent.
+
+### Dispatch
+
+Enqueue inserts the command `pending` in the caller's transaction and, after commit, pokes the node's gateway.
+Each gateway dispatches on a poke or every second, joining commands to the sessions it holds:
+
+```sql
+SELECT c.*, s.session_epoch FROM commands c JOIN node_sessions s USING (node_id)
+ WHERE s.gateway_id = $me AND c.state = 'pending'
+   AND c.not_before <= compute_now() AND c.not_after > compute_now()
+ ORDER BY c.node_id, c.seq LIMIT 1000
+ FOR UPDATE OF c SKIP LOCKED FOR SHARE OF s
+```
+
+A row is marked `dispatched` with the session's epoch only when that epoch equals the gateway's in-memory epoch for
+the node and the lane has credit. Order within a lane is kept: once a lane is out of credit, later commands of that
+lane wait. Some commands are cancelled at this point instead of sent: a pending command whose cancel was
+requested, a kind outside the certificate's `allowed_kinds` (`kind-not-allowed`), and a destructive kind for a
+tenant-controlled node (`tenant-controlled`).
+
+### Acceptance checks
+
+A delivered command first goes through the journal's duplicate rules (below). A new command, or a retry-safe one a
+crash interrupted, then passes these checks in order:
+
+1. **`UNSUPPORTED`**: the body names another node, or the kind is unknown or not allowed for this agent's role.
+   While the session is upgrade-only, every kind but `daemon.upgrade` is refused this way.
+2. **`min_generation`** above the applied generation: the daemon sends `SpecRequest` and defers the command. A newer
+   spec re-runs the checks; still behind at `not_after`, the command is `STALE_GENERATION`.
+3. **`EXPIRED`**: past `not_after`, in server time through the `Welcome` offset. A command without `not_after` is
+   `EXPIRED`, so the control plane always sets one.
+4. **`BUSY`**: no free credit on the lane, or the journal is full. Not terminal: see
+   [BUSY](/docs/daemon/sessions#busy).
+5. **`BAD_SIGNATURE`**: a missing, unknown-key or invalid signature on a kind that requires one.
+
+`UNSUPPORTED`, `EXPIRED`, `STALE_GENERATION` and `BAD_SIGNATURE` are terminal: the command becomes `rejected`, and
+the rejection is journaled, so a duplicate delivery or a `Hello` replay gets the same answer. `BUSY` is never
+journaled. The Go dispatcher (`dispatch.Precheck`, then `Lanes.Admit`) and the FakeDaemon follow this order. One
+difference: the FakeDaemon evaluates the signature verdict inside its precheck, so `BAD_SIGNATURE` wins over a
+missing credit there.
+
+### Lanes, credits and workers
+
+| Lane | Gateway credits | Daemon workers | For |
+| --- | --- | --- | --- |
+| `control` | 8 | 4 | Short, latency-sensitive work: diagnostics, inventory, reboots, resets |
+| `provision` | 4 | 2 | Provisioning steps: wipe, deploy, kexec (v0.2) |
+| `bulk` | 2 | 1 | Large transfers and slow jobs: log collection, image pre-warm |
+
+Credits bound the commands admitted at once, running or waiting for a worker; workers bound the ones running. Each
+lane has a fixed worker pool, never a goroutine per command, and a per-resource lock (a GPU UUID, a disk, an
+allocation) keeps two lanes from acting on the same device at once. A command holds its credit from acceptance until
+its result is journaled.
+
+### Results and acknowledgements
+
+The daemon reports `ACKED` once `accepted` is durable, `RUNNING` when the side effect starts, and one terminal
+outcome: `SUCCEEDED`, `FAILED` (with an error code such as `interrupted`, `invalid-payload`, `internal` or a
+kind-specific one), `REJECTED` (with a reason) or `CANCELLED`. Each update records the `boot_id` it was produced in.
+Reports may skip steps; a lost `ACKED` does not stop a result from landing.
+
+The gateway applies updates through the command state table, scoped to the reporting node, so a node can never move
+another node's command, and a stale or repeated update changes nothing. The terminal result and the node's
+signature are stored exactly as received. Every terminal update is then acknowledged in `Ack.command_ids`, including
+ones stored earlier or unknown to this node, and only then does the daemon stop replaying it. Settled commands
+publish `command.settled` and wake the node's controller.
+
+### Timeouts
+
+The CommandSweeper, a singleton, runs every 5 seconds: a `pending` command past `not_after` becomes `expired`, and a
+`dispatched`, `acked` or `running` one past `not_after` plus its kind's timeout becomes `failed` with reason
+`timeout`. For self-terminating kinds the timeout covers the rejoin window. The built-in timeouts are 2 minutes for
+`diag.nvml` and `inventory.refresh`, 5 for `gpu.reset`, and 15 for `logs.collect` and `node.reboot`; an unregistered
+kind gets 15 minutes.
+
+### Cancel
+
+A cancel requested before dispatch wins: the command is cancelled and never sent. For an in-flight command the
+gateway sends `Cancel{command_id, reason}` once per session, and again after every reconnect, until the daemon
+settles it. The daemon stops between actions and never hides a completed side effect: a command still queued or
+deferred is reported `CANCELLED`, while one whose side effect has started reports its real outcome. A real outcome
+always wins over a late cancel.
+
+### Signed commands and attested results
+
+Two signatures keep a compromised gateway, which can delay, drop or read frames, from forging intent or results:
+
+- **Signed intent.** `Command.signature` is a worker key's signature under purpose `command`; the key chains to the
+  command-signing roots of the daemon's trust bundle. The server signs every command when `pki.commandSigning` is
+  configured, and sends the matching trust bundle in `JoinResponse` and `Welcome`; without it commands go unsigned,
+  as v0.1 allows. The daemon's own kind table decides which kinds require a signature, never a flag the body could
+  carry: destructive kinds from v0.2, all kinds from v0.4. Desired state has the same envelope (purpose
+  `desired-state`), but the gateway's default spec source sends specs unsigned today.
+- **Attested results.** For attested kinds (`diag.*`, `gpu.reset`, and later `wipe`, `deploy.*`, `firmware.*`) the
+  node signs `CommandUpdate.node_sig` over the command id, the state and the SHA-256 of the result, and allocation
+  reports travel as node-signed `AttestedReport`s. Workers verify them against `node_certs` before any state
+  transition; the gateway never judges or strips them.
+
+## Events
+
+Everything the daemon observes on its own (allocation reports, failures) is an event, journaled with a sequence
+number that increases from 1 per `journal_id`, and sent in `EventBatch`es. The gateway stores the events above the
+node's cumulative ack for its current journal, publishes each as `node.event` (attested reports decoded), runs the
+report handlers, advances `node_sessions.acked_event_seq`, and answers `Ack{journal_id, event_seq}`. A batch for
+another journal id is ignored.
+
+A report whose body names another node is published as `security.node-mismatch` and never reaches a handler; an
+undecodable one is `security.invalid-report`. Handlers (`allocationBound`, `allocationReleased`,
+`allocationFailed`) run in the ingest transaction under a savepoint: a failing one rolls back its own writes, is
+published as `node.report-failed`, and does not stop the stream, since an unacked event would only be replayed into
+the same failure.
+
+## The journal
+
+The journal is the daemon's durable memory. The production store is bbolt, which arrives with the Go toolchain; the
+Go package holds the contract, the command rules and an in-memory store, and the FakeDaemon mirrors them rule for
+rule.
+
+| Part | Holds |
+| --- | --- |
+| `meta` | Node id, `journal_id`, the event sequence, the last epoch, the applied generation |
+| `commands` | Command id to `accepted`, `running{boot_id}` or `done` with its result; done entries kept 7 days |
+| `events` | Unacked events |
+| `spec` | The last full spec, its hash and its signature |
+| `certs` | The certificate chain and the command-signing trust bundle |
+| exec tickets | The `jti` set of tickets already used |
+
+**Durability.** Every write is fsynced before it returns. `accepted` reaches disk before any side effect, and
+self-terminating kinds write `running{boot_id}` immediately before theirs, so a restart can tell the reboot they
+caused from a crash.
+
+**Bounds.** 64 MiB and 10,000 unacked events, which `config.toml` may lower but never raise. Events are classed
+metric, transition or result. When the journal is full, the oldest metric events are dropped; results and
+transitions never are. If that is not enough, the daemon answers new commands `BUSY` until acks drain the backlog.
+
+### Duplicates and crash recovery
+
+Every daemon process start picks a fresh incarnation id. An entry written by another incarnation belongs to a
+process that no longer exists, so there is nothing to re-attach to. A delivered command is resolved against the
+journal first (`journal.Resolve`):
+
+| Journal entry | Action |
+| --- | --- |
+| none | Execute: run the acceptance checks, journal `accepted`, run it |
+| `done` | Resend the stored result |
+| `accepted` or `running` in this process | Re-attach: the execution in flight reports the result |
+| `running`, self-terminating, from an earlier boot | Report `SUCCEEDED` with `rebooted`: the reboot it caused completed it |
+| left by an earlier process, retry-safe | Re-execute, after the acceptance checks run again |
+| left by an earlier process, not retry-safe | Report `FAILED` with `interrupted`, for the controller to decide |
+
+At start, `journal.Recover` settles the entries whose outcome needs no server input (`rebooted` and `interrupted`)
+so they go out in `Hello.unacked_results`; retry-safe entries wait for the server to redeliver them, so a
+re-execution passes the `not_after` and `min_generation` checks again. `wipe`, `deploy.*`, `firmware.*` and
+`gpu.reset` are not retry-safe. `journal.Sweep` deletes done entries older than 7 days; accepted and running entries
+are never swept.
+
+The server keeps the matching half at `Hello` (see [resume rules](/docs/daemon/sessions#resume-rules)): a new boot
+completes self-terminating commands, and a new journal fails non-retry-safe in-flight commands with `journal-lost`
+instead of replaying them into a journal that cannot deduplicate.
+
+Open items the FakeDaemon already covers and bcd must match: the `cancelled` journal outcome, recording the
+producing `boot_id` on results, filling `NodeRebootResult.previous_boot_id` on a `rebooted` result, and expiring
+accepted or running entries that are never redelivered.

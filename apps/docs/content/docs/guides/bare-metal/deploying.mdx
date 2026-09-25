@@ -1,0 +1,377 @@
+---
+title: Deploying machines
+description: Walkthroughs that deploy machines on an emulated QEMU/KVM site, install Ubuntu over virtual media, and run Talos on an agentless pool.
+metaTitle: Deploying bare-metal machines
+icon: Rocket
+packages: ['@better-compute/metal', '@better-compute/provision']
+sources:
+  - examples/emulated-site/README.md
+  - examples/emulated-site/better-compute.config.ts
+  - examples/shared/compose.ts
+  - tests/metal-lifecycle.test.ts
+  - tests/extensions/ubuntu-autoinstall.test.ts
+  - tests/extensions/talos.test.ts
+  - tests/extensions/metal-sim.ts
+  - packages/metal/src/http-proxy.ts
+  - packages/metal/src/profiles.ts
+  - packages/metal/src/reconcile.ts
+  - packages/pki/src/attestors/provisioned.ts
+  - PLAN.md
+---
+
+import { Layers, Puzzle, ShieldKeyhole } from '@/lib/icons';
+
+This page walks through the three deployments the repository proves: a GPU host commissioned and
+deployed over <Term id="pxe">PXE</Term> on an emulated site, Ubuntu installed by its own installer
+from a per-machine ISO, and Talos on machines that never run `bcd`. Each follows the same lifecycle from
+[bare metal](/docs/guides/bare-metal); they differ in how the OS gets onto the disk and how the
+control plane learns it is up.
+
+<Callout type="warn" title="Status">
+None of these run on real hardware yet: they need `bcd site` and `bcd ramdisk`, which are written for
+v0.2 but not built. The Ubuntu and Talos walkthroughs run in the test suite against simulated site
+agents and machines (`tests/extensions/`), and the emulated-site configuration is checked to load
+and pass `better-compute doctor`.
+</Callout>
+
+## Adopt or PXE
+
+| | Adopt (v0.1) | Enroll and deploy (v0.2) |
+| --- | --- | --- |
+| You start with | a machine running an OS you installed | a machine with a BMC, whatever is on its disks |
+| You provide | a join token and the install script | the BMC address and credentials, a site agent, an image, a profile |
+| Reimage | never | on every deploy |
+| On the way back | no platform wipe | an attested wipe before `ready` |
+| States | `adopting`, `adopted` | `enrolling` through `ready`, `deploying`, `deployed` |
+
+Adoption is covered on [joining nodes](/docs/guides/nodes/joining). The state table lets an adopted
+node with a BMC be released, but metal acts only on machines it enrolled, so an adopted node has no
+metal record and `metal.undeploy` answers `NOT_FOUND` for it today.
+
+## Before you start
+
+A deployment that provisions metal needs, beyond the usual control plane:
+
+- `metal({ hardwareProfiles })` and `provisionModule({ modules: [bareMetal], userData })`, as on
+  [bare metal](/docs/guides/bare-metal). The examples' shared configuration
+  (`examples/shared/compose.ts`) registers both modules but no `userData` options and no attestors,
+  so add them for profiles that render user data and for agents that join over PXE.
+- A PKI bundle (`better-compute pki init`), so JoinService can admit site agents, ramdisks and
+  installed machines, and the gateway role for them to connect to. See [PKI](/docs/operations/pki).
+- The `discovery` and `provisioned` <Term id="attestor">attestors</Term>, wired as on
+  [sites](/docs/guides/bare-metal/sites).
+- A site with a connected site agent, a pool on it whose `policy.hardwareProfile` names your hardware
+  profile, an image in the catalog, and a deploy profile.
+
+## Walkthrough: an emulated site
+
+`examples/emulated-site` stands in for a rack: QEMU/KVM virtual machines are the servers,
+`sushy-emulator` gives each a Redfish BMC over libvirt, and a `bcd site` agent on the libvirt bridge
+runs proxy DHCP, iPXE and the image cache. It needs Linux with `/dev/kvm`, QEMU, libvirt, sushy-tools
+and a `bcd` build. Its configuration registers one hardware profile:
+
+```ts title="examples/emulated-site/better-compute.config.ts"
+export const hardwareProfiles = {
+  'emulated-redfish': {
+    description: 'QEMU/KVM machines behind sushy-tools (Redfish), PXE-booted by the site agent',
+    drivers: { power: 'redfish', management: 'redfish', boot: 'ipxe', deploy: 'image-stream' },
+  },
+};
+```
+
+<Steps>
+<Step>
+### Create the machines and their BMCs
+
+```bash
+virt-install --name bm-1 --memory 8192 --vcpus 4 --disk size=40 --pxe --network network=bc-site --noautoconsole
+virt-install --name bm-2 --memory 8192 --vcpus 4 --disk size=40 --pxe --network network=bc-site --noautoconsole
+sushy-emulator --libvirt-uri qemu:///system --port 8000
+```
+</Step>
+<Step>
+### Start the control plane
+
+```bash
+cd examples/emulated-site
+better-compute pki init --trust-domain site.example.test
+better-compute serve
+```
+
+The gateway role needs a serving certificate (`better-compute pki issue-gateway`); see
+`examples/postgres` for the environment variables. Calls below run as `BETTER_COMPUTE_TOKEN`.
+</Step>
+<Step>
+### Create a site, its agent and a pool
+
+```bash
+better-compute api sites.create tenantId=root kind=shared region=lab-1 idempotencyKey=lab-1
+better-compute api siteTokens.create tenantId=root siteId=site_… ttlSeconds:=3600 idempotencyKey=lab-1-agents
+better-compute api pools.create tenantId=root siteId=site_… class=metal-host \
+  policy:='{"hardwareProfile":"emulated-redfish"}'
+```
+
+Join a site agent on the `bc-site` network with the site token (`BCD_JOIN_TOKEN=bcjt_… bcd join`,
+then `bcd site --config /etc/bcd/config.toml`). It becomes the site's boot server.
+</Step>
+<Step>
+### Register the image and the profile
+
+```bash
+better-compute api images.register --data @image.json
+better-compute api profiles.create tenantId=root document:=@ubuntu-gpu-host.json
+better-compute api profiles.validate tenantId=root profileId=ubuntu-24.04-gpu-host profileVersion:=1
+```
+
+The profile is the GPU host from [profiles and images](/docs/guides/bare-metal/profiles-and-images):
+render user data, boot the ramdisk, stream the image, set boot to disk, kexec.
+</Step>
+<Step>
+### Enroll the machines
+
+```json title="enroll-bm-1.json"
+{
+  "tenantId": "root",
+  "siteId": "site_…",
+  "poolId": "pool_…",
+  "bmc": {
+    "address": "https://192.168.122.1:8000/redfish/v1/Systems/<libvirt domain uuid>",
+    "driver": "redfish",
+    "credentials": { "username": "admin", "password": "…" }
+  }
+}
+```
+
+```bash
+better-compute api metal.enroll --data @enroll-bm-1.json
+better-compute api workflows.list tenantId=root nodeId=node_… --query "items[].profileId"
+```
+
+The node is `enrolling`, and the reconciler carries it through `metal-enroll`, `metal-inspect` and
+`metal-commission` to `ready` with no further calls. The example's README also lists `metal.manage`,
+`metal.inspect` and `metal.provide` here: you do not need them after an enrollment. They re-run
+phases of a machine that is already `ready`.
+</Step>
+<Step>
+### Deploy, then release
+
+```bash
+better-compute api metal.deploy tenantId=root nodeId=node_… profileId=ubuntu-24.04-gpu-host profileVersion:=1
+better-compute api metal.undeploy tenantId=root nodeId=node_… wipe=quick
+```
+
+The deploy ends when the installed OS has joined as the same node and the profile's acceptance
+steps passed: the node is `deployed` with role `host`. The undeploy wipes and powers off, and the
+node is `ready` again only after the wipe is attested.
+</Step>
+</Steps>
+
+### What the machine sees
+
+In the lifecycle test, enrollment to `ready` sends exactly these commands. BMC work goes to the site
+agent, disk and diagnostics work to the machine's ramdisk:
+
+| # | Command | Sent by |
+| --- | --- | --- |
+| 1 | `bmc.query` | `power.getPower` (the BMC answers with these credentials) |
+| 2 | `bmc.query` | `inspect.oob` (PXE MACs, SMBIOS UUID, IP addresses) |
+| 3 | `bmc.boot` | one-time PXE |
+| 4 | `boot.prepareRamdisk` | a boot entry with a MAC-bound discovery token |
+| 5 | `bmc.power` | cycle into the ramdisk |
+| 6 | `inventory.refresh` | in-band inventory |
+| 7 | `boot.cleanUp` | inspection's cleanup; the ramdisk stays up |
+| 8 | `diag.dcgm` | level 2, node-signed |
+| 9 | `disk.wipe` | quick, node-signed |
+| 10 | `bmc.power` | off |
+| 11 | `boot.cleanUp` | commissioning's cleanup |
+
+The deploy then sends `deploy.image` (the catalog source, digest, format and compression, plus a
+reference to the rendered user data) and `boot.kexec`. The user data travels only as a reference, and
+the deploy's ramdisk boot gets its own discovery token.
+
+## Walkthrough: Ubuntu autoinstall over virtual media
+
+This is walkthrough 1 of PLAN.md §5.6: a third-party plugin, with no change to `@better-compute/*`,
+installs Ubuntu with its own installer from an ISO mounted through the BMC, with a single-use
+`provisioned` join token inside the autoinstall configuration so `bcd` joins afterwards.
+
+```ts title="acme-autoinstall.ts"
+import { createHash } from 'node:crypto';
+import { definePlugin, manifest } from 'better-compute/core';
+import { defineProfile, defineStep, renderTemplate } from 'better-compute/provision';
+
+const autoinstall = `#cloud-config
+autoinstall:
+  version: 1
+  identity: { hostname: {{hostname}} }
+  late-commands:
+    - curtin in-target -- sh -c "echo {{joinToken}} > /etc/bcd/join-token && chmod 600 /etc/bcd/join-token"
+    - curtin in-target -- systemctl enable bcd
+`;
+
+const renderAutoinstallIso = defineStep({
+  id: 'autoinstall.renderIso',
+  runsOn: 'control-plane',
+  timeout: '5m',
+  retrySafe: false,
+  input: manifest({}),
+  async run(_input, context) {
+    const node = context.node!;
+    const { token } = await context.sql.transaction((tx) =>
+      context.pki!.issueJoinToken(tx, { tenantId: 'root', role: 'provisioned', siteId: node.siteId, ttlSeconds: 7200, maxUses: 1 }),
+    );
+    const userData = renderTemplate(autoinstall, { hostname: node.id.replace(/_/g, '-'), joinToken: token });
+    const digest = createHash('sha256').update(userData).digest('hex');
+    await publishIso(digest, userData); // your ISO build and storage behind the site cache
+    return { url: `https://cache.site-a/autoinstall/${digest}.iso` }; // unguessable, per node
+  },
+});
+
+const ubuntuAutoinstall = defineProfile({
+  id: 'ubuntu-24.04-autoinstall',
+  version: 1,
+  target: 'metal',
+  role: 'host',
+  steps: [
+    { use: 'autoinstall.renderIso' },
+    { use: 'media.insert', on: 'site', with: { fromStep: 'autoinstall.renderIso' } },
+    { use: 'management.setBootDevice', on: 'site', with: { device: 'cd' } },
+    { use: 'power.setPower', on: 'site', with: { action: 'cycle' } },
+    { use: 'wait.agentJoined', with: { role: 'node' } },
+    { use: 'media.eject', on: 'site' },
+  ],
+});
+
+export const acmeAutoinstall = definePlugin({
+  id: 'acme-autoinstall',
+  extensions: [renderAutoinstallIso],
+  profiles: [ubuntuAutoinstall],
+});
+```
+
+Pass the plugin to the workflow engine next to metal, so it resolves the plugin's step and profile:
+`provisionModule({ modules: [bareMetal, acmeAutoinstall] })`. `media.insert` with `fromStep` reads the
+`url` the render step returned and mounts it through the BMC's virtual media.
+
+What the tests assert:
+
+- `profiles.validate` resolves every step of the plugin profile.
+- Enroll, `ready`, deploy, `deployed` with role `host`, undeploy, `ready`; the ISO is ejected and the
+  token appears only inside the ISO, never in a command.
+- The v0.2 acceptance in simulation: 20 consecutive unattended deploy and release loops, a fresh
+  single-use token per install, and every transition into `ready` preceded by exactly one attested
+  wipe in that workflow. A release whose wipe is not attested ends `failed` with
+  `failedFrom: 'releasing'` and maintenance on.
+
+<Callout type="warn" title="Joining as the same node">
+In the simulation the installed OS rejoins as the deploying node. The real `provisioned` attestor
+re-keys an existing node only for tokens it can trace to a running workflow, and the resolver that
+ships (`provisionedTargetResolver`) traces tokens minted by `userdata.render`. A token a plugin mints
+itself must at least carry `expect: { productUuid }`, and then joins as a new node.
+</Callout>
+
+## Walkthrough: Talos on an agentless pool
+
+Talos manages itself through its own API and never runs `bcd`. This is walkthrough 3 of PLAN.md §5.6:
+a pool with `agent: 'none'`, inventory from Redfish, and a third-party step that reaches the Talos
+API through the site agent, because the control plane never talks to machines directly.
+
+```ts title="acme-talos.ts"
+import { field, manifest } from 'better-compute/core';
+import { httpViaSite } from 'better-compute/metal';
+import { defineProfile, defineStep, stepNotReady } from 'better-compute/provision';
+
+const talosReady = defineStep({
+  id: 'wait.talosReady',
+  runsOn: 'control-plane',
+  relays: ['site'],
+  timeout: '20m',
+  retrySafe: true,
+  input: manifest({ port: field.int({ min: 1, max: 65535 }).default(50000) }),
+  async run(input, context) {
+    const { rows } = await context.sql.query<{ addresses: string[] }>(
+      'SELECT addresses FROM metal_nodes WHERE node_id = $1', [context.node!.id],
+    );
+    const address = rows[0]?.addresses[0];
+    if (!address) throw stepNotReady(10_000);
+    const response = await httpViaSite(context, {
+      url: `https://${address}:${input.port}/machine/version`,
+      tlsSpkiSha256: talosCaSpki, // Talos serves its own CA: pin it
+      poll: true, // each call returns the newest answer and sends the next request
+    });
+    if (response.status !== 200) throw stepNotReady(5_000);
+    return { talos: response.json<{ version: string }>().version };
+  },
+});
+
+const talos = defineProfile({
+  id: 'talos-1.8',
+  version: 1,
+  target: 'metal',
+  role: 'host',
+  steps: [
+    { use: 'media.insert', on: 'site', with: { url: 'https://cache.site-a/talos-1.8-metal-amd64.iso' } },
+    { use: 'management.setBootDevice', on: 'site', with: { device: 'cd' } },
+    { use: 'power.setPower', on: 'site', with: { action: 'cycle' } },
+    { use: 'wait.talosReady' },
+  ],
+});
+```
+
+The pool opts in to what an agentless machine cannot do:
+
+```ts
+await compute.api.pools.create(credential, {
+  tenantId: 'root',
+  siteId,
+  class: 'metal-host',
+  agent: 'none',
+  policy: { allowUnverifiedRelease: true, provisioningCidrs: ['10.30.0.0/16'] },
+});
+```
+
+- **Enrollment** runs `metal-enroll`, then the out-of-band profiles: Redfish inspection records the
+  machine's MACs and IP addresses, and commissioning only powers it off. No ramdisk ever boots.
+- **Deploy** mounts the Talos ISO, boots it and polls the Talos API until it answers. The node is
+  `deployed` with role `host`, and every command went to the site agent.
+- **Release** ejects the media and powers off. It reaches `ready` without an attested wipe only
+  because the pool set `allowUnverifiedRelease`, and metal publishes `node.release.unverified`.
+  Without it the release fails with `UNVERIFIED_WIPE`.
+- **Rescue** needs a ramdisk and fails the node with `UNSUPPORTED`.
+- The node never connects, so it is never schedulable for `hold` reservations. PLAN.md has such
+  nodes serve `binding: 'node'` leases from v0.5.
+
+### What `site.httpProxy` allows
+
+The site agent is a trusted proxy on the provisioning network, so `httpViaSite` refuses anything
+beyond talking to the machine itself, with `INVALID_INPUT`, before a command exists:
+
+- The host must be an IP literal among the machine's recorded addresses. Names are refused, so DNS
+  rebinding cannot redirect it.
+- `https` only, unless the address is inside one of the pool's `policy.provisioningCidrs` (IPv4).
+- No credentials in the URL, no `Host` or hop-by-hop headers, no line breaks in header values, and
+  secret headers only as `secret://` references that the agent resolves and never logs.
+- Methods `GET`, `POST`, `PUT` and `DELETE`, with a timeout from 1 to 60 seconds (30 by default).
+
+A redirect is `DRIVER_ERROR` rather than followed, and so is a response over 1 MiB.
+
+## Release and retire
+
+- `metal.undeploy` takes `wipe`: `quick` (the default), `secure-erase`, `crypto-erase`, or `none`.
+  Every mode but `none` must come back node-signed with every disk's read-back passed before the
+  machine is `ready`.
+- `metal.retire` works from `ready`, `failed`, `enrolling`, `adopting` or `adopted`, so undeploy a
+  deployed machine first. It crypto-erases, powers off and revokes the machine's identity; `retired`
+  is final.
+
+<Cards>
+  <Card icon={<Layers />} title="Profiles and images" href="/docs/guides/bare-metal/profiles-and-images">
+    The steps these profiles use, user data templates and the image catalog.
+  </Card>
+  <Card icon={<Puzzle />} title="Extension walkthroughs" href="/docs/extending/walkthroughs">
+    The same walkthroughs from the plugin author's side.
+  </Card>
+  <Card icon={<ShieldKeyhole />} title="Dedicated-root metal" href="/docs/guides/bare-metal/dedicated-root">
+    Leasing a whole machine, with root, to one tenant.
+  </Card>
+</Cards>

@@ -1,0 +1,223 @@
+---
+title: MCP
+description: The Better Compute MCP server gives AI agents tools to find capacity, reserve GPUs and check nodes, as the agent, behind Better IAM's gate with delegated confirmation.
+metaTitle: MCP tools for AI agents
+icon: Bot
+status: beta
+packages: ['@better-compute/mcp', '@better-compute/client']
+sources:
+  - packages/mcp/README.md
+  - packages/mcp/package.json
+  - packages/mcp/src/index.ts
+  - packages/mcp/src/server.ts
+  - packages/mcp/src/tools.ts
+  - packages/mcp/src/confirmations.ts
+  - packages/better-compute/src/mcp.ts
+  - tests/mcp-server.test.ts
+  - tests/mcp-e2e-confirmation.test.ts
+  - PLAN.md
+---
+
+`@better-compute/mcp` turns the compute API into [Model Context Protocol](https://modelcontextprotocol.io) tools, so
+an AI agent can find GPU capacity, reserve and release GPUs, look at a node and run a diagnostic. It is built for
+the v0.3 goal "an agent reserves via MCP with human confirmation, retrying with the same key", and the end-to-end
+test `tests/mcp-e2e-confirmation.test.ts` runs exactly that against a real server and an embedded Better IAM.
+
+The design has one rule: **every tool calls the compute API as the caller.** A tool forwards the agent's own
+`Authorization` header, so compute and Better IAM make the real decision on each call, and a tool can never do more
+than the agent's credential allows. The server holds no credential of its own.
+
+## How it fits
+
+```mermaid
+sequenceDiagram
+  participant A as Agent (MCP client)
+  participant G as Better IAM gate
+  participant M as createComputeMcp
+  participant C as compute API
+  participant I as Better IAM
+  A->>G: POST tools/call reserve_gpus (Bearer agent token)
+  G->>I: authenticate; compute:pools:read on the pool?
+  G->>M: forwarded request, caller
+  M->>M: validate arguments against the tool's schema
+  M->>C: reservations.create (same Bearer token)
+  C->>I: decide compute:reservations:create on the draft
+  C-->>M: reservation, or CONFIRMATION_REQUIRED
+  M-->>A: tool result (structuredContent)
+```
+
+The server is a small, stateless Streamable HTTP endpoint that speaks JSON-RPC 2.0 for `initialize`, `ping`,
+`tools/list` and `tools/call`, and accepts notifications. It has no MCP SDK dependency; its only runtime dependency
+is `@better-compute/client`. `@better-iam/mcp`, which provides the gate, is an optional peer.
+
+<Callout type="info" title="A library, not a service">
+  No better-compute process mounts an MCP endpoint for you: `serve`, `dev` and the console do not. You host the
+  handler yourself, in any runtime with the Fetch API, as below. A remote-IAM variant that authenticates through
+  Better IAM's `sts.getCallerIdentity` is planned for v0.4.
+</Callout>
+
+## Mount the endpoint
+
+```ts title="mcp.ts"
+import { createMcpGate } from '@better-iam/mcp';
+import { createComputeMcp, gateTools, iamConfirmations } from 'better-compute/mcp';
+import { iam } from './iam';
+
+const mcp = createComputeMcp({
+  baseURL: 'https://compute.example.com',
+  // Optional: wait inside the tool call for the person to approve (see below).
+  confirmations: iamConfirmations(iam.api.delegations),
+});
+
+const gate = createMcpGate({ iam, tenantId, tools: gateTools(), unlisted: 'deny' });
+
+export default {
+  fetch: (request: Request) => gate(request, (forwarded, caller) => mcp.handler(forwarded, caller)),
+};
+```
+
+With `baseURL`, each request gets a fresh compute client that forwards the caller's `Authorization` header and a
+request id. The gate authenticates the caller, applies the visibility rules below, and hands the handler the
+caller's `tenantId`, which the tools act in.
+
+<TypeTable
+  type={{
+    baseURL: { type: 'string', description: 'The compute API origin. Needed unless client is given.' },
+    basePath: { type: 'string', description: "Where the API is mounted.", default: "'/api/compute'" },
+    client: {
+      type: 'ComputeApi | ((request, caller?) => ComputeApi)',
+      description: 'How tools reach compute instead: a fixed client, or one per request. Anything with $request fits, such as createComputeClient().',
+    },
+    tenantId: { type: 'string | ((caller?) => string | undefined)', description: "The tenant tools act in. Default: the caller's tenantId. Without one, every tool answers ACCESS_DENIED." },
+    execCommand: { type: 'boolean', description: 'Build exec_command. Off: running node commands through a model is a deliberate choice.', default: 'false' },
+    fleet: { type: 'boolean', description: 'Build the read-only fleet_export and fleet_plan tools (platform administrators only).', default: 'false' },
+    confirmations: {
+      type: 'ConfirmationPolling | ((request, caller?) => ConfirmationPolling | undefined)',
+      description: 'Wait for people to approve held-back actions inside the tool call. iamConfirmations() builds one per request.',
+    },
+    serverInfo: { type: '{ name: string; version: string }', description: 'Reported at initialize.', default: "{ name: 'better-compute', version: '0.1.0' }" },
+    instructions: { type: 'string', description: 'Shown to the model at initialize. The default explains the list, preview, reserve and retry flow.' },
+    maxBodyBytes: { type: 'number', description: 'Largest JSON-RPC request body.', default: '1048576 (1 MiB)' },
+    newKey: { type: '() => string', description: 'Idempotency keys for tools that create things.', default: 'mcp- and 24 random hex characters' },
+  }}
+/>
+
+`createComputeMcp()` returns the `tools`, `listTools()` (the `tools/list` entries) and `callTool(name, args, request,
+caller?)` besides `handler`, so you can run a tool without the JSON-RPC wrapper, for example from your own agent
+framework.
+
+## The tools
+
+| Tool | Calls | Gate rule | Hints |
+| --- | --- | --- | --- |
+| `list_pools` | `pools.list` | any authenticated caller | read-only |
+| `capacity_summary` | `capacity.summary`, or `capacity.byPool` with `poolId` | any authenticated caller | read-only |
+| `preview_reservation` | `capacity.preview` | `compute:pools:read` on the pool | read-only |
+| `reserve_gpus` | `reservations.create` (`binding: 'hold'`) | `compute:pools:read` on the pool | idempotent |
+| `release_reservation` | `reservations.release` | any authenticated caller | destructive, idempotent |
+| `node_status` | `nodes.get` | `compute:nodes:read` on the node | read-only |
+| `run_diagnostic` | `commands.run` with `diag.nvml` | `compute:nodes:read` on the node | idempotent |
+| `create_instance` | `instances.create` | `compute:pools:read` on the pool | idempotent |
+| `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot` | `compute:nodes:read` on the node | destructive |
+| `fleet_export` (with `fleet: true`) | `fleet.export` | `compute:fleet:admin` on the fleet | read-only |
+| `fleet_plan` (with `fleet: true`) | `fleet.plan` | `compute:fleet:admin` on the fleet | read-only |
+
+The GPU tools share one argument shape: `poolId`, `gpus` (1 to 64 whole GPUs), `duration` (such as `30m`, `8h`,
+`3d`), and optionally `gpuModel` (`H100`), `gpuProduct` (`H100-SXM5-80GB`), `nvlink` (all GPUs in one NVLink
+domain) and `selector` (up to 32 `{ key, op, values }` expressions with `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt`,
+`Gte`, `Lt` or `Lte`). The tool turns them into one device request of class `gpu`. `reserve_gpus` also takes an
+`idempotencyKey` and `waitSeconds` (0 to 30, default 20).
+
+Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
+(`pool_…`, `node_…`, `rsv_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
+with the path of the first problem.
+
+**Fleet tools plan but never apply.** `fleet_plan` returns the changes and the `planHash`, with the list of calls
+replaced by `callCount`. There is deliberately no apply tool: a person reviews the plan and runs
+`better-compute fleet apply FILE --plan-hash HASH`. Pass `fleet: true` to both `createComputeMcp` and `gateTools`.
+
+## The gate checks visibility only
+
+`gateTools()` returns the rules for `@better-iam/mcp`'s `createMcpGate({ tools, unlisted: 'deny' })`. They are
+deliberately light:
+
+- A tool that names a pool is visible to a caller with `compute:pools:read` on `compute-pool/{poolId}`; one that
+  names a node needs `compute:nodes:read` on `compute-node/{nodeId}`.
+- `list_pools`, `capacity_summary` and `release_reservation` are open to any authenticated caller, because the
+  compute API filters and decides every call anyway.
+- The fleet tools need `compute:fleet:admin` on `compute-fleet/global`, which only resolves in the root tenant.
+
+The gate never checks the action a tool performs, such as `compute:reservations:create`. That decision happens once,
+in compute, on the reservation draft with its full attributes. Actions a delegation holds back for confirmation are
+never gate actions, so a person is never asked twice about two different resources for one request. Pass
+`typePrefix` to `gateTools` if your deployment uses a resource type prefix other than `compute-`.
+
+## Results and errors
+
+A tool result carries the compute response twice: as pretty-printed JSON text in `content`, and as
+`structuredContent` (an object; other values are wrapped as `{ result }`). `reserve_gpus` answers
+`{ idempotencyKey, reservation }` and `create_instance` `{ idempotencyKey, instance }`, so the model always has the key
+to retry with.
+
+A compute error becomes a tool error with `isError: true`, the text `CODE: message`, and
+`structuredContent.error` holding `code`, `message`, and `retryAfterMs` and `details` when compute sent them. Any
+other failure is reported as `INTERNAL_ERROR` with a generic message, never internals. JSON-RPC problems use the
+standard codes: `-32700` for unparsable JSON (HTTP 400) or a non-JSON content type (HTTP 415), `-32600` for an
+invalid request or a batch (HTTP 400) or a body over `maxBodyBytes` (HTTP 413), `-32601` for an unknown method and
+`-32602` for a missing `params.name`. Methods other than POST get 405. Notifications get 202 with no body.
+
+## Delegated confirmation
+
+An agent usually acts through a Better IAM **delegation**: a person lets the agent use some of their permissions,
+and can list actions that the person must approve each time. When the agent calls one of those,
+compute answers `CONFIRMATION_REQUIRED` and Better IAM opens a confirmation request. See
+[delegated confirmation](/docs/guides/iam/delegated-confirmation) for the whole mechanism.
+
+`reserve_gpus` and `create_instance` turn that error into a normal result the model can act on:
+
+```json title="reserve_gpus, waiting for a person"
+{
+  "status": "confirmation-required",
+  "confirmationId": "cnf_…",
+  "idempotencyKey": "mcp-3f9c0a…",
+  "message": "A person must approve this action. Once they have, call the tool again with the same idempotencyKey."
+}
+```
+
+The model calls the tool again with the same arguments and that `idempotencyKey` once the person has approved. The
+retry reaches the same reservation draft, Better IAM finds the approval, and the reservation is placed. The default
+server instructions tell the model to do exactly this.
+
+**Waiting inside the call.** With `confirmations`, the tool polls instead of returning at once: it asks for the
+confirmation's state every `intervalMs` (default 2 s) for up to `timeoutMs` (default 25 s). On `approved` it
+retries once with the same key and returns the result; on `denied` or `expired` it returns
+`{ status: 'confirmation-denied' | 'confirmation-expired', confirmationId, idempotencyKey }`; on a timeout it returns
+`confirmation-required` as above.
+
+`iamConfirmations(iam.api.delegations, { timeoutMs?, intervalMs?, now? })` builds that poller per request from
+Better IAM's `delegations.getConfirmation`, called with the caller's own bearer token in the caller's tenant, so an
+agent only ever sees its own requests. It maps `rejected` to `denied`, and a `pending` request past its `expiresAt`
+to `expired`. Without a bearer token or a tenant it returns nothing and the tool answers `confirmation-required`.
+
+<Callout type="warn" title="Stop on a rejection">
+  A retry after the person rejected is decided again, denied again, and opens a new confirmation request. Tell your
+  agent to stop on `confirmation-denied`, and to start over with a new request (and key) after
+  `confirmation-expired`.
+</Callout>
+
+## Limits worth knowing
+
+- `exec_command` is off unless you pass `execCommand: true`, and even then it only runs `inventory.refresh`,
+  `logs.collect` and `node.reboot`. `node.reboot` restarts the machine.
+- `run_diagnostic` runs `diag.nvml` only. It returns the queued command; the result arrives when the node finishes,
+  and `node_status` or the command's own methods show it.
+- `reserve_gpus` always books with `binding: 'hold'`; whole-node leases, spot, gangs and calendar starts are not
+  exposed as tool arguments.
+- `release_reservation` is marked destructive: many MCP hosts ask the user before calling such a tool.
+- The server is stateless, with JSON responses only: it does not open SSE streams or send server notifications, and
+  `tools.listChanged` is `false`. It negotiates protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`,
+  answering with the newest when the client asks for another.
+
+Related: [reservations](/docs/guides/capacity/reservations), [policies](/docs/guides/iam/policies) (the
+`agent-guardrails` example policy), and the [TypeScript client](/docs/guides/clients/typescript-client) the tools
+are built on.

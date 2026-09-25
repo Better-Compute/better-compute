@@ -1,0 +1,301 @@
+---
+title: Deployment
+description: Lay out the api, gateway and worker processes, put the right load balancers in front, run the better-compute serve host or embed the handler in your own app.
+icon: Rocket
+packages: ['@better-compute/cli', '@better-compute/server', '@better-compute/gateway']
+sources:
+  - packages/cli/src/commands/serve.ts
+  - packages/cli/src/host/config.ts
+  - packages/cli/src/host/http.ts
+  - packages/cli/src/host/gateway.ts
+  - packages/cli/src/host/tunnels.ts
+  - packages/cli/src/host/iam.ts
+  - packages/cli/src/host/findings.ts
+  - packages/cli/src/config.ts
+  - packages/server/src/http.ts
+  - packages/server/src/runtime/index.ts
+  - packages/gateway/README.md
+  - packages/gateway/src/gateway.ts
+  - apps/console/console.config.mjs
+  - apps/console/server.mjs
+  - apps/console/src/app/api/compute/[...path]/route.ts
+  - examples/README.md
+  - examples/shared/compose.ts
+  - examples/postgres/README.md
+  - examples/postgres/docker-compose.yml
+  - PLAN.md
+---
+
+Every process of a deployment loads the same configuration and differs only in the roles it runs. That leaves
+two decisions: how many processes of each role you run and where, and whether you run them with the
+`better-compute serve` host or embed the control plane in an application of your own.
+
+## Topologies
+
+### One process
+
+`better-compute serve` with the default `--roles all` runs the API, every worker role, and the gateway when the
+configuration exports `host.gateway`. It suits a small installation, a staging environment or a single site.
+Nothing changes in the database when you later split it: leases and shard ownership already keep every job
+single-writer.
+
+```bash
+better-compute migrate
+better-compute serve --port 3000 --no-migrate
+```
+
+### Split roles
+
+The production shape runs each role in its own processes, all from one configuration. This is what
+`examples/postgres` does:
+
+```bash
+better-compute migrate                                                    # once per deploy
+better-compute serve --roles api --port 3000 --no-migrate                 # behind an L7 load balancer
+better-compute serve --roles controllers,scheduler,sinks,iam --no-migrate # workers, no listener
+better-compute serve --roles gateway --no-migrate                         # mTLS on :8443, behind an L4 balancer
+```
+
+Run as many of each as you need:
+
+- **api** processes are stateless. Put them behind any HTTP load balancer.
+- **Worker** processes register in the `workers` table and split the 256 `shard:<n>` leases by rendezvous hashing;
+  singleton jobs (the CommandSweeper, outbox dispatch, each IAM job) run under their own `singleton:<name>` lease on
+  whichever worker holds it. Shard and singleton leases live 15 s and renew every 5 s.
+- **Gateway** processes each hold a `gateway:<id>` lease (20 s, renewed every 5 s) and a row in `gateways`. A node's
+  session row names the gateway that holds it, and dispatch joins on it, so any number of gateways can share a
+  region.
+
+With separate processes, give each gateway an internal control API (`host.gateway.internal`) and the api a
+`notifier`. Then the api wakes the owning gateway right after it enqueues a command, relays tunnels, and pushes
+revocations. Without them dispatch waits for the gateway's 1-second loop, and tunnels cannot open; `doctor` reports
+both (`host.gateway.internal`, `host.gateway.notifier`, `host.gateway.tunnels`).
+
+### A highly available region
+
+Section 14 of PLAN.md sizes a highly available region as:
+
+| Component | Count | Notes |
+| --- | --- | --- |
+| api | 3 | Behind an L7 load balancer |
+| gateway | 3 or more | Behind an L4 load balancer with TLS passthrough |
+| worker | 2 or more | Shards move by rendezvous hashing when a worker joins or leaves |
+| PostgreSQL | HA pair | With PgBouncer in transaction mode |
+| Better IAM | embedded | In the api and worker processes; compute is the IAM host family, and the `iam` role runs its jobs |
+| Site agents | 2 per site | One holds the `site:<id>:boot` lease, the other stands by |
+
+It also lists an object store, an OTLP collector with a time-series database, and KMS or Vault. None of those is
+required to start: the local CAs in the PKI bundle are the form the code ships, meant for development and small
+deployments.
+
+### Regions and sites
+
+A region is a set of gateways with the same `host.gateway.region` (the value in `sites.region`). Daemons dial the
+gateways of their own region; sites need only outbound 443. Every region's gateways write to the same database as
+the api and workers.
+
+An air-gapped installation (local object store, image mirror, `bcd` downloads from `downloads.dir`) is designed in
+PLAN.md but not built: the `downloads` option is accepted and not used yet.
+
+## Load balancers
+
+| In front of | Kind | Why |
+| --- | --- | --- |
+| api | L7 (HTTP) with TLS termination | The API is plain HTTP on `--port`; `serve` itself never terminates TLS for it. `baseURL` must be the public origin, since cookie requests must come from exactly that origin. |
+| gateway | L4 (TCP) with TLS passthrough | The gateway terminates mutual TLS itself and authenticates the daemon by its client certificate. A balancer that terminates TLS strips it. |
+| gateway internal API | none, or internal L4 | Each gateway advertises its own `host.gateway.internal.url` in its `gateways` row; the api dials that URL directly. |
+
+For networks whose TLS-inspecting proxies strip client certificates, the gateway can also serve a WebSocket
+fallback (v0.4) at `wss://<publicHost>/v1/session` (`host.gateway.ws`, default port 443), where the daemon proves its
+identity in-band.
+
+## The serve host
+
+`better-compute serve` (`packages/cli/src/host/**`) is a thin Node.js host around `compute`. On start it:
+
+1. loads the configuration and resolves the `host` export;
+2. runs `compute.initialize()` (migrations, registry checks, module start) unless `--no-migrate`;
+3. installs the IAM event handlers when `host.iam` is set;
+4. starts the worker roles with `compute.start({ roles })`;
+5. starts the gateway role: `createGateway`, the revocation feed, the mTLS listener, and the WebSocket and internal
+   listeners when configured;
+6. opens the HTTP listener for the `api` role.
+
+### Routes
+
+The HTTP listener answers, in order:
+
+| Path | Answer |
+| --- | --- |
+| `GET /healthz` | Always `200 {"ok":true}`: the process is up. |
+| `GET /readyz` | `200 {"ok":true}` when `SELECT 1` succeeds, else `503 {"ok":false}`. |
+| `GET /.well-known/better-compute` | The server's document (name, version, base path, agent protocol range) plus JoinService's public keys as `join` when `pki.join` publishes them. Cached for 300 s. `host.http.wellKnown` adds fields but never overrides the server's. |
+| `host.http.routes` | Your own fetch-style routes, for example the events module's `GET /watch` and `GET /metrics`. |
+| `{basePath}/…` | The API: `POST {basePath}/{group}/{method}`, `GET {basePath}/health` and `GET {basePath}/.well-known/better-compute`. The default base path is `/api/compute`. |
+| `GET {basePath}/tunnels/{ticket}` (upgrade) | Interactive tunnels, mounted when the options set `tunnels: { issuer }`. |
+
+Host routes must be absolute paths without a trailing slash, outside the base path, and must not reuse the
+built-in paths; `doctor` reports a clash as `host.routes`. `GET /metrics` is added only when `host.metrics` has a
+`bearerToken` of at least 16 characters; scrapers send `Authorization: Bearer <token>`. See
+[observability](/docs/operations/observability).
+
+### Health checks
+
+Use `/healthz` for liveness and `/readyz` for readiness of api processes. `{basePath}/health` also pings the store
+and answers `{ status, database, latencyMs, time }`. Worker-only and gateway-only processes open no HTTP listener,
+so check them through the database instead: `better-compute doctor` reports lease health and gateway headroom, and
+the `gateways` row of a live gateway has a fresh `heartbeat_at`.
+
+### Shutdown
+
+On SIGINT or SIGTERM `serve` stops in this order:
+
+1. The gateway drains: it tells each daemon to reconnect elsewhere (`Drain`, with a random delay of up to 60 s),
+   closes its listeners with a 2 s grace, and releases its lease.
+2. The HTTP listener closes, so no new requests arrive.
+3. Tunnel relays close.
+4. The worker roles stop and release their shard and singleton leases, and the worker leaves the `workers` table.
+
+A process killed without that still loses nothing: its leases expire after 15 s (20 s for a gateway) and another
+process takes them over, with a new epoch that fences out anything the old one still tries.
+
+### The gateway role
+
+`--roles gateway` (or `all` with `host.gateway` set) needs:
+
+- `host.gateway.region`;
+- `host.gateway.tls` with `key` and `cert` from the gateway serving CA (`pki issue-gateway`) and `ca`, the node CA
+  roots;
+- a way to authenticate daemons: `pki.nodeCa` and `pki.join` in the options (from the PKI bundle), or
+  `host.gateway.identity { roots, trustDomain, revocations }`. The role refuses to start without roots and a trust
+  domain.
+
+The host fills in the gateway's store, services, work queue, events, report handlers and the tunnel JWKS. Anything
+else `createGateway()` takes goes in `host.gateway.options`, for example `maxStreams` (default 5,000) or vps's
+`instanceStatusHandler` in `options.reports.status`. The certificate is read once at start: after
+`pki issue-gateway` writes a new one, restart gateways one at a time.
+
+In this release the gateway process builds `compute.gatewayServices` from the shared configuration, so it loads the
+PKI bundle like every other process. See [security](/docs/operations/security#gateway-processes).
+
+## Embedding in your application
+
+`betterCompute()` returns a fetch handler and a Node handler, so you can serve the API from any framework:
+
+<Tabs items={['Next.js', 'Node', 'Hono']}>
+<Tab value="Next.js">
+
+```ts title="app/api/compute/[...path]/route.ts"
+import { getStack } from '@/lib/stack';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+async function handle(request: Request): Promise<Response> {
+  return (await getStack()).compute.handler(request);
+}
+
+export { handle as GET, handle as POST };
+```
+
+</Tab>
+<Tab value="Node">
+
+```ts title="server.ts"
+import { createServer } from 'node:http';
+
+await compute.initialize();
+await compute.start(); // every worker role
+createServer(compute.nodeHandler).listen(3000);
+```
+
+</Tab>
+<Tab value="Hono">
+
+```ts title="server.ts"
+app.all('/api/compute/*', (c) => compute.handler(c.req.raw));
+```
+
+</Tab>
+</Tabs>
+
+`apps/console` is the reference: Better IAM and Better Compute in one Next.js process on one origin (`/api/iam`
+and `/api/compute`), with `acceptIamCookie: true` so the browser's IAM session cookie authenticates compute calls
+that carry `X-Better-Compute: 1` from that origin. Next.js route handlers cannot take a WebSocket upgrade, so its
+`server.mjs` wraps Next and hands `GET /api/compute/tunnels/{ticket}` to `handleTunnel` from
+`better-compute/server`.
+
+When you embed, you take over what `serve` does for you:
+
+- call `compute.initialize()` before serving and `compute.start({ roles })` in the processes that run workers;
+- register `retentionModule()` from `better-compute/postgres` yourself; the CLI adds it when the configuration does
+  not (see [retention](/docs/operations/retention));
+- serve your own health and readiness routes, and `/.well-known/better-compute` at the origin root if daemons use
+  it (the server answers it under the base path);
+- run the gateway with `createGateway` and `serveGateway` from `better-compute/gateway`, or run it with
+  `serve --roles gateway` from the same configuration;
+- call `compute.stop()` on shutdown so leases are released at once rather than after they expire.
+
+## Containers
+
+The repository has no container image for the control plane (`apps/docs/Dockerfile` builds the documentation
+site). A container runs `better-compute serve` like any other process. It needs Node.js 22.12 or newer (22.18 or
+newer for a `.ts` configuration), the configuration file, and the environment below; `serve` handles SIGTERM.
+
+| Variable | Needed by |
+| --- | --- |
+| `BETTER_COMPUTE_DATABASE_URL`, `BETTER_COMPUTE_SECRET` | Every process (the examples read them; your configuration decides) |
+| `BETTER_COMPUTE_ROLES`, `PORT`, `HOST` | `serve` flags `--roles`, `--port`, `--host` |
+| `BETTER_COMPUTE_CONFIG` | A configuration outside the working directory and its parents |
+| `BETTER_COMPUTE_PKI` | The PKI bundle path (default `.better-compute/pki.json`), mounted read-only |
+
+Run `better-compute migrate` as a one-off job before rolling out new processes, and start them with `--no-migrate`.
+See [configuration](/docs/operations/configuration#environment-variables).
+
+## Upgrades
+
+PLAN.md orders an upgrade as:
+
+1. expand migrations (`better-compute migrate`);
+2. workers and api;
+3. gateways, one at a time, each drained first;
+4. daemon waves within each pool's disruption budget (see [rollouts](/docs/guides/rollouts));
+5. contract migrations in the next release.
+
+`migrate` refuses to run an older build against a database a newer build migrated, naming the migrations it does
+not know, so a rollback of the code needs the matching database. See [database](/docs/operations/database#migrations).
+
+## Examples
+
+Each directory under `examples/` is a workspace package with a `better-compute.config.ts`. All three run the same
+deployment from `examples/shared/compose.ts`: every module (provision and metal, vps, events, fleet, and rollout and
+audit when their keys exist) and a `host` export with `GET /watch`, `GET /metrics` and the gateway role when its
+certificate exists.
+
+| Example | Shows | Needs |
+| --- | --- | --- |
+| `examples/dev` | `better-compute dev --sim 8`: simulated GPU machines join, are adopted and serve reservations, on PGlite | Node.js 22.18 or newer |
+| `examples/postgres` | api, worker and gateway processes on PostgreSQL from one configuration, with the `pool-lease` placer; `docker-compose.yml` runs `postgres:17` | PostgreSQL 16 or newer, a PKI bundle for the gateway |
+| `examples/emulated-site` | Bare metal on QEMU/KVM with Redfish BMCs from sushy-tools and PXE through a `bcd site` agent | Linux, KVM, libvirt, sushy-tools and a `bcd` build |
+
+`tests/examples-smoke.test.ts` checks that each configuration loads, migrates and passes `doctor`, and that
+`dev --sim` adopts machines and serves `/watch`. The PostgreSQL and emulated-site walkthroughs are not run in CI
+beyond that.
+
+The shared composition reads these variables:
+
+| Variable | Effect |
+| --- | --- |
+| `BETTER_COMPUTE_DATABASE_URL` | `postgres://…`, `pglite:DIR` or `pglite:memory`; default PGlite in `.better-compute/example-db` |
+| `BETTER_COMPUTE_SECRET` | Required with PostgreSQL; PGlite examples fall back to a fixed development secret |
+| `BETTER_COMPUTE_PKI` | The bundle; with it JoinService, the audit module and the gateway role turn on |
+| `BETTER_COMPUTE_GATEWAY_CERT`, `BETTER_COMPUTE_GATEWAY_KEY` | `pki issue-gateway` output; with them and the bundle, `host.gateway` |
+| `BETTER_COMPUTE_GATEWAY_PORT`, `BETTER_COMPUTE_REGION` | Gateway port (default 8443) and region (default `dev-1`) |
+| `BETTER_COMPUTE_METRICS_TOKEN` | At least 16 characters; mounts `GET /metrics` |
+| `BETTER_COMPUTE_RELEASE_PINS`, `BETTER_COMPUTE_DOWNLOADS_URL` | Turn on the rollout module |
+| `BETTER_COMPUTE_BASE_URL`, `BETTER_COMPUTE_ROOT_TENANT` | Public origin and IAM root tenant |
+
+<Callout type="warn" title="No IAM in the examples">
+  The examples use `unconfiguredIam()`: no credential authenticates until you wire Better IAM through the IAM bridge.
+  `better-compute dev --sim N` replaces it with an embedded, in-memory Better IAM and prints a root token.
+</Callout>

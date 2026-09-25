@@ -1,0 +1,272 @@
+---
+title: Database
+description: PostgreSQL requirements, connecting and pooling through PgBouncer, how migrations run, PGlite for development, the runtime tables and the lock order.
+icon: PostgreSQL
+packages: ['@better-compute/postgres']
+sources:
+  - packages/postgres/README.md
+  - packages/postgres/src/node-postgres.ts
+  - packages/postgres/src/migrate.ts
+  - packages/postgres/src/migrations/index.ts
+  - packages/postgres/src/migrations/0001_clock.ts
+  - packages/postgres/src/migrations/0002_base.ts
+  - packages/postgres/src/pglite.ts
+  - packages/postgres/src/index.ts
+  - packages/server/src/index.ts
+  - packages/server/src/runtime/workers.ts
+  - packages/capacity/src/quota.ts
+  - packages/cli/src/commands/setup.ts
+  - .claude/coordination.md
+  - CHANGELOG.md
+  - PLAN.md
+---
+
+PostgreSQL is the only source of truth. Leases, the work queue, the outbox and every aggregate are tables, so
+processes never coordinate through anything else, and a crashed process leaves nothing behind that the database
+does not already know. Better Compute's store is PostgreSQL or PGlite only: it needs `EXCLUDE` constraints,
+`SKIP LOCKED`, range types and `xid8`, so there is no SQLite adapter.
+
+## Requirements
+
+| Requirement | Why |
+| --- | --- |
+| PostgreSQL 16 or newer | `migrate()` reads `server_version_num` and refuses anything below 160000 with `INVALID_CONFIG`. CI runs PostgreSQL 17. |
+| `btree_gist` | The first migration runs `CREATE EXTENSION IF NOT EXISTS btree_gist`. `device_bookings` needs it for text equality inside `EXCLUDE USING gist (device_id WITH =, during WITH &&)`, the constraint that makes a double booking impossible. |
+| `CREATE` on the database | Migrations create tables, indexes and the `compute_now()` function. |
+
+`btree_gist` is a trusted extension, so a database owner with `CREATE` can install it. On a managed service that
+does not allow that, have a superuser run `CREATE EXTENSION btree_gist` once before the first migration. The
+official `postgres` image ships it; `examples/postgres/docker-compose.yml` runs `postgres:17`.
+
+The booking constraint is the <Term id="exclude-constraint">exclusion constraint</Term> behind every capacity
+guarantee: two overlapping bookings of one device cannot both commit, whatever the application does. See
+[capacity](/docs/guides/capacity).
+
+## Connecting
+
+```ts
+import { postgres } from 'better-compute/postgres';
+
+const database = postgres({ url: process.env.BETTER_COMPUTE_DATABASE_URL!, max: 20, statementTimeoutMs: 15_000 });
+```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `url` | — | A `postgres://` or `postgresql://` connection string. Give this or `pool`. |
+| `pool` | — | A `pg.Pool` you own: TLS, IAM authentication hooks, a PgBouncer endpoint. `close()` leaves it open. |
+| `max` | 10 | Pool size when `url` is given, from 1 to 100. A connection attempt gives up after 10 seconds. |
+| `statementTimeoutMs` | none | `SET LOCAL statement_timeout` at the start of every transaction; standalone statements then run in a short transaction of their own. Migrations run without it. |
+
+An idle connection that errors (a restarted server) is dropped and the next checkout reconnects; it never crashes
+the process.
+
+### Pooling and PgBouncer
+
+Each process holds its own pool, so the total is roughly `max` times the number of processes. PLAN.md lists
+connections as one of the first limits at scale and puts PgBouncer in front of PostgreSQL. `postgres()` is safe
+behind PgBouncer in **transaction** mode:
+
+- it keeps no session state: the statement timeout is `SET LOCAL`, and no startup parameters are set;
+- it never uses `LISTEN`/`NOTIFY`;
+- it uses only unnamed prepared statements;
+- it takes no session-level advisory locks: concurrent migrators serialize on the transaction-level
+  `pg_advisory_xact_lock(1650683248, 1)`, released at `COMMIT`.
+
+Leases are table rows with a TTL and an epoch rather than advisory locks for the same reason: session-level
+`pg_advisory_lock` breaks under transaction pooling.
+
+### Transactions
+
+`transaction(fn, { isolation?, readOnly? })` runs `fn` on one connection between `BEGIN` and `COMMIT` at
+`read committed` by default; guarded updates and row locks carry the invariants. Inside `fn`'s async call chain the
+executor joins the caller's transaction, and a nested `transaction()` becomes a savepoint. A statement error that
+`fn` catches still aborts the transaction in PostgreSQL; the executor detects the `COMMIT` that became a `ROLLBACK`
+and rejects with `INTERNAL_ERROR`. `sqlState(error)` reads the SQLSTATE, such as `23P01` for an exclusion
+violation, from either driver.
+
+## Migrations
+
+`better-compute migrate` runs `compute.initialize()`. It first checks every method's IAM action against the merged
+catalog and the normative method table, and fails with `INVALID_CONFIG` before touching the store if one is
+missing or wrong. Then it applies migrations, anchors the clock, and starts each module. It is idempotent, and
+`serve` and `dev` run it on start unless `--no-migrate`.
+
+```bash
+better-compute migrate     # once per deploy, before new processes start
+better-compute serve --no-migrate
+```
+
+### The ledger
+
+Two tables record what ran: `compute_migrations(name, applied_at)` and `compute_schema_version`, whose `version` is
+the number of base migrations applied. Every migration is named `<owner>/<nnnn>_<slug>` and:
+
+- runs in its own transaction and is recorded in the ledger in that same transaction, so a failed one leaves
+  nothing behind;
+- is skipped when the ledger already has it;
+- is never edited, renamed or removed once released. Numbers only grow within an owner.
+
+`migrate` takes the advisory lock in every transaction, so two processes migrating at once serialize and the
+second skips what the first applied. It refuses to run, with `INVALID_CONFIG` naming the entries, when the ledger
+holds something this build cannot account for:
+
+- a later number from an owner it knows: a newer release migrated this database;
+- an unknown name at or below an owner's last number: a migration was renamed or removed;
+- a base schema version above its own.
+
+Migrations of owners this build has no migrations for are ignored, so dropping a module from the configuration does
+not block startup. Its tables stay.
+
+### Order
+
+Migrations run in registration order:
+
+1. the base schema, owner `core`, which is reserved for it;
+2. the built-in modules: node controllers, site boot, `inventory`, `capacity` (`capacity/0001_device_links`,
+   `capacity/0002_lease_health`), `pki/0001_sealed_secrets` when the default secret store is in use, and the tunnels
+   module when `tunnels` is set;
+3. your `modules`, in the order you list them;
+4. your `plugins`.
+
+### The base schema
+
+| Migration | Adds |
+| --- | --- |
+| `core/0001_clock` | `btree_gist`, `compute_sim_clock`, `compute_now()` |
+| `core/0002_base` | The frozen v0.1 schema: sites, pools, nodes, devices, `device_bookings`, `node_resources`, `quota_usage`, reservations, commands, `work_queue`, `leases`, `workers`, `outbox`, `authz_projection`, `authz_changes`, `iam_inbox`, `join_tokens`, `gateways`, allocations, usage windows and dead letters, `node_certs`, `inventory_snapshots`, `audit_events`, `pool_capacity_rollup` |
+| `core/0003_v01` | v0.1 columns, `node_inventory`, `node_inventory_sections` |
+| `core/0004_command_cancel` | `cancel_requested_at`: cancelling a command after dispatch |
+| `core/0005_audit_commit_order` | `audit_events.txid` and `seq`, so audit readers page in commit order |
+| `core/0006_pool_archive` | Archived pools |
+| `core/0007_device_health` | `device_health` quarantines |
+| `core/0008_session_versions` | The daemon version and protocol a node announced in Hello |
+| `core/0009_runtime` | `outbox_cursors`, `work_queue.attempts`, `commands.owner`, tenant indexes |
+| `core/0010_v02_server` | `join_requests`, `node_certs.allowed_kinds`, `nodes.deleted_at`, `secret_refs` |
+| `core/0011_v02_security` | `sites.deleted_at`, `attestation_uses` |
+| `core/0012_v02_evidence` | `node_bindings`, node signatures of attested results |
+| `core/0013_image_cache` | `node_image_cache` |
+| `core/0014_ssh_certificates` | `ssh_certificates`, for break-glass revocation and audit |
+| `core/0015_inventory_images` | The `images` inventory section |
+
+### Module migrations
+
+| Owner | Migrations |
+| --- | --- |
+| `capacity` | `0001_device_links`, `0002_lease_health` |
+| `pki` | `0001_sealed_secrets` |
+| `iam` | `0001_successors` |
+| `provision` | `0001_workflows`, `0002_images`, `0003_workflow_owner` |
+| `metal` | `0001_nodes`, `0002_addresses`, `0003_tenant_root`, `0004_bmc_credentials` |
+| `vps` | `0001_instances` |
+| `events` | `0001_webhooks` |
+| `fleet` | `0001_names`, `0002_applied` |
+| `rollout` | `0001_rollouts` |
+| `audit` | `0001_checkpoints` |
+
+A module you write owns its own prefix; see [modules](/docs/extending/modules).
+
+### Upgrading
+
+Additive migrations ("expand") run before new code starts; PLAN.md puts destructive ones ("contract") in the
+following release, once no process of the old release is left. Released migrations never change, so a database
+migrated by release N+1 refuses release N; roll back code only together with the database it expects.
+
+## One clock
+
+All SQL reads time through <Term id="compute-now">`compute_now()`</Term>, never `now()`, and column defaults use it
+too. `scripts/check-sql-now.mjs` fails CI on a bare `now()` in `packages/*/src`, except in `core/0001_clock`, which
+defines the function. In production `compute_now()` is the server's clock, and each process anchors its business
+time to it, re-sampling at every lease renewal and raising `ClockSkew` beyond 1 s.
+
+For tests and the simulator, `useSimClock(sql, startMs)` points `compute_now()` at `compute_sim_clock`,
+`setSimClock(sql, ms)` moves it forward (never back), and `restoreSystemClock(sql)` points it back. These are
+database-wide. `computeNowMode(sql)` reports `system`, `sim`, `custom` or `missing`, and `doctor` reports a
+`compute_now()` that differs from the database clock.
+
+## The runtime tables
+
+These tables are how processes cooperate. You never write them by hand, but you will read them when you debug.
+
+| Table | Role |
+| --- | --- |
+| `leases` | `name`, `owner`, `epoch`, `expires_at`. Names: `shard:<n>`, `pool:<id>`, `site:<id>:boot`, `singleton:<job>`, `gateway:<id>`. |
+| `workers` | One row per worker process with its heartbeat; rendezvous hashing over the live rows assigns the 256 shards. |
+| `work_queue` | The coalescing <Term id="work-queue">work queue</Term>: one row per `(kind, key)` with `shard`, `gen`, `not_before`, `claimed_until`. |
+| `commands` | Every command with its per-node `seq`, state, deadline and signature. |
+| `outbox` | Events written in the transaction that caused them: `seq`, `txid` (`pg_current_xact_id()`), `topic`, `payload`. |
+| `outbox_cursors` | Each sink's position, saved after every delivered batch. |
+| `authz_changes` | The authorization projection's change feed, in the outbox's `(txid, seq)` shape. |
+| `gateways` | The gateway directory: region, `internal_url`, version, `max_streams`, sessions, `draining`, heartbeat. |
+
+### Leases and fencing
+
+A lease is acquired or renewed with one guarded update, and the epoch goes up whenever the owner changes:
+
+```sql
+UPDATE leases SET owner = $me, epoch = CASE WHEN owner = $me THEN epoch ELSE epoch + 1 END,
+       expires_at = compute_now() + make_interval(secs => $ttl)
+ WHERE name = $name AND (owner = $me OR expires_at < compute_now()) RETURNING epoch;
+```
+
+Shard, pool and site leases live 15 s, gateway leases 20 s, and both renew every 5 s. Each fenced transaction
+starts with `SELECT 1 FROM leases WHERE name = $name AND owner = $me AND epoch = $e AND expires_at > compute_now()
+FOR SHARE`, so a process that lost its lease either sees that and aborts, or holds up the takeover until its
+transaction ends. A bare `EXISTS` would not fence under `read committed`.
+
+### The work queue
+
+Enqueuing happens in the state-change transaction and coalesces: a key already queued gets `gen = gen + 1` and the
+earlier `not_before`. A worker claims due keys of its shards with `FOR UPDATE SKIP LOCKED` and sets
+`claimed_until`; success deletes the row only `WHERE gen = $claimedGen`, so a key dirtied again while it was being
+processed survives and no wake-up is lost. Reconcilers also re-enqueue everything they own every `resyncMs`.
+
+### The outbox
+
+Commit order is not `seq` order, so readers never trust `seq` alone:
+
+```sql
+WHERE txid < pg_snapshot_xmin(pg_current_snapshot())
+  AND (txid, seq) > ($cursorTxid, $cursorSeq)
+ORDER BY txid, seq
+```
+
+Nothing can commit behind the cursor. The same cursor serves the SSE `Last-Event-ID`, `authz_changes` and the
+audit checkpoints. Delivery is at least once, with one lease per sink. Order by the table's own columns
+(`o.txid, o.seq`), never by a text alias of `txid`, which would sort `"10"` before `"2"`. The `retention` module
+prunes rows every cursor has passed; see [retention](/docs/operations/retention).
+
+## Lock order
+
+Any transaction that locks several of these rows takes them in this order:
+
+```text
+quota_usage → pools → nodes → devices → node_resources → pool_capacity_rollup
+```
+
+Reserve charges quota first and release refunds it first, so concurrent reservations and releases never wait on
+each other in a cycle. The order was set by the capacity torture test, which found a quota and rollup deadlock
+before it was fixed. Module code that touches capacity rows (node verbs, `nodes.delete`, join approvals, which lock
+the pool first) follows it too.
+
+## PGlite
+
+`pglite({ dataDir?, extensions? })` from `better-compute/pglite` runs PostgreSQL in WebAssembly. `better-compute
+dev`, the test suites and the examples use it.
+
+- `@electric-sql/pglite` is an optional peer dependency, loaded on the first statement. `btree_gist` is always
+  included.
+- Without `dataDir` the database lives in memory. `BETTER_COMPUTE_DATABASE_URL=pglite:DIR` or `pglite:memory`
+  selects it from the environment.
+- There is one connection. Transactions and standalone statements run one at a time behind an async mutex, so
+  code in a transaction that waits for another top-level transaction deadlocks. Concurrency tests belong on real
+  PostgreSQL.
+- It runs `ANALYZE` after migrations and periodically, so query plans in development match PostgreSQL's.
+
+PGlite is for development and tests. The production-shaped `examples/postgres` refuses `pglite:` URLs. See
+[local development](/docs/operations/local-development).
+
+## Backups
+
+Back up the database and the PKI bundle together. The bundle holds the CAs every node certificate chains to and the
+keys daemons pin; `doctor` tells you to restore it from backup if it cannot be read, since creating a new one makes
+every node rejoin. See [PKI](/docs/operations/pki).

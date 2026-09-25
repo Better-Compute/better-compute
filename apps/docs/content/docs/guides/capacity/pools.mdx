@@ -1,0 +1,265 @@
+---
+title: Pools
+description: Pools group the nodes of one site under one GPU model, sharing mode and policy, and offerings make a pool visible to other tenants with a quota.
+metaTitle: GPU pools and offerings
+icon: Boxes
+packages: ['@better-compute/capacity']
+sources:
+  - packages/capacity/src/module.ts
+  - packages/core/src/domain.ts
+  - packages/capacity/src/quota.ts
+  - packages/server/src/controllers/liveness.ts
+  - packages/server/src/join/service.ts
+  - packages/provision/src/remediation.ts
+  - tests/capacity-reservations.test.ts
+  - PLAN.md
+---
+
+A <Term id="pool">pool</Term> is the unit you schedule into and sell from. It lives in one
+<Term id="site">site</Term>, holds machines with **one GPU model**, shares its GPUs in one way, and
+carries the policy its nodes and reservations follow. Every reservation names exactly one pool, and
+every quota is per pool.
+
+A pool has an owner tenant. For platform capacity that is the root tenant; a customer that brings its
+own hardware owns the pools on its `custom` site. Other tenants see a pool only when its owner
+**offers** it to them, with a quota.
+
+## What a pool is made of
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'pool_ followed by a ULID, or an id derived from an idempotency key.' },
+    ownerTenantId: { type: 'string', description: 'The tenant that created the pool and may offer, update and archive it.' },
+    siteId: { type: 'string', description: 'The site the pool lives in. It never changes.' },
+    class: {
+      type: "'metal-host' | 'metal-dedicated' | 'vps-host' | 'provider'",
+      description: 'What the machines are for. It sets the role joining machines get and never changes.',
+    },
+    gpuModel: { type: 'string', description: 'The GPU family, such as H100 (1 to 32 letters, digits or hyphens). Policies and meters use it.' },
+    sharing: {
+      type: "'exclusive' | 'mig' | 'timeslice' | 'mps'",
+      description: 'How GPUs are handed out. It never changes after creation.',
+      default: "'exclusive'",
+    },
+    agent: {
+      type: "'bcd' | 'none'",
+      description: 'bcd when machines run the daemon; none when they are reached only through a provider API.',
+      default: "'bcd' ('none' for provider pools)",
+    },
+    providerAccountId: { type: 'string', description: 'provider pools only: the provider account (pacct_) that backs the pool.' },
+    policy: { type: 'PoolPolicy', description: 'Acceptance checks, overcommit, timers and sharing parameters; see below.', default: '{}' },
+    version: { type: 'number', description: 'Raised by every update.' },
+  }}
+/>
+
+### Classes
+
+The class decides the role a machine gets when it joins the pool (see
+[joining](/docs/guides/nodes/joining)), and only `host` nodes add schedulable capacity:
+
+| Class | Node role | Used for |
+| --- | --- | --- |
+| `metal-host` | `host` | Bare-metal GPU servers running `bcd`, reserved as holds |
+| `vps-host` | `host` | Hypervisors that run [VPS instances](/docs/guides/vps/instances) |
+| `provider` | `host` | Machines of a [provider account](/docs/guides/vps/providers), with `agent: 'none'` |
+| `metal-dedicated` | `dedicated` | Machines [metal](/docs/guides/bare-metal/deploying) deploys whole; `dedicated` nodes add no reservable capacity |
+
+### One GPU model
+
+A pool holds one `gpuModel`, the family name inventory derives from the NVML name (`H100` for
+`H100-SXM5-80GB`). Policies, IAM attributes and meters (`gpu.h100.hours`) all key on it, so a
+pool that mixed models would bill and authorize wrongly. Selectors can still narrow within the model by
+`gpuProduct`, `vramGiB` or any other attribute ([placement](/docs/guides/capacity/placement)).
+
+### Sharing modes
+
+- `exclusive` (the default): each GPU is one atom, booked whole.
+- `mig`: GPUs in MIG mode expose their instances as `gpu.mig` atoms.
+- `timeslice` and `mps`: each GPU is split into `gpu.slot` atoms. These modes give no isolation
+  between workloads, so these pools are single-tenant: they can be offered only to their owner.
+
+[Fractional GPUs](/docs/guides/capacity/fractional-gpus) covers the atoms and what a request must ask
+for in each mode.
+
+## Pool policy
+
+`policy` is a JSON object. Unknown fields are stored as given; these are the fields the code reads:
+
+<TypeTable
+  type={{
+    acceptance: {
+      type: '{ kind: string; with?: object }[]',
+      description: 'Checks a node must pass on adoption before it becomes schedulable. v0.1 runs diag.nvml.',
+    },
+    overcommit: {
+      type: 'Record<string, number>',
+      description: 'Overcommit ratios for scalar resources such as vcpu and memoryGiB. GPUs are never overcommitted.',
+    },
+    lostAfter: {
+      type: 'Duration',
+      description: 'How long an unreachable node waits before it is declared lost. Applied only to provider pools, never to metal.',
+    },
+    disruptionBudget: {
+      type: 'number',
+      description: 'The share of the pool that remediation and rollouts may disrupt at once, from 0 to 1.',
+      default: '0.05',
+    },
+    maxPending: {
+      type: 'Duration',
+      description: 'How long a reservation may stay pending before it fails with MaxPendingExceeded.',
+      default: "'24h'",
+    },
+    hardwareProfile: { type: 'string', description: 'The metal hardware profile whose driver bindings nodes inherit.' },
+    sharing: {
+      type: '{ replicas?: number }',
+      description: 'timeslice and mps pools: slot atoms per GPU (1 to 64). Defaults are 4 for timeslice and 10 for mps.',
+    },
+    migLayout: { type: 'string', description: 'mig pools: the layout the mig-layout config unit applies, such as all-1g.10gb.' },
+    tenantRoot: {
+      type: 'boolean',
+      description: "Dedicated-root pools (v0.5): reservations may use binding 'node' to lease whole machines.",
+    },
+    admission: {
+      type: "{ budgetCheck?: 'none' | 'meter' }",
+      description: 'Declared for a per-admission billing check. The admission path does not call it yet.',
+    },
+  }}
+/>
+
+Two of these are declared ahead of the code that honours them. `overcommit` describes the intended
+ratio, but the placer reads the ratio stored on each `node_resources` row, and nothing in this
+release fills those rows from the pool policy. `admission.budgetCheck: 'meter'` is part of the type
+and the `IamPort` has `billingCheck`, but no admission calls it yet; budgets are enforced through the
+IAM policy described in [quotas and usage](/docs/guides/capacity/quotas-and-usage).
+
+## Create a pool
+
+[`pools.create`](/docs/reference/api/pools#create) is authorized as `compute:pools:create` on the
+tenant, and the site must belong to that tenant. Platform pools are therefore created by the root
+tenant on its `shared` or `dedicated` sites, and a customer creates pools on its own `custom` site.
+
+```ts title="create-pool.ts"
+const pool = await compute.api.pools.create(rootCredential, {
+  tenantId: 'root',
+  siteId: 'site_01k…',
+  class: 'metal-host',
+  gpuModel: 'H100',
+  sharing: 'exclusive',
+  policy: {
+    acceptance: [{ kind: 'diag.nvml' }],
+    maxPending: '6h',
+  },
+  idempotencyKey: 'pool-fra1-h100',
+});
+```
+
+- `ownerQuota` sets the owner's own quota rows. It defaults to `{ gpu: 2147483647 }`, effectively
+  unlimited whole GPUs. Owners of `mig`, `timeslice` or `mps` pools must add `gpu.mig` or `gpu.slot`
+  rows themselves, because a missing row grants 0.
+- With `idempotencyKey`, the pool id is derived from the tenant, the caller and the key, as for
+  reservation drafts. A retry returns the same pool; the same key with a different site, class,
+  sharing mode, agent or provider account is `CONFLICT`. [Fleet config](/docs/guides/fleet-config)
+  uses this to plan pools it has not created yet.
+- `class: 'provider'` needs `providerAccountId` and `agent: 'none'`; other classes refuse
+  `providerAccountId`. Both are `INVALID_INPUT`.
+- A site the tenant does not own is `NOT_FOUND`.
+
+The pool starts with an empty rollup and emits `pool.created`. Machines join it with a join token (see
+[joining](/docs/guides/nodes/joining)).
+
+## Offerings
+
+An <Term id="offering">offering</Term> is a `pool_offers` row. It makes the pool exist in another
+tenant's view and creates that tenant's quota rows in the same transaction.
+
+```ts title="offer.ts"
+await compute.api.pools.offer(rootCredential, {
+  tenantId: 'root', // the pool's owner, acting
+  poolId,
+  toTenantId: 'acme',
+  quota: { gpu: 32 },
+  priority: 10,
+});
+```
+
+- [`pools.offer`](/docs/reference/api/pools#offer) is `compute:pools:share` on the pool, and only the
+  owner can call it (anyone else gets `NOT_FOUND`). Offering again updates the row and the quota.
+- `quota` maps resources to limits: `gpu`, `gpu.mig`, `gpu.slot`, or a scalar such as `vcpu`. A
+  resource without a quota row grants 0.
+- `includeDescendants` and `priority` (-1000 to 1000, default 0) are stored with the offer and
+  round-trip through fleet config. In this release the capacity module matches the offered tenant
+  exactly and the placer does not read `priority`.
+- The **offering validator** refuses, with `INVALID_STATE`, to offer a `timeslice` or `mps` pool, or a
+  pool that holds `tenant-owned` nodes, to anyone but its owner. An archived pool cannot be offered
+  either.
+
+The offered tenant then sees the pool in [`pools.list`](/docs/reference/api/pools#list) and
+[`pools.get`](/docs/reference/api/pools#get), each pool with `owned`, `archived` and the tenant's own
+quota rows:
+
+```json title="pools.list, as acme sees it"
+{
+  "items": [
+    {
+      "id": "pool_01k…",
+      "ownerTenantId": "root",
+      "siteId": "site_01k…",
+      "class": "metal-host",
+      "gpuModel": "H100",
+      "sharing": "exclusive",
+      "agent": "bcd",
+      "policy": { "acceptance": [{ "kind": "diag.nvml" }], "maxPending": "6h" },
+      "version": 1,
+      "owned": false,
+      "archived": false,
+      "quotas": [{ "tenantId": "acme", "poolId": "pool_01k…", "resource": "gpu", "max": 32, "used": 4, "available": 28 }]
+    }
+  ]
+}
+```
+
+[`pools.unoffer`](/docs/reference/api/pools#unoffer) removes the offer and answers
+`{ removed: boolean }`. It lowers the tenant's quotas on the pool to what is in use, so live
+reservations keep their bookings and charge while nothing new fits. Pending reservations of that
+tenant fail with `PoolGone` at their next retry. A pool cannot be unoffered from its owner.
+
+Offering also writes the pool's row in the IAM <Term id="authz-projection">authz projection</Term>
+for the tenant, with the attributes `gpuModel`, `class`, `sharing`, `region` and `owned`, so tenant
+policies can decide on them (see [actions and resources](/docs/guides/iam/actions-and-resources)).
+
+## Update and archive
+
+[`pools.update`](/docs/reference/api/pools#update) (`compute:pools:manage`, owner only) takes a new
+`policy`, a new `gpuModel`, or both. The policy is replaced as a whole, not merged, so send every field
+you want to keep. The update refreshes the pool's authz row for the owner and every offered tenant and
+emits `pool.updated`. Class, site, sharing mode and agent cannot change.
+
+[`pools.archive`](/docs/reference/api/pools#archive) (`compute:pools:manage`, owner only) retires a
+pool without disturbing what runs on it:
+
+- every offer is removed, each offered tenant's quotas drop to what is in use, and their authz rows
+  are removed;
+- the pool takes no new work: new reservations are `NOT_FOUND`, and the placer answers `pending` with
+  `the pool is archived`;
+- placed and active reservations keep their bookings until they end, while pending ones fail with
+  `PoolGone` at their next retry;
+- only the owner still sees the pool, with `archived: true`.
+
+Archiving is idempotent and emits `pool.archived` with the list of unoffered tenants.
+
+## The pools API
+
+| Method | Action | Decided on | Phase |
+| --- | --- | --- | --- |
+| [`pools.list`](/docs/reference/api/pools#list) | `compute:pools:read` | tenant | v0.1 |
+| [`pools.get`](/docs/reference/api/pools#get) | `compute:pools:read` | pool | v0.1 |
+| [`pools.create`](/docs/reference/api/pools#create) | `compute:pools:create` | tenant | v0.1 |
+| [`pools.capacity`](/docs/reference/api/pools#capacity) | `compute:capacity:read` | pool | v0.1 |
+| [`pools.offer`](/docs/reference/api/pools#offer) | `compute:pools:share` | pool | v0.1 |
+| [`pools.unoffer`](/docs/reference/api/pools#unoffer) | `compute:pools:share` | pool | v0.1 |
+| [`pools.update`](/docs/reference/api/pools#update) | `compute:pools:manage` | pool | v0.2 |
+| [`pools.archive`](/docs/reference/api/pools#archive) | `compute:pools:manage` | pool | v0.2 |
+
+All eight are served today. Events: `pool.created`, `pool.offered`, `pool.unoffered`, `pool.updated`,
+`pool.archived`, and `quota.updated` from `quotas.set`. `better-compute pools list --tenant acme`
+lists pools from the [CLI](/docs/reference/cli).

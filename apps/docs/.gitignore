@@ -1,0 +1,6 @@
+.next/
+.next-*/
+.source/
+.cache/
+next-env.d.ts
+*.tsbuildinfo

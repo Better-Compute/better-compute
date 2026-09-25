@@ -1,0 +1,284 @@
+---
+title: Attestation
+metaTitle: Node attestation and attestors
+description: The attestors that admit machines (join-token, x509pop, provisioned, discovery, cloud-iid, tpm), what each proves, single-use evidence and two-round joins.
+icon: BadgeCheck
+packages: ['@better-compute/pki', '@better-compute/server', '@better-compute/provision']
+sources:
+  - PLAN.md
+  - packages/pki/README.md
+  - packages/pki/src/attestors/common.ts
+  - packages/pki/src/attestors/x509pop.ts
+  - packages/pki/src/attestors/provisioned.ts
+  - packages/pki/src/attestors/discovery.ts
+  - packages/pki/src/attestors/cloud-iid.ts
+  - packages/pki/src/attestors/tpm.ts
+  - packages/pki/src/attestors/join-requests.ts
+  - packages/server/src/join/service.ts
+  - packages/core/src/extension.ts
+  - packages/provision/src/join-resolvers.ts
+  - tests/pki-attestors-join.test.ts
+---
+
+A join token proves that someone with access to your API wanted a machine to join. That is enough for a server
+you install by hand, but not for a machine that PXE-boots on its own, a cloud VM, or a server whose certificate
+expired over a long weekend. An <Term id="attestor">attestor</Term> answers the question for one kind of
+evidence: is this machine allowed to join, and as which node?
+
+Each attestor is a `@better-compute/core` `AttestorVerifier` that runs inside JoinService's join transaction.
+`JoinRequest.attestor` names it (empty means `join-token`), `JoinRequest.attestation` carries its evidence, and a
+sealed token, when the request has one, is opened and handed over as `evidence.token`. Every refusal reaches the
+agent as the same `ACCESS_DENIED`; the reason goes only to the `onRefusal` hook and the `security.join.refused`
+event (see [joining](/docs/guides/nodes/joining)).
+
+## The attestors
+
+| Attestor | Phase | Roles | Evidence | Proves | Joins as |
+| --- | --- | --- | --- | --- | --- |
+| `join-token` | v0.1 | `node`, `site` | a sealed `node` or `site` token | the holder of a live token for this pool or site | a new node, or a reclaim with `allowReclaim` |
+| `x509pop` | v0.2 | `node`, `site` | its last certificate chain and a proof by that key | the machine still holds the key of a recent certificate | the same node, in place |
+| `provisioned` | v0.2 | `node` | a sealed single-use `provisioned` token and a product UUID claim | the OS a deploy or provider bootstrap installed | the target node re-keyed, or a new node |
+| `discovery` | v0.2 | `ramdisk` | a sealed single-use `discovery` token and a signed discovery assertion | the ramdisk the site's boot server just booted | a ramdisk identity of at most 2 hours |
+| `cloud-iid` | v0.3 | `node` (configurable) | a provider-signed instance identity | the cloud instance your provider account created | whatever `resolve` answers |
+| `tpm` | v0.5 | `node` (configurable) | TPM endorsement and attestation keys, then an activated credential and a quote | the TPM holding that endorsement key | the node bound to that key |
+
+Only `join-token` is built into the server. You add the others, and one with id `join-token` replaces the
+built-in:
+
+```ts title="compute.ts"
+import { betterCompute, pkiJoinCrypto } from 'better-compute/server';
+import {
+  discoveryAttestor,
+  provisionedAttestor,
+  x509popAttestor,
+} from 'better-compute/pki';
+import {
+  discoveryWorkflowNodeResolver,
+  provisionedTargetResolver,
+} from 'better-compute/provision';
+
+// `bundle`: the PKI bundle `better-compute pki init` wrote, loaded with importPkiBundle(text, { secret }).
+export const compute = betterCompute({
+  // database, secret, baseURL, iam, modules, …
+  pki: {
+    nodeCa: bundle.nodeCa,
+    join: pkiJoinCrypto({
+      trustDomain: bundle.trustDomain,
+      nodeCa: bundle.nodeCa,
+      signingKey: bundle.joinSigning,
+      encryptionKey: bundle.joinEncryption.privateKey,
+    }),
+  },
+  attestors: [
+    x509popAttestor(),
+    provisionedAttestor({ resolveTarget: provisionedTargetResolver() }),
+    discoveryAttestor({
+      resolveWorkflowNode: discoveryWorkflowNodeResolver(),
+      approval: 'unknown-machines',
+    }),
+  ],
+});
+```
+
+The attestors from `@better-compute/pki` also take `onRefusal(refusal)`, called with
+`{ attestor, reason, tokenId?, nodeId?, tenantId? }` for your own audit or metrics.
+
+## join-token
+
+The v0.1 attestor, described in [joining](/docs/guides/nodes/joining). It locks the `join_tokens` row, checks
+the secret in constant time, revocation, expiry at `compute_now()`, the remaining uses and the role (`node`
+tokens admit `node`, `site` tokens admit `site`), and consumes one use. JoinService enforces the token's
+`expect` binding and reclaim flag for every token-based attestor, not only this one.
+
+## x509pop
+
+A node's certificate lasts 24 hours. A machine that was powered off or cut off longer than that comes back with
+an expired certificate, and renewal refuses expired certificates. `x509pop` lets it re-join as itself: it
+presents its last certificate chain and a proof by the certificate's key, bound to its new CSR.
+
+The evidence is UTF-8 JSON:
+
+```json title="JoinRequest.attestation"
+{
+  "v": 1,
+  "nodeId": "node_…",
+  "chain": ["<base64url DER leaf>", "<base64url DER issuer>"],
+  "clientTime": 1790000000000,
+  "sig": "<base64url r‖s>"
+}
+```
+
+`sig` is an ES256 signature under purpose `x509pop` over the CSR's SHA-256, the node id and the client time, so
+neither a Renew proof nor an earlier `x509pop` proof can be replayed as one. The attestor refuses unless:
+
+- the leaf is byte for byte a `node_certs` row of that node, of its current identity generation, and not revoked;
+- the node is not `retired`, and the certificate's role is the requested one (`node` or `site`; a lessee's
+  `node-tenant` certificate re-joins as `node` and JoinService restores the restriction);
+- the certificate expired at most `graceMs` ago (7 days by default);
+- `clientTime` is within `windowMs` (60 seconds) of database time, and the proof was not used before
+  (`replayCache`, in memory by default, 10,000 entries).
+
+The result names the node, so JoinService reclaims it in place: it raises the identity generation, revokes every
+older certificate and keeps the node's state. A revoked certificate never re-joins; neither does one from before
+`nodes.revokeIdentity`. Agents build the evidence with `createX509popEvidence` (or `x509popProducer` for
+`FakeDaemon`).
+
+## provisioned
+
+When Better Compute deploys an operating system, the deploy renders a single-use `provisioned` token into the
+machine's user data (the provisioning engine's `userdata.render` step). The installed system joins with it.
+The attestor requires:
+
+- a token of role `provisioned` with exactly one use left (`not-single-use` otherwise);
+- a product UUID in the machine's claims (`no-product-uuid`);
+- a binding to one machine: the token's `expect.productUuid`, or a target the host resolves (`unbound`).
+
+`resolveTarget(tx, token)` answers with the node the token was minted for and its expected product UUID.
+`provisionedTargetResolver()` from `@better-compute/provision` finds the running workflow whose `userdata.render`
+step minted the token, and reads the product UUID from that node's newest inventory. With a target node, the
+join re-keys that node in place and keeps its provisioning state; a UUID that differs is
+`product-uuid-mismatch`. Without one, the machine joins as a new node, which is what a provider bootstrap such as
+Hetzner Robot's installimage does.
+
+## discovery
+
+During commissioning, a bare-metal server PXE-boots a platform ramdisk before anything is installed on it. The
+ramdisk has no identity of its own, so two parties vouch for it: the iPXE script carries a single-use
+`discovery` token bound to the MAC, and the site's boot server signs a statement that it just served that MAC.
+
+The evidence is the sealed token plus a serialized `SignedDiscoveryAssertion` (`bettercompute.site.v1`). The
+assertion names the site, the vouching site agent's node id, the boot lease epoch it held, the MAC, and
+optionally the IP, product UUID and workflow id, with `issued_at` and `not_after`. The attestor checks:
+
+- the token: role `discovery`, one use left, issued for the assertion's site, and its `expect.mac` (when set)
+  equal to the asserted MAC;
+- the signer: a `site` node of that site, not retired, currently holding the `site:<id>:boot` lease at exactly the
+  asserted epoch, so a fenced boot server can no longer vouch; the signature (purpose `discovery-assertion`) must
+  verify against its unexpired certificate;
+- freshness: the assertion is valid until the earlier of its `not_after` and 15 minutes after `issued_at`
+  (`maxAgeMs`);
+- the machine: its claimed MACs include the asserted MAC, and its product UUID matches when the assertion names
+  one.
+
+Each signed assertion admits one join (`assertion-reused` otherwise), and the token is spent. The resulting
+certificate is a `ramdisk` certificate of at most 2 hours (`certTtlSeconds` may shorten it) that allows only the
+commissioning command kinds, `discoveryAllowedKinds` by default: `inventory`, `diag.*`, `wipe`, `deploy.*` and
+`boot.kexec`. Pass `allowedKinds` to change the list.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `resolveWorkflowNode(tx, workflowId)` | none | A known machine re-commissions as its node (`discoveryWorkflowNodeResolver()` answers for running workflows). Without it every discovery creates a node. |
+| `approval` | `'never'` | `'unknown-machines'` defers machines no workflow names; `'always'` defers every one. |
+| `hardwareKey(claims)` | none | The trusted hardware key requests are keyed on; without one they key on site and MAC. |
+| `pendingTtlSeconds` | 86,400 | How long a pending request waits for a decision. |
+| `retryAfterSeconds` | 30 | When the ramdisk retries a deferred join. |
+
+## cloud-iid
+
+A cloud VM that your provider account created can prove it with the identity document its cloud signs, so it
+needs no token at all. `cloudIidAttestor({ providers, resolve, roles? })` verifies the document with one of its
+providers, then asks `resolve(tx, identity, { role, claims })` where the instance joins. `resolve` returns an
+attestation result (tenant, pool, site, and `nodeId` for a known machine) or `undefined` to refuse
+(`unknown-instance`), for example for an instance in an account you do not manage.
+
+```json title="JoinRequest.attestation"
+{ "provider": "gcp", "document": "<identity token JWT>" }
+```
+
+| Provider | Verifies | Bound to the CSR |
+| --- | --- | --- |
+| `gcpInstanceIdentity({ audience, fetch or jwks, projects?, maxAgeMs? })` | A Compute Engine identity token with `format=full`, signed by Google (RS256 or ES256, JWKS cached an hour). `projects` limits the accepted project ids. | Yes: the agent requests audience `cloudIidAudience(audience, sha256(csr))`, that is `<audience>#<base64url hash>`. |
+| `awsInstanceIdentity({ certificates, maxAgeMs?, accounts? })` | The EC2 identity document and its `signature`, checked with the region's AWS certificate, which you supply (`'*'` covers regions not listed). `accounts` limits the account ids. | No: accepted only within `maxAgeMs` (30 minutes) of the instance's `pendingTime`. |
+| `oidcInstanceIdentity({ id, issuers, jwks, audience, identity })` | Any issuer that signs JWTs into a JWKS; `identity(claims)` maps the claims to account and instance. | Yes, through the audience. |
+
+Identity tokens older than `maxAgeMs` (10 minutes by default for OIDC and GCP) are refused. Whatever the
+provider, each (provider, account, instance) admits exactly one join, ever (`instance-reused`): an AWS document
+is readable by any process on the VM, and even a bound token must not mint a second node. A known instance that
+lost its certificate re-joins with `x509pop`.
+
+## tpm
+
+`tpm` (v0.5) ties a node to its TPM's endorsement key (EK), an identity that survives a reinstall or a disk swap.
+It follows the go-attestation enrollment flow as a two-round join.
+
+1. **Challenge.** The agent sends its EK (public area and manufacturer certificate) and an attestation key (AK).
+   The attestor checks the EK certificate chains to one of `ekRoots` and that the AK has attestation-key
+   attributes, then answers with a `MakeCredential` challenge plus an opaque state sealed under `challengeKey`
+   (AES-256-GCM, bound to the CSR, at most 5 minutes). It writes no row, so any `api` replica can finish the join.
+2. **Answer.** Only the TPM holding that EK, with that AK loaded, can activate the credential. The agent returns
+   the secret and a quote of its PCRs whose `extraData` is `sha256(secret ‖ sha256(csr))`. The attestor checks
+   the secret, the quote signature, the nonce, that the PCR values match the quote's digest, and your
+   `pcrPolicy`.
+
+It then decides where the machine joins, keyed by the SHA-256 of the EK: the node that key is already bound to
+(a reclaim), else your `resolve` allow-list (for example a vendor's delivery manifest), else operator
+`enrollment` through [join requests](/docs/guides/nodes/joining). JoinService binds the EK to the node
+(`node_bindings`): a later join proving it reclaims that node, and it can never admit another one
+(`bound-elsewhere`).
+
+| Option | Meaning |
+| --- | --- |
+| `challengeKey` | 32 bytes shared by every `api` replica; seals the challenge state. Required. |
+| `ekRoots` | Manufacturer EK CA certificates (PEM or DER). |
+| `allowUncertifiedEk` | Accept an EK without a certificate (swtpm, labs). Never in production. |
+| `pcrSelection` | PCRs the quote must cover; default the SHA-256 bank, PCRs 0 to 7. |
+| `pcrPolicy(pcrs)` | Returns a refusal reason, or `undefined` to accept. |
+| `resolve(tx, identity, { role })` | Where an unbound EK joins, or `undefined`. |
+| `enrollment` | `{ tenantId, siteId, poolId?, pendingTtlSeconds?, retryAfterSeconds? }`: defer unknown EKs for approval. |
+| `challengeTtlMs` | Challenge lifetime, at most 5 minutes. |
+
+`tpmProducer(SoftwareTpm)` is the agent side for tests. How `bcd` will drive a real TPM (go-attestation) is still
+to be confirmed for v0.5.
+
+## Single-use evidence
+
+Tokens are not the only thing that must not be used twice. `cloud-iid` and `discovery` record what they
+accepted in `attestation_uses (attestor, subject, expires_at)` inside the join transaction:
+
+| Attestor | Subject | Kept until |
+| --- | --- | --- |
+| `cloud-iid` | SHA-256 of provider, account and instance | forever |
+| `discovery` | SHA-256 of the signed assertion body | the assertion's expiry |
+
+A second join with the same subject is refused. `pruneAttestationUses(tx, { batch? })` from
+`@better-compute/postgres` deletes expired rows, 5,000 per call by default; see
+[retention](/docs/operations/retention). Single-use tokens (`provisioned`, `discovery`) must have exactly one
+use left, so a token minted for several machines is never accepted as a machine credential.
+
+## Two-round joins
+
+Some attestors cannot decide in one request: `tpm` must challenge the TPM, and `discovery` or `tpm` may wait for
+an operator. Such an attestor returns an `AttestationDeferral` instead of a result:
+
+```ts
+interface AttestationDeferral {
+  deferred: 'approval' | 'challenge';
+  requestId?: string; // approval: the join request
+  retryAfterSeconds?: number; // approval: default 30
+  challenge?: Uint8Array; // challenge: attestor-specific bytes
+  notAfter?: Date; // challenge: answers after this are refused
+}
+```
+
+JoinService then commits the transaction (so the attestor's own rows, such as a pending join request, persist),
+issues nothing and spends nothing, and answers with a signed `JoinResponseBody` whose `deferral` holds either
+`JoinPending{ request_id, retry_after_seconds }` or `JoinChallenge{ attestor, payload, not_after }`. The node id
+and chain are empty, and `csr_sha256` still binds the answer to the request. The agent re-sends `Join` with the
+**same CSR**: after the wait, or with its answer to the challenge in `attestation`. Attestors therefore consume
+tokens and record uses only on the final round.
+
+On the agent side, `openJoinResponse` reads a response as joined, pending or challenge, and `verifyJoinResponse`
+refuses a deferral. `runAgentJoin` in `@better-compute/testing` is the reference retry loop.
+
+## Choosing an attestor
+
+| Situation | Use |
+| --- | --- |
+| A server you install by hand or with configuration management | `join-token`, with `expect` when the firmware reports placeholder identifiers |
+| A node whose certificate expired while it was offline | `x509pop` |
+| The OS a Better Compute deploy or a provider bootstrap installed | `provisioned` |
+| A ramdisk during bare-metal commissioning | `discovery`, with `approval` if unexpected machines should wait for a person |
+| A VM your provider account created | `cloud-iid` |
+| Hardware identity that must survive reinstalls, on TPM 2.0 machines | `tpm` (v0.5) |
+
+To write your own attestor, see [attestors](/docs/extending/attestors).

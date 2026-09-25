@@ -1,0 +1,376 @@
+---
+title: Policies
+metaTitle: Compute policies in Better IAM
+description: Write Better IAM policies for Better Compute, from the gpu-user and agent-guardrails examples to pool relations, resource attributes and conditions.
+icon: FileBraces
+packages: ['@better-compute/iam']
+sources:
+  - packages/iam/src/setup.ts
+  - packages/cli/src/commands/iam-setup.ts
+  - packages/core/src/catalog.ts
+  - packages/capacity/src/reservations.ts
+  - packages/capacity/src/module.ts
+  - packages/server/src/controllers/node-state.ts
+  - packages/server/src/api/sites.ts
+  - packages/server/src/api/projects.ts
+  - packages/vps/src/instances.ts
+  - tests/iam-contract.test.ts
+  - tests/iam-bridge-matrix.test.ts
+  - PLAN.md
+---
+
+Who may do what in Better Compute is written in Better IAM policies. A policy names `compute:*` actions and
+`compute-*` resources (see [Actions and resources](/docs/guides/iam/actions-and-resources)), and conditions on
+the attributes compute attaches to each resource. Roles group policies, and bindings give roles to people,
+groups, service accounts and agents, exactly as for any other Better IAM application.
+
+Compute never writes an organization's policies. It ships two example policies that organization administrators
+review and apply, and every policy that names a `compute:*` action must be created on a Better IAM host that has
+compute's plugin installed. A host without it rejects the policy with `INVALID_ACTION`.
+
+## Print the example policies
+
+`better-compute iam setup` prints the examples as JSON, `{ "policies": [...] }`, parameterized for your
+deployment:
+
+```bash
+better-compute iam setup --audience https://compute.example.com \
+  --gpu-model H100 --regions eu-west-1,eu-central-1 --max-gpus 8 --max-hours 72
+```
+
+| Flag | Default | What it sets |
+| --- | --- | --- |
+| `--audience` | from `BETTER_COMPUTE_BASE_URL` | The compute API URL (reduced to its origin), the audience of session JWTs for compute. Required. |
+| `--gpu-model` | `H100` | The GPU model family the bounded-reservation statement allows |
+| `--regions` | `eu-west-1,eu-central-1` | The regions it allows |
+| `--max-gpus` | `8` | GPUs per reservation |
+| `--max-hours` | `72` | Hours per reservation, extensions included |
+| `--feature` | `compute.<model>` | The tenant flag the statement requires in `tenant.features` |
+
+The same function is exported for code: `examplePolicies({ audience, gpuModel, regions, maxGpus, maxHours,
+feature, typePrefix })` returns both documents in the `{ name, document: { version: 1, statements } }` shape that
+Better IAM's `policies.create` takes:
+
+```ts title="apply-policies.ts"
+import { examplePolicies } from 'better-compute/iam';
+
+const ids: string[] = [];
+for (const { name, document } of examplePolicies({ audience: 'https://compute.example.com' }))
+  ids.push((await iam.api.policies.create(orgOwner, { tenantId: orgId, name, document })).id);
+
+const role = await iam.api.roles.create(orgOwner, { tenantId: orgId, name: 'gpu-users', policyIds: ids });
+await iam.api.bindings.create(orgOwner, {
+  tenantId: orgId,
+  roleId: role.id,
+  subjectType: 'group',
+  subjectId: mlTeamGroupId,
+});
+```
+
+`tests/iam-contract.test.ts` applies both policies verbatim to a real Better IAM and checks every condition below.
+
+## The gpu-user policy
+
+`gpu-user` is for members who reserve GPUs from pools shared with them, within bounds:
+
+```json title="gpu-user"
+{
+  "name": "gpu-user",
+  "document": {
+    "version": 1,
+    "statements": [
+      {
+        "sid": "ListInTenant",
+        "effect": "allow",
+        "actions": ["compute:pools:read", "compute:capacity:read", "compute:reservations:read"],
+        "resources": ["compute-tenant/*"]
+      },
+      {
+        "sid": "SeeSharedPools",
+        "effect": "allow",
+        "actions": ["compute:pools:read", "compute:capacity:read"],
+        "resources": ["compute-pool/*"],
+        "conditions": { "ArrayContains": { "resource.relations": "user" } }
+      },
+      {
+        "sid": "ReserveBoundedH100",
+        "effect": "allow",
+        "actions": ["compute:reservations:create"],
+        "resources": ["compute-reservation/*"],
+        "conditions": {
+          "StringEquals": { "resource.gpuModel": "H100", "resource.region": ["eu-west-1", "eu-central-1"] },
+          "NumericLessThanEquals": { "resource.gpuCount": 8, "resource.durationHours": 72 },
+          "ArrayContains": { "resource.parentRelations": "user", "tenant.features": "compute.h100" }
+        }
+      },
+      {
+        "sid": "OwnReservations",
+        "effect": "allow",
+        "actions": ["compute:reservations:read", "compute:reservations:release"],
+        "resources": ["compute-reservation/*"],
+        "conditions": { "StringEquals": { "resource.ownerId": "${principal.id}" } }
+      },
+      {
+        "sid": "BoundedExtend",
+        "effect": "allow",
+        "actions": ["compute:reservations:extend"],
+        "resources": ["compute-reservation/*"],
+        "conditions": {
+          "StringEquals": { "resource.ownerId": "${principal.id}" },
+          "NumericLessThanEquals": { "resource.durationHours": 72 }
+        }
+      },
+      {
+        "sid": "StopWhenOverBudget",
+        "effect": "deny",
+        "actions": ["compute:reservations:create", "compute:reservations:extend", "compute:instances:create"],
+        "resources": ["*"],
+        "conditions": { "Bool": { "principal.spendExceeded": true } }
+      },
+      {
+        "sid": "SessionJwtForCompute",
+        "effect": "allow",
+        "actions": ["iam:session-tokens:create"],
+        "resources": ["iam/${principal.id}"]
+      },
+      {
+        "sid": "AssertToCompute",
+        "effect": "allow",
+        "actions": ["iam:assertions:create"],
+        "resources": ["iam/https://compute.example.com"]
+      }
+    ]
+  }
+}
+```
+
+| Statement | What it allows or denies |
+| --- | --- |
+| `ListInTenant` | The coarse gate of `pools.list`, `reservations.list` and `capacity.summary`, decided on the tenant scope |
+| `SeeSharedPools` | Reading a pool, and its capacity, when the member holds the `user` relation on it, directly or through a group |
+| `ReserveBoundedH100` | Creating a reservation when the draft asks for H100s in the listed regions, at most 8 GPUs for at most 72 hours, in a pool where the member holds `user`, and the tenant has the `compute.h100` flag |
+| `OwnReservations` | Reading and releasing the member's own reservations. `${principal.id}` is a Better IAM policy variable. |
+| `BoundedExtend` | Extending the member's own reservations while the total stays within 72 hours |
+| `StopWhenOverBudget` | Denies new reservations, extensions and instances once an enforced Better IAM budget covering the member is spent |
+| `SessionJwtForCompute`, `AssertToCompute` | What Better IAM checks before it mints a session JWT whose audience includes compute |
+
+`BoundedExtend` cannot be bypassed by extending in small steps. Before deciding, `reservations.extend` writes the
+reservation's new **total** `durationHours` into the projection row's pending overlay, and the resolver reports
+the pending value. A denied extension clears the overlay.
+
+The flag in `ReserveBoundedH100` must be on for the organization in Better IAM (its feature flags), or the
+statement never applies. `--feature` names a different flag.
+
+## The agent-guardrails policy
+
+`agent-guardrails` keeps AI agents away from the most dangerous actions and caps what they may reserve:
+
+```json title="agent-guardrails"
+{
+  "name": "agent-guardrails",
+  "document": {
+    "version": 1,
+    "statements": [
+      {
+        "sid": "AgentKeys",
+        "effect": "deny",
+        "actions": ["compute:nodes:ssh-root", "compute:nodes:provision", "compute:images:publish"],
+        "resources": ["*"],
+        "conditions": { "StringEquals": { "principal.kind": "agent" } }
+      },
+      {
+        "sid": "DelegatedSessions",
+        "effect": "deny",
+        "actions": ["compute:nodes:ssh-root", "compute:nodes:provision", "compute:images:publish"],
+        "resources": ["*"],
+        "conditions": { "Bool": { "principal.delegated": true } }
+      },
+      {
+        "sid": "DelegatedSmall",
+        "effect": "deny",
+        "actions": ["compute:reservations:create", "compute:reservations:extend"],
+        "resources": ["compute-reservation/*"],
+        "conditions": {
+          "Bool": { "principal.delegated": true },
+          "NumericGreaterThan": { "resource.gpuCount": 4 }
+        }
+      }
+    ]
+  }
+}
+```
+
+Two statements are needed because Better IAM reports the identity's kind in `principal.kind`. An agent using its
+own key is `agent`, but a delegated session acts as the person, so its kind is `user` and only
+`principal.delegated` tells it apart. Both keys are always present, so these denies cannot be skipped by a
+missing key. To let agents ask a person instead of being refused outright, see
+[Delegated confirmation](/docs/guides/iam/delegated-confirmation).
+
+## Resource attributes
+
+Conditions on `resource.*` read what compute writes into each resource's projection row. These are the attributes
+the rows carry today:
+
+| Type | Attributes | Owner and parent |
+| --- | --- | --- |
+| `compute-reservation` | `gpuModel` (`other` when the pool has none), `gpuCount` (whole GPUs, times the gang size), `gpuSlices`, `gangSize`, `durationHours`, `region`, `binding` (`hold` or `node`), `spot`, `renewable`, and `projectId` when given | `ownerId` is the requesting identity; the parent is the pool |
+| `compute-instance` | `vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, and `projectId` when given | `ownerId` is the requesting identity; the parent is the pool |
+| `compute-pool` | `gpuModel`, `class`, `sharing`, `region` (its site's), and `owned` (true in the owner tenant's view) | The parent is the site |
+| `compute-node` | `region`, `gpuCount`, `lifecycle` (the provision state), `trust`, and `gpuModel` when the node is in a pool with one | The parent is the pool |
+| `compute-site` | `region`, `kind`, and `iamRegion` when set | |
+| `compute-project` | none | `ownerId` is the creator |
+
+A reservation's `gpuCount` counts whole GPUs only; fractional requests show up in `gpuSlices`. The catalog also
+declares `gpuMemoryGb` on pools and `dedicatedTo` on nodes, which no row carries yet, so a condition on them
+never matches. Rows written by `metal` verbs carry `provisionState`, `poolId` and `siteId` instead of the node
+controller's attributes.
+
+A missing attribute fails every condition operator except `Exists`. For a deny statement that means the deny
+does not apply, so guard denies on optional attributes such as `projectId` with an `Exists` statement.
+
+## Pool relations
+
+Relationships let an organization share a pool with a team without listing ids in policies. The catalog declares
+four relations on `compute-pool` (`viewer`, `user`, `operator`, `admin`), `operator` on `compute-node`, and
+`member` and `admin` on `compute-project`. A relation grants nothing by itself: policies test it, as
+`resource.relations` on the resource itself and as `resource.parentRelations` on its children. Reservations,
+instances and nodes have their pool as parent.
+
+```ts title="share-pool.ts"
+await iam.api.relationships.create(orgOwner, {
+  tenantId: orgId,
+  type: 'compute-pool',
+  id: poolId, // the pool's compute id (pool_...)
+  relation: 'user',
+  subjectType: 'group',
+  subjectId: mlTeamGroupId,
+});
+```
+
+Relationships live in the organization's own tenant, so an organization can share a platform pool that is offered
+to it. One common split of the four pool relations:
+
+| Relation | Typical statements |
+| --- | --- |
+| `viewer` | `compute:pools:read` and `compute:capacity:read` on `compute-pool/*` with `resource.relations` |
+| `user` | The above, plus `compute:reservations:create` on `compute-reservation/*` with `resource.parentRelations` |
+| `operator` | `compute:nodes:read`, `compute:nodes:cordon` and `compute:nodes:drain` on `compute-node/*` with `resource.parentRelations` |
+| `admin` | `compute:pools:manage`, `compute:pools:share` and the `compute:join-tokens:*` actions on `compute-pool/*` with `resource.relations` |
+
+```json title="Operate the nodes of pools you operate"
+{
+  "sid": "OperatePoolNodes",
+  "effect": "allow",
+  "actions": ["compute:nodes:read", "compute:nodes:cordon", "compute:nodes:drain"],
+  "resources": ["compute-node/*"],
+  "conditions": { "ArrayContains": { "resource.parentRelations": "operator" } }
+}
+```
+
+<Callout type="warn" title="Share pools, not reservations">
+  Never create one relationship per reservation or instance. Better IAM loads all of a tenant's relationship
+  tuples for every decision, so per-item tuples slow down every call in the tenant. Share pools and projects, and
+  test ownership with `resource.ownerId`.
+</Callout>
+
+## Conditions compute relies on
+
+These Better IAM context keys carry most compute policies:
+
+| Key | Use |
+| --- | --- |
+| `resource.<attribute>` | The attributes in the table above, including pending `extend` values |
+| `resource.ownerId` | "Own" statements, with the `${principal.id}` variable |
+| `resource.relations`, `resource.parentRelations` | Relations on the resource and on its pool |
+| `principal.kind` | `user`, `service` or `agent`; a delegated session is `user` |
+| `principal.delegated` | True while an AI agent acts for the person |
+| `principal.mfa` | True for MFA-verified sessions; always false for API keys and delegated sessions |
+| `principal.spendExceeded` | True once an enforced budget covering the principal is spent |
+| `tenant.features` | The flags that are on for the decision's tenant, such as `compute.h100` |
+
+Flags gate features inside decisions at no extra cost. PLAN.md names `compute.baremetal`, `compute.h100` and
+`compute.byo-nodes` as examples; compute's code reads flags through `IamPort.featureEnabled`, backed by the flag
+cache, and no built-in method requires a flag today.
+
+## Fleet administrators
+
+Fleet-wide methods decide on `compute-fleet/global` in the root tenant, so platform operators hold root-tenant
+policies. This example is a starting point, not a shipped policy:
+
+```json title="fleet-operator"
+{
+  "name": "fleet-operator",
+  "document": {
+    "version": 1,
+    "statements": [
+      {
+        "sid": "Fleet",
+        "effect": "allow",
+        "actions": ["compute:fleet:admin", "compute:sites:manage", "compute:pools:create", "compute:quotas:manage"],
+        "resources": ["compute-fleet/global"]
+      },
+      {
+        "sid": "ListInRoot",
+        "effect": "allow",
+        "actions": ["compute:sites:read", "compute:pools:read", "compute:nodes:read"],
+        "resources": ["compute-tenant/*"]
+      },
+      {
+        "sid": "PlatformPools",
+        "effect": "allow",
+        "actions": [
+          "compute:pools:read", "compute:pools:manage", "compute:pools:share", "compute:capacity:read",
+          "compute:join-tokens:create", "compute:join-tokens:read", "compute:join-tokens:revoke"
+        ],
+        "resources": ["compute-pool/*"]
+      },
+      {
+        "sid": "PlatformNodes",
+        "effect": "allow",
+        "actions": ["compute:nodes:read", "compute:nodes:cordon", "compute:nodes:drain", "compute:nodes:update", "compute:nodes:exec"],
+        "resources": ["compute-node/*"]
+      }
+    ]
+  }
+}
+```
+
+A root-tenant operator acts on an organization's resources only through Better IAM's root override, which needs
+root authority and an MFA-verified user session, and which Better IAM audits. See
+[Tenancy](/docs/guides/iam/tenancy).
+
+## Break-glass access
+
+PLAN.md describes break-glass root access to platform nodes for v0.3, when `nodes.issueSshCert` and
+`tunnels.open` arrive (both are planned in this release). The policy allows the console and root SSH only on
+platform-trust nodes from an MFA session:
+
+```json title="break-glass"
+{
+  "sid": "BreakGlass",
+  "effect": "allow",
+  "actions": ["compute:nodes:console", "compute:nodes:ssh-root"],
+  "resources": ["compute-node/*"],
+  "conditions": {
+    "Bool": { "principal.mfa": true },
+    "StringEquals": { "resource.trust": "platform" }
+  }
+}
+```
+
+It is bound as an eligible binding, which a person must activate before use:
+`iam.api.bindings.create(credential, { tenantId, roleId, subjectType, subjectId, eligible: true, requireMfa: true,
+requireJustification: true, requireApproval: true })`. The planned certificate and tunnel lifetimes never exceed
+the activation's expiry, and deactivating the binding closes the sessions. MFA on join tokens is a per-pool
+policy you may add, not a default, because CI cannot carry MFA.
+
+## Validation and testing
+
+- Create compute policies on a host with compute's plugin. A wildcard such as `compute:*` validates on any host,
+  but it decides only where the plugin is installed; elsewhere every compute decision denies.
+- A denial never explains itself: callers see `ACCESS_DENIED`. Use Better IAM's policy simulation as an
+  administrator to see why.
+- `tests/iam-bridge-matrix.test.ts` grants each action and type pair of the method table in a real Better IAM
+  and checks that a grant on one type never allows the action on another. Use the same approach, with
+  `createEmbeddedTestIam` from `better-compute/iam/testing`, to test your own policies. See
+  [Testing](/docs/operations/testing).

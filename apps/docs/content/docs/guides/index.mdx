@@ -1,0 +1,208 @@
+---
+title: Introduction
+description: Better Compute is an embeddable TypeScript control plane for GPU and bare-metal capacity that uses Better IAM for identity, policy and billing.
+icon: Sparkles
+packages: ['better-compute']
+sources: ['README.md', 'PLAN.md', 'CHANGELOG.md', 'packages/better-compute/README.md', 'packages/server/README.md', 'packages/server/src/index.ts', 'daemon/README.md', '.claude/coordination.md']
+---
+
+import { Blocks, Code, Cpu, FileCodeCorner, HardDrive, Instance, KeyRound, Rocket, Server, ShieldCheck, Webhook } from '@/lib/icons';
+
+Better Compute tracks GPU and bare-metal capacity: what hardware exists, what is free, and who holds it. The
+database referees every booking, so a GPU can never be given to two holders at once. It also makes machines useful:
+you can adopt a server that is already running, deploy an image to a bare machine over PXE, or run a VPS on your own
+hosts or on a provider's.
+
+It is a library, not a hosted service. You construct the control plane with `betterCompute()` in your own process,
+on your own PostgreSQL, the same way you construct Better IAM with `betterIam()`:
+
+```ts title="compute.ts"
+import { betterCompute } from 'better-compute';
+import { postgres } from 'better-compute/postgres';
+
+export const compute = betterCompute({
+  database: postgres({ url: process.env.BETTER_COMPUTE_DATABASE_URL! }),
+  secret: process.env.BETTER_COMPUTE_SECRET!, // at least 32 characters
+  baseURL: 'https://compute.example.com',
+  rootTenantId, // the Better IAM root (platform) tenant
+  iam, // an IamPort, for example bridge.embedded(iam, { rootTenantId })
+  modules: [], // metal(), vps(), provisionModule() and friends
+});
+
+await compute.initialize(); // registry checks, migrations, module start()
+```
+
+## What it is for
+
+GPU fleets are usually tracked in spreadsheets, a scheduler's memory, or a cloud console, and each of those forgets
+something: who holds which device, which machine is healthy, or what was promised for next Tuesday. Better Compute
+keeps one authoritative record and builds everything else on it:
+
+- **Fleet truth.** <Term id="site">Sites</Term>, <Term id="pool">pools</Term>, <Term id="node">nodes</Term>,
+  devices, health and holders, in PostgreSQL.
+- **Exact capacity, now and over a horizon.** Every claim is a <Term id="booking">booking</Term> row guarded by an
+  `EXCLUDE` constraint, so double-booking is impossible by construction, not by careful scheduling.
+- **Many provisioning paths.** Adopt a running server, PXE or virtual media plus an image stream, a provider
+  reinstall, a VPS on libvirt/KVM or Cloud Hypervisor, or a provider VM. Each path is a composition of drivers.
+- **A daemon per server and a horizontally scalable control plane,** with an API, a typed client, a CLI and MCP tools.
+- **Scale targets per region on one PostgreSQL primary:** 10,000 nodes, 100,000 GPUs, at least 200 placements per
+  second and a command p99 under 1.5 s. These are design targets that the v0.4 phase is meant to prove.
+- **Modularity.** New provisioning methods and providers are modules, drivers and profiles. They need no edits to
+  the `@better-compute/*` packages.
+- **Agent-ready.** AI agents use the same typed API or MCP tools, and a person can confirm what an agent asks for.
+
+## What it is not
+
+The design lists these as non-goals for v1:
+
+- A workload orchestrator. Capacity goes to Kubernetes or Slurm through config drivers; Better Compute hands out
+  devices, it does not run jobs.
+- A sandbox product.
+- A source of users, roles, keys or invoices of its own. Better IAM owns all of those.
+- A telemetry store. Metrics go to a time-series database, never through PostgreSQL or the control stream.
+- Active-active multi-region, live migration, or volumes and software-defined networking beyond bridges, VLANs and
+  IPAM.
+- Windows or macOS nodes.
+- Equinix Metal, which reached end of life on 2026-06-30.
+
+## Three runtime parts
+
+```mermaid
+flowchart LR
+  C["SDK, CLI, MCP"] -->|"POST /api/compute"| A["api: authn, admission, placement"]
+  A --> P[(PostgreSQL)]
+  W["worker: reconcilers, sinks"] --> P
+  G["gateway: sessions, dispatch"] --> P
+  D["bcd node, site, ramdisk"] -->|"gRPC over mTLS, outbound 443"| G
+  A -.->|"one decision per mutation"| I[Better IAM]
+```
+
+### bcd, the daemon
+
+<Term id="bcd">bcd</Term> is one Go binary with a mode per job:
+
+| Mode | Runs on | Does |
+| --- | --- | --- |
+| `node` | every server | session, inventory, NVML health, CDI device holds, commands |
+| `site` | one or two per datacenter | proxy DHCP, iPXE, image cache, BMC access |
+| `ramdisk` | a machine during PXE commissioning | inspection, diagnostics, wipe, image streaming |
+| `sim` | test hosts | many daemons on fake hardware |
+
+It only ever dials out, over gRPC on mutual TLS to a <Term id="gateway">gateway</Term> on port 443. See
+[the daemon](/docs/daemon).
+
+### The control plane
+
+`betterCompute(options)` returns `{ api, handler, nodeHandler, gatewayServices, initialize, start, stop, … }`. The
+same configuration runs in any of four process modes: `api` (stateless HTTP, admission and JoinService), `gateway`
+(daemon sessions and dispatch), `worker` (reconcilers, event sinks, IAM jobs) or `all`. PostgreSQL is the truth, and
+all SQL reads one clock, `compute_now()`. See [architecture](/docs/guides/concepts/architecture).
+
+### The API and its clients
+
+Every method is `POST /api/compute/{group}/{method}`. On the server you call it as
+`compute.api.reservations.create(credential, input)`, in the browser through a typed client inferred from your
+server instance, from a shell through the `better-compute` CLI, and from AI agents through MCP tools. All of them go
+through the same envelope: authentication, the tenant pre-check, one IAM decision, then one transaction. See
+[clients](/docs/guides/clients) and the [API reference](/docs/reference/api).
+
+## Better Compute and Better IAM
+
+Better Compute has no users, roles or API keys of its own. [Better IAM](/docs/guides/iam) is its only identity
+provider, policy decision point and billing ledger, and also its feature-flag store and event source. Better Compute
+owns only its machine PKI: the certificates that identify daemons.
+
+- **One decision per mutation.** Each mutating call makes exactly one Better IAM decision, such as
+  `compute:reservations:create` on the reservation being requested. Reads use a short decision cache.
+- **Fleet paths never call IAM.** Heartbeats, inventory, commands and reconcilers run without a single IAM call, so
+  a busy fleet cannot saturate the identity system.
+- **Application-owned resources.** Better Compute contributes `compute-*` resource types (`compute-pool`,
+  `compute-reservation`, …) to Better IAM's catalog and resolves them itself from an in-memory projection.
+- **Billing on reserved time.** Usage windows such as `gpu.<model>.hours` are recorded in Better IAM's billing
+  ledger.
+- **Embedded by default.** The IAM bridge (`better-compute/iam`) runs Better IAM in the same processes. A remote
+  mode, where Better IAM runs elsewhere, is part of the v0.4 phase.
+
+Better IAM itself is not published to npm yet, so Better Compute depends on it through vendored tarballs.
+
+## What it covers
+
+<FeatureGrid>
+  <Feature icon={<Blocks />} title="Concepts" href="/docs/guides/concepts">
+    Architecture, the domain model, desired state and commands, and the consistency rules everything rests on.
+  </Feature>
+  <Feature icon={<Server />} title="Nodes" href="/docs/guides/nodes">
+    Joining with a token, attestation, inventory and health, cordon and drain, and one-shot commands.
+  </Feature>
+  <Feature icon={<Cpu />} title="Capacity" href="/docs/guides/capacity">
+    Pools, placement, reservations, quotas, gangs, calendar and spot reservations, and fractional GPUs.
+  </Feature>
+  <Feature icon={<HardDrive />} title="Bare metal" href="/docs/guides/bare-metal">
+    Sites, workflows, profiles and images, BMC access, deploys, and dedicated-root leases.
+  </Feature>
+  <Feature icon={<Instance />} title="VPS" href="/docs/guides/vps">
+    Instances on your own hosts or a provider's, flavors, provider accounts and networking.
+  </Feature>
+  <Feature icon={<KeyRound />} title="Access" href="/docs/guides/access">
+    Exec and console tunnels with single-use tickets, and SSH certificates.
+  </Feature>
+  <Feature icon={<FileCodeCorner />} title="Fleet config" href="/docs/guides/fleet-config">
+    Export, plan and apply sites, pools, offers and quotas as one document, with drift detection.
+  </Feature>
+  <Feature icon={<Rocket />} title="Rollouts" href="/docs/guides/rollouts">
+    Signed bcd releases rolled out in waves within each pool's disruption budget.
+  </Feature>
+  <Feature icon={<ShieldCheck />} title="IAM" href="/docs/guides/iam">
+    Actions and resources, policies, tenancy, billing and delegated confirmation with Better IAM.
+  </Feature>
+  <Feature icon={<Webhook />} title="Events" href="/docs/guides/events">
+    Signed webhooks, the server-sent event stream, and tamper-evident audit checkpoints.
+  </Feature>
+  <Feature icon={<Code />} title="Clients" href="/docs/guides/clients">
+    The typed TypeScript client, the CLI, MCP tools and the console kit.
+  </Feature>
+</FeatureGrid>
+
+## Project status
+
+<Callout type="warn" title="Pre-release">
+  Every package is at version 0.1.0 and nothing is published to npm. Better Compute will not publish while it
+  depends on Better IAM through vendored tarballs. Build it from a clone; see [Installation](/docs/guides/installation).
+</Callout>
+
+The roadmap runs in phases, and a phase closes only when its exit tests pass in CI. Much of the TypeScript control
+plane for later phases has already landed; what is still open is mostly the Go daemon and the tests that need it:
+
+| Phase | Theme | What has landed | What is open |
+| --- | --- | --- | --- |
+| P0 | Scaffold | Workspace, repository rules, CI, vendored Better IAM; contracts frozen (`agent/v1`, `@better-compute/core`, the v0.1 schema and method table) | Nothing |
+| v0.1 | Adopt and reserve | Server runtime, JoinService, gateway, machine PKI, inventory, capacity with the inline placer, IAM bridge, CLI `dev`, `serve` and `sim`, the TypeScript FakeDaemon and fleet simulator | bcd join, session, NVML and CDI; the gateway and IAM-lane benchmark gates on reference hardware |
+| v0.2 | Metal | Workflow engine, `metal()`, images and profiles, site tokens, join requests, write-only secrets, FleetConfig, XID health and remediation, node-signed attested results | `bcd site` and `bcd ramdisk`; emulation CI on real QEMU machines |
+| v0.3 | VPS and access | `vps()` with hosted and provider pools, the Hetzner provider, tunnels, webhooks and the SSE stream, MCP tools, delegated confirmation | The daemon's VM runtimes |
+| v0.4 | Scale and HA | Pool-lease placer, gateway WebSocket fallback, signed releases and rollouts, remote IAM mode, Merkle audit checkpoints, metrics | 10,000-node runs, `bcd helper`, daemon self-update |
+| v0.5 | GPU depth and ecosystem | Gang, calendar and spot reservations, MIG and time-slice atoms, dedicated-root metal, TPM attestor, the bcx driver SDK (draft), the Proxmox provider, the console kit | Real-hardware MIG tests |
+| v1.0 | Freeze | Nothing yet | API and protocol freeze, security review, npm publication after Better IAM publishes |
+
+The daemon deserves a note. `daemon/` holds the Go module with its configuration, inventory encoding and fake
+hardware done, and the journal, dispatch, session and converger packages as contracts; `bcd version` and
+`bcd doctor` work. It is not built or released yet, because the build machine has no Go toolchain. Until it is, the
+TypeScript `FakeDaemon` in `@better-compute/testing` speaks the real protocol, and it is what joins in
+`better-compute dev --sim N`, the simulator and the test suites. See the [roadmap](/docs/reference/roadmap) for each
+phase's exit tests.
+
+## Where to go next
+
+<Cards>
+  <Card title="Quickstart" href="/docs/guides/quickstart">
+    Build from a clone, start the development server with simulated GPU machines, and reserve GPUs.
+  </Card>
+  <Card title="Installation" href="/docs/guides/installation">
+    Requirements, the umbrella package and its subpaths, and installing before the first npm release.
+  </Card>
+  <Card title="Concepts" href="/docs/guides/concepts">
+    The architecture, the domain model and the design principles.
+  </Card>
+  <Card title="API reference" href="/docs/reference/api">
+    Every API group and method, with its HTTP route, IAM action and phase.
+  </Card>
+</Cards>

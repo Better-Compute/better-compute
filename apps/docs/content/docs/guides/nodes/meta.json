@@ -1,0 +1,5 @@
+{
+  "title": "Nodes",
+  "icon": "Server",
+  "pages": ["index", "joining", "attestation", "inventory-and-health", "operating-nodes", "commands"]
+}

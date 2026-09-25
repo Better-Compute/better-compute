@@ -1,0 +1,126 @@
+---
+title: Reference
+description: Generated reference for the API, the CLI, command kinds, error codes, events, modules and packages, built from a live control plane with every module.
+icon: Code
+sources:
+  - apps/docs/scripts/generate.mjs
+  - apps/docs/scripts/descriptions.mjs
+  - apps/docs/scripts/check-content.mjs
+  - apps/docs/app/llms.txt/route.ts
+  - apps/docs/app/llms-full.txt/route.ts
+  - apps/docs/app/llms.mdx/docs/[[...slug]]/route.ts
+  - apps/docs/app/api/search/route.ts
+  - apps/docs/app/api/mcp/route.ts
+  - apps/docs/proxy.ts
+  - apps/docs/lib/glossary.ts
+---
+
+import { BookA, Blocks, Bot, Braces, Broadcast, Command, History, OctagonAlert, Package, Signpost, SquareTerminal } from '@/lib/icons';
+
+Most of this section is generated from the repository by `apps/docs/scripts/generate.mjs`, so it matches the code
+it documents. The generator does not parse source files. It imports the built packages and constructs a real control
+plane with `betterCompute()` and **every** module registered: the built-in node controllers, `inventory` and
+`capacity`, plus `provision` with `metal`, `vps`, `events`, `fleet`, `rollout` and `audit`. That control plane runs
+on a PGlite executor that is never opened and an `IamPort` that refuses every call, so nothing is migrated and no
+decision is made. What it reads is the registry a full deployment serves:
+
+| Page | Generated from |
+| --- | --- |
+| [API](/docs/reference/api) | The method registry, joined with PLAN.md §9.2 (core's `apiSurface`), so every method shows as `registered` (served by this build) or `planned` with its phase |
+| [CLI](/docs/reference/cli) | `cliManifest()` of `@better-compute/cli`, the same data `better-compute help --json` prints |
+| [Command kinds](/docs/reference/command-kinds) | `registry.commandKinds`: lane, roles, retry-safe, self-terminating, attested and destructive flags, timeout and payload message |
+| [Errors](/docs/reference/errors) | Core's `errorCodes` and `defaultStatus` |
+| [Events](/docs/reference/events) | `eventCatalog` of `@better-compute/events`: every event family with its type, subject and module, the same list `webhooks.eventTypes` returns |
+| [Modules](/docs/reference/modules) | The registry's modules, their API groups and migrations, and every job in `compute.jobs` |
+| [Packages](/docs/reference/packages) | Every `packages/*/package.json`: name, description and export subpaths |
+
+The prose on the API and error pages is hand-written and kept beside the generator in `apps/docs/descriptions/`:
+`api/<group>.md` holds an overview paragraph and one `## method` section per method, whose first paragraph becomes
+the summary, and `errors.md` holds one `## CODE` section per error code. The generator checks those files against
+the registry, so a description of a method or code that no longer exists fails the run.
+
+The rest of the section is written by hand: the [glossary](/docs/reference/glossary) (from
+`apps/docs/data/glossary.json`, which also feeds the hover cards on every term in the guides), how to
+[use these docs with AI](/docs/reference/ai), the [roadmap](/docs/reference/roadmap), and the
+[changelog](/docs/reference/changelog), which includes the repository's `CHANGELOG.md` at build time.
+
+<Cards>
+  <Card icon={<Braces />} title="API" href="/docs/reference/api">
+    Every `compute.api` group and method: HTTP route, IAM action and resource, module, phase and status.
+  </Card>
+  <Card icon={<SquareTerminal />} title="CLI" href="/docs/reference/cli">
+    The `better-compute` command line: `dev`, `serve`, `pki`, `fleet`, `sim`, `audit` and the rest, with flags and
+    environment variables.
+  </Card>
+  <Card icon={<Command />} title="Command kinds" href="/docs/reference/command-kinds">
+    The typed one-shot operations daemons run, with their lanes and safety flags.
+  </Card>
+  <Card icon={<OctagonAlert />} title="Errors" href="/docs/reference/errors">
+    Every stable error code with its HTTP status and meaning.
+  </Card>
+  <Card icon={<Broadcast />} title="Events" href="/docs/reference/events">
+    Every event type the outbox publishes, for webhooks and the watch stream.
+  </Card>
+  <Card icon={<Blocks />} title="Modules" href="/docs/reference/modules">
+    What each module registers: API groups, migrations and jobs.
+  </Card>
+  <Card icon={<Package />} title="Packages" href="/docs/reference/packages">
+    Every package in the repository and its entry points.
+  </Card>
+  <Card icon={<BookA />} title="Glossary" href="/docs/reference/glossary">
+    Atoms, bookings, leases, NodeSpecs and every other term the guides use.
+  </Card>
+  <Card icon={<Bot />} title="Use the docs with AI" href="/docs/reference/ai">
+    The docs MCP server, `llms.txt` and per-page Markdown.
+  </Card>
+  <Card icon={<Signpost />} title="Roadmap" href="/docs/reference/roadmap">
+    The version plan from P0 to v1.0 and the honest state of each item.
+  </Card>
+  <Card icon={<History />} title="Changelog" href="/docs/reference/changelog">
+    Every notable change, newest first.
+  </Card>
+</Cards>
+
+## Machine-readable docs
+
+The site serves its content to tools and language models as well as to people:
+
+| URL | Content |
+| --- | --- |
+| `/llms.txt` | An index of every page with its URL and description, headed by a one-line summary of Better Compute |
+| `/llms-full.txt` | Every page as Markdown in one file |
+| `/docs/<page>.md` | One page as Markdown. A request for `/docs/<page>` with `Accept: text/markdown` gets the same answer |
+| `/llms.mdx/docs/<page>/content.md` | The route both of the above are rewritten to, with a `Link: rel="canonical"` header pointing at the HTML page |
+| `/api/search?query=...` | The search index behind the search dialog, as JSON |
+| `/api/mcp` | An MCP server (Streamable HTTP) with search, page and reference lookup tools; see [use the docs with AI](/docs/reference/ai) |
+
+`/llms.txt` and `/llms-full.txt` are sent with `X-Robots-Tag: noindex`, so search engines index the pages
+themselves.
+
+## Regenerating
+
+The generator imports the packages' `dist/` output, so build them first. It stops with the list of missing builds
+when one is absent.
+
+```bash
+node node_modules/typescript/bin/tsc -b          # build every package the generator imports
+node apps/docs/scripts/generate.mjs              # write apps/docs/generated/*.json and the generated pages
+node apps/docs/scripts/generate.mjs --check      # fail when anything it would write differs (CI)
+node apps/docs/scripts/check-content.mjs         # frontmatter, meta.json entries, links and anchors
+```
+
+`generate.mjs` writes `apps/docs/generated/{api,errors,cli,command-kinds,modules,packages}.json` next to the pages.
+The site reads them at build time: the MCP server's `lookup_api_method`, `lookup_error_code` and
+`lookup_cli_command` tools answer from them. In `--check` mode, pages in `reference/api/` that the generator would no
+longer write count as drift too; without `--check` it deletes them.
+
+`tests/docs-generate.test.ts` checks the committed output without a build: the descriptions name only real groups,
+methods and codes, every API group has its page and `meta.json` entry, and `check-content.mjs` reports no problems.
+With the packages built and `DOCS_GENERATE_CHECK=1` it also runs `generate.mjs --check`, so a registry change
+without regenerated docs fails the suite.
+
+<Callout type="info" title="Edit the source, not the page">
+Every generated page starts with a comment naming its source. Change the code, or the matching file in
+`apps/docs/descriptions/`, and regenerate; a hand edit to a generated page is overwritten on the next run and fails
+`--check` until then.
+</Callout>

@@ -1,0 +1,14 @@
+{
+  "title": "Capacity",
+  "icon": "Cpu",
+  "pages": [
+    "index",
+    "pools",
+    "placement",
+    "reservations",
+    "quotas-and-usage",
+    "gang-and-calendar",
+    "spot-and-preemption",
+    "fractional-gpus"
+  ]
+}

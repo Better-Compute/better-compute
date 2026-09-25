@@ -1,0 +1,488 @@
+[
+  {
+    "id": "admission",
+    "term": "Admission",
+    "definition": "The request-as-resource path every `create` of a reservation or instance takes: the request is written as a draft, Better IAM decides on that draft with its attributes, and only an allowed draft is placed. A retry with the same idempotency key replays the stored result.",
+    "href": "/docs/guides/capacity/reservations"
+  },
+  {
+    "id": "admission-context",
+    "term": "Admission context",
+    "definition": "The IAM decision context recorded with each allowed mutation in `audit_events`: identity, session kind, agent, delegation and request id. Better IAM does not audit allows, and asynchronous work acts on this record, never on a stored token.",
+    "href": "/docs/guides/iam"
+  },
+  {
+    "id": "allocation",
+    "term": "Allocation",
+    "definition": "A placement on one node, owned by a reservation or an instance, listing the atoms and scalar amounts it holds. A gang has one allocation per node.",
+    "href": "/docs/guides/capacity/reservations"
+  },
+  {
+    "id": "allocation-lease",
+    "term": "Allocation lease",
+    "definition": "A renewable hold on a reservation: one made with `leaseSeconds` is released unless `reservations.renew` is called within every period.",
+    "href": "/docs/guides/capacity/reservations"
+  },
+  {
+    "id": "atom",
+    "term": "Atom",
+    "definition": "A device with `bookable: true`, the only kind ever booked: a whole GPU, a MIG instance, a time-slice or MPS slot, a NIC virtual function, a disk or a whole node. A partitioned GPU's parent is not an atom.",
+    "href": "/docs/guides/capacity"
+  },
+  {
+    "id": "attestor",
+    "term": "Attestor",
+    "definition": "A plug-in of JoinService that checks one kind of join evidence and decides whether a machine may join and as which node: `join-token`, `x509pop`, `provisioned`, `discovery`, `cloud-iid` or `tpm`.",
+    "href": "/docs/guides/nodes/attestation"
+  },
+  {
+    "id": "authz-projection",
+    "term": "Authz projection",
+    "definition": "Compute's own rows describing every `compute-*` resource Better IAM may decide on (type, id, tenant, parent, owner and attributes), written in the same transaction as the change and held in memory. The resolver answers IAM from it, and list queries filter on the same rows.",
+    "href": "/docs/guides/iam/actions-and-resources"
+  },
+  {
+    "id": "bcd",
+    "term": "bcd",
+    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. It is written but not built yet; the TypeScript `FakeDaemon` stands in for it.",
+    "href": "/docs/daemon"
+  },
+  {
+    "id": "bmc",
+    "term": "BMC",
+    "definition": "The baseboard management controller: the part of a server that works when the server does not, used to power it, choose its boot device, mount media and read hardware. Metal reaches every BMC through a site agent, never from the control plane.",
+    "href": "/docs/guides/bare-metal/bmc"
+  },
+  {
+    "id": "booking",
+    "term": "Booking",
+    "definition": "One row `(device_id, allocation_id, during)` in `device_bookings`. An `EXCLUDE` constraint allows one live booking per atom per instant, which is why double-booking cannot happen.",
+    "href": "/docs/guides/concepts/consistency"
+  },
+  {
+    "id": "booking-repair",
+    "term": "BookingRepair",
+    "definition": "The check that re-places a calendar reservation whose booked hardware went bad (cordoned, quarantined or unreachable), run 15 minutes before its start and again at the start.",
+    "href": "/docs/guides/capacity/gang-and-calendar"
+  },
+  {
+    "id": "calendar-reservation",
+    "term": "Calendar reservation",
+    "definition": "A reservation with a `start` in the future. Its atoms are booked at admission for the window from `start` to `start + duration`, so nobody else can take them for that window.",
+    "href": "/docs/guides/capacity/gang-and-calendar"
+  },
+  {
+    "id": "capacity",
+    "term": "Capacity",
+    "definition": "What the inventory makes bookable, per pool and resource: allocatable, allocated, reserved and available. Only schedulable nodes count as allocatable.",
+    "href": "/docs/guides/capacity"
+  },
+  {
+    "id": "cdi",
+    "term": "CDI",
+    "definition": "The Container Device Interface. For a `hold` reservation the node writes a CDI spec naming exactly the booked GPUs, which a workload manager on the node (containerd, Kubernetes, Slurm) consumes.",
+    "href": "/docs/guides/capacity/reservations"
+  },
+  {
+    "id": "command",
+    "term": "Command",
+    "definition": "A durable, idempotent one-shot message to one node, with a per-node `seq`, `not_before`, `not_after`, an optional `min_generation` and the flags of its kind. Commands are for actions; lasting state belongs in the NodeSpec.",
+    "href": "/docs/guides/nodes/commands"
+  },
+  {
+    "id": "command-kind",
+    "term": "Command kind",
+    "definition": "The registered type of a command, such as `node.reboot` or `diag.nvml`: its lane, the agent roles that accept it, a timeout, a payload message, and the flags retry-safe, self-terminating, attested and destructive.",
+    "href": "/docs/reference/command-kinds"
+  },
+  {
+    "id": "compute-now",
+    "term": "compute_now()",
+    "definition": "The SQL function every query uses for the current time instead of `now()`, so the whole control plane reads one database clock. Tests point it at a simulated clock, and a repository lint refuses bare `now()`.",
+    "href": "/docs/guides/concepts/consistency"
+  },
+  {
+    "id": "condition",
+    "term": "Condition",
+    "definition": "A typed statement about a node or GPU, such as `GpuCountMismatch`, `NodeUnreachable` or `ClockSkew`, written by the health, inventory and liveness controllers. A condition with a NoSchedule effect keeps the node out of placement.",
+    "href": "/docs/guides/nodes/inventory-and-health"
+  },
+  {
+    "id": "cordon",
+    "term": "Cordon",
+    "definition": "A flag that stops new placements on a node and changes nothing else: existing allocations keep running and commands still flow. `nodes.uncordon` clears it.",
+    "href": "/docs/guides/nodes/operating-nodes"
+  },
+  {
+    "id": "delegated-confirmation",
+    "term": "Delegated confirmation",
+    "definition": "When an agent acting under a Better IAM delegation is denied an action the person held back, compute answers `CONFIRMATION_REQUIRED` instead of a plain denial; the person approves in Better IAM and the agent retries the same request.",
+    "href": "/docs/guides/iam/delegated-confirmation"
+  },
+  {
+    "id": "device",
+    "term": "Device",
+    "definition": "A unit of hardware with typed attributes, in the style of Kubernetes dynamic resource allocation: class `gpu`, `gpu.mig`, `gpu.slot`, `nic.vf`, `disk` or `node`, with a stable id such as a GPU UUID, disk WWN or MAC.",
+    "href": "/docs/guides/nodes/inventory-and-health"
+  },
+  {
+    "id": "draft",
+    "term": "Draft",
+    "definition": "The first state of a reservation or instance, written before IAM decides so that policies can read exactly what is asked for. Its id derives from the tenant, the caller's identity and the idempotency key, so a retry finds the same row.",
+    "href": "/docs/guides/capacity/reservations"
+  },
+  {
+    "id": "drain",
+    "term": "Drain",
+    "definition": "A cordon that also waits for the node to empty: `nodes.drain` cordons the node, adds the `draining` NoSchedule reason and hands it to the Drain controller.",
+    "href": "/docs/guides/nodes/operating-nodes"
+  },
+  {
+    "id": "drift",
+    "term": "Drift",
+    "definition": "A difference between the fleet and the FleetConfig document last applied. The `fleet.drift` reconciler re-plans the applied document every 15 minutes by default and publishes `fleet.drifted` or `fleet.converged`.",
+    "href": "/docs/guides/fleet-config"
+  },
+  {
+    "id": "driver",
+    "term": "Driver",
+    "definition": "An implementation of one or more hardware concerns in the Ironic sense: `power`, `management`, `boot`, `deploy`, `inspect`, `console`, `virtual-media`, `bios`, `raid`, `firmware`, `config` or `runtime`. A node binds one driver per concern, inherited from its pool's hardware profile unless overridden.",
+    "href": "/docs/extending/drivers"
+  },
+  {
+    "id": "epoch",
+    "term": "Epoch",
+    "definition": "A counter that fences a lease or session: every takeover increments it, and writes carrying an older epoch are refused, so a stalled worker, site agent or gateway cannot act after losing ownership.",
+    "href": "/docs/daemon/sessions"
+  },
+  {
+    "id": "exclude-constraint",
+    "term": "EXCLUDE constraint",
+    "definition": "The PostgreSQL constraint `EXCLUDE USING gist (device_id WITH =, during WITH &&)` on `device_bookings`. It lets at most one live booking exist per atom per instant, whatever the placer or the API does.",
+    "href": "/docs/guides/concepts/consistency"
+  },
+  {
+    "id": "exec-ticket",
+    "term": "Exec ticket",
+    "definition": "A single-use ES256 JWT (`typ: bc-exec+jwt`) that `tunnels.open` issues for one node, one tunnel and one caller, valid for at most 60 seconds. The API, the gateway and the daemon each verify it before any byte flows.",
+    "href": "/docs/guides/access/tunnels"
+  },
+  {
+    "id": "fake-daemon",
+    "term": "FakeDaemon",
+    "definition": "The TypeScript implementation of the daemon side of the protocol in `@better-compute/testing`, with the same journal rules, acceptance checks and lanes as bcd. It runs in tests, the fleet simulator and `better-compute dev --sim N`.",
+    "href": "/docs/operations/testing"
+  },
+  {
+    "id": "flavor",
+    "term": "Flavor",
+    "definition": "A named instance shape such as `g1.small`, defined by a pool's owner and picked by name when creating an instance. In a hosted pool it becomes claims on one host; in a provider pool it names the provider's offer.",
+    "href": "/docs/guides/vps/flavors"
+  },
+  {
+    "id": "fleet-config",
+    "term": "FleetConfig",
+    "definition": "The fleet's shape (sites, provider accounts, pools, quotas, offers and flavors) as one document keyed by name, exported, planned and applied in one transaction with `fleet.export`, `fleet.plan` and `fleet.apply`.",
+    "href": "/docs/guides/fleet-config"
+  },
+  {
+    "id": "gang",
+    "term": "Gang",
+    "definition": "A reservation of 2 to 64 whole nodes that is placed all or nothing, optionally on one value of a topology label such as `fabric.domain`. It has one allocation per node and counts as one request for quota and IAM.",
+    "href": "/docs/guides/capacity/gang-and-calendar"
+  },
+  {
+    "id": "gateway",
+    "term": "Gateway",
+    "definition": "The process that holds daemons' long-lived gRPC sessions over mutual TLS, delivers desired state and commands, and writes results and events to PostgreSQL. It keeps only soft state, so losing one loses open streams and nothing else.",
+    "href": "/docs/daemon/gateway"
+  },
+  {
+    "id": "generation",
+    "term": "Generation",
+    "definition": "The version number of a node's NodeSpec, incremented only when the spec's canonical JSON changes; adoption writes generation 1. The daemon reports `observedGeneration`, and a node is schedulable only once it has converged at least once.",
+    "href": "/docs/guides/concepts/desired-state-and-commands"
+  },
+  {
+    "id": "hardware-key",
+    "term": "Hardware key",
+    "definition": "The SHA-256 of a machine's normalized product UUID, serial number, permanent MACs and GPU UUIDs, used to recognize the same machine across joins. It is trusted only when at least two independent identifiers survive the placeholder blocklist.",
+    "href": "/docs/guides/nodes/joining"
+  },
+  {
+    "id": "iam-port",
+    "term": "IamPort",
+    "definition": "The interface compute calls for every IAM question: `authenticate`, `require`, `authorize`, `authorizeMany`, `requestConfirmation`, `billingCheck`, `recordUsage` and `featureEnabled`. The IAM bridge implements it over an embedded or a remote Better IAM.",
+    "href": "/docs/guides/iam"
+  },
+  {
+    "id": "image",
+    "term": "Image",
+    "definition": "A signed, content-addressed OS or ramdisk artifact (`name@version`, `raw`, `qcow2` or `iso`, with a SHA-256). It is `verified` once its signature checks out against a signer allowlist, and unsigned images stay private.",
+    "href": "/docs/guides/bare-metal/profiles-and-images"
+  },
+  {
+    "id": "instance",
+    "term": "Instance",
+    "definition": "A VM, microVM or single-tenant container in a VPS pool, with a `desiredState` (`running`, `stopped` or `deleted`) and an observed `state` that the `vps.instances` reconciler drives toward it.",
+    "href": "/docs/guides/vps/instances"
+  },
+  {
+    "id": "inventory",
+    "term": "Inventory",
+    "definition": "The node's `NodeInventory v1` document: hardware facts in sections, each hashed so the daemon sends only what changed, stored as append-only snapshots. It produces the node's devices, labels and conditions.",
+    "href": "/docs/guides/nodes/inventory-and-health"
+  },
+  {
+    "id": "join-service",
+    "term": "JoinService",
+    "definition": "The control-plane service that admits machines: it runs the attestors on the join evidence, creates or reclaims the node row, and signs a short-lived node certificate, all in one transaction.",
+    "href": "/docs/guides/nodes/joining"
+  },
+  {
+    "id": "join-token",
+    "term": "Join token",
+    "definition": "A secret of the form `bcjt_<id>.<secret>` that lets a machine join one pool, for a limited time (`ttlSeconds`) and a limited number of machines (`maxUses`, default 1). It is shown once and handed to the machine out of band.",
+    "href": "/docs/guides/nodes/joining"
+  },
+  {
+    "id": "journal",
+    "term": "Journal",
+    "definition": "The daemon's local, bounded record of every command it accepted and every result and event not yet acknowledged, keyed by a `journal_id`. It makes sure no side effect runs twice; a lost journal starts a new id, and the server fails in-flight commands instead of replaying them.",
+    "href": "/docs/daemon/delivery"
+  },
+  {
+    "id": "lane",
+    "term": "Lane",
+    "definition": "One of the three delivery channels a command kind belongs to, `control`, `provision` or `bulk`, each with its own credits and a fixed pool of workers on the daemon, so bulk work never blocks control commands.",
+    "href": "/docs/daemon/delivery"
+  },
+  {
+    "id": "liveness-lease",
+    "term": "Liveness lease",
+    "definition": "A session's 40-second time to live, extended by heartbeats. When it lapses the node becomes unreachable, but nothing it holds is released.",
+    "href": "/docs/daemon/sessions"
+  },
+  {
+    "id": "maintenance",
+    "term": "Maintenance",
+    "definition": "A node flag, separate from cordon, set when provisioning fails, remediation gives up or an operator asks. It keeps the node out of placement until cleared.",
+    "href": "/docs/guides/nodes/operating-nodes"
+  },
+  {
+    "id": "mig",
+    "term": "MIG",
+    "definition": "NVIDIA Multi-Instance GPU, which splits one GPU into isolated instances. A GPU in MIG mode becomes an unbookable parent plus one `gpu.mig` atom per instance, and only `mig` pools accept requests for them.",
+    "href": "/docs/guides/capacity/fractional-gpus"
+  },
+  {
+    "id": "node",
+    "term": "Node",
+    "definition": "A machine Better Compute manages: a server running bcd, a site agent, or a provider machine. Its state is several independent axes (provision state, maintenance, cordon, power, connectivity and conditions), not one field.",
+    "href": "/docs/guides/nodes"
+  },
+  {
+    "id": "node-certificate",
+    "term": "Node certificate",
+    "definition": "The short-lived ECDSA P-256 client certificate JoinService signs for a daemon, valid for at most 24 hours (2 hours for a ramdisk), named by a SPIFFE ID and carrying a role: `node`, `site`, `ramdisk` or `node-tenant`.",
+    "href": "/docs/guides/nodes/joining"
+  },
+  {
+    "id": "nodespec",
+    "term": "NodeSpec",
+    "definition": "A node's generation-numbered desired state, in sections the daemon converges in a fixed order: `host`, `devices`, `instances`, `access`, `telemetry` and `daemon`. Modules contribute sections; the gateway delivers the whole spec or a patch.",
+    "href": "/docs/guides/concepts/desired-state-and-commands"
+  },
+  {
+    "id": "offering",
+    "term": "Offering",
+    "definition": "A `pool_offers` row that makes a pool visible to another tenant, with a quota per resource and an optional priority. A resource missing from the quota grants zero.",
+    "href": "/docs/guides/capacity/pools"
+  },
+  {
+    "id": "outbox",
+    "term": "Outbox",
+    "definition": "The table every event is written to, in the same transaction as the change it describes, so an event exists if and only if the change committed. Webhooks, the live stream, the history API and in-process subscribers all read it.",
+    "href": "/docs/guides/events"
+  },
+  {
+    "id": "placer",
+    "term": "Placer",
+    "definition": "The component that decides where a request lands: which node, which atoms and which scalar amounts. The default inline placer places during admission; the pool-lease placer queues requests and places them in batches.",
+    "href": "/docs/guides/capacity/placement"
+  },
+  {
+    "id": "pool",
+    "term": "Pool",
+    "definition": "A scheduling and policy domain in one site, owned by one tenant, with exactly one GPU model, a class (`metal-host`, `metal-dedicated`, `vps-host` or `provider`), a sharing mode and policies such as acceptance checks and a disruption budget.",
+    "href": "/docs/guides/capacity/pools"
+  },
+  {
+    "id": "profile",
+    "term": "Profile",
+    "definition": "A versioned provisioning template for metal or VPS targets, with driver bindings, an image, user data, steps, host configuration and acceptance checks. It is immutable once a workflow has used it.",
+    "href": "/docs/guides/bare-metal/profiles-and-images"
+  },
+  {
+    "id": "project",
+    "term": "Project",
+    "definition": "An application-owned grouping inside a tenant (the `projects` table), which reservations and instances can name and policies can read as `projectId`.",
+    "href": "/docs/guides/iam/tenancy"
+  },
+  {
+    "id": "provider",
+    "term": "Provider",
+    "definition": "An external capacity API, such as Hetzner Cloud, Hetzner Robot or Proxmox VE, behind a pool of class `provider`. Instances in such a pool are created through the provider rather than on your own hosts.",
+    "href": "/docs/guides/vps/providers"
+  },
+  {
+    "id": "provider-account",
+    "term": "Provider account",
+    "definition": "A configured account with a provider, whose credentials are stored only as secret references, never as values. A provider pool is backed by one account.",
+    "href": "/docs/guides/vps/providers"
+  },
+  {
+    "id": "provision-state",
+    "term": "Provision state",
+    "definition": "A node's lifecycle axis, from `adopting` or `enrolling` through `ready` and `deployed` to `retired`. The legal moves live in one table in `@better-compute/core`, and every verb, method and reconciler checks against it.",
+    "href": "/docs/guides/bare-metal"
+  },
+  {
+    "id": "pxe",
+    "term": "PXE",
+    "definition": "Network boot. On a bare-metal site the site agent answers proxy DHCP and serves TFTP and iPXE, so an enrolled machine boots into the ramdisk without anyone touching it.",
+    "href": "/docs/guides/bare-metal/deploying"
+  },
+  {
+    "id": "quota",
+    "term": "Quota",
+    "definition": "A cap on how much of each resource a tenant may hold in one pool at the same time, set by the pool's offering or `quotas.set`, counted in compute's database and charged all or nothing at admission.",
+    "href": "/docs/guides/capacity/quotas-and-usage"
+  },
+  {
+    "id": "ramdisk",
+    "term": "Ramdisk",
+    "definition": "The PXE-booted initramfs in which bcd runs as `bcd ramdisk` to inspect, burn in, wipe and image a machine. Its certificate lasts at most 2 hours and allows only the commissioning command kinds.",
+    "href": "/docs/guides/bare-metal/deploying"
+  },
+  {
+    "id": "reconciler",
+    "term": "Reconciler",
+    "definition": "A level-triggered controller that reads the current state, compares it with the desired state and acts on the difference. It is woken through the work queue, sharded across workers, and never relies on having seen every event.",
+    "href": "/docs/guides/concepts/desired-state-and-commands"
+  },
+  {
+    "id": "region",
+    "term": "Region",
+    "definition": "A geographic label in Better IAM's region-name grammar, stored on a site as `iamRegion` so policies can decide on where capacity is.",
+    "href": "/docs/guides/concepts/domain-model"
+  },
+  {
+    "id": "release",
+    "term": "Release",
+    "definition": "A manifest of one bcd version's files, signed offline by keys the control plane knows only by their `sha256/...` pins. Rollouts move nodes from one release to another.",
+    "href": "/docs/guides/rollouts"
+  },
+  {
+    "id": "reservation",
+    "term": "Reservation",
+    "definition": "A tenant's claim on devices of one pool for a time window: devices with counts, selectors and topology, an optional `start`, a `duration` and a `binding` of `hold`, `instance` or `node`.",
+    "href": "/docs/guides/capacity/reservations"
+  },
+  {
+    "id": "resolver",
+    "term": "Resolver",
+    "definition": "The function Better IAM calls to learn about a resource it does not store. Compute's resolver answers every `compute-*` type from the authz projection in memory and hands other types to the host's own resolver.",
+    "href": "/docs/guides/iam/actions-and-resources"
+  },
+  {
+    "id": "rollout",
+    "term": "Rollout",
+    "definition": "The controlled move of the fleet to one signed bcd release in waves (1%, 10%, 50%, 100% by default), within each pool's disruption budget, pausing by itself when too many nodes of a wave fail.",
+    "href": "/docs/guides/rollouts"
+  },
+  {
+    "id": "session",
+    "term": "Session",
+    "definition": "The long-lived gRPC stream a daemon holds to one gateway, opened with `Hello` and answered with `Welcome`. Each new session increments the node's epoch, which fences the old one.",
+    "href": "/docs/daemon/sessions"
+  },
+  {
+    "id": "shard-lease",
+    "term": "Shard lease",
+    "definition": "A lease that gives one worker or agent ownership of something, with a fencing epoch: `shard:<n>` for a slice of reconciler work, and likewise `pool:<id>`, `site:<id>:boot`, `singleton:<job>` and `gateway:<id>`.",
+    "href": "/docs/guides/concepts/consistency"
+  },
+  {
+    "id": "site",
+    "term": "Site",
+    "definition": "A boot and failure domain served by at least one site agent, of kind `shared`, `dedicated` or `custom` (a tenant's own hardware). Pools, nodes and join tokens each belong to exactly one site.",
+    "href": "/docs/guides/bare-metal/sites"
+  },
+  {
+    "id": "site-agent",
+    "term": "Site agent",
+    "definition": "bcd running as `bcd site` on a site's provisioning and BMC networks, stored as a node with `role: 'site'`. It relays BMC operations, serves network boot while it holds the site's boot lease, and caches images.",
+    "href": "/docs/guides/bare-metal/sites"
+  },
+  {
+    "id": "site-boot-lease",
+    "term": "SiteBoot lease",
+    "definition": "The lease `site:<id>:boot` that lets exactly one connected site agent serve network boot for its site; the standby is promoted only after it expires, under a new epoch.",
+    "href": "/docs/guides/bare-metal/sites"
+  },
+  {
+    "id": "spiffe-id",
+    "term": "SPIFFE ID",
+    "definition": "The URI name in every node certificate, `spiffe://<trustDomain>/site/<siteId>/node/<nodeId>`. Names come only from JoinService, never from the certificate request, and no tenant appears in them.",
+    "href": "/docs/guides/nodes/joining"
+  },
+  {
+    "id": "spot",
+    "term": "Spot",
+    "definition": "A reservation made with `spot: true`: placed like any other and billed as `gpu.<model>.spot.hours`, but preempted with a short notice (2 minutes by default) when a regular request needs its GPUs and nothing else fits.",
+    "href": "/docs/guides/capacity/spot-and-preemption"
+  },
+  {
+    "id": "step",
+    "term": "Step",
+    "definition": "One persisted unit of a workflow, run on the `control-plane`, a `site` agent, the `node` or the `ramdisk`. An agent step is exactly one command, and `await: 'rejoin'` marks steps that end the agent's boot.",
+    "href": "/docs/guides/bare-metal/workflows"
+  },
+  {
+    "id": "taint",
+    "term": "Taint",
+    "definition": "A named NoSchedule reason an operator sets on a node (`taint:<key>`), shown next to the reasons controllers write, to keep the node out of placement for a reason that should stay visible.",
+    "href": "/docs/guides/nodes/operating-nodes"
+  },
+  {
+    "id": "tenant",
+    "term": "Tenant",
+    "definition": "A Better IAM `tenantId`: the root tenant is the platform, organizations are customers. Every tenant-scoped record carries its tenant, and a caller outside a request's tenant and the root tenant is refused before any database access.",
+    "href": "/docs/guides/iam/tenancy"
+  },
+  {
+    "id": "tunnel",
+    "term": "Tunnel",
+    "definition": "A two-way byte stream between a caller and a shell, console, SSH server or TCP port on a node, carried over the session the node already holds to its gateway, so the node needs no inbound port.",
+    "href": "/docs/guides/access/tunnels"
+  },
+  {
+    "id": "usage-window",
+    "term": "Usage window",
+    "definition": "One row per allocation, hour and meter in `usage_windows`, such as `gpu.h100.hours`, written by the usage reconcilers every 5 minutes and sent to Better IAM billing with an idempotency key, so every retry is safe.",
+    "href": "/docs/guides/capacity/quotas-and-usage"
+  },
+  {
+    "id": "work-queue",
+    "term": "Work queue",
+    "definition": "The table of `(kind, key)` wake-ups for reconcilers, written in the same transaction as the change that causes them. Enqueueing a key that is already queued bumps its generation instead of adding a row, so no wake-up is lost.",
+    "href": "/docs/guides/concepts/desired-state-and-commands"
+  },
+  {
+    "id": "workflow",
+    "term": "Workflow",
+    "definition": "A profile expanded for one target into persisted steps, run by the provision engine with retries, timeouts, failure and cleanup steps. A node runs at most one active workflow at a time.",
+    "href": "/docs/guides/bare-metal/workflows"
+  }
+]

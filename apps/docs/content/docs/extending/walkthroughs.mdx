@@ -1,0 +1,214 @@
+---
+title: Walkthroughs
+metaTitle: Extension walkthroughs in the repository
+description: The acceptance walkthroughs of PLAN.md 5.6 and the emulated-site example, what each one proves about extending Better Compute, and how to run them.
+icon: Route
+status: beta
+packages: ['@better-compute/provision', '@better-compute/metal', '@better-compute/vps', '@better-compute/testing']
+sources:
+  - PLAN.md
+  - tests/extensions/ubuntu-autoinstall.test.ts
+  - tests/extensions/talos.test.ts
+  - tests/extensions/metal-sim.ts
+  - tests/metal-fakedaemon.test.ts
+  - tests/metal-dev-site.test.ts
+  - tests/metal-chaos.test.ts
+  - tests/vps-provider.test.ts
+  - tests/vps-instances.test.ts
+  - tests/provider-hetzner.test.ts
+  - tests/provider-proxmox.test.ts
+  - tests/examples-smoke.test.ts
+  - examples/README.md
+  - examples/emulated-site/README.md
+  - examples/emulated-site/better-compute.config.ts
+  - packages/metal/src/http-proxy.ts
+  - packages/metal/src/steps.ts
+  - packages/metal/src/profiles.ts
+  - packages/vps/src/conformance.ts
+  - .claude/coordination.md
+---
+
+import { Rocket, Workflow, Cloud, Plug } from '@/lib/icons';
+
+PLAN.md §5.6 sets the bar for the extension points: each one is proven by a walkthrough that adds something real to
+Better Compute **with zero edits to `@better-compute/*`**. A walkthrough is a third-party plugin, written in a test the
+way an outside package would write it, plus the test that shows the platform picks it up and runs it. They double as
+the best worked examples of the contracts on the other pages of this section.
+
+| Walkthrough | Phase | Extension points | Where | State |
+| --- | --- | --- | --- | --- |
+| 1. Ubuntu autoinstall via Redfish virtual media | v0.2 | a control-plane step, a profile, a plugin | `tests/extensions/ubuntu-autoinstall.test.ts` | runs in simulation |
+| 2. VPS provider `acme-cloud` | v0.3 | `defineProvider`, conformance cases, a provider pool | `tests/vps-provider.test.ts`, `tests/vps-instances.test.ts`, the provider suites | covered piecewise, no single walkthrough test |
+| 3. Talos on an agentless pool | v0.3 | a relaying step, a profile, `site.httpProxy` | `tests/extensions/talos.test.ts`, `tests/metal-fakedaemon.test.ts` | runs in simulation and on the dev stack |
+| 4. Kata runtime in Go | v0.5 | a bcx `runtime` plugin in `plugins.d` | none | not started |
+| Emulated site | v0.2 | a hardware profile, the whole metal lifecycle | `examples/emulated-site` | configuration checked; needs Linux, KVM and a `bcd` build to run |
+
+<Callout type="warn" title="No real hardware yet">
+Every metal walkthrough needs `bcd site` and `bcd ramdisk`, which are written for v0.2 but not built (Go is not
+installed on the build machine). The tests answer their commands with simulated site agents and machines, or with a
+FakeDaemon site agent over the real gateway. PLAN.md's pass criterion for walkthrough 1, "a sushy-tools VM reaches
+`deployed`", has not been met.
+</Callout>
+
+Run them all from the repository root:
+
+```bash
+pnpm vitest run tests/extensions tests/metal-fakedaemon.test.ts tests/examples-smoke.test.ts
+```
+
+## Walkthrough 1: Ubuntu autoinstall
+
+**The plugin.** `acme-autoinstall` installs Ubuntu with its own installer from a per-machine ISO mounted through the
+BMC, instead of streaming an image from a ramdisk. It is three definitions:
+
+```ts
+const renderAutoinstallIso = defineStep({ id: 'autoinstall.renderIso', runsOn: 'control-plane', /* … */ });
+const ubuntuAutoinstall = defineProfile({ id: 'ubuntu-24.04-autoinstall', version: 1, target: 'metal', role: 'host', /* … */ });
+const acmeAutoinstall = definePlugin({ id: 'acme-autoinstall', extensions: [renderAutoinstallIso], profiles: [ubuntuAutoinstall] });
+```
+
+- `autoinstall.renderIso` mints a single-use `provisioned` join token through `ctx.pki`, renders it into an
+  autoinstall `late-commands` entry with `renderTemplate`, stores the ISO under its sha256, and returns
+  `{ url }`, an unguessable per-node URL behind the site cache.
+- The profile chains built-in metal steps around it: `media.insert` on the site agent with
+  `fromStep: 'autoinstall.renderIso'`, `management.setBootDevice` to `cd`, `power.setPower` `cycle`,
+  `wait.agentJoined` for role `node`, and `media.eject`.
+
+Both are written out in full on [steps and profiles](/docs/extending/steps-and-profiles#definestep) and
+[deploying](/docs/guides/bare-metal/deploying#walkthrough-ubuntu-autoinstall-over-virtual-media).
+
+**The harness.** `createMetalSim({ modules: [acmeAutoinstall], install })` in `tests/extensions/metal-sim.ts` builds a
+simulated site: PGlite, the real provision engine and metal module, a site agent, and per-machine BMC state (boot
+device, mounted media, power, firmware, BIOS and RAID). Booting from PXE brings up the ramdisk; booting from a CD whose
+ISO the `install` hook accepts brings up the installed OS as role `node`. Results come back as each kind's binary result
+message, node-signed where the kind is attested, as real agents send them.
+
+**What it proves.**
+
+- `profiles.validate` resolves every step of the plugin's profile: the engine found a third-party step and profile.
+- One machine goes enroll, `ready`, `deployed` with role `host`, undeploy, `ready`. The ISO is ejected, and the join
+  token appears inside the ISO and nowhere in any command the agents saw.
+- The v0.2 acceptance of PLAN.md §16 in simulation: 20 consecutive unattended deploy and release loops, a fresh
+  single-use token for each install, and every transition into `ready` preceded by exactly one attested wipe in that
+  workflow (checked in SQL over `workflows` and `workflow_steps`).
+- A release whose wipe is not attested never reaches `ready`: it ends `failed` from `releasing`, with maintenance on.
+
+```bash
+pnpm vitest run tests/extensions/ubuntu-autoinstall.test.ts
+```
+
+**What it does not prove.** The ISO build and hosting are stubbed (a map from digest to token), the installed OS
+rejoining as the same node is simulated, and no real BMC mounts anything. A token a plugin mints itself joins through
+the `provisioned` attestor only if it carries `expect: { productUuid }` or the host's resolver can trace it; see
+[attestors](/docs/extending/attestors).
+
+## Walkthrough 3: Talos on an agentless pool
+
+Talos manages itself through its own API and never runs `bcd`. The plugin is one step and one profile:
+
+- `wait.talosReady` is a control-plane step with `relays: ['site']`. It reads the machine's address from
+  `metal_nodes.addresses` (recorded by Redfish inspection), and calls `httpViaSite(ctx, { url, tlsSpkiSha256, poll: true })`
+  on `https://<address>:50000/machine/version`. Until Talos answers 200, it throws `stepNotReady`.
+- `talos-1.8` mounts the Talos ISO with `media.insert`, sets boot to `cd`, power-cycles, and waits in
+  `wait.talosReady`.
+
+The pool opts in to what an agentless machine cannot do: `agent: 'none'`, `policy.allowUnverifiedRelease: true`, and
+`policy.provisioningCidrs` for plain-HTTP targets.
+
+`httpViaSite` is the extension point this walkthrough added to metal: a control-plane step reaches a machine only
+through its site agent's `site.httpProxy` command, and the control plane refuses anything else before a command
+exists. The request takes `url`, `method` (`GET`, `POST`, `PUT`, `DELETE`), `headers`, `secretHeaders` (secret
+references only), `body`, `tlsSpkiSha256`, `timeoutMs`, `key` and `poll`. With `poll`, each call returns the newest
+settled answer and sends the next request, which is what a readiness loop needs.
+
+**What it proves** (`tests/extensions/talos.test.ts`, on PGlite with a stub command queue):
+
+- Enrollment and commissioning run out of band (the agentless variants of metal's profiles); the recorded addresses
+  come from Redfish.
+- The deploy polls the Talos API until it answers, always at the machine's own address, with the pinned SPKI, and the
+  node is `deployed` with role `host`. Every command went to the site agent, never to the machine.
+- The node is never `connected`, so it is never schedulable for `hold` reservations.
+- Release reaches `ready` without an attested wipe only because the pool opted in, and says so with
+  `node.release.unverified`. Rescue fails the node with `UNSUPPORTED`.
+- `site.httpProxy` is SSRF-bounded: other hosts, names, credentials in URLs, plain HTTP off the provisioning network,
+  forbidden headers and header line breaks are refused; a request for another node's IP creates no command; a
+  redirect or an oversize response is `DRIVER_ERROR`; secret headers travel by reference.
+
+`tests/metal-fakedaemon.test.ts` runs the same Talos plugin on the dev stack: the real control plane with provision
+and metal, the real gateway, JoinService, and a site agent that is a FakeDaemon of role `site`, joined with a site
+token (`tests/metal-dev-site.test.ts`), in front of simulated BMCs. Every command crosses the gateway and back.
+
+```bash
+pnpm vitest run tests/extensions/talos.test.ts tests/metal-fakedaemon.test.ts
+```
+
+## Walkthrough 2: a VPS provider
+
+PLAN.md describes it as `defineProvider(…)`, `providerConformance(acmeCloud, { recordReplay })`, a provider account, and
+a `class: 'provider'` pool with `agent: 'none'` whose instances run through the generic provider steps. What exists:
+
+- `tests/vps-provider.test.ts` declares an `acme-cloud` provider with `defineProvider`, checks that its accounts are
+  validated by its manifest and typed from it, and checks every shape refusal.
+- `tests/vps-instances.test.ts` registers a `fake-cloud` provider in `vps({ providers })` and runs instances of a
+  provider pool through it: an idempotent create followed to `running`, provider errors recorded and retried, a
+  vanished machine marked `lost`.
+- The conformance API is `providerConformanceCases()` with `runConformance`, not a single `providerConformance`
+  function, and recording is left to the transport: adapters take a `fetch`. The Hetzner Cloud, Hetzner Robot and
+  Proxmox suites run the cases against in-memory emulators.
+
+Instances of provider pools are driven by the `vps.instances` reconciler calling the account's client, not by
+workflow steps. [Providers](/docs/extending/providers) shows how to write and test one.
+
+## Walkthrough 4: a Kata runtime over bcx
+
+A `runtime` driver written in Go, listed in `/etc/bcd/plugins.d/`, advertised in `Hello.drivers`, and selected by pools
+through `vps({ runtimes })`. The TypeScript half of bcx is in `@better-compute/driver-sdk`, with a real-subprocess test
+suite, but `bcd` does not run plugins, the Go SDK does not exist, and the control plane does not merge
+`Hello.drivers`. See [drivers](/docs/extending/drivers#bcx-under-bcd).
+
+## The emulated site
+
+`examples/emulated-site` is the metal walkthrough without a rack: QEMU/KVM virtual machines stand in for servers,
+`sushy-emulator` gives each a Redfish BMC over libvirt, and a `bcd site` agent on the libvirt bridge runs proxy DHCP,
+iPXE and the image cache. Its `better-compute.config.ts` uses the shared example deployment (`examples/shared/compose.ts`,
+every module) and adds one hardware profile:
+
+```ts title="examples/emulated-site/better-compute.config.ts"
+export const hardwareProfiles = {
+  'emulated-redfish': {
+    description: 'QEMU/KVM machines behind sushy-tools (Redfish), PXE-booted by the site agent',
+    drivers: { power: 'redfish', management: 'redfish', boot: 'ipxe', deploy: 'image-stream' },
+  },
+};
+```
+
+A pool that names it in `policy.hardwareProfile` drives the emulated BMCs through commission, deploy, release and
+retire. The run needs Linux with `/dev/kvm`, QEMU, libvirt, sushy-tools and a `bcd` build, so none of it runs in CI.
+What CI checks, in `tests/examples-smoke.test.ts`, is that the configuration loads, migrates on PGlite and passes
+`better-compute doctor` with no error findings (on an unconfigured machine it reports `iam.not-configured`).
+
+The step-by-step run, from `virt-install` to `metal.undeploy`, is on
+[deploying](/docs/guides/bare-metal/deploying#walkthrough-an-emulated-site). Two details there supersede the example's
+README: site agents join with a site token from `siteTokens.create`, and after `metal.enroll` the reconciler carries a
+machine to `ready` on its own, so `metal.manage`, `metal.inspect` and `metal.provide` are not needed.
+
+## Writing your own
+
+A walkthrough for your extension follows the same recipe:
+
+1. Write the plugin in the test file, importing only public entry points, the way an outside package would.
+2. Register it the way a deployment would (`provisionModule({ modules })`, `vps({ providers })`,
+   `betterCompute({ attestors })`), not by reaching into internals.
+3. Assert the platform's view first: `profiles.validate` returns no issues, `drivers.list` shows the driver, the
+   conformance report is empty.
+4. Drive the lifecycle end to end on a simulated site or the dev stack, and assert on states, events and the commands
+   agents saw, including what must **not** appear (a token in a command body, a destructive command sent twice).
+5. Add the failure cases: an unattested result, a crash mid-step (`tests/metal-chaos.test.ts` kills the worker at every
+   point of a deploy), a refused request.
+
+<Cards>
+  <Card title="Deploying machines" href="/docs/guides/bare-metal/deploying" icon={<Rocket />}>The same walkthroughs from the operator's side.</Card>
+  <Card title="Steps and profiles" href="/docs/extending/steps-and-profiles" icon={<Workflow />}>defineStep, profiles, the step context and idempotency.</Card>
+  <Card title="Providers" href="/docs/extending/providers" icon={<Cloud />}>Adapters, idempotent create and conformance.</Card>
+  <Card title="Drivers" href="/docs/extending/drivers" icon={<Plug />}>Driver kinds, bindings and bcx plugins.</Card>
+</Cards>

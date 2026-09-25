@@ -1,0 +1,269 @@
+---
+title: Inventory and health
+description: NodeInventory v1 and its section hashes, snapshots and diffs, GPU naming, devices and atoms, conditions, XID handling, remediation and acceptance.
+icon: ClipboardList
+packages: ['@better-compute/inventory', '@better-compute/server', '@better-compute/protocol']
+sources:
+  - PLAN.md
+  - packages/inventory/README.md
+  - packages/inventory/src/sections.ts
+  - packages/inventory/src/store.ts
+  - packages/inventory/src/module.ts
+  - packages/inventory/src/diff.ts
+  - packages/inventory/src/devices.ts
+  - packages/inventory/src/gpu-models.ts
+  - packages/inventory/src/labels.ts
+  - packages/inventory/src/hardware-key.ts
+  - packages/inventory/src/conditions.ts
+  - packages/inventory/src/health.ts
+  - packages/gateway/src/health.ts
+  - packages/provision/src/remediation.ts
+  - packages/server/src/controllers/lifecycle.ts
+  - proto/bettercompute/agent/v1/inventory.proto
+---
+
+Placement can only book what the control plane knows a node has, and should only book it on hardware that
+works. <Term id="inventory">Inventory</Term> is what a node reports about its hardware; health is what the
+control plane concludes from it. Together they produce the node's <Term id="device">devices</Term> and
+<Term id="atom">atoms</Term>, the labels selectors match, and the <Term id="condition">conditions</Term> that keep
+a broken node or GPU out of placement.
+
+Inventory is owned by `@better-compute/inventory`, a built-in module that every server registers.
+
+## NodeInventory v1
+
+The daemon reports its hardware as eight sections of the `NodeInventory v1` schema
+(`bettercompute.agent.v1`). Readings that change by the second (temperatures, power draw, clocks, utilization)
+are never inventory; they are telemetry, and they never go to Postgres.
+
+| Section | Source on the node | Holds |
+| --- | --- | --- |
+| `system` | DMI | vendor, product, serials (system, board, chassis), product UUID, BIOS, boot mode, Secure Boot, TPM |
+| `cpu` | `/proc/cpuinfo`, sysfs | vendor, model, architecture, sockets, cores, threads, flags, NUMA nodes |
+| `memory` | `/proc/meminfo`, EDAC, DMI | total bytes, huge page pools, DIMMs, EDAC counters |
+| `disks` | sysfs, udev, NVMe, SMART | name, model, serial, WWN, size, transport, SMART health |
+| `nics` | netlink, sysfs | physical NICs: permanent MAC, driver, firmware, speed, PCI address, NUMA node, SR-IOV VFs, RDMA, link, MTU |
+| `gpus` | NVML | driver, CUDA and NVML versions; per GPU: index, UUID, PCI bus id, raw NVML name, architecture, VRAM, serial, VBIOS, NUMA node, MIG state, NVLinks, topology row, fabric clique, ECC counters, row remapping |
+| `bmc` | in-band IPMI, Redfish host interface | IP, MAC, vendor, firmware, Redfish and IPMI support |
+| `os` | os-release, uname | distro and version, kernel, cgroup version, KVM, IOMMU, runtimes, hostname |
+
+The daemon collects inventory when its boot changes, on hardware events and XIDs, after provisioning steps,
+on a jittered 12-hour rescan, and when you run `inventory.refresh`.
+
+## How inventory travels
+
+Inventory is large and rarely changes, so it is never re-sent whole. Each section travels, and is stored, by
+the hash of its bytes.
+
+<Steps>
+<Step>
+### Hash on the node
+
+The daemon canonicalizes each section (repeated fields sorted by a stable key), encodes it, and takes the SHA-256
+of those exact bytes. `Hello`, and every tenth heartbeat, carry the section hashes.
+</Step>
+<Step>
+### Pull what changed
+
+The gateway records the hashes and asks, in `Welcome.request_sections`, only for sections whose hash differs from
+the stored one. Unknown section names from a newer daemon are ignored.
+</Step>
+<Step>
+### Verify over the received bytes
+
+Each `InventorySection{ section, content, sha256 }` is checked against its SHA-256 over the bytes as received
+and decoded; it is never re-encoded to compare, so only the daemon's encoding has to be stable. A section over
+1 MiB, a hash mismatch or bytes that do not decode are `INVALID_INPUT`.
+</Step>
+<Step>
+### Apply once complete
+
+The Inventory controller runs when every reported section is present. The snapshot digest is the SHA-256 over
+`name=hash` lines in section order; an unchanged digest does nothing. A changed one is applied in one transaction
+with the node row locked.
+</Step>
+</Steps>
+
+Applying an inventory:
+
+- appends a snapshot (`inventory_snapshots`, id `inv_…`): snapshots are append-only;
+- plans the node's devices and atoms, and its inventory labels;
+- sets the <Term id="hardware-key">hardware key</Term>;
+- writes the inventory conditions and health findings, and mirrors the NoSchedule ones into
+  `noScheduleReasons`, keeping every entry it does not own;
+- publishes `node.inventory.changed` (`snapshotId`, `digest`, `sections`, `changes`) and one event per change:
+  `node.gpu.missing`, `node.gpu.added`, `node.disk.replaced`, `node.driver.changed`, `node.mig.layout.changed`.
+
+## Reading inventory
+
+All three methods are decided as `compute:nodes:read` on the node, and answer `NOT_FOUND` for a node of another
+tenant or one with no inventory yet.
+
+| Method | Returns |
+| --- | --- |
+| [`inventory.get`](/docs/reference/api/inventory#get) | The latest snapshot: `nodeId`, `hash`, `sections` (decoded, 64-bit numbers as strings), `collectedAt`. |
+| [`inventory.history`](/docs/reference/api/inventory#history) (v0.2) | Snapshots newest first, `limit` 1 to 100 (20 by default), paged by snapshot id. |
+| [`inventory.diff`](/docs/reference/api/inventory#diff) (v0.2) | The changes between two snapshots, named by id (`inv_…`) or hash; by default the latest against the one before. |
+
+```ts
+const latest = await client.inventory.get({ tenantId, nodeId });
+console.log(latest.sections.gpus);
+
+const { from, to, changes } = await client.inventory.diff({ tenantId, nodeId });
+for (const change of changes) console.log(change.type, change.deviceId, change.before, change.after);
+```
+
+```bash
+better-compute api inventory.diff tenantId=$TENANT nodeId=node_… --format table
+```
+
+A diff lists, in this order, GPUs missing and added (by UUID), MIG layout changes (mode plus sorted instances),
+disks replaced (the same kernel name with another WWN or serial), and driver changes (NVIDIA driver or CUDA
+version). A section missing on either side yields no changes for it: a node that stopped reporting a section did
+not lose hardware.
+
+## GPU naming
+
+NVML names are inconsistent across drivers and SKUs ("NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe"). Every GPU
+gets two normalized names:
+
+- `gpuProduct`, the exact product in `<MODEL>-<FORM>-<MEMORY>GB` form, such as `H100-SXM5-80GB`;
+- `gpuModel`, its family, such as `H100`.
+
+Pools, policies and meters use `gpuModel`: a pool holds exactly one. Selectors may use either. The mapping is the
+versioned table `gpuModels` (the plan's `gpu-models.json`, version 1), and `normalizeGpuProduct(name)` applies
+it: upper case, punctuation collapsed to `-`, a leading `NVIDIA` dropped.
+
+| Family | Products |
+| --- | --- |
+| `H100` | `H100-SXM5-80GB`, `H100-PCIE-80GB`, `H100-NVL-94GB` |
+| `H200` | `H200-SXM5-141GB`, `H200-NVL-141GB` |
+| `B200` | `B200-SXM-180GB` |
+| `GB200` | `GB200-SUPERCHIP-186GB` |
+| `A100` | `A100-SXM4-40GB`, `A100-SXM4-80GB`, `A100-PCIE-40GB`, `A100-PCIE-80GB` |
+| `L40S` | `L40S-PCIE-48GB` |
+| `L4` | `L4-PCIE-24GB` |
+| `RTX-PRO-6000` | `RTX-PRO-6000-SERVER-96GB`, `RTX-PRO-6000-WORKSTATION-96GB`, `RTX-PRO-6000-MAXQ-96GB` |
+
+A name the table does not know keeps its canonical form as `gpuProduct`, maps to `gpuModel: 'other'`, and raises
+`GpuModelUnknown`, which keeps the node from scheduling until the table knows it.
+
+## Devices and atoms
+
+The `gpus` section becomes devices with stable ids, so a reboot or a re-inventory never renames them:
+
+| Device | Id | Class | Bookable |
+| --- | --- | --- | --- |
+| A whole GPU | its UUID, `GPU-…` | `gpu` | yes, unless partitioned |
+| A MIG instance | `<gpuUuid>/gi<g>/ci<c>` | `gpu.mig` | yes; its parent GPU is not |
+| A time-slice or MPS slot | `<gpuUuid>/s<k>` | `gpu.slot` | yes; its parent GPU is not |
+
+Only atoms are booked. Slots exist in `timeslice` and `mps` pools: 4 per GPU for time-slicing and 10 for MPS by
+default (`policy.sharing.replicas`, 1 to 64). A GPU whose MIG mode is about to change has every atom
+unbookable, with `partitionPending: true`, until the change completes. See
+[fractional GPUs](/docs/guides/capacity/fractional-gpus).
+
+Device attributes are what selectors and scorers read: `gpuProduct`, `gpuModel`, `vramGiB`, `index`,
+`pciBusId`, `numaNode`, `architecture`, `computeCapability`, `driverVersion`, `migCapable`, `nvlinkPeers`,
+`fabricCluster` and `fabricClique`. A device that vanished while it still has live bookings is kept with
+`healthy: false` and deleted once its bookings end. A device id another node already owns is left alone and
+raises `DuplicateIdentity`.
+
+### Labels
+
+Inventory also writes node labels with source `inventory`, the way NVIDIA's GPU Feature Discovery does:
+`gpu.present`, `gpu.count`, `gpu.product`, `gpu.model`, `gpu.vramGiB`, `cuda.driver.major`,
+`nvidia.driver.version`, `mig.capable`, `fabric.domain`, `cpu.arch`, `cpu.vendor`, `os.distro`, `os.kernel` and
+`kvm.available`. A label whose GPUs disagree reads `mixed`. `nodes.label` cannot overwrite them.
+
+### The hardware key
+
+The hardware key identifies the machine rather than its operating system. It is the SHA-256 over the normalized
+product UUID, serial (system, else board, else chassis), sorted permanent MACs and sorted GPU UUIDs, after
+dropping firmware placeholders such as `To Be Filled By O.E.M.`. It is **trusted** when at least two independent
+identifiers survive, and trusted keys are unique across nodes. JoinService computes it from the join claims and
+the Inventory controller from inventory, with the same function, so both agree. A second node with the same
+trusted key (a cloned disk image, a moved board) gets `DuplicateIdentity` and keeps its key untrusted until an
+operator resolves it.
+
+## Conditions
+
+A condition is `{ type, status, reason?, message?, since }`, where `status` is `true`, `false` or `unknown` and
+`since` moves only when the status changes. `nodes.get` lists them. A condition with a NoSchedule policy also
+puts its type into `noScheduleReasons`, in the same transaction.
+
+| Condition | Raised by | Effect |
+| --- | --- | --- |
+| `GpuCountMismatch` (v0.1) | Inventory: a GPU count other than the pool's `policy.expect.gpuCount`, or a family other than the pool's `gpuModel` | NoSchedule. `unknown` with reason `NotReported` when the node sends no `gpus` section. |
+| `GpuModelUnknown` (v0.1) | Inventory: a GPU name missing from `gpuModels` | NoSchedule |
+| `DuplicateIdentity` | Inventory: the trusted hardware key or a device id belongs to another node | NoSchedule |
+| `AcceptanceFailed` | NodeLifecycle, see below | NoSchedule while `true` |
+| `NodeUnreachable` | Liveness, see [operating nodes](/docs/guides/nodes/operating-nodes) | the `unreachable` reason |
+| `Xid48` (v0.2) | an XID 48 (double-bit ECC) | the GPU is quarantined |
+| `Xid79`, `Xid95` (v0.2) | an XID 79 (fell off the bus) or 95 (uncontained ECC) | NoSchedule; a reboot once no allocation is live |
+| `RowRemapPending` (v0.2) | XID 63, or inventory's row-remap state | NoSchedule; a GPU reset once no allocation is live |
+| `RowRemapFailed` (v0.2) | XID 64, or inventory's row-remap state | the GPU is quarantined for replacement |
+| `EccUncorrectable`, `NvlinkDegraded` (v0.2) | inventory: volatile uncorrectable ECC errors, or NVLinks down on a GPU that has NVLink peers | the GPU is quarantined |
+
+The condition table in `@better-compute/inventory` (`nodeConditionTypes`) also defines `PcieReplayHigh`,
+the v0.3 `DiskPressure`, `MemoryPressure` and `CpuPressure` (NoSchedule on VPS hosts), and `DriverMismatch`,
+`DaemonOutdated`, `CertExpiring` and `ClockSkew`. No controller raises those on nodes yet.
+
+## Health, quarantines and remediation
+
+Not every fault should take a whole node away. A GPU with a double-bit ECC error is one bad atom on an
+eight-GPU machine, while a GPU that fell off the bus usually needs a reboot of the node.
+
+- **Device quarantine.** A device-level fault writes a `device_health` row (source `xid` or `inventory`) and
+  marks the device `healthy: false`. The atom leaves placement; the rest of the node keeps working. An XID
+  quarantine stays until it is lifted with `clearDeviceHealth(tx, deviceId, reason?)` (a function of
+  `@better-compute/inventory`) or by a successful remediation; inventory quarantines follow each new inventory.
+- **XID events.** The daemon reports XIDs as `Xid<n>` conditions on a GPU in its status reports. With the
+  gateway's `xidStatusHandler` installed (`createGateway({ reports: { ...gatewayReportHandlers, status:
+  xidStatusHandler } })`), each one goes through `recordXid`. XIDs without a policy (13, 31, 43, 45 and other
+  application faults) are only recorded as events.
+- **Remediation.** Node-level faults queue the `health` reconciler of the provision module. It waits until
+  the node holds no live allocation, then runs a `node.reboot` workflow (`Xid79`, `Xid95`) or a GPU reset
+  (`RowRemapPending`). Runs share the pool's disruption budget (`policy.disruptionBudget`, 5% of the pool and
+  at least one node, together with workflows and rollouts), and a circuit breaker pauses remediation for a pool
+  when more than 10% of its nodes turned unhealthy within 10 minutes (`pool.remediation.paused`). A successful
+  reboot clears the XID conditions and their quarantines; a GPU reset is confirmed by the next inventory. A
+  failed or cancelled run, or two runs that did not clear the fault, put the node in `maintenance` for an
+  operator (`node.remediation.escalated`). Progress is published as `node.remediation.started` and
+  `node.remediation.succeeded`.
+
+## Acceptance checks
+
+A node that just joined has not proven its hardware works. Acceptance runs the pool's checks before the node
+becomes schedulable, and again whenever you ask.
+
+```json title="pool policy"
+{
+  "acceptance": [{ "kind": "diag.nvml" }],
+  "expect": { "gpuCount": 8 }
+}
+```
+
+The NodeLifecycle controller runs them for a node in `adopting` once it is connected:
+
+1. It takes the pool's `policy.acceptance` list (each kind once). A site agent, a node without a pool, or an
+   empty list passes at once (reason `NoChecks`).
+2. It enqueues one command per check, with idempotency key `acceptance:<nodeId>:<attempt>:<kind>` and a
+   10-minute `not_after`, sets `AcceptanceFailed` to `unknown` (reason `Running`), and publishes
+   `node.acceptance.started` with the attempt, command ids and checks.
+3. `diag.nvml` checks the GPUs inventory found against `policy.expect.gpuCount` (else against the number
+   found). Other kinds run with their default payload in this release; a kind that is not registered fails the
+   attempt with `UnsupportedCheck`.
+4. When every command settled: all succeeded (and `diag.nvml` reported `passed`) makes the node `adopted`,
+   sets `AcceptanceFailed` to `false` (reason `Passed`), refreshes its IAM projection, asks the NodeSpec
+   controller for generation 1 and publishes `node.adopted`. Otherwise `AcceptanceFailed` turns `true` with the
+   reason (`Expired`, `diag.nvml:<check>`, `<kind>:failed`, …), the node stays `adopting` with the
+   `AcceptanceFailed` NoSchedule reason, and `node.acceptance.failed` carries the reason and command id.
+
+A failure is sticky: the controller does not retry on its own. Fix the cause, then call
+[`nodes.adopt`](/docs/reference/api/nodes#adopt) (`compute:nodes:provision`), which starts a new attempt. On an
+`adopted` node, `nodes.adopt` moves it back to `adopting`, so it leaves placement until the checks pass again.
+
+`diag.nvml` is the v0.1 check. The `diag.dcgm` kind comes with the metal module, whose commissioning profile
+runs it at level 2 (and the dedicated-root release at level 1); as a pool acceptance check it runs with its
+default payload until check arguments (`with`) are mapped per kind.

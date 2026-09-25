@@ -1,0 +1,262 @@
+---
+title: Installation
+description: Requirements, the better-compute umbrella package and its subpaths, packages outside it, optional peers, and installing before the first npm release.
+icon: Download
+packages: ['better-compute']
+sources: ['README.md', 'docs/development.md', 'packages/better-compute/README.md', 'packages/better-compute/umbrella.json', 'packages/better-compute/package.json', 'packages/better-compute/src/index.ts', 'scripts/packed-smoke.mjs', 'scripts/tooling.mjs', 'packages/cli/src/config.ts', 'daemon/README.md', 'PLAN.md']
+---
+
+Better Compute is split into `@better-compute/*` packages. Most applications install the umbrella package,
+`better-compute`, which depends on all of them and re-exports each one as a subpath. A subpath loads only when you
+import it, and the server never imports the injected modules (`provision`, `metal`, `vps`): your application imports
+them and passes them in, so what you do not use costs nothing at run time.
+
+<Callout type="warn" title="Not on npm yet">
+  Every package is at version 0.1.0 and nothing is published. Better Compute depends on Better IAM, which is not on
+  npm either, and it will not publish while that dependency comes from vendored tarballs. Until then you install
+  from a clone, as described below.
+</Callout>
+
+## Requirements
+
+| Requirement | Notes |
+| --- | --- |
+| Node.js 22.12 or newer | The `engines` field of every package. CI runs Node.js 22 and 24 on Ubuntu and Windows. A TypeScript configuration file (`better-compute.config.ts`) needs 22.18 or newer, which strips types by default. |
+| ESM | Every package is an ES module with TypeScript declarations and `{ types, import }` exports only. Use `"type": "module"` or a bundler. |
+| PostgreSQL 16 or newer | The production store; CI runs PostgreSQL 17. The first migration creates the `btree_gist` extension, which the booking constraint needs. PgBouncer in transaction mode is supported. |
+| PGlite, for development | PostgreSQL in WebAssembly, through the optional peer `@electric-sql/pglite`. One connection, with transactions serialized. `btree_gist` works on it. |
+| Native builds, for embedded Better IAM | Better IAM's SQLite adapter and password hashing use `better-sqlite3` and `argon2`, so allow their install scripts (pnpm: `allowBuilds`). |
+| TypeScript, optional | `moduleResolution` of `bundler`, `node16` or `nodenext`, so subpath exports resolve. |
+
+Compute's own store is PostgreSQL or PGlite only. It needs `EXCLUDE` constraints, `SKIP LOCKED` and range types, so
+there is no SQLite adapter for it. Embedded Better IAM can still use Better IAM's SQLite adapter in development.
+
+## Install from a clone
+
+Build the workspace, pack every package, and install the tarballs in your project together with the vendored Better
+IAM tarballs. This is exactly what the repository's packed smoke test (`pnpm test:packed`) does in a fresh consumer.
+
+<Steps>
+<Step>
+
+### Build and pack
+
+```bash
+git clone https://github.com/better-compute/better-compute.git
+cd better-compute
+npx pnpm@11.19.0 install
+node node_modules/pnpm/bin/pnpm.mjs build
+node node_modules/pnpm/bin/pnpm.mjs pack:all   # writes artifacts/*.tgz, publishes nothing
+```
+
+`pack:all` writes one tarball per package, named like `pnpm pack` names them: `@better-compute/core@0.1.0`
+becomes `artifacts/better-compute-core-0.1.0.tgz`, and the umbrella becomes `artifacts/better-compute-0.1.0.tgz`.
+The Better IAM tarballs are already in `vendor/better-iam`, one per package (`better-iam-server-0.1.0.tgz`, …).
+
+</Step>
+<Step>
+
+### Point your project at the tarballs
+
+The umbrella depends on the other `@better-compute/*` packages by version, and they depend on `@better-iam/*`
+packages, none of which a registry has. Override every one of them to its tarball. With pnpm:
+
+```yaml title="pnpm-workspace.yaml"
+allowBuilds:
+  argon2: true
+  better-sqlite3: true
+  esbuild: true
+overrides:
+  better-compute: file:../better-compute/artifacts/better-compute-0.1.0.tgz
+  '@better-compute/core': file:../better-compute/artifacts/better-compute-core-0.1.0.tgz
+  '@better-compute/server': file:../better-compute/artifacts/better-compute-server-0.1.0.tgz
+  # ...one line for every tarball in artifacts/
+  '@better-iam/server': file:../better-compute/vendor/better-iam/better-iam-server-0.1.0.tgz
+  '@better-iam/core': file:../better-compute/vendor/better-iam/better-iam-core-0.1.0.tgz
+  # ...one line for every tarball in vendor/better-iam/
+```
+
+Then add the umbrella and the optional peers you use:
+
+```bash
+pnpm add better-compute @electric-sql/pglite @better-iam/server @better-iam/core @better-iam/adapter-sqlite
+```
+
+</Step>
+<Step>
+
+### Check it
+
+```bash
+pnpm exec better-compute --help
+pnpm exec better-compute init   # writes better-compute.config.ts
+```
+
+</Step>
+</Steps>
+
+## Install from npm, after publication
+
+Once Better Compute is published, the umbrella is one install. This command does not work yet:
+
+```npm
+npm i better-compute
+```
+
+```ts
+import { betterCompute } from 'better-compute';
+import { metal } from 'better-compute/metal';
+import { postgres } from 'better-compute/postgres';
+import { createComputeClient } from 'better-compute/client';
+```
+
+Each package is also published on its own as `@better-compute/<name>`, for services that need only part of the
+platform, for example a browser bundle that needs only `@better-compute/client`.
+
+## Subpath imports
+
+The umbrella's subpaths are generated from `packages/better-compute/umbrella.json`; each one is a one-line
+re-export of its package, and nested subpaths map to nested exports of the same package.
+
+| Import | Package | What it provides |
+| --- | --- | --- |
+| `better-compute` | `@better-compute/server`, `@better-compute/core` | `betterCompute`, `defineConfig`, `configOptions`, `ComputeError`, `defineModule`, `definePlugin`, `defineDriver`, `defineSchedulerPlugin`, `defineAttestor`, `defineSink`, `manifest`, `field`, and their types |
+| `better-compute/core` | `@better-compute/core` | Browser-safe contracts: ids, errors, domain types, state tables, extension and port contracts, the IAM catalog, `defineMethod` |
+| `better-compute/protocol` | `@better-compute/protocol` | Generated daemon and control-plane wire types |
+| `better-compute/inventory` | `@better-compute/inventory` | Section hashing, diffs, GPU model mapping, labels and health conditions |
+| `better-compute/capacity` | `@better-compute/capacity` | Atoms, bookings, quotas, rollups and the placement pipeline |
+| `better-compute/provision` | `@better-compute/provision` | The workflow engine, `defineStep`, `defineProfile`, `provisionModule()` |
+| `better-compute/metal` | `@better-compute/metal` | Bare-metal verbs and drivers, `metal()` |
+| `better-compute/vps` | `@better-compute/vps` | Instances, runtimes, flavors, `defineProvider`, `vps()` |
+| `better-compute/iam`, `/iam/plugin`, `/iam/testing` | `@better-compute/iam` | The Better IAM bridge, the plugin for IAM hosts, and an embedded Better IAM for tests and `dev --sim` |
+| `better-compute/events` | `@better-compute/events` | Signed webhooks and the server-sent `/watch` stream |
+| `better-compute/fleet` | `@better-compute/fleet` | FleetConfig export, plan and apply |
+| `better-compute/rollout` | `@better-compute/rollout` | Signed bcd releases and wave rollouts |
+| `better-compute/audit` | `@better-compute/audit` | Signed per-tenant Merkle checkpoints over the audit log |
+| `better-compute/observability` | `@better-compute/observability` | A bounded Prometheus registry and the standard metrics |
+| `better-compute/server` | `@better-compute/server` | Everything the server exports: `betterCompute()`, the envelope, the registry, JoinService, controllers |
+| `better-compute/gateway` | `@better-compute/gateway` | Daemon sessions over gRPC on HTTP/2 mTLS, liveness and dispatch |
+| `better-compute/pki` | `@better-compute/pki` | Local CAs, SPIFFE node certificates, sealed join tokens, attestors |
+| `better-compute/postgres` | `@better-compute/postgres` | `postgres({ url })`, migrations, `compute_now()` and sim-clock helpers |
+| `better-compute/pglite` | `@better-compute/postgres/pglite` | `pglite()`, the development and test store |
+| `better-compute/client` | `@better-compute/client` | `createComputeClient`, the typed, browser-safe client |
+| `better-compute/cli` | `@better-compute/cli` | The command line, also the umbrella's `better-compute` bin |
+| `better-compute/mcp` | `@better-compute/mcp` | MCP tools for AI agents, gated by Better IAM |
+| `better-compute/testing` | `@better-compute/testing` | `computeFixture()`, `FakeDaemon`, the fleet simulator, the dev stack |
+
+`defineMethod` comes from `better-compute/core`, `defineStep` and `defineProfile` from `better-compute/provision`,
+and `defineProvider` from `better-compute/vps`.
+
+## Built-in and injected modules
+
+`inventory` and `capacity` are built in: `betterCompute()` always registers them (after the node controllers), and
+their groups (`inventory`, `pools`, `capacity`, `reservations`, `quotas`) exist in every deployment. Everything else
+is a module you pass in `modules`:
+
+```ts title="compute.ts"
+import { betterCompute } from 'better-compute';
+import { eventsModule } from 'better-compute/events';
+import { fleetModule } from 'better-compute/fleet';
+import { metal } from 'better-compute/metal';
+import { postgres } from 'better-compute/postgres';
+import { provisionModule } from 'better-compute/provision';
+import { vps } from 'better-compute/vps';
+
+const secret = process.env.BETTER_COMPUTE_SECRET!; // at least 32 characters
+const bareMetal = metal();
+
+export const compute = betterCompute({
+  database: postgres({ url: process.env.BETTER_COMPUTE_DATABASE_URL! }),
+  secret,
+  baseURL: 'https://compute.example.com',
+  rootTenantId,
+  iam,
+  // provision runs metal's workflows; metal contributes its verbs, steps and profiles
+  modules: [provisionModule({ modules: [bareMetal] }), bareMetal, vps(), eventsModule({ secret }), fleetModule()],
+});
+```
+
+The API types follow the modules: `client.instances` exists only when `vps()` is in `modules`. The repository
+enforces the direction with `scripts/check-deps.mjs`: `@better-compute/server` never depends on `provision`,
+`metal`, `vps`, `gateway`, `iam`, `postgres`, a provider or a driver. See [modules](/docs/extending/modules).
+
+## Packages outside the umbrella
+
+These are installed directly, not through `better-compute`:
+
+| Package | What it is |
+| --- | --- |
+| `@better-compute/provider-hetzner` | Hetzner Cloud servers as VPS instances and offers, and Hetzner Robot bootstrap |
+| `@better-compute/provider-proxmox` | Proxmox VE QEMU VMs cloned from templates |
+| `@better-compute/driver-sdk` | bcx, the out-of-process driver protocol (a v0.5 draft; the protocol is unstable until v0.5 ships) |
+| `@better-compute/console-kit` | Framework-free view models for consoles over the typed client |
+
+Nothing in `packages/` imports a `@better-compute/provider-*` package; you pass providers to `vps()` yourself. See
+[providers](/docs/guides/vps/providers).
+
+## Optional peers
+
+The umbrella declares these as optional peer dependencies. Install the ones you use:
+
+| Peer | Needed for |
+| --- | --- |
+| `@electric-sql/pglite` `^0.5.8` | `better-compute/pglite`, the testing fixture, `dev` without a database URL. Without it, the CLI fails with `MISSING_DEPENDENCY` and an install hint. |
+| `@better-iam/server`, `@better-iam/core` `^0.1.0` | Embedded Better IAM through the bridge |
+| `@better-iam/adapter-sqlite` `^0.1.0` | Better IAM on SQLite in development, and the embedded IAM of `dev --sim` |
+| `@better-iam/client` `^0.1.0` | `better-compute iam setup --meters`, which creates the billing meters in Better IAM |
+| `@better-iam/cli` `^0.1.0` | Declared for Better IAM's CLI; today the `better-compute` CLI reads its credential from `BETTER_COMPUTE_TOKEN` only |
+
+## Better IAM before it is published
+
+Better IAM 0.1.0 is not on npm, so the repository vendors its 23 packed tarballs and a `SOURCE.json` (source, pack
+time and sha256 of each) in `vendor/better-iam`. `pnpm-workspace.yaml` is generated by `scripts/sync-better-iam.mjs`
+and overrides every `better-iam` and `@better-iam/*` package, transitive ones included, to its tarball. The
+publishing job in CI skips until the umbrella's version is new on npm and Better IAM is on npm. See
+[Better IAM](/docs/guides/iam) for how the two fit together.
+
+## The daemon
+
+`bcd` is not an npm package. It is designed as a Go binary for Linux on amd64 and arm64, released by goreleaser as
+`bcd_<version>_linux_{amd64,arm64}.tar.gz` with a `.sha256`, plus the bare binaries for machines, and listed in an
+offline-signed release manifest (`better-compute release sign`). `better-compute daemon install-script` already
+writes the POSIX installer: it downloads the pinned binary from
+`{base-url}{base-path}/downloads/bcd/{version}/linux-{arch}`, checks its SHA-256, writes `/etc/bcd/config.toml`
+and a hardened `bcd.service`, and runs `bcd join`. The control plane does not serve that download route yet.
+
+No binary is released yet. `daemon/` is a Go module whose configuration, inventory encoding and fake hardware are
+done and whose session, journal, dispatch and converger packages are contracts; it has not been built because the
+build machine has no Go toolchain. The TypeScript `FakeDaemon` in `better-compute/testing` speaks the real protocol
+in the meantime. See [installing the daemon](/docs/daemon/install).
+
+## All packages
+
+<PackageTable />
+
+## Verify the installation
+
+`doctor` loads your configuration and checks the database, the schema, the clock and the method registry without
+changing anything:
+
+```bash
+better-compute migrate
+better-compute doctor --strict
+```
+
+It runs `compute.selfCheck()` (applied migrations, `btree_gist`, `compute_now()` against the database clock, every
+method's IAM action, each module's own checks) and adds the CLI's findings, such as `iam.not-configured` when no
+Better IAM is wired in. `--strict` exits non-zero with `DOCTOR_FINDINGS` on any warning, so you can run it in CI.
+See the [CLI reference](/docs/reference/cli).
+
+## Next steps
+
+<Cards>
+  <Card title="Quickstart" href="/docs/guides/quickstart">
+    Run the development server with simulated GPU machines and reserve GPUs.
+  </Card>
+  <Card title="Configuration" href="/docs/operations/configuration">
+    Every `betterCompute()` option and the configuration file the CLI loads.
+  </Card>
+  <Card title="Database" href="/docs/operations/database">
+    PostgreSQL, PGlite, migrations and PgBouncer.
+  </Card>
+</Cards>

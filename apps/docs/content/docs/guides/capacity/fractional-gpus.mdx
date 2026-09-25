@@ -1,0 +1,153 @@
+---
+title: Fractional GPUs
+description: Share GPUs as MIG instances, time-slice slots or MPS slots, each booked as its own atom, and what of it runs today versus in v0.5.
+metaTitle: MIG, time-slicing and MPS GPUs
+icon: Split
+status: experimental
+packages: ['@better-compute/capacity', '@better-compute/inventory']
+sources:
+  - packages/inventory/src/devices.ts
+  - packages/capacity/src/reservations.ts
+  - packages/capacity/src/partition.ts
+  - packages/capacity/src/usage.ts
+  - packages/capacity/src/module.ts
+  - packages/core/src/domain.ts
+  - packages/provision/src/config-units.ts
+  - daemon/internal/converge/converge.go
+  - tests/capacity-fractional.test.ts
+  - PLAN.md
+---
+
+A whole H100 for a notebook or a small inference server wastes most of it. A pool can instead split
+its GPUs, and each piece becomes an <Term id="atom">atom</Term> of its own: booked, placed, metered
+and kept exclusive exactly like a whole GPU. The control-plane side of this has landed ahead of its
+roadmap phase, v0.5; the node side has not (the last section of this page lists what runs today).
+
+## Sharing modes and atoms
+
+A pool's `sharing` mode, fixed when the pool is created, decides how its GPUs are split:
+
+| Pool `sharing` | Atom class | Atom id | Atoms per GPU |
+| --- | --- | --- | --- |
+| `exclusive` | `gpu` | the GPU UUID | 1 |
+| `mig` | `gpu.mig` | `<gpuUuid>/gi<g>/ci<c>` | one per MIG instance the GPU reports |
+| `timeslice` | `gpu.slot` | `<gpuUuid>/s<k>` | `policy.sharing.replicas`, default 4 |
+| `mps` | `gpu.slot` | `<gpuUuid>/s<k>` | `policy.sharing.replicas`, default 10 |
+
+Inventory derives the atoms from what the node reports (see
+[inventory and health](/docs/guides/nodes/inventory-and-health)):
+
+- A GPU in MIG mode becomes an unbookable `gpu` parent plus one `gpu.mig` atom per
+  <Term id="mig">MIG</Term> instance. This happens whatever the pool's mode, but only `mig` pools accept
+  `gpu.mig` requests, so a MIG-mode GPU in another pool cannot be reserved.
+- In a `timeslice` or `mps` pool, a GPU not in MIG mode becomes an unbookable parent plus `replicas`
+  slot atoms (1 to 64). In `mps` pools each slot also carries `mpsUnits`, its share of the GPU's 100
+  MPS units (`floor(100 / replicas)`).
+- A GPU whose MIG mode is changing (the pending mode differs from the current one) has every atom
+  unbookable and marked `partitionPending`, so nothing new lands on it until the change completes.
+
+Atoms carry the attributes selectors match on. MIG atoms have `gpuProduct`, `gpuModel`, `migProfile`
+(such as `3g.40gb`), `giId`, `ciId`, `migUuid` and `numaNode`. Slot atoms have `gpuProduct`,
+`gpuModel`, `sharing`, `slot`, `slots`, `vramGiB`, `numaNode`, and `mpsUnits` in MPS pools.
+
+## Reserve a fraction
+
+Ask for the atom class and narrow it with a selector:
+
+```ts
+await compute.api.reservations.create(credential, {
+  tenantId: 'acme',
+  poolId: migPool,
+  devices: [
+    {
+      class: 'gpu.mig',
+      count: 1,
+      selector: { matchExpressions: [{ key: 'migProfile', op: 'In', values: ['3g.40gb'] }] },
+    },
+  ],
+  duration: '4h',
+  idempotencyKey: 'notebook-ana-0924',
+});
+```
+
+Admission checks every device request against the pool's mode, with `INVALID_INPUT`:
+
+- `gpu.mig` only in `mig` pools: `devices[0]: gpu.mig atoms exist only in mig pools`;
+- `gpu.slot` only in `timeslice` or `mps` pools: `devices[0]: gpu.slot atoms exist only in timeslice or mps pools`;
+- a request's own `sharing`, when given, must be `exclusive` or the pool's mode:
+  `devices[0]: the pool shares GPUs as timeslice, not mps`.
+
+Whole `gpu` requests stay valid in every pool and take GPUs that are not split. Atoms of one GPU count
+as `NV`-connected to each other for the topology scorer. The `better-compute reserve` command asks for
+whole GPUs only; reserve fractions through the API, the typed client or
+`better-compute api reservations.create`.
+
+## Quota, policy and billing
+
+- **Quota** is kept per atom class: a MIG instance charges `gpu.mig`, a slot charges `gpu.slot`.
+  A pool owner's default quota covers only `gpu`, so set `gpu.mig` or `gpu.slot` rows with
+  `ownerQuota`, [`pools.offer`](/docs/reference/api/pools#offer) or
+  [`quotas.set`](/docs/reference/api/quotas#set), or every fractional request is `QUOTA_EXCEEDED`.
+- **IAM policies** see fractions as `gpuSlices` on the reservation, apart from whole GPUs in
+  `gpuCount`, so a limit on `gpuCount` does not count slices.
+- **Billing** uses the pool's GPU meter at each atom's share of a GPU hour: a `timeslice` slot is
+  `1 / slots`, an MPS slot `mpsUnits / 100`, and a MIG instance its compute slices over 7
+  (`3g.40gb` is 3/7). Two of four time-slice slots and one `3g.40gb` instance for an hour bill
+  0.5 + 3/7, about 0.928571 `gpu.h100.hours`.
+- **Rollups** keep `gpu.mig` and `gpu.slot` rows next to `gpu`. `capacity.summary`'s per-model totals
+  and `capacity.timeline` count whole GPUs only; read the class rows with
+  [`capacity.byPool`](/docs/reference/api/capacity#bypool).
+
+## Single-tenant sharing
+
+Time slicing and MPS do not isolate one workload from another the way MIG does. `timeslice` and `mps`
+pools are therefore single-tenant: the offering validator refuses to offer them to anyone but their
+owner, with `INVALID_STATE`. `mig` pools can be offered like `exclusive` ones. See
+[pools](/docs/guides/capacity/pools).
+
+## Changing a layout: the atom rule
+
+A flat `EXCLUDE` constraint cannot see a MIG instance and its parent overlapping, so repartitioning a
+GPU under a live booking would slip past it. The atom rule closes that gap: a mode or layout change
+books **every atom of the GPU, parent included**, for the change window. It commits only when nothing
+of the GPU is booked in that window, and keeps anything new off the GPU until the window is released.
+
+`better-compute/capacity` exports the primitive:
+
+```ts
+import { bookPartitionChange, releasePartitionChange } from 'better-compute/capacity';
+
+const change = await bookPartitionChange(tx, { gpuId: 'GPU-…', during: { start, end } });
+if (change.status === 'conflict') {
+  // something of the GPU is booked; the whole family is free from change.freeFrom
+} else {
+  // apply the layout, then:
+  await releasePartitionChange(tx, change.bookingId);
+}
+```
+
+The window's bookings use the allocation id `partition:<gpuId>:<start>` and have no allocation row.
+An unknown GPU is `NOT_FOUND`. For `mig` pools, `policy.migLayout` names the layout the `mig-layout`
+config unit applies, such as `all-1g.10gb` or `mixed:3g.40gb+2x2g.20gb`; a profile's host config can take
+it with `from: 'pool'` (see [profiles and images](/docs/guides/bare-metal/profiles-and-images)).
+
+## What runs today
+
+Shipped in the control plane:
+
+- atoms derived from inventory for all three modes, with `partitionPending` during a MIG mode change;
+- the sharing checks at admission, and placement, booking and exclusivity of `gpu.mig` and `gpu.slot`
+  atoms (covered by `tests/capacity-fractional.test.ts`);
+- the atom-rule primitive, fractional metering and the single-tenant offering rule.
+
+Still to come in v0.5:
+
+- the node side: `bcd` is written but not built or released, its devices converger (the CDI hold) is
+  not written, and applying MIG layouts on the node is scheduled for v0.5;
+- a caller for `bookPartitionChange`: nothing in the control plane wraps layout changes in it yet, so
+  a host that changes layouts must do so itself;
+- the v0.5 exit tests, the MIG torture test and the real-hardware nightly.
+
+PLAN.md plans to reset GPUs on release and leaves one question open: clearing memory between tenants
+relies on the driver's guarantees, and a zeroing pass may be added. See the
+[roadmap](/docs/reference/roadmap).

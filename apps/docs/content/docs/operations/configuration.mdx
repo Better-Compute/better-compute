@@ -1,0 +1,305 @@
+---
+title: Configuration
+description: The better-compute.config file, every betterCompute() option with its default, the host export that serve runs, environment variables and the deployment secret.
+icon: Settings2
+packages: ['@better-compute/server', '@better-compute/cli']
+sources:
+  - packages/server/src/options.ts
+  - packages/server/src/define.ts
+  - packages/server/src/index.ts
+  - packages/server/src/tunnels/module.ts
+  - packages/capacity/src/module.ts
+  - packages/core/src/extension.ts
+  - packages/cli/src/config.ts
+  - packages/cli/src/framework.ts
+  - packages/cli/src/commands/setup.ts
+  - packages/cli/src/commands/serve.ts
+  - packages/cli/src/host/config.ts
+  - packages/cli/src/host/tunnels.ts
+  - packages/cli/src/host/iam.ts
+  - packages/pki/src/secrets.ts
+  - packages/pki/src/bundle.ts
+  - packages/events/src/webhooks.ts
+  - examples/shared/compose.ts
+---
+
+A deployment is configured in one TypeScript or JavaScript module that every process loads. Its default export
+holds the options of `betterCompute()`; its named `host` export holds what `better-compute serve` runs around the
+control plane. Values that differ between environments come from environment variables.
+
+## The configuration file
+
+The CLI looks for the configuration in this order:
+
+1. `--config PATH`;
+2. `BETTER_COMPUTE_CONFIG`;
+3. the nearest `better-compute.config.mjs`, `.js`, `.ts` or `.mts`, in the working directory and then each parent.
+
+With no file, `BETTER_COMPUTE_DATABASE_URL` and `BETTER_COMPUTE_SECRET` describe a minimal deployment on their own
+(`configFromEnv`): the store from the URL, `BETTER_COMPUTE_BASE_URL` (default `http://localhost:3000`), root tenant
+`root`, and no IAM, so only public methods answer. A `.ts` configuration needs Node.js 22.18 or newer, which strips
+types by default. `better-compute init` writes a starter file and never overwrites one.
+
+The module is executable code and is trusted as such. It can export four things:
+
+| Export | What it is |
+| --- | --- |
+| `default` | `defineConfig(options)` or `defineConfig(factory)`: the options of `betterCompute()` |
+| `host` | `defineHost(config)` or `defineHost(factory)`: routes, metrics, tunnels, IAM handlers and the gateway role for `serve` |
+| `commands` | Project commands made with `defineCommand`, run as `better-compute <name>` |
+| `cli` | `{ defaults: { [command]: { flag: value } } }`, keyed by command name or `'*'` for every command: flag defaults, used when neither the flag nor its environment variable is set |
+
+Prefer the factory form. Importing the module then opens nothing; the CLI calls the factory with
+`{ command, env, cwd }`, and your own server calls it through `configOptions(config)`:
+
+```ts title="better-compute.config.ts"
+import { postgres } from 'better-compute/postgres';
+import { pglite } from 'better-compute/pglite';
+import { defineConfig } from 'better-compute/server';
+
+export default defineConfig(({ env = process.env, cwd = process.cwd() } = {}) => ({
+  database: env.BETTER_COMPUTE_DATABASE_URL
+    ? postgres({ url: env.BETTER_COMPUTE_DATABASE_URL })
+    : pglite({ dataDir: `${cwd}/.better-compute-pglite` }),
+  secret: env.BETTER_COMPUTE_SECRET ?? '',
+  baseURL: env.BETTER_COMPUTE_BASE_URL ?? 'http://localhost:3000',
+  rootTenantId,
+  iam: bridge.embedded(iam, { rootTenantId }),
+  modules: [...bridge.modules /* , metal(), vps(), … */],
+}));
+```
+
+```ts title="server.ts"
+import config from './better-compute.config';
+import { betterCompute, configOptions } from 'better-compute/server';
+
+const compute = betterCompute(await configOptions(config));
+```
+
+## betterCompute() options
+
+`betterCompute()` is synchronous and side-effect free: it validates the options and registers the method table.
+Anything wrong throws `INVALID_CONFIG` before a connection is opened.
+
+### Required
+
+| Option | Type | Notes |
+| --- | --- | --- |
+| `database` | `SqlExecutor` | `postgres({ url })` or `pglite()`. Must implement `query`, `transaction` and `migrate`. See [database](/docs/operations/database). |
+| `secret` | `string` | At least 32 characters, the same in every process. See [the deployment secret](#the-deployment-secret). |
+| `baseURL` | `string` | The API's public origin, such as `https://compute.example.com`. HTTP or HTTPS, no credentials, query or fragment. Cookie requests must come from exactly this origin. |
+| `iam` | `IamPort` | `bridge.embedded(iam, …)` from the IAM bridge. Must implement `authenticate`, `require` and `authorize`. See [Better IAM](/docs/guides/iam). |
+
+### Optional
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `rootTenantId` | `iam.rootTenantId` | The IAM root tenant. Required when the port does not name it; when both are given they must agree. |
+| `basePath` | `/api/compute` | Where the handler is mounted. An absolute path without a trailing slash. |
+| `typePrefix` | `compute-` | IAM resource type prefix, the same as the IAM bridge's. |
+| `modules` | `[]` | Injected modules (`provisionModule()`, `metal()`, `vps()`, `eventsModule()`, …), registered after the built-ins. |
+| `plugins` | `[]` | Third-party modules mounted under `plugins/{id}`, with actions `compute:<id>:*`. |
+| `drivers`, `providers`, `attestors` | `[]` | Extensions: bare-metal drivers, VPS providers, join attestors beyond `join-token`. |
+| `scheduler` | none | Placement plugins, scorer `weights` and `topN` (default 5) for the built-in capacity module. |
+| `capacity` | see below | Options of the built-in capacity module. |
+| `pki` | none | CAs, JoinService keys and command signing. See [pki](#pki). |
+| `secrets` | the local sealed store | `SecretStore`s by URI scheme. Without any, secrets are sealed in `sealed_secrets` under `secret`. |
+| `tunnels` | none | Exec tickets and break-glass SSH (v0.3). Without it neither `tunnels.open` nor `nodes.issueSshCert` exists. See [tunnels](#tunnels). |
+| `notifier` | none | Best-effort wake-ups after commit, such as `gatewayNotifier({ sql, tls })` from `better-compute/gateway`. Never a source of truth. |
+| `sinks` | none | `{ usage?, events?, audit? }`. Each event sink needs a unique `id`: its outbox cursor is stored under it. |
+| `clock` | anchored to `compute_now()` | Business time. Tests pass the sim clock. |
+| `acceptIamCookie` | `false` | Accept the IAM session cookie on same-origin requests (a console on one origin). |
+| `log` | JSON warnings and errors on stderr | A `Logger` with `debug`, `info`, `warn` and `error`. |
+| `iamJobs` | `[]` | Better IAM's jobs for the `iam` worker role: `{ name, everyMs, run }`, `everyMs` at least 100. Usually filled by the IAM bridge. |
+| `worker` | see below | Worker runtime tuning. |
+| `ports` | built-in | Replace `ctx.capacity` or `ctx.inventory`. |
+| `downloads`, `gateway` | none | Accepted and typed for later phases (`bcd` downloads, gateway public URLs); nothing reads them yet. |
+
+### capacity
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `placer` | `inline` | `inline` places a reservation in the admission transaction. `pool-lease` (v0.4) queues it; the worker owning the pool places up to `maxBatch` at a time and `reservations.create` answers `pending` with a `Queued` condition. |
+| `maxBatch` | 64 | Reservations per pool-lease batch, at most 64. |
+| `maxAttempts` | 3 | Placement attempts per admission. |
+| `rollupEvery` | `5m` | How often the rollup job rebuilds every pool. |
+| `usageEvery` | `5m` | How often closed hourly usage windows are written. |
+| `spotNoticeMs` | 2 minutes | Notice a preempted spot reservation gets. |
+
+### worker
+
+| Option | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `id` | `wkr_<ulid>` | `[A-Za-z0-9._:-]`, 1-128 | This process's worker id and lease owner |
+| `batchSize` | 32 | 1-1,000 | Keys a reconciler claims per pass |
+| `concurrency` | 4 | 1-64 | Keys one reconciler runs at once |
+| `pollMs` | 1,000 | 10-60,000 | Wait when there was nothing to do |
+| `claimTtlMs` | 60,000 | 1,000-3,600,000 | How long a claimed key stays claimed |
+| `resyncMs` | 300,000 | 1,000-86,400,000 | Owned keys are re-enqueued every `resyncMs` plus up to `resyncMs` of jitter |
+
+These are fixed: shard and singleton leases live 15 s and renew every 5 s, a worker is live while its heartbeat is
+younger than 30 s, `SYNC_AGAIN` brings a key back after 1 s, failures back off from 1 s to 5 minutes, and the
+CommandSweeper runs every 5 s.
+
+### pki
+
+| Option | What it does |
+| --- | --- |
+| `pki.nodeCa` | The node CA. The gateway role takes its trust anchor and revocation set from it. |
+| `pki.servingCa`, `pki.internalCa` | Accepted, but nothing reads them yet: the gateway's TLS comes from `host.gateway`, issued with `pki issue-gateway`. |
+| `pki.join` | JoinService's keys and node CA: `pkiJoinCrypto({ trustDomain, nodeCa, signingKey, encryptionKey })`. Without it, `Join` and `Renew` answer `INVALID_CONFIG`. Its public keys appear in `/.well-known/better-compute` as `join`. |
+| `pki.commandSigning` | The command-signing root (v0.2). Every command is then signed with a 24 h worker key it certifies, and daemons get its root in their trust bundle. |
+| `pki.commandSigningRoots` | Roots still trusted during a rotation. Needs `commandSigning`. |
+| `pki.trustVersion` | The trust bundle's version (default 1). Bump it whenever the roots change. |
+
+The PKI bundle supplies all of these:
+
+```ts
+import { loadPkiBundle } from 'better-compute/cli';
+import { pkiJoinCrypto } from 'better-compute/server';
+
+const bundle = await loadPkiBundle('.better-compute/pki.json', env); // unsealed with BETTER_COMPUTE_SECRET
+const pki = {
+  nodeCa: bundle.nodeCa,
+  join: pkiJoinCrypto({
+    trustDomain: bundle.trustDomain,
+    nodeCa: bundle.nodeCa,
+    signingKey: bundle.joinSigning,
+    encryptionKey: bundle.joinEncryption.privateKey,
+  }),
+  commandSigning: bundle.commandSigning,
+};
+```
+
+See [PKI](/docs/operations/pki).
+
+### tunnels
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `issuer` | required | The exec ticket issuer: `execTicketIssuer(bundle, { issuer })` or `createExecTicketIssuer`, with `issuer` set to `baseURL`'s origin (the api accepts only tickets from it). Its JWKS goes into every node's NodeSpec and to the gateway. |
+| `ssh` | none | The compute SSH CA (`bundle.sshCa`) for `nodes.issueSshCert`. Without it that method answers `UNSUPPORTED`. |
+| `sshRequiresMfa` | `true` | Break-glass certificates need an MFA session. |
+| `sshAccounts` | `['root']` | Unix accounts a certificate may name; the principal is `<account>@<nodeId>`. |
+| `limits` | 10 tunnels a minute, 20 certificates an hour | Per identity and per api replica. Beyond them: `RATE_LIMITED` with `retryAfterMs`. |
+
+The `api` role mounts the tunnel upgrade only when `tunnels.issuer` is set, and it needs a re-authorizer: an
+`IamPort` with `authorizeSession` (the IAM bridge has one) or `host.tunnels.authorize`. See
+[tunnels](/docs/guides/access/tunnels).
+
+## The host export
+
+`host` is what `serve` runs around the control plane. A factory receives `{ compute, options, env, cwd }`, so
+routes can close over the same instances the modules use.
+
+```ts title="better-compute.config.ts"
+import { readFile } from 'node:fs/promises';
+import { defineHost } from 'better-compute/cli';
+import { handleWatch } from 'better-compute/events';
+import { createMetrics } from 'better-compute/observability';
+
+const metrics = createMetrics();
+
+export const host = defineHost(async ({ compute, env }) => ({
+  http: { routes: [{ path: '/watch', method: 'GET', handler: (request) => handleWatch(request, { sql: compute.context.sql, authorize }) }] },
+  metrics: { registry: metrics, bearerToken: env.BETTER_COMPUTE_METRICS_TOKEN },
+  gateway: {
+    region: 'eu-1',
+    listen: { port: 8443 },
+    tls: {
+      key: await readFile('.better-compute/gateway/gateway.key', 'utf8'),
+      cert: await readFile('.better-compute/gateway/gateway.crt', 'utf8'),
+      ca: bundle.nodeCa.export().certificatesPem,
+    },
+    internal: { url: 'https://gw-1.internal:8444', tls: internalServerTls },
+  },
+}));
+```
+
+| Field | What it configures |
+| --- | --- |
+| `http.routes` | Fetch-style routes beside the API: `{ path, method?, prefix?, handler(request) }` |
+| `http.upgrade` | Upgrade handlers, tried after the tunnel handler |
+| `http.wellKnown` | Extra public fields of `/.well-known/better-compute` |
+| `metrics.registry` | The process's `createMetrics()` registry; `serve` adds the gateway role's series to it |
+| `metrics.bearerToken`, `metrics.path` | With a token of at least 16 characters, `GET /metrics` (or `path`) |
+| `tunnels.authorize` | The tunnel re-authorizer (default `tunnelAuthorizer(iam)`) |
+| `tunnels.control` | Client TLS (`tls`, `timeoutMs`) for the gateways' internal control APIs |
+| `tunnels.reauthorizeMs`, `maxDurationMs`, `onClose` | Tunnel re-authorization period, lifetime and close hook |
+| `iam.bridge` | The IAM bridge whose inbox the workers drain: a revoked delegation closes the agent's tunnels on every gateway, and revocations drop IAM caches |
+| `gateway.region` | Required. The region, as in `sites.region` |
+| `gateway.listen` | Daemon listener, default `0.0.0.0:8443` |
+| `gateway.tls` | Required. `key` and `cert` from the serving CA, `ca` the node CA roots |
+| `gateway.identity` | `{ roots, trustDomain, revocations }`; default: `pki.nodeCa`, `pki.join.trustDomain` and the node CA's revocation set |
+| `gateway.internal` | `{ url, listen?, tls }`: the internal control API (default port 8444) over internal-CA mutual TLS; `url` is advertised in the `gateways` row |
+| `gateway.ws` | `{ publicHost, listen? }`: the v0.4 WebSocket fallback (default port 443) |
+| `gateway.options` | Anything else `createGateway()` takes (`maxStreams`, rates, extra `reports`) |
+
+`serve` checks the shape and refuses a bad one with `INVALID_CONFIG`; `doctor` checks the wiring.
+
+## Modules and their options
+
+Modules are values you construct and pass in `modules`, each with options of its own. The examples register:
+
+```ts
+const bareMetal = metal({ hardwareProfiles });
+modules: [
+  provisionModule({ modules: [bareMetal] }), // runs metal's workflows
+  bareMetal,
+  vps(),
+  retentionModule(), // added by the CLI when missing
+  eventsModule({ secret }), // seals webhook signing secrets under the deployment secret
+  fleetModule(),
+  rolloutModule({ release: { pins }, downloadsUrl }), // needs the release keys' pins
+  auditModule({ signer: bundle.auditSigning }), // needs the bundle's audit key
+];
+```
+
+Each module's own migrations run with `better-compute migrate` (see [database](/docs/operations/database)). Its
+options are documented with the module; see [modules](/docs/reference/modules).
+
+## Environment variables
+
+The CLI reads these:
+
+| Variable | Used by | Meaning |
+| --- | --- | --- |
+| `BETTER_COMPUTE_CONFIG` | every command | The configuration module, like `--config` |
+| `BETTER_COMPUTE_DATABASE_URL` | environment-only mode, `dev`, the template | `postgres://…`, `pglite:DIR` or `pglite:memory` |
+| `BETTER_COMPUTE_SECRET` | environment-only mode, `pki`, `audit`, the template | The deployment secret |
+| `BETTER_COMPUTE_BASE_URL` | environment-only mode, the template | The public origin (default `http://localhost:3000`) |
+| `BETTER_COMPUTE_ROLES`, `PORT`, `HOST` | `serve` | `--roles` (default `all`), `--port` (default 3000), `--host` (default `0.0.0.0`) |
+| `BETTER_COMPUTE_PKI` | `pki`, `doctor`, `audit` | The PKI bundle (default `.better-compute/pki.json`) |
+| `BETTER_COMPUTE_TRUST_DOMAIN` | `pki init` | `--trust-domain` |
+| `BETTER_COMPUTE_TOKEN` | token commands | IAM session token, API key or session JWT to act as |
+| `BETTER_COMPUTE_URL` | token commands | Call a running server instead of loading the configuration |
+| `BETTER_COMPUTE_TENANT` | `reserve`, `capacity`, `audit` | The tenant |
+| `BETTER_COMPUTE_AUDIT_PIN` | `audit verify` | The audit key pin |
+| `BETTER_COMPUTE_DEBUG` | every command | Print the stack trace of a failure |
+
+Inside the configuration, variables are yours to name: the file reads `env` and decides. The CLI only guarantees
+that `env` is the process environment.
+
+## The deployment secret
+
+`secret` is at least 32 random characters, identical in every process of the deployment. Generate it once:
+
+```bash
+openssl rand -base64 48
+```
+
+It protects:
+
+- **Secrets at rest.** Without `secrets`, `sealed_secrets` holds values sealed with AES-256-GCM under a key derived
+  from it (migration `pki/0001_sealed_secrets`).
+- **The PKI bundle.** `pki init` seals the private keys under a key derived from `BETTER_COMPUTE_SECRET`
+  (HKDF-SHA256, AES-256-GCM); every process unseals the bundle with it.
+- **Webhook signing secrets**, when you pass it to `eventsModule({ secret })` as the examples do.
+
+<Callout type="warn" title="Changing the secret">
+  With the defaults, a new secret cannot open anything sealed under the old one: sealed secrets, the PKI bundle and
+  webhook secrets. To rotate the sealed-secret key, configure the store yourself with both keys,
+  `secrets: [localSealedSecretStore({ sql, keys: { current: 'k2', keys: { k1: old, k2: next } } })]`, and run its
+  `reseal()` until it reports no rows left. There is no CLI command for this yet, and re-sealing the PKI bundle
+  under a new secret means exporting it again with `exportPkiBundle`.
+</Callout>

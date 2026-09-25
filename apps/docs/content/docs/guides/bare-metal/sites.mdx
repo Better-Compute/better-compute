@@ -1,0 +1,238 @@
+---
+title: Sites and site agents
+description: Sites are boot and failure domains. A bcd site agent in each one runs proxy DHCP, iPXE, the image cache and BMC access, with one active boot server per site.
+metaTitle: Sites, site agents and boot leases
+icon: MapPin
+packages: ['@better-compute/server', '@better-compute/metal', '@better-compute/pki']
+sources:
+  - packages/server/src/api/sites.ts
+  - packages/server/src/api/sites-manage.ts
+  - packages/server/src/api/site-tokens.ts
+  - packages/server/src/controllers/site-boot.ts
+  - packages/provision/src/engine.ts
+  - packages/provision/src/join-resolvers.ts
+  - packages/metal/src/steps.ts
+  - packages/pki/src/attestors/discovery.ts
+  - proto/bettercompute/site/v1/site.proto
+  - tests/server-groups-site-tokens.test.ts
+  - tests/metal-dev-site.test.ts
+  - tests/metal-discovery-token.test.ts
+  - PLAN.md
+---
+
+A <Term id="site">site</Term> is a boot and failure domain: a room, a cage or a lab whose machines
+share a provisioning network and a BMC network. Everything the control plane does to a machine's
+hardware (power, boot device, network boot, image streaming) goes through a
+<Term id="site-agent">site agent</Term> on that site, because the control plane never dials into a
+site. Pools, nodes and join tokens all belong to exactly one site.
+
+## Sites
+
+A site has an owner, a kind and a region:
+
+| Kind | Owner | Created under | Use it for |
+| --- | --- | --- | --- |
+| `shared` | the root (platform) tenant | `compute-fleet/global` | platform hardware shared through offerings |
+| `dedicated` | the root tenant | `compute-fleet/global` | platform hardware set aside for one customer |
+| `custom` | the tenant | `compute-tenant/{t}` | a tenant's own hardware (bring your own) |
+
+Every `sites.*` mutation is decided as `compute:sites:manage`. Creating a `shared` or `dedicated`
+site with a `tenantId` other than the root tenant is `INVALID_INPUT`.
+
+```ts
+const site = await compute.api.sites.create(credential, {
+  tenantId: 'root',
+  kind: 'shared',
+  region: 'eu-central-1', // a region label
+  iamRegion: 'eu-central', // optional: the IAM region name, when it differs
+  idempotencyKey: 'site-fsn1',
+});
+// { id: 'site_…', ownerTenantId: 'root', kind: 'shared', region: 'eu-central-1', iamRegion: 'eu-central', version: 1 }
+```
+
+The id derives from the tenant, the caller and the idempotency key, so a retry returns the same site
+and a different request under the same key is `CONFLICT`. The site's `region`, `iamRegion` and
+`kind` are the attributes IAM conditions see on `compute-site`.
+
+- [`sites.update`](/docs/reference/api/sites#update) (v0.2) changes `region` and `iamRegion`, or clears
+  `iamRegion` with `clearIamRegion: true`. Pass the `version` you read to get `CONFLICT` instead of a
+  lost update.
+- [`sites.delete`](/docs/reference/api/sites#delete) (v0.2) refuses with `INVALID_STATE` while the site
+  still has live pools or nodes. Otherwise it revokes every join token of the site (site tokens
+  included), expires its open join requests, drops its boot lease, and removes the row, or tombstones
+  it when anything ever referenced it. Deleting a tombstoned site again answers `deleted: false`.
+
+## The site agent
+
+A site agent is `bcd` running in `site` mode on a machine next to the fleet, one or two per site. To
+the control plane it is a node like any other: a `nodes` row with `role = 'site'`, no pool, a
+`site` certificate and a session through the gateway. It runs the site's commands:
+
+| Duty | When |
+| --- | --- |
+| Proxy DHCP, so booting machines find the iPXE binary without replacing your DHCP server | only while holding the boot lease |
+| TFTP and iPXE scripts over HTTPS, one per machine being booted | only while holding the boot lease |
+| Vouching for ramdisks that PXE-booted from it (signed discovery assertions) | only while holding the boot lease |
+| A range-capable image cache that ramdisks stream from | always |
+| BMC access (Redfish, IPMI, vendor drivers) on the management network | always |
+
+The command kinds it accepts are role-restricted to `site`: `bmc.query`, `bmc.boot`, `bmc.power`,
+`bmc.rotate`, `bmc.firmware`, `boot.prepareRamdisk`, `boot.cleanUp` and `site.httpProxy`. Their
+payloads are messages of `bettercompute.site.v1`, which stays a draft package until v0.2 closes. See
+[BMC drivers and credentials](/docs/guides/bare-metal/bmc) and the
+[command kinds reference](/docs/reference/command-kinds).
+
+<Callout type="info" title="Status">
+`bcd site` is designed and its contracts are in `proto/bettercompute/site/v1`, but the Go daemon is
+not built yet. The dev stack joins site agents as FakeDaemons with role `site`
+(`createDevStack().joinSite()`), and the metal test suite answers site commands with a simulated agent.
+</Callout>
+
+## Enroll site agents with site tokens
+
+A site agent joins with a site token: a join token of role `site`, bound to one site and no pool.
+[`siteTokens.create`](/docs/reference/api/site-tokens#create) is decided as `compute:sites:manage` on
+`compute-site/{siteId}`, and only the site's owner can mint one.
+
+```ts
+const minted = await compute.api.siteTokens.create(credential, {
+  tenantId: 'root',
+  siteId: site.id,
+  ttlSeconds: 3600, // 60 to 86 400
+  maxUses: 2, // how many agents may enroll with it: 1 (default) to 16
+  idempotencyKey: 'fsn1-site-agents',
+});
+// { id: 'jt_…', siteId, role: 'site', usesLeft: 2, expiresAt, token: 'bcjt_<id>.<secret>' }
+```
+
+- The bearer (`bcjt_<id>.<secret>`) is in the answer that created the token and nowhere else: only
+  its hash is stored, and a replay of the same request omits it. The same key for another site is
+  `CONFLICT`.
+- A deleted site is `INVALID_STATE`; a site the tenant does not own is `NOT_FOUND`.
+- [`siteTokens.revoke`](/docs/reference/api/site-tokens#revoke) takes `tenantId`, `siteId` and
+  `tokenId`. It revokes only site tokens: a node join token is `NOT_FOUND` there.
+- Both publish security events: `security.site-token.created` and `security.site-token.revoked`.
+
+The agent joins through the same Join RPC as any daemon (see [joining nodes](/docs/guides/nodes/joining)),
+and JoinService issues it a 24-hour certificate with role `site`.
+
+## One active boot server per site
+
+Two agents answering DHCP for the same machine would race, and a stale agent vouching for a ramdisk
+would be a way in. So exactly one agent per site is the boot server: the holder of the lease
+`site:<siteId>:boot`.
+
+- The lease has a 15-second TTL and a fencing epoch that grows on every change of holder.
+- The SiteBoot controller renews it while its holder is a connected site agent. The holder learns
+  that it is active, and at which epoch, from the `site` section of its NodeSpec (`BootLeaseState`).
+- A holder that loses its session keeps the lease until it expires and self-fences after the TTL: it
+  stops answering proxy DHCP, iPXE and discovery. Only then is the first connected standby (by node
+  id) promoted, under a new epoch. A live lease never changes hands, so two agents can never both
+  believe they are active at the same epoch.
+- When no agent is left, the lease is released and the epoch still moves on.
+- Every discovery assertion carries the epoch the agent held, and the control plane refuses an epoch
+  that is not the lease's current one.
+
+The lease logic is the server's SiteBoot controller (`tickSiteBoot`, tested for promotion and a
+failover inside 30 seconds). The worker does not run it on a schedule yet.
+
+### Where site steps go
+
+`siteAgentFor(nodeId)` picks the agent for a machine's site steps: a connected site agent of the
+machine's own site, the boot-lease holder first, otherwise the first connected agent by id. A machine's
+site steps never go to another site's agent. When no agent is connected, a relaying step waits and
+retries until its timeout, and a step that runs on `site` directly fails with `NO_SITE_AGENT` at its
+deadline. PLAN.md also routes BMC and image-cache work to any agent that advertises the driver; that
+is not implemented.
+
+## Booting a machine into the ramdisk
+
+Metal never lets a machine boot something it did not prepare. Before each network boot, the
+`metal.ensureRamdisk` step sets a one-time PXE boot through the BMC, sends the site agent one boot
+entry per known PXE MAC, and power-cycles the machine:
+
+```mermaid
+sequenceDiagram
+  participant W as Worker
+  participant S as Site agent
+  participant M as Machine
+  participant J as JoinService
+  W->>S: bmc.boot, one-time PXE
+  W->>S: boot.prepareRamdisk, one entry per MAC
+  W->>S: bmc.power, cycle
+  M->>S: DHCP and iPXE script request
+  S-->>M: iPXE script with the discovery token
+  M->>J: Join with the token and a signed assertion
+  J-->>M: ramdisk certificate, at most 2 h
+  W->>M: inventory, diagnostics, wipe, image
+```
+
+- Each entry (`ProxyDhcpEntry`) names the MAC, the SMBIOS product UUID when known, the boot
+  architecture (`BIOS`, `X86_64_EFI` or `ARM64_EFI`, from the node's `arch` and `uefi`), the workflow
+  and a `notAfter` two hours out.
+- Each entry carries a fresh single-use `discovery` join token bound to that MAC (`expect.mac`), valid
+  for 900 seconds. The token is stored in the secret store and the entry carries only its reference;
+  the site agent fetches the bearer with a SecretRequest for that workflow step and renders it into
+  that MAC's iPXE script. No command body ever holds the token.
+- A token is minted only when its entry's command is first sent, not on every poll, and the cleanup
+  step `boot.cleanUp` removes the entries and deletes the stored tokens.
+- A machine with no known MAC fails with `INVALID_STATE`: inspect it out of band first.
+
+### The discovery attestor
+
+The ramdisk joins with the discovery token plus the site agent's `SignedDiscoveryAssertion` that it
+served this MAC. The `discovery` attestor admits it only when all of these hold:
+
+- the token is a live, single-use `discovery` token for the same site, and its `expect.mac` matches;
+- the vouching agent is a site agent of that site, holds the live boot lease, and the assertion's
+  epoch is the lease's current epoch;
+- the assertion is signed by that agent's key under a `site` certificate, at most 15 minutes old, and
+  used for one join only;
+- the ramdisk's claimed MACs include the asserted MAC, and its product UUID matches when asserted.
+
+The result is a <Term id="ramdisk">ramdisk</Term> certificate valid for at most two hours and
+restricted to the commissioning command kinds. When the assertion names a running workflow, the
+ramdisk joins as that workflow's node, so a known machine re-commissions as itself.
+
+Hosts wire the attestors with provision's resolvers:
+
+```ts title="compute.ts"
+import { discoveryAttestor, provisionedAttestor } from 'better-compute/pki';
+import { discoveryWorkflowNodeResolver, provisionedTargetResolver } from 'better-compute/provision';
+
+export const compute = betterCompute({
+  // …
+  attestors: [
+    discoveryAttestor({ resolveWorkflowNode: discoveryWorkflowNodeResolver() }),
+    provisionedAttestor({ resolveTarget: provisionedTargetResolver() }),
+  ],
+});
+```
+
+Both resolvers answer only for workflows that are still running, so a token or assertion from a
+finished or aborted workflow cannot re-key a node that has moved on. See
+[attestation](/docs/guides/nodes/attestation) for the other attestors.
+
+## Discovering new machines
+
+Today a machine enters metal by its BMC: `metal.enroll` with the BMC address, then the `inspect.oob`
+step asks the BMC for the machine's PXE MACs, SMBIOS UUID and IP addresses and records them. That is
+what makes the boot entries above possible.
+
+Machines that PXE-boot without being enrolled first are designed but not shipped end to end. The
+site protocol lets the boot server report an unknown MAC as a discovery event, and the discovery
+attestor already supports operator approval:
+
+- `approval: 'never'` (the default) admits as described above;
+- `approval: 'unknown-machines'` defers a join that no running workflow names;
+- `approval: 'always'` defers every discovery join.
+
+A deferred join becomes a pending join request (24 hours by default) that an operator decides with
+[`joinRequests.approve`](/docs/reference/api/join-requests#approve) or `joinRequests.reject`; the
+ramdisk retries every 30 seconds with the same CSR and consumes the approval once.
+
+## Next
+
+- [Provisioning workflows](/docs/guides/bare-metal/workflows): what runs on the site agent and when.
+- [BMC drivers and credentials](/docs/guides/bare-metal/bmc): the BMC side of the site agent.
+- [PKI](/docs/operations/pki): the node CA and JoinService keys the agents join against.

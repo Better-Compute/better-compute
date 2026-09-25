@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "docs",
+      "cwd": "apps/docs",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--port", "4100"],
+      "env": { "NEXT_DIST_DIR": ".next-731f14" },
+      "port": 4100
+    }
+  ]
+}

@@ -1,0 +1,393 @@
+---
+title: Modules
+description: A ComputeModule bundles API groups, migrations, reconcilers, command kinds and NodeSpec sections. How to write one, what its context offers, and how the host runs it.
+icon: Package
+status: experimental
+packages: ['@better-compute/core', '@better-compute/server']
+sources:
+  - packages/core/src/extension.ts
+  - packages/core/src/sql.ts
+  - packages/core/src/shard.ts
+  - packages/core/src/domain.ts
+  - packages/server/src/index.ts
+  - packages/server/src/registry.ts
+  - packages/server/src/context.ts
+  - packages/server/src/ports.ts
+  - packages/server/src/self-check.ts
+  - packages/server/src/options.ts
+  - packages/server/src/runtime/index.ts
+  - packages/server/src/runtime/reconcilers.ts
+  - packages/server/src/runtime/work-queue.ts
+  - packages/server/src/runtime/commands.ts
+  - packages/server/src/controllers/nodespec.ts
+  - packages/postgres/src/migrate.ts
+  - packages/iam/src/catalog.ts
+  - packages/iam/src/bridge.ts
+  - packages/events/src/module.ts
+  - packages/fleet/src/module.ts
+  - packages/rollout/src/module.ts
+  - packages/rollout/src/migrations.ts
+  - packages/audit/src/module.ts
+  - packages/capacity/src/module.ts
+  - tests/support/server.ts
+  - tests/server-operation.test.ts
+  - PLAN.md
+---
+
+A module is the unit of extension. Everything Better Compute does beyond its envelope is a module: `capacity` and
+`inventory` are built in, and `events`, `fleet`, `rollout`, `audit`, `iam`, `vps`, `metal` and `provision` are
+modules you pass in. Yours use the same contract, `ComputeModule` from `@better-compute/core`, and reach the rest of
+the system only through the ports on their context.
+
+## What a module declares
+
+```ts title="@better-compute/core"
+interface ComputeModule<Name extends string = string, A extends ApiGroups = {}> {
+  name: Name;
+  requires?: string[];
+  migrations?: Migration[];
+  extensions?: Extension[];
+  api?(context: ModuleContext): A;
+  reconcilers?: Reconciler[];
+  commandKinds?: CommandKindSpec[];
+  nodeSpec?(context: ModuleContext, node: NodeRecord): Promise<Partial<NodeSpec>>;
+  catalog?: { actions?: string[]; resourceTypes?: Record<string, ComputeResourceType> };
+  commands?: CliCommandSpec[];
+  profiles?: ProfileDocument[];
+  selfCheck?(context: ModuleContext): Promise<Finding[]>;
+  start?(context: ModuleContext): Promise<void>;
+  stop?(): Promise<void>;
+}
+```
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: 'Matches ^[a-z][a-z0-9-]{0,63}$. core, server and plugins are reserved; a name registered twice is INVALID_CONFIG.', required: true },
+    requires: { type: 'string[]', description: 'Names of modules that must also be registered, in any position.' },
+    migrations: { type: 'Migration[]', description: 'Named <name>/<nnnn>_<slug>, numbers strictly increasing. See Migrations.' },
+    extensions: { type: 'Extension[]', description: 'Drivers, steps, scheduler plugins, attestors and sinks built with a define* helper, unique by kind:id@version.' },
+    api: { type: '(ctx) => ApiGroups', description: 'Returns { group: { method: defineMethod(...) } }. Called once, while the registry is built.' },
+    reconcilers: { type: 'Reconciler[]', description: 'Level-triggered workers on the work queue. See Reconcilers.' },
+    commandKinds: { type: 'CommandKindSpec[]', description: 'Agent command kinds this module sends. Each kind is registered once across all modules.' },
+    nodeSpec: { type: '(ctx, node) => Partial<NodeSpec>', description: "The module's sections of a node's desired state." },
+    catalog: { type: '{ actions?, resourceTypes? }', description: 'Merged into the IAM catalog. Every action matches compute:<area>:<verb>.' },
+    commands: { type: 'CliCommandSpec[]', description: 'CLI commands the module adds: { name, summary, group? }.' },
+    profiles: { type: 'ProfileDocument[]', description: 'Provisioning profiles the module ships; see steps and profiles.' },
+    selfCheck: { type: '(ctx) => Finding[]', description: 'Read-only checks reported by selfCheck() and better-compute doctor.' },
+    start: { type: '(ctx) => Promise<void>', description: 'Awaited by initialize() after migrations, in registration order.' },
+    stop: { type: '() => Promise<void>', description: 'Awaited by stop(), in reverse registration order.' },
+  }}
+/>
+
+`defineModule(module)` returns its argument unchanged; it only keeps the name and API types literal, so the typed
+client and `compute.api` know your groups.
+
+## A complete example
+
+This plugin is the one the server's own tests register (`tests/support/server.ts`), trimmed and given a reconciler
+and a self-check:
+
+```ts title="acme-widgets.ts"
+import { definePlugin, field, manifest } from 'better-compute';
+import { ComputeError, defineMethod, type Finding } from 'better-compute/core';
+
+const widgetInput = manifest({
+  tenantId: field.string({ pattern: '^[A-Za-z0-9._:-]{1,128}$' }),
+  widgetId: field.string({ pattern: '^[a-z0-9-]{1,64}$' }),
+});
+type WidgetInput = { tenantId: string; widgetId: string };
+
+export const acmeWidgets = () =>
+  definePlugin({
+    id: 'acme',
+    catalog: { actions: ['compute:acme:poke', 'compute:acme:read'] },
+    migrations: [
+      {
+        name: 'acme/0001_widgets',
+        sql: `CREATE TABLE plg_acme_widgets (
+                id text PRIMARY KEY, tenant_id text NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT compute_now())`,
+      },
+    ],
+    api: () => ({
+      widgets: {
+        poke: defineMethod<WidgetInput, { poked: string }>({
+          action: 'compute:acme:poke',
+          kind: 'mutation',
+          resource: (input) => ({ type: 'tenant', id: input.tenantId }),
+          validate: (input) => widgetInput.parse(input),
+          async handler(ctx, input) {
+            await ctx.sql.query('INSERT INTO plg_acme_widgets (id, tenant_id) VALUES ($1, $2)', [
+              input.widgetId,
+              input.tenantId,
+            ]);
+            await ctx.events.publish(ctx.sql, {
+              type: 'acme.widget-poked',
+              tenantId: input.tenantId,
+              subject: `widget/${input.widgetId}`,
+              data: { widgetId: input.widgetId },
+            });
+            await ctx.work.enqueue(ctx.sql, 'acme.widgets', input.tenantId);
+            return { poked: input.widgetId };
+          },
+        }),
+      },
+    }),
+    reconcilers: [
+      {
+        name: 'acme.widgets',
+        shardBy: 'none',
+        periodic: [{ key: 'sweep', every: '10m' }],
+        async run(ctx, key) {
+          // Level-triggered: look at the state for `key` and converge it. Safe to run twice.
+          return 'DONE';
+        },
+      },
+    ],
+    async selfCheck(ctx): Promise<Finding[]> {
+      const { rows } = await ctx.sql.query<{ n: string }>('SELECT count(*)::text AS n FROM plg_acme_widgets');
+      return Number(rows[0]?.n) > 1_000_000
+        ? [{ check: 'acme.widgets', severity: 'warning', message: 'Over a million widgets', fix: 'Prune old widgets' }]
+        : [];
+    },
+  });
+```
+
+The method's handler runs inside the envelope's transaction, so the row, the event and the work item commit
+together or not at all. Its HTTP route is `POST /api/compute/plugins/acme/widgets/poke`; see
+[methods](/docs/extending/methods).
+
+## Registering modules
+
+```ts title="compute.ts"
+import { betterCompute } from 'better-compute';
+import { eventsModule } from 'better-compute/events';
+import { createComputeIamBridge } from 'better-compute/iam';
+import { acmeWidgets } from './acme-widgets';
+
+const plugins = [acmeWidgets()];
+const bridge = createComputeIamBridge({ rootTenantId, plugins }); // merges the plugin's catalog
+
+export const compute = betterCompute({
+  // …database, secret, baseURL
+  iam: bridge.embedded(iam, { rootTenantId }),
+  modules: [...bridge.modules, eventsModule({ secret })],
+  plugins,
+});
+await compute.initialize();
+```
+
+`betterCompute()` registers, in this order: the server's own groups, the built-in `node-controllers` and
+`site-boot` modules, `inventory`, `capacity`, a `pki` entry carrying the sealed-secrets migration when the default
+secret store is in use, the `tunnels` module when `tunnels` is configured, then your `modules`, then your
+`plugins`. The order is the order of migrations, of `start()` calls and of NodeSpec merging.
+
+Registration checks everything it can without the database and throws `INVALID_CONFIG`:
+
+- module names are unique and well formed, and every `requires` entry is registered;
+- every migration of a module is named `<module>/…`, and the whole list passes `assertMigrations`;
+- extensions are built with a `define*` helper and unique by `kind:id@version`;
+- command kinds are unique, including against the server's built-in kinds;
+- routes are unique, group and method names match `^[A-Za-z][A-Za-z0-9_-]{0,63}$` and are not `then`, `catch`,
+  `finally`, `toJSON`, `constructor`, `prototype`, `__proto__` or `plugins`;
+- catalog actions match `compute:<area>:<verb>`; a plugin's actions must be `compute:<plugin-id>:<verb>`.
+
+`initialize()` then checks every method against the merged catalog and the method table of PLAN.md §9.2, migrates
+the store (its base schema first, then module and plugin migrations in order), anchors the clock, and awaits each
+module's `start()` in registration order. If a `start()` throws, the modules already started are stopped in
+reverse and the error is rethrown. `stop()` stops the worker loops first, then the modules in reverse order.
+
+<Callout type="info" title="Pass the catalog to IAM too">
+A module's or plugin's `catalog` must reach every Better IAM host, not only the compute server. Pass the same
+modules and plugins to `createComputeIamBridge({ modules, plugins })`, which merges their fragments into the catalog
+IAM decides with. See [actions and resources](/docs/guides/iam/actions-and-resources).
+</Callout>
+
+## Plugins
+
+A plugin is a module with an `id`, built with `definePlugin`. Its name defaults to the id. Three things differ from
+a module:
+
+| | Module (`modules`) | Plugin (`plugins`) |
+| --- | --- | --- |
+| Routes | `POST {basePath}/{group}/{method}` | `POST {basePath}/plugins/{id}/{group}/{method}` |
+| Server API | `compute.api.<group>.<method>` | `compute.api.plugins.<id>.<group>.<method>` |
+| Actions | Must match its row in the §9.2 method table | Must be `compute:<id>:<verb>` |
+
+A non-plugin method with no §9.2 row is an `undeclared` problem: `initialize()` still succeeds, `better-compute
+doctor` reports a `catalog.undeclared` warning, and `scripts/authz-matrix.mjs` fails. The method table is
+normative for Better Compute's own surface, so **third-party code ships as plugins**. By convention a plugin's
+tables are named `plg_<id>_*`; nothing enforces it, but it keeps plugin tables apart from compute's own.
+
+## Migrations
+
+```ts title="@better-compute/core"
+interface Migration {
+  name: `${string}/${string}`; // <owner>/<nnnn>_<slug>
+  sql: string | ((tx: SqlTx) => Promise<void>);
+}
+```
+
+A name matches `^([a-z][a-z0-9-]{0,63})/(\d{4})_[a-z0-9][a-z0-9_-]{0,95}$`, and the owner must be the module's
+own name: `rollout/0001_rollouts`, `events/0001_webhooks`, `acme/0001_widgets`. Within an owner the numbers must
+strictly increase. Names are checked before anything runs.
+
+The store applies them after its base schema (owner `core`). Each migration runs in its own transaction and is
+recorded in the append-only `compute_migrations` ledger; concurrent migrators serialize on an advisory lock and skip
+what another applied. So a failed migration leaves nothing behind, and an applied one is never run again. Never
+edit a migration that has shipped; add the next number instead. Use `compute_now()` for defaults, never `now()`.
+
+## Reconcilers
+
+```ts title="@better-compute/core"
+interface Reconciler {
+  name: string;
+  shardBy: 'node' | 'pool' | 'none';
+  run(context: ReconcileContext, key: string): Promise<'DONE' | 'SYNC_AGAIN'>;
+  periodic?: readonly { key: string; every: Duration }[];
+}
+```
+
+A reconciler's name is also its work kind: `ctx.work.enqueue(tx, 'acme.widgets', key)` wakes it for `key`. Names
+match `^[a-z][a-z0-9._-]{0,63}$`, are unique across modules, and may not be `command-sweeper`, `outbox-dispatch` or
+`event-subscribers`, which the runtime reserves. Keys are non-empty strings of at most 512 characters.
+
+Runs are level-triggered. The work queue coalesces: enqueuing a key that is already queued bumps its generation
+instead of adding a row, and a run that finishes deletes the key only at the generation it claimed. A key dirtied
+again while its reconciler runs survives, so no wake-up is lost.
+
+| Outcome | What happens to the key |
+| --- | --- |
+| `'DONE'` | Removed; for a periodic key, due again `every` after this run |
+| `'SYNC_AGAIN'` | Due again in 1 second |
+| a throw | Due again after a back-off of 1 s, doubling to at most 5 minutes; logged as a warning |
+
+`shardBy` decides which worker runs a key. Every key lands on shard `shardOf(key)`, an FNV-1a hash modulo 256.
+
+- **`node`** and **`pool`**: keys are node or pool ids. Each worker runs the keys of the shards it holds `shard:<n>`
+  leases for. Every 5 minutes plus up to 5 minutes of jitter (`worker.resyncMs`), it re-enqueues every node or pool
+  of its shards, so a missed wake-up heals.
+- **`none`**: one worker at a time runs the reconciler, under a `singleton:<name>` lease.
+
+`periodic` keys are seeded once and then come back `every` after each run (at least `1s`), besides any edge
+enqueue. Every transaction a reconciler opens through `ctx.sql.transaction` begins by fencing its lease, so a worker
+that lost the lease cannot commit. `ctx.shard` and `ctx.lease` say what the run holds, and `ctx.signal` aborts on
+`stop()`.
+
+Reconcilers from the built-in modules, for reference:
+
+| Reconciler | Module | `shardBy` | Periodic |
+| --- | --- | --- | --- |
+| `capacity.reservations` | capacity | `none` | edge-triggered, with `notBefore` wake-ups |
+| `capacity.placer` | capacity (`placer: 'pool-lease'`) | `pool` | |
+| `capacity.rollup`, `capacity.usage` | capacity | `none` | `all` every `5m` |
+| `events.fanout`, `events.deliver` | events | `none` | every `1s`, `2s` |
+| `fleet.drift` | fleet | `none` | every `15m` by default |
+| `rollout` | rollout | `none` | `all` every `30s` |
+| `audit.checkpoint` | audit | `none` | `checkpoint` every `1h` |
+| `iam.inbox`, `iam.reconcile`, `iam.usage` | iam | `none` | `2s`, `5m`, `1h` |
+
+Workers run reconcilers in the `controllers` role. Tests and the simulator step them without timers:
+`await compute.jobs['acme.widgets'].tick()` runs one batch.
+
+## Command kinds
+
+A module that sends work to agents registers the kinds it sends. `ctx.commands.enqueue` refuses a kind nobody
+registered.
+
+```ts title="packages/rollout/src/module.ts"
+export const daemonUpgradeKind: CommandKindSpec = {
+  kind: 'daemon.upgrade',
+  lane: 'control',
+  retrySafe: true,
+  selfTerminating: true,
+  timeout: '15m',
+  roles: ['node', 'site'],
+  payload: DaemonSectionSchema, // a protobuf-es message descriptor
+};
+```
+
+| Field | Meaning |
+| --- | --- |
+| `lane` | `control`, `provision` or `bulk`; the daemon runs each lane on a fixed worker pool |
+| `retrySafe` | Safe to run again after a crash between accept and completion |
+| `selfTerminating` | Ends the agent's process or boot; completes when the agent rejoins |
+| `attested` | The result is node-signed and verified before any transition (v0.2) |
+| `destructive` | Must be signed from v0.2 |
+| `timeout` | A duration; the CommandSweeper fails the command after it |
+| `roles` | Agent roles allowed to run it: `node`, `site`, `ramdisk` |
+| `payload` | The protobuf message the payload encodes as |
+
+`enqueue(tx, { nodeId, kind, payload, idempotencyKey, notAfter, … })` writes a `pending` row in your transaction;
+the same idempotency key on the same node returns the existing command. When the CommandSweeper expires or times
+out a command, it wakes the node's controller and, if the key's first segment names a registered reconciler
+(`acme.widgets:<key>:…`, or `wf:<id>:…` for workflows), that reconciler for `<key>`. See
+[command kinds](/docs/reference/command-kinds) and [commands](/docs/guides/nodes/commands).
+
+## NodeSpec sections
+
+`nodeSpec(ctx, node)` returns this module's part of the node's <Term id="nodespec">NodeSpec</Term>. The NodeSpec
+controller calls every module's `nodeSpec` in registration order and merges the parts:
+
+- `host.config`, `telemetry` and `access` merge key by key, later modules winning; `access.sshCaPublicKeys` is a
+  union;
+- `devices.assignments` merge by `allocationId` and `instances` by `id`;
+- `daemon` and `site` are taken whole from the last module that returns them.
+
+The controller bumps the node's generation only when the merged spec's hash changes. Your module must say when its
+contribution may have changed: call `ctx.desired.invalidate(tx, nodeId)` in the transaction that changes it. The
+capacity module does this on every binding change; rollout returns a `daemon` section from `daemonSpecFor`. See
+[desired state and commands](/docs/guides/concepts/desired-state-and-commands).
+
+## The module context
+
+`api()`, `nodeSpec`, `selfCheck`, `start` and every reconciler run get a `ModuleContext`. Method handlers get a
+`MethodContext`, which adds the caller; see [methods](/docs/extending/methods#the-method-context).
+
+| Port | What it does |
+| --- | --- |
+| `sql` | The store. In a method handler it is the envelope's transaction; in a reconciler every `transaction` is lease-fenced |
+| `clock` | Business time anchored to `compute_now()`; the sim clock in tests |
+| `work` | `enqueue(tx, kind, key, { notBefore? })` and `enqueueMany`: wake a reconciler |
+| `events` | `publish(tx, { type, tenantId, subject, data })` and `publishMany`: append to the <Term id="outbox">outbox</Term> |
+| `commands` | `enqueue(tx, command)` and `cancel(tx, commandId)`: the durable command queue |
+| `desired` | `invalidate(tx, nodeId)`: recompute a node's NodeSpec |
+| `authz` | `upsert`, `remove`, `setPending`: maintain your rows of the <Term id="authz-projection">authz projection</Term> |
+| `capacity` | `reserve(tx, request)` and `release(tx, allocationId)`: quota plus the inline placer |
+| `inventory` | `get(nodeId)`: the latest stored inventory snapshot |
+| `leases` | `acquire`, `release`, `fence`: named leases with a fencing epoch |
+| `iam` | The <Term id="iam-port">IamPort</Term>; never call it inside a transaction |
+| `registry` | `hasModule`, `commandKind`, `driver`: a read-only view of what is registered |
+| `secrets` | The secret broker: `put`, `resolve`, `delete` over the configured stores |
+| `pki` | `issueJoinToken(tx, …)`: single-use join tokens for agents a module brings up |
+| `workflows` | `start(tx, …)` and `abort(tx, id)`, present only when a hosted module runs workflows (`provisionModule()`) |
+| `afterCommit` | Runs a hook once the outermost transaction commits, never on rollback; for pokes and in-memory updates only |
+| `caches` | `dropIdentity`, `dropSession`, `dropDecisions`: invalidate the envelope's IAM caches |
+| `log` | `debug`, `info`, `warn`, `error` |
+
+`usage` (a `UsageRecorder`) is declared on the contract but the v0.1 server leaves it unset. The built-in
+capacity and vps modules write <Term id="usage-window">usage windows</Term> in SQL themselves.
+
+## start, stop and selfCheck
+
+`start(ctx)` is for work that must happen before the process serves: the IAM bridge loads its authz projection
+and binds its inbox there, and `eventsModule` anchors its fan-out cursor at the outbox tail so no event committed
+after start is missed. It runs in every process mode, so keep it idempotent. `stop()` releases what `start()`
+took.
+
+`selfCheck(ctx)` only reads and returns findings:
+
+```ts
+interface Finding {
+  check: string; // 'events.webhook-dead-letters'
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  fix: string;
+  count?: number;
+}
+```
+
+`compute.selfCheck()`, the `system.selfCheck` method and `better-compute doctor` collect them from every module. A
+module whose `selfCheck` throws becomes one `module.<name>` error finding; any `error` finding makes the report not
+`ok`. Report what an operator can act on: a backlog, dead letters, rows left unsealed (the audit module warns about
+audit events older than 3 hours that no checkpoint covers).

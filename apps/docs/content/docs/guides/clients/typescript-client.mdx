@@ -1,0 +1,317 @@
+---
+title: TypeScript client
+description: createComputeClient infers every group and method from your server's type, sends bearer tokens or the IAM cookie, and raises ComputeClientError with stable codes.
+metaTitle: The typed TypeScript client
+icon: TypeScript
+packages: ['@better-compute/client']
+sources:
+  - packages/client/src/index.ts
+  - packages/client/src/tunnel.ts
+  - packages/client/README.md
+  - packages/client/package.json
+  - packages/better-compute/src/client.ts
+  - packages/server/src/http.ts
+  - packages/console-kit/src/events.ts
+  - apps/console/src/components/console-provider.tsx
+  - tests/client.test.ts
+  - tests/client-types.test.ts
+  - tests/tsconfig.client.json
+  - PLAN.md
+---
+
+`@better-compute/client` is the typed, browser-safe client for the compute API. Its types come from your server
+through a type-only import, so there is no code generation step and no schema file to keep in sync: add a module
+to `betterCompute()` and its methods appear on the client. At run time it is a small `fetch` wrapper behind a Proxy,
+with one dependency (`@better-compute/core`, for types).
+
+It is exported twice: as `@better-compute/client`, and as `better-compute/client` from the umbrella package. Both are
+the same module.
+
+## Create a client
+
+```ts title="client.ts"
+import { createComputeClient } from 'better-compute/client';
+import type { compute } from './compute.server'; // type-only: nothing from the server is bundled
+
+export const client = createComputeClient<typeof compute>({
+  baseURL: 'https://compute.example.com',
+  token: () => session.getToken(), // read at every request, never stored
+  requestId: true,
+  retryRateLimited: true,
+});
+
+const { version } = await client.system.version();
+const pools = await client.pools.list({ tenantId: 'acme' });
+```
+
+`compute` is the value `betterCompute({ ... })` returns in your server code. The client needs only its type, so
+`import type` keeps the server, its database driver and its secrets out of a browser bundle.
+
+<TypeTable
+  type={{
+    baseURL: {
+      type: 'string',
+      description: "The API's origin, an absolute http(s) URL without credentials, query or fragment. Defaults to the page's origin in a browser; required elsewhere.",
+    },
+    basePath: { type: 'string', description: 'Where the API is mounted: an absolute path without a trailing slash.', default: "'/api/compute'" },
+    token: {
+      type: 'string | (() => string | undefined | Promise<string | undefined>)',
+      description: 'The bearer token: a Better IAM token (biam_...) or a session JWT whose audience includes compute. A function is called before every request.',
+    },
+    headers: { type: 'HeadersInit | (() => HeadersInit | Promise<HeadersInit>)', description: 'Extra headers for every request.' },
+    fetch: { type: 'typeof fetch', description: 'The Fetch implementation.', default: 'globalThis.fetch' },
+    credentials: {
+      type: "'omit' | 'same-origin' | 'include'",
+      description: "Whether the browser sends cookies. Compute authenticates bearer tokens, so the default sends none; a same-origin console that relies on the IAM cookie uses 'same-origin'.",
+      default: "'omit'",
+    },
+    requestId: {
+      type: 'boolean | (() => string)',
+      description: 'Send an X-Request-Id on every request (true generates one per request) and expose it on errors.',
+      default: 'false',
+    },
+    retryRateLimited: {
+      type: 'boolean | { maxWaitMs?: number }',
+      description: 'Retry a RATE_LIMITED answer once, after the server\'s retryAfterMs, when that wait is at most maxWaitMs (5000 by default).',
+      default: 'false',
+    },
+    onUnauthenticated: { type: '(error: ComputeClientError) => void', description: 'Called once per UNAUTHENTICATED answer, after the error is raised. Send people to sign in here.' },
+  }}
+/>
+
+A bad option fails at once, before any request, with `ComputeClientError('INVALID_CONFIG', …, 0)`: a relative or
+credential-bearing `baseURL`, a `basePath` with a trailing slash, a missing `fetch`, or an unknown `credentials`
+value.
+
+## Call methods
+
+Every server method has the shape `(credential, input)`. On the client the credential is supplied for you, so each
+method becomes `(input, options?)`:
+
+```ts
+// Server: compute.api.reservations.get(credential, { tenantId, reservationId })
+// Client:
+const reservation = await client.reservations.get({ tenantId: 'acme', reservationId: 'rsv_…' });
+
+// The input is optional when the method has no required field.
+const me = await client.system.whoami();
+
+// Per call: an AbortSignal and extra headers.
+const controller = new AbortController();
+await client.capacity.summary({ tenantId: 'acme' }, { signal: controller.signal });
+```
+
+The types follow the server exactly:
+
+- **Groups exist only for the modules you built with.** `client.instances` is a type error unless `vps()` is in the
+  server's `modules`, and `client.webhooks` needs `eventsModule()`.
+- **Plugins** are under `client.plugins[id][group][method]`, for plugins registered on the server:
+  `await client.plugins['acme-autoinstall'].isos.render({ tenantId, nodeId })`.
+- **Results** are the handler's return type, awaited.
+
+`$request(path, input?, options?)` calls any route below the base path by name. Use it for groups the server adds
+at run time and the type does not list, such as `tunnels`, or when you have no server type to import:
+
+```ts
+const opened = await client.$request<{ tunnelId: string; path: string }>('tunnels/open', {
+  tenantId: 'acme',
+  instanceId: 'inst_…',
+  op: 'exec',
+});
+```
+
+A path is plain segments that start with a letter (`system/version`, `plugins/acme/widgets/poke`). Anything else
+is refused with `INVALID_PATH` before a request is made. The segments `then`, `catch`, `finally`, `toJSON`,
+`constructor`, `prototype` and `__proto__` never route, so the client is not thenable and `await client` or
+`JSON.stringify(client)` does no network call.
+
+### On the wire
+
+Each call is one request:
+
+```text
+POST /api/compute/reservations/get HTTP/1.1
+Host: compute.example.com
+Content-Type: application/json
+X-Better-Compute: 1
+Authorization: Bearer biam_…
+X-Request-Id: 6f1c…
+
+{"tenantId":"acme","reservationId":"rsv_…"}
+```
+
+The client always sets `content-type` and `x-better-compute`, after your own headers, because the server's CSRF
+check needs both. It sends `redirect: 'error'` and `cache: 'no-store'`, and the input must serialize as JSON
+(`INVALID_INPUT` otherwise).
+
+## Credentials
+
+**Bearer tokens.** `token` accepts only the two shapes the server can authenticate: an opaque token of 16 to 512
+URL-safe characters (`biam_…`), or a session JWT of three base64url segments, at most 4096 characters. Anything
+else fails with `INVALID_TOKEN` before a request, so a stray value never ends up in an `Authorization` header. Pass
+a function (sync or async) so a refreshed session is picked up on the next call; the client never stores what it
+returns, and `undefined` sends no `Authorization` header.
+
+A session JWT is accepted only when its audience includes compute's; see
+[credentials compute accepts](/docs/guides/iam#credentials-compute-accepts).
+
+**The IAM cookie.** A console served from the same origin as compute, with `betterCompute({ acceptIamCookie: true })`,
+can rely on the person's Better IAM session cookie instead of a token. Leave `token` unset and send cookies:
+
+```ts title="The console's client"
+const api = createComputeClient({
+  baseURL: origin,
+  credentials: 'same-origin',
+  onUnauthenticated: () => window.location.assign(`/login?next=${encodeURIComponent(location.pathname)}`),
+});
+```
+
+The server accepts the cookie only with an `Origin` header equal to its own origin; the browser sends one on these
+POSTs. See [console](/docs/guides/clients/console).
+
+## Errors
+
+Every failure throws a `ComputeClientError`. It keeps the server's stable code and message and never exposes the raw
+response body.
+
+<TypeTable
+  type={{
+    code: { type: 'string', description: 'The error code: ACCESS_DENIED, NOT_FOUND, CONFLICT, CONFIRMATION_REQUIRED, RATE_LIMITED, or a client-side code below.', required: true },
+    message: { type: 'string', description: 'A human-readable message.', required: true },
+    status: { type: 'number', description: 'The HTTP status; 0 when the client refused before sending anything.', required: true },
+    retryAfterMs: { type: 'number', description: 'For RATE_LIMITED and retryable conflicts: how long to wait. From the error body, else the Retry-After header.' },
+    requestId: { type: 'string', description: "The request's X-Request-Id (yours, or the one the server echoed), for support and log lookups." },
+    details: { type: 'Record<string, unknown>', description: 'Machine-readable context, such as confirmationId for CONFIRMATION_REQUIRED or reservationId for CONFLICT.' },
+  }}
+/>
+
+| Code | Status | Raised when |
+| --- | --- | --- |
+| `INVALID_CONFIG` | 0 | an option is invalid (at creation, or a bad `requestId` value) |
+| `INVALID_PATH` | 0 | a route segment is not plain |
+| `INVALID_TOKEN` | 0 | `token` is not a bearer shape the server accepts |
+| `INVALID_INPUT` | 0 | the input does not serialize as JSON |
+| `INVALID_RESPONSE` | the response's | the body is not a `{ data }` or `{ error }` envelope |
+| `HTTP_ERROR` | the response's | a non-2xx status without an error envelope |
+| anything else | the response's | the server's own code; see the [error reference](/docs/reference/errors) |
+
+```ts title="Handling errors"
+import { ComputeClientError } from 'better-compute/client';
+
+try {
+  await client.reservations.create(input);
+} catch (error) {
+  if (!(error instanceof ComputeClientError)) throw error;
+  switch (error.code) {
+    case 'CONFIRMATION_REQUIRED':
+      return { waitFor: error.details?.confirmationId, retryWith: input.idempotencyKey };
+    case 'QUOTA_EXCEEDED':
+      return { denied: error.message };
+    default:
+      console.error(`${error.code} (${error.requestId}): ${error.message}`);
+      throw error;
+  }
+}
+```
+
+**Rate limits.** With `retryRateLimited`, a `RATE_LIMITED` answer is retried once after `retryAfterMs`, but only
+when that wait is at most `maxWaitMs`. Aborting the call's `signal` during the wait rejects at once without a second
+request. Longer waits surface as the error, with `retryAfterMs` set, for you to schedule.
+
+**Sign-in.** `onUnauthenticated` runs once for every `UNAUTHENTICATED` answer, after the error is created. An
+exception thrown from it is swallowed; it never changes what the caller sees.
+
+## Idempotent writes and confirmation
+
+Methods that create things take an `idempotencyKey`. Generate one per attempt, keep it across retries, and pass the
+same input again. The server returns the stored result for a repeated key, so a retry after a network error never
+books twice.
+
+An agent in a delegated Better IAM session may get `CONFIRMATION_REQUIRED` when the person it acts for holds the
+action back. Wait for the person, then call again with the same input and key: the retry reaches the same draft and
+is decided again. [Delegated confirmation](/docs/guides/iam/delegated-confirmation#approve-and-retry) has the full
+polling loop with `@better-iam/client`.
+
+## Watching events
+
+<Callout type="warn" title="No $watch on the client yet">
+  PLAN.md lists a `$watch` method on the client. It is not implemented: the client only makes JSON calls. To follow
+  events live, read `GET /watch` with `watchEvents` from `@better-compute/console-kit`, which works in browsers and
+  in Node.js 22 (it uses `fetch` and `TextDecoderStream`).
+</Callout>
+
+`watchEvents` reads Server-Sent Events over `fetch`, so it can send an `Authorization` header, which the browser's
+`EventSource` cannot. It resumes with `Last-Event-ID` after a reconnect:
+
+```ts title="Follow reservation events"
+import { watchEvents } from '@better-compute/console-kit';
+
+const watcher = watchEvents({
+  url: 'https://compute.example.com/watch', // wherever your host mounts handleWatch
+  types: ['reservation.*'],
+  headers: async () => ({ authorization: `Bearer ${await session.getToken()}` }),
+  onEvent: (event) => console.log(event.type, event.subject, event.sequence),
+  onStatus: (status) => console.log('watch', status),
+});
+// later
+watcher.stop();
+await watcher.done;
+```
+
+For history, page `client.events.list({ tenantId, cursor })`. [Watch](/docs/guides/events/watch) covers the stream,
+cursors and authorization, and [events](/docs/guides/events) the event shape.
+
+## Tunnels
+
+The client also carries the caller side of a [tunnel](/docs/guides/access/tunnels): after `tunnels.open` returns a
+single-use ticket and its `path`, `connectTunnel` opens the WebSocket and exchanges `TunnelFrame`s. The frames are
+encoded by hand for the few fields a caller uses, so the client needs no protobuf runtime.
+
+```ts title="An exec session"
+import { connectTunnel, tunnelUrl } from 'better-compute/client';
+
+const opened = await client.$request<{ path: string }>('tunnels/open', {
+  tenantId: 'acme',
+  instanceId: 'inst_…',
+  op: 'exec',
+});
+const tunnel = connectTunnel({ url: tunnelUrl('https://compute.example.com', '/api/compute', opened.path) });
+tunnel.onData((data, channel) => process[channel === 1 ? 'stderr' : 'stdout'].write(data));
+await tunnel.ready; // the node verified the ticket
+tunnel.resize(40, 120);
+tunnel.write('nvidia-smi\n');
+const { exitCode, reason } = await tunnel.exited;
+```
+
+| Member | Does |
+| --- | --- |
+| `ready` | resolves when the node opened its end; rejects if the socket closes first |
+| `exited` | resolves with `{ exitCode, reason }` when the tunnel ends (`-1` and the close reason when the node sent no status) |
+| `write(data)` | sends bytes or UTF-8 text to stdin or the byte stream |
+| `resize(rows, cols)` | sets the terminal size for exec and console sessions |
+| `onData(handler)` | receives output: channel 0 is stdout or the byte stream, 1 is stderr |
+| `close()` | ends the session; the node reports its exit status, then the socket closes |
+
+The ticket is valid for 60 seconds and once, so open the WebSocket right after `tunnels.open`. `tunnelUrl` turns
+`https` into `wss`. Outside a runtime with a global `WebSocket`, pass one: `connectTunnel({ url, WebSocket })`.
+Console-kit's `createTerminalSession` wraps all of this for browser terminals.
+
+## Typing
+
+The exported types let you name what the client infers:
+
+| Type | Is |
+| --- | --- |
+| `ComputeClient<typeof compute>` | the whole client: its groups, `plugins`, and `$request` |
+| `ClientGroups<Api>` | the groups of an API type, each method mapped to `(input, options?) => Promise<Output>` |
+| `ComputeClientOptions` | the options above |
+| `ComputeCallOptions` | `{ signal?, headers? }` per call |
+| `ClientTransport` | `{ $request }`, all that console-kit and the MCP tools need |
+
+A server parameter counts as the credential, and is dropped from the client signature, when every key it has is a
+key of core's `Credential` (`headers`, `token`). `tests/client-types.test.ts`, compiled with
+`tests/tsconfig.client.json`, pins the inference through modules and plugins: `client.instances` is an error
+without `vps()`, and plugin methods keep their input and output types.
+
+Without a server type to import (another repository, a plain script), the groups are not typed: call routes with
+`$request<Output>(path, input)`, which is also all that console-kit's stores and the MCP tools use.

@@ -1,0 +1,289 @@
+---
+title: Observability
+description: Prometheus metrics with bounded labels, a bearer-protected /metrics route, ComputeSpan observers, trace context, health endpoints and doctor.
+icon: Activity
+packages: ['@better-compute/observability', '@better-compute/cli', '@better-compute/server', '@better-compute/iam', '@better-compute/events']
+sources:
+  - packages/observability/README.md
+  - packages/observability/src/registry.ts
+  - packages/observability/src/standard.ts
+  - packages/observability/src/instrument.ts
+  - packages/observability/src/spans.ts
+  - packages/observability/src/traceparent.ts
+  - packages/cli/src/commands/serve.ts
+  - packages/cli/src/commands/setup.ts
+  - packages/cli/src/host/config.ts
+  - packages/cli/src/host/gateway.ts
+  - packages/cli/src/host/http.ts
+  - packages/cli/src/host/findings.ts
+  - packages/server/src/self-check.ts
+  - packages/server/src/runtime/clock.ts
+  - packages/server/src/http.ts
+  - packages/server/src/options.ts
+  - packages/iam/src/bridge.ts
+  - packages/iam/src/resolver.ts
+  - packages/iam/src/iam-plugin.ts
+  - packages/events/src/module.ts
+  - packages/audit/src/module.ts
+  - packages/capacity/src/module.ts
+  - proto/bettercompute/agent/v1/session.proto
+  - examples/shared/compose.ts
+  - tests/observability-metrics.test.ts
+  - PLAN.md
+---
+
+import { Gauge, History, Scale, ShieldCheck } from '@/lib/icons';
+
+`@better-compute/observability` holds the pieces a host uses to watch a deployment: a Prometheus registry that
+refuses tenant labels and caps its series, the standard `better_compute_*` metric set of PLAN.md section 14, a
+`GET /metrics` handler behind a bearer token, wrappers that meter IAM calls, gateway services, attestors and
+providers, `ComputeSpan` observers and W3C `traceparent` helpers. It is browser-safe (no Node.js imports), so every
+package can depend on it. The CLI host mounts it for you when the configuration's `host` export has a registry.
+
+<Callout type="warn" title="Defined is not the same as recorded">
+`standardMetrics(registry)` fixes the names, labels and buckets of every section 14 series, so all packages record
+the same thing. Today the built-in packages record only some of them: the gateway series sampled by
+`gatewayCollector`, the gateway service calls, outbox events by family, and whatever you wrap
+(`meteredIamPort`, `meteredAttestor`, `meteredProvider`, spans). The work-queue, placement, pool, connectivity,
+backlog, certificate, clock and command-latency series are defined but no package sets them yet; they expose their
+`HELP` and `TYPE` lines with no samples until your host records them. The matching `doctor` checks cover most of
+those conditions today.
+</Callout>
+
+## Wire metrics into a deployment
+
+One registry per process. The configuration creates it, registers the standard series, passes it to what it meters,
+and hands it to the host through `host.metrics`:
+
+```ts title="better-compute.config.ts"
+import { defineHost } from 'better-compute/cli';
+import { createMetrics, eventCounter, meteredIamPort, standardMetrics } from 'better-compute/observability';
+import { eventsModule } from 'better-compute/events';
+import { defineConfig } from 'better-compute/server';
+
+export const metrics = createMetrics(); // maxSeries 2000 per metric
+const standard = standardMetrics(metrics);
+
+export default defineConfig(({ env = process.env } = {}) => ({
+  // …database, secret, baseURL
+  iam: meteredIamPort(bridge.embedded(iam, { rootTenantId }), standard), // iam_calls_total, iam_call_duration_seconds
+  modules: [eventsModule({ secret: env.BETTER_COMPUTE_SECRET!, countEvent: eventCounter(metrics) })],
+}));
+
+export const host = defineHost(async ({ env }) => ({
+  metrics: { registry: metrics, bearerToken: env.BETTER_COMPUTE_METRICS_TOKEN }, // GET /metrics
+}));
+```
+
+`better-compute serve` then:
+
+- mounts `GET /metrics` (or `host.metrics.path`) on the API listener when `bearerToken` is set; without a token there
+  is no route;
+- when it runs the gateway role, meters `compute.gatewayServices` with `meteredGatewayServices` and samples the
+  gateway at every scrape with `gatewayCollector`.
+
+`better-compute dev` mounts the configuration's `host.metrics` too. The examples read the token from
+`BETTER_COMPUTE_METRICS_TOKEN`.
+
+Scrape it with the token as a bearer credential:
+
+```yaml title="prometheus.yml"
+scrape_configs:
+  - job_name: better-compute
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/better-compute.token
+    static_configs:
+      - targets: ['compute-api-1:3000', 'compute-api-2:3000']
+```
+
+## The registry
+
+`createMetrics({ prefix?, maxSeries?, forbiddenLabels?, now? })` returns a registry of counters, gauges and
+histograms.
+
+- **Prefix.** Every name gets `better_compute_` unless it already has it. Names and labels must match
+  `[a-z_][a-z0-9_]*`; `le` is reserved.
+- **No tenant labels.** A label named `tenant`, `tenant_id`, `tenantid`, `org`, `organization`, `identity` or `user`
+  is refused with `INVALID_CONFIG` when the metric is defined. Per-tenant numbers belong in usage and audit, not in
+  your TSDB.
+- **Bounded series.** Each metric holds at most `maxSeries` label sets (default 2000). New label sets past the cap
+  fold into one series whose labels all read `(other)`, and `better_compute_metrics_collapsed_total` counts every
+  folded recording.
+- **Caller-controlled values.** A label value that is not a string or is longer than 256 characters reads
+  `(invalid)`; an empty one reads `(unknown)`.
+- **Collectors.** `registry.collect(fn)` runs `fn` at the start of every `expose()`, for gauges sampled at scrape
+  time. A collector that throws is skipped for that scrape.
+- **Exposition.** `expose()` renders text format 0.0.4. `value(name, labels)` and `stats()` (`series`, `dropped`)
+  serve tests and health checks.
+
+`metricsHandler({ registry, bearerToken, timingSafeEqual })` answers `GET` only (405 otherwise), requires a token of
+at least 16 characters, compares the SHA-256 digests of the presented and expected tokens with the constant-time
+function you pass (`crypto.timingSafeEqual` in Node), answers 401 with `WWW-Authenticate: Bearer` on a mismatch,
+and serves the text with `Cache-Control: no-store`.
+
+## The standard series
+
+`standardMetrics(registry)` defines these; none carries a tenant label.
+
+| Series | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `better_compute_gateway_sessions` | gauge | `role` | Open daemon sessions on this gateway |
+| `better_compute_gateway_handshakes_total` | counter | `outcome` | Session handshakes |
+| `better_compute_command_latency_seconds` | histogram | `kind`, `lane` | Command enqueue to terminal result; buckets 0.05 to 60 s |
+| `better_compute_commands_swept_total` | counter | `to` | Commands the CommandSweeper moved |
+| `better_compute_work_queue_depth` | gauge | `kind` | Due `work_queue` rows |
+| `better_compute_reconcile_duration_seconds` | histogram | `reconciler` | One reconciler run |
+| `better_compute_generation_lag_nodes` | gauge | | Nodes whose observed generation is behind |
+| `better_compute_placements_total` | counter | `outcome` | Placement attempts |
+| `better_compute_booking_conflicts_total` | counter | | Booking conflicts that forced a replan |
+| `better_compute_pool_gpus` | gauge | `state` | GPUs by state across pools |
+| `better_compute_node_connectivity` | gauge | `state` | Nodes by connectivity |
+| `better_compute_backlog` | gauge | `queue` | Rows waiting in a queue table |
+| `better_compute_usage_dead_letters_total` | counter | | Usage events dead-lettered |
+| `better_compute_iam_inbox_spill_total` | counter | | IAM events spilled because the inbox was down |
+| `better_compute_iam_calls_total` | counter | `op`, `outcome` | IamPort calls (`ok`, `denied`, `error`) |
+| `better_compute_iam_call_duration_seconds` | histogram | `op` | IamPort call latency; each op takes at least one IAM lock acquisition |
+| `better_compute_resolver_lookups_total` | counter | `result` | Authz resolver lookups |
+| `better_compute_cert_expiry_seconds` | gauge | `kind` | Seconds until the soonest expiry |
+| `better_compute_clock_offset_seconds` | gauge | | Process clock minus `compute_now()` |
+| `better_compute_security_events_total` | counter | `type` | Security events recorded |
+
+Two IAM series have hooks in the IAM bridge you can point at them: `bridge.plugin({ onSpill })` is called for every
+event the plugin spills, and `bridge.resolveResource(fallback, { onLookup })` reports each lookup as `hit`, `miss`,
+`timeout`, `unavailable`, `scope` or `fallback`. Hook failures never change a decision.
+
+```ts
+const plugin = bridge.plugin({ onSpill: () => standard.iamInboxSpill.inc() });
+const resolveResource = bridge.resolveResource(undefined, {
+  onLookup: (result) => standard.resolverLookups.inc({ result }),
+});
+```
+
+### Series the instrumentation adds
+
+| Series | From | Labels |
+| --- | --- | --- |
+| `better_compute_gateway_open_sessions` | `gatewayCollector` | `gateway`, `role` |
+| `better_compute_gateway_stream_headroom`, `_draining`, `_lease_held`, `_commands_in_flight`, `_sessions_upgrade_required` | `gatewayCollector` | `gateway` |
+| `better_compute_gateway_loop_consecutive_failures`, `_loop_failures`, `_loop_last_ok_age_seconds` | `gatewayCollector` | `gateway`, `loop` (dispatch, lease, liveness, specs, status) |
+| `better_compute_gateway_service_calls_total`, `_service_seconds` | `meteredGatewayServices` | `method` (join, renew, secret), `outcome` |
+| `better_compute_attestor_verifications_total`, `_verification_seconds` | `meteredAttestor` | `attestor`, `outcome` (`admitted`, `deferred-<kind>`, `refused` or an error code) |
+| `better_compute_provider_calls_total`, `provider_call_seconds` | `meteredProvider` | `provider`, `method`, `outcome` |
+| `better_compute_revocation_feed_consecutive_failures` | `revocationFeedCollector` | `feed` |
+| `better_compute_events_total` | `eventCounter` via `eventsModule({ countEvent })` | `family`, `module` |
+| `better_compute_spans_total`, `span_duration_seconds` | `createObserver({ metrics })` | `kind`, `name`, `outcome`, `code`; `kind` |
+
+`gatewayCollector` and `meteredGatewayServices` are wired by `serve` for the gateway role; the others are yours to
+wrap around what you register. Outcome labels are bounded: ids, method names, error codes and catalog families.
+
+## Spans and traces
+
+`createObserver({ onSpan?, metrics?, now? })` times units of work as a `ComputeSpan`, shaped like better-iam's
+`IamSpan`:
+
+```ts
+interface ComputeSpan {
+  kind: 'operation' | 'decision' | 'http' | 'command' | 'reconcile' | 'placement' | 'iam' | 'sink';
+  name: string; // method, route, command kind or reconciler
+  tenantId?: string; // for hooks only, never a label
+  outcome: 'ok' | 'denied' | 'error';
+  code?: string;
+  status?: number;
+  requestId?: string;
+  durationMs: number;
+}
+```
+
+`observer.span(kind, name, fn, extra?)` runs `fn`, classifies the outcome (401, 403 and 429, or the codes
+`UNAUTHENTICATED`, `ACCESS_DENIED`, `CONFIRMATION_REQUIRED`, `RATE_LIMITED`, `CSRF_REJECTED` and
+`UNTRUSTED_ORIGIN`, are `denied`; anything else that throws is `error`), fans the span out to `onSpan` hooks and feeds
+the span metrics. Hooks and metrics can never affect the work: their failures are swallowed. A name the caller
+controls (an unknown route, `NOT_FOUND`, `INVALID_INPUT`, `METHOD_NOT_ALLOWED`) is recorded as `(invalid)` or
+`(unknown)`, so it cannot grow the series. The server does not create an observer itself; hosts use it to export
+spans to their tracing system.
+
+**Trace context.** `parseTraceparent`, `formatTraceparent` and `childTraceparent` handle W3C Trace Context version
+`00` (`00-<32 hex trace id>-<16 hex parent id>-<2 hex flags>`), refusing all-zero ids and version `ff`. The protocol
+carries `traceparent` on every `CommandBody` and `DesiredStateBody`, and the driver SDK passes it to drivers, so a
+daemon's work can join the request's trace. The server does not fill it from API requests yet: commands and specs
+go out with it empty.
+
+**Request ids.** The API takes the caller's `X-Request-Id` when it is 1 to 128 characters of letters, digits and
+`._:-`, else it mints a `req_` id, and returns it in the response's `X-Request-Id`. IAM receives the same id in
+the forwarded headers, and the admission context of a mutation's audit row records it, so a support ticket with the
+header finds the call.
+
+**Logs.** `betterCompute({ log })` takes a `Logger`; the default writes warnings and errors as JSON to standard error.
+GPU telemetry does not go through the control plane (principle P8); send it from the nodes straight to your TSDB.
+
+## Health and readiness
+
+The CLI host answers two routes beside the API on every `api` listener:
+
+| Route | Answers |
+| --- | --- |
+| `GET /healthz` | 200 `{ "ok": true }` while the process serves requests |
+| `GET /readyz` | 200 `{ "ok": true }` when `SELECT 1` succeeds on the store, else 503 `{ "ok": false }` |
+
+Point the load balancer's health check at `/readyz`. A gateway-only or worker-only process has no HTTP listener;
+watch it through the gateway series and leases instead.
+
+## doctor
+
+`better-compute doctor` runs `compute.selfCheck()` and adds the CLI's own findings. It only reads. `--strict` exits
+non-zero with `DOCTOR_FINDINGS` when any error or warning is found; `--pki PATH` names the PKI bundle to check.
+
+```bash
+better-compute doctor --strict --query "findings[].check"
+```
+
+| Check | Severity | Finds |
+| --- | --- | --- |
+| `migrations` | error | A database never migrated, or migrations of this release and its modules not applied |
+| `btree-gist` | error | The extension the booking exclusion constraints need is missing |
+| `clock` | error or info | `compute_now()` is not the database clock (info when it reads the sim clock) |
+| `clock.skew` | warning | This process's clock differs from `compute_now()` by more than 1 s |
+| `catalog.*` | error or warning | Methods whose actions are uncatalogued, mismatched or undeclared |
+| `database` | error | The check itself could not run |
+| `iam.not-configured` | warning | No IAM is configured, so only public methods answer |
+| `iam.projection` | error | The authz projection is not loaded, so every decision is denied |
+| `iam.inbox-spill` | warning or error | IAM events spilled in memory, or dropped |
+| `iam.inbox-backlog` | warning | More than 10,000 IAM events wait in `iam_inbox` |
+| `events.webhook-dead-letters` | warning | Webhook deliveries that failed every attempt |
+| `events.webhook-backlog` | warning | More than 1,000 deliveries overdue by 5 minutes |
+| `capacity.reservations.stale` | warning | Reservations more than 10 minutes past their end and not released |
+| `audit.checkpoints` | warning | Audit rows older than 3 hours not sealed by a checkpoint |
+| `pki.*` | error or warning | The PKI bundle unreadable or not unsealable, or a CA expired (error) or expiring (warning) |
+| `host.*` | error or warning | The `host` export: routes, tunnels, IAM, and whether the gateway role can authenticate daemons, reach the API's pokes, tunnels and revocations |
+
+[`system.selfCheck`](/docs/reference/api/system#selfcheck) serves the server's part of the report over the API
+(action `compute:fleet:admin` on `compute-fleet`); the `pki.*`, `host.*` and `iam.not-configured` findings come from
+the CLI only.
+
+## What to alert on
+
+These follow from the series and findings above, and from PLAN.md section 8.6 on what breaks first.
+
+- **The gateway is fenced or stuck.** `better_compute_gateway_lease_held` at 0, or
+  `better_compute_gateway_loop_consecutive_failures` rising for any loop. A gateway that loses its lease drops its
+  streams; nodes re-home to the others.
+- **Stream headroom.** `better_compute_gateway_stream_headroom` near 0 (default `maxStreams` 5,000 per gateway):
+  add a gateway before handshakes are refused.
+- **The IAM lane.** `better_compute_iam_call_duration_seconds` p99 rising, or `iam_calls_total{outcome="error"}`.
+  Every IAM call takes at least one global lock acquisition in embedded mode.
+- **Backlogs.** `iam.inbox-backlog`, `events.webhook-backlog` and `audit.checkpoints` findings: a worker role is not
+  running or cannot keep up. Run `doctor --strict` on a schedule and alert on a non-zero exit.
+- **Clock.** `clock.skew`: run NTP on every host. Business time stays anchored to the database, but ids and logs use
+  the host clock.
+- **Stale reservations.** `capacity.reservations.stale`: the `controllers` role is not running reconcilers.
+- **Revocations.** `better_compute_revocation_feed_consecutive_failures` above 0: revoked certificates keep their
+  sessions while the feed fails.
+- **Series cap.** `better_compute_metrics_collapsed_total` rising means some label is not bounded.
+
+<Cards>
+  <Card title="Scaling" href="/docs/operations/scaling" icon={<Scale />}>The numbers behind these limits.</Card>
+  <Card title="Retention" href="/docs/operations/retention" icon={<History />}>What the housekeeping pass prunes.</Card>
+  <Card title="Security" href="/docs/operations/security" icon={<ShieldCheck />}>The threat model and hardening.</Card>
+  <Card title="The gateway" href="/docs/daemon/gateway" icon={<Gauge />}>Leases, loops and admission control.</Card>
+</Cards>

@@ -1,0 +1,5 @@
+{
+  "title": "Concepts",
+  "icon": "Blocks",
+  "pages": ["index", "architecture", "domain-model", "desired-state-and-commands", "consistency"]
+}

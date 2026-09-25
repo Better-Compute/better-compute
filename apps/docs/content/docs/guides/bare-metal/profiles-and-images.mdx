@@ -1,0 +1,313 @@
+---
+title: Profiles and images
+description: Versioned metal profiles that name steps, drivers, an image and user data; the profiles metal ships for each provision state; and the signed image catalog.
+metaTitle: Metal profiles and the image catalog
+icon: Layers
+packages: ['@better-compute/provision', '@better-compute/metal']
+sources:
+  - packages/provision/README.md
+  - packages/provision/src/profile.ts
+  - packages/provision/src/profiles.ts
+  - packages/provision/src/api.ts
+  - packages/provision/src/renderers.ts
+  - packages/provision/src/config-units.ts
+  - packages/provision/src/images.ts
+  - packages/provision/src/migrations.ts
+  - packages/provision/src/builtin-steps.ts
+  - packages/metal/src/profiles.ts
+  - packages/metal/src/steps.ts
+  - packages/metal/src/store.ts
+  - packages/metal/src/module-types.ts
+  - tests/metal-lifecycle.test.ts
+  - tests/provision-images.test.ts
+  - PLAN.md
+---
+
+A <Term id="profile">profile</Term> is the recipe for one machine: which steps run, which drivers
+do each job, which <Term id="image">image</Term> goes on the disk, what user data it boots with and
+what host configuration the installed OS converges to. Profiles are versioned documents, and a
+version becomes immutable the first time a workflow uses it, so you can always tell exactly what
+was run on a machine.
+
+## Defining a profile
+
+`defineProfile(document)` checks a profile and returns a deeply frozen copy. This GPU host profile
+follows the one the metal test suite deploys over PXE, with host config, acceptance and cleanup
+added:
+
+```ts title="profiles/ubuntu-gpu-host.ts"
+import { defineProfile } from 'better-compute/provision';
+
+export const ubuntuGpuHost = defineProfile({
+  id: 'ubuntu-24.04-gpu-host',
+  version: 1,
+  target: 'metal',
+  role: 'host',
+  image: { ref: 'ubuntu-24.04-server@2026.09', format: 'raw', compression: 'zstd' },
+  userData: { kind: 'cloud-init', template: 'bcd-host.yaml.hbs' },
+  hostConfig: { 'nvidia-driver': { branch: '580' }, 'fabric-manager': { when: 'nvswitch' } },
+  steps: [
+    { use: 'userdata.render' },
+    { use: 'boot.prepareRamdisk', on: 'site' },
+    { use: 'management.setBootDevice', on: 'site', with: { device: 'pxe' } },
+    { use: 'power.setPower', on: 'site', with: { action: 'cycle' } },
+    { use: 'wait.agentJoined', with: { role: 'ramdisk' } },
+    { use: 'deploy.deploy', on: 'ramdisk', timeout: '30m' },
+    { use: 'management.setBootDevice', on: 'site', with: { device: 'disk' } },
+    { use: 'boot.kexec', on: 'ramdisk', await: 'rejoin', timeout: '15m' }, // completes when the OS joins
+  ],
+  acceptance: [{ use: 'diag.dcgm', with: { level: 1 } }],
+  cleanup: [{ use: 'boot.cleanUp', on: 'site' }],
+});
+```
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'Lower-case letters, digits, dots, underscores and hyphens; at most 128 characters.', required: true },
+    version: { type: 'number', description: 'A positive whole number. Change the document, bump the version.', required: true },
+    target: { type: "'metal' | 'vps'", description: 'Metal fields are refused on vps profiles and the other way round.', required: true },
+    description: { type: 'string', description: 'At most 1024 characters.' },
+    role: { type: "'host' | 'dedicated'", description: 'The role the node takes when a deploy of this profile completes.', default: "'host'" },
+    entry: { type: "'adopt' | 'deploy'", description: "An adopt profile may not carry image, userData or steps. Nothing starts adopt-entry profiles yet: adoption acceptance comes from the pool's policy.acceptance." },
+    drivers: { type: 'Record<concern, string | { driver, config }>', description: 'Drivers for the driver operations this profile invokes (driver.invoke).' },
+    image: { type: '{ ref, format?, compression? }', description: "A catalog reference name@version. format ('raw', 'qcow2', 'iso') and compression ('none', 'zstd', 'gzip') override the catalog's." },
+    userData: { type: "{ kind: 'cloud-init' | 'ignition' | 'talos', template }", description: 'What userdata.render renders; template names a registered template.' },
+    hostConfig: { type: 'Record<unit, settings>', description: 'Config units that become the node desired state after the workflow succeeds.' },
+    steps: { type: 'ProfileStep[]', description: 'The main phase, at most 256 steps.' },
+    acceptance: { type: 'ProfileStep[]', description: 'Run after the main steps, in the main phase.' },
+    cleanup: { type: 'ProfileStep[]', description: 'Run last, whatever the outcome.' },
+  }}
+/>
+
+`defineProfile` rejects unknown fields, malformed steps, ids and durations, values that are not
+JSON, and fields that belong to the other target, with `INVALID_CONFIG` whose `details.path` names
+the first offending field (for example `steps[2].timeout`). Through the API the same problems are
+`INVALID_INPUT`. The step fields (`on`, `with`, `timeout`, `retries`, `await`, `onFailure`,
+`fallback`, `when`) are described on [provisioning workflows](/docs/guides/bare-metal/workflows).
+
+## Storing and checking profiles
+
+Profiles live in two places: those your code ships through `provisionModule({ profiles })` or a
+module's `profiles` (read-only, visible to every tenant, listed under the tenant `builtin`), and
+stored ones in the `profiles` table, per tenant and version. A lookup prefers the tenant's own
+profile, then a public stored one, then a shipped one.
+
+| Method | Action | What it does |
+| --- | --- | --- |
+| [`profiles.create`](/docs/reference/api/profiles#create) | `compute:profiles:manage` | stores a new version with `visibility` `private` (default) or `public`; an existing version is `CONFLICT` |
+| [`profiles.get`](/docs/reference/api/profiles#get) | `compute:profiles:read` | one version, the latest when `profileVersion` is left out |
+| [`profiles.list`](/docs/reference/api/profiles#list) | `compute:profiles:read` | the tenant's, public and shipped profiles, up to 200 a page |
+| [`profiles.validate`](/docs/reference/api/profiles#validate) | `compute:profiles:read` | `{ valid, issues }`: every `use` that does not resolve and every `with` its step rejects |
+| [`profiles.render`](/docs/reference/api/profiles#render) | `compute:profiles:read` | the expanded steps a workflow of this profile would run |
+| [`profiles.update`](/docs/reference/api/profiles#update) | `compute:profiles:manage` | replaces an unused version's document, or changes visibility; a used version is `INVALID_STATE` |
+| [`profiles.delete`](/docs/reference/api/profiles#delete) | `compute:profiles:manage` | hides one version, or all, from new workflows; running workflows keep their steps |
+
+Run `validate` before the first deploy: it reports every problem at once with its path, where a
+deploy would fail on the first.
+
+```bash
+better-compute api profiles.create tenantId=root document:=@ubuntu-gpu-host.json
+better-compute api profiles.validate tenantId=root profileId=ubuntu-24.04-gpu-host profileVersion:=1
+```
+
+## The profiles metal ships
+
+Metal runs one shipped profile per workflow-driven state. Deploying is the exception: it runs the
+profile named in `metal.deploy`.
+
+| Profile | State | Main steps | Cleanup |
+| --- | --- | --- | --- |
+| `metal-enroll@1` | `enrolling` | `power.getPower`, `inspect.oob` | none |
+| `metal-inspect@2` | `inspecting` | `metal.ensureRamdisk`, `inventory.refresh` | `boot.cleanUp` |
+| `metal-commission@1` | `commissioning` | `metal.ensureRamdisk`, `diag.dcgm` level 2, `disk.wipe` quick, `power.setPower` off | `boot.cleanUp` |
+| `metal-release@1` | `releasing` | `metal.ensureRamdisk`, `disk.wipe` with the undeploy's mode, `power.setPower` off | `boot.cleanUp` |
+| `metal-retire@1` | `retiring` | `metal.ensureRamdisk`, `disk.wipe` crypto-erase, `power.setPower` off (each continues on failure), `metal.revokeIdentity` | `boot.cleanUp` |
+| `metal-rescue@1` | `rescue` | `metal.ensureRamdisk` | none |
+
+Pools whose machines never run `bcd` (`agent: 'none'`) cannot boot a ramdisk, so they get
+out-of-band variants: `metal-inspect-oob@1` (`inspect.oob`), `metal-commission-oob@1` (power off),
+`metal-release-oob@1` (`media.eject`, then power off) and `metal-retire-oob@1` (power off, then
+`metal.revokeIdentity`). Rescue on such a pool fails the node with `UNSUPPORTED`. The two tenant-root
+teardown profiles are on [dedicated-root metal](/docs/guides/bare-metal/dedicated-root), and provision
+ships `remediate-reboot@1` and `remediate-gpu-reset@1` for health remediation.
+
+## Steps you can use
+
+| Step | Runs | Input | Timeout |
+| --- | --- | --- | --- |
+| `power.getPower` | relays to the site agent | none | 2m |
+| `power.setPower` | relays to the site agent | `action`: `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi` | 5m |
+| `management.setBootDevice` | relays to the site agent | `device`: `pxe`, `http`, `disk`, `cd`; `persistent` | 2m |
+| `inspect.oob` | relays to the site agent | none | 5m |
+| `media.insert` | relays to the site agent | `url` (https) or `fromStep` | 5m |
+| `media.eject` | relays to the site agent | none | 5m |
+| `boot.prepareRamdisk`, `boot.cleanUp` | relays to the site agent | none | 2m |
+| `metal.ensureRamdisk` | control plane | none | 20m |
+| `inventory.refresh` | relays to the ramdisk or node | none | 10m |
+| `diag.dcgm` | relays to the ramdisk or node | `level` 1 to 4 (default 1) | 1h |
+| `disk.wipe` | relays to the ramdisk | `mode`: `none`, `quick`, `secure-erase`, `crypto-erase` | 6h |
+| `deploy.deploy` | relays to the ramdisk | `image` (defaults to the profile's) | 1h |
+| `boot.kexec` | ramdisk, `await: 'rejoin'` | none | 15m |
+| `userdata.render` | control plane | none | 2m |
+| `wait.agentJoined` | control plane | `role`: `node`, `ramdisk` or `site` | 15m |
+| `wait.generationObserved` | control plane | none | 10m |
+
+- `metal.ensureRamdisk` does nothing when the machine's ramdisk is already connected. Otherwise it
+  sets one-time PXE, sends the boot entries and power-cycles the machine, then waits for the ramdisk
+  to join.
+- `diag.dcgm` fails with `DRIVER_ERROR` unless the result is node-signed and every test passed.
+- `disk.wipe` succeeds with `attested: false` when the signature or a disk's read-back check fails;
+  metal then refuses to release the node to `ready` (`UNVERIFIED_WIPE`).
+- `deploy.deploy` resolves the image in the machine owner's tenant (its own image first, then a
+  public one), refuses an `iso` (`INVALID_INPUT`), sends `deploy.image` with the source URL, digest,
+  format, compression and a user-data reference, and fails with `DRIVER_ERROR` when the digest the
+  ramdisk wrote differs from the catalog's.
+- `media.insert` with `fromStep` mounts the `url` an earlier step of the same workflow returned: how
+  a plugin hands a per-node ISO to the BMC (see [deploying](/docs/guides/bare-metal/deploying)).
+
+## Driver bindings from the hardware profile
+
+Machines in a pool usually share their BMC and boot hardware, so driver choices live in a hardware
+profile rather than on each node:
+
+```ts
+metal({
+  hardwareProfiles: {
+    'gpu-redfish': { drivers: { power: 'redfish', management: 'redfish', boot: 'ipxe', deploy: 'image-stream', inspect: 'agent' } },
+  },
+});
+await compute.api.pools.create(credential, {
+  tenantId: 'root', siteId, class: 'metal-host', policy: { hardwareProfile: 'gpu-redfish' },
+});
+```
+
+At enrollment, `resolveDriverBindings` builds the node's bindings in three layers:
+
+1. The BMC given to `metal.enroll` binds `power`, `management` and `virtual-media`, with its address
+   and credential reference as config.
+2. The hardware profile (the node's `hardwareProfile`, else the pool's `policy.hardwareProfile`)
+   overrides per concern.
+3. Per-node overrides win.
+
+An unknown hardware profile is `INVALID_INPUT`. The bindings are stored on the node and served in its
+NodeSpec. Metal's own BMC steps use the BMC driver the node was enrolled with; a profile's `drivers`
+apply to the driver operations it invokes directly.
+
+## User data
+
+A deployed OS has to join as the same node, so it needs a join token in its first-boot
+configuration. `userdata.render` builds that configuration from the profile's `userData`:
+
+1. It mints a single-use `provisioned` join token for the node's pool and site (valid 2 hours, or
+   `tokenTtlSeconds`).
+2. It renders the named template with the variables `nodeId`, `hostname` (the node id with `_`
+   turned into `-`), `joinToken`, `controlPlaneUrl`, `bcdUrl` and `bcdSha256`.
+3. It stores the document in the secret store and returns only `{ userDataRef, kind, joinTokenId }`.
+   `deploy.deploy` passes the reference, and the ramdisk fetches the document with a SecretRequest.
+
+Two templates ship: `bcd-host.yaml.hbs` (cloud-init) and `bcd-host.ign` (Ignition 3.4.0, built as
+JSON so values cannot change its structure). The cloud-init one writes the token to a 0600 file,
+downloads `bcd`, checks its digest and joins:
+
+```yaml title="bcd-host.yaml.hbs"
+#cloud-config
+hostname: {{hostname}}
+write_files:
+  - path: /etc/bcd/join-token
+    permissions: '0600'
+    content: {{joinToken}}
+runcmd:
+  - [sh, -c, "curl -fsSL {{bcdUrl}} -o /usr/local/bin/bcd && echo '{{bcdSha256}}  /usr/local/bin/bcd' | sha256sum -c - && chmod 0755 /usr/local/bin/bcd"]
+  - [/usr/local/bin/bcd, join, --server, {{controlPlaneUrl}}, --node-id, {{nodeId}}, --token-file, /etc/bcd/join-token]
+```
+
+- Configure it with `provisionModule({ userData: { controlPlaneUrl, bcdUrl, bcdSha256, templates?, tokenTtlSeconds? } })`.
+  Without the three URLs and the digest, rendering fails with `INVALID_CONFIG`.
+- A template is a string with `{{name}}` placeholders or a function of the variables. Every value
+  must be a single line without `{{`, so a value can never add lines to the document; a placeholder
+  with no value is `INVALID_CONFIG`.
+- No template ships for `kind: 'talos'`; bring your own.
+- A profile with `userData` whose deploy runs before any `userdata.render` step fails with
+  `INVALID_CONFIG`. A re-run after a crash mints a new token; the unused one is single-use and
+  expires, so it never becomes a second way in.
+- The installed `bcd` joins through the `provisioned` attestor, which maps the token back to the
+  running workflow's node (see [sites](/docs/guides/bare-metal/sites) for the wiring).
+
+## Host config
+
+`hostConfig` is not a step: when the workflow succeeds, its units become the node's desired state
+(the NodeSpec `host` section), and the daemon corrects drift continuously. Built-in units are
+`nvidia-driver` (`branch`, three digits; `open`), `container-toolkit` (`cdi`, default true),
+`mig-layout` (`from: 'pool'` takes the pool's `policy.migLayout`, or a `layout`), `fabric-manager`
+and `sysctl` (sysctl names with scalar values). Any unit takes `when`, a label expression. Add units
+with `provisionModule({ configUnits })`.
+
+## The image catalog
+
+Images are built outside the control plane (mkosi or Packer, as `raw.zst` or `qcow2`) and registered
+by digest. The catalog records where the artifact lives, what it is, and whether a trusted signer
+vouched for it. It never stores the image itself.
+
+```ts title="register-image.ts"
+import { sign } from 'node:crypto';
+import { imageSigningInput } from 'better-compute/provision';
+
+const image = {
+  ref: 'ubuntu-24.04-server@2026.09',
+  kind: 'os',
+  format: 'raw',
+  compression: 'zstd',
+  sha256: '<64 hex digits>',
+} as const;
+const signature = sign(null, imageSigningInput(image), signingKey).toString('base64'); // Ed25519
+
+await compute.api.images.register(credential, {
+  tenantId: 'root',
+  ...image,
+  sizeBytes: 3_221_225_472,
+  source: 'https://images.example.com/ubuntu-24.04-server-2026.09.raw.zst', // https:// or oci://
+  signerId: 'platform-2026',
+  signature,
+});
+```
+
+<TypeTable
+  type={{
+    ref: { type: 'string', description: 'name@version, unique per tenant (a duplicate is CONFLICT).', required: true },
+    kind: { type: "'os' | 'ramdisk'", description: 'Ramdisks must be signed by a platform signer.', default: "'os'" },
+    format: { type: "'raw' | 'qcow2' | 'iso'", description: 'deploy.deploy writes raw and qcow2 to disk; an iso goes through virtual media.', required: true },
+    compression: { type: "'none' | 'zstd' | 'gzip'", description: 'How the artifact is compressed.', default: "'none'" },
+    sha256: { type: 'string', description: '64 hex digits of the artifact as stored.', required: true },
+    sizeBytes: { type: 'number', description: 'The artifact size, for cache planning.' },
+    source: { type: 'string', description: 'Where caches pull it from: an https:// or oci:// URL.', required: true },
+    signature: { type: 'string', description: 'Base64 signature over imageSigningInput(...). Goes with signerId.' },
+    signerId: { type: 'string', description: "A signer on the tenant's allowlist or the platform's." },
+  }}
+/>
+
+- **What is signed.** `imageSigningInput` is the UTF-8 text `bc-image-v1`, then the kind, ref,
+  format, compression and lower-case digest, one per line. Sign it with Ed25519, or ECDSA P-256 over
+  SHA-256 (IEEE P1363 or DER encoding).
+- **Signers.** Allowlists are rows of `image_signers` per tenant, with SPKI PEM keys; the root
+  tenant's signers are the platform's. Hosts add and revoke them with `addImageSigner` and
+  `revokeImageSigner`; there is no API method. Images a revoked signer verified keep their flag.
+- **Verification.** A signature must verify against the named signer of the tenant or the platform,
+  else `INVALID_INPUT`. A verified image has `verified: true`. The default check is offline against
+  `image_signers`; swap in Sigstore or a KMS with `provisionModule({ imageVerifier })`.
+- **Visibility.** Unsigned images stay private to their tenant forever (a table `CHECK` enforces it).
+  [`images.promote`](/docs/reference/api/images#promote) makes a verified image public to every tenant;
+  on an unsigned one it is `INVALID_STATE`.
+- **Reading.** `images.get` and `images.list` (filter by `kind`, up to 200 a page) return the tenant's
+  own images and public ones. A profile's `image.ref` resolves to the tenant's own image first.
+
+`images.register` and `images.promote` are decided as `compute:images:publish`, `get` and `list` as
+`compute:images:read`.
+
+### Site caches
+
+The catalog also tracks which site caches hold which images (`image_locations`: `pulling`, `ready`,
+`failed`, `evicting`). `recordImageLocation` and `touchImageLocation` record reports and use (and pin
+an image while a deploy streams it), `imagesCachedAt(siteId)` feeds the `image-cached` placement
+scorer, and `evictionCandidates(siteId, bytes, inUse)` picks the least recently used ready images,
+never pinned or in-use ones. The agent side (a `bcd site` cache that pulls on demand, pre-warms per
+pool policy and re-verifies digests before serving) arrives with the site agent.

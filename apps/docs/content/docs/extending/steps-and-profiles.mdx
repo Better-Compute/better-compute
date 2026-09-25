@@ -1,0 +1,367 @@
+---
+title: Steps and profiles
+metaTitle: Extending the provision workflow engine
+description: Write workflow steps with defineStep, ship profiles, use the step context's PKI and secret ports, and keep steps idempotent across crashes and wake-ups.
+icon: Workflow
+status: beta
+packages: ['@better-compute/provision', '@better-compute/metal', '@better-compute/core']
+sources:
+  - packages/provision/README.md
+  - packages/provision/src/step.ts
+  - packages/provision/src/check.ts
+  - packages/provision/src/profile.ts
+  - packages/provision/src/expand.ts
+  - packages/provision/src/engine.ts
+  - packages/provision/src/command-step.ts
+  - packages/provision/src/builtin-steps.ts
+  - packages/provision/src/module.ts
+  - packages/provision/src/renderers.ts
+  - packages/provision/src/config-units.ts
+  - packages/provision/src/images.ts
+  - packages/provision/src/join-resolvers.ts
+  - packages/metal/src/steps.ts
+  - packages/metal/src/http-proxy.ts
+  - packages/metal/src/module.ts
+  - packages/core/src/extension.ts
+  - packages/core/src/domain.ts
+  - packages/server/src/runtime/commands.ts
+  - packages/server/src/join/secret-broker.ts
+  - tests/provision-define.test.ts
+  - tests/provision-engine.test.ts
+  - tests/extensions/ubuntu-autoinstall.test.ts
+  - tests/extensions/talos.test.ts
+  - tests/extensions/metal-sim.ts
+  - PLAN.md
+---
+
+import { Workflow, Layers, Route } from '@/lib/icons';
+
+The provision engine runs a <Term id="profile">profile</Term>, a versioned document, as a
+<Term id="workflow">workflow</Term> of persisted <Term id="step">steps</Term> for one node or instance. Metal's whole
+lifecycle is built this way: enrolling, inspecting, commissioning, deploying, releasing and retiring are each a profile
+that metal ships. You extend the engine with your own steps and profiles, and around them with user-data templates,
+config units and image signers, without editing `@better-compute/*`.
+
+How workflows run, fail, retry and are aborted is on [provisioning workflows](/docs/guides/bare-metal/workflows); this
+page is about writing the pieces.
+
+<Callout type="warn" title="Where this runs today">
+The engine, `defineStep`, `defineProfile` and every metal step run in the control plane and are tested on PGlite,
+including the Ubuntu and Talos walkthroughs. Steps that send commands wait for agents: `bcd site` and `bcd ramdisk`
+are written but not built, so in tests simulated agents (or FakeDaemon site agents) answer the commands.
+</Callout>
+
+## Three kinds of step
+
+| Kind | Declared with | Runs as | Example |
+| --- | --- | --- | --- |
+| control-plane | `runsOn: 'control-plane'`, `run` | `run(input, ctx)` in the worker that owns the target's shard, outside any transaction | `userdata.render`, `wait.agentJoined` |
+| relaying | `runsOn: 'control-plane'`, `run`, `relays` | the same, but `run` builds a command and sends it to an agent with `awaitCommand` | `power.setPower`, `media.insert` |
+| agent | `runsOn: 'site' \| 'node' \| 'ramdisk'`, `command` | exactly one command of kind `command`, whose payload is the step's input | `diag.dcgm`, `boot.kexec` |
+
+Relaying steps exist because the command often needs data only the control plane has: a BMC address and credential
+reference, a resolved catalog image, a freshly minted token. `relays: ['site']` lets profiles still write
+`{ use: 'power.setPower', on: 'site' }`.
+
+## defineStep
+
+```ts title="steps/render-iso.ts"
+import { createHash } from 'node:crypto';
+import { manifest } from 'better-compute/core';
+import { defineStep, renderTemplate } from 'better-compute/provision';
+
+export const renderAutoinstallIso = defineStep({
+  id: 'autoinstall.renderIso',
+  runsOn: 'control-plane',
+  timeout: '5m',
+  retrySafe: false,
+  input: manifest({}),
+  async run(_input, ctx) {
+    const node = ctx.node!;
+    const { token } = await ctx.sql.transaction((tx) =>
+      ctx.pki!.issueJoinToken(tx, { tenantId: 'root', role: 'provisioned', siteId: node.siteId, ttlSeconds: 7200, maxUses: 1 }),
+    );
+    const userData = renderTemplate(autoinstallTemplate, { hostname: node.id.replace(/_/g, '-'), joinToken: token });
+    const digest = createHash('sha256').update(userData).digest('hex');
+    await publishIso(digest, userData); // your ISO build and storage behind the site cache
+    return { url: `https://cache.site-a/autoinstall/${digest}.iso` };
+  },
+});
+```
+
+This is the step of [walkthrough 1](/docs/extending/walkthroughs). `defineStep` checks the shape up front and returns
+the step frozen with `extension: 'step'`; every refusal is `INVALID_CONFIG` with `details.path`.
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'What profiles use: dotted, lower-case first segment, at most 128 characters, e.g. power.setPower or acme.renderIso.', required: true },
+    version: { type: 'string', description: 'Optional version string.' },
+    runsOn: { type: "'control-plane' | 'site' | 'node' | 'ramdisk'", description: 'Where it runs.', required: true },
+    timeout: { type: 'Duration', description: "One attempt's budget: '30s', '10m', '1h' or milliseconds; must be positive. A profile step may override it.", required: true },
+    retries: { type: 'number', description: 'Extra attempts after a failure, 0 to 100. A profile step may override it.', default: '0' },
+    retrySafe: { type: 'boolean', description: 'Whether running it twice does no harm. Required; see idempotency below.', required: true },
+    input: { type: 'Manifest<I> | StandardSchema', description: "Validates the profile step's with when the profile is expanded, and again before run.", required: true },
+    run: { type: '(input, ctx) => Promise<Json | void>', description: 'Control-plane steps only (required there). The result is stored as the step result.' },
+    relays: { type: "('site' | 'node' | 'ramdisk')[]", description: 'Control-plane steps only: the places a profile may name with on:.' },
+    command: { type: 'string', description: 'Agent steps only (required there): the dotted command kind sent.' },
+    await: { type: "'rejoin'", description: 'Agent steps only: complete when the agent comes back with a new boot or role, for self-terminating kinds.' },
+    cleanup: { type: 'ProfileStep[]', description: "Steps that run, last in first out, in the cleanup phase if this step started." },
+  }}
+/>
+
+An agent step's `command` must be a command kind some module registers (`ComputeModule.commandKinds`, see
+[modules](/docs/extending/modules) and [command kinds](/docs/reference/command-kinds)); the server's command queue
+refuses others with `INVALID_CONFIG`. Its payload is the step's validated input as the kind's proto3 JSON. The agent
+has to implement the kind, which for a new kind means a change to `bcd`.
+
+## The step context
+
+A control-plane step's `run` receives a `StepContext`: the whole `ModuleContext`, plus the workflow's coordinates.
+
+<TypeTable
+  type={{
+    workflowId: { type: 'string', description: 'The workflow.' },
+    stepId: { type: 'string', description: "The step's id within the workflow: main.3, main.3.on-failure, cleanup.1." },
+    attempt: { type: 'number', description: '0 on the first attempt, then 1, 2, ... on retries.' },
+    idempotencyKey: { type: 'string', description: 'wf:<workflowId>:<stepId>, the same on every run of the step.' },
+    node: { type: '{ id, siteId, poolId? }', description: 'The target node, for node workflows.' },
+    signal: { type: 'AbortSignal', description: "Aborted at the step's deadline and when the worker stops." },
+    emit: { type: '(progress) => void', description: 'Accepted but discarded for control-plane steps today.' },
+    sql: { type: 'SqlExecutor', description: 'Queries, and transaction(fn) for writes. No transaction is open while run executes.' },
+    commands: { type: 'CommandQueue', description: 'enqueue(tx, command); prefer awaitCommand, which adds the keys and the waiting.' },
+    pki: { type: 'PkiPort', description: 'issueJoinToken(tx, { tenantId, role, poolId?, siteId?, ttlSeconds, maxUses?, expect? }) → { id, token }. Optional.' },
+    secrets: { type: 'SecretBroker', description: 'put(tenantId, value) → SecretRef, resolve(ref), delete?(ref). Optional.' },
+    'clock, events, work, log, …': { type: 'ModuleContext', description: 'Everything a module gets; see modules.' },
+  }}
+/>
+
+`pki` and `secrets` are optional on `ModuleContext`. A step that needs them should fail with `INVALID_CONFIG` when
+they are missing, as `userdata.render` does, rather than crash on `undefined`.
+
+- **`ctx.pki.issueJoinToken`** mints the credential an agent your step brings up will join with. Roles are `node`,
+  `site`, `provisioned` and `discovery`. For anything a machine uses to join, mint `maxUses: 1`, a short `ttlSeconds`,
+  and `expect` (`mac`, `productUuid`, `serial` or `gpuUuid`) when you know the machine, so a join with other hardware
+  claims is refused without spending the token.
+- **`ctx.secrets.put`** stores a value and returns a `SecretRef`. Put tokens and rendered documents there and send only
+  the reference. An agent can fetch a reference's value only when a live command of this workflow step for that agent
+  (key `wf:<workflow>:<step>`, with any `#n` or `:key` suffix) carries the reference in its body, so the reference must
+  travel in the step's own command.
+
+Never return a secret from `run`. The result is stored in `workflow_steps.result` and readable through
+[`workflows.get`](/docs/reference/api/workflows#get); `userdata.render` returns `{ userDataRef, kind, joinTokenId }`,
+not the document.
+
+## Idempotency and wake-ups
+
+A control-plane step is marked `running` in one transaction, runs outside any transaction, and is settled in another
+that first checks it is still `running` with the same attempt. A worker that dies in between leaves the step
+`running`, and the next owner of the shard runs it again **under the same idempotency key**. The engine does not read
+`retrySafe` today, so every `run` must be safe to repeat. The pattern is find before create:
+
+```ts title="steps/acme-reserve-ip.ts"
+async run(input, ctx) {
+  return ctx.sql.transaction(async (tx) => {
+    const { rows } = await tx.query('SELECT ip FROM plg_acme_ips WHERE step_key = $1', [ctx.idempotencyKey]);
+    if (rows[0]) return rows[0]; // a re-run after a crash finds the first run's work
+    const ip = await nextFreeIp(tx); // your allocator, over your plugin's own tables
+    await tx.query('INSERT INTO plg_acme_ips (step_key, ip) VALUES ($1, $2)', [ctx.idempotencyKey, ip]);
+    return { ip };
+  });
+}
+```
+
+Key per attempt, not per step, when a retry must start over: `stepCommandKey(ctx, key)` is
+`wf:<id>:<step>#<attempt>[:<key>]`.
+
+### Waiting
+
+A step that cannot finish yet throws `stepNotReady(ms)`. The engine settles nothing, and runs the step again after
+`ms` (5,000 by default), never later than its deadline; at the deadline the step fails `TIMEOUT`. The built-in waits
+are written this way:
+
+```ts
+async run(input, ctx) {
+  const { rows } = await ctx.sql.query('SELECT generation, observed_generation FROM nodes WHERE id = $1', [ctx.node!.id]);
+  if (Number(rows[0].observed_generation) < Number(rows[0].generation)) throw stepNotReady(5_000);
+  return { generation: Number(rows[0].generation) };
+}
+```
+
+### Sending commands from a step
+
+`awaitCommand(ctx, { nodeId, kind, payload, key?, timeoutMs? })` is find-before-create for commands. It looks the
+command up by `wf:<id>:<step>#<attempt>[:<key>]` on that node, enqueues it only if absent (with `notAfter` now plus
+`timeoutMs`, 10 minutes by default), and then:
+
+- throws `stepNotReady(2000)` while the command is `pending`, `dispatched`, `acked` or `running`;
+- returns `{ commandId, result, attested }` once it `succeeded`, with the agent's raw result bytes;
+- throws `DRIVER_ERROR` with the state and reason once it `failed`, was `rejected`, `expired` or `cancelled`.
+
+Give each command of one step its own `key` (`'boot-device'`, `'power-cycle'`): `metal.ensureRamdisk` sends a
+one-time PXE boot, a boot entry per MAC and a power cycle in sequence, and a re-run skips the ones already done
+because it finds them by key. To reach a node's site
+agent, `siteAgentFor(ctx.sql, nodeId)` returns a connected agent of the node's site, the boot-lease holder first, or
+`undefined`, in which case throw `stepNotReady` and wait for one. Metal's `httpViaSite(ctx, request)` is a relaying
+helper built the same way: one HTTP request from the site agent to the machine's own address, with SSRF checks; see
+[walkthroughs](/docs/extending/walkthroughs).
+
+A command's result is not trusted just because it arrived. A result that decides a transition, like a wipe, should be
+node-signed and verified: metal's steps check the stored signature against the node's certificates before they
+accept `attested`.
+
+### What wakes a workflow
+
+Nothing depends on a wake-up arriving. The `workflow` reconciler is keyed by the node id (or the workflow id for
+workflows without a node), and after each pass it queues itself in the work queue with `notBefore` set to the next
+moment it cares about:
+
+- an agent step waiting on its command: in 10 seconds (`workflowPollMs`), or at the step's deadline if sooner;
+- a control-plane step that threw `stepNotReady(ms)`: in `ms`, or at the deadline if sooner (a relaying step's
+  `awaitCommand` uses 2 seconds);
+- a verb (`abort`, `retry`, `resume`) or a new workflow: at once.
+
+When a workflow ends, its `owner` hears about it. `ctx.workflows.start(tx, { …, owner })` names a reconciler that is
+queued under the workflow's key when it finishes. Metal starts every workflow with `owner: 'metal'`, so the node moves
+on without polling.
+
+## Profiles
+
+```ts title="profiles/ubuntu-autoinstall.ts"
+import { defineProfile } from 'better-compute/provision';
+
+export const ubuntuAutoinstall = defineProfile({
+  id: 'ubuntu-24.04-autoinstall',
+  version: 1,
+  target: 'metal',
+  role: 'host',
+  steps: [
+    { use: 'autoinstall.renderIso' },
+    { use: 'media.insert', on: 'site', with: { fromStep: 'autoinstall.renderIso' } },
+    { use: 'management.setBootDevice', on: 'site', with: { device: 'cd' } },
+    { use: 'power.setPower', on: 'site', with: { action: 'cycle' } },
+    { use: 'wait.agentJoined', with: { role: 'node' } },
+    { use: 'media.eject', on: 'site' },
+  ],
+});
+```
+
+`defineProfile` rejects unknown fields, malformed steps, ids and durations, non-JSON values, fields of the other
+target, and an image, user data or steps on an `adopt` profile; it returns a deeply frozen copy. The fields are listed
+on [profiles and images](/docs/guides/bare-metal/profiles-and-images).
+
+Steps pass data forward through their results. `media.insert` with `fromStep` reads the `url` the latest succeeded
+step with that action returned in the same workflow; `deploy.deploy` finds `userdata.render`'s reference the same way
+(`renderedUserData(sql, workflowId)`). Read earlier results from `workflow_steps` by `workflow_id` and `action`, never
+from memory.
+
+When a workflow starts, each `use:` resolves once and the result is persisted:
+
+1. a registered step with that id (an `on:` must match its `runsOn` or one of its `relays`);
+2. otherwise, with `on:` naming an agent, a driver operation `<concern>.<operation>` sent as one `driver.invoke`
+   command (see [drivers](/docs/extending/drivers#from-a-profile-step-to-a-driver));
+3. otherwise `fallback:`, resolved the same way.
+
+`with` is validated against the step's `input` at the same moment. `profiles.validate` reports every unresolved `use`
+and rejected `with` with its path, and `profiles.render` returns the expanded steps; run both before the first deploy.
+A version becomes immutable the first time a workflow uses it, and a workflow holds at most 512 steps.
+
+## Shipping steps and profiles
+
+The engine resolves only what `provisionModule` knows. There are two ways to tell it:
+
+```ts title="compute.ts"
+import { definePlugin } from 'better-compute/core';
+import { metal } from 'better-compute/metal';
+import { provisionModule } from 'better-compute/provision';
+
+// 1. Directly: provision registers them as its own.
+const provision = provisionModule({ steps: [talosReady], profiles: [talos] });
+
+// 2. As a plugin: the engine borrows its steps and profiles, the plugin registers them itself.
+const acmeAutoinstall = definePlugin({ id: 'acme-autoinstall', extensions: [renderAutoinstallIso], profiles: [ubuntuAutoinstall] });
+const bareMetal = metal();
+const provisionWithPlugin = provisionModule({ modules: [bareMetal, acmeAutoinstall] });
+```
+
+With the second form, register the plugin with the server as well (`betterCompute({ plugins: [acmeAutoinstall] })`),
+the way metal is listed both in `provisionModule({ modules })` and in `modules`: provision registers only its own
+steps and profiles, and the registry refuses an extension registered twice. Shipped profiles are read-only, visible to
+every tenant, and listed under the tenant `builtin`; tenants can still store their own with `profiles.create`, and a
+lookup prefers the tenant's own profile, then a public stored one, then a shipped one. Step ids share one namespace:
+a duplicate is `INVALID_CONFIG`, so prefix yours (`acme.`, `autoinstall.`).
+
+## User-data templates
+
+`userdata.render` renders the pinned profile's `userData: { kind, template }` for the workflow's node with a fresh
+single-use `provisioned` token (2 hours, or `tokenTtlSeconds`), stores the document through `ctx.secrets`, and returns
+only the reference. Add templates by name:
+
+```ts
+provisionModule({
+  userData: {
+    controlPlaneUrl: 'https://gw.eu-1.example.com',
+    bcdUrl: 'https://downloads.example.com/bcd/0.2.0/bcd-linux-amd64',
+    bcdSha256: '…',
+    templates: { 'acme-talos.yaml': acmeTalosTemplate }, // kind 'talos' ships no template
+  },
+});
+```
+
+A template is a string with `{{name}}` placeholders or a function of the variables: `nodeId`, `hostname` (the node id
+with `_` as `-`), `joinToken`, `controlPlaneUrl`, `bcdUrl` and `bcdSha256`. `renderTemplate` refuses a value with a line
+break or `{{` (`INVALID_INPUT`) and a placeholder with no value (`INVALID_CONFIG`), so a value can never add lines to
+the document. Build structured formats as data and serialize them, as the built-in Ignition template does, rather
+than splicing strings. `provisionedTargetResolver()` (for the `provisioned` attestor) maps the token back to the node
+through the step result's `joinTokenId`, so the installed OS re-keys the same node.
+
+## Config units
+
+A profile's `hostConfig` is not a step: when the workflow succeeds, its units become the node's NodeSpec `host`
+section, which the daemon converges and keeps correcting. A unit is `{ name, description, settings }`, where
+`settings` is a manifest:
+
+```ts
+import { field, manifest } from 'better-compute/core';
+
+provisionModule({
+  configUnits: [
+    {
+      name: 'acme-nic-firmware',
+      description: 'Pins the NIC firmware branch',
+      settings: manifest({ branch: field.string({ pattern: '^[0-9]+\\.[0-9]+$' }) }),
+    },
+  ],
+});
+```
+
+Any unit takes `when:`, a label expression that turns it on per node. An unknown unit or invalid settings is
+`INVALID_INPUT` when the host section is resolved. The built-ins are `nvidia-driver`, `container-toolkit`,
+`mig-layout`, `fabric-manager` and `sysctl`. A new unit is data to the control plane; the daemon's host converger has
+to know how to apply it.
+
+## Images
+
+Steps that deploy an image resolve it from the catalog in the machine owner's tenant with
+`resolveImageRef(tx, tenantId, 'name@version')`, which prefers the tenant's own image, then a public one. Images are
+registered by digest and verified against allowlisted signers (Ed25519, or ECDSA P-256 over SHA-256);
+`provisionModule({ imageVerifier })` replaces the check. `ImageSource`, a core contract for resolving other schemes,
+is declared but nothing uses it yet. See [profiles and images](/docs/guides/bare-metal/profiles-and-images#the-image-catalog).
+
+## Testing
+
+- **Shapes.** `tests/provision-define.test.ts` covers `defineStep` and `defineProfile` refusals; assert yours throw
+  `INVALID_CONFIG` with the `details.path` you expect.
+- **The engine with a stub queue.** `tests/extensions/talos.test.ts` runs the real provision module and metal on
+  PGlite with an in-memory `CommandQueue` and `WorkQueue`, answers commands from a simulated machine, and drives the
+  reconcilers until nothing is left. Copy its `settle()` loop.
+- **A simulated site.** `createMetalSim({ modules, steps, profiles, install })` in `tests/extensions/metal-sim.ts` adds
+  a site agent, per-machine BMC state and node-signed results; `ubuntu-autoinstall.test.ts` runs 20 deploy and
+  release loops on it.
+- **Crashes.** `tests/metal-chaos.test.ts` kills the worker at every point of a deploy and checks that no destructive
+  command is sent twice. Do the same for a step with side effects.
+
+<Cards>
+  <Card title="Provisioning workflows" href="/docs/guides/bare-metal/workflows" icon={<Workflow />}>Phases, states, retries, abort and the workflows API.</Card>
+  <Card title="Profiles and images" href="/docs/guides/bare-metal/profiles-and-images" icon={<Layers />}>Profile fields, the shipped profiles and the image catalog.</Card>
+  <Card title="Walkthroughs" href="/docs/extending/walkthroughs" icon={<Route />}>Plugins that add steps and profiles, end to end.</Card>
+</Cards>

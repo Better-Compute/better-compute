@@ -1,0 +1,412 @@
+---
+title: Drivers
+metaTitle: Writing hardware drivers and bcx plugins
+description: Declare a driver with defineDriver, bind drivers to machines through hardware profiles, and run one out of process with the bcx driver SDK.
+icon: Plug
+status: experimental
+packages: ['@better-compute/core', '@better-compute/metal', '@better-compute/vps', '@better-compute/driver-sdk', '@better-compute/server']
+sources:
+  - packages/core/src/extension.ts
+  - packages/core/src/domain.ts
+  - packages/metal/src/kinds.ts
+  - packages/metal/src/module-types.ts
+  - packages/metal/src/store.ts
+  - packages/metal/src/api.ts
+  - packages/metal/src/steps.ts
+  - packages/metal/README.md
+  - packages/vps/src/runtime.ts
+  - packages/provision/src/expand.ts
+  - packages/provision/src/engine.ts
+  - packages/server/src/api/drivers.ts
+  - packages/server/src/index.ts
+  - packages/server/src/runtime/commands.ts
+  - packages/driver-sdk/README.md
+  - packages/driver-sdk/src/host.ts
+  - packages/driver-sdk/src/serve.ts
+  - packages/driver-sdk/src/handshake.ts
+  - packages/driver-sdk/src/schema.ts
+  - packages/driver-sdk/src/wire.ts
+  - proto/bettercompute/driver/v1/driver.proto
+  - proto/bettercompute/common/v1/common.proto
+  - tests/driver-sdk-handshake.test.ts
+  - tests/driver-sdk-host.test.ts
+  - tests/driver-sdk-supervision.test.ts
+  - tests/fixtures/bcx-echo-driver.mjs
+  - tests/fixtures/bcx-loader.mjs
+  - tests/metal-driver-kinds.test.ts
+  - tests/server-groups-secrets-drivers.test.ts
+  - PLAN.md
+  - .claude/coordination.md
+---
+
+import { Power, Layers, Workflow } from '@/lib/icons';
+
+A <Term id="driver">driver</Term> is the code that does one hardware job for a machine: read and set its power
+through the <Term id="bmc">BMC</Term>, pick its boot device, write an image to its disk, or run its VMs. Each job is a
+driver **kind** (Ironic calls it an interface), and one driver may implement several kinds together, which is what
+Ironic calls a hardware type: a `redfish` driver serves `power`, `management` and `virtual-media` for the same BMC.
+
+Code registers drivers; data selects them. A driver is a `defineDriver()` declaration. Which driver a machine uses for
+each kind is data: a binding on the node, inherited from its pool's hardware profile.
+
+<Callout type="warn" title="What runs today">
+- **Declarations work.** `defineDriver`, the driver kinds, `drivers.list`, hardware profiles and per-node bindings are
+  implemented and tested.
+- **The built-in drivers do not run yet.** Redfish, IPMI and vendor BMCs (through bmclib), iPXE, image streaming and
+  kexec run inside `bcd site` and `bcd ramdisk`, which are written in Go for v0.2 but not built.
+- **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
+  instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
+- **bcx works in TypeScript.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to end, with
+  real subprocesses in its tests. The Go side (`daemon/pkg/bcx`, `/etc/bcd/plugins.d/`) does not exist yet.
+</Callout>
+
+## Driver kinds
+
+`DriverKinds` in `@better-compute/core` is empty. Packages open it by declaration merging, so a kind type-checks only
+where the package that declares it is imported:
+
+| Kind | Declared by | Operations | Built-in drivers |
+| --- | --- | --- | --- |
+| `power` | metal | `getPower()`, `setPower(action)` | v0.2 |
+| `management` | metal | `setBootDevice(device, { persistent, uefi })`, optional `rotateCredential(newPassword, { username })` | v0.2 |
+| `boot` | metal | `prepareRamdisk(spec)`, `prepareInstance(boot)`, `cleanUp()` | v0.2 |
+| `deploy` | metal | `deploy(spec)`, `tearDown({ wipe })`, both `AsyncIterable<Progress>` | v0.2 |
+| `inspect` | metal | `inspect()`, a `NodeInventory` | v0.2 |
+| `virtual-media` | metal | `insert(iso)`, `eject()` | v0.2 |
+| `console` | metal | `open()`, a byte stream | draft until v0.3 |
+| `bios` | metal | `getSettings()`, `applySettings(settings)` | draft until v0.5 |
+| `raid` | metal | `applyLayout(layout)`, `clear()` | draft until v0.5 |
+| `firmware` | metal | `components()`, `update(component, image)` | draft until v0.5 |
+| `runtime` | vps | `traits`, `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, optional `console(id)` | v0.3 (libvirt-kvm, cloud-hypervisor in bcd) |
+
+Importing only `@better-compute/core` leaves `power` and `runtime` unusable, and `tests/stubs-driver-kinds.test.ts`
+checks exactly that. [BMC drivers and credentials](/docs/guides/bare-metal/bmc) describes what each metal kind is for.
+
+A new kind is the same declaration in your own package:
+
+```ts title="kinds.ts"
+declare module '@better-compute/core' {
+  interface DriverKinds {
+    'acme-cooling': { getFanCurve(): Promise<number[]>; setFanCurve(curve: number[]): Promise<void> };
+  }
+}
+```
+
+## Declaring a driver
+
+```ts title="drivers/acme-bmc.ts"
+import { defineDriver, field, manifest } from 'better-compute/core';
+import 'better-compute/metal'; // merges the metal kinds into DriverKinds
+
+export const acmeBmc = defineDriver({
+  id: 'acme-bmc',
+  version: '1.0.0',
+  runsOn: 'site',
+  config: manifest({
+    address: field.url(),
+    credentials: field.secret(),
+    timeout: field.duration().default('30s'),
+  }),
+  capabilities: ['virtual-media'],
+  implements: {
+    power: (config, ctx) => ({
+      async getPower() {
+        return 'on';
+      },
+      async setPower(action) {
+        ctx.emit({ phase: 'power', message: `setting ${action}` });
+      },
+    }),
+    'virtual-media': (config) => ({ insert: async (iso) => {}, eject: async () => {} }),
+  },
+  retrySafe: { power: ['getPower'], 'virtual-media': ['insert', 'eject'] },
+  async validate(config, ctx) {
+    await ctx.secrets.resolve(config.credentials); // a live check, e.g. log in once
+  },
+});
+```
+
+`defineDriver` returns the definition frozen with `extension: 'driver'`.
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'The driver id bindings name, such as redfish or ipmi.', required: true },
+    version: { type: 'string', description: 'The implementation version. kind:id@version must be unique in a deployment.', required: true },
+    runsOn: { type: "'control-plane' | 'site' | 'node' | 'ramdisk'", description: 'Where the driver executes.', required: true },
+    config: { type: 'Manifest<C>', description: "The per-binding config. Declare credentials with field.secret(), so they stay SecretRefs.", required: true },
+    capabilities: { type: 'readonly string[]', description: 'Free-form flags such as virtual-media or uefi-http.' },
+    implements: { type: '{ [kind]: (config, ctx) => DriverKinds[kind] }', description: 'One factory per kind; it may be async.', required: true },
+    retrySafe: { type: 'Partial<Record<kind, readonly string[]>>', description: 'Per kind, the operations safe to run again after an interruption.' },
+    validate: { type: '(config, ctx) => Promise<void>', description: 'Live checks beyond the manifest; throw to refuse.' },
+  }}
+/>
+
+Every factory receives the parsed config and a `DriverContext`:
+
+<TypeTable
+  type={{
+    node: { type: 'NodeRef', description: 'The node acted on, when there is one.' },
+    idempotencyKey: { type: 'string', description: 'Stable across retries of the same operation.' },
+    signal: { type: 'AbortSignal', description: 'Aborted when the caller gives up.' },
+    deadline: { type: 'number', description: 'Epoch ms the operation must finish by, when set.' },
+    traceparent: { type: 'string', description: 'W3C trace context of the calling step.' },
+    clock: { type: 'Clock', description: 'Use it instead of Date.now(), so simulations stay deterministic.' },
+    secrets: { type: 'SecretResolver', description: 'resolve(ref) returns the value; keep it in memory only.' },
+    log: { type: 'Logger', description: 'debug, info, warn and error with structured fields.' },
+    emit: { type: '(progress: Progress) => void', description: '{ phase?, message?, percent?, bytes? } for long operations.' },
+  }}
+/>
+
+Mark an operation retry-safe only when running it twice does no harm. A power cycle is not retry-safe; reading the
+power state is. The flag decides whether an interrupted call may be repeated, and, over bcx, whether an error the
+plugin returns is marked `retryable`.
+
+## Registering and listing
+
+Pass drivers to `betterCompute({ drivers })`, or ship them in a module's `extensions` (see
+[modules](/docs/extending/modules)). The registry refuses a second `driver:<id>@<version>` with `INVALID_CONFIG`.
+
+[`drivers.list`](/docs/reference/api/drivers#list) returns what the deployment registered, so `metal.enroll` callers
+and the console can offer valid choices. It returns declarations only, never a configuration or a credential:
+
+```ts
+const { items } = await compute.api.drivers.list(credential, { tenantId: 'root', kind: 'power' });
+// [{ id: 'acme-bmc', version: '1.0.0', runsOn: 'site', kinds: ['power', 'virtual-media'],
+//    capabilities: ['virtual-media'], retrySafe: { power: ['getPower'], 'virtual-media': ['eject', 'insert'] } }]
+```
+
+It is decided as `compute:drivers:read` on the tenant, filters by `kind` (lower-case letters, digits and hyphens), and
+sorts by id, then version, with kinds, capabilities and operations sorted too.
+
+## Binding drivers to machines
+
+Machines of one pool usually share their BMC and boot hardware, so bindings live in a hardware profile that
+`metal({ hardwareProfiles })` names and a pool selects with `policy.hardwareProfile`:
+
+```ts
+import { metal } from 'better-compute/metal';
+
+const bareMetal = metal({
+  hardwareProfiles: {
+    'gpu-redfish': {
+      description: 'HGX hosts with Redfish BMCs',
+      drivers: { power: 'redfish', management: 'redfish', boot: 'ipxe', deploy: 'image-stream' },
+    },
+  },
+});
+```
+
+A binding is a driver id, or `{ driver, config }` when the binding carries config. At `metal.enroll`,
+`resolveDriverBindings` builds the node's bindings in three layers, each overriding the one before per kind:
+
+1. The enrolled BMC binds `power`, `management` and `virtual-media` to `bmc.driver`, with `{ address, credentials }`
+   as config (the credentials as a `secret://` reference).
+2. The hardware profile: the enroll input's `hardwareProfile`, else the pool's `policy.hardwareProfile`. An unknown
+   name is `INVALID_INPUT`.
+3. Per-node overrides.
+
+The result is stored on the node (`nodes.drivers`) and served in its NodeSpec. `metal.enroll` checks only that
+`bmc.driver` is a well-formed id; PLAN.md has bindings validated against the registry, which is not done yet. The
+hardware profile also carries the BIOS settings and RAID layout that commissioning applies (drafts until v0.5); see
+[profiles and images](/docs/guides/bare-metal/profiles-and-images).
+
+### From a profile step to a driver
+
+A profile step names a driver operation as `<concern>.<operation>` with `on:` set to an agent. When no registered
+step has that id, the workflow engine turns it into one `driver.invoke` command whose args carry the concern, the
+operation, the step's `with`, and the driver and config bound in the profile's own `drivers`:
+
+```json title="driver.invoke payload"
+{
+  "workflowId": "wf_…",
+  "stepId": "main.3",
+  "attempt": 0,
+  "targetNodeId": "node_…",
+  "args": { "concern": "bios", "operation": "applySettings", "args": { "…": "…" }, "driver": "acme-bmc" }
+}
+```
+
+`targetNodeId` appears when the command goes to the site agent rather than the machine itself. The default timeout of
+a driver operation is 10 minutes. The server's command queue refuses kinds no module registers (`INVALID_CONFIG`), and
+no module registers `driver.invoke` yet, so such a step cannot be sent on a real server today. Metal's own steps
+(`power.setPower`, `media.insert`, ...) are registered control-plane steps that relay typed commands instead; see
+[workflows](/docs/guides/bare-metal/workflows).
+
+## BMCs through bmclib on the site agent
+
+The control plane never dials into a site. Metal's BMC steps run in the control plane, where the node's BMC address and
+credential reference are, and send one `BmcOperationRequest` (`driver`, `address`, `credentialsRef`, `operation`,
+`argsJson`, optional `tlsSpkiSha256`) to the site's agent under a kind such as `bmc.query`, `bmc.boot`,
+`bmc.power`, `bmc.rotate` or `bmc.firmware`. The site agent fetches the credential by reference, runs `<concern>.<operation>` on the named driver
+through bmclib (Redfish, IPMI and vendor BMCs), and answers a `BmcOperationResult`. A new BMC family therefore means a
+driver the site agent can run: built into `bcd site`, or, from v0.5, a bcx plugin next to it. The command kinds and
+credential handling are on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
+
+## Out-of-process drivers: bcx
+
+bcx is one protocol, `bettercompute.driver.v1.DriverPlugin`, for drivers that run in their own process, in any
+language, next to `bcd` or the control plane. It is go-plugin style: the host execs the plugin, the plugin prints one
+handshake line, and the host dials it over gRPC on HTTP/2 with mutual TLS.
+
+| RPC | Does |
+| --- | --- |
+| `Describe` | the drivers the plugin serves, as `DriverManifest`s, its version and the bcx protocol version (1) |
+| `Validate` | checks a config against the manifest and the driver's live checks; answers `{ valid, issues[] }` with JSON pointers |
+| `Invoke` | runs one operation; streams `Progress`, then exactly one `result_json` or `DriverError { code, message, retryable }` |
+| `Stream` | a duplex byte stream (consoles); the first frame is `open` |
+| `Health` | `SERVING` or `NOT_SERVING` |
+
+A `DriverManifest` is `{ id, version, kinds[], runs_on, config_schema_json, capabilities[], retry_safe_operations[] }`,
+with the config schema as JSON Schema 2020-12 (`manifest().jsonSchema()`) and retry-safe operations as
+`<kind>.<operation>`. The proto is draft and excluded from `buf breaking` until v0.5 ships.
+
+```mermaid
+sequenceDiagram
+  participant H as Host (externalDriver or bcd)
+  participant P as Plugin (serveDriver)
+  H->>H: check sha256 pin, make an ephemeral P-256 cert
+  H->>P: exec with BCX_MAGIC_COOKIE, BCX_SOCKET_DIR, BCX_CLIENT_CERT
+  P->>P: listen on a unix socket (tcp 127.0.0.1 on Windows)
+  P-->>H: stdout: bcx|1|unix|<socket>|grpc|<cert>
+  H->>P: dial with mTLS, both certificates pinned
+  H->>P: Describe
+  P-->>H: DriverManifests, protocol_version 1
+  H->>P: Invoke(driver, kind, operation, config, args, secrets, key, deadline)
+  P-->>H: Progress ... then result_json or DriverError
+```
+
+### The plugin side
+
+`serveDriver` serves **the same `defineDriver` object** you would register in process:
+
+```ts title="acme-bmc-plugin.ts"
+#!/usr/bin/env node
+import { serveDriver } from '@better-compute/driver-sdk';
+import { acmeBmc } from './drivers/acme-bmc.js';
+
+await serveDriver(acmeBmc, { pluginVersion: '1.0.0' }); // or serveDriver([acmeBmc, acmeMedia], …)
+```
+
+Run by hand, without the magic cookie, it prints that it is a plugin and exits with code 1. Started by a host, it
+prints the handshake line on stdout, writes JSON log lines to stderr (the host forwards them to its own log), shuts
+down gracefully on SIGTERM or when its stdin closes, and ignores SIGINT.
+
+| Option | Default | Does |
+| --- | --- | --- |
+| `pluginVersion` | `''` | `DescribeResponse.plugin_version` |
+| `streams` | none | operations, as `<kind>.<operation>`, that return a byte stream; each is advertised as capability `bcx.stream:<kind>.<operation>` |
+| `network` | `unix`, or `tcp` on Windows | where to listen |
+| `log` | JSON lines on stderr | the plugin's logger |
+| `handleSignals` | `true` | the SIGTERM, stdin and SIGINT behaviour above |
+| `shutdownGraceMs` | 5,000 | how long in-flight calls may run after shutdown starts |
+| `env`, `stdout` | `process.env`, `process.stdout` | for tests |
+
+Throw `driverError(code, message)` for an error of your own: the code must be lower-case kebab-case, and the host sees
+`DRIVER_ERROR` with `details.driverCode`. A thrown `ComputeError` travels as its code in kebab-case (`INVALID_CONFIG`
+becomes `invalid-config`); any other error is `driver-error` with its message.
+
+### The host side
+
+```ts title="compute.ts"
+import { externalDriver } from '@better-compute/driver-sdk';
+
+const acme = externalDriver({ command: ['/opt/bc/plugins/acme-bmc'], sha256: '9f3e…' });
+export const compute = betterCompute({ drivers: [...builtins, ...(await acme.start())] /* , … */ });
+// on shutdown: await acme.close();
+```
+
+`start()` verifies the pin, execs the plugin, reads the handshake within `startTimeoutMs`, dials it and calls
+`Describe`. It resolves with one `RemoteDriverDefinition` per served driver, a normal `DriverDefinition` whose parts
+are backed by the plugin:
+
+- `implements[kind](config, ctx)` returns a proxy whose every method calls `Invoke`. Awaiting a call sends progress to
+  `ctx.emit`; iterating it (`for await (const p of deploy(spec))`) yields the progress instead.
+- `config` is a Standard Schema built from the plugin's JSON Schema. The host checks structure (types, enums,
+  patterns, lengths, ranges, required and unknown fields) and passes the value through unchanged; the plugin parses it
+  again, applying defaults.
+- `validate` calls the plugin's `Validate`; `retrySafe` and `capabilities` come from the manifest.
+
+`startExternalDrivers([a, b])` starts several hosts and returns all their drivers.
+
+| Option | Default | Does |
+| --- | --- | --- |
+| `command` | required | the command line, run without a shell; `command[0]` is resolved against `cwd` or `PATH` |
+| `sha256` | required | hex SHA-256 of the pinned file, checked before every start and restart |
+| `env` | none | extra environment for the plugin |
+| `cwd` | `process.cwd()` | the plugin's working directory |
+| `startTimeoutMs` | 30,000 | time to print the handshake and answer `Describe` |
+| `callTimeoutMs` | none | deadline of calls whose context carries no `deadline` |
+| `restart` | `{ initialDelayMs: 250, maxDelayMs: 30000 }` | crash restart back-off, doubling |
+| `shutdownGraceMs` | 5,000 | between stdin EOF and SIGTERM, and SIGKILL |
+| `log` | warnings on stderr | plugin stderr, exits and restarts |
+
+### Wire rules
+
+- **Pinning.** `sha256` pins `command[0]`. When `command[0]` is `node`, `nodejs` or `bun`, it pins the script instead:
+  the first later argument not starting with `-` (after `bun`'s optional `run`). Interpreter options must use the
+  `--name=value` form, and only the entry file is pinned, so bundle a JS plugin into one file. A mismatch is
+  `INVALID_CONFIG`, and the host stops restarting.
+- **Mutual TLS.** Each side makes an ephemeral self-signed P-256 certificate. The plugin accepts exactly the host's
+  certificate from `BCX_CLIENT_CERT`, not merely one signed by the same key; the host trusts only the certificate in the
+  handshake line.
+- **Environment.** The plugin does not inherit the host's environment: it gets `PATH`, the temp directories, `HOME`, a
+  few OS basics, your `env`, and the three `BCX_*` variables.
+- **Arguments and results.** `args_json` is a JSON array of the positional arguments (trailing `undefined`s dropped);
+  a non-array value from another host is taken as the single argument. Results are JSON, and `undefined` travels as
+  `null`.
+- **Deadlines.** The host sends `ctx.deadline`, or now plus `callTimeoutMs`. The plugin turns it into `ctx.signal` and
+  ends the call with `timeout` even when the operation ignores the signal; the host gives up one second later.
+  Aborting the caller's `ctx.signal` cancels the call.
+- **Secrets.** The host resolves only top-level config fields the schema declares secret (`x-bc.kind: 'secret'` or
+  `writeOnly`), and only when their value is a `SecretRef`, and sends them in the request. In the plugin,
+  `ctx.secrets.resolve(ref)` resolves only refs delivered that way.
+- **Streams.** For an advertised stream operation the proxy opens `Stream` instead of `Invoke`. The plugin answers the
+  `open` frame with an empty `data` frame, then bytes flow both ways until `close`. The deadline bounds opening the
+  stream, not its lifetime.
+- **Supervision.** A crash or a lost connection fails calls in flight with a retryable `DRIVER_ERROR`
+  (`driverCode: 'unreachable'`), restarts the plugin with back-off, and makes new calls wait for the restart. A
+  restarted plugin that describes other drivers is logged and the registered ones are kept. `close()` closes stdin,
+  sends SIGTERM (not on Windows), then SIGKILL after `shutdownGraceMs`.
+
+### bcx under bcd
+
+PLAN.md §5.5 has `bcd` run bcx plugins that are sha256-pinned in `/etc/bcd/plugins.d/`, each under its own uid with
+seccomp and cgroup limits, and advertise their manifests in `Hello.drivers` so the control plane merges them as remote
+drivers scoped to those agents. A Go SDK, `daemon/pkg/bcx.Serve`, would serve the same protocol. None of this is in
+the daemon yet, and the control plane does not merge `Hello.drivers` today; the FakeDaemon only advertises an
+`nvidia` driver of kind `config` on GPU hosts. PLAN.md's v0.5 acceptance includes "a third-party TS driver runs on a
+node via bcx" and a Kata `runtime` plugin in Go (walkthrough 4).
+
+## Testing a driver
+
+Unit-test the definition in process: call `implements[kind](config, ctx)` with a context you build and assert on the
+operations. Then test the plugin as a real subprocess, as `tests/driver-sdk-*.test.ts` do with
+`tests/fixtures/bcx-echo-driver.mjs`:
+
+```ts title="acme-bmc.test.ts"
+import { externalDriver, pinnedFile, sha256File } from '@better-compute/driver-sdk';
+
+const command = [process.execPath, 'dist/acme-bmc-plugin.js'];
+const host = externalDriver({ command, sha256: await sha256File(pinnedFile(command)) });
+const [acme] = await host.start();
+
+const power = await acme.implements.power({ address: 'https://10.0.0.10', credentials: 'secret://root/bmc' }, context);
+expect(await power.getPower()).toBe('on');
+expect(await host.health()).toEqual({ serving: true, message: '' });
+await host.close();
+```
+
+`tests/fixtures/bcx-loader.mjs` lets a plain `node` subprocess load the workspace's TypeScript sources, so the fixture
+runs without a build. The suites cover the handshake and pinning, Describe, Validate, Invoke with progress, errors,
+deadlines, cancellation, secrets and streams, and supervision (crash restart, a pin changed under a running host,
+graceful close):
+
+```bash
+pnpm vitest run tests/driver-sdk-handshake.test.ts tests/driver-sdk-host.test.ts tests/driver-sdk-supervision.test.ts
+```
+
+<Cards>
+  <Card title="BMC drivers and credentials" href="/docs/guides/bare-metal/bmc" icon={<Power />}>The metal kinds, BMC commands, sealed credentials and rotation.</Card>
+  <Card title="Profiles and images" href="/docs/guides/bare-metal/profiles-and-images" icon={<Layers />}>Hardware profiles, deploy profiles and the image catalog.</Card>
+  <Card title="Steps and profiles" href="/docs/extending/steps-and-profiles" icon={<Workflow />}>Workflow steps that drive agents.</Card>
+</Cards>

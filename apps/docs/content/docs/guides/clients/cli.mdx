@@ -1,0 +1,272 @@
+---
+title: CLI
+description: Use the better-compute command line as a tenant or operator client - authenticate with a token, call any method, reserve GPUs, run fleet plans and verify the audit trail.
+metaTitle: The better-compute CLI as a client
+icon: SquareTerminal
+packages: ['@better-compute/cli']
+sources:
+  - packages/cli/src/framework.ts
+  - packages/cli/src/transport.ts
+  - packages/cli/src/errors.ts
+  - packages/cli/src/index.ts
+  - packages/cli/src/commands/index.ts
+  - packages/cli/src/commands/api.ts
+  - packages/cli/src/commands/capacity.ts
+  - packages/cli/src/commands/fleet.ts
+  - packages/cli/src/commands/audit.ts
+  - apps/docs/content/docs/reference/cli.mdx
+  - PLAN.md
+---
+
+`better-compute` is one binary for two jobs. Operators use it to run and maintain a deployment (`migrate`, `serve`,
+`doctor`, `pki`). Tenants, operators and CI jobs also use it as an API client: every token command sends the same
+request as the TypeScript client and is decided by Better IAM as the token's identity. This page covers the client
+side. The [CLI reference](/docs/reference/cli) lists every command and flag.
+
+```bash
+npx better-compute help            # the commands, grouped
+npx better-compute help reserve    # one command's flags and examples
+npx better-compute help --json     # the whole manifest, as the reference is generated
+```
+
+## Two kinds of command
+
+Every command declares a target, and the target decides what it needs:
+
+| Target | Needs | Commands |
+| --- | --- | --- |
+| `token` | `BETTER_COMPUTE_TOKEN`, and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `fleet export/plan/status/apply` |
+| `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
+| `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `audit check-proof` |
+
+A `config` command talks to the database directly. It is an operator tool: whoever can run it can already read the
+database, so it is not decided by IAM. A `token` command never reads the database itself.
+
+## Authenticate
+
+Token commands act as `BETTER_COMPUTE_TOKEN`: a Better IAM session token, API key or session JWT. Without it they
+stop with `MISSING_ENV`; public methods such as `system.version` need no token.
+
+```bash
+export BETTER_COMPUTE_URL=https://compute.example.com
+export BETTER_COMPUTE_TOKEN=biam_…          # from Better IAM: an API key or a session token
+export BETTER_COMPUTE_TENANT=acme           # the default --tenant
+better-compute api system.whoami
+```
+
+<Callout type="warn" title="Only the environment variable">
+  PLAN.md section 9.3 describes a fallback to Better IAM's profile store and to a 0600 credentials file. Neither is
+  implemented: the CLI reads `BETTER_COMPUTE_TOKEN` and nothing else. Keep the token out of shell history, for
+  example by exporting it from your secret manager.
+</Callout>
+
+**Where the call goes.**
+
+- With `--url` (or `BETTER_COMPUTE_URL`) the command calls a running server over HTTP through the typed client, with
+  a request id on every call and one retry after a short `RATE_LIMITED`. The URL is an origin
+  (`https://compute.example.com`, base path `/api/compute`) or a full endpoint (`https://host/custom/compute`).
+  Plain `http` is allowed only for `localhost`, `127.0.0.1`, `[::1]` and `*.localhost`, so a token never crosses a
+  network in clear text.
+- Without `--url` the command loads your configuration and calls `compute.handler` in process. It still goes through
+  the route table, the envelope, the CSRF rules and the 64 KiB body limit, and IAM still decides as the token, so a
+  command behaves the same locally and remotely.
+
+`--tenant` names the tenant acting, and defaults to `BETTER_COMPUTE_TENANT`. It must be the token's own tenant, or the
+root tenant for platform operators; anything else is `ACCESS_DENIED` before compute reads its database.
+
+## Output
+
+Commands that print a result share two flags:
+
+| Flag | Does |
+| --- | --- |
+| `--format json` | indented JSON (the default) |
+| `--format compact` | JSON on one line, for piping |
+| `--format table` | a table, for lists |
+| `--query PATH` | prints part of the result, like `binding`, `items[].id` or `findings[].check`; strings print raw |
+
+A failure prints its code and message, plus a hint line saying what to run or set next. Usage mistakes (an unknown
+flag, a missing value) exit 2 with `INVALID_ARGUMENT`, and unknown commands and flags get a "did you mean"
+suggestion. `BETTER_COMPUTE_DEBUG=1` prints the stack trace of a failure.
+
+## Call any method
+
+`better-compute api GROUP.METHOD` calls any method, including plugin methods (`plugins.ID.GROUP.METHOD`). Build the
+input from `key=value` items, `--data`, or both:
+
+| Item | Sets |
+| --- | --- |
+| `name=gpu-a` | a string |
+| `limit:=10`, `labels:='["a","b"]'` | a JSON value |
+| `spec:=@spec.json` | a JSON value read from a file |
+| `notes=@notes.md` | a string read from a file |
+| `resource.type=pool` | a nested field |
+| `ids[]=a` | an item appended to an array |
+| `--data JSON`, `--data @file.json`, `--data -` | the whole body, from the argument, a file or standard input |
+
+```bash
+better-compute api --list                  # every route, whether it needs a token, and its IAM action
+better-compute api --list reservations     # one group
+better-compute api events.list tenantId=acme type=reservation. limit:=20 --format table
+better-compute api webhooks.create tenantId=acme url=https://hooks.example.com/compute 'events[]=reservation.*'
+better-compute api reservations.get tenantId=acme reservationId=rsv_… --query binding
+```
+
+`api --list` reads the deployment's route table, so it shows plugin routes and marks the public ones. Anything
+`api` can reach, the [API reference](/docs/reference/api) documents.
+
+## Capacity
+
+The capacity commands wrap the reservation methods with friendlier flags:
+
+```bash
+better-compute pools list
+better-compute capacity                                  # per pool and per GPU model
+better-compute capacity --preview --pool pool_01k… --gpus 8 --for 1d --selector "vramGiB >= 80"
+better-compute reserve --pool pool_01k… --gpus 4 --for 8h --nvlink
+better-compute reservations list --state active --format table
+better-compute extend rsv_01k… --by 4h
+better-compute release rsv_01k…
+```
+
+`reserve` sends a new idempotency key on every run unless you pass `--key`, and prints the key it used. To retry the
+same request, whether after a timeout or after a person approved a `CONFIRMATION_REQUIRED` call, repeat the command
+with that `--key`. It waits up to `--wait` seconds (default 20) while the reservation is queued. `--selector` takes a
+shorthand such as `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80`, and `--model` and `--product` add a `gpuModel`
+or `gpuProduct` match. See [reservations](/docs/guides/capacity/reservations).
+
+## Fleet configuration
+
+`fleet` manages a tenant's platform objects (sites, provider accounts, pools with quotas and offers, VPS flavors) as
+one [FleetConfig](/docs/guides/fleet-config) document. The loop is export, edit, plan, review, apply:
+
+<Steps>
+<Step>
+
+### Export
+
+```bash
+better-compute fleet export --out fleet.json
+```
+
+Objects the fleet did not create are keyed by id. Rename them in the document and the next apply keeps them.
+Secrets appear only as references.
+
+</Step>
+<Step>
+
+### Plan
+
+```bash
+better-compute fleet plan fleet.json            # + create, ~ update, - delete (only with --prune), BLOCKED
+better-compute fleet plan fleet.json --calls    # also the API calls apply would make
+```
+
+A plan changes nothing and prints a `planHash`. A plan with a blocked change (a site's region, a pool's class or
+site, a dangling name) exits `PLAN_BLOCKED`.
+
+</Step>
+<Step>
+
+### Apply the reviewed plan
+
+```bash
+better-compute fleet apply fleet.json --plan-hash 3f1c…
+```
+
+Every underlying call is decided before anything runs, then all of them run in one transaction, so a denial or a
+failure applies nothing. If the fleet changed since the plan, the hash no longer matches and the command exits
+`CONFIG_DRIFT`. Without `--plan-hash` or `--yes`, `apply` only plans.
+
+</Step>
+</Steps>
+
+In CI, fail a job when the live fleet no longer matches the committed document, or when it drifted from the last
+apply:
+
+```bash
+better-compute fleet plan fleet.json --fail-on-drift   # exits FLEET_DRIFTED when the plan is not empty
+better-compute fleet status --fail-on-drift            # exits FLEET_DRIFTED while the fleet.drift job sees drift
+```
+
+The fleet methods are decided on `compute:fleet:admin`, which only the root tenant's administrators hold. The MCP
+server's fleet tools stop at `fleet_plan` for the same reason: a person applies. See
+[fleet configuration](/docs/guides/fleet-config).
+
+## Audit
+
+The audit commands are operator commands: they read `audit_events` and the checkpoints straight from the
+database through your configuration, not through the API.
+
+```bash
+better-compute audit verify --tenant acme                  # recompute every checkpoint; AUDIT_TAMPERED on any problem
+better-compute audit verify --tenant acme --query problems
+better-compute audit prove aud_01k… --tenant acme --out proof.json
+better-compute audit check-proof proof.json --pin sha256/…  # offline, no database
+better-compute audit checkpoint                            # seal now, as the hourly job does
+```
+
+`verify` and `check-proof` check signatures under the audit key's pin: `--pin`, `BETTER_COMPUTE_AUDIT_PIN`, or the
+public half of the PKI bundle (`--pki`, default `.better-compute/pki.json`). `checkpoint` signs, so it needs the
+bundle's private audit key, unsealed with `BETTER_COMPUTE_SECRET`. Anyone you hand a proof file and the pin to can
+run `check-proof` without access to your deployment. See [audit](/docs/guides/events/audit).
+
+## Operator commands
+
+The rest of the CLI runs and maintains a deployment. Briefly:
+
+| Command | Does |
+| --- | --- |
+| `init` | writes a starter `better-compute.config.ts` |
+| `migrate` | creates or upgrades the schema and every module's migrations; run it on every deploy |
+| `doctor [--strict]` | checks the database, schema, clock, method registry, IAM wiring, the PKI bundle and the host export |
+| `serve` | runs the API and the worker roles (`--roles api`, `controllers,sinks`, `gateway`, …) |
+| `dev [--sim N]` | a local server with PGlite and, with `--sim`, N simulated machines and an embedded Better IAM |
+| `sim` | the deterministic fleet simulator and its invariants |
+| `pki init / show / issue-gateway` | the machine PKI bundle, its pins, gateway certificates |
+| `daemon install-script` | the POSIX installer that joins a server to a pool |
+| `iam setup [--meters]` | prints the example policies; creates the billing meters in Better IAM |
+| `release keygen / sign / cosign / verify` | signed bcd release manifests |
+
+See [installation](/docs/guides/installation), [local development](/docs/operations/local-development) and the
+[CLI reference](/docs/reference/cli).
+
+## Exit codes and common errors
+
+The binary exits 0 on success and 2 for a usage mistake (`INVALID_ARGUMENT`, `INVALID_COMMAND`). Other failures
+exit non-zero with the error's code:
+
+| Code | Meaning |
+| --- | --- |
+| `MISSING_ENV` | a token command without `BETTER_COMPUTE_TOKEN` |
+| `CONFIG_NOT_FOUND` | no configuration found, and no `--url` or `BETTER_COMPUTE_DATABASE_URL` |
+| `UNAUTHENTICATED`, `ACCESS_DENIED`, `CONFIRMATION_REQUIRED`, … | the API's own codes, from the server; see [errors](/docs/reference/errors) |
+| `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
+| `AUDIT_TAMPERED`, `INVALID_PROOF`, `AUDIT_KEY_MISSING`, `PKI_NOT_FOUND` | audit verification outcomes |
+| `DOCTOR_FINDINGS` | `doctor --strict` found an error or warning |
+
+## Project commands
+
+A configuration can export its own commands, which get the same flag parsing, help, configuration loading and
+output formatting as the built-in ones:
+
+```ts title="better-compute.config.ts"
+import { defineCommand } from 'better-compute/cli';
+
+export const commands = [
+  defineCommand({
+    name: 'seed',
+    summary: 'Create the demo sites and pools',
+    target: 'config',
+    flags: { region: { type: 'string', description: 'Region label', default: 'eu' } },
+    async run({ compute, flags }) {
+      const instance = await compute();
+      // …
+      return { created: true, region: flags.region };
+    },
+  }),
+];
+```
+
+A `token` project command gets `context.api()`, the same transport the built-in commands use, so it is decided as
+`BETTER_COMPUTE_TOKEN` like any other call.

@@ -1,0 +1,380 @@
+---
+title: Fleet configuration
+description: Keep sites, provider accounts, pools, quotas, offers and flavors in one reviewed FleetConfig document; export, plan and apply it, and catch drift.
+metaTitle: FleetConfig as code
+icon: FileCode
+status: new
+packages: ['@better-compute/fleet', '@better-compute/cli']
+sources:
+  - PLAN.md
+  - packages/fleet/README.md
+  - packages/fleet/src/config.ts
+  - packages/fleet/src/plan.ts
+  - packages/fleet/src/state.ts
+  - packages/fleet/src/drift.ts
+  - packages/fleet/src/module.ts
+  - packages/cli/src/commands/fleet.ts
+  - packages/server/src/operations.ts
+  - packages/core/src/catalog.ts
+  - 'apps/console/src/app/(console)/admin/fleet/page.tsx'
+  - tests/fleet-config.test.ts
+---
+
+The shape of a platform changes rarely and matters a lot: which sites exist, which pools they hold, how much of each
+pool its owner keeps, which tenants each pool is offered to and with what quota, and which VM sizes are sold. Made
+through one-off API calls, those changes have no review, staging and production slowly diverge, and nobody notices
+when someone edits a pool by hand during an incident.
+
+<Term id="fleet-config">FleetConfig</Term> treats that shape as code, the way Better IAM's configuration as code
+treats an access model. The fleet is one document keyed by name. You export it once, keep it in version control,
+review changes as pull requests, plan them, and apply them in one transaction. A reconciler re-plans the applied
+document every 15 minutes and raises an event when the fleet <Term id="drift">drifts</Term> from it.
+
+Every fleet method decides `compute:fleet:admin` on `compute-fleet/global`, a scope that exists only in the root
+tenant, so FleetConfig is a tool for platform operators. `fleet.apply` also decides every call it makes, as the
+caller.
+
+## Turn it on
+
+```ts title="compute.ts"
+import { fleetModule } from 'better-compute/fleet';
+import { betterCompute } from 'better-compute/server';
+import { vps } from 'better-compute/vps';
+
+export const compute = betterCompute({
+  // database, secret, iam, baseURL ...
+  modules: [vps(), fleetModule()],
+});
+```
+
+`fleetModule({ driftEvery })` takes one option, how often the drift check runs (default `15m`). It adds the
+migrations `fleet/0001_names` (table `fleet_names`) and `fleet/0002_applied` (table `fleet_applied`), and the
+`fleet.drift` <Term id="reconciler">reconciler</Term>. Flavors and provider accounts are served by the `vps` module;
+without it, `fleet.export` leaves them out and reports them in `missing`, and a document's flavors plan as blocked.
+
+## The document
+
+A document has `version: 1` and any of four lists. References between items are names from the same document or
+objects fleet already manages. Secrets are references only (`secret://`, `vault://` or `env://`), never values.
+
+```json title="fleet.json"
+{
+  "version": 1,
+  "sites": [{ "name": "fra", "kind": "shared", "region": "eu-central" }],
+  "providerAccounts": [
+    {
+      "name": "cloud",
+      "provider": "hetzner-cloud",
+      "config": { "token": "secret://hetzner", "location": "fsn1" }
+    }
+  ],
+  "pools": [
+    {
+      "name": "vps-fra",
+      "site": "fra",
+      "class": "vps-host",
+      "gpuModel": "L40S",
+      "policy": { "disruptionBudget": 0.1 },
+      "ownerQuota": { "gpu": 8 },
+      "offers": [{ "tenant": "acme", "quota": { "vcpu": 64, "gpu": 2 }, "priority": 5 }]
+    },
+    { "name": "burst", "site": "fra", "class": "provider", "providerAccount": "cloud" }
+  ],
+  "flavors": [{ "pool": "vps-fra", "name": "g1.small", "vcpu": 2, "memoryGiB": 4, "diskGiB": 40 }]
+}
+```
+
+<Tabs items={['sites', 'providerAccounts', 'pools', 'offers', 'flavors']}>
+<Tab value="sites">
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: 'Lowercase letters, digits, ".", "_" and "-", up to 63 characters.', required: true },
+    kind: { type: "'shared' | 'dedicated' | 'custom'", description: 'The site kind.', required: true },
+    region: { type: 'string', description: 'Lowercase letters, digits and "-", up to 64 characters.', required: true },
+    iamRegion: { type: 'string', description: 'The IAM region, same form as region.' },
+  }}
+/>
+
+See [sites](/docs/guides/bare-metal/sites).
+
+</Tab>
+<Tab value="providerAccounts">
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: 'Same form as a site name.', required: true },
+    provider: { type: 'string', description: 'The provider id, such as hetzner-cloud.', required: true },
+    config: { type: 'object', description: 'Provider configuration; secret fields hold references.', default: '{}' },
+  }}
+/>
+
+See [providers](/docs/guides/vps/providers).
+
+</Tab>
+<Tab value="pools">
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: 'Same form as a site name.', required: true },
+    site: { type: 'string', description: 'A site name.', required: true },
+    class: { type: 'string', description: 'metal-host, metal-dedicated, vps-host or provider.', required: true },
+    gpuModel: { type: 'string', description: 'Letters, digits and "-", up to 32 characters.' },
+    sharing: { type: 'string', description: 'exclusive, mig, timeslice or mps.' },
+    agent: { type: "'bcd' | 'none'", description: 'Whether machines run the daemon.' },
+    policy: { type: 'object', description: 'The pool policy, compared as a whole.', default: '{}' },
+    ownerQuota: { type: 'Record<string, number>', description: "The owner's own maximum per resource, such as { gpu: 8 }." },
+    providerAccount: { type: 'string', description: 'A provider account name, for provider pools.' },
+    offers: { type: 'FleetOffer[]', description: 'Who else may use the pool, one entry per tenant.' },
+  }}
+/>
+
+See [pools](/docs/guides/capacity/pools).
+
+</Tab>
+<Tab value="offers">
+
+<TypeTable
+  type={{
+    tenant: { type: 'string', description: 'The tenant the pool is offered to. Never the owner: use ownerQuota.', required: true },
+    quota: { type: 'Record<string, number>', description: "That tenant's maximum per resource, such as { gpu: 16 }.", default: '{}' },
+    includeDescendants: { type: 'boolean', description: "Offer to the tenant's child tenants too.", default: 'false' },
+    priority: { type: 'number', description: 'An integer from -1000 to 1000.', default: '0' },
+  }}
+/>
+
+</Tab>
+<Tab value="flavors">
+
+<TypeTable
+  type={{
+    pool: { type: 'string', description: 'A pool name.', required: true },
+    name: { type: 'string', description: 'Unique within the pool.', required: true },
+    vcpu: { type: 'number', description: '1 to 1024.', required: true },
+    memoryGiB: { type: 'number', description: '1 to 65536.', required: true },
+    diskGiB: { type: 'number', description: '1 to 1048576.', required: true },
+    gpus: { type: 'number', description: '0 to 64.', default: '0' },
+    offerId: { type: 'string', description: 'Sell the flavor under one offer only.' },
+  }}
+/>
+
+See [flavors](/docs/guides/vps/flavors).
+
+</Tab>
+</Tabs>
+
+Validation rejects unknown fields, a `version` other than 1, lists over 1000 items, repeated names (flavors repeat
+by pool and name, offers by tenant) and malformed values, with `INVALID_INPUT` and the offending `details.path`.
+Quota keys are resource names (a letter, then up to 63 letters, digits, `.`, `_` or `-`) with integer maxima of 0
+or more.
+
+### Names instead of ids
+
+Sites and pools have no name of their own, so fleet keeps the names it gave them in `fleet_names`. Provider accounts
+use their `name`, flavors are named `<pool>/<name>`, offers `<pool> -> <tenant>`, and owner quotas
+`<pool>:<resource>`.
+
+- **Objects fleet did not create** appear in an export under their id (`pool_01...`). Keep those names: the plan
+  matches by name, so a new name plans a new object.
+- **Created objects get deterministic ids.** The idempotency key is `fleet:<tenant>:<kind>:<name>`, and the id
+  derives from it and the caller, so an apply retried after a failure converges instead of creating duplicates.
+
+## Plan
+
+`fleet.plan` (a read) diffs a document against the tenant's current objects and changes nothing. It returns:
+
+- `changes`: one entry per item with `kind`, `name`, `action` (`create`, `update`, `delete` or `unchanged`), the
+  differing `fields`, and `blocked` or `note` when they apply;
+- `calls`: the exact API calls `fleet.apply` would make, in order;
+- `summary`: counts per action, and `blocked` when any change cannot be applied;
+- `planHash`: SHA-256 over the canonical call list.
+
+What each kind can do:
+
+| Kind | Create | Update | Delete, only with `prune` | Cannot change |
+| --- | --- | --- | --- | --- |
+| Provider account | `providerAccounts.create` | `providerAccounts.update` (the listed `config` fields) | `providerAccounts.delete`, once no remaining pool uses it | `provider` |
+| Site | `sites.create` | Never | Never | `kind`, `region`, `iamRegion` |
+| Pool | `pools.create`, with its owner quota | `pools.update` (`policy`, `gpuModel`) | `pools.archive`: running reservations keep their bookings | `site`, `class`, `sharing`, `agent`, `providerAccount` |
+| Owner quota | `quotas.set` | `quotas.set` | No | |
+| Offer | `pools.offer` | `pools.offer` (`quota`, `includeDescendants`, `priority`) | `pools.unoffer` | |
+| Flavor | `flavors.create` | `flavors.update` (`vcpu`, `memoryGiB`, `diskGiB`, `gpus`, `offerId`) | `flavors.delete` | |
+
+A change is **blocked** when it touches a field that cannot change, names an unknown site, pool or provider account,
+offers a pool to its own owner, or lists flavors on a deployment without `vps`. Fix the document, or create a new
+object instead of changing a fixed field. Without `prune`, items the document leaves out are left alone, so you can
+adopt FleetConfig one list at a time.
+
+Calls run in dependency order: provider account creates and updates, site creates, pool creates, pool updates and
+quotas, offers, flavor creates and updates, flavor deletes, unoffers, pool archives, and provider account deletes.
+
+## Apply
+
+`fleet.apply` takes the same input plus an optional `planHash`, and runs the plan through the owning modules' own
+methods. It is a composite method (`transaction: 'manual'`): it decides each call with `ctx.check` while no
+transaction is open, then runs them with `ctx.invoke` in one transaction. A host without composite methods answers
+`UNSUPPORTED`; the standard server has them (see [methods](/docs/extending/methods)).
+
+<Steps>
+<Step>
+
+### Plan and compare
+
+Fleet plans the document. A blocked plan fails with `INVALID_STATE` and the blocked changes in `details.blocked`.
+If you passed a `planHash` and the plan no longer has it, apply fails with `CONFIG_DRIFT` (409). A plan with no
+calls only records the document and returns `applied: 0`.
+
+</Step>
+<Step>
+
+### Decide every call
+
+Each call is decided for the caller, one IAM decision per call, with no transaction open. A single denial fails the
+apply with `ACCESS_DENIED` before anything is written.
+
+</Step>
+<Step>
+
+### Run everything in one transaction
+
+Inside one transaction fleet plans again. If the call list changed while IAM was deciding, nothing is applied and
+the apply fails with `CONFIG_DRIFT`. Otherwise every call runs, created names go into `fleet_names`, and the
+document is recorded as the tenant's applied document.
+
+</Step>
+</Steps>
+
+The caller therefore needs `compute:fleet:admin` and the permission of every call the plan makes:
+
+| Calls | Action |
+| --- | --- |
+| `sites.create` | `compute:sites:manage` |
+| `pools.create` | `compute:pools:create` |
+| `pools.update`, `pools.archive` | `compute:pools:manage` |
+| `pools.offer`, `pools.unoffer` | `compute:pools:share` |
+| `quotas.set` | `compute:quotas:manage` |
+| `flavors.create`, `flavors.update`, `flavors.delete` | `compute:flavors:manage` |
+| `providerAccounts.create`, `providerAccounts.update`, `providerAccounts.delete` | `compute:providers:manage` |
+
+Every call writes its own audit row, and the apply writes one more after it succeeds. The result is
+`{ plan, applied }`, the number of calls that ran.
+
+```ts title="Plan, review, apply exactly that plan"
+const { config } = await compute.api.fleet.export(credential, { tenantId: 'root' });
+
+const plan = await compute.api.fleet.plan(credential, { tenantId: 'root', config, prune: true });
+console.log(plan.summary, plan.changes.filter((change) => change.action !== 'unchanged'));
+
+await compute.api.fleet.apply(credential, {
+  tenantId: 'root',
+  config,
+  prune: true,
+  planHash: plan.planHash, // refuse with CONFIG_DRIFT if the fleet moved since the review
+});
+```
+
+## Drift
+
+Every apply, including one with nothing to change, records the document it applied. The `fleet.drift` reconciler
+runs its key `all` every `driftEvery`, which queues one `tenant:<id>` key per tenant with an applied document; each
+tenant is then re-planned in its own transaction, so one tenant's failure never blocks another.
+
+A non-empty call list, or a blocked plan, means someone changed the fleet outside FleetConfig:
+
+- `fleet.drifted` is published once per distinct drift, with the applied `planHash`, the summary, `blocked`, and up to
+  50 changes;
+- `fleet.converged` is published when the drift clears on its own;
+- `fleet.status` shows the drift as of the last check.
+
+Both events have the subject `fleet/<tenant>` and reach [webhooks](/docs/guides/events/webhooks) like any other.
+Applying the document again resets the drift.
+
+```json title="fleet.status result"
+{
+  "tenantId": "root",
+  "applied": {
+    "planHash": "3f1c...",
+    "appliedBy": "usr_ops",
+    "appliedAt": 1790251200000,
+    "prune": true,
+    "checkedAt": 1790252100000
+  },
+  "drift": {
+    "changes": [{ "kind": "pool", "name": "vps-fra", "action": "update", "fields": ["policy"] }],
+    "summary": { "create": 0, "update": 1, "delete": 0, "unchanged": 5 },
+    "blocked": false,
+    "planHash": "9ab0..."
+  }
+}
+```
+
+A tenant that never applied a document gets only `{ tenantId }`. The console's **Fleet drift** page (platform
+administrators) shows the same: who applied last, when it was checked, and the drifted changes by kind.
+
+## From the CLI
+
+The four `fleet` commands act as `BETTER_COMPUTE_TOKEN`, through the configuration or against `--url`. They read
+and write JSON; the server validates the document.
+
+```bash
+better-compute fleet export --tenant root --out fleet.json   # refuses to overwrite a file
+better-compute fleet plan fleet.json --tenant root            # --prune, --calls
+better-compute fleet apply fleet.json --tenant root --yes
+better-compute fleet status --tenant root
+```
+
+`fleet plan` prints one line per change that does something, then the counts:
+
+```text
+~ pool vps-fra (policy)
+~ ownerQuota vps-fra:gpu (max)
++ offer vps-fra -> globex
++ flavor vps-fra/g1.large
+2 to create, 2 to update, 0 to delete, 5 unchanged.
+```
+
+- **`fleet apply`** plans and prints the changes. Without `--yes` it stops there and prints the `--plan-hash` to
+  apply that exact plan later. With `--yes` it applies what it just planned; with `--plan-hash` it applies a plan
+  reviewed earlier, and fails with `CONFIG_DRIFT` if the fleet moved.
+- **A blocked plan** exits `PLAN_BLOCKED` from `plan` and `apply`.
+- **`--fail-on-drift`** makes `fleet plan` exit `FLEET_DRIFTED` when any call would run, and `fleet status` exit
+  `FLEET_DRIFTED` while the recorded drift is set.
+
+These codes exit with status 1 (usage errors exit 2). When nothing would change, `fleet apply` without
+`--plan-hash` does not call `fleet.apply`, so it does not re-record the document; pass `--plan-hash` to make an
+unchanged document the new drift baseline. See [the CLI reference](/docs/reference/cli#fleet-plan).
+
+### In CI
+
+Plan on every pull request and fail when production no longer matches the reviewed file; apply on merge:
+
+```yaml title=".github/workflows/fleet.yml (excerpt)"
+- name: Production matches the reviewed document
+  run: better-compute fleet plan fleet.json --tenant root --fail-on-drift
+  env:
+    BETTER_COMPUTE_URL: https://compute.example.com
+    BETTER_COMPUTE_TOKEN: ${{ secrets.BETTER_COMPUTE_TOKEN }}
+
+- name: Apply the reviewed document
+  if: github.ref == 'refs/heads/main'
+  run: better-compute fleet apply fleet.json --tenant root --yes
+  env:
+    BETTER_COMPUTE_URL: https://compute.example.com
+    BETTER_COMPUTE_TOKEN: ${{ secrets.BETTER_COMPUTE_TOKEN }}
+```
+
+Give the pipeline an API key of a service account in the root tenant that holds `compute:fleet:admin` and the call
+permissions above, and nothing else. Between runs, schedule `fleet status --fail-on-drift` or subscribe to
+`fleet.drifted` to hear about hand edits the same day.
+
+<Cards>
+  <Card title="fleet API reference" href="/docs/reference/api/fleet">
+    export, plan, apply and status.
+  </Card>
+  <Card title="CLI: fleet plan" href="/docs/reference/cli#fleet-plan">
+    Flags of export, plan, status and apply.
+  </Card>
+  <Card title="Rollouts" href="/docs/guides/rollouts">
+    The other root-tenant tool: bcd versions in waves.
+  </Card>
+</Cards>

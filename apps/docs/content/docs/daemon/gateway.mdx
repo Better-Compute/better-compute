@@ -1,0 +1,293 @@
+---
+title: Gateway
+metaTitle: The gateway process
+description: The gateway holds daemon sessions in memory and writes what matters to PostgreSQL. Its loops, dispatch by join, group commit, lease, control API, tunnels and metrics.
+icon: RadioTower
+status: experimental
+packages: ['@better-compute/gateway', '@better-compute/observability', '@better-compute/cli']
+sources:
+  - packages/gateway/README.md
+  - packages/gateway/src/gateway.ts
+  - packages/gateway/src/store.ts
+  - packages/gateway/src/http2.ts
+  - packages/gateway/src/identity.ts
+  - packages/gateway/src/internal.ts
+  - packages/gateway/src/tunnels.ts
+  - packages/gateway/src/health.ts
+  - packages/gateway/src/ws.ts
+  - packages/cli/src/host/gateway.ts
+  - packages/observability/src/instrument.ts
+  - packages/observability/src/standard.ts
+  - packages/postgres/src/migrations/0002_base.ts
+  - packages/server/src/join/gateway-services.ts
+  - bench/gateway-streams/README.md
+  - bench/multi-gateway/README.md
+  - PLAN.md
+---
+
+The <Term id="gateway">gateway</Term> is the process every daemon connects to. It terminates the daemons' mTLS,
+keeps their sessions, heartbeats and lane counters in memory, dispatches commands, ingests results, events,
+status and inventory, relays `Join`, `Renew` and secret requests, and relays interactive tunnels. It holds no CA and
+no signing key (principle P14), and PostgreSQL stays the only source of truth (P1): restarting a gateway loses open
+streams and nothing else.
+
+`@better-compute/gateway` implements it in TypeScript on `node:http2`. It depends on `core`, `protocol`,
+`inventory`, `pki` and the server's types only; the server never imports it.
+
+## Running a gateway
+
+`better-compute serve` runs the gateway role from the deployment's configuration; see
+[deployment](/docs/operations/deployment). Embedded in your own process:
+
+```ts title="gateway.ts"
+import { createGateway, serveGateway } from '@better-compute/gateway';
+
+const gateway = createGateway({
+  region: 'eu-1',
+  database, // the compute store: postgres() or pglite()
+  services: compute.gatewayServices, // JoinService, renewal, secret broker
+  work: compute.context.work,
+  events: compute.context.events,
+  revocations, // pki RevocationSet: refused at open, pushed to live sessions
+  reports: gatewayReportHandlers, // allocation transitions from @better-compute/server
+});
+await gateway.start(); // directory row and the gateway:<id> lease
+await serveGateway(gateway, {
+  port: 443,
+  tls: { key, cert, ca: nodeCaPem },
+  nodeRoots: [nodeCa.certificate], // certificateAuthenticate; there is no weaker default
+  revocations,
+});
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `id` | a fresh `gw_...` id | One per process |
+| `region` | | Required |
+| `internalUrl` | | Where the api reaches this gateway's control API (`gateways.internal_url`) |
+| `maxStreams` | 5,000 | Sessions this gateway admits |
+| `heartbeatIntervalMs` | 10,000 | Sent in `Welcome` |
+| `sessionLeaseTtlMs` | 40,000 | The daemon liveness lease, sent in `Welcome` |
+| `credits` | control 8, provision 4, bulk 2 | Commands in flight per node and lane |
+| `handshakesPerSecond` | 200 | Session opens and joins admitted per second |
+| `maxPendingHellos` | 64 | Hello transactions in flight at once |
+| `gatewayLeaseTtlMs`, `leaseRenewMs` | 20,000, 5,000 | The `gateway:<id>` lease |
+| `livenessFlushMs` | 15,000 | How often ages are flushed |
+| `dispatchIntervalMs`, `dispatchBatch` | 1,000, 1,000 | The dispatch loop |
+| `pokeWindowMs` | 10 | Minimum spacing of poke-driven dispatch runs |
+| `specSweepMs` | 10,000 | How often open sessions are checked for a newer generation |
+| `busyBackoff` | 1,000 to 30,000 ms | Back-off for commands answered `BUSY` |
+| `trustBundle` | | A function returning the pre-signed trust bundle for `Welcome`, read per session |
+| `revocations` | | Revoked serials; without it, `start()` warns that revoked certificates keep their sessions until they expire |
+| `tunnels` | | Exec-ticket verification and re-authorization (v0.3) |
+| `reports` | | Report and status handlers, below |
+| `manual` | false | No timers: tests and the simulator step `gateway.jobs` themselves |
+
+## Memory and PostgreSQL
+
+| In memory, lost on restart | In PostgreSQL |
+| --- | --- |
+| Open sessions: node, epoch, role, boot and journal id, peer identity | `node_sessions`: routing, epoch, boot and journal id, event ack, last seen, versions |
+| Last-seen time per session | Flushed as ages every 15 s |
+| Lane counters and in-flight command ids | `commands`: state, epoch, attempt, result |
+| The generation last sent per session | `nodes.generation`, `nodes.spec`, `nodes.observed_generation` |
+| The latest status report per session | Written about once a second |
+| `BUSY` counts, cancels already sent | `commands.not_before`, `cancel_requested_at` |
+| Open tunnels | nothing: a tunnel dies with its gateway |
+| The lease token | `leases` row `gateway:<id>`; `gateways` directory row |
+
+Everything in the left column is rebuilt by the next `Hello`, which is why a gateway crash costs a reconnect and
+nothing more; see [failure modes](/docs/daemon/failure-modes#gateway-crash).
+
+The `gateways` table is the directory: id, region, `internal_url`, software version, `max_streams`, current
+`sessions`, `draining`, `started_at` and `heartbeat_at`. `start()` upserts the row, and every lease renewal updates
+the session count and drain flag, which `doctor` reads for headroom.
+
+## The loops
+
+| Job | Period | Does |
+| --- | --- | --- |
+| `lease` | 5 s | Renews `gateway:<id>`; fences the gateway when it cannot |
+| `dispatch` | 1 s, and on pokes | Sends pending commands; at most once per interval, sends `Cancel` for in-flight commands whose cancel was requested |
+| `liveness` | 5 s | Closes silent sessions (three missed heartbeats) and sessions with expired certificates; sweeps tunnels; every 15 s, flushes ages and drops zombie sessions |
+| `specs` | 10 s | Pushes a full spec to sessions whose node's generation moved past what they hold and were sent |
+| `status` | 1 s | Writes each session's latest status report and runs the status handlers |
+
+`gateway.status()` reports each loop's consecutive failures, total failures, last clean run and last error, so a
+stuck loop can be alerted on. `GET /v1/health` on the control API returns the same object.
+
+## Dispatch by join
+
+Routing is a join between `commands` and `node_sessions` at dispatch time, never a column copied onto commands:
+
+```sql
+SELECT c.*, s.session_epoch FROM commands c JOIN node_sessions s USING (node_id)
+ WHERE s.gateway_id = $me AND c.state = 'pending'
+   AND c.not_before <= compute_now() AND c.not_after > compute_now()
+ ORDER BY c.node_id, c.seq LIMIT 1000
+ FOR UPDATE OF c SKIP LOCKED FOR SHARE OF s
+```
+
+`SKIP LOCKED` lets several gateways and runs work side by side, and the `FOR SHARE` lock on the session row makes a
+dispatch and a concurrent `Hello` epoch bump serialize. A row is marked `dispatched` only when its session epoch
+matches the gateway's live session and the lane has credit; a session that closed after commit leaves the row
+`dispatched`, and the next `Hello` replays it. Because routing is a join, a reconnect needs no rewrite and a command
+enqueued during a reconnect cannot be stranded. Enqueues poke the gateway after commit; pokes are coalesced, so a
+burst costs a few dispatch passes, and a `Hello` pokes only when the node has pending commands, so a reconnect storm
+does not turn every `Hello` into a pass over every session.
+
+Delivery rules (credits, cancel, refusals) are in [delivery](/docs/daemon/delivery#dispatch).
+
+## Group commit
+
+A fleet sends many small frames. Writing each in its own transaction would serialize the gateway on the database,
+so command updates, event batches and inventory work are group-committed: frames from every session that arrive in
+the same I/O turn share one transaction, at most 500 entries each. A session still waits for its own entry before
+its next frame is handled, so per-session order holds, and a lone frame never waits for company.
+
+Update transactions lock every command involved in id order, so two concurrent flushes never deadlock; event
+transactions lock session rows in node-id order. When a batch fails, each entry is retried alone, so one bad frame
+cannot fail the others. Inventory sections are not awaited by the frame queue at all: a section is an idempotent
+upsert, so a node's sections sent back to back after `Welcome` share one transaction, each under its own savepoint;
+a section lost to an error is simply requested again at the next `Hello`.
+
+## The lease and fencing
+
+Each gateway holds a `leases` row named `gateway:<id>`, renewed every 5 seconds with a 20-second TTL. The epoch of
+the lease rises whenever its owner changes. Every routing transaction (the `Hello` transaction, dispatch) starts
+by re-reading the lease `FOR SHARE`:
+
+```sql
+SELECT 1 FROM leases
+ WHERE name = $name AND owner = $me AND epoch = $epoch AND expires_at > compute_now()
+FOR SHARE
+```
+
+A zombie either still sees its lease as valid, or aborts; a takeover blocks until the zombie's transaction ends. If
+another owner holds the lease, or renewals have failed for half the TTL (10 seconds), the gateway fences itself:
+it forgets its lease and closes every stream `UNAVAILABLE` ("gateway fenced; reconnect"). Daemons redial, possibly to
+another gateway. Separately, the per-node session epoch fences routing and liveness writes; see
+[epochs and fencing](/docs/daemon/sessions#epochs-and-fencing).
+
+`stop()` closes every session `UNAVAILABLE` with a disconnect write, marks the gateway draining and releases the lease
+so a successor need not wait for the TTL. `drain()` sends every daemon `Drain` with a random delay up to 60 seconds
+and refuses new sessions, for rolling deploys: PLAN.md upgrades gateways one at a time with `Drain`.
+
+## Report and status hooks
+
+The gateway imports no domain module. State transitions driven by what nodes report are injected by the host:
+
+| Hook | Called with | Typical wiring |
+| --- | --- | --- |
+| `reports.allocationBound` | an `AllocationBound` | capacity's `markAllocationBound`: the reservation's allocation is bound |
+| `reports.allocationReleased` | an `AllocationReleased` | capacity marks the binding lost or released |
+| `reports.allocationFailed` | an `AllocationFailed` | capacity retries or fails the binding |
+| `reports.status` | the coalesced `StatusReport` | `xidStatusHandler` (XID conditions to inventory's `recordXid`), VPS instance status |
+
+Each report hook runs in the transaction that stores the event and advances the ack, so a report is applied exactly
+once, and receives `{ nodeId, tenantId, journalId, seq, bootId, signed, work }`. `signed` says whether a `node_sig`
+came with it; workers verify signatures, the gateway never treats one as proof. Status handlers may be a list, each
+run under its own savepoint. A failing hook rolls back to its savepoint and is published as `node.report-failed`;
+ingestion goes on. `@better-compute/server` exports `gatewayReportHandlers` with the capacity hooks, and
+`better-compute serve` always adds `xidStatusHandler`.
+
+## Certificate authentication
+
+`Join` accepts clients without a certificate. `Renew`, `Session` and `Tunnel` need one that the authenticator
+accepts, and the node id always comes from the certificate. `serveGateway` requires either `nodeRoots` (for the
+production `certificateAuthenticate`) or an explicit `authenticate` hook; anything else is `INVALID_CONFIG`.
+
+`certificateAuthenticate` verifies the chain to the node CA with the `clientAuth` usage, refuses revoked serials,
+optionally requires a SPIFFE trust domain, and reads the node id and site from the single SPIFFE URI SAN. It returns
+the serial, the role and the expiry, which drive `node_certs.allowed_kinds`, revocation, the `Hello` role check and
+the close at expiry, plus `tenantControlled` for a `node-tenant` certificate: such a session gets no secrets and no
+destructive platform commands. `unsafeSanOnlyAuthenticate` reads only the SAN and skips all of that; it is for tests,
+as is `insecure: true` (cleartext h2c).
+
+## Revocation
+
+Revocations reach live sessions within about a second. In `better-compute serve`, pki's `createRevocationFeed`
+polls `node_certs.revoked_at` into the revocation set the gateway enforces, and the gateway subscribes to it: a
+session whose certificate serial is revoked receives `RevocationNotice{reason, serials}`, its tunnels close, and the
+stream ends `UNAUTHENTICATED`. New opens with that serial are refused at the handshake, and the `Hello` transaction
+re-checks `node_certs` itself, since the database is the revocation truth and the in-memory feed may lag a poll.
+The control API's `revoke` does the same for one node on demand.
+
+## Control API
+
+Each gateway serves a small internal API on `gateways.internal_url`, HTTP/2 over the internal CA's mTLS, called by
+api and worker processes. Every call but tunnels is an accelerator: dispatch polls every second, specs are re-pushed
+by the sweep, revocations arrive through the feed and cancellations from the database, so correctness never depends
+on it.
+
+| Call | Body | Answer |
+| --- | --- | --- |
+| `GET /v1/health` | | `GatewayStatus`: id, region, started, draining, sessions, `maxStreams`, lease epoch, loops |
+| `POST /v1/poke` | `{ nodeIds? }` | 202; dispatch now, and a spec check for the named nodes |
+| `POST /v1/revoke` | `{ nodeId, reason, serials?: hex[] }` | `{ revoked }` |
+| `POST /v1/drain` | `{ reason? }` | 202 |
+| `POST /v1/tunnels/close` | `{ tunnelId?, nodeId?, subject?, agentId?, delegationId?, reason }` | `{ closed }`; at least one filter |
+| `POST /v1/tunnels` | a duplex stream | The api's side of one tunnel |
+
+Host wiring uses three helpers. `gatewayControlClient(...)` calls one gateway. `gatewayNotifier(...)` implements the
+core `Notifier`: `publish('gw:<id>')` pokes that gateway, and the runtime publishes it after an enqueue or a spec
+change commits. `gatewayTunnelRelay(...)` is the server's `TunnelRelay`: it opens a tunnel through the gateway named
+by `node_sessions.gateway_id`, caching gateway URLs for 30 seconds; an unregistered gateway is `UNAVAILABLE`.
+
+## Tunnels (v0.3)
+
+The api authorizes the caller and issues a 60-second single-use exec ticket for one node, then asks the owning
+gateway to open a tunnel. The gateway verifies the ticket (signature against the api's JWKS, audience, its own
+`jti` set, which fails closed when full), sends `OpenTunnel` on the node's session, and waits up to 10 seconds for the
+node's `Tunnel` stream. The daemon verifies the ticket again before opening it. The gateway then only relays frames,
+with backpressure in both directions. It re-authorizes the caller every 60 seconds: a refusal closes the tunnel, and
+2 minutes of IAM failures close it too. A tunnel lives at most 12 hours, and revocation or
+`POST /v1/tunnels/close` ends it at once. See [tunnels](/docs/guides/access/tunnels).
+
+## Admission and scale
+
+Three bounds protect a gateway from a reconnect storm: the handshake token bucket (200 opens and joins per second),
+`maxStreams`, and `maxPendingHellos`. The last one exists because the bucket can admit `Hello`s faster than the
+database commits them; an unbounded queue once starved the lease renewal until the gateway fenced itself and dropped
+every stream. With the bound, a refused `Hello` retries with jitter and the database queue stays short.
+
+PLAN.md's v0.1 gate is one Node gateway holding at least 5,000 mTLS sessions at 10-second heartbeats for 30 minutes,
+with dispatch p99 under 500 ms and RSS under 2 GiB; if it fails, the gateway is rewritten in Go on the same proto
+(decision D20). Indicative runs on a development workstation (PGlite, h2c, the load generator in the same process,
+60 seconds) held 5,000 sessions with dispatch p99 of 22 to 32 ms and RSS around 1 GiB, and survived a storm with
+5,000 of 5,000 back. A gate result needs the reference hardware, mTLS and 30 minutes; see `bench/gateway-streams`.
+
+### Several gateways
+
+A region runs three or more gateways behind the L4 load balancer. Nothing is shared between them but PostgreSQL:
+each dispatches only the nodes routed to it (`node_sessions.gateway_id`), and a node that reconnects elsewhere
+simply moves its row with the next `Hello`. In the fleet simulator with the real control plane
+(`bench/multi-gateway`), killing one of three gateways re-homed its nodes with p99 of 1 second at 1,000 nodes and
+13.25 seconds at 10,000, with no invariant violations. Peering between gateways is planned for v0.4.
+
+## Metrics
+
+With a metrics registry, `better-compute serve` wraps the gateway services with `meteredGatewayServices` and
+registers `gatewayCollector`, which export (all prefixed `better_compute_`, no tenant labels):
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `gateway_open_sessions` | `gateway`, `role` | Open sessions by agent role |
+| `gateway_stream_headroom` | `gateway` | Streams the gateway can still admit |
+| `gateway_draining` | `gateway` | 1 while draining |
+| `gateway_lease_held` | `gateway` | 1 while it holds its lease, 0 while fenced |
+| `gateway_commands_in_flight` | `gateway` | Commands in flight on its sessions |
+| `gateway_sessions_upgrade_required` | `gateway` | Sessions told to upgrade |
+| `gateway_loop_consecutive_failures`, `gateway_loop_failures`, `gateway_loop_last_ok_age_seconds` | `gateway`, `loop` | Loop health |
+| `gateway_service_calls_total` | `method`, `outcome` | `Join`, `Renew` and secret calls |
+| `gateway_service_seconds` | `method` | Their duration |
+
+The collector samples `gateway.status()` and `gateway.sessions()` at every scrape. See
+[observability](/docs/operations/observability).
+
+## Testing without a network
+
+`gateway.open(peer, sink)` drives a session without any transport, and `attachFrameConn(gateway, peer, conn)` serves
+one over the testing kit's in-memory frame stream, so the fleet simulator runs real FakeDaemons against a real
+gateway on simulated time. `gateway.crash()` simulates process death: loops stop and every session is forgotten
+without a database write, so the lease simply expires. See [testing](/docs/operations/testing).

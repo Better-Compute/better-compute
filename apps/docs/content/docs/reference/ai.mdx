@@ -1,0 +1,131 @@
+---
+title: Use the docs with AI
+description: Connect AI coding assistants to these docs through their MCP endpoint, or hand them the site as Markdown with llms.txt and per-page Markdown.
+icon: Bot
+sources:
+  - apps/docs/app/api/mcp/route.ts
+  - apps/docs/app/llms.txt/route.ts
+  - apps/docs/app/llms-full.txt/route.ts
+  - apps/docs/app/llms.mdx/docs/[[...slug]]/route.ts
+  - apps/docs/proxy.ts
+  - apps/docs/lib/shared.ts
+  - apps/docs/lib/source.ts
+  - apps/docs/lib/llms-text.ts
+  - apps/docs/next.config.mjs
+---
+
+AI coding assistants write better Better Compute code when they can read the real reference instead of guessing
+method names, IAM actions or CLI flags. This site offers the same content to tools as it does to people, in three
+forms: an MCP server an assistant can query while it works, plain-text indexes for one-shot context, and a Markdown
+version of every page.
+
+<Callout type="info" title="Two different MCP servers">
+This page is about the **documentation's** MCP endpoint, which answers questions about Better Compute. To let an
+agent act on a deployment (list pools, reserve GPUs, create instances), use the `@better-compute/mcp` package
+instead; see [MCP](/docs/guides/clients/mcp).
+</Callout>
+
+## Connect an assistant with MCP
+
+The [Model Context Protocol](https://modelcontextprotocol.io) lets an assistant call tools while it works. The docs
+serve an MCP endpoint at `/api/mcp` over Streamable HTTP. It needs no sign-in and only reads. The server introduces
+itself as `better-compute-docs` and offers six tools:
+
+| Tool | Input | What it returns |
+| --- | --- | --- |
+| `search` | `query`, optional `locale` | Full-text search over every page, the same index as the search dialog, as JSON. |
+| `list_pages` | none | Every page with its URL and one-line description (the body of `/llms.txt`). |
+| `get_page` | `url` | One page as Markdown, by its path, for example `/docs/guides/capacity/reservations`. |
+| `lookup_api_method` | `method` | One API method: its HTTP route, the server call `compute.api.{group}.{method}(credential, input)`, the browser client call, its kind, the IAM action and resource it is decided on, its module, and whether this release serves it or it is planned for a later phase. |
+| `lookup_error_code` | `code` | What a `ComputeError` code means and its HTTP status, for example `CAPACITY_UNAVAILABLE` or `ACCESS_DENIED`. |
+| `lookup_cli_command` | `command` | Usage, flags (with defaults and environment variables) and examples of one `better-compute` command, for example `dev` or `fleet apply`. |
+
+The lookup tools are forgiving about how you name things. `lookup_api_method` accepts `reservations.create`,
+`compute.api.reservations.create(...)`, `client.joinTokens.create`, a route such as
+`/api/compute/reservations/create`, or a reference URL such as `/docs/reference/api/reservations#create`; an
+unknown group or method answers with the list of valid ones. `lookup_cli_command` drops a leading
+`better-compute` and any flags, and matches the longest command name the query starts with, so
+`fleet plan fleet.json` finds `fleet plan`. Error codes are matched case-insensitively.
+
+<Tabs items={['Claude Code', 'Cursor', 'VS Code']} groupId="mcp-client" persist>
+<Tab value="Claude Code">
+
+```bash
+claude mcp add --transport http better-compute-docs https://docs.example.com/api/mcp
+```
+
+</Tab>
+<Tab value="Cursor">
+
+```json title=".cursor/mcp.json"
+{
+  "mcpServers": {
+    "better-compute-docs": { "url": "https://docs.example.com/api/mcp" }
+  }
+}
+```
+
+</Tab>
+<Tab value="VS Code">
+
+```json title=".vscode/mcp.json"
+{
+  "servers": {
+    "better-compute-docs": { "type": "http", "url": "https://docs.example.com/api/mcp" }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+Replace `https://docs.example.com` with the address where these docs are served. When you run them locally with
+`pnpm --filter @better-compute/docs dev`, that is `http://localhost:4100`. The links the lookup tools print use the
+site's canonical origin, `DOCS_SITE_URL`, which defaults to the same local address.
+
+A session might look like this: the assistant searches for "extend a reservation", reads
+`/docs/guides/capacity/reservations` with `get_page`, then calls `lookup_api_method` with `reservations.extend` to get
+the exact route and IAM action before it writes the call.
+
+## Give a model the whole site
+
+When a tool cannot call MCP, paste or fetch the site as plain text:
+
+| URL | Content | Use it for |
+| --- | --- | --- |
+| `/llms.txt` | An index: every page's title, URL and description, under a one-paragraph summary of Better Compute | Letting a model pick which pages to read |
+| `/llms-full.txt` | Every page as Markdown in one file | Loading everything into a long context window |
+| `/docs/<page>.md` | One page as Markdown | Quoting a single page precisely |
+
+Any docs URL also returns Markdown when the request asks for it with `Accept: text/markdown`, so agents that fetch
+pages get Markdown without special URLs:
+
+```bash
+curl -H 'Accept: text/markdown' https://docs.example.com/docs/guides/quickstart
+curl https://docs.example.com/docs/guides/quickstart.md          # the same answer
+```
+
+Both are rewritten to `/llms.mdx/docs/<page>/content.md`, which answers with a `Link: rel="canonical"` header that
+points at the HTML page. Each page's **Copy Markdown** button and its view-options menu use the same Markdown.
+
+The Markdown is not the raw MDX source. Each page starts with its title, URL and description, comments are dropped,
+visual-only components are removed, the API endpoint boxes become a line of text with the route, authorization and
+calls, and the [glossary](/docs/reference/glossary) becomes every term as a heading with its definition.
+`/llms.txt` and `/llms-full.txt` carry `X-Robots-Tag: noindex`, so search engines index the pages themselves.
+
+## Keep answers accurate
+
+The reference pages, and the MCP lookup tools, come from the code: the generator builds a control plane with every
+module and reads its method registry, command kinds, error codes and CLI manifest (see
+[reference](/docs/reference)). They match the version of Better Compute these docs were built from, including
+which methods that version serves and which PLAN.md lists for a later phase.
+
+Two things to tell an assistant:
+
+- **Planned is not served.** `lookup_api_method` says `Status: planned for <phase>` for methods this release does not
+  route; the HTTP endpoint answers `NOT_FOUND` for them. Check the status before generating code against a method.
+- **The daemon is not built yet.** Pages about `bcd` describe a Go binary that is written but not released; the
+  TypeScript `FakeDaemon` in `@better-compute/testing` is what runs today. See [the daemon](/docs/daemon).
+
+When an answer disagrees with your installed version, trust the TypeScript types in your editor: every server method
+is typed end to end from the `betterCompute()` instance and the `@better-compute/client` client.

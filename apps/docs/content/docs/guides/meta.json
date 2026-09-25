@@ -1,0 +1,22 @@
+{
+  "title": "Guides",
+  "description": "Concepts, nodes, capacity, bare metal, VPS and the platform around them",
+  "root": true,
+  "icon": "BookOpen",
+  "pages": [
+    "index",
+    "quickstart",
+    "installation",
+    "concepts",
+    "nodes",
+    "capacity",
+    "bare-metal",
+    "vps",
+    "access",
+    "fleet-config",
+    "rollouts",
+    "iam",
+    "events",
+    "clients"
+  ]
+}

@@ -1,0 +1,104 @@
+---
+title: Concepts
+description: The ideas Better Compute is built on, from one Postgres truth and desired state to one IAM decision per mutation, and its fifteen design principles.
+metaTitle: Better Compute concepts
+icon: Blocks
+packages: ['@better-compute/core', '@better-compute/server']
+sources: ['PLAN.md', 'packages/core/README.md', 'packages/server/README.md', 'packages/core/src/states.ts']
+---
+
+Better Compute answers three questions about a fleet of machines at any moment: what exists, what is free, and who
+holds it. Everything else, from placement to provisioning to billing, is built on those answers. This section
+explains the model behind them before the guides show how to use it.
+
+## The shape of the system
+
+A <Term id="node">node</Term> is a server running <Term id="bcd">bcd</Term>, the daemon. It dials out to a
+<Term id="gateway">gateway</Term> and keeps one long-lived session open. The control plane never connects to it; it
+writes what the node should look like, its <Term id="nodespec">NodeSpec</Term>, and queues
+<Term id="command">commands</Term> for one-shot actions. The gateway delivers both.
+
+Nodes belong to a <Term id="pool">pool</Term>, a scheduling and policy domain in one <Term id="site">site</Term>
+with exactly one GPU model. A tenant asks a pool for devices with a <Term id="reservation">reservation</Term>. Better
+IAM decides whether the caller may ask, and the <Term id="placer">placer</Term> decides where the devices come from
+by inserting <Term id="booking">bookings</Term>: rows that a database constraint makes exclusive per device and per
+instant.
+
+All of this state lives in PostgreSQL. Gateways, caches and in-memory projections can be rebuilt from it at any
+time, and <Term id="reconciler">reconcilers</Term> keep the world converging toward it.
+
+<Cards>
+  <Card title="Architecture" href="/docs/guides/concepts/architecture">
+    Planes, components, process modes, and the four flows: join, reserve, bare metal and VPS.
+  </Card>
+  <Card title="Domain model" href="/docs/guides/concepts/domain-model">
+    Every entity, how they relate, and how each maps to a Better IAM resource type.
+  </Card>
+  <Card title="Desired state and commands" href="/docs/guides/concepts/desired-state-and-commands">
+    NodeSpec generations, level-triggered reconcilers, and when to use a command instead.
+  </Card>
+  <Card title="Consistency" href="/docs/guides/concepts/consistency">
+    One clock, exclusion constraints, the outbox and work queue, fencing, and why disconnected is not dead.
+  </Card>
+</Cards>
+
+## Design principles
+
+The design follows fifteen principles. They explain most of the behavior you will see, including the behavior that
+looks conservative at first, such as never releasing a reservation because a node went quiet.
+
+| # | Principle | What it means in practice |
+| --- | --- | --- |
+| P1 | PostgreSQL is the truth | Gateway memory, caches, projections and wake-up pokes can all be lost and rebuilt. Nothing is correct only because a process remembered it. |
+| P2 | Desired state plus generations, reconciled level-triggered | Standing facts (device assignments, instances, host configuration) are desired state with a generation number. Controllers compare desired and observed state and act on the difference, not on events. Commands are only for one-shot actions. |
+| P3 | At-least-once delivery, made safe | Every message may arrive twice. Idempotency keys and fencing tokens (session epoch, lease epoch, generation, journal id) make the second arrival harmless. |
+| P4 | Invariants live in the database | `EXCLUDE` constraints, `CHECK` constraints, guarded updates and partial unique indexes enforce the rules, whatever the application code does. |
+| P5 | Nodes only dial out | A daemon opens no listening port. It connects to a gateway on 443, so nodes can sit behind NAT and firewalls. |
+| P6 | Disconnected is not dead | Nothing is released because a node is unreachable, and bare metal is never declared lost automatically. A partition changes a condition, not ownership. |
+| P7 | Fleet paths never call IAM | Heartbeats, inventory, commands and reconcilers never call Better IAM. An admission makes exactly one IAM decision. |
+| P8 | Telemetry stays out of the control path | Metrics go to a time-series database, never through PostgreSQL or the daemon's session. |
+| P9 | One clock | SQL reads time only through `compute_now()`, and TypeScript business time comes from a `Clock` anchored to it. Gateways report ages, not timestamps. |
+| P10 | Core never imports an implementation | Stores, the IAM port, modules and drivers are passed in. The two always-on modules, `inventory` and `capacity`, are the one exception. |
+| P11 | Fail closed | An unknown command kind is `UNSUPPORTED`; a resolver miss is `NOT_FOUND` and a resolver timeout is a deny; a failed batch authorization fails the request; a method whose action is missing from the catalog fails `initialize()`. |
+| P12 | Everything is bounded | Lanes, queues, payloads, the daemon's journal, spill buffers and metric cardinality all have limits. |
+| P13 | The daemon is dumb but capable | The daemon executes typed commands and converges typed desired state. Policy stays in the TypeScript control plane. |
+| P14 | Relays cannot forge | Gateways and site agents relay signed intent downward and node-signed results upward. Tokens and secrets cross them only sealed. |
+| P15 | Mirror Better IAM | Conventions follow Better IAM (the factory, the operation envelope, the CLI framework, the packaging) unless there is a stated reason not to. |
+
+Where a principle turns into a mechanism, the concept pages explain it: P1, P3, P4, P6 and P9 in
+[consistency](/docs/guides/concepts/consistency), P2 and P13 in
+[desired state and commands](/docs/guides/concepts/desired-state-and-commands), P5, P7 and P14 in
+[architecture](/docs/guides/concepts/architecture).
+
+## Where Better IAM stops and Better Compute starts
+
+Better Compute deliberately owns very little identity. It has no users, roles, API keys, policies or invoices:
+[Better IAM](/docs/guides/iam) owns those. What Better Compute owns is the fleet and its machine identities:
+
+| Better IAM owns | Better Compute owns |
+| --- | --- |
+| People, agents, service accounts and their sessions | Nodes and their SPIFFE certificates (the machine PKI) |
+| Tenants and the tenant tree | Sites, pools, offerings, quotas and projects inside those tenants |
+| Policies, roles and every allow or deny | The method-to-action table, and one request to Better IAM per mutation |
+| The billing ledger and meters | Usage windows, computed from reserved time and sent to the ledger |
+| The audit chain for IAM events | `audit_events` rows with the admission context of every allowed mutation |
+
+The line matters for security: a daemon never holds an IAM credential, and a person never holds a machine
+certificate.
+
+## Vocabulary
+
+The guides use a small set of terms precisely. The ones that trip people up most:
+
+- An <Term id="atom">atom</Term> is the only thing that is ever booked: a whole GPU, a MIG instance, or a time-slice
+  slot. A partitioned GPU's parent is not bookable.
+- A <Term id="draft">draft</Term> is a reservation or instance row written before the IAM decision, so Better IAM
+  can decide on the exact request.
+- A lease is always qualified: an <Term id="allocation-lease">allocation lease</Term> is a renewable hold on
+  devices, a <Term id="liveness-lease">liveness lease</Term> says a session is alive, and a
+  <Term id="shard-lease">shard lease</Term> gives one worker ownership of a slice of reconciler work.
+- <Term id="cordon">Cordon</Term> stops new placements on a node; <Term id="drain">drain</Term> also waits for
+  its current allocations to end; <Term id="maintenance">maintenance</Term> is a separate flag, set when
+  provisioning fails or remediation gives up, that also keeps a node out of placement.
+
+The [glossary](/docs/reference/glossary) defines every term.

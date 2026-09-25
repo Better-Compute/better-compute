@@ -1,0 +1,251 @@
+---
+title: Roadmap
+description: The version plan from P0 to v1.0 with each phase's deliverables and exit gates, and the honest state of every item in the repository today.
+icon: Signpost
+sources:
+  - PLAN.md
+  - CHANGELOG.md
+  - .claude/coordination.md
+  - bench/REFERENCE.md
+  - bench/gateway-streams/README.md
+  - bench/iam-lane/README.md
+  - bench/placements/README.md
+  - bench/realtime-spine/README.md
+  - bench/multi-gateway/README.md
+  - daemon/README.md
+  - tests/server-spine-v01.test.ts
+  - tests/capacity-concurrency.test.ts
+  - tests/sim/fleet-gateway.test.ts
+  - tests/sim/iam-negative.test.ts
+  - tests/sim/multi-gateway.test.ts
+  - tests/sim/v04-scenarios.test.ts
+  - tests/metal-chaos.test.ts
+  - tests/vps-churn.test.ts
+  - tests/e2e/access.test.ts
+  - tests/mcp-e2e-confirmation.test.ts
+  - tests/pki-workload.test.ts
+---
+
+Better Compute is built in phases, each defined in PLAN.md §16 by its deliverables, its acceptance criteria and its
+exit tests. A phase closes only when its exit tests are green in CI; the benchmark gates are measured on the
+reference hardware in `bench/REFERENCE.md` (a gateway host with 8 vCPU and 32 GiB, PostgreSQL 17 on 16 vCPU and
+64 GiB NVMe).
+
+The phases were planned in order, but the work did not stay in order: the TypeScript control plane for every phase
+up to v0.5 exists in the repository, while the pieces that need a Go toolchain, a PostgreSQL server or real hardware
+do not. So no phase after P0 is formally closed yet. This page tracks each item as:
+
+- **Done**: in the code, with tests, and listed in the changelog.
+- **In progress**: partly there. The note says which part is missing.
+- **Not started**: nothing in the repository yet.
+
+<Callout type="warn" title="Three blockers hold every phase open">
+- **The Go daemon is not built.** `bcd` is written in `daemon/` but Go is not installed on the build machine, so
+  nothing in it has been compiled, released or run on a server. Everything a daemon does is exercised through the
+  TypeScript `FakeDaemon`, which speaks the real protocol. See [the daemon](/docs/daemon).
+- **No PostgreSQL server has run the suites.** Local runs use PGlite (PostgreSQL 18 in WebAssembly). Suites that need
+  real concurrency skip unless `BETTER_COMPUTE_POSTGRES_URL` is set, and every benchmark number below is from PGlite
+  on a development machine, which the gates do not count.
+- **The hardware gates (PLAN.md D15) have not run.** They need one NVIDIA box, a self-hosted KVM runner and the
+  reference benchmark machines, and rented A100 or H100 capacity before the v0.5 exit.
+</Callout>
+
+## At a glance
+
+| Phase | Theme | State |
+| --- | --- | --- |
+| [P0](#p0-scaffold) | Scaffold | Done, except the Go generated code |
+| [v0.1](#v01-adopt-and-reserve) | Adopt and reserve | Control plane done; blocked on bcd, PostgreSQL and the reference gate runs |
+| [v0.2](#v02-metal) | Bare metal | Control plane done and tested in simulation; site agent and ramdisk need bcd |
+| [v0.3](#v03-vps-and-access) | VPS and access | Control plane done; host runtimes and walkthrough runs need bcd |
+| [v0.4](#v04-scale-and-ha) | Scale and HA | Mostly done in simulation; NodeSpec signing, partitioned history and `bcd helper` missing |
+| [v0.5](#v05-gpu-depth-and-ecosystem) | GPU depth and ecosystem | Control plane done ahead of schedule; hardware exits not run |
+| [v1.0](#v10-freeze) | Freeze | Not started |
+
+Every package is at version 0.1.0 and none is published: npm publishing waits until Better IAM is on npm.
+
+## P0: Scaffold
+
+P0 was committed with `pnpm check` green, and its contracts are frozen: `proto/bettercompute/agent/v1`, the
+`@better-compute/core` contracts, the v0.1 schema and the v0.1 rows of PLAN.md §9.2 now change only by additive,
+reviewed edits.
+
+| Deliverable | State | Notes |
+| --- | --- | --- |
+| git and `git init` | Done | With GitHub Desktop's bundled git; git is not on the machine's `PATH` |
+| A pnpm workspace mirroring Better IAM's | Done | |
+| Scripts `check-deps`, `check-sql-now`, `umbrella`, `sync-better-iam`, `proto-gen`, `authz-matrix` | Done | Under `scripts/`; `pnpm lint:repo` runs the repository rules |
+| Better IAM vendored | Done | 0.1.0 as tarballs in `vendor/better-iam`, pinned through `overrides` |
+| Packages `core`, `protocol`, `postgres` (with `./pglite` and `compute_now()`), shells of `server`, `client`, `cli`, `testing`, stubs of `inventory`, `provision`, `metal`, `vps`, and the umbrella | Done | The stubs have since been implemented |
+| `protocol` with TypeScript and Go generated code committed | In progress | TypeScript is generated; `daemon/gen/` stays empty until Go is installed |
+| `daemon/` skeleton and goreleaser configuration | In progress | Written; never built, since there is no Go toolchain |
+| CI: Ubuntu and Windows on Node 22 and 24, a PostgreSQL job, a Go job; the IAM contract test; `bench/REFERENCE.md` | Done | `.github/workflows/ci.yml` and `daemon.yml` are defined; this page does not track CI runs |
+
+| Exit | State |
+| --- | --- |
+| `pnpm check` green, including `umbrella --check` | Done locally |
+| `buf breaking` against `proto/baseline.binpb` | Done: the baseline is committed and CI runs it |
+| Packed smoke importing `better-compute/{inventory,provision,metal,vps}` | Done: `test:packed` |
+| Freeze of `agent/v1`, the core contracts, the v0.1 schema and the v0.1 §9.2 rows | Done |
+
+Of the day-one verifications, PGlite's `btree_gist` is verified. The go-nvml mock, the KVM runner and CDI on target
+hosts are not, for want of Go and hardware.
+
+## v0.1: Adopt and reserve
+
+v0.1 adopts servers you already run (a brownfield join with a token) and reserves their GPUs. It was split into five
+workstreams.
+
+| Workstream | State | Notes |
+| --- | --- | --- |
+| **W1, Go daemon**: join, session, journal, Renew with proof of possession, NVML inventory, `devices` and `access` convergence, CDI holds, `diag.nvml`, `node.reboot`, release artifacts, install script | In progress, blocked | The Go skeleton has `bcd version` and `bcd doctor` plus the contracts of every package; every other subcommand exits 2 `NOT_IMPLEMENTED`. The install script is done (`better-compute daemon install-script`). The FakeDaemon implements the whole W1 contract today |
+| **W2, gateway and PKI**: mTLS sessions, the serving CA, epoch fencing, liveness batching, dispatch by join, resume rules, `BUSY` re-queue, local CAs, the `join-token` attestor, JoinService, the downloads route | Done | `@better-compute/gateway`, `@better-compute/pki` |
+| **W3, store, capacity and inventory**: schema, `compute_now()`, work queue, outbox, leases, CommandSweeper, `InlinePlacer`, atoms, rollups, `gpu-models.json`, conformance and torture tests | Done | `@better-compute/postgres`, `capacity`, `inventory` |
+| **W4, IAM bridge**: the catalog, plugin and inbox, projection and resolver, `embedded()`, IAM jobs, flag cache, usage sink, IamReconcile, contract test, authz matrix | Done | `@better-compute/iam` |
+| **W5, server, client, CLI, simulator**: `operation()`, the method registry, the v0.1 groups, the typed client, the CLI (`dev`, `iam setup`, `daemon install-script`, `pki issue-gateway`), the deterministic simulator and the real-time harness | Done | |
+
+| Acceptance | State | Notes |
+| --- | --- | --- |
+| A real `bcd` installed by the install script, plus 3 FakeDaemons, join and match the golden inventory | In progress | The FakeDaemon half is done; no real `bcd` exists yet |
+| An org user reserves 4 GPUs from an offered pool; the CDI spec lists exactly the booked UUIDs, which `reservations.get` returns | In progress | `tests/server-spine-v01.test.ts` runs join, adopt, reserve, bind and liveness end to end against the FakeDaemon; a CDI spec on a real host needs bcd |
+| `ReserveBoundedH100` allows 8 GPUs and denies 9; `BoundedExtend` denies 72 h + 1 h | Done | IAM bridge and contract tests |
+| `gpu.h100.hours` reaches Better IAM billing without duplicates across worker restarts, even with a deleted identity in a batch | Done | Idempotency keys on every usage window; the sink re-attributes deleted identities |
+| Place-to-active p99 under 2 s with 1k FakeDaemons in the real-time harness | Done, indicative | 1.02 s at 5 placements/s on PGlite; the inline placer saturates one pool between 5 and 10/s |
+| No upstream Better IAM change | Done | The supported topology of PLAN.md §12.1 |
+
+| Exit test | State |
+| --- | --- |
+| The spine end to end (planned as `tests/e2e/spine.test.ts`) | Done as `tests/server-spine-v01.test.ts` |
+| `tests/capacity-concurrency.test.ts`: 1,000 concurrent operations never double-book, and the torture test | Done on PGlite (interleaved); the truly concurrent PostgreSQL half skips without a server |
+| Faults: gateway kill mid-command runs nothing twice, journal loss fails instead of replaying, a reboot completes on rejoin, invariants I1, I2, I5, I8 | Done in `tests/sim/fleet-gateway.test.ts` and `fleet-stub.test.ts` |
+| Security negatives: an IamPort spy records zero IAM calls on fleet paths over 10 simulated minutes | Done (`tests/sim/iam-negative.test.ts`) |
+| Security negatives: authz matrix at 100%, resolver timeout denies, a failed `authorizeMany` fails the list, join tokens honour `maxUses` and TTL, node A cannot get node B's spec, Renew without proof of possession is rejected, cross-tenant requests leak nothing | Done |
+
+The v0.1 gates are where the phase is really held open:
+
+| Gate | State |
+| --- | --- |
+| **Gateway**: one Node gateway holds 5,000 mTLS sessions at 10 s heartbeats for 30 minutes, dispatch p99 under 500 ms, RSS under 2 GiB | Indicative pass only. On a development workstation (PGlite, cleartext HTTP/2, the load generator in the same process, 60 s): 5,000 sessions held, dispatch p99 32 ms, RSS 924 MiB, 0 drops, and a reconnect storm with every command settled once. The 30-minute run with mTLS and PostgreSQL 17 on the reference host has not happened, so D20 (a Go gateway) stays undecided |
+| **IAM lane**: embedded Better IAM on adapter-postgres sustains 50 admissions/s with lock wait under 50%, and the ceiling is recorded | Not started: the suite exists (`tests/bench/iam-lane.bench.ts`) but needs PostgreSQL, so D18 (proposing R1 upstream) stays open |
+| Placements/s recorded | Done on PGlite: 35.7/s for the inline placer at 1k nodes |
+
+## v0.2: Metal
+
+v0.2 takes servers from a BMC and network boot to a deployed OS and back, with verified wipes.
+
+| Deliverable | State | Notes |
+| --- | --- | --- |
+| `bcd site` and `bcd ramdisk` | In progress, blocked | Their command kinds, payloads and the control-plane side are done; the Go modes need a toolchain. The FakeDaemon plays both roles in tests |
+| `provision` and `metal()` | Done | The workflow engine, profiles, the `metal` group and reconciler |
+| `siteTokens` and the SiteBoot lease; `joinRequests` | Done | A standby site agent is promoted within 30 s of the active one's loss |
+| `discovery`, `provisioned` and `x509pop` attestors | Done | |
+| Signed destructive commands and the trust bundle; node-signed attested results | Done | Every command is worker-signed when `commandSigning` is configured; a gateway-forged wipe result is refused |
+| `SecretRequest` sealed secrets, the `secrets` API and BMC rotation | Done | Two-phase BMC password rotation |
+| The image catalog and site caches; FleetConfig plan and apply | Done | |
+| XID and health classification, and `diag.dcgm` acceptance | In progress | Classification, quarantines and remediation are done; running DCGM needs the ramdisk |
+| The revocation-push SLA | Done | A revoked node's session closes within 5 s (about 1 s in tests) |
+| Emulation CI | In progress | `examples/emulated-site` runs metal on QEMU/KVM with sushy-tools on a Linux host with KVM; there is no KVM runner (D15) |
+| Walkthrough 1, Ubuntu autoinstall | Done in simulation | `tests/extensions/ubuntu-autoinstall.test.ts` |
+
+| Acceptance and exit | State |
+| --- | --- |
+| 20 unattended enroll, ready, deployed, released, ready loops on UEFI and BIOS VMs | Done in simulation; not run on VMs |
+| Killing the site agent or the worker mid-deploy resumes cleanly (`metal-chaos`) | Done (`tests/metal-chaos.test.ts`) |
+| Every `ready` follows a verified wipe; `metal-lifecycle` | Done |
+| Site agents refuse other sites' steps | Done |
+| A `SecretResponse` cannot be opened with another key or after its TTL | Done |
+| Unsigned images are rejected; a ramdisk certificate cannot open a `node` session; unsigned destructive commands are rejected | Done |
+
+## v0.3: VPS and access
+
+| Deliverable | State | Notes |
+| --- | --- | --- |
+| `vps()`: instances, flavors, provider accounts, overcommit, IPAM | Done | The control plane and the instance reconciler |
+| Host runtimes `libvirt-kvm` and `cloud-hypervisor` | In progress, blocked | They run inside bcd on each host |
+| `provider-hetzner` (Cloud, and Robot with `bootstrap`) | Done | Outside the umbrella package |
+| Single-tenant containers | In progress | Pools declare `policy.runtime` and must set `policy.singleTenant` for container runtimes, and vps refuses a container on a pool that serves other tenants; the host runtime needs bcd |
+| Tunnels with daemon-verified tickets, `nodes.issueSshCert`, the `access` section | Done | Including node-bound break-glass certificates and an SSH KRL for revocation |
+| Webhooks and SSE | Done | `@better-compute/events` |
+| `mcp` | Done | `@better-compute/mcp` |
+| Delegated confirmation | Done | |
+| The `cloud-iid` attestor | Done | |
+| Walkthrough 2 (a VPS provider plugin) and walkthrough 3 (Talos) | Done in tests | `tests/vps-provider.test.ts`, `tests/extensions/talos.test.ts` |
+
+| Acceptance and exit | State |
+| --- | --- |
+| 200-instance churn on 3 emulated hosts with no leaks | Done (`tests/vps-churn.test.ts`) against emulated hosts in the test process |
+| Host loss recreates instances per policy | Done |
+| An agent reserves over MCP with a person's confirmation, retrying with the same key | Done (`tests/mcp-e2e-confirmation.test.ts`) |
+| A replayed exec ticket is rejected by the gateway and the daemon | Done, with the FakeDaemon as the daemon |
+| `delegation:revoke` closes the agent's stream within 5 s | Done (`tests/e2e/access.test.ts`) |
+| Multi-tenant container offers are rejected; no tenant VM runs bcd | Done |
+| `tests/e2e/vps.test.ts` on real hosts | Not started: needs bcd and a KVM host |
+
+## v0.4: Scale and HA
+
+| Deliverable | State | Notes |
+| --- | --- | --- |
+| `PoolLeasePlacer` | Done | Opt-in: `capacityModule({ placer: 'pool-lease' })` (D22) |
+| Shard rebalancing | Done | A silent worker's shards are taken at lease expiry |
+| Several gateways | Done in simulation | Three real gateways behind the fleet simulator, with gateway kill and zombie fencing |
+| WebSocket fallback, signed frames only | Done | Gateway and FakeDaemon sides; bcd's side needs Go |
+| A/B self-update and Rollout | In progress | Signed releases and wave rollouts are done; the A/B swap on the node is bcd's |
+| `bcd helper` | Not started | Go |
+| Signing of all commands and specs | In progress | Every command is signed; `signDesiredState` exists in pki but the server does not sign NodeSpecs yet |
+| Remote IAM (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) | Done | U0 is an upstream Better IAM item outside this repository |
+| Partitioned history | Not started | History tables are pruned by `retentionModule()` instead |
+| Merkle audit checkpoints | Done | `@better-compute/audit`, with `better-compute audit verify` |
+| `bcd sim` | In progress | `better-compute sim` runs the FakeDaemon fleet simulator; the Go mode is not built |
+| R1, if the IAM-lane benchmark demands it | Not started | Waits for the v0.1 IAM-lane gate |
+
+The v0.4 acceptance is set at 10,000 nodes and 100,000 GPUs on the reference PostgreSQL. What exists is simulation:
+
+| Criterion | State |
+| --- | --- |
+| Gateway-kill recovery under 60 s | Met in simulation: at 10k nodes, the 3,334 re-homed nodes are back at a p99 of 13.25 s simulated time, with no invariant violated |
+| 0 false unreachable marks | Met in simulation (`tests/sim/v04-scenarios.test.ts`) |
+| At least 200 placements/s | Indicative: 1,092/s end to end at 1k nodes and 161/s at 10k with the pool-lease placer, on PGlite |
+| Cold start under 3 minutes, command p99 under 1.5 s with polling only, PostgreSQL CPU under 50% | Not measured: needs the reference PostgreSQL |
+| Suites green in both IAM modes | In progress: embedded and remote modes are both tested |
+| Every §15 v0.4 scenario green on 3 consecutive nights | In progress: the scenarios run in the simulator and `sim:nightly` exists; no nightly history is recorded |
+
+## v0.5: GPU depth and ecosystem
+
+Most of v0.5 landed early, on the control plane.
+
+| Deliverable | State | Notes |
+| --- | --- | --- |
+| MIG, time-slice and MPS atoms | Done | See [fractional GPUs](/docs/guides/capacity/fractional-gpus); applying a MIG layout on a GPU is bcd's |
+| Calendar reservations and BookingRepair | Done | See [gang and calendar](/docs/guides/capacity/gang-and-calendar) |
+| Gang scheduling | Done | |
+| Spot | Done | See [spot and preemption](/docs/guides/capacity/spot-and-preemption) |
+| `dedicated-root` metal and `binding: 'node'` | Done | See [dedicated root](/docs/guides/bare-metal/dedicated-root) |
+| TPM attestor | In progress | The verifier and a software TPM producer are done; bcd's agent side (go-attestation) is not |
+| Optional workload identity | Done in pki | Workload OIDC tokens and the IMDS token exchange |
+| bcx and `driver-sdk` | In progress | The TypeScript SDK runs drivers out of process with mutual TLS; loading them from bcd needs Go |
+| `provider-proxmox` | Done | |
+| console-kit and `apps/console` | Done | |
+| Walkthrough 4, a Kata runtime in Go | Not started | |
+
+| Exit | State |
+| --- | --- |
+| The MIG torture test and the real-hardware nightly | Not started on hardware (D15) |
+| A `dedicated-root` lease and release yield a new identity generation | Done |
+| A third-party TypeScript driver runs on a node via bcx | In progress: runs out of process in tests; not on a node |
+| IMDS cross-instance access fails | Done (`tests/pki-workload.test.ts`) |
+
+## v1.0: Freeze
+
+Not started. It freezes the API and the protocol, guarantees N-2 version skew, adds an external security review
+and SLSA level 3 builds, and publishes to npm with provenance once Better IAM is published. Its acceptance: upgrading
+from v0.5 disturbs no running allocation, with no open critical or high findings.
+
+## What unblocks what
+
+| Unblocked by | Moves |
+| --- | --- |
+| Installing Go 1.24+ | P0's Go code generation, W1, `bcd site` and `bcd ramdisk`, host runtimes, the WebSocket and A/B paths on the node, `bcd helper`, bcx on nodes, the TPM agent |
+| A PostgreSQL 17 server | The concurrent capacity and torture suites, the IAM-lane gate, the 30-minute gateway gate, every v0.4 number |
+| The D15 hardware | Real inventory and CDI on an NVIDIA host, emulation CI on a KVM runner, the MIG and real-hardware nightlies |
+
+For what changed recently, see the [changelog](/docs/reference/changelog).

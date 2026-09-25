@@ -1,0 +1,355 @@
+---
+title: Installing bcd
+metaTitle: Install and upgrade the bcd daemon
+description: The install script that puts bcd on a server, the files and hardened systemd unit it writes, joining with BCD_JOIN_TOKEN, and upgrades.
+icon: Install
+status: experimental
+packages: ['@better-compute/cli', '@better-compute/rollout']
+sources:
+  - packages/cli/src/install-script.ts
+  - packages/cli/src/commands/daemon.ts
+  - daemon/internal/config/config.go
+  - daemon/cmd/bcd/main.go
+  - daemon/internal/journal/journal.go
+  - daemon/internal/journal/rules.go
+  - daemon/.goreleaser.yaml
+  - daemon/README.md
+  - packages/rollout/README.md
+  - packages/server/src/options.ts
+  - PLAN.md
+  - .claude/coordination.md
+---
+
+A server becomes a node in two moves: an operator generates an install script once per pool, then runs it on each
+machine with a single-use <Term id="join-token">join token</Term>. The script downloads a pinned
+<Term id="bcd">bcd</Term> binary, checks its digest, writes a small configuration, installs a hardened systemd unit,
+joins the fleet and starts the daemon. The script contains no secret, so you can keep it in a provisioning
+repository; the token travels separately.
+
+<Callout type="warn" title="The pieces are not all runnable yet">
+The script generator (`better-compute daemon install-script`) is built and tested. Two things it depends on are
+not. First, bcd is written but not built: Go is not installed on the build machine, so no release binary exists,
+and in the skeleton `bcd join` and `bcd node` exit 2 with `NOT_IMPLEMENTED`. Second, the control plane does not
+serve the `downloads/bcd/...` route the script fetches from yet (`ComputeOptions.downloads` is typed but unused).
+Until both land, `better-compute dev --sim N` is the way to see nodes join: it runs the TypeScript FakeDaemon
+through the same join and session protocol. See [local development](/docs/operations/local-development).
+</Callout>
+
+## Generate the script
+
+`daemon install-script` reads the public half of the PKI bundle for the pins, so it needs no secret. Create the
+bundle first with `better-compute pki init` (see [PKI](/docs/operations/pki)).
+
+```bash
+better-compute daemon install-script \
+  --pool pool_h100 --site fsn1 \
+  --gateway-url https://gw.eu.example.com \
+  --base-url https://compute.example.com \
+  --bcd-version 0.1.0 \
+  --sha256 amd64=<hex>,arm64=<hex> > install-bcd.sh
+```
+
+| Flag | Required | Environment | Meaning |
+| --- | --- | --- | --- |
+| `--pool ID` | yes | | The pool the node joins; named in the script's header |
+| `--site ID` | yes | | The pool's site; written to `config.toml` as `site` |
+| `--gateway-url URL` | yes | `BETTER_COMPUTE_GATEWAY_URL` | The regional gateway bcd dials, `https://...` |
+| `--base-url URL` | yes | `BETTER_COMPUTE_BASE_URL` | The control plane that serves the downloads |
+| `--base-path PATH` | no | | The API base path, default `/api/compute` |
+| `--bcd-version VERSION` | yes | `BETTER_COMPUTE_BCD_VERSION` | The release to install, e.g. `0.1.0` (a leading `v` is dropped) |
+| `--sha256 ARCH=HEX,...` | one of two | | SHA-256 of each architecture's bare binary |
+| `--release-manifest PATH` | one of two | | A signed release manifest; its verified digests are pinned instead |
+| `--release-pins PINS` | with a manifest | `BCD_RELEASE_PINS` | Comma-separated `sha256/...` pins of the release keys |
+| `--release-threshold N` | no | | How many release keys must have signed (1 to 16, default 1) |
+| `--pki PATH` | no | | The PKI bundle to read the pins from |
+| `--out PATH` | no | | Write a new file with mode 0755 instead of printing; refuses to overwrite (`FILE_EXISTS`) |
+
+Give exactly one of `--sha256` and `--release-manifest`. With a manifest, the CLI verifies its signatures under
+the pins and threshold, checks that it is for product `bcd` and for `--bcd-version` (`RELEASE_MISMATCH`
+otherwise), and pins the one bare `linux-amd64` and `linux-arm64` binary it lists; archives, checksums and
+metadata files are skipped. See [rollouts](/docs/guides/rollouts) for signing releases.
+
+Every value embedded in the script is checked against a narrow pattern before it is written, so nothing a caller
+passes can break out of the shell or TOML quoting:
+
+| Value | Must be |
+| --- | --- |
+| pool and site ids | letters, digits, `.`, `_` and `-`, starting with a letter or digit, at most 128 characters |
+| version | a semantic version such as `0.1.0` or `v0.2.0-rc.1` |
+| pins | `sha256/` followed by the standard base64 of 32 bytes |
+| digests | 64 lower-case hex digits, for `amd64` and/or `arm64` only |
+| URLs | `https://` with letters, digits and `. - _ ~ /` only; trailing slashes are dropped |
+| join encryption key | a P-256 public JWK (`kty: EC`, `crv: P-256`) |
+
+A bad value fails with `INVALID_INPUT` naming the flag.
+
+## What the script does
+
+The output is a POSIX `sh` script that runs with `set -eu` and `umask 077`.
+
+<Steps>
+<Step>
+
+### Check the host
+
+It stops unless the host runs Linux, the caller is root, and `systemctl` and `sha256sum` exist. It maps
+`uname -m` to an architecture (`x86_64` or `amd64` to `amd64`, `aarch64` or `arm64` to `arm64`) and refuses an
+architecture the script carries no digest for.
+
+</Step>
+<Step>
+
+### Read the token
+
+The token comes from `BCD_JOIN_TOKEN`, or else from the first line of standard input when standard input is not a
+terminal. The variable is unset right after. Anything that does not look like `bcjt_<id>.<secret>` is refused with
+exit code 2. Without a token, the script continues only when `/etc/bcd/config.toml` already exists; that is an
+upgrade (below).
+
+</Step>
+<Step>
+
+### Download and verify
+
+It fetches `{downloads}/bcd/{version}/linux-{arch}` into a temporary directory with `curl` (HTTPS only, TLS 1.2 or
+later, three retries) or `wget --https-only`, and compares the file with the pinned SHA-256. A mismatch stops the
+script before anything is installed.
+
+</Step>
+<Step>
+
+### Install the files
+
+It creates `/etc/bcd` and `/var/lib/bcd` with mode 0700 and `/etc/cdi` with mode 0755. Each file is written next to
+its target as `*.new` and renamed over it, so a replacement is atomic even while bcd runs. Then
+`systemctl daemon-reload`.
+
+</Step>
+<Step>
+
+### Check, join and start
+
+It runs `bcd doctor --config /etc/bcd/config.toml` and prints a warning if doctor reports a problem, without
+stopping. With a token, it pipes the token into `bcd join --config /etc/bcd/config.toml` with `printf`, a shell
+builtin, so the token never appears in a process listing, then runs `systemctl enable --now bcd.service`. Without
+a token, it runs `systemctl restart bcd.service`.
+
+</Step>
+</Steps>
+
+Download the script before running it. Piping it into `sh` would leave no standard input for the token.
+
+```bash
+BCD_JOIN_TOKEN=bcjt_... sudo -E sh install-bcd.sh
+# or, keeping the token out of the environment:
+sudo sh install-bcd.sh < token-file
+```
+
+## Files on the host
+
+<Files>
+  <Folder name="/usr/local/bin" defaultOpen>
+    <File name="bcd (0755)" />
+  </Folder>
+  <Folder name="/etc/bcd" defaultOpen>
+    <File name="config.toml (0600)" />
+    <File name="join-encryption.jwk (0644, public)" />
+  </Folder>
+  <Folder name="/etc/systemd/system" defaultOpen>
+    <File name="bcd.service (0644)" />
+  </Folder>
+  <Folder name="/var/lib/bcd (0700)" defaultOpen>
+    <File name="journal, and the node key when there is no TPM" />
+  </Folder>
+  <Folder name="/run/bcd (0700)" defaultOpen>
+    <File name="bcd.sock (root-only status socket)" />
+  </Folder>
+  <Folder name="/etc/cdi (0755)" defaultOpen>
+    <File name="bcd-ALLOCATION.json (written by the devices converger)" />
+  </Folder>
+</Files>
+
+The script writes the first four. The other paths belong to the running daemon: the journal and key under
+`data_dir`, the status socket under `socket_path`, and CDI specs for `hold` bindings. The token is consumed by the
+join and never written anywhere.
+
+### config.toml
+
+```toml title="/etc/bcd/config.toml"
+# Written by the better-compute install script. bcd refuses unknown keys.
+gateway_url = "https://gw.eu.example.com"
+site = "fsn1"
+serving_ca_spki_pin = "sha256/..."
+join_signing_key_pin = "sha256/..."
+join_encryption_key_pin = "sha256/..."
+```
+
+bcd reads the file with `daemon/internal/config`, a strict subset of TOML 1.0: bare keys, basic or literal
+strings, decimal integers (with `_` between digits) and booleans, in the top level or a bare `[section]`. Arrays,
+inline tables, floats, dates, multi-line strings, dotted or quoted keys, unknown keys, unknown sections, duplicate
+keys and wrong types are all errors with a line number, so a typo fails loudly. Files over 64 KiB are refused.
+
+| Key | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `gateway_url` | yes | | An `https://` URL without credentials |
+| `site` | yes | | The site id, no whitespace |
+| `serving_ca_spki_pin` | yes | | Pins the gateway serving CA |
+| `join_signing_key_pin` | yes | | Pins the JoinService key that signs `JoinResponse` |
+| `join_encryption_key_pin` | yes | | Pins the JoinService key the token is sealed to |
+| `data_dir` | no | `/var/lib/bcd` | Absolute path for the journal and key |
+| `socket_path` | no | `/run/bcd/bcd.sock` | Absolute path of the status socket |
+| `[journal] max_bytes` | no | 67108864 | May lower the 64 MiB cap, never raise it |
+| `[journal] max_events` | no | 10000 | May lower the 10,000 unacked-event cap, never raise it |
+| `[log] level` | no | `info` | `debug`, `info`, `warn` or `error` |
+| `[log] json` | no | `true` | JSON lines |
+
+A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKeyInfo, the form HPKP and
+`curl --pinnedpubkey` use. `bcd doctor` warns when the file is readable or writable by anyone but its owner.
+
+### join-encryption.jwk
+
+The pins alone cannot seal a token, so the script also writes the JoinService encryption public key as a JWK.
+`bcd join` uses it only when its SPKI hash equals `join_encryption_key_pin`, and otherwise falls back to
+`GET {basePath}/.well-known/better-compute`, accepting keys from there only when they match the pins. See
+[the join key and its fallback](/docs/guides/nodes/joining#the-join-key-and-its-fallback).
+
+## The systemd unit
+
+Until the v0.4 helper split, `bcd node` runs as root, so the unit narrows what root can do.
+
+```ini title="/etc/systemd/system/bcd.service"
+[Unit]
+Description=better-compute node agent (bcd)
+Documentation=https://github.com/better-compute/better-compute
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bcd node --config /etc/bcd/config.toml
+Restart=always
+RestartSec=5s
+UMask=0077
+StateDirectory=bcd
+StateDirectoryMode=0700
+RuntimeDirectory=bcd
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=bcd
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=-/etc/cdi -/var/run/cdi
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_SYS_BOOT CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target
+```
+
+| Setting | Effect |
+| --- | --- |
+| `ProtectSystem=strict` | The whole file system is read-only for bcd, except its state, runtime and configuration directories and the `ReadWritePaths` |
+| `ReadWritePaths=-/etc/cdi -/var/run/cdi` | The CDI spec directories the devices converger writes; the `-` tolerates a missing directory |
+| `StateDirectory`, `RuntimeDirectory` | systemd creates `/var/lib/bcd` and `/run/bcd` with mode 0700 |
+| `NoNewPrivileges`, `RestrictSUIDSGID` | No privilege gain through exec or set-id files |
+| `ProtectHome`, `PrivateTmp` | No access to home directories; a private `/tmp` |
+| `ProtectKernelModules`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname` | Kernel modules, cgroups, the clock and the hostname are off limits |
+| `RestrictAddressFamilies` | Unix sockets, IPv4, IPv6 and netlink (for NIC inventory) only |
+| `CapabilityBoundingSet` | Rebooting, device and raw I/O access, network administration and file ownership; nothing else |
+| `Restart=always`, `StartLimitBurst=10` in 300 s | Restarts after 5 s, and gives up after 10 starts in five minutes |
+
+`bcd node` opens no TCP listener; everything it does starts with an outbound connection to the gateway. See
+[the overview](/docs/daemon) for the privilege-separation plan.
+
+## Joining
+
+The join itself is `bcd join`, which the script runs for you:
+
+1. bcd generates a P-256 key, in the TPM when there is one, else in a 0600 file under `data_dir`, and a CSR.
+2. It seals the token to the JoinService encryption key and calls `Join` on the gateway over TLS pinned to the
+   serving CA. The gateway relays the call; it can neither read the token nor forge the answer.
+3. It verifies the signed `JoinResponse` under the pinned signing key, checks that the response is for its own
+   CSR, and stores the certificate chain and trust bundle in the journal.
+
+bcd never takes the token from a command-line argument, so a token pasted in the wrong place does not reach shell
+history or logs. `bcd join` rejects positional arguments without echoing them:
+
+```bash
+$ bcd join bcjt_jt_01...
+bcd join: takes no positional arguments
+bcd join reads the join token from BCD_JOIN_TOKEN or stdin, never from arguments
+```
+
+The node then opens its session (see [sessions](/docs/daemon/sessions)) and appears as `adopting`. Tokens,
+attestors, refusals and certificates are covered in [joining nodes](/docs/guides/nodes/joining).
+
+## Upgrades
+
+### Before v0.4: rerun the script
+
+Run the same script, or one generated for a newer `--bcd-version`, without a token on a host that already has
+`/etc/bcd/config.toml`. It downloads and verifies the new binary, replaces `/usr/local/bin/bcd` with an atomic
+rename, rewrites the configuration, key and unit, and restarts the service:
+
+```bash
+sudo sh install-bcd.sh
+# bcd upgraded to 0.1.1 and restarted.
+```
+
+The node keeps its identity and journal across the restart. On reconnect its `Hello` carries the new
+`daemon_version`, which the gateway records in `node_sessions.daemon_version`.
+
+### From v0.4: rollouts and self-update
+
+The v0.4 design moves upgrades into desired state. A [rollout](/docs/guides/rollouts) sets
+`NodeSpec.daemon = { version, url, sha256 }` on nodes wave by wave (1%, 10%, 50%, 100% by default) within each
+pool's disruption budget, and a node succeeds when it rejoins reporting that version. On the node, PLAN.md §6
+designs:
+
+- two binary slots with a `current` symlink: verify the download, write `upgrade.json` with a deadline of now plus
+  120 seconds, swap, and `exec` the new binary;
+- no `Welcome` by the deadline: swap back;
+- a crash loop trips `StartLimitBurst`, and `OnFailure=bcd-rollback.service` restores the old slot;
+- running workloads are not touched.
+
+A daemon too old to speak the server's minimum protocol version gets `Welcome.upgrade_required`, and its session
+accepts only the `daemon.upgrade` command kind, which carries the same `DaemonSection`. The rollout controller sends
+it to such nodes. `daemon.upgrade` is self-terminating, like `node.reboot`: see
+[delivery](/docs/daemon/delivery).
+
+<Callout type="warn" title="Self-update is control-plane only today">
+`@better-compute/rollout` ships the releases, the rollout controller, `NodeSpec.daemon` and `daemon.upgrade`. The
+node half is not written: bcd has no slot swap yet, the unit the script installs has no `OnFailure` rollback
+service, and the FakeDaemon reports a non-empty `daemon` section as `SectionUnsupported`. Rerun the install script
+to upgrade.
+</Callout>
+
+The fleet-wide order for any upgrade is: expand migrations, then workers and api, then gateways one at a time
+with `Drain`, then daemons in waves, and contract migrations in the next release. See
+[version skew](/docs/daemon/protocol#version-skew).
+
+## Removing bcd
+
+Neither the CLI nor bcd has an uninstall step, and PLAN.md designs none. Retire the node in the control plane first
+so nothing is scheduled on it (see [operating nodes](/docs/guides/nodes/operating-nodes)). Then stop and disable
+`bcd.service` and remove the files listed above.
+
+## Release artifacts
+
+bcd builds with goreleaser from `daemon/` (`.goreleaser.yaml`) for Linux on amd64 and arm64, with cgo and `zig cc`
+because go-nvml loads `libnvidia-ml`. A release produces `bcd_<version>_linux_{amd64,arm64}.tar.gz`, each with a
+`.sha256`, and the bare binaries `bcd_<version>_linux_{amd64,arm64}`. The bare binary is what the install script
+downloads, what a signed release manifest lists and what self-update verifies. Publishing is disabled in the
+configuration until the release workflow exists.

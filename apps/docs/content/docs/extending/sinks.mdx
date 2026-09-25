@@ -1,0 +1,264 @@
+---
+title: Sinks
+description: Event sinks receive every committed outbox event at least once, each with its own durable cursor. How dispatch works, the cursor pitfalls, poison events, and the IAM usage sink.
+icon: Inbox
+status: experimental
+packages: ['@better-compute/core', '@better-compute/server', '@better-compute/events', '@better-compute/iam']
+sources:
+  - packages/core/src/extension.ts
+  - packages/core/src/domain.ts
+  - packages/core/src/iam.ts
+  - packages/server/src/runtime/events.ts
+  - packages/server/src/runtime/index.ts
+  - packages/server/src/options.ts
+  - packages/server/src/index.ts
+  - packages/events/src/outbox.ts
+  - packages/events/src/webhooks.ts
+  - packages/events/src/module.ts
+  - packages/events/src/migrations.ts
+  - packages/iam/src/bridge.ts
+  - packages/iam/src/worker.ts
+  - packages/iam/src/usage.ts
+  - packages/capacity/src/module.ts
+  - packages/postgres/src/migrations/0002_base.ts
+  - packages/postgres/src/migrations/0009_runtime.ts
+  - packages/postgres/src/retention.ts
+  - tests/server-runtime-outbox-cursors.test.ts
+  - tests/server-runtime-outbox.test.ts
+  - PLAN.md
+---
+
+Every change in Better Compute writes an event to the <Term id="outbox">outbox</Term> in the same transaction as the
+change. An **event sink** is how you get all of those events out of the database and into something else: a
+warehouse, a queue, a platform-wide audit feed. The control plane hands each sink every committed event, in commit
+order, at least once, and remembers per sink how far it got.
+
+## The contract
+
+```ts title="@better-compute/core"
+interface EventSink {
+  readonly extension: 'sink';
+  readonly kind: 'events';
+  readonly id: string;
+  /** At-least-once; events carry ids for deduplication. */
+  deliver(events: readonly ComputeEvent[]): Promise<void>;
+}
+
+interface ComputeEvent<D = Json> {
+  id: string;       // evt_…, stable across redeliveries
+  type: string;     // reservation.placed, node.connected, …
+  tenantId: string;
+  subject: string;  // reservation/rsv_…
+  time: string;     // RFC 3339, from compute_now() at insert
+  sequence: string; // <txid>:<seq>, the outbox position
+  data: D;
+}
+```
+
+`deliver` resolves when the batch is safely stored on your side, and throws when it is not. That is the whole
+protocol.
+
+```ts title="compute.ts"
+import { betterCompute, defineSink } from 'better-compute';
+
+const warehouse = defineSink({
+  kind: 'events',
+  id: 'warehouse',
+  async deliver(events) {
+    // One idempotent write per batch; event.id is the deduplication key.
+    await warehouseClient.upsert('compute_events', events.map((event) => ({ key: event.id, row: event })));
+  },
+});
+
+export const compute = betterCompute({
+  // …database, secret, baseURL, iam
+  sinks: { events: [warehouse] },
+});
+```
+
+The id must be a non-empty string, unique among the event sinks (two sinks with one id would share a cursor, so the
+options refuse it with `INVALID_CONFIG`). Pick it once and keep it: the cursor is stored under the id.
+
+## How dispatch works
+
+OutboxDispatch runs in the `sinks` worker role, under the singleton lease `singleton:outbox-dispatch`, so exactly one
+process delivers at a time. Tests step it with `compute.jobs['outbox-dispatch'].tick()`.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as OutboxDispatch (lease holder)
+  participant O as outbox
+  participant S as your sink
+  participant C as outbox_cursors
+  W->>C: new lease epoch: load every sink cursor
+  loop each sink, each pass
+    W->>O: read after the sink's cursor (finished transactions only)
+    W->>S: deliver(batch)
+    alt resolved
+      W->>C: save the cursor, forward only
+    else threw
+      W->>W: back off this sink; cursor unchanged
+    end
+  end
+```
+
+- **Per-sink cursors.** Each sink reads from its own position, so a failing sink backs off without holding the
+  others back.
+- **Batches.** A pass reads up to 4 × `worker.batchSize` events per sink (128 with the default of 32) and hands them
+  to `deliver` in one call.
+- **Failure.** A throw leaves the cursor where it was. The sink is retried after 1 second, doubling up to 5
+  minutes, and a warning is logged with the attempt count. There is no attempt limit and no dead letter.
+- **Handover.** Cursors are saved to `outbox_cursors` after every delivered batch. When a process takes the lease
+  under a new epoch it reloads them, so a new holder resumes where the last one saved. A batch delivered whose save
+  failed, or whose holder died before saving, is delivered again.
+- **A new sink** has no stored cursor and starts at the origin: it receives every event the outbox still holds.
+
+## Cursors and the txid pitfall
+
+```sql
+CREATE TABLE outbox (
+  seq bigserial PRIMARY KEY,
+  txid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+  topic text NOT NULL,
+  payload jsonb
+);
+CREATE TABLE outbox_cursors (            -- core/0009_runtime
+  name text PRIMARY KEY,                 -- sink:<id>
+  stream text NOT NULL DEFAULT 'outbox', -- or authz_changes
+  txid xid8 NOT NULL,
+  seq bigint NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT compute_now()
+);
+```
+
+An event's position is the pair `(txid, seq)`, never `seq` alone. Sequence numbers are drawn when a row is
+inserted, but transactions commit in a different order: transaction A can take `seq` 41, transaction B `seq` 42,
+and B commit first. A reader that saw 42 and moved its cursor past it would never see 41. Every reader in Better
+Compute therefore reads like this:
+
+```sql
+SELECT o.seq::text AS seq, o.txid::text AS txid, o.topic, o.payload FROM outbox o
+ WHERE o.txid < pg_snapshot_xmin(pg_current_snapshot())
+   AND (o.txid, o.seq) > ($1::xid8, $2::bigint)
+ ORDER BY o.txid, o.seq LIMIT $3;
+```
+
+Only transactions older than every transaction still running are read, so nothing can commit behind the cursor
+afterwards. If you read the outbox yourself, keep all of it:
+
+- **Filter on `txid < pg_snapshot_xmin(…)`.** Without it you will skip events under load, and no test on an idle
+  database will show it.
+- **Compare and order the pair.** `(txid, seq) > (…)` as a row comparison, `ORDER BY txid, seq`.
+- **Order by the columns, not their text.** A query that selects `txid::text AS txid` and then says `ORDER BY txid,
+  seq` sorts the text aliases (`'10' < '9'`). Qualify the columns (`o.txid`) or alias the text differently
+  (`txid_text`), as the built-in readers do.
+- **Keep the numbers as strings.** `xid8` is 64 bits; carry it as a decimal string and compare with `BigInt`, never
+  as a JavaScript number.
+- **Two spellings.** Server-side events (`events.list`, sinks, `compute.events`) write `sequence` as `<txid>:<seq>`.
+  The events package's readers, the SSE stream and webhook bodies write `<txid>.<seq>`. They name the same position.
+
+Cursor saves only move forward: the upsert applies only when the new `(txid, seq)` is greater, so a late save by a
+holder that lost the lease cannot move a cursor back.
+
+**Retention.** `retentionModule()` from `@better-compute/postgres` deletes outbox rows only behind the lowest cursor
+of the `outbox` stream (and older than a minimum age); a stream with no cursor is never pruned. So a sink that stops
+delivering holds the outbox back, and a sink you remove from the options leaves its `sink:<id>` row behind: delete
+that row, or retention keeps waiting for it. On a schema without `outbox_cursors`, cursors live in memory, a
+warning is logged once, and a new lease holder starts every sink at the origin.
+
+## Poison events
+
+Because a throw retries the whole batch, one event your sink can never accept blocks that sink forever: every retry
+hands it the same batch. The dispatcher does not bisect. Isolate poison inside `deliver`:
+
+```ts title="warehouse-sink.ts"
+import { defineSink } from 'better-compute';
+
+export const warehouse = defineSink({
+  kind: 'events',
+  id: 'warehouse',
+  async deliver(events) {
+    try {
+      await store.insertMany(events); // the fast path: one idempotent write
+      return;
+    } catch (error) {
+      if (isTransient(error)) throw error; // retried with back-off, cursor unchanged
+    }
+    // A permanent failure somewhere in the batch: store what you can, park the rest.
+    for (const event of events) {
+      try {
+        await store.insertMany([event]);
+      } catch (error) {
+        if (isTransient(error)) throw error;
+        await store.deadLetter(event, String(error)); // your own table or queue
+      }
+    }
+  },
+});
+```
+
+Throw only for failures that a retry can fix (the destination is down, a timeout). Everything that is wrong with
+one event must be recorded and skipped, or the sink never moves again.
+
+## Webhooks are not a sink
+
+Per-tenant webhooks are built differently, as the `eventsModule()` from `better-compute/events`, and they show the
+other way to consume the outbox: from a module of your own.
+
+| | Event sink (`sinks.events`) | `eventsModule()` webhooks |
+| --- | --- | --- |
+| Runs in | OutboxDispatch, the `sinks` role | Reconcilers `events.fanout` (every 1 s) and `events.deliver` (every 2 s), the `controllers` role |
+| Cursor | `outbox_cursors`, `sink:<id>`; holds retention back | `event_cursors`, `webhooks`; does not hold retention back |
+| Starts at | The origin | The outbox tail when the module first starts: history is not replayed |
+| Unit of retry | The whole batch, forever | One delivery row per webhook and event: backoff 1 m, 5 m, 30 m, 2 h, 6 h, 12 h, 24 h, then `dead` after 8 attempts |
+| Poison | Yours to isolate | A failing endpoint dead-letters its own deliveries; `webhooks.redeliver` retries one |
+
+The fan-out pass locks its cursor row, reads a page with `readOutbox`, inserts one `webhook_deliveries` row per
+matching webhook and event, and advances the cursor, all in one transaction. A module that needs per-item retries
+can follow the same pattern with `readOutbox`, `outboxTail` and `formatCursor` from `better-compute/events`. Remember
+that such a cursor is invisible to retention: if you need every event, save a copy of your position in
+`outbox_cursors` too, or use a sink. See [webhooks](/docs/guides/events/webhooks).
+
+For in-process reactions, `compute.events.subscribe('reservation.*', handler)` tails the outbox from the moment you
+subscribe, with an in-memory cursor. It is not durable: use a sink when you need every event.
+
+## Usage and audit sinks
+
+`defineSink` also accepts `kind: 'usage'` (`write(events: UsageEvent[]): Promise<UsageResult[]>`, one result per
+event) and `kind: 'audit'` (`write(records: AuditRecord[])`), and `betterCompute({ sinks: { usage, audit } })`
+registers them. **Nothing dispatches to them in v0.1**: they are checked for duplicate ids and otherwise unused.
+Audit rows stay in `audit_events`, sealed by the `audit` module's hourly checkpoints; see
+[audit](/docs/guides/events/audit).
+
+Usage reaches Better IAM billing through the IAM bridge instead. PLAN.md §5.4 sketches it as
+`sinks: { usage: [bridge.usageSink()] }`; the code implements it as reconcilers:
+
+1. `capacity.usage` (every 5 minutes) writes closed hourly <Term id="usage-window">usage windows</Term> of running
+   allocations to `usage_windows`, each with the idempotency key `cmp:<allocationId>:<windowStartMs>`.
+2. `iam.usage` in the bridge's `iam` module (every hour) sends up to 1,000 closed, unrecorded windows through
+   `IamPort.recordUsage`, then stores each window's outcome.
+
+`recordUsage` isolates poison the way an event sink should. Better IAM records a batch of up to 200 in one
+transaction, so one bad event would fail the whole batch on every retry. On an error specific to the events
+(`NOT_FOUND`, `CONFLICT`, `BILLING_PERIOD_CLOSED`, `INVALID_INPUT`, `INVALID_TRANSITION`, `METER_ARCHIVED`) the
+batch is bisected down to the event, which gets one of these results:
+
+| Result | Meaning |
+| --- | --- |
+| `recorded`, `duplicate` | Recorded now, or already recorded under the same key |
+| `reattributed` | Its identity no longer exists: recorded under the offboarded identity's successor, or tenant-attributed with the tag `attribution=orphaned` |
+| `dead-lettered` | Still fails on its own; stored in `usage_dead_letters` with the error code and message |
+
+Any other error is transient and rejects the whole call; the windows stay unrecorded and the next pass retries them
+with the same keys. See [billing and usage](/docs/guides/iam/billing-and-usage).
+
+## Checklist for your own sink
+
+1. Choose a stable `id`; it names the cursor.
+2. Make `deliver` idempotent on `event.id`: every event can arrive twice.
+3. Throw only for transient failures; dead-letter the rest yourself.
+4. Keep `deliver` within seconds: while it runs, the lease holder delivers to no other sink.
+5. Expect a new sink to start with everything the outbox still holds.
+6. When you retire a sink, delete its `sink:<id>` row from `outbox_cursors`.
+7. Run at least one worker with the `sinks` role (`compute.start()` runs every role by default).

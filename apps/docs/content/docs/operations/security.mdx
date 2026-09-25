@@ -1,0 +1,250 @@
+---
+title: Security
+description: The trust boundaries and threat model of Better Compute, the controls that enforce them, and a checklist for hardening a deployment.
+icon: ShieldCheck
+packages: ['@better-compute/server', '@better-compute/gateway', '@better-compute/pki', '@better-compute/audit', '@better-compute/cli']
+sources:
+  - PLAN.md
+  - CHANGELOG.md
+  - packages/server/README.md
+  - packages/server/src/http.ts
+  - packages/server/src/options.ts
+  - packages/server/src/join/gateway-services.ts
+  - packages/server/src/join/secret-broker.ts
+  - packages/server/src/join/rate.ts
+  - packages/server/src/runtime/command-signing.ts
+  - packages/server/src/tunnels/module.ts
+  - packages/gateway/README.md
+  - packages/gateway/src/gateway.ts
+  - packages/pki/README.md
+  - packages/pki/src/tickets.ts
+  - packages/pki/src/revocation-feed.ts
+  - packages/audit/README.md
+  - packages/cli/src/host/gateway.ts
+  - packages/cli/src/host/tunnels.ts
+  - packages/cli/src/host/findings.ts
+  - packages/cli/src/commands/serve.ts
+---
+
+Better Compute runs commands as root on your machines, so its security model starts from one question: who can make
+a machine do something? The answer is meant to be only the control plane, only after Better IAM allowed the call,
+and only in a form the machine can check itself. This page summarizes the model from the security section of PLAN.md, says which parts
+are built, and ends with a hardening checklist.
+
+## Trust boundaries
+
+| Boundary | Protected by |
+| --- | --- |
+| Caller to api | TLS at your load balancer; Better IAM authenticates every caller and decides every call |
+| api to Better IAM | In-process (embedded) through the IAM bridge |
+| api and workers to gateway | Mutual TLS from the internal CA |
+| Gateway to daemon | Mutual TLS from the machine PKI: the node CA for clients, the serving CA for gateways |
+| Site agent to BMC | The management VLAN, reachable only from site agents |
+| Tenant to tenant | Tenant pre-checks, SQL tenant scoping, the authorization projection |
+| Tenant-controlled node to platform | A `node-tenant` certificate that gets no secrets and no destructive platform commands |
+
+## Threat model
+
+| Threat | Mitigation | State |
+| --- | --- | --- |
+| Cross-tenant access, forged attributes | Tenant pre-check before any database access; SQL tenant scoping; idempotency keys scoped to tenant and identity; attributes only from compute's own projection | Built |
+| Stolen join token | Short TTL, `maxUses` (default 1), `expect` binding; tokens stored hashed, revocable, and sealed to JoinService in transit, bound to the CSR | Built |
+| Compromised node | `nodeId` only from the certificate's SAN; 24 h certificates with pushed revocation; secrets bound to current work; its attested results speak only for itself | Built |
+| Compromised gateway | Holds no key in its code; commands signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results signed by the node. It can delay, drop or read frames, not forge intent, identity, results or secrets | Built, with the [process caveat](#gateway-processes) |
+| Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited | Built; fleet-wide quorum is v1.0 |
+| Replay | Command-id journal, `not_after`, epoch fencing, ticket `jti` sets, a Renew replay cache | Built in the control plane and FakeDaemon; `bcd` not built |
+| Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
+| PXE and DHCP spoofing | One lease-holding boot server per site, isolated VLANs, signed images | Partly built (v0.2) |
+| Cross-tenant residue on bare metal | BMC-driven teardown: attested erase, DCGM, a firmware baseline check, a new identity generation | Built in `metal` (v0.2, v0.5) |
+
+<Callout type="warn" title="The daemon is not built">
+  Every guarantee that ends in "the daemon checks" (signature requirements per kind, ticket re-verification, the
+  journal) is implemented in the TypeScript `FakeDaemon` and specified for `bcd`, which is written but not built. See
+  [the daemon](/docs/daemon).
+</Callout>
+
+## Gateway processes
+
+The gateway package holds no CA, signing or encryption key: it relays `Join`, `Renew` and `SecretRequest` to
+`gatewayServices` and returns the answers verbatim. The design puts those services in the api process behind
+internal mutual TLS.
+
+In this release, `serve --roles gateway` builds `compute.gatewayServices` in the gateway's own process from the
+shared configuration, so that process loads the PKI bundle and the deployment secret like any other. Treat gateway
+hosts with the same care as api hosts until the services move out. `createGateway({ services })` takes any
+implementation of `GatewayServices`, so a remote implementation can replace the in-process one without changing the
+gateway.
+
+## Controls
+
+### Mutual TLS, failing closed
+
+- Daemons connect to gateways over mutual TLS. `certificateAuthenticate` checks the chain against the node CA, the
+  SPIFFE trust domain, revocation, role and expiry. `Join` alone accepts a client without a certificate; `Renew`,
+  `Session` and `Tunnel` require one.
+- The gateway role refuses to start without node-CA roots and a trust domain (`INVALID_CONFIG`). `serveGateway`
+  refuses without `nodeRoots` or an explicit `authenticate`: there is no weaker default.
+- `unsafeSanOnlyAuthenticate` and `insecure: true` (cleartext h2c) exist for tests only. `better-compute dev --sim`
+  runs its gateway on loopback h2c with header authentication, for local development only.
+- The api reaches gateways' internal control APIs (pokes, tunnels, revocations, closing an agent's streams) over
+  mutual TLS from the internal CA. The client side is configured in `notifier: gatewayNotifier({ sql, tls })` and
+  `host.tunnels.control.tls`.
+
+### Allowlisted command kinds
+
+Each certificate role accepts only its own command kinds. A certificate can be narrowed further with
+`node_certs.allowed_kinds`, read at `Hello`: any other kind is cancelled `kind-not-allowed`, including in-flight
+ones after a restricted re-join. A ramdisk admitted through discovery gets a certificate of at most 2 h limited to
+the commissioning kinds. A `node-tenant` certificate gets no secrets, and destructive kinds sent to it are
+cancelled `tenant-controlled`.
+
+### Signed commands
+
+With `pki.commandSigning`, every command is signed by a 24 h worker key that the command-signing root certifies.
+The gateway relays signatures it cannot produce. `better-compute/pki` can sign desired state the same way
+(`signDesiredState`), but the server does not sign NodeSpecs yet. A daemon requires a
+signature for the kinds its own table marks destructive and checks any that is present. PLAN.md extends the
+requirement to access-changing kinds from v0.2 and to all kinds from v0.4. See [PKI](/docs/operations/pki#signed-intent).
+
+### Attested results
+
+A wipe or diagnostics result counts as attested only when the node signed it: the gateway stores
+`CommandUpdate.node_sig`, and metal verifies it against `node_certs`. A revoked certificate is refused; an expired
+one is accepted for 7 more days, for results journaled offline. Before this fix a kind's `attested` flag was
+trusted, so a gateway could have forged a wipe. A `node-tenant` certificate never attests.
+
+### Sealed secrets
+
+- PostgreSQL holds only `secret://` references. The default store seals values in `sealed_secrets` with
+  AES-256-GCM; the authenticated data binds each ciphertext to its reference and tenant.
+- `secrets.put` is write-only: the API never reads a value back. Events and audit rows carry the reference and
+  version, never the value.
+- The broker (`gatewayServices.secret`) releases a value only when the request is signed by the node's current,
+  unrevoked, platform certificate, names the session's node, is bound to work that node is doing right now (a live
+  command of the step that carries the reference, or a live allocation on it), and uses a fresh request id. The
+  answer is a JWE to the request's one-time key, expiring within 5 minutes.
+- Commands carry references, never values.
+
+### Tunnels, tickets and break-glass SSH
+
+- `tunnels.open` decides the caller with Better IAM, then issues a 60 s, single-use exec ticket for one node. The
+  gateway and the daemon each verify it again, including its `jti`.
+- While a tunnel is open, the caller is re-authorized every 60 s by the ticket's own action; after 2 minutes of IAM
+  failures it closes. Tunnels last at most 12 h. A revoked delegation or suspended agent closes its tunnels on every
+  gateway when `host.iam` is configured.
+- Break-glass shells use `nodes.issueSshCert`: `compute:nodes:ssh-root` on the node and, by default, an MFA session.
+  Certificates last at most 1 h and never beyond the session, name `<account>@<nodeId>`, and grant only
+  `permit-pty`. Each issuance is recorded; `nodes.revokeSshCert` puts the serial in the node's key revocation list.
+- Per identity and per api replica: 10 tunnels a minute and 20 certificates an hour, then `RATE_LIMITED`.
+
+See [interactive access](/docs/guides/access).
+
+### Tenant isolation
+
+- **Pre-check first.** A caller outside the input's tenant and the root tenant gets `ACCESS_DENIED` before any
+  database access or IAM decision, identical to an IAM denial, so there is no existence oracle and outsiders put no
+  traffic on another tenant's audit chain.
+- **No ambient tenant.** Tenant-scoped repository functions take `tenantId` as a required parameter.
+- **Attributes from the projection.** IAM decides on attributes from compute's own
+  <Term id="authz-projection">authorization projection</Term>, never from the request.
+- **Idempotency keys** are scoped to `(tenant, identity)`, so one tenant cannot replay another's request.
+- **Tenant-controlled machines.** Under a dedicated-root lease the node's identity is reissued as `node-tenant`,
+  and its inventory becomes advisory.
+
+See [tenancy](/docs/guides/iam/tenancy).
+
+### Nothing leaks
+
+- Unexpected errors answer `500` with `INTERNAL_ERROR` and a generic message; the detail goes only to `log.error`.
+- Join, renew and secret refusals are one generic `ACCESS_DENIED` to the agent; the reason goes to audit
+  (`security.join.refused`, `security.secret.refused`), rate-limited per reason.
+- A report a node sends about another node becomes `security.node-mismatch` and never reaches a handler.
+- `/.well-known/better-compute` publishes only public key members; a private JWK member never passes.
+- The PKI bundle is sealed at rest, and `pki show` reads only its public half.
+- `bcd` reads its join token from `BCD_JOIN_TOKEN` or standard input, never from arguments, and never echoes a
+  positional argument.
+
+### The HTTP API
+
+- `POST` requests need `content-type: application/json` and `X-Better-Compute: 1`, else `CSRF_REJECTED`. A plain
+  HTML form cannot set that header.
+- The IAM session cookie is ignored unless `acceptIamCookie` is set. Even then a cookie request needs an `Origin`
+  exactly equal to `baseURL`'s origin: a missing one is `CSRF_REJECTED`, another one `UNTRUSTED_ORIGIN`.
+- Bodies are JSON objects of at most 64 KiB (`PAYLOAD_TOO_LARGE`). `TRACE`, `CONNECT` and `TRACK` are refused.
+- Every answer carries `cache-control: no-store`, `x-content-type-options: nosniff` and `referrer-policy:
+  no-referrer`.
+- `X-Request-Id` is echoed only when it matches `^[A-Za-z0-9._:-]{1,128}$`, and IAM sees the same id.
+
+### Rate limits and admission
+
+| Where | Limit |
+| --- | --- |
+| Gateway handshakes | A token bucket of 200 a second |
+| Gateway sessions | `maxStreams` (default 5,000) |
+| Pending `Hello`s | 64; more are refused `RESOURCE_EXHAUSTED` so a reconnect storm cannot starve the lease |
+| Tunnels, break-glass certificates | 10 a minute and 20 an hour per identity, per api replica |
+| Better IAM | A 429 from IAM becomes `RATE_LIMITED`, with `Retry-After` |
+| Security events | Join and secret refusal events: 60 a minute per reason by default; the rest are counted as suppressed |
+
+### Tamper-evident audit
+
+Every allowed mutation writes an `audit_events` row with its admission context in the same transaction, as do
+commands, steps, tickets and security events. With `auditModule`, an hourly job seals new rows into signed,
+hash-chained Merkle checkpoints per tenant (RFC 6962), in commit order so a long transaction cannot land behind a
+checkpoint. `better-compute audit verify --tenant ID` recomputes the chain and finds an edited, deleted or inserted
+row, a removed checkpoint or a foreign signature; `audit prove` writes an inclusion proof a third party checks
+offline with `audit check-proof`. The module's self-check warns when rows older than 3 hours are still unsealed.
+
+## Hardening checklist
+
+<Steps>
+<Step>
+
+### Secrets and keys
+
+- A deployment secret of at least 32 random characters, from a secret manager, identical in every process.
+- `pki init` with the secret (never `--plaintext` outside development) and `--offline-root`, with the root key
+  kept off every server.
+- The bundle, the secret and the root key backed up, separately.
+
+</Step>
+<Step>
+
+### Network
+
+- api behind an L7 load balancer that terminates TLS; `baseURL` is exactly the public origin.
+- Gateways behind an L4 load balancer with TLS passthrough. Machines need only outbound 443.
+- Internal control APIs (`host.gateway.internal`) reachable only from the control plane, over internal-CA mTLS.
+- `GET /metrics` only with a `bearerToken`, and not exposed publicly.
+- BMC networks reachable only from site agents.
+
+</Step>
+<Step>
+
+### Configuration
+
+- Better IAM wired through the bridge; `doctor` reports `iam.not-configured` otherwise.
+- `acceptIamCookie` only for a console on the same origin.
+- `pki.commandSigning` set, so commands are signed.
+- `tunnels` only if you need interactive access, with the SSH CA's MFA requirement left on.
+- `auditModule` registered with the bundle's audit key.
+
+</Step>
+<Step>
+
+### Operations
+
+- `better-compute doctor --strict` in CI and after every deploy.
+- Gateway serving certificates reissued before their 30 days end, and CA expiry watched (`doctor` warns 30 days
+  ahead).
+- Revocations checked in practice: `nodes.revokeIdentity` should close the node's session within seconds.
+- `audit verify` run on a schedule for the tenants that matter.
+
+</Step>
+</Steps>
+
+## Reporting a vulnerability
+
+The repository has no security policy file or dedicated disclosure address yet. Until it does, report a
+vulnerability privately to the maintainers rather than in a public issue, and include the version, the
+configuration involved, and steps to reproduce.

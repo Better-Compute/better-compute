@@ -1,0 +1,186 @@
+---
+title: Consistency
+description: Why double-booking cannot happen in Better Compute, and how one clock, exclusion constraints, the outbox, the work queue and fencing keep the fleet consistent.
+metaTitle: Consistency in Better Compute
+icon: Database
+packages: ['@better-compute/postgres', '@better-compute/capacity', '@better-compute/server']
+sources: ['PLAN.md', 'docs/development.md', 'packages/postgres/src/migrations/0001_clock.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/postgres/src/clock.ts', 'packages/capacity/src/quota.ts', 'packages/capacity/src/partition.ts', 'packages/server/src/runtime/leases.ts', 'packages/server/src/runtime/work-queue.ts', 'packages/server/src/runtime/events.ts', 'packages/server/src/runtime/commands.ts', 'packages/server/README.md', 'packages/core/src/states.ts']
+---
+
+A GPU fleet is a distributed system with slow, unreliable members: daemons that reconnect, workers that crash
+mid-transaction, gateways that lose their database for thirty seconds. Better Compute stays correct through all of
+that by putting its invariants where they cannot be bypassed, in PostgreSQL, and by making every message safe to
+deliver twice. This page explains the mechanisms and what they guarantee.
+
+## PostgreSQL is the truth
+
+Everything authoritative is a row. Everything in memory is a cache that can be rebuilt:
+
+| In memory | Rebuilt from |
+| --- | --- |
+| A gateway's sessions and liveness ages | `node_sessions`, and the daemons reconnecting |
+| The IAM resolver's authorization projection | `authz_projection`, tailed through `authz_changes` |
+| The 30-second authentication cache and the 10-second read-decision cache | Better IAM, on the next miss |
+| Pokes that wake a gateway or a worker early | Nothing: every loop also polls, so a lost poke only delays |
+
+Aggregates carry a `version`. A transition is `UPDATE … WHERE id = $id AND version = $v`; zero rows means
+someone else changed the record first, and the caller gets `CONFLICT`. Which transitions are legal comes from the
+state tables in `@better-compute/core` (`reservationStateTable`, `commandStateTable`, `provisionStateTable`, …), so
+the rules live in one place.
+
+## One clock
+
+Every time comparison in SQL (lease expiry, `not_before`, `not_after`, booking ranges, liveness) reads
+`compute_now()`, never `now()`. The first migration defines it:
+
+```sql title="core/0001_clock"
+-- defines compute_now()
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+-- Tests only: computeFixture({ clock: 'sim' }) points compute_now() here (useSimClock).
+CREATE TABLE compute_sim_clock (id int PRIMARY KEY CHECK (id = 1), ts timestamptz NOT NULL);
+CREATE FUNCTION compute_now() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT now() $$;
+```
+
+- **Simulated time.** Tests and the simulator replace the body with `SELECT ts FROM compute_sim_clock WHERE id = 1`
+  (`useSimClock` and `setSimClock` in `@better-compute/postgres`; `computeFixture()` does it by default). Leases,
+  deadlines and liveness then all expire in simulated time, deterministically.
+- **Enforced.** `scripts/check-sql-now.mjs` fails CI on `now()`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`,
+  `transaction_timestamp()`, `statement_timestamp()` or `clock_timestamp()` in any string in `packages/*/src`,
+  except in the migration that defines `compute_now()` and on lines marked `check-sql-now: allow`.
+- **TypeScript time.** Business time in TypeScript comes from a `Clock` anchored to `compute_now()`: sampled at
+  `initialize()` and at every lease renewal. A process that drifts more than one second logs `ClockSkew`, and
+  `selfCheck()` reports `clock.skew`.
+- **Gateways report ages, not timestamps.** A gateway flushes "last seen 3.2 seconds ago", and the database turns it
+  into `compute_now() - 3.2 s`, so a gateway with a wrong clock cannot fake liveness.
+
+## Why double-booking cannot happen
+
+Every claim on a device is a row in `device_bookings`, and the database refuses overlapping rows whatever the
+scheduler, the API or a buggy module does:
+
+```sql
+CREATE TABLE device_bookings (
+  device_id text NOT NULL REFERENCES devices,
+  allocation_id text NOT NULL,
+  during tstzrange NOT NULL CHECK (NOT isempty(during)),
+  EXCLUDE USING gist (device_id WITH =, during WITH &&)
+);
+```
+
+Five rules together close every gap:
+
+1. **Device-time exclusivity.** The exclusion constraint allows one live booking per <Term id="atom">atom</Term>
+   per instant.
+2. **The atom rule.** A flat constraint cannot see that a MIG instance overlaps its parent GPU, so parents and
+   children are never both bookable: a MIG GPU exposes only its instances, a time-slice or MPS GPU only its slots
+   (`<uuid>/s<k>`). Changing a GPU's mode or layout books every atom of the GPU, parent included, for the change
+   window, so the change commits only when nothing on the GPU is booked.
+3. **Scalars.** vCPU, memory and disk are counters, changed only by guarded updates
+   (`allocated + x <= floor(allocatable * ratio)`) under row locks, with a `CHECK` constraint as the backstop.
+4. **Eligibility is linearizable.** The placer locks candidate node rows and the chosen atoms `FOR SHARE`. Cordoning,
+   tainting, marking a node unreachable and quarantining a GPU are updates to those same rows, so whichever
+   transaction commits second sees the first.
+5. **Quota.** `UPDATE quota_usage SET used = used + n WHERE … AND used + n <= max` in the same transaction; zero
+   rows is `QUOTA_EXCEEDED`. A reservation holds its charge in every non-terminal state, `pending` included.
+
+As defense in depth, the daemon also refuses a device assignment that overlaps one it already holds, and reports the
+allocation as failed. The capacity torture test
+attacks all five rules at once: 1,000 concurrent operations with cordons, taints, health flips and releases, checking
+every invariant.
+
+### Conflicts do not abort the request
+
+The guarded statements return zero rows instead of raising a constraint error, and bookings use
+`INSERT … ON CONFLICT DO NOTHING`, which honors exclusion constraints. Each placement attempt runs under a savepoint:
+a node, atom or counter conflict rolls back to it and replans without the conflicting node, at most three times.
+After that the reservation becomes `pending` with an `Unschedulable` condition and is retried every 30 seconds. A
+quota failure is final for the request.
+
+Transactions that lock several of these tables take them in one order, which rules out deadlocks between reserve
+and release: `quota_usage`, then `pools`, `nodes`, `devices`, `node_resources`, `pool_capacity_rollup`. Reserving
+charges quota first; releasing refunds it first.
+
+## Side effects leave through the outbox
+
+Nothing external happens inside a transaction. Events are rows in `outbox`, written in the same transaction as the
+change they describe, as `{ id, type, tenantId, subject, data, time }`. Webhook delivery, the SSE stream and
+in-process subscribers read them afterwards. If the transaction rolls back, the event never existed.
+
+Commit order is not sequence order, so a naive `WHERE seq > $cursor` reader could skip a row that commits late. The
+reader only takes rows whose transaction is older than every transaction still running:
+
+```sql
+SELECT … FROM outbox o
+ WHERE o.txid < pg_snapshot_xmin(pg_current_snapshot())
+   AND (o.txid, o.seq) > ($cursorTxid, $cursorSeq)
+ ORDER BY o.txid, o.seq
+```
+
+Nothing can then appear behind the cursor. The worker holding the `outbox-dispatch` lease delivers to the event
+sinks, saving each sink's position in `outbox_cursors` after every batch, so a new lease holder resumes where the
+last one stopped. Delivery is at least once: consumers deduplicate by event `id`. The same cursor shape
+serves the SSE stream's `Last-Event-ID` and the `authz_changes` feed. See [events](/docs/guides/events).
+
+## The work queue never loses a wake-up
+
+Reconcilers are woken through `work_queue`, enqueued in the transaction that changed the state:
+
+```sql
+INSERT INTO work_queue (kind, key, shard, gen, not_before) VALUES (…)
+  ON CONFLICT (kind, key) DO UPDATE SET gen = work_queue.gen + 1, …
+```
+
+A worker claims due rows of its own shards with `FOR UPDATE SKIP LOCKED` and stamps `claimed_until`. When the run
+succeeds it deletes the row only if `gen` still equals the value it claimed; a key dirtied again during the run
+survives and runs again. Because reconcilers are level-triggered and also resync everything they own every few
+minutes, even a lost row costs only time. See [desired state and commands](/docs/guides/concepts/desired-state-and-commands).
+
+## At least once, made safe
+
+Every hop may deliver twice, so every receiver can tell a duplicate from new work:
+
+| Mechanism | Where | What it prevents |
+| --- | --- | --- |
+| Idempotency keys scoped to `(tenant, identity, key)` | `reservations.create`, `reservations.extend`, `instances.create`, `commands.run`; optional on `sites.create` and `pools.create` | A retried request booking twice; another identity squatting a key |
+| `UNIQUE (node_id, idempotency_key)` | Commands (`wf:<workflowId>:<stepId>` for workflow steps) | A step sending its command twice |
+| `cmp:<allocationId>:<windowStart>` | Usage windows sent to Better IAM billing | Double billing across worker restarts |
+| Session epoch | Routing and liveness writes carry `AND session_epoch = $epoch`; dispatch locks the session row | A zombie gateway routing or marking a node after it lost the session |
+| Lease epoch | The first statement of every fenced transaction | A worker acting after its lease was taken over |
+| Generation | `min_generation` on commands, `observedGeneration` on nodes | A command running against a spec the node has not applied |
+| Journal id | A new daemon journal fails in-flight commands that are not retry-safe | A wipe or deploy replayed after the daemon lost its memory |
+
+### Leases and fencing
+
+Leases are rows in `leases`, not advisory locks: session-level advisory locks break under PgBouncer's transaction
+pooling, and a table gives both a time to live and an epoch.
+
+```sql
+UPDATE leases SET owner = $me,
+       epoch = CASE WHEN owner = $me THEN epoch ELSE epoch + 1 END,
+       expires_at = compute_now() + make_interval(secs => $ttl)
+ WHERE name = $name AND (owner = $me OR expires_at < compute_now())
+RETURNING epoch;
+
+-- the first statement of each fenced transaction
+SELECT 1 FROM leases WHERE name = $name AND owner = $me AND epoch = $epoch
+   AND expires_at > compute_now() FOR SHARE;
+```
+
+Shard, pool, site and singleton leases live 15 seconds and are renewed every 5; gateway leases live 20 seconds. A
+takeover increments the epoch and blocks until the old holder's `FOR SHARE` transaction ends, so a zombie either
+still sees its lease as valid or aborts. A plain `EXISTS` check would not be a fence under READ COMMITTED; the row
+lock is.
+
+## Disconnected is not dead
+
+When a daemon stops talking, Better Compute changes a condition, not ownership:
+
+| Transition | When | What happens |
+| --- | --- | --- |
+| `connected` to `disconnected` | The session closes or its gateway's lease expires | Nothing is released |
+| `disconnected` to `unreachable` | 40 seconds without a session, plus grace: 120 s after a gateway loss, 5 minutes after a database or controller outage | The node leaves placement (`unreachable` joins `noScheduleReasons`, `NodeUnreachable` is raised); nothing is released |
+| `unreachable` to `lost` | The pool's `lostAfter`, for provider pools only | Never automatic for bare metal |
+
+Workloads on an isolated node keep running, and its reservations keep their devices and keep billing on reserved
+time. A daemon that comes back supersedes its old session by epoch and replays its journal. If the machine really is
+gone, an operator decides, by draining, releasing or retiring it. See [failure modes](/docs/daemon/failure-modes).

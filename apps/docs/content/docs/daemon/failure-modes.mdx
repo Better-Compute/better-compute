@@ -1,0 +1,278 @@
+---
+title: Failure modes
+metaTitle: What happens when a gateway, node, network or database fails
+description: What happens when a gateway, a node, the network, the journal, PostgreSQL, the api or a worker fails, or clocks and certificates go wrong, and which invariants hold.
+icon: OctagonAlert
+status: experimental
+packages: ['@better-compute/gateway', '@better-compute/testing', '@better-compute/server']
+sources:
+  - PLAN.md
+  - packages/gateway/src/gateway.ts
+  - packages/gateway/src/store.ts
+  - packages/gateway/README.md
+  - packages/server/src/controllers/liveness.ts
+  - packages/server/src/runtime/commands.ts
+  - packages/server/src/runtime/clock.ts
+  - packages/testing/src/daemon/fake-daemon.ts
+  - packages/testing/src/sim/invariants.ts
+  - packages/testing/src/sim/fleet-sim.ts
+  - packages/testing/src/sim/control-plane.ts
+  - packages/testing/src/sim/nightly.ts
+  - packages/cli/src/commands/sim.ts
+  - tests/sim/multi-gateway.test.ts
+  - daemon/internal/journal/rules.go
+  - daemon/internal/session/session.go
+  - bench/gateway-streams/README.md
+  - bench/multi-gateway/README.md
+---
+
+The daemon protocol is built on the assumption that everything fails: processes crash, links go half-open,
+databases fail over, clocks drift, journals get wiped. The design goal is that each failure costs a reconnect and a
+replay, never a duplicated side effect, a double booking, or a released allocation. This page lists what happens
+for each failure, what state is lost, and which invariant the behavior protects.
+
+## The invariants
+
+PLAN.md §15 defines the fleet invariants. Four of them are checked mechanically after every simulated run, by pure
+functions in `@better-compute/testing` (`checkI1`, `checkI2`, `checkI5`, `checkI8`):
+
+| Id | Invariant | Checked over |
+| --- | --- | --- |
+| I1 | No overlapping bookings or node-reported assignments: no atom booked by two allocations at one instant, no device bound by a node for two allocations at once, and no binding of a device its allocation did not book | `device_bookings` rows and the bindings nodes reported |
+| I2 | At most one execution per command: a non-retry-safe or self-terminating command starts its side effect at most once; a retry-safe one re-executes only after a crash interrupted it; after a journal loss, a non-retry-safe command accepted in the lost journal never starts again and never ends `succeeded` | the side-effect facts the daemons record, journal losses, and outcomes |
+| I5 | No allocation released only because a node disconnected | release reasons against connectivity transitions |
+| I8 | Billing conservation: the sum of usage equals the sum of booking duration times atoms, with no duplicate keys | allocations and flushed usage windows |
+
+I3 (convergence within a bound), I4 (no false liveness positives, including under gateway clock skew), I6
+(latency) and I7 (nothing pending that an offline solver could place) are part of the design but have no
+checker in this module.
+
+## At a glance
+
+| Failure | What happens | Lost | Invariant kept |
+| --- | --- | --- | --- |
+| [Gateway crash](#gateway-crash) | Daemons redial elsewhere with jitter; `Hello` bumps the epoch and replays; 120 s grace before `unreachable` | Open streams and tunnels | I2, I5 |
+| [Gateway cut off from PostgreSQL](#gateway-cut-off-from-postgresql) | The gateway fences itself within 10 s and drops every stream; its stale writes fail on the epoch | Open streams | One router per node |
+| [Daemon crash](#daemon-crash-or-node-reboot) | systemd restarts it; the journal settles interrupted commands | Work in progress of non-retry-safe commands | I2 |
+| [Node reboot](#daemon-crash-or-node-reboot) | New `boot_id`: self-terminating commands complete on rejoin | Nothing | I2 |
+| [Network partition](#network-partition-and-half-open-links) | Session closes after three missed heartbeats; node `disconnected`, later `unreachable`; workloads keep running | Nothing | I5 |
+| [Journal loss](#journal-loss) | New `journal_id`: in-flight non-retry-safe commands fail `journal-lost` | Unacked events of the lost journal | I2 |
+| [PostgreSQL unavailable](#postgresql-unavailable) | Gateways fence and drop streams; daemons back off and keep enforcing their last spec; 5 min grace afterwards | Nothing durable | I5 |
+| [api or worker crash](#api-or-worker-crash) | Stateless api restarts; worker leases expire and move | Nothing durable | none needed |
+| [Clock skew](#clock-skew) | Ages instead of timestamps; server time on the daemon; `ClockSkew` on control-plane processes | Nothing | I4 |
+| [Certificate expiry](#certificate-expiry) | Renewal at 60% of the lifetime; the session closes at expiry | The session | |
+| [Certificate revocation](#certificate-revocation) | `RevocationNotice`, then the stream closes; the daemon stops redialing | The session | |
+| [Reconnect storm](#reconnect-storm) | Token bucket, pending-Hello bound, jitter, hash-only `Hello` | Nothing | Bounded load |
+| [Compromised gateway](#compromised-gateway) | Can delay, drop or read frames; cannot mint certificates, read tokens or secrets, or forge results or signed intent | | P14 |
+
+## Gateway crash
+
+A gateway process dies: no disconnect writes, no lease release. Everything it held in memory is gone, and it held
+nothing else.
+
+1. Each daemon sees its stream end and redials with full-jitter back-off (0 to 1 s, doubling to 60 s). The L4 load
+   balancer sends it to a live gateway.
+2. The new gateway's `Hello` transaction bumps the epoch and routes the node to itself. In-flight commands
+   (`dispatched`, `acked`, `running`) move to the new epoch and are replayed in `seq` order, except those the daemon
+   reports as running; its unacked results are applied first. Pending commands need no rewrite: dispatch is a join
+   on `node_sessions.gateway_id`, which now names the new gateway.
+3. The daemon's journal deduplicates every replay: a done command resends its result, a running one re-attaches.
+   Nothing runs twice (I2).
+4. Nodes that do not come back are handled by the Liveness controller: once the dead gateway's `gateway:<id>`
+   lease expires (20 s), its nodes become `disconnected`, and only after the 40-second lease TTL plus a 120-second
+   gateway-loss grace do they become `unreachable`. That transition adds a NoSchedule reason and a condition and
+   releases nothing (I5).
+
+Tunnels on the dead gateway close; the caller opens a new one. In the fleet simulator with three real gateways and
+the real control plane, killing one re-homed its nodes with a p99 of 1 second at 1,000 nodes and 13.25 seconds at
+10,000, with no invariant violations (`bench/multi-gateway`). PLAN.md's v0.4 target is under 60 seconds with no
+unreachable marks and no duplicate executions.
+
+## Gateway cut off from PostgreSQL
+
+A gateway that loses the database, or stalls, cannot renew its `gateway:<id>` lease. After half the lease TTL (10
+seconds) without a successful renewal, or as soon as it finds another owner on the lease, it fences itself: it
+forgets its lease and closes every stream `UNAVAILABLE`. Its daemons redial elsewhere.
+
+A gateway that does not know it is stale (a paused process that wakes up) is stopped by two fences:
+
+- every routing transaction begins by re-reading its lease `FOR SHARE`; a lease that moved aborts the transaction
+  (`FencedError`), which fences the gateway;
+- routing and liveness writes carry `AND session_epoch = $myEpoch`. After the node's `Hello` elsewhere, the zombie's
+  dispatch marks and disconnect writes match nothing, and its liveness flush reports those nodes as gone, so it
+  closes their streams `ABORTED`. Dispatch holds the session row `FOR SHARE`, so it cannot race an epoch bump.
+
+Results and events the zombie still ingests are facts and are accepted from any epoch, deduplicated as usual. At
+most one gateway routes to a node at a time. `tests/sim/multi-gateway.test.ts` runs a stalled gateway that comes back
+as a zombie holding sessions its nodes have left.
+
+## Daemon crash or node reboot
+
+**Daemon crash.** systemd restarts bcd after 5 seconds. The new process has a new incarnation id, and
+`journal.Recover` settles what the old one left behind:
+
+| Left in the journal | Outcome |
+| --- | --- |
+| `done` | Its result is replayed in `Hello.unacked_results` until acked |
+| `accepted` or `running`, retry-safe | Waits for the server to redeliver it, then runs again after the acceptance checks |
+| `accepted` or `running`, not retry-safe | `FAILED` with `interrupted`; the owning controller decides |
+| `running`, self-terminating, same boot | Treated like any other entry by its retry-safety (the process died before the reboot) |
+
+The rule that makes this safe: `accepted` is fsynced before any side effect starts. A command is either known to the
+journal before it could have done anything, or it never ran.
+
+**Node reboot.** The kernel `boot_id` changes. A self-terminating command (`node.reboot`, `boot.kexec`,
+`daemon.upgrade`) journaled `running{boot_id}` immediately before its side effect, so on restart the daemon reports
+it `SUCCEEDED` with `rebooted`, and the server's `Hello` transaction completes any in-flight self-terminating command
+the same way when it sees the new `boot_id` or role. Neither side ever replays it. Files under `/run` are gone after a
+reboot; the devices converger rewrites missing env files for assignments it still holds.
+
+## Network partition and half-open links
+
+When a node's link is cut, both ends notice through silence. The gateway closes the session after three missed
+heartbeats (30 seconds) and writes an epoch-fenced disconnect; HTTP/2 PINGs every 20 seconds detect a dead TCP
+connection. A half-open connection, where one end died silently, ends the same way, and when the node comes back its
+new session supersedes the old one by epoch.
+
+While partitioned, the daemon keeps enforcing its last desired state and keeps every device assignment: it never
+drops one on its own. Workloads keep running. It journals events (up to 64 MiB and 10,000 unacked; metric events are
+dropped oldest-first when full, results and transitions never) and redials with back-off.
+
+On the control plane the node goes `disconnected`, then `unreachable` after the 40-second lease TTL, with a
+NoSchedule reason and the `NodeUnreachable` condition. Only nodes of `provider` pools can become `lost`, after the
+pool's `lostAfter`; metal never does automatically. No step releases an allocation, a booking or a command (I5).
+Commands that pass `not_after` while the node is away are swept to `expired`, or rejected `EXPIRED` by the daemon if
+they were already delivered.
+
+## Journal loss
+
+A ramdisk reboot, a reinstall or corruption loses the journal. The daemon starts a new one with a new `journal_id`;
+its identity stays with its key, so it reconnects as the same node.
+
+- The server sees the new `journal_id` in `Hello` and fails every in-flight command that is not retry-safe with
+  reason `journal-lost`, instead of replaying it into a journal that cannot deduplicate. Controllers re-decide
+  (I2).
+- Retry-safe in-flight commands are replayed and may run again, which their kind allows.
+- The event ack restarts at 0 for the new journal. Events still unacked in the lost journal are gone.
+- The new journal holds no spec, so the daemon reports applied generation 0 and receives a full `DesiredState` at
+  `Hello`.
+
+The fleet simulator's `journalLoss` chaos and `sim.loseJournal(nodeId)` exercise this path.
+
+## PostgreSQL unavailable
+
+PostgreSQL is the only source of truth, so an outage stops the fleet from changing without losing anything.
+
+- **Gateways** cannot renew their leases and fence themselves within 10 seconds, dropping every stream. Without a
+  lease they refuse new sessions `UNAVAILABLE`. A frame that fails to write also drops its stream. The lease loop
+  keeps retrying, and once it renews, the gateway admits sessions again.
+- **Daemons** back off up to 60 seconds between attempts, keep enforcing their last spec, and keep results and events
+  in the journal until a gateway acknowledges them. Nothing is buffered in the gateway beyond its memory.
+- **Commands** stay `pending`; nothing is dispatched. After the outage, those past `not_after` are swept to
+  `expired`, and a stale command that does reach a node is rejected on `not_after` or `min_generation`.
+- **Liveness.** When the Liveness controller finds a gap of more than 20 seconds since its last sweep, it holds every
+  timed transition back for 5 minutes, so the ages the gateways could not flush do not read as dead nodes.
+
+PLAN.md sizes this for a database failover of about 30 seconds: the fleet reconnects, nothing is marked
+unreachable, and nothing is released.
+
+## api or worker crash
+
+**api.** api processes are stateless; a crash fails the requests in flight, and clients retry with their
+idempotency keys. `Join`, `Renew` and secret requests reach JoinService and the secret broker through the gateway's
+`GatewayServices` port. While the process serving them is down, `Join` and `Renew` fail and the daemon retries
+(a node certificate lasts 24 hours and renews at about 60% of its life, which leaves hours of margin), and secret
+requests are answered with the error `unavailable`.
+
+**Worker.** Workers run the reconcilers, the CommandSweeper and the Liveness controller under table leases (15
+seconds for shards, renewed every 5). When a worker dies, its leases expire and another worker takes them over; the
+work queue loses no wake-up because a claim that is not completed simply becomes claimable again. While no worker
+runs, gateways keep dispatching commands that are already pending and keep ingesting results, but nothing new is
+decided and nothing is swept. The Liveness controller's outage grace (above) applies when it comes back. See
+[leases and fencing](/docs/guides/concepts/consistency#leases-and-fencing).
+
+## Clock skew
+
+No component trusts another's wall clock.
+
+- **Gateways report ages.** Liveness is flushed as "seen `age_ms` ago", and PostgreSQL computes
+  `compute_now() - age`. A gateway whose clock is off cannot make a node look alive or dead (I4).
+- **Daemons use server time.** `Welcome.server_time` gives the daemon the offset between its clock and
+  `compute_now()`, and it evaluates `not_after` through that offset. Conditions carry `age_ms` on the daemon's
+  monotonic clock, and the control plane derives `since` itself; event and inventory timestamps are advisory.
+- **Control-plane processes** anchor their business clock to `compute_now()`, re-sampled at every lease renewal. A
+  process more than 1 second off raises `ClockSkew`: a log warning and a `selfCheck` finding, and the
+  `clock_offset_seconds` metric shows the offset.
+- **Proofs** tolerate 60 seconds: `Renew` proofs of possession, WebSocket proofs.
+
+## Certificate expiry
+
+Node certificates last at most 24 hours (ramdisk certificates at most 2), and bcd renews at about 60% of the
+lifetime with `Renew`, proving possession of its current key. A session whose certificate expires is closed
+`UNAUTHENTICATED` ("certificate expired; renew and reconnect") by the gateway's liveness loop.
+
+A certificate that expired while the machine was offline cannot be renewed. From v0.2, when the server has the
+`x509pop` attestor configured, the machine re-joins with its old key within 7 days unless the certificate was
+revoked. See [renewal](/docs/guides/nodes/joining#renewal). Gateway serving certificates last 30 days in the PLAN.md
+design, which lists serving-certificate expiry among the fleet checks of `doctor`.
+
+## Certificate revocation
+
+A revoked serial reaches every gateway within about a second through the revocation feed, which polls
+`node_certs.revoked_at`. The gateway sends the session `RevocationNotice{reason, serials}`, closes the node's
+tunnels, and ends the stream `UNAUTHENTICATED`. The daemon stops using the certificate and does not redial with it.
+New opens with the serial are refused at the handshake, and the `Hello` transaction checks `node_certs` directly,
+also refusing a certificate from an older identity generation of the node. PLAN.md's target is a revoked node out
+within 5 seconds.
+
+## Reconnect storm
+
+When a gateway dies or a network heals, thousands of daemons redial at once. Four things keep that bounded:
+full-jitter back-off on the daemon, the handshake token bucket (200 per second per gateway), the pending-Hello bound
+(64 transactions in flight, beyond which a `Hello` is refused `RESOURCE_EXHAUSTED` and retried), and a small `Hello`
+that carries inventory hashes instead of inventory. Without the pending-Hello bound, a storm once queued enough
+`Hello` transactions to starve the gateway's own lease renewal until it fenced itself. `Drain` spreads planned
+reconnects over up to 60 seconds.
+
+## Compromised gateway
+
+A gateway holds no CA and no signing key. A compromised one can delay, drop or read frames. It cannot:
+
+- mint certificates: `Renew` needs a proof of possession by the node's current key, verified by JoinService;
+- harvest join tokens: they are sealed to the JoinService encryption key, and `JoinResponse` is signed;
+- read secrets: they travel as JWE to a one-time key of the node;
+- forge attested results: they carry `node_sig`, verified against `node_certs` by workers;
+- forge intent: commands, and from v0.4 specs, are signed by worker keys the daemon verifies.
+
+Signed commands require `pki.commandSigning` on the server, and daemons require signatures for destructive kinds
+from v0.2 and for all kinds from v0.4. See [security](/docs/operations/security).
+
+## How the failures are exercised
+
+<Cards>
+  <Card title="createFleetSim" href="/docs/operations/testing">
+    N FakeDaemons on seeded fake hardware and in-memory links with drops, duplicates and reordering, against a gateway
+    stub or a real gateway. Chaos: crashes, reboots, journal loss, partitions, isolation, half-open links, resets,
+    stalls and gateway kills. Same seed, same event log.
+  </Card>
+  <Card title="createControlPlaneSim" href="/docs/operations/testing">
+    The same simulator with the real control plane on the sim clock and real gateways; facts for the checkers come
+    from compute's own tables.
+  </Card>
+  <Card title="better-compute sim" href="/docs/reference/cli">
+    Runs the fleet simulator with a steady workload and `--chaos none`, `light` or `heavy`, then checks I1, I2, I5
+    and I8 and prints the event-log digest.
+  </Card>
+  <Card title="The nightly and bench suites" href="/docs/operations/testing">
+    `tests/sim/multi-gateway.test.ts` (a kill mid-command, a zombie gateway, a revocation), the nightly simulation
+    with worker outages, and `bench/multi-gateway` at up to 10,000 nodes.
+  </Card>
+</Cards>
+
+```bash
+better-compute sim --nodes 100 --chaos heavy --seed 7
+```
+
+The real Go daemon joins this testing once it is built: PLAN.md plans a protocol and skew suite running
+`bcd -tags fakehw` against an in-process gateway, and `bcd sim --nodes 10000` against real gateways and PostgreSQL
+through Toxiproxy in v0.4.

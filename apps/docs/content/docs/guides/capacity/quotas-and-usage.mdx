@@ -1,0 +1,202 @@
+---
+title: Quotas and usage
+description: Per-pool quotas that cap what a tenant holds at once, hourly usage windows metered from active reservations, and how both reach Better IAM billing.
+metaTitle: GPU quotas, usage and billing
+icon: Gauge
+packages: ['@better-compute/capacity', '@better-compute/iam']
+sources:
+  - packages/capacity/src/quota.ts
+  - packages/capacity/src/usage.ts
+  - packages/capacity/src/module.ts
+  - packages/server/src/api/usage.ts
+  - packages/iam/src/worker.ts
+  - packages/iam/src/bridge.ts
+  - packages/iam/src/setup.ts
+  - packages/postgres/src/migrations/0002_base.ts
+  - tests/capacity-usage.test.ts
+  - tests/capacity-placer.test.ts
+  - PLAN.md
+---
+
+Better Compute keeps two separate books. A <Term id="quota">quota</Term> caps how much a tenant may
+hold in one pool at the same time; it is counted in compute's database and enforced at admission.
+Usage records what a tenant actually consumed, hour by hour, and hands it to Better IAM billing,
+where prices and budgets live. A quota never stops a running reservation, and billing never places
+one.
+
+## Quotas
+
+Quotas live in `quota_usage`, one row per tenant, pool and resource, with a `max` and a `used`
+counter guarded by `CHECK (used BETWEEN 0 AND max)`. **A missing row grants 0**: a tenant can reserve
+in a pool only for the resources its offering gave it.
+
+A request counts against quota per resource:
+
+- each device class by count: `gpu`, `gpu.mig`, `gpu.slot`, `nic.vf`, `disk`, `node`;
+- each scalar by amount: `vcpu`, `memoryGiB`, `diskGiB` (VPS instances);
+- a gang counts `size` times the per-node request.
+
+Charging happens in the second admission transaction, before placement, all or nothing inside a
+savepoint, with a guarded update per resource:
+
+```sql
+UPDATE quota_usage SET used = used + $n
+ WHERE tenant_id = $1 AND pool_id = $2 AND resource = $3 AND used + $n <= max;
+-- no row updated: QUOTA_EXCEEDED, and every counter stays as it was
+```
+
+The refusal is [`QUOTA_EXCEEDED`](/docs/reference/errors) (HTTP 409) with the numbers in `details`:
+
+```json
+{
+  "error": {
+    "code": "QUOTA_EXCEEDED",
+    "message": "Quota exceeded for gpu in pool pool_01k…: 9 requested, 8 of 8 left",
+    "details": { "resource": "gpu", "poolId": "pool_01k…", "requested": 9, "max": 8, "used": 0 }
+  }
+}
+```
+
+**A reservation holds its charge until it is terminal** (decision D9). `pending`, `placed`, `binding`,
+`active` and `releasing` all count, so a tenant cannot queue unlimited pending demand. Re-placements
+after a bind timeout, BookingRepair and a spot re-queue keep the charge. Release, cancel, failure and
+expiry refund it, and a refund never drives a counter below 0, so a double refund cannot corrupt it.
+
+### Where quota rows come from
+
+| Operation | Effect on quota rows |
+| --- | --- |
+| [`pools.create`](/docs/reference/api/pools#create) | Creates the owner's rows from `ownerQuota`, by default `gpu` at 2,147,483,647 |
+| [`pools.offer`](/docs/reference/api/pools#offer) | Creates or resizes the offered tenant's rows from `quota` |
+| [`quotas.set`](/docs/reference/api/quotas#set) | Sets one row for any tenant and pool (fleet operators) |
+| [`pools.unoffer`](/docs/reference/api/pools#unoffer), [`pools.archive`](/docs/reference/api/pools#archive) | Lower the tenant's rows to what is in use |
+
+Setting a maximum never lowers it below `used`: the stored `max` becomes the larger of the two. To shrink
+a quota under live reservations, set it again once they have released.
+
+### Read and set quotas
+
+[`quotas.get`](/docs/reference/api/quotas#get) (`compute:quotas:read` on the tenant) lists the
+tenant's rows, optionally for one pool. [`quotas.set`](/docs/reference/api/quotas#set)
+(`compute:quotas:manage` on `compute-fleet/global`, which resolves only in the root tenant) sets any
+tenant's limit on any pool and emits `quota.updated`.
+
+```ts title="quotas.ts"
+const { items } = await compute.api.quotas.get(credential, { tenantId: 'acme', poolId });
+// [{ tenantId: 'acme', poolId, resource: 'gpu', max: 32, used: 4, available: 28 }]
+
+await compute.api.quotas.set(rootCredential, { tenantId: 'acme', poolId, resource: 'gpu', max: 64 });
+```
+
+Resource names start with a letter and use letters, digits, `.`, `_` and `-` (at most 64 characters);
+`max` is a non-negative integer. An unknown pool is `NOT_FOUND`. VPS instances charge the same rows
+through the capacity port, which charges, places, and gives the charge back when nothing fits (see
+[instances](/docs/guides/vps/instances)).
+
+## Usage windows
+
+The `capacity.usage` <Term id="reconciler">reconciler</Term> runs every 5 minutes (`usageEvery` in the
+capacity options) and writes <Term id="usage-window">usage windows</Term>: one row per allocation, hour
+and meter in `usage_windows`.
+
+- **The basis is reserved time** (decision D14): from the moment an allocation is bound, which is when
+  the reservation becomes `active`, until it is released or its booking ends. A reservation that never
+  goes active bills nothing; time spent `placed` or `binding` is not billed.
+- **Windows are hour-aligned** and written only when final: the hour has closed, or billing ended inside
+  it. A window never changes once written. Its quantity is the meter's rate times the fraction of the
+  hour used, rounded to six decimals.
+- **Every window has an idempotency key**, `cmp:<allocationId>:<windowStartMs>`, with `:<meter>` added
+  for an allocation's second and later meters. Rows are inserted with `ON CONFLICT DO NOTHING`, so every
+  pass is safe to repeat, including after a worker restart.
+- **Each pass looks back 48 hours** and handles at most 5,000 allocations.
+
+| Allocation | Meters |
+| --- | --- |
+| A `hold` reservation | `gpu.<model>.hours`, one unit per GPU; the model is the pool's, lower-cased (`gpu.h100.hours`) |
+| A spot reservation | `gpu.<model>.spot.hours` |
+| MIG instances and slots | The same GPU meter, at the atom's share of a GPU; see [fractional GPUs](/docs/guides/capacity/fractional-gpus) |
+| A `binding: 'node'` lease | `node.metal.hours`, plus the GPU meter for the GPUs healthy at each window's start |
+| A VPS instance | `vps.vcpu.hours`, `vps.memory.gib.hours`, and `gpu.<model>.hours` for GPU flavors, written by the `vps.usage` job |
+
+Tags have bounded cardinality: `region`, `pool`, `gpuModel`, `project` and `agent`, never a
+reservation, allocation or node id. The window is attributed to the reservation's owner identity: the
+person for work an agent does in a delegated session (tagged `agent`), or the agent itself for agent
+keys.
+
+`meterAllocation` is exported by `better-compute/capacity`, so a module that books its own allocations
+can meter them with the same keys and rules.
+
+## Into Better IAM billing
+
+The IAM bridge's `iam.usage` reconciler runs hourly, before Better IAM's daily period close, and sends
+closed, unrecorded windows through `IamPort.recordUsage`. Recording is poison-isolating: a failing
+batch is bisected down to the event, so one bad window never blocks the others.
+
+- An identity deleted before the flush is re-recorded under its successor if the inbox saw one, or
+  without an identity (tenant-attributed, tagged `attribution=orphaned`).
+- A window that still fails on its own, such as a key reused on another meter, an unknown meter or a
+  closed billing period, is dead-lettered into `usage_dead_letters`.
+- A transient failure, such as IAM being unreachable, fails the whole pass, which retries later with
+  the same keys.
+- Each window stores `recordedAt` and its `outcome`: `recorded`, `duplicate`, `reattributed` or
+  `dead-lettered`.
+
+The meters must exist in Better IAM billing. `better-compute iam setup --meters` creates
+`gpu.<model>.hours` for each model in `--gpu-models` (every known GPU family by default),
+`node.metal.hours`, `vps.vcpu.hours` and `vps.memory.gib.hours`. It does not create spot meters: create `gpu.<model>.spot.hours` yourself before
+you sell spot capacity, or those windows are dead-lettered. Prices, invoices and spend reports are
+Better IAM's; see [billing and usage](/docs/guides/iam/billing-and-usage).
+
+## Read usage
+
+[`usage.list`](/docs/reference/api/usage#list) (`compute:usage:read`) returns a tenant's windows, or one
+project's when `projectId` is given (then decided on the project). It filters by `meter`, `from` and
+`to` (epoch milliseconds) and pages with `limit` (at most 500, default 100) and `cursor`.
+
+```ts
+const page = await compute.api.usage.list(credential, {
+  tenantId: 'acme',
+  meter: 'gpu.h100.hours',
+  from: Date.UTC(2026, 8, 1),
+});
+```
+
+```json title="One usage window"
+{
+  "idempotencyKey": "cmp:alloc_01k…:1790002800000",
+  "allocationId": "alloc_01k…",
+  "tenantId": "acme",
+  "identityId": "…",
+  "meter": "gpu.h100.hours",
+  "quantity": 4,
+  "windowStart": 1790002800000,
+  "windowEnd": 1790006400000,
+  "tags": { "region": "eu-central-1", "pool": "pool_01k…", "gpuModel": "H100" },
+  "recordedAt": 1790010000000,
+  "outcome": "recorded"
+}
+```
+
+[`usage.export`](/docs/reference/api/usage#export) is planned for v0.2 and not served yet.
+
+## Spend and budgets
+
+Quotas cap GPUs, not money. Budgets are enforced in the admission decision itself: the example tenant
+policy `gpu-user` that `better-compute iam setup` prints includes
+
+```json title="gpu-user, StopWhenOverBudget"
+{
+  "sid": "StopWhenOverBudget",
+  "effect": "deny",
+  "actions": ["compute:reservations:create", "compute:reservations:extend", "compute:instances:create"],
+  "resources": ["*"],
+  "conditions": { "Bool": { "principal.spendExceeded": true } }
+}
+```
+
+Every create and extend is decided by Better IAM, so once a tenant's spend passes its budget no new
+reservation or extension is allowed. Reservations that are already running continue until they end.
+Two budget controls from PLAN.md are not implemented yet: the per-pool check at admission
+(`policy.admission.budgetCheck: 'meter'` is declared but not called) and an offering's
+`onBudgetExceeded` reaction (`notify`, `stop-new`, `drain`). See
+[policies](/docs/guides/iam/policies).

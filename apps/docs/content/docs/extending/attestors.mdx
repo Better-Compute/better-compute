@@ -1,0 +1,351 @@
+---
+title: Attestors
+metaTitle: Writing a node attestor
+description: Write an AttestorVerifier that admits machines on your own evidence, defer a join for a second round, use evidence once, and register it with JoinService.
+icon: BadgeCheck
+status: experimental
+packages: ['@better-compute/core', '@better-compute/pki', '@better-compute/server', '@better-compute/testing']
+sources:
+  - packages/core/src/extension.ts
+  - packages/server/src/join/service.ts
+  - packages/server/src/join/attestor.ts
+  - packages/server/src/join/gateway-services.ts
+  - packages/server/src/index.ts
+  - packages/server/src/options.ts
+  - packages/server/src/registry.ts
+  - packages/pki/src/attestors/common.ts
+  - packages/pki/src/attestors/index.ts
+  - packages/pki/src/attestors/x509pop.ts
+  - packages/pki/src/attestors/provisioned.ts
+  - packages/pki/src/attestors/discovery.ts
+  - packages/pki/src/attestors/cloud-iid.ts
+  - packages/pki/src/attestors/tpm.ts
+  - packages/pki/src/join-response.ts
+  - packages/pki/src/index.ts
+  - packages/postgres/src/migrations/0011_v02_security.ts
+  - packages/postgres/src/migrations/0012_v02_evidence.ts
+  - packages/postgres/src/retention.ts
+  - packages/testing/src/daemon/join.ts
+  - packages/testing/src/sim/control-plane.ts
+  - packages/observability/src/instrument.ts
+  - tests/pki-attestors-join.test.ts
+  - tests/pki-attestors-tpm.test.ts
+  - PLAN.md
+  - .claude/coordination.md
+---
+
+import { BadgeCheck, UserPlus, KeyRound } from '@/lib/icons';
+
+An <Term id="attestor">attestor</Term> decides one question at join time: may this machine join, and as which node?
+The built-in ones cover join tokens, expired certificates, installed images, PXE-booted ramdisks, cloud instance
+identities and TPMs. Write your own when your machines can prove who they are some other way: a vendor-signed
+delivery manifest, an asset database, a hardware security module.
+
+An attestor has two halves:
+
+| Half | Contract | Runs in | Does |
+| --- | --- | --- | --- |
+| verifier | `AttestorVerifier` from `defineAttestor` | JoinService, inside the join transaction | checks evidence, answers where the machine joins, or defers |
+| producer | `NodeAttestor` | the joining agent | produces the evidence, and answers a challenge in a second round |
+
+The verifier is what you register. The producer for real machines is Go in `bcd`; the TypeScript producers in
+`@better-compute/pki` exist for the FakeDaemon and tests.
+
+<Callout type="warn" title="The agent half">
+`bcd` is written but not built, and it has no plug-in point for third-party producers. A custom attestor can be
+registered and exercised end to end today with TypeScript agents (`runAgentJoin` in `@better-compute/testing`), but a
+real machine needs a `bcd` that sends its `JoinRequest.attestor` and `attestation`.
+</Callout>
+
+## How a join reaches your attestor
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Agent
+  participant G as Gateway
+  participant J as JoinService (api)
+  participant V as Your verifier
+  participant D as Postgres
+  A->>G: Join(csr, claims, role, attestor, attestation, sealed_token?)
+  G->>J: relay (it cannot read the token or forge the answer)
+  J->>J: pick the attestor by id, check the role is in its roles
+  J->>J: open the sealed token against the CSR, if any
+  J->>D: BEGIN
+  J->>V: verify(evidence, context)
+  alt deferral
+    V-->>J: { deferred: 'approval' | 'challenge', ... }
+    J->>D: COMMIT (the attestor's own rows only)
+    J-->>A: signed JoinResponse with the deferral
+  else result
+    V-->>J: AttestationResult
+    J->>D: node, certificate, bindings, events, audit; COMMIT
+    J-->>A: signed JoinResponse with the certificate chain
+  end
+```
+
+`JoinRequest.attestor` names the attestor; empty means `join-token`. An unknown id is `UNSUPPORTED`, and a role the
+attestor does not list is refused before `verify` runs. The gateway only relays: it cannot read the sealed token, sign
+the response, or get a certificate issued without the node key's proof of possession.
+
+## The contract
+
+```ts title="acme-asset.ts"
+import { createHash, createPublicKey, verify } from 'node:crypto';
+import { ComputeError, defineAttestor, type AttestationResult } from 'better-compute/core';
+
+const vendorKey = createPublicKey(process.env.ACME_VENDOR_KEY_PEM!);
+const refuse = (reason: string): never => {
+  throw new ComputeError('ACCESS_DENIED', 'Join refused', undefined, {
+    reason: 'acme-asset',
+    refusal: `acme-asset:${reason}`,
+  });
+};
+
+export const acmeAssetAttestor = defineAttestor({
+  id: 'acme-asset',
+  version: '1.0.0',
+  roles: ['node'],
+  async verify(evidence, context): Promise<AttestationResult> {
+    if (!context.csrSha256) return refuse('no-csr-binding');
+    let body: { assetTag?: unknown; sig?: unknown };
+    try {
+      body = JSON.parse(new TextDecoder().decode(evidence.payload));
+    } catch {
+      return refuse('malformed');
+    }
+    if (typeof body.assetTag !== 'string' || typeof body.sig !== 'string') return refuse('malformed');
+    // The vendor signed the asset tag together with this join's CSR, so a captured proof is useless.
+    const statement = Buffer.concat([Buffer.from(body.assetTag), context.csrSha256]);
+    if (!verify('sha256', statement, vendorKey, Buffer.from(body.sig, 'base64url'))) return refuse('bad-signature');
+
+    const { rows } = await context.tx.query<{ tenant_id: string; pool_id: string }>(
+      'SELECT tenant_id, pool_id FROM plg_acme_assets WHERE asset_tag = $1',
+      [body.assetTag],
+    );
+    const asset = rows[0] ?? refuse('unknown-asset');
+    return {
+      tenantId: asset.tenant_id,
+      role: 'node',
+      poolId: asset.pool_id,
+      bind: createHash('sha256').update(body.assetTag).digest(), // one node per asset, for good
+    };
+  },
+});
+```
+
+`defineAttestor` returns the verifier frozen with `extension: 'attestor'`. `id` is what agents name, `roles` the agent
+roles it may admit (`node`, `site`, `ramdisk`), and `verify` receives:
+
+<TypeTable
+  type={{
+    'evidence.attestor': { type: 'string', description: 'The attestor id from the request.' },
+    'evidence.payload': { type: 'Uint8Array', description: 'JoinRequest.attestation: your evidence, in whatever format your producer writes. For join-token only, the opened token.' },
+    'evidence.token': { type: 'string', description: 'The opened sealed join token, whenever the request carried one (provisioned and discovery need it).' },
+    'context.tx': { type: 'SqlTx', description: "JoinService's transaction. Lock and write your rows here; they commit or roll back with the join." },
+    'context.clock': { type: 'Clock', description: 'Prefer compute_now() in SQL for anything compared with stored times.' },
+    'context.claims': { type: 'HardwareClaims', description: '{ productUuid?, serial?, macs?, gpuUuids?, hostname?, arch? } as the agent claims them. Claims, not proof.' },
+    'context.csrSha256': { type: 'Uint8Array', description: 'SHA-256 of JoinRequest.csr. Bind signed evidence to it, so it cannot be replayed with another key.' },
+    'context.role': { type: 'AgentRole', description: 'The role the agent asks for.' },
+  }}
+/>
+
+### What a result means
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: 'The tenant the node belongs to. With a pool it must be the pool owner.', required: true },
+    role: { type: 'AgentRole', description: "Must equal the requested role, or the join is refused ('role').", required: true },
+    poolId: { type: 'string', description: "The pool it joins. The pool must exist, run bcd (agent 'bcd'), belong to tenantId, and sit in siteId when both are given. A site agent never takes a pool." },
+    siteId: { type: 'string', description: 'Required when there is no pool; the site must exist.' },
+    trust: { type: 'NodeTrust', description: "Defaults to tenant-owned on a custom site, else platform." },
+    nodeId: { type: 'string', description: 'A reclaim: the node the machine proved it is. It is re-keyed in place (identity generation + 1, older certificates revoked) and keeps its state.' },
+    tokenId: { type: 'string', description: "A join token you consumed. JoinService then enforces that token's expect binding against the claims." },
+    certTtlSeconds: { type: 'number', description: 'Caps the certificate lifetime: min(this, the service TTL of at most 86,400 s, and 7,200 s for ramdisks).' },
+    allowedKinds: { type: 'readonly string[]', description: "Restricts the command kinds the certificate allows: exact kinds or prefix.* globs. A malformed entry fails the join with INVALID_CONFIG." },
+    bind: { type: 'Uint8Array', description: 'A 32-byte stable hardware identity (a hash). Bound to the node in node_bindings after issuing; the same subject can never admit another node.' },
+  }}
+/>
+
+JoinService then checks the rest itself: the token's `expect` binding when you returned a `tokenId`, a trusted hardware
+key already enrolled (a reclaim through a token needs `allowReclaim`), and that a reclaimed node keeps its tenant,
+site, pool and role. It inserts the node in `adopting` (or re-keys the existing one), issues the certificate, writes
+`node.joined` with `attestor: '<your id>'` and an audit row, all in the same transaction.
+
+`allowedKinds` is how the `discovery` attestor gives a ramdisk only `inventory`, `diag.*`, `wipe`, `deploy.*` and
+`boot.kexec`. It is stored on the certificate row (`node_certs.allowed_kinds`), renewed with it, and enforced both
+when a command is enqueued and when the gateway dispatches it.
+
+`bind` is how `tpm` ties an endorsement key to a node: on the next join, the attestor finds the bound node and returns
+its `nodeId`, so a reinstall or a lost key reclaims the same node. A subject bound to another node is refused
+`bound-elsewhere`. `nodes.delete` and retirement drop the node's bindings.
+
+## Refusing
+
+Throw `ComputeError('ACCESS_DENIED', 'Join refused')` for every refusal, whatever the reason: the agent must not learn
+which check failed. Put the reason in `details`, which stays on the server:
+
+- `details.refusal`: `<attestor>:<reason>`, recorded in the `security.join.refused` event (rate-bounded per attestor
+  and reason, 60 a minute by default) with hashes of the CSR and claimed hardware key, never the evidence itself.
+- `details.tenantId`: only once the evidence authenticated a tenant (a token's secret matched). The event then lands in
+  that tenant's stream; otherwise it goes to the root tenant, so an unauthenticated caller cannot write into another
+  tenant's events.
+
+Any other error (`INVALID_INPUT`, a plain `Error`) also rolls the transaction back and fails the join, but it is not
+recorded as a refusal, so reserve it for bugs, not for evidence you did not like. The attestors in `@better-compute/pki` build their refusals with an
+internal `refuser(attestor, onRefusal)` helper and take an `onRefusal` hook for your own metrics; copy the pattern.
+
+## Two-round joins
+
+Return an `AttestationDeferral` instead of a result when you cannot decide yet. JoinService commits the transaction, so
+your own rows persist, issues nothing, spends nothing of its own, and answers with a signed deferral. The agent sends
+`Join` again with **the same CSR**.
+
+<TypeTable
+  type={{
+    deferred: { type: "'approval' | 'challenge'", description: 'approval: an operator must decide; the agent retries the same request. challenge: the agent must answer your bytes.', required: true },
+    requestId: { type: 'string', description: 'approval: the join request an operator approves or rejects.' },
+    retryAfterSeconds: { type: 'number', description: 'approval: when the agent retries (default 30, at least 1).' },
+    challenge: { type: 'Uint8Array', description: 'challenge: attestor-specific bytes, delivered inside the signed response. Required and non-empty, or the join fails INVALID_CONFIG.' },
+    notAfter: { type: 'Date', description: 'challenge: answers after this are refused.' },
+  }}
+/>
+
+- **Approval.** `discovery` (with `approval: 'unknown-machines'` or `'always'`) and `tpm` (with `enrollment`) record a
+  pending row in `join_requests` and defer; an operator decides with
+  [`joinRequests.approve`](/docs/reference/api/join-requests#approve) or `reject`, and the retry consumes the approved
+  request in its own transaction. The `join_requests` helpers are internal to pki, so a third-party attestor that wants
+  approvals keeps its own table (`plg_<id>_*`) or builds on the built-ins.
+- **Challenge.** `tpm` answers the first round with a `MakeCredential` challenge and an opaque state sealed with the
+  host's `challengeKey`, writing no row, so any API replica can finish the join. The agent activates the credential and
+  quotes its PCRs with a nonce bound to the CSR; the second round verifies all of it.
+
+Two rules follow from the commit:
+
+1. **Consume only on the final round.** Anything single-use (a join token's use, a replay marker) must be spent in the
+   round that returns a result, never in a round that defers, or the retry finds it already spent. The built-ins split
+   it: `checkSingleUseToken` locks and checks a token in every round, and `spendToken` decrements it only at the end.
+2. **Bind the rounds to the CSR.** Put `csrSha256` into whatever you hand out, and check it when the answer comes back,
+   so a challenge answered for one key cannot finish another key's join.
+
+The agent loop is `runAgentJoin` in `@better-compute/testing`, which is also the behaviour `bcd` must implement: it
+keeps one key and CSR for the whole exchange, waits `retryAfterSeconds` on `pending`, passes a `challenge` to the
+producer of the same id, and verifies every response against the pinned signing key and the CSR before using it. A
+deferral is never taken for a join.
+
+## Single-use evidence
+
+Evidence that anyone on the machine can read, or that could be captured in flight, must admit one join at most.
+`attestation_uses` records it:
+
+```sql
+CREATE TABLE attestation_uses (
+  attestor text NOT NULL,
+  subject bytea NOT NULL CHECK (length(subject) = 32), -- sha256 of what must be used once
+  node_id text,
+  used_at timestamptz NOT NULL DEFAULT compute_now(),
+  expires_at timestamptz,                              -- NULL keeps it forever
+  PRIMARY KEY (attestor, subject)
+);
+```
+
+Insert in the final round's transaction and refuse on conflict:
+
+```ts
+const subject = createHash('sha256').update(`${provider}\0${accountId}\0${instanceId}`).digest();
+const used = await context.tx.query(
+  'INSERT INTO attestation_uses (attestor, subject, expires_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+  ['acme-asset', subject, null],
+);
+if (used.rowCount !== 1) refuse('reused');
+```
+
+That is what pki's internal `useOnce` does. `cloud-iid` admits each (provider, account, instance) once, forever, so a
+machine that lost its certificate re-joins through `x509pop`; `discovery` marks each signed site assertion until it
+expires. Set `expires_at` when the evidence cannot be presented after some time: `pruneAttestationUses(tx)` from
+`@better-compute/postgres` deletes expired rows in batches (5,000 by default), and rows without an expiry stay.
+
+## The built-ins as examples
+
+| Attestor | Read it for | Factory |
+| --- | --- | --- |
+| `join-token` | the simplest case: lock a row, verify in constant time, spend one use | built into JoinService; one you register with id `join-token` replaces it |
+| `x509pop` | a proof bound to the CSR, the node id and the client time, a replay cache, a reclaim by `nodeId` | `x509popAttestor({ graceMs?, windowMs?, replayCache? })` |
+| `provisioned` | a single-use token plus a host-supplied resolver (`resolveTarget`) that maps it to a node | `provisionedAttestor({ resolveTarget? })` |
+| `discovery` | two pieces of evidence (a token and a site-signed assertion), a fencing epoch, `certTtlSeconds` and `allowedKinds`, approval deferrals | `discoveryAttestor({ resolveWorkflowNode?, approval?, … })` |
+| `cloud-iid` | pluggable verifiers per cloud (`CloudIdentityProvider`), a host `resolve`, `attestation_uses` | `cloudIidAttestor({ providers, resolve, roles? })` |
+| `tpm` | a stateless challenge round, `bind`, allow-lists and enrollment | `tpmAttestor({ challengeKey, ekRoots?, pcrPolicy?, resolve?, enrollment? })` |
+
+They live in `packages/pki/src/attestors/`, with their agent-side producers next to them: `x509popProducer`,
+`createCloudIidEvidence`, `signDiscoveryAssertion` (the site agent's half) and `tpmProducer` over a software TPM.
+[Attestation](/docs/guides/nodes/attestation) explains what each one proves and how to configure it.
+
+## Registering
+
+Pass verifiers to `betterCompute({ attestors })`, or ship them in a module's `extensions`. The registry collects both,
+and `betterCompute()` builds the JoinService behind its gateway services with every registered extension whose
+`extension` is `'attestor'`:
+
+```ts title="compute.ts"
+import { betterCompute } from 'better-compute/server';
+import { x509popAttestor } from 'better-compute/pki';
+import { acmeAssetAttestor } from './acme-asset';
+
+export const compute = betterCompute({
+  // database, secret, baseURL, iam, pki: { nodeCa, join }, …
+  attestors: [x509popAttestor(), acmeAssetAttestor],
+});
+```
+
+Hosts that run JoinService themselves call `createJoinService({ database, clock, work, events, crypto, attestors })`
+from `better-compute/server`. It keeps the built-in `join-token` unless the list has one with that id, and skips
+anything that is not an attestor, so a registry's whole extension list can be passed as is. Wrap a verifier with
+`meteredAttestor(attestor, registry)` from `@better-compute/observability` to count verifications by outcome
+(`admitted`, `deferred-<kind>`, `refused`) and time them.
+
+## Testing
+
+Run the verifier through the real JoinService on PGlite, as `tests/pki-attestors-join.test.ts` does, and drive it with
+`runAgentJoin` and a `NodeAttestor` producer:
+
+```ts title="acme-asset.test.ts"
+import { createJoinService, pkiJoinCrypto } from '@better-compute/server';
+import { computeFixture, runAgentJoin } from '@better-compute/testing';
+
+// trustDomain, nodeCa, signingKey, encryptionKey and vendorSign are your test's own (see the pki test above).
+const fixture = await computeFixture({ clock: 'sim' });
+const service = createJoinService({
+  database: fixture.database,
+  clock: fixture.clock,
+  work: fixture.compute.context.work,
+  events: fixture.compute.context.events,
+  crypto: pkiJoinCrypto({ trustDomain, nodeCa, signingKey, encryptionKey }),
+  attestors: [acmeAssetAttestor],
+});
+
+const joined = await runAgentJoin({
+  send: (request) => service.join(request),
+  signer: { publicKey: signingKey.publicKey },
+  wait: async () => {},
+  claims: { productUuid: '4c4c4544-0042-3510-8052-b7c04f4e4e01' },
+  attestor: {
+    id: 'acme-asset',
+    async produce({ nonce }) {
+      // nonce is sha256(csr): sign the asset tag with it, as the vendor tooling would
+      return { attestor: 'acme-asset', payload: vendorSign('ASSET-0042', nonce!) };
+    },
+  },
+});
+expect(joined.rounds).toBe(1);
+```
+
+Test the refusals too: a replayed proof, a proof for another CSR, an unknown asset, the wrong role, and that each one
+is the same `ACCESS_DENIED`. The control-plane simulator in `@better-compute/testing`
+(`packages/testing/src/sim/control-plane.ts`) registers a minimal custom attestor, `sim-restricted`, the same way, to
+join simulated nodes with restricted certificates.
+
+<Cards>
+  <Card title="Attestation" href="/docs/guides/nodes/attestation" icon={<BadgeCheck />}>What each built-in attestor proves and how to configure it.</Card>
+  <Card title="Joining nodes" href="/docs/guides/nodes/joining" icon={<UserPlus />}>Join tokens, sealed tokens and what JoinService records.</Card>
+  <Card title="PKI" href="/docs/operations/pki" icon={<KeyRound />}>The node CA and the JoinService keys a join needs.</Card>
+</Cards>

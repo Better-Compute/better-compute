@@ -1,0 +1,177 @@
+---
+title: Gang and calendar reservations
+description: Book several nodes at once on one fabric, book a window that starts later, and let BookingRepair move a future booking off hardware that went bad.
+metaTitle: Gang and calendar GPU reservations
+icon: CalendarClock
+status: new
+packages: ['@better-compute/capacity']
+sources:
+  - packages/capacity/src/gang.ts
+  - packages/capacity/src/placer.ts
+  - packages/capacity/src/reservations.ts
+  - packages/capacity/src/module.ts
+  - packages/inventory/src/labels.ts
+  - tests/capacity-gang.test.ts
+  - tests/capacity-reservations.test.ts
+  - PLAN.md
+---
+
+import { Cpu, Route } from '@/lib/icons';
+
+Two workloads need more than "some GPUs, now". Distributed training needs several machines at once,
+all on the same high-speed fabric, or none at all. Planned work, such as a training run next Monday or
+a nightly batch, needs its capacity promised ahead of time. A <Term id="gang">gang</Term> covers the
+first and a <Term id="calendar-reservation">calendar reservation</Term> the second; they combine
+freely. Both landed ahead of their roadmap phase, v0.5.
+
+## Gang reservations
+
+Add `gang` to a reservation request. `devices` then describes **one node**, and the gang books `size`
+nodes that each take all of it:
+
+```ts title="pretrain.ts"
+const run = await compute.api.reservations.create(credential, {
+  tenantId: 'acme',
+  poolId,
+  devices: [{ class: 'gpu', count: 8, topology: 'nvlink-all' }], // per node
+  gang: { size: 4, topologyKey: 'fabric.domain' }, // 4 nodes, one NVLink fabric
+  duration: '3d',
+  idempotencyKey: 'pretrain-run-7',
+});
+```
+
+<TypeTable
+  type={{
+    size: { type: 'number', description: 'Nodes to book, 2 to 64.', required: true },
+    topologyKey: {
+      type: 'string',
+      description: 'A node label, such as fabric.domain or rack. Every member shares one value of it; nodes without the label never join. Without a key, any nodes of the pool form a gang.',
+    },
+  }}
+/>
+
+`fabric.domain` is an inventory label: the NVLink fabric cluster and clique of the node's GPUs, set
+only when all of them agree. Operator labels such as `rack` work the same way.
+
+### How a gang is placed
+
+1. Every node of the pool is planned for the per-node request with the normal
+   [filters, atom pick and scorers](/docs/guides/capacity/placement).
+2. The nodes that fit are grouped by their `topologyKey` value. Each group with at least `size` fitting
+   nodes contributes a candidate gang made of its `size` best nodes.
+3. Candidate gangs are ranked by the sum of their members' scores, then by group name, and one is
+   picked at random among the best `topN`.
+4. All members are committed inside one outer savepoint, one allocation per node. If any member loses
+   a race, the **whole gang** rolls back, that node is excluded, and the gang is planned again, up to
+   `maxAttempts` times.
+
+Gangs never use the SQL shortlist and always place inline, even with the pool-lease placer. When no
+group is large enough the reservation is `pending`, with a reason such as:
+
+```text
+no gang of 4 nodes fits in one fabric.domain (at most 3 nodes fit together)
+```
+
+### What a gang counts as
+
+- **Quota** counts the whole gang: `size` times the per-node devices, charged all or nothing.
+- **IAM** sees the whole gang too. The draft's `gpuCount` is the per-node whole GPUs times `size`, and
+  `gangSize` carries `size`, so a policy capped at 8 GPUs refuses a gang of two 8-GPU nodes.
+- **The lifecycle** moves all members together. The reservation becomes `active` only when every
+  member node has reported its devices bound; extend moves every member's end or none; release and
+  cancel free every member.
+- **`reservations.get`** shows one member's `binding` (the first bound allocation by id). Each member
+  node carries its own assignment in its desired state.
+
+[`capacity.preview`](/docs/reference/api/capacity#preview) accepts `gang` and answers with the members of
+the best gang, or the reason none fits. A regular gang that does not fit may preempt spot work on
+several nodes in one notice ([spot and preemption](/docs/guides/capacity/spot-and-preemption)), and a
+`binding: 'node'` lease can be a gang of whole machines.
+
+## Calendar reservations
+
+A reservation with a `start` in the future is a calendar reservation. It is placed at admission for
+the window from `start` to `start + duration`: the atoms are booked now, so nobody else can take them
+for that window.
+
+```bash
+better-compute reserve --tenant acme --pool pool_01k… --gpus 8 --for 12h --start 2026-09-28T08:00:00Z --key weekly-eval
+better-compute reserve --tenant acme --pool pool_01k… --gpus 2 --for 1h --start +2h
+```
+
+- Bookings are intervals, so the same atoms can serve other reservations that end before `start`.
+  The pool's rollup counts the booking as `reserved` until it begins.
+- The reservation stays `placed` until its start, then binds like any other. Billing starts only
+  when it is `active`.
+- Its quota charge is held from admission, including the time before the start.
+- [`reservations.cancel`](/docs/reference/api/reservations#cancel) withdraws it before the start and
+  refunds the quota. `reservations.extend` works on a placed reservation too.
+- If nothing fits the window at admission, the reservation is `pending` and retried every 30 seconds
+  for the same start. Once the start has passed, a successful retry books from the moment it is
+  placed, for the full duration.
+
+## BookingRepair
+
+Between placement and start, hardware can go bad: a node is cordoned for maintenance, a GPU is
+quarantined after an XID error, a node is unreachable. A calendar reservation that simply waited for
+its start would then fail to bind. **BookingRepair** checks the booking before that happens.
+
+At 15 minutes before the start, and again at the start, the lifecycle checks every allocation of a
+`placed` reservation: its node must still be schedulable and every booked atom healthy and bookable.
+A node lease is judged by whether its node is still leasable, and only before its window begins,
+because from then on the node is metal's to deploy. If an allocation fails the check:
+
+1. The pool is locked first, keeping capacity's lock order.
+2. The reservation's allocations are released, and it is placed again for **the same window**,
+   avoiding the bad nodes. The quota charge is kept.
+3. On success the reservation stays `placed` on its new nodes, and `reservation.repaired` reports
+   the nodes it left (`from`) and the new ones (`nodeIds`).
+4. If nothing fits, the reservation goes `pending` with `Unschedulable` and reason
+   `BookingRepairFailed`, and retries like any pending reservation.
+
+Repairs always place inline. A reservation that starts immediately is checked at its start, just
+before it binds.
+
+## The timeline API
+
+[`capacity.timeline`](/docs/reference/api/capacity#timeline) draws booked GPUs over time for a calendar
+view, decided as `compute:capacity:read` on the pool.
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: 'The tenant asking; the pool must be visible to it.', required: true },
+    poolId: { type: 'string', description: 'The pool.', required: true },
+    from: { type: 'number', description: 'Epoch milliseconds.', default: 'the start of the current hour' },
+    to: { type: 'number', description: 'Epoch milliseconds, after from.', default: 'from plus 24 hours' },
+    stepMinutes: { type: 'number', description: 'Bucket width, 5 to 1440 minutes.', default: '60' },
+  }}
+/>
+
+A timeline spans at most 7 days and 336 buckets; anything longer is `INVALID_INPUT`.
+
+```json title="capacity.timeline, from now to 4 hours ahead"
+{
+  "poolId": "pool_01k…",
+  "allocatable": 8,
+  "buckets": [
+    { "start": 1790000000000, "end": 1790003600000, "booked": 3, "free": 5 },
+    { "start": 1790003600000, "end": 1790007200000, "booked": 3, "free": 5 },
+    { "start": 1790007200000, "end": 1790010800000, "booked": 2, "free": 6 },
+    { "start": 1790010800000, "end": 1790014400000, "booked": 0, "free": 8 }
+  ]
+}
+```
+
+`booked` counts the distinct whole GPUs (`gpu` atoms) of the pool with any booking that overlaps the
+bucket, so a GPU busy for five minutes of an hour counts for the hour. `free` is
+`max(0, allocatable − booked)`, where `allocatable` is the pool's current rollup value, not a forecast
+of future health. MIG instances and slots are not counted.
+
+<Cards>
+  <Card title="Reservations" href="/docs/guides/capacity/reservations" icon={<Cpu />}>
+    The lifecycle, bindings, extend and release.
+  </Card>
+  <Card title="Placement" href="/docs/guides/capacity/placement" icon={<Route />}>
+    The per-node planning a gang is built from.
+  </Card>
+</Cards>

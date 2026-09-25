@@ -1,0 +1,22 @@
+---
+title: Glossary
+description: Every term the Better Compute docs use, from atoms and bookings to leases, NodeSpecs and exec tickets, with a link to the page that explains it.
+icon: BookA
+sources:
+  - apps/docs/data/glossary.json
+  - apps/docs/components/glossary.tsx
+  - apps/docs/components/term.tsx
+  - PLAN.md
+  - packages/core/src/domain.ts
+---
+
+Better Compute borrows words from Kubernetes, OpenStack Ironic and cloud APIs, and gives a few of them a narrower
+meaning. "Lease", for example, is never used alone: it is an allocation lease, a liveness lease, or a shard, pool or
+site lease, and each is a different thing. This page defines every term the guides mark as a glossary term, one or
+two sentences each, with a link to the page that explains it in depth.
+
+A dotted underline in any guide marks such a term: hover or tap it for the definition, then follow **Glossary** to
+land on its entry here. Each entry's anchor is its name in lower case with hyphens, for example
+`#allocation-lease`.
+
+<Glossary />

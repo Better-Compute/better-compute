@@ -1,0 +1,150 @@
+---
+title: Flavors
+description: Named instance shapes per VPS pool, and how each becomes scalar claims, GPU atoms and quota on a host, or a provider offer.
+metaTitle: VPS flavors and instance shapes
+icon: SlidersHorizontal
+status: beta
+packages: ['@better-compute/vps', '@better-compute/capacity']
+sources: ['packages/vps/src/flavors.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/usage.ts', 'packages/vps/src/module.ts', 'packages/capacity/src/bookings.ts', 'packages/capacity/src/placer.ts', 'packages/capacity/src/shortlist.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/provision/src/profile.ts', 'packages/fleet/README.md', 'tests/vps-instances.test.ts']
+---
+
+Tenants should not have to know how many vCPUs a host has or what a provider calls its server types. A
+<Term id="flavor">flavor</Term> is a named shape, such as `g1.small` or `gpu1.l40s`, that the pool's owner defines
+and tenants pick by name when they create an <Term id="instance">instance</Term>. The pool decides what the name
+means: in a hosted pool it becomes claims on one host, in a provider pool it names the provider's offer.
+
+Flavors belong to one pool. The same name in two pools can mean two different shapes.
+
+## Define a flavor
+
+The pool's owner creates flavors with [flavors.create](/docs/reference/api/flavors#create), decided as
+`compute:flavors:manage` on the pool:
+
+```ts
+await compute.api.flavors.create(
+  { token },
+  { tenantId: 'root', poolId: 'pool_01jz…', name: 'gpu1.l40s', vcpu: 8, memoryGiB: 32, diskGiB: 200, gpus: 1 },
+);
+// → { id: 'flv_…', poolId: 'pool_01jz…', name: 'gpu1.l40s', vcpu: 8, memoryGiB: 32, diskGiB: 200,
+//     gpus: 1, archived: false, version: 1 }
+```
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: "The pool owner's tenant. Other tenants get NOT_FOUND.", required: true },
+    poolId: { type: 'string', description: 'A pool of class vps-host or provider. Any other class is INVALID_STATE.', required: true },
+    name: { type: 'string', description: '1 to 63 lower-case letters, digits, dots, underscores or hyphens, starting with a letter or digit. Unique in the pool.', required: true },
+    vcpu: { type: 'number', description: 'Whole vCPUs, 1 to 1024.', required: true },
+    memoryGiB: { type: 'number', description: 'GiB of memory, 1 to 16384.', required: true },
+    diskGiB: { type: 'number', description: 'GiB of disk, 1 to 65536.', required: true },
+    gpus: { type: 'number', description: 'Whole GPUs passed through to the VM, 0 to 16.', default: '0' },
+    offerId: { type: 'string', description: "Provider pools: the provider offer this flavor creates, 1 to 128 characters. Required there; hosted pools ignore it.", },
+  }}
+/>
+
+A second flavor with the same name in the pool is `CONFLICT`. A provider pool flavor without `offerId` is
+`INVALID_INPUT`.
+
+You can also declare flavors in a [FleetConfig](/docs/guides/fleet-config) document, next to the pools they belong
+to, and let `fleet apply` call `flavors.*` for you:
+
+```yaml title="fleet.yaml"
+flavors:
+  - { pool: vps-fra, name: g1.small, vcpu: 2, memoryGiB: 4, diskGiB: 40 }
+```
+
+## List flavors
+
+[flavors.list](/docs/reference/api/flavors#list) (`compute:flavors:read`) returns `{ items }`, sorted by name, to
+the pool's owner and to every tenant the pool is offered to. That is what an instance form loads when a pool is
+chosen. Archived flavors are not listed.
+
+## Flavors on hosted pools
+
+In a `vps-host` pool, capacity places the flavor on one host of the pool as an open-ended
+<Term id="allocation">allocation</Term> (it lasts until the instance is deleted) with:
+
+- **scalar claims** `vcpu`, `memoryGiB` and `diskGiB`, the flavor's numbers;
+- **devices** `{ class: 'gpu', count: gpus }`: whole GPU <Term id="atom">atoms</Term>, passed through with VFIO
+  and booked like any other GPU booking.
+
+A host fits when, for every scalar, `allocated + claim <= floor(allocatable × ratio)` on its `node_resources` row.
+`ratio` is the overcommit: with `allocatable` 16 vCPU and `ratio` 2, a host takes 32 vCPUs of flavors. GPUs are never
+overcommitted. A host with no row for a scalar the flavor asks for is not a candidate.
+
+<Callout type="warn" title="Host scalars are not filled in automatically yet">
+In this release nothing derives a VPS host's `node_resources` rows from its inventory, and the pool's
+`policy.overcommit` is not applied to `ratio`. The tests and the churn acceptance write the rows directly. Until
+inventory fills them, a hosted pool has no candidate hosts unless you do the same.
+</Callout>
+
+The same shape is what the instance counts against the tenant's quota in the pool: `vcpu`, `memoryGiB`, `diskGiB`,
+and `gpu` when `gpus` is above 0. The placement charges it, and deleting the instance returns it. See
+[placement](/docs/guides/capacity/placement) and [quotas and usage](/docs/guides/capacity/quotas-and-usage).
+
+Hosted instances are metered from placement until their allocation is released: `vps.vcpu.hours` at `vcpu` per hour,
+`vps.memory.gib.hours` at `memoryGiB` per hour, and for GPU flavors `gpu.<model>.hours` at `gpus` per hour, where the
+model is the pool's `gpuModel` in lower case. The `vps.usage` job writes the windows every 5 minutes; see
+[billing and usage](/docs/guides/iam/billing-and-usage).
+
+## Flavors on provider pools
+
+In a `provider` pool the flavor's `offerId` is what the reconciler passes to `ProviderImpl.create`. Its `vcpu`,
+`memoryGiB`, `diskGiB` and `gpus` are what the tenant is charged against quota at admission, and what policies
+see; nothing checks them against the offer. Copy them from the offer:
+
+```ts
+const { items } = await compute.api.providerAccounts.offers(
+  { token },
+  { tenantId: 'root', accountId: 'pacct_…', query: { kind: 'vps', minVcpu: 2 } },
+);
+// [{ id: 'cx22', kind: 'vps', region: 'fsn1', vcpu: 2, memoryGiB: 4, diskGiB: 40, pricePerHour: 0.0071, currency: 'EUR', available: true }, …]
+
+await compute.api.flavors.create(
+  { token },
+  { tenantId: 'root', poolId: providerPool, name: 'cx22', vcpu: 2, memoryGiB: 4, diskGiB: 40, offerId: 'cx22' },
+);
+```
+
+Provider instances have no allocation and are not metered: the provider bills you. See
+[providers](/docs/guides/vps/providers).
+
+## The shape an instance keeps
+
+An instance stores a copy of its flavor's shape when it is admitted. Changing or archiving the flavor later never
+changes a live instance: its claims, quota and policy attributes stay what they were. To move an instance to another
+shape, resize it.
+
+[instances.resize](/docs/reference/api/instances#resize) works on stopped hosted instances whose GPU count stays the
+same. It computes the difference per resource between the old shape and the new one, then:
+
+1. charges the growth to quota (`QUOTA_EXCEEDED` if it does not fit);
+2. calls capacity's `resizeAllocation(tx, allocationId, { vcpu, memoryGiB, diskGiB })`, which changes the
+   allocation's scalar claims in place on its node, all or nothing: growth takes the same guarded
+   `allocated + Δ <= floor(allocatable × ratio)` update, shrinkage returns room;
+3. on a conflict, refunds the growth and fails with `CAPACITY_UNAVAILABLE`, `details.resource` naming what ran out;
+4. otherwise refunds the shrinkage and stores the new shape.
+
+The allocation never moves to another host, and GPU atoms are never added or removed: a different GPU count is
+`UNSUPPORTED`, and so is resizing a provider instance. Create a new instance instead.
+
+## Update and delete
+
+[flavors.update](/docs/reference/api/flavors#update) takes the same input as `create` and replaces the shape. Every
+field is required again except `gpus`, which falls back to 0 when you leave it out, and `offerId`, which keeps its
+value when you leave it out. Updating an archived flavor also restores it. A missing flavor is `NOT_FOUND`.
+
+[flavors.delete](/docs/reference/api/flavors#delete) returns `{ deleted, archived }`:
+
+- a flavor no instance ever used is deleted: `{ deleted: true, archived: false }`;
+- a flavor any instance row references, including deleted instances, is archived instead:
+  `{ deleted: false, archived: true }`.
+
+An archived flavor is hidden from `flavors.list`, and new instances and resizes that name it are `NOT_FOUND`.
+Instances already using it keep running.
+
+## Flavors in profiles
+
+A VPS profile written with `defineProfile({ target: 'vps', runtime, flavors, network })` validates a map of flavor
+names to shapes as well (see [steps and profiles](/docs/extending/steps-and-profiles)). `vps()` does not read
+profiles in this release: instances always use the pool's flavor rows described here.

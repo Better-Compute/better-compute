@@ -1,0 +1,19 @@
+{
+  "title": "Operations",
+  "description": "Deploy, secure, observe and scale",
+  "root": true,
+  "icon": "Server",
+  "pages": [
+    "index",
+    "deployment",
+    "configuration",
+    "database",
+    "pki",
+    "security",
+    "local-development",
+    "testing",
+    "observability",
+    "retention",
+    "scaling"
+  ]
+}

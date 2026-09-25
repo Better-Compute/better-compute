@@ -1,0 +1,408 @@
+---
+title: Instances
+description: Create, start, stop, resize and delete VPS instances, and how the vps.instances reconciler converges them from host reports or provider polls.
+metaTitle: VPS instances and their lifecycle
+icon: Server
+status: beta
+packages: ['@better-compute/vps']
+sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts']
+---
+
+An <Term id="instance">instance</Term> is a VM in a VPS <Term id="pool">pool</Term>. You ask for one with a
+<Term id="flavor">flavor</Term>, an image and SSH keys; after that you only change what you want it to be
+(`running`, `stopped` or `deleted`). The `vps.instances` <Term id="reconciler">reconciler</Term> works out how to
+get there, from what the host's runtime reports in a hosted pool or from what the provider answers in a provider
+pool.
+
+This page assumes you registered `vps()` and have a VPS pool with at least one flavor; see [VPS](/docs/guides/vps)
+and [flavors](/docs/guides/vps/flavors).
+
+## Create an instance
+
+```ts title="server.ts"
+const instance = await compute.api.instances.create(
+  { token },
+  {
+    tenantId: 'acme',
+    poolId: 'pool_01jz…',
+    flavor: 'g1.small',
+    imageId: 'ubuntu-24.04',
+    sshKeys: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… alice@laptop'],
+    idempotencyKey: 'build-agent-7',
+  },
+);
+// Hosted pool: { id: 'inst_…', state: 'provisioning', desiredState: 'running',
+//                nodeId: 'node_…', addresses: ['10.0.0.2'], … }
+// Provider pool: { id: 'inst_…', state: 'scheduling', … }
+```
+
+From a browser or another service, the typed client strips the credential, and every method is also a plain HTTP
+route:
+
+<Tabs items={['Client', 'HTTP', 'CLI']}>
+  <Tab value="Client">
+
+```ts
+import { createComputeClient } from 'better-compute/client';
+
+const client = createComputeClient<typeof compute>({ baseURL, token: () => session.getToken() });
+await client.instances.create({ tenantId: 'acme', poolId, flavor: 'g1.small', imageId: 'ubuntu-24.04', idempotencyKey: 'build-agent-7' });
+```
+
+  </Tab>
+  <Tab value="HTTP">
+
+```http
+POST /api/compute/instances/create
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "tenantId": "acme", "poolId": "pool_01jz…", "flavor": "g1.small", "imageId": "ubuntu-24.04", "idempotencyKey": "build-agent-7" }
+```
+
+  </Tab>
+  <Tab value="CLI">
+
+```bash
+better-compute api instances.create tenantId=acme poolId=pool_01jz… flavor=g1.small \
+  imageId=ubuntu-24.04 'sshKeys[]=ssh-ed25519 AAAAC3Nza… alice@laptop' idempotencyKey=build-agent-7
+```
+
+  </Tab>
+</Tabs>
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: 'The tenant the instance belongs to.', required: true },
+    poolId: { type: 'string', description: 'A vps-host or provider pool the tenant owns or is offered, and not archived.', required: true },
+    flavor: { type: 'string', description: 'A flavor name of that pool, such as g1.small.', required: true },
+    imageId: { type: 'string', description: 'Up to 200 characters of letters, digits and . _ @ : / -, starting with a letter or digit. Hosted pools resolve it with vps({ images }); provider pools pass it to the provider as is.', required: true },
+    sshKeys: { type: 'string[]', description: 'Up to 32 OpenSSH public key lines: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256/384/521 or sk-ssh-ed25519@openssh.com.', default: '[]' },
+    userData: { type: 'string', description: 'Your own cloud-init, at most 32 KiB. When given it is used as is, and sshKeys are not added to it.' },
+    desiredState: { type: "'running' | 'stopped'", description: 'Where the instance should end up.', default: "'running'" },
+    projectId: { type: 'string', description: 'A prj_ id, for usage tags and policies.' },
+    idempotencyKey: { type: 'string', description: '1 to 128 of letters, digits and . _ : -. Retrying with the same key returns the same instance.', required: true },
+  }}
+/>
+
+Unknown fields are `INVALID_INPUT`. The API reference has the route and action:
+[instances.create](/docs/reference/api/instances#create).
+
+### How a create is admitted
+
+`instances.create` follows the same request-as-resource <Term id="admission">admission</Term> as
+[reservations](/docs/guides/capacity/reservations): the instance exists as a <Term id="draft">draft</Term> before
+anyone decides on it, so policies can read what is being asked for.
+
+<Steps>
+<Step>
+
+### Transaction 1: the draft
+
+The instance id is derived from the tenant, the caller's identity and the idempotency key. If a finished instance
+already has that id, the call returns it (a replay). If the stored request differs from this one, the call fails
+with `CONFLICT` and `details.instanceId`. Otherwise vps checks that the pool is visible and is a VPS pool, that the
+flavor exists and is not archived, and, in a hosted pool, that the image resolves for the tenant. It then writes the
+draft and its authorization row.
+
+</Step>
+<Step>
+
+### The decision
+
+Better IAM decides `compute:instances:create` on `compute-instance/<draft id>`. The row's parent is the pool, its
+owner is the caller, and it carries the attributes policies can test: `vcpu`, `memoryGiB`, `gpus`, `imageId`,
+`imageVerified` and `projectId`. A refusal deletes the draft, so a later retry is decided afresh. An agent under
+[delegated confirmation](/docs/guides/iam/delegated-confirmation) gets `CONFIRMATION_REQUIRED` and retries with the
+same key once a person approves.
+
+</Step>
+<Step>
+
+### Transaction 2: admission and scheduling
+
+The draft becomes an instance in `scheduling`. In a **hosted pool**, capacity places it at once and vps leases an IP
+address, so the answer is already `provisioning` with a `nodeId`. When no host fits, the answer is `scheduling` with
+an `Unschedulable` condition (reason `NoFit`), and the reconciler tries again every 30 seconds. In a **provider
+pool**, vps charges the flavor's shape to the tenant's quota and returns `scheduling`; the reconciler creates the
+machine.
+
+</Step>
+</Steps>
+
+A policy can bound what tenants create, for example only small VMs from signed images:
+
+```json title="policy statement"
+{
+  "sid": "SmallVerifiedVms",
+  "effect": "allow",
+  "actions": ["compute:instances:create"],
+  "resources": ["compute-instance/*"],
+  "conditions": {
+    "Bool": { "resource.imageVerified": true },
+    "NumericLessThanEquals": { "resource.vcpu": 8, "resource.gpus": 0 }
+  }
+}
+```
+
+`imageVerified` comes from the image resolver. In a provider pool without `vps({ images })` it is `false`.
+
+### Errors
+
+| Code                    | When                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `INVALID_INPUT`         | A field fails validation, or the pool is not of class `vps-host` or `provider`.                                                      |
+| `NOT_FOUND`             | The pool is not owned by or offered to the tenant, or is archived; the flavor is missing or archived; a hosted pool's image does not resolve. |
+| `CONFLICT`              | The idempotency key was used for a different request.                                                                                |
+| `ACCESS_DENIED`         | Better IAM refused. The draft is gone.                                                                                               |
+| `CONFIRMATION_REQUIRED` | A delegated session needs a person to approve.                                                                                       |
+| `QUOTA_EXCEEDED`        | The tenant's quota in the pool is too small. `details` names `resource`, `requested`, `max` and `used`.                             |
+| `CAPACITY_UNAVAILABLE`  | Hosted pool: the pool's IP range has no free address.                                                                                |
+| `INVALID_CONFIG`        | Hosted pool, but `vps()` was registered without `images`.                                                                            |
+| `INVALID_STATE`         | Provider pool without a provider account.                                                                                            |
+
+Every resource an instance uses needs a quota row in the pool: `vcpu`, `memoryGiB`, `diskGiB`, and `gpu` for GPU
+flavors. [pools.offer](/docs/reference/api/pools#offer) sets them for a tenant. A pool's owner gets only a `gpu`
+quota by default, so give the owner `ownerQuota` for the scalar resources before it creates instances in its own
+pool. See [quotas and usage](/docs/guides/capacity/quotas-and-usage).
+
+## Read and list
+
+[instances.get](/docs/reference/api/instances#get) returns one instance of the tenant, deleted ones included. Drafts
+and other tenants' instances are `NOT_FOUND`.
+
+[instances.list](/docs/reference/api/instances#list) returns `{ items, cursor? }`, newest first:
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: 'The tenant.', required: true },
+    scope: { type: "'mine' | 'all'", description: "mine: the caller's own instances, filtered in SQL. all: every instance of the tenant, each checked with compute:instances:read.", default: "'mine'" },
+    state: { type: 'InstanceState', description: 'Only instances in this state.' },
+    poolId: { type: 'string', description: 'Only instances in this pool.' },
+    limit: { type: 'number', description: '1 to 200.', default: '50' },
+    cursor: { type: 'string', description: 'The cursor of the previous page (an instance id).' },
+  }}
+/>
+
+## Start, stop and delete
+
+[start](/docs/reference/api/instances#start) and [stop](/docs/reference/api/instances#stop)
+(`compute:instances:update`) set `desiredState` to `running` or `stopped`, and
+[delete](/docs/reference/api/instances#delete) (`compute:instances:delete`) sets it to `deleted`. Each returns the
+instance at once, before anything has happened, and wakes the reconciler; a hosted instance's node also gets a new
+NodeSpec. Watch `state`, or the `instance.*` [events](/docs/guides/events), to see the change land.
+
+- `start` or `stop` on an instance that is being deleted is `INVALID_STATE`.
+- `start` on an instance in `error` that has a host or a provider machine retries it: it moves to `starting` and the
+  runtime or provider is asked again. An instance that failed before it was placed stays in `error`; delete it and
+  create a new one.
+- `delete` is idempotent. A deleted instance stays readable with `state: 'deleted'`; deleting it again returns it.
+- Deletion releases everything the instance held: the capacity allocation, the IP lease and the quota, and its
+  authorization row.
+
+A hosted instance is `deleted` only once its runtime has dropped it: the next complete report from the host no
+longer lists it. If the host is `lost`, or the instance was never placed, deletion finishes without waiting. A
+provider instance is `deleted` once the provider's `delete` succeeds or finds nothing to delete.
+
+## Resize
+
+[instances.resize](/docs/reference/api/instances#resize) moves a stopped hosted instance to another flavor of its pool,
+on the same host. It exists so a tenant can grow a VM without rebuilding it.
+
+```ts
+await compute.api.instances.stop({ token }, { tenantId: 'acme', instanceId });
+// … wait until state is 'stopped' …
+await compute.api.instances.resize({ token }, { tenantId: 'acme', instanceId, flavor: 'g1.large' });
+```
+
+The call charges the growth to quota first, then resizes the allocation in place on the node, then refunds any
+shrinkage. It is all or nothing: if the host lacks room, the quota charge is undone.
+
+| Code                   | When                                                                         |
+| ---------------------- | ---------------------------------------------------------------------------- |
+| `UNSUPPORTED`          | The instance is in a provider pool, or the new flavor has a different GPU count. |
+| `INVALID_STATE`        | The instance is not stopped (both `state` and `desiredState`), or holds no allocation. |
+| `NOT_FOUND`            | The flavor is missing or archived.                                           |
+| `QUOTA_EXCEEDED`       | The growth does not fit the tenant's quota.                                  |
+| `CAPACITY_UNAVAILABLE` | The host has no room; `details.resource` names what ran out.                 |
+
+The instance passes through `resizing` and is `stopped` again when the call returns, with its policy attributes
+updated. See [flavors](/docs/guides/vps/flavors) for how shapes become claims.
+
+## The reconciler
+
+`vps.instances` runs one instance per work item, keyed by the instance id. Every API change, every host report that
+changes something and every provider answer enqueues it again, and it schedules its own next look:
+
+| Situation                                  | Next look       |
+| ------------------------------------------ | --------------- |
+| Nothing fits a hosted instance yet         | 30 s            |
+| Transitional state (waiting on a runtime)  | 10 s            |
+| Steady provider instance (drift polling)   | 60 s            |
+| Provider call failed and will be retried   | 30 s            |
+| Settled hosted instance, error, deleted    | Only when woken |
+
+### Hosted pools
+
+The API never calls a runtime. The reconciler changes the database, and the host acts on its NodeSpec:
+
+```mermaid
+sequenceDiagram
+  participant A as API
+  participant R as vps.instances
+  participant G as Gateway
+  participant H as Host runtime
+  A->>A: place, lease IP, state provisioning
+  A->>G: NodeSpec gains the instance
+  G->>H: desired state
+  H->>G: StatusReport with instances
+  G->>R: reportInstances, enqueue
+  R->>R: provisioning, starting, running
+```
+
+Each hosted node's `instances` section lists every live instance placed on it (not `pending`, `scheduling` or
+`deleted`) with its runtime, flavor, image (`url`, `sha256`, `format`), rendered cloud-init and the GPU atoms of its
+allocation. An instance being deleted is sent with `desiredState: 'deleted'`. The rendered cloud-init sets the
+hostname from the instance id and installs `sshKeys`, unless you passed `userData`.
+
+From the reports, the reconciler moves the instance:
+
+- When the reported state equals `desiredState`, it walks `state` there: `provisioning` to `starting` to `running`,
+  or `running` to `stopped` and back. Each step publishes `instance.<state>`.
+- A reported `error` moves it to `error` with a `RuntimeError` condition and publishes `instance.failed`.
+- While the report and `desiredState` disagree, it waits and looks again in 10 seconds.
+
+<Callout type="warn" title="The host side is not built yet">
+bcd is written in `daemon/` but not built or released, and has no VM runtime behind its `instances` section. On the
+wire, the NodeSpec encoder forwards user data only as a `secret://` reference and does not fill `InstanceSpec.nics`,
+so a runtime would not yet receive the rendered cloud-init or the IPAM address.
+</Callout>
+
+### Provider pools
+
+There is no node. Each round is three steps, so no network call ever runs inside a database transaction:
+
+1. **Plan** in a short transaction: lock the instance, start deletion if `desiredState` is `deleted`, and read the
+   provider account.
+2. **Call** the account's `ProviderImpl` with the instance id as the idempotency key.
+3. **Apply** the answer in a second transaction, only if the instance's `version` has not moved; otherwise try again
+   at once.
+
+| Instance                                                    | Provider call                     |
+| ----------------------------------------------------------- | --------------------------------- |
+| `scheduling`, no machine yet                                | `create` with the flavor's `offerId`, the `imageId`, rendered user data and the instance id as name |
+| `running`, wanted `stopped`, reported running                | `power(id, 'graceful-off')`, then `get` |
+| `stopped`, wanted `running`, reported stopped                | `power(id, 'on')`, then `get`     |
+| `deleting` with a machine                                   | `delete` (`NOT_FOUND` counts as done) |
+| Anything else with a machine                                | `get`                             |
+
+The machine's `id` becomes `externalId`, its addresses replace `addresses`, and its state maps to `running`,
+`stopped`, `error` or, for `deleted`, absent. The first answer moves `scheduling` to `provisioning` and publishes
+`instance.provisioning`.
+
+A failed call records a `ProviderError` condition with the error code as reason and the message (up to 500
+characters). `UNSUPPORTED`, `INVALID_STATE` and `INVALID_CONFIG` move the instance to `error`; anything else,
+`RATE_LIMITED` and `PROVIDER_ERROR` included, is retried in 30 seconds. A machine that `get` no longer finds makes the
+instance `lost`, and the reconciler stops polling it; delete it to refund its quota.
+
+## Reports from hosts
+
+The gateway hands each node's coalesced `StatusReport` to `instanceStatusHandler`, inside its ingest transaction. The
+report's `instances` lists every VM the host's runtimes hold, managed or not:
+
+- States map from `InstanceObservedState`: `RUNNING`, `STOPPED` and `ERROR`. `UNSPECIFIED` entries are skipped.
+- Only instances placed on the reporting node are touched, so one node can never move another node's instances.
+- Reported addresses are added to the instance's `addresses`.
+- With `instancesComplete: true` the list is the whole inventory: a placed instance missing from it is marked
+  absent. That is how deletion completes. An empty, incomplete report changes nothing.
+
+You can call the same seam yourself, which is what the tests and the churn acceptance do to emulate hosts:
+
+```ts
+import { reportInstances } from '@better-compute/vps';
+
+// `work` is the runtime's work queue (ModuleContext['work']): changed instances are enqueued on it.
+await db.transaction((tx) =>
+  reportInstances(tx, work, nodeId, [{ id: instanceId, state: 'running', addresses: ['fe80::1'] }], {
+    complete: true,
+  }),
+);
+// → { updated: 1, orphans: [] }
+```
+
+### Orphans and leak alerts
+
+An instance the runtime holds that no live row places on that node is an orphan: a leaked VM, overlay or tap, or one
+reported by the wrong host. `reportInstances` returns orphan ids sorted, and never changes anything for them.
+
+`instanceStatusHandler({ events })` publishes `instance.orphaned` with subject `node/<id>` and
+`data: { nodeId, instanceIds }` (up to 100 ids). It announces a node's orphan set only when the set changes; hosts
+report about once a second and leaks persist. The last announced set is kept in memory, so a restarted process
+announces current leaks once more. Without `events`, orphans go to `log` (default `console.warn`).
+`vpsInstanceStatusHandler` is the handler with no event publisher.
+
+The v0.3 acceptance checks the other direction too: after 200 instances churn on 3 emulated hosts, every runtime
+domain is a live placed instance and every allocation, IP lease, scalar claim and quota counter matches the live
+instances (`tests/vps-churn.test.ts`).
+
+## Lost hosts
+
+When a hosted instance's node becomes `lost` (see [inventory and health](/docs/guides/nodes/inventory-and-health)),
+the instance moves to `lost` and `instance.lost` is published with the `nodeId`. The reconciler then looks every 60
+seconds:
+
+- If the node reconnects and reports the instance `running` or `stopped`, it recovers to that state
+  (`instance.recovered`).
+- If the pool's policy has `recreateOnHostLoss: true`, the instance releases its allocation and IP lease, goes back to
+  `scheduling` (`instance.recreating`) and is placed again, on a host that is still schedulable, where it boots
+  from its image.
+
+`recreateOnHostLoss` is read from the pool's stored `policy` document; it is not part of the `PoolPolicy` type yet,
+so a typed caller setting it through `pools.create` or `pools.update` needs a cast.
+
+## Runtimes
+
+A runtime is the driver that runs VMs on a host, under the `runtime` driver kind that importing `@better-compute/vps`
+adds to `DriverKinds`. It runs on the node (`runsOn: 'node'`), and every operation is idempotent by instance id:
+
+```ts title="@better-compute/vps"
+interface RuntimeDriver {
+  readonly traits: RuntimeTraits; // isolation 'vm' | 'microvm' | 'container', multiTenant, gpuPassthrough, imageFormats
+  list(): Promise<RuntimeInstanceStatus[]>; // everything it holds, so leaks are found by diffing
+  apply(spec: InstanceSpec): Promise<RuntimeInstanceStatus>; // cache the image, build the overlay and NoCloud seed, start/stop/resize
+  reboot(instanceId: string): Promise<void>;
+  remove(instanceId: string): Promise<void>; // an absent instance counts as removed
+  console?(instanceId: string): Promise<DuplexStream>; // the serial console, for tunnels
+}
+```
+
+`libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet.
+Out-of-process runtimes (a Kata runtime as a bcx plugin, selected by pools) are planned for v0.5; see
+[drivers](/docs/extending/drivers). `vps({ runtimes })` only names the ids: the first one is recorded on every new
+hosted instance and sent in its spec.
+
+## Events
+
+Instance events have subject `instance/<id>` and carry `state`, `desiredState` and `poolId`:
+
+| Event                                                           | When                                                  |
+| --------------------------------------------------------------- | ----------------------------------------------------- |
+| `instance.created`                                              | The create was admitted.                              |
+| `instance.scheduled`                                            | A hosted instance was placed (`data.nodeId`).         |
+| `instance.provisioning`                                         | A provider machine exists (`data.externalId`).        |
+| `instance.starting`, `instance.stopping`, `instance.deleting`   | `start`, `stop` or `delete` was called.               |
+| `instance.running`, `instance.stopped`, …                       | The reconciler moved `state` (named after the new state). |
+| `instance.resized`                                              | A resize finished (`data.flavor`).                    |
+| `instance.failed`                                               | The instance entered `error` (`data.reason`).         |
+| `instance.lost`, `instance.recovered`, `instance.recreating`    | Host or machine loss, and what followed.              |
+| `instance.deleted`                                              | Everything it held was released.                      |
+| `instance.orphaned`                                             | A host holds instances no row places there (subject `node/<id>`). |
+
+## Access to an instance
+
+Console, exec and SSH into a hosted instance go through a <Term id="tunnel">tunnel</Term>:
+`tunnels.open({ tenantId, instanceId, op })` is decided as `compute:instances:exec` and returns a single-use
+<Term id="exec-ticket">exec ticket</Term> for the instance's node. The instance must be `running` and its node
+connected; provider instances are `UNSUPPORTED`, since no platform agent runs next to them. The method is registered
+only when the deployment configures tunnels. See [tunnels](/docs/guides/access/tunnels) and
+[SSH](/docs/guides/access/ssh).

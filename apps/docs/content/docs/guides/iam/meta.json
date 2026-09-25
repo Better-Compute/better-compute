@@ -1,0 +1,12 @@
+{
+  "title": "IAM integration",
+  "icon": "ShieldCheck",
+  "pages": [
+    "index",
+    "actions-and-resources",
+    "policies",
+    "tenancy",
+    "billing-and-usage",
+    "delegated-confirmation"
+  ]
+}

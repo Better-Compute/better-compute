@@ -1,0 +1,114 @@
+---
+title: Networking
+description: How VPS instances get addresses today, from one IPv4 range per hosted pool to what runtimes and providers report, and what is not built yet.
+metaTitle: VPS networking and pool IPAM
+icon: Network
+status: beta
+packages: ['@better-compute/vps']
+sources: ['packages/vps/src/ipam.ts', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'PLAN.md']
+---
+
+A VM is not much use until you know its address. Better Compute keeps networking deliberately small: an address
+plan per hosted pool, and whatever the runtime or the provider reports. Software-defined networking beyond bridges,
+VLANs and IPAM is a non-goal for v1, as are volumes and live migration.
+
+Where an instance's addresses come from depends on its pool:
+
+| Pool                        | Addresses                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Hosted (`vps-host`)         | One IPv4 lease from the pool's range, taken at placement, plus any addresses the host's runtime reports.          |
+| Hosted, no range configured | Only what the runtime reports.                                                                                     |
+| Provider (`provider`)       | What the provider reports for the machine, replaced on every poll.                                                 |
+
+## Give a hosted pool a range
+
+Pool IPAM is one IPv4 range per hosted pool. You configure it with `setIpPool`, a function exported by
+`@better-compute/vps`. There is no API method, CLI command or FleetConfig field for it in this release, so run it
+from your own setup code against the compute database:
+
+```ts title="setup-ipam.ts"
+import { setIpPool } from '@better-compute/vps';
+
+const range = await compute.context.sql.transaction((tx) =>
+  setIpPool(tx, { poolId: 'pool_01jz…', cidr: '10.0.0.0/24', gateway: '10.0.0.1' }),
+);
+// → { poolId: 'pool_01jz…', cidr: '10.0.0.0/24', gateway: '10.0.0.1',
+//     firstHost: '10.0.0.2', lastHost: '10.0.0.254' }
+```
+
+<TypeTable
+  type={{
+    poolId: { type: 'string', description: 'The hosted pool.', required: true },
+    cidr: { type: 'string', description: 'The IPv4 network, such as 10.0.0.0/24. IPv6 ranges are refused.', required: true },
+    gateway: { type: 'string', description: 'The gateway address. It is never leased, even when it falls inside the range.', required: true },
+    firstHost: { type: 'string', description: 'The first address to lease.', default: 'the address after the gateway' },
+    lastHost: { type: 'string', description: 'The last address to lease.', default: 'the address before the broadcast address' },
+  }}
+/>
+
+`firstHost` and `lastHost` must both lie inside `cidr`, with `firstHost` not after `lastHost`. Anything else,
+including a malformed address, is `INVALID_INPUT` naming the pool. Because the default `firstHost` is the address after
+the gateway, set it explicitly when the gateway sits at the end of the network (`10.0.0.254` in a `/24`).
+
+Calling `setIpPool` again for the same pool replaces the range. Existing leases are kept as they are, even if they now
+fall outside it.
+
+## How leases work
+
+A hosted instance takes its lease in the same transaction that places it, right after capacity claims its resources on
+a host (see [instances](/docs/guides/vps/instances)):
+
+- The lease is the lowest free address from `firstHost` to `lastHost`, skipping the gateway.
+- An instance holds at most one lease. Placing an instance that already holds one returns the same address.
+- `(pool, address)` is the primary key of `ip_leases`, so two instances can never hold the same address. Concurrent
+  placements that race for one address retry, up to 8 times, on the next free one.
+- When the range is exhausted, placement fails with `CAPACITY_UNAVAILABLE` ("Pool … has no free IP address"). In
+  `instances.create` the whole transaction rolls back, host claims included, and the caller gets the error. When the
+  reconciler places an instance later (after a host loss), the instance moves to `error` with an `Unschedulable`
+  condition.
+- A pool without a range leases nothing, and placement succeeds without an address.
+
+The lease is returned when the instance is deleted. After a host loss with `recreateOnHostLoss`, the instance returns
+its lease with its allocation and takes a new one, again the lowest free address, when it is placed on another host.
+
+For example, with `cidr: '10.0.0.0/29'` and `gateway: '10.0.0.1'`, the range is `10.0.0.2` to `10.0.0.6`: five
+instances get `.2` to `.6` in order, and a sixth create fails with `CAPACITY_UNAVAILABLE` until one of them is deleted.
+
+Operators can see the plan and the leases in the database:
+
+```sql
+SELECT cidr, host(gateway) AS gateway, host(first_host) AS first, host(last_host) AS last
+  FROM ip_pools WHERE pool_id = $1;
+
+SELECT host(address) AS address, instance_id
+  FROM ip_leases WHERE pool_id = $1 ORDER BY address;
+```
+
+The v0.3 acceptance run (`tests/vps-churn.test.ts`) checks that after 200 instances churn on 3 hosts there is exactly
+one lease per placed instance, none leaked and none shared.
+
+## Addresses on an instance
+
+`Instance.addresses` starts with the lease, if any. After that:
+
+- **Hosted pools.** Addresses in the host's `StatusReport.instances` (from the guest agent or DHCP leases, CIDR form
+  on the wire) are added to the list. Reports only add; the lease stays first.
+- **Provider pools.** Each poll replaces the list with the machine's addresses. Hetzner Cloud reports the public IPv4
+  address, the public IPv6 network as Hetzner gives it (a `/64`), and private network addresses. Proxmox VE reports
+  the guest agent's addresses while the VM runs, without loopback and link-local ones, and nothing without an agent.
+  Proxmox clones are configured with `ipconfig0=ip=dhcp`, so the guest takes its address from your cluster network's
+  DHCP.
+
+## What reaches the host
+
+The protocol has room for a hosted instance's network: `InstanceSpec.nics` in the `instances` section of the
+<Term id="nodespec">NodeSpec</Term> carries, per interface, the host bridge or network name, the MAC address, and the
+addresses assigned by IPAM in CIDR form.
+
+In this release the NodeSpec encoder does not fill `nics`, so the lease is a record in the control plane that a host
+does not receive yet, and there is no host runtime to act on it: `libvirt-kvm` and `cloud-hypervisor` are planned for
+bcd, which is written but not built. A VPS profile can already declare `network: { mode: 'bridge', ipam: 'pool' }`
+(see [steps and profiles](/docs/extending/steps-and-profiles)), but `vps()` does not read profiles.
+
+What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
+give you console and SSH access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).

@@ -1,0 +1,273 @@
+---
+title: PKI
+metaTitle: The machine PKI
+description: The local CAs, JoinService keys and signing keys a deployment owns, the pki CLI and bundle, SPIFFE IDs, node certificate lifetimes, revocation and rotation.
+icon: KeyRound
+packages: ['@better-compute/pki', '@better-compute/cli', '@better-compute/server', '@better-compute/gateway']
+sources:
+  - packages/pki/README.md
+  - packages/pki/src/bundle.ts
+  - packages/pki/src/ca.ts
+  - packages/pki/src/spiffe.ts
+  - packages/pki/src/intent.ts
+  - packages/pki/src/tickets.ts
+  - packages/pki/src/ssh.ts
+  - packages/pki/src/signing.ts
+  - packages/pki/src/revocation-feed.ts
+  - packages/pki/src/secrets.ts
+  - packages/cli/src/commands/pki.ts
+  - packages/cli/src/commands/audit.ts
+  - packages/cli/src/commands/daemon.ts
+  - packages/cli/src/host/gateway.ts
+  - packages/server/src/options.ts
+  - packages/server/src/runtime/command-signing.ts
+  - packages/server/src/tunnels/module.ts
+  - packages/postgres/src/migrations/0002_base.ts
+  - examples/shared/compose.ts
+  - PLAN.md
+---
+
+Better IAM identifies people and AI agents. Machines are identified by Better Compute's own PKI: a set of local
+certificate authorities and keys that one deployment owns, created once with `better-compute pki init` and loaded by
+every process at start. Everything is ECDSA P-256 with SHA-256, except the SSH CA, which is Ed25519 by default, and
+the package needs nothing beyond `node:crypto`.
+
+The design rule is that **no key does two jobs**. A CA that signs agent certificates cannot sign a gateway's server
+certificate, and the key that signs `JoinResponse` is not the one join tokens are sealed to.
+
+## The keys
+
+| Key | Signs or does | Lifetime | Who trusts it |
+| --- | --- | --- | --- |
+| Root CA | Only the three subordinate CAs | 10 years | Anchor above the CAs; can be kept offline |
+| Node CA | Agent client certificates: one SPIFFE URI SAN, a role extension, `clientAuth` | CA 1 year; leaves at most 24 h (ramdisk at most 2 h) | Gateways, as the trust anchor for daemon mTLS |
+| Gateway serving CA | Gateway server certificates: DNS SANs, `serverAuth` | CA 1 year; leaves at most 30 days | Daemons, by its SPKI pin |
+| Internal CA | Control-plane mutual TLS between api, workers and gateways | CA 1 year; leaves at most 7 days | The control plane |
+| JoinService signing key | `JoinResponse` and `SignedTrustBundle` | Certificate 10 years | Daemons, by pin |
+| JoinService encryption key | Nothing: join tokens are sealed to it | — | Daemons, by pin |
+| Command-signing root (v0.2) | 24 h worker keys, which sign every command | 5 years | Daemons, through the trust bundle |
+| Exec ticket key (v0.3) | 60 s single-use tunnel tickets | — | Gateways (their tunnel JWKS) and daemons (the JWKS in NodeSpec) |
+| SSH CA (v0.3) | Break-glass OpenSSH user certificates, at most 1 h | — | Nodes' sshd, through NodeSpec |
+| Audit signing key (v0.4) | Per-tenant Merkle checkpoints of `audit_events` | Certificate 10 years | `audit verify` and third parties, by pin |
+
+Subordinate CAs never outlive the root: a CA certificate's `notAfter` is capped at the root's. Leaf lifetimes are
+enforced by the CA itself, whatever a caller asks for.
+
+The gateway holds none of these keys in its own code: it relays `Join`, `Renew` and secret requests to JoinService
+and never signs anything. See [security](/docs/operations/security#gateway-processes) for what that means for the
+process that runs it.
+
+## The pki commands
+
+### pki init
+
+```bash
+export BETTER_COMPUTE_SECRET=$(openssl rand -base64 48)   # the same for every process
+better-compute pki init --trust-domain compute.example.com
+```
+
+It creates every key above and writes one JSON file, mode 0600, never overwriting an existing one. The private keys
+are sealed with AES-256-GCM under a key derived (HKDF-SHA256) from `BETTER_COMPUTE_SECRET`, with the trust domain in
+the authenticated data. It prints the pins, like `pki show`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--trust-domain DOMAIN` | required (`BETTER_COMPUTE_TRUST_DOMAIN`) | The SPIFFE trust domain of agent identities |
+| `--pki PATH` | `.better-compute/pki.json` (`BETTER_COMPUTE_PKI`) | Where to write the bundle |
+| `--offline-root PATH` | none | Write the root key to its own file (sealed like the bundle) and leave it out of the bundle |
+| `--organization NAME` | `better-compute` | Subject organization of the CA certificates |
+| `--plaintext` | off | Store the private keys as PEM when `BETTER_COMPUTE_SECRET` is not set |
+
+Without the secret and without `--plaintext` it refuses with `MISSING_ENV`. Keep the `--offline-root` file off the
+servers: it is needed only to replace a CA.
+
+### pki show
+
+`pki show` reads only the public half of the bundle, so it needs no secret. It prints:
+
+| Field | Used by |
+| --- | --- |
+| `trustDomain` | Install scripts, `bcd` configuration |
+| `servingCaSpkiPin` | Daemons check the gateway's certificate against it |
+| `joinSigningKeyPin`, `joinEncryptionKeyPin` | Daemons check `JoinResponse` and seal join tokens only to a matching key |
+| `joinEncryptionJwk` | The key daemons seal join tokens to |
+| `auditSigningKeyPin` | `audit verify` |
+| `execTicketKeyId` | The `kid` of the exec ticket key (its RFC 7638 thumbprint) |
+| `sshCaPublicKey` | The OpenSSH public key sshd trusts |
+| `commandSigningRootSha256` | The command-signing root, as trust bundles list it |
+| `expires` | When the root, node, serving, internal and command-signing certificates expire |
+
+Pins have `bcd`'s form, `sha256/<base64 of SHA-256(SPKI)>`. `better-compute daemon install-script` reads the bundle
+and writes the serving CA pin and the JoinService pins and key into each machine's configuration.
+
+### pki issue-gateway
+
+```bash
+better-compute pki issue-gateway --san gw.eu-1.compute.example.com --out /etc/better-compute/tls --days 14
+```
+
+It generates a P-256 key and issues a serving certificate from the bundle's serving CA. It writes `NAME.key` (mode
+0600) and `NAME.crt` (the certificate followed by the serving CA, stopping below the root) into `--out`, replacing
+earlier files atomically.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--san NAMES` | required | DNS names, comma-separated |
+| `--out DIR` | `.better-compute/gateway` | Directory for the key and certificate |
+| `--name NAME` | `gateway` | File name stem |
+| `--days N` | 30 | Lifetime, from 1 to 30 days |
+| `--pki PATH` | `.better-compute/pki.json` | The bundle |
+
+The `serve` gateway role reads its certificate at start, so after reissuing, restart gateways one at a time.
+
+## The bundle in code
+
+The bundle is a JSON document (`format: "better-compute-pki"`, `version: 1`) with the certificates and public keys
+in the clear and the private keys either sealed or, with `--plaintext`, as PEM.
+
+| Function | Package | Does |
+| --- | --- | --- |
+| `loadPkiBundle(path, env)` | `better-compute/cli` | Reads the file and unseals it with `env.BETTER_COMPUTE_SECRET` |
+| `importPkiBundle(text, { secret?, rootKey? })` | `better-compute/pki` | Loads a bundle; `INVALID_CONFIG` on a wrong secret, a damaged file or a key that does not match its certificate |
+| `exportPkiBundle(bundle, { secret?, omitRootKey? })` | `better-compute/pki` | Serializes a bundle, sealed when `secret` is given |
+| `exportRootKey(bundle, { secret? })` | `better-compute/pki` | The root key alone, for keeping it offline |
+| `readPkiPins(text)` | `better-compute/pki` | The pins and expiry dates from the public half |
+| `createPkiBundle({ trustDomain })` | `better-compute/pki` | What `pki init` runs |
+
+Wire it into the options and the gateway:
+
+```ts title="better-compute.config.ts"
+const bundle = await loadPkiBundle(env.BETTER_COMPUTE_PKI ?? '.better-compute/pki.json', env);
+
+export default defineConfig(() => ({
+  // …
+  pki: {
+    nodeCa: bundle.nodeCa, // the gateway role's trust anchor and revocation set
+    join: pkiJoinCrypto({
+      trustDomain: bundle.trustDomain,
+      nodeCa: bundle.nodeCa,
+      signingKey: bundle.joinSigning,
+      encryptionKey: bundle.joinEncryption.privateKey,
+    }),
+    commandSigning: bundle.commandSigning, // v0.2 signed intent
+  },
+  // The ticket issuer must be baseURL's origin: the api accepts only tickets from it.
+  tunnels: { issuer: execTicketIssuer(bundle, { issuer: 'https://compute.example.com' }), ssh: bundle.sshCa },
+  modules: [auditModule({ signer: bundle.auditSigning })],
+}));
+```
+
+Bundles made before a key existed still load; they lack that key (`auditSigning`, `execTicketKey`, `sshCa`,
+`commandSigning` are optional), and `execTicketIssuer` then fails with `INVALID_CONFIG`.
+
+`doctor` checks the bundle at `--pki`: `pki.unreadable` when it cannot be parsed, `pki.unseal` when it does not
+open with this deployment's secret, `pki.ca-expired` for an expired CA, and `pki.ca-expiring` for one that expires
+within 30 days.
+
+## Trust domain and SPIFFE IDs
+
+Every agent certificate carries exactly one URI SAN:
+
+```text
+spiffe://<trust-domain>/site/<siteId>/node/<nodeId>
+```
+
+The trust domain is lower-case `a-z`, `0-9`, `.`, `-` and `_`, up to 255 characters, such as `compute.example.com`.
+The node id always comes from this SAN, never from a message field, so a daemon cannot speak for another node. The
+gateway checks the SPIFFE ID's trust domain against its configured one.
+
+The role travels in a non-critical extension (OID `2.25.121396728463777788658791269357486937304.1.1`, a UTF8String):
+`node`, `site`, `ramdisk` or `node-tenant` for agents, `gateway` and `internal` for control-plane certificates.
+Each role accepts only its own command kinds. A `node-tenant` certificate (a dedicated-root lease) runs as a node
+that gets no secrets and no destructive platform commands, and never attests.
+
+## Node certificates
+
+JoinService issues a node certificate when a machine joins with a <Term id="join-token">join token</Term> or
+another attestor, and records it in `node_certs`:
+
+| Column | Meaning |
+| --- | --- |
+| `serial` | The certificate serial |
+| `node_id`, `role` | Whose it is, and as what |
+| `identity_gen` | The node's identity generation when issued; a new generation revokes the old certificates |
+| `spki_sha256`, `der` | The key and certificate, so node signatures can be checked later |
+| `not_before`, `not_after` | Validity |
+| `revoked_at`, `revocation_reason` | Revocation |
+| `allowed_kinds` | When set, the only command kinds this certificate may receive; others are cancelled `kind-not-allowed` |
+
+Lifetimes: `node` and `site` certificates live 24 h; `ramdisk` certificates at most 2 h, whatever the profile asks.
+A daemon renews at about 60% of its lifetime with `Renew`, signing a proof of possession with its **current** key
+over the new CSR, its node id and its clock. The api checks the chain, revocation, the SPIFFE ID, a ±60 s window and
+a 120 s replay cache keyed by the signed statement. A machine that lost its certificate re-joins with the `x509pop`
+attestor, which accepts a certificate of the current identity generation up to 7 days past its expiry. See
+[attestation](/docs/guides/nodes/attestation).
+
+## Revocation
+
+A certificate is revoked by setting `node_certs.revoked_at`. Every path that ends an identity does it:
+`nodes.revokeIdentity`, node deletion, a reclaim, metal retire and a dedicated-root lease.
+
+Each gateway runs a revocation feed. It loads every revoked, unexpired certificate on start, then polls
+`node_certs.revoked_at` every second, re-reading 60 s before the newest revocation it has seen so out-of-order
+commits are still caught. After three failures in a row it polls every 5 s until one succeeds, and never stops the
+gateway. A serial the set learns about is refused at the next session open, and a live session gets a
+`RevocationNotice` and is closed. The target is a revoked node disconnected within 5 s.
+
+## Signed intent
+
+With `pki.commandSigning` set, every command the queue writes is signed by a worker key: a P-256 key the
+command-signing root certifies for at most 24 h, with the command-signing extended key usage
+(`2.25.121396728463777788658791269357486937304.2.1`). Each process replaces its worker key after 60% of its lifetime.
+Daemons receive the roots in their trust bundle, first in `JoinResponse` and then in `Welcome`, signed by the
+JoinService key so a gateway can relay it but not change it. A daemon requires a signature for the kinds its own
+table marks destructive, and checks any signature that is present.
+
+Rotating the root takes three steps, gated on the fleet:
+
+1. add the new root beside the old one (`pki.commandSigningRoots`) and bump `pki.trustVersion`; workers still sign
+   under the old root;
+2. once every daemon has acknowledged that version, switch `pki.commandSigning` to the new root;
+3. once nothing is signed under the old root any more, remove it and bump the version again.
+
+`addTrustRoot`, `trustVersionAcknowledged` and `removeTrustRoot` in `better-compute/pki` implement the gates; the
+control plane does not run them for you yet. In production the design keeps this root in KMS or Vault transit; the
+bundle form is for development and small deployments.
+
+## Exec tickets and the SSH CA
+
+The exec ticket key signs ES256 JWTs (`typ: bc-exec+jwt`) that live at most 60 s, name one node as audience
+(`aud: node:<id>`), and carry a single-use `jti`. `tunnels.open` issues them after Better IAM allowed the call; the
+gateway and then the daemon verify each ticket against the JWKS in the node's NodeSpec. Every api replica and the
+gateway derive the same `kid` from the key, and `rotate()` keeps the previous key listed.
+
+The SSH CA issues OpenSSH user certificates for break-glass access, valid at most 1 h and never beyond the
+requesting session, with the principal `<account>@<nodeId>` so a certificate opens only the node it names. Every
+issuance is a row in `ssh_certificates`; `nodes.revokeSshCert` adds the serial to the node's key revocation list in
+its next NodeSpec. See [SSH](/docs/guides/access/ssh) and [tunnels](/docs/guides/access/tunnels).
+
+## The audit key
+
+With the bundle's `auditSigning` key, `auditModule({ signer })` seals `audit_events` into signed, hash-chained,
+per-tenant Merkle checkpoints every hour. `better-compute audit verify --tenant ID` checks a tenant's trail against
+the key's pin, taken from `--pin`, `BETTER_COMPUTE_AUDIT_PIN` or the bundle's public half, and exits
+`AUDIT_TAMPERED` on any problem. See [audit](/docs/guides/events/audit).
+
+## Rotation and expiry
+
+| What | How it is replaced today |
+| --- | --- |
+| Node certificates | Automatically: daemons renew at about 60% of their 24 h lifetime |
+| Worker signing keys | Automatically, at 60% of their 24 h lifetime |
+| Gateway serving certificates | `pki issue-gateway` before the 30 days run out, then restart each gateway |
+| Command-signing root | The three steps above |
+| Exec ticket key | `rotate()` on the issuer; the previous key stays in the JWKS |
+| Sealed secrets | `localSealedSecretStore` with several keys, then `reseal()` (see [configuration](/docs/operations/configuration#the-deployment-secret)) |
+| Node, serving and internal CAs (1 year) | Not automated: no CLI command reissues a CA from the root yet. `doctor` warns 30 days ahead. |
+| JoinService keys | Not automated. Daemons pin them, so new keys mean new pins in every machine's configuration. |
+
+<Callout type="warn" title="Losing the bundle">
+  A bundle that is lost, or that no longer opens because the secret changed, cannot be recreated: a new
+  `pki init` makes new CAs and new pins, and every node has to rejoin. Back up the bundle and the secret, and keep the
+  offline root key apart from both.
+</Callout>

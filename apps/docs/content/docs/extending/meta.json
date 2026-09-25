@@ -1,0 +1,18 @@
+{
+  "title": "Extending",
+  "description": "Modules, methods, drivers, attestors, providers, scheduler plugins, sinks and steps",
+  "root": true,
+  "icon": "Blocks",
+  "pages": [
+    "index",
+    "modules",
+    "methods",
+    "drivers",
+    "attestors",
+    "providers",
+    "scheduler-plugins",
+    "sinks",
+    "steps-and-profiles",
+    "walkthroughs"
+  ]
+}

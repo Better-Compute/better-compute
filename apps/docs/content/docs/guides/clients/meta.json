@@ -1,0 +1,5 @@
+{
+  "title": "Clients",
+  "icon": "Code",
+  "pages": ["index", "typescript-client", "cli", "mcp", "console"]
+}
