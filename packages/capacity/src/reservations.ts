@@ -19,6 +19,7 @@ import {
   type MethodContext,
   type ModuleContext,
   type PlacementContext,
+  type PlacementOutcome,
   type Placer,
   type Reservation,
   type ReservationSpec,
@@ -38,6 +39,13 @@ import { chargeQuota, quotaDemand, refundQuota } from './quota.js';
 import { schedulableSql } from './eligibility.js';
 import { assertGang } from './gang.js';
 import { assertSelector } from './selector.js';
+import {
+  defaultSpotNoticeMs,
+  planPreemption,
+  readSpotAllocations,
+  truncateAllocation,
+} from './spot.js';
+import { readPool, readPoolNodes } from './store.js';
 
 // Reservations (PLAN.md §3.4, §10.5): request-as-resource drafts decided by IAM, placed by the
 // Placer in the second transaction, then driven by the `capacity.reservations` reconciler through
@@ -76,6 +84,8 @@ export interface CreateReservationInput {
   wait?: { timeoutMs: number };
   /** Book `gang.size` nodes, each taking `devices`, all or nothing (v0.5). */
   gang?: GangSpec;
+  /** Preemptible (v0.5): billed at the spot meter; a non-spot request may take its atoms after a notice. */
+  spot?: boolean;
 }
 
 function fail(message: string): never {
@@ -177,8 +187,7 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
       'UNSUPPORTED',
       `binding ${String(input.binding)} arrives later (instance: v0.3, node: v0.5)`,
     );
-  if (input.spot !== undefined && input.spot !== false)
-    throw new ComputeError('UNSUPPORTED', 'Spot reservations arrive in v0.5');
+  if (input.spot !== undefined && typeof input.spot !== 'boolean') fail('spot must be a boolean');
 
   const result: CreateReservationInput = {
     tenantId,
@@ -210,6 +219,7 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
     result.gang = { size: input.gang.size };
     if (input.gang.topologyKey !== undefined) result.gang.topologyKey = input.gang.topologyKey;
   }
+  if (input.spot === true) result.spot = true;
   return result;
 }
 
@@ -226,6 +236,7 @@ export function reservationSpec(input: CreateReservationInput): ReservationSpec 
   if (input.start !== undefined) spec.start = input.start;
   if (input.leaseSeconds !== undefined) spec.leaseSeconds = input.leaseSeconds;
   if (input.gang !== undefined) spec.gang = { ...input.gang };
+  if (input.spot === true) spec.spot = true;
   return spec;
 }
 
@@ -548,6 +559,8 @@ export interface ReservationDeps {
   desired: ModuleContext['desired'];
   placer: Placer;
   placement: Omit<PlacementContext, 'clock' | 'admission'>;
+  /** The notice a preempted spot reservation gets (default `defaultSpotNoticeMs`, 2 min). */
+  spotNoticeMs?: number;
 }
 
 /** Scheduler plugins, weights, top-N and randomness for the placer. */
@@ -740,12 +753,16 @@ async function attemptPlacement(
 ): Promise<ReservationRow> {
   const now = deps.clock.now();
   const start = Math.max(row.request.start ?? now, now);
-  const during = { start, end: start + requestedDuration(row) };
-  const outcome = await deps.placer.place(tx, placementRequest(row, during), {
+  let during = { start, end: start + requestedDuration(row) };
+  let outcome = await deps.placer.place(tx, placementRequest(row, during), {
     ...deps.placement,
     clock: deps.clock,
     ...(admission ? { admission } : {}),
   });
+  if (outcome.status === 'pending' && row.request.spot !== true) {
+    const preempted = await preemptFor(deps, tx, row, during);
+    if (preempted) ({ outcome, during } = preempted);
+  }
   if (outcome.status === 'placed') {
     const conditions = withoutCondition(row.conditions, 'Unschedulable');
     const lease =
@@ -784,6 +801,134 @@ async function attemptPlacement(
   await deps.work.enqueue(tx, reservationWork, row.id, { notBefore: now + pendingRetryMs });
   await publish(deps, tx, pending, 'reservation.pending', { reason });
   return pending;
+}
+
+const preemptable: readonly ReservationState[] = ['placed', 'binding', 'active'];
+
+/**
+ * Spot preemption for a non-spot request that would go pending (§10.5, v0.5): plans it as if spot
+ * bookings were free, gives the spot reservations holding the chosen atoms a notice (see
+ * `noticeSpot`), and places the request from the notice deadline on, on the planned nodes. All of
+ * it inside one savepoint: if the victims cannot be locked or the placement still fails, nothing
+ * changes. Victims locked by another transaction are skipped (`SKIP LOCKED`), never waited on.
+ */
+async function preemptFor(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  row: ReservationRow,
+  during: TimeRange,
+): Promise<{ outcome: PlacementOutcome; during: TimeRange } | undefined> {
+  const pool = await readPool(tx, row.poolId);
+  if (!pool || pool.archived) return undefined;
+  const now = deps.clock.now();
+  const at = Math.max(during.start, now + (deps.spotNoticeMs ?? defaultSpotNoticeMs));
+  const window = { start: at, end: at + (during.end - during.start) };
+  const request = placementRequest(row, window);
+  const spot = await readSpotAllocations(tx, pool.id, window);
+  const plan = await planPreemption(tx, pool, request, spot, deps.placement);
+  if (!plan) return undefined;
+
+  await tx.query(`SAVEPOINT capacity_preempt`);
+  const undo = async () => {
+    await tx.query(`ROLLBACK TO SAVEPOINT capacity_preempt`);
+    await tx.query(`RELEASE SAVEPOINT capacity_preempt`);
+    return undefined;
+  };
+  try {
+    const locked = await tx.query<{ id: string }>(
+      `SELECT id FROM reservations WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE SKIP LOCKED`,
+      [plan.victims],
+    );
+    if (locked.rows.length !== plan.victims.length) return await undo();
+    for (const id of plan.victims) {
+      const victim = await readReservationById(tx, id, false);
+      if (!victim?.during || !preemptable.includes(victim.state) || victim.request.spot !== true)
+        return await undo();
+      await noticeSpot(deps, tx, victim, row.id, at);
+    }
+    const planned = new Set(plan.nodeIds);
+    const others = (await readPoolNodes(tx, pool.id))
+      .map((node) => node.id)
+      .filter((nodeId) => !planned.has(nodeId));
+    const outcome = await deps.placer.place(
+      tx,
+      { ...request, excludeNodes: others },
+      { ...deps.placement, clock: deps.clock },
+    );
+    if (outcome.status !== 'placed') return await undo();
+    await tx.query(`RELEASE SAVEPOINT capacity_preempt`);
+    return { outcome, during: window };
+  } catch (error) {
+    await undo();
+    throw error;
+  }
+}
+
+/**
+ * The notice of a preempted spot reservation. One that starts at or after the deadline has not run:
+ * its bookings are released and it goes back to `pending` to be placed again (quota kept). One that
+ * has started, or starts before the deadline, is cut back to end at the deadline with a `Preempted`
+ * condition; its nodes learn the new end, and at the deadline the lifecycle releases it with reason
+ * `preempted`. Either way it is billed only for the time it held the atoms.
+ */
+async function noticeSpot(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  victim: ReservationRow,
+  by: string,
+  at: number,
+): Promise<void> {
+  const now = deps.clock.now();
+  const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: victim.id });
+  const condition: Omit<Condition, 'since'> = {
+    type: 'Preempted',
+    status: 'true',
+    reason: 'SpotPreempted',
+    message: by,
+  };
+  if (victim.during!.start >= at) {
+    for (const allocation of allocations) {
+      await releaseAllocation(tx, allocation.id);
+      await deps.desired.invalidate(tx, allocation.nodeId);
+    }
+    const pending = await move(tx, victim, 'defer', {
+      during: null,
+      conditions: withCondition(
+        victim.conditions,
+        {
+          type: 'Unschedulable',
+          status: 'true',
+          reason: 'SpotPreempted',
+          message: `preempted by ${by}`,
+        },
+        now,
+      ),
+    });
+    await deps.work.enqueue(tx, reservationWork, victim.id, { notBefore: now + pendingRetryMs });
+    await publish(deps, tx, pending, 'reservation.preempted', { by, requeued: true });
+    return;
+  }
+  for (const allocation of allocations) {
+    await truncateAllocation(tx, allocation.id, at);
+    await deps.desired.invalidate(tx, allocation.nodeId);
+  }
+  const conditions = withCondition(victim.conditions, condition, now);
+  const { rowCount } = await tx.query(
+    `UPDATE reservations SET during = tstzrange(lower(during), $3::timestamptz), conditions = $4::jsonb,
+                             version = version + 1
+      WHERE id = $1 AND version = $2`,
+    [victim.id, victim.version, new Date(at).toISOString(), JSON.stringify(conditions)],
+  );
+  if (rowCount === 0)
+    throw new ComputeError('CONFLICT', `Reservation ${victim.id} changed concurrently`);
+  const noticed = { ...victim, conditions, during: { start: victim.during!.start, end: at } };
+  await deps.work.enqueue(tx, reservationWork, victim.id, { notBefore: at });
+  await publish(deps, tx, noticed, 'reservation.preempting', { by, at });
+}
+
+/** Whether a reservation was cut short by spot preemption. */
+export function isPreempted(row: Pick<ReservationRow, 'conditions'>): boolean {
+  return row.conditions.some((entry) => entry.type === 'Preempted' && entry.status === 'true');
 }
 
 /** A pending reservation retries placement this often (§10.5). */
@@ -837,7 +982,7 @@ export async function endReservation(
   deps: ReservationDeps,
   tx: SqlTx,
   row: ReservationRow,
-  why: 'release' | 'expired' | 'lease-lapsed',
+  why: 'release' | 'expired' | 'lease-lapsed' | 'preempted',
 ): Promise<ReservationRow> {
   if (reservationStateTable.terminal.includes(row.state)) return row;
   if (row.state === 'draft' || row.state === 'awaiting-confirmation')
@@ -1255,7 +1400,7 @@ export async function reconcileReservation(
     return undefined;
   }
   if (row.during.end <= now) {
-    await endReservation(deps, tx, row, 'expired');
+    await endReservation(deps, tx, row, isPreempted(row) ? 'preempted' : 'expired');
     return undefined;
   }
   const wake = (at: number) =>

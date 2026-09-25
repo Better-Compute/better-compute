@@ -186,18 +186,23 @@ export async function readDevices(tx: SqlTx, nodeIds: readonly string[]): Promis
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-/** Device ids (of these nodes) with a booking that overlaps `during`. */
+/**
+ * Device ids (of these nodes) with a booking that overlaps `during`; bookings of `ignoreAllocations`
+ * do not count (a what-if for preemption).
+ */
 export async function readBusyDevices(
   tx: SqlTx,
   nodeIds: readonly string[],
   during: TimeRange,
+  ignoreAllocations: readonly string[] = [],
 ): Promise<Set<string>> {
   if (nodeIds.length === 0) return new Set();
   const { rows } = await tx.query<{ device_id: string }>(
     `SELECT DISTINCT b.device_id FROM device_bookings b JOIN devices d ON d.id = b.device_id
       WHERE d.node_id = ANY($1::text[])
-        AND b.during && tstzrange($2::timestamptz, $3::timestamptz)`,
-    [nodeIds, iso(during.start), iso(during.end)],
+        AND b.during && tstzrange($2::timestamptz, $3::timestamptz)
+        AND NOT (b.allocation_id = ANY($4::text[]))`,
+    [nodeIds, iso(during.start), iso(during.end), [...ignoreAllocations]],
   );
   return new Set(rows.map((row) => row.device_id));
 }
@@ -334,6 +339,8 @@ export interface LoadNodeViewsOptions {
   excludeNodes?: readonly string[];
   /** Load only these nodes of the pool (a placement shortlist). */
   onlyNodes?: readonly string[];
+  /** Count these allocations' atoms as free (a what-if for spot preemption). */
+  ignoreAllocations?: readonly string[];
 }
 
 /**
@@ -355,7 +362,7 @@ export async function loadNodeViews(
   const live = nodes.filter((node) => isSchedulable(node, pool)).map((node) => node.id);
   const [devices, busy, resources, labels, links] = [
     await readDevices(tx, live),
-    await readBusyDevices(tx, live, during),
+    await readBusyDevices(tx, live, during, options.ignoreAllocations),
     await readNodeResources(tx, live),
     await readNodeLabels(
       tx,

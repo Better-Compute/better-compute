@@ -24,6 +24,7 @@ import {
   markAllocationBound,
   markAllocationFailed,
   markAllocationReleased,
+  meterReservations,
   readQuotas,
   reservationWork,
   wakePendingForNode,
@@ -174,6 +175,7 @@ async function advance(ms: number): Promise<void> {
 }
 
 const tables = [
+  'usage_windows',
   'capacity_device_links',
   'pool_capacity_rollup',
   'device_bookings',
@@ -364,8 +366,8 @@ describe('reservations.create', () => {
       await expect(call('reservations', 'create', bad)).rejects.toMatchObject({
         code: 'INVALID_INPUT',
       });
-    await expect(call('reservations', 'create', create({ spot: true }))).rejects.toMatchObject({
-      code: 'UNSUPPORTED',
+    await expect(call('reservations', 'create', create({ spot: 'yes' }))).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
     });
     await expect(
       call('reservations', 'create', create({ binding: 'instance' })),
@@ -1335,5 +1337,166 @@ describe('BookingRepair (v0.5)', () => {
       [created.id],
     );
     expect(live.rows).toEqual([]);
+  });
+});
+
+describe('spot reservations (v0.5)', () => {
+  const NOTICE = 2 * 60_000;
+  const four = (key: string, extra: Record<string, unknown> = {}) =>
+    create({
+      devices: [{ class: 'gpu', count: 4 }],
+      duration: '8h',
+      idempotencyKey: key,
+      ...extra,
+    });
+  const get = async (id: string) =>
+    (await call('reservations', 'get', { tenantId: 'acme', reservationId: id })) as Rsv;
+
+  /** Starts a placed reservation and binds all its allocations. */
+  async function activate(id: string): Promise<void> {
+    await reconcile(id);
+    const { rows } = await db.query<{ id: string }>(
+      `SELECT id FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+      [id],
+    );
+    for (const row of rows)
+      await db.transaction((tx) =>
+        markAllocationBound(tx, moduleContext(db).work, row.id, { cdiDevices: ['x'] }),
+      );
+    await reconcile(id);
+    expect((await get(id)).state).toBe('active');
+  }
+
+  beforeEach(async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+  });
+
+  it('gives a running spot reservation a notice, then releases it; the preemptor starts at the deadline', async () => {
+    const spotA = (await call('reservations', 'create', four('s1', { spot: true }))) as Rsv;
+    const spotB = (await call('reservations', 'create', four('s2', { spot: true }))) as Rsv;
+    expect([spotA.state, spotB.state]).toEqual(['placed', 'placed']);
+    expect(recorded.authz.at(-1)!.attributes).toMatchObject({ spot: true });
+    await activate(spotA.id);
+    await activate(spotB.id);
+    recorded.events = [];
+    recorded.work = [];
+
+    // A regular request finds the pool full of spot work: it takes one node after the notice.
+    const regular = (await call('reservations', 'create', four('r1', { duration: '2h' }))) as Rsv;
+    expect(regular.state).toBe('placed');
+    expect(regular.during).toEqual({ start: T0 + NOTICE, end: T0 + NOTICE + 2 * HOUR });
+    const preempting = recorded.events.filter((event) => event.type === 'reservation.preempting');
+    expect(preempting).toHaveLength(1);
+    expect(preempting[0]!.data).toMatchObject({ by: regular.id, at: T0 + NOTICE });
+    const victimId = preempting[0]!.subject.replace('reservation/', '');
+    const survivor = victimId === spotA.id ? spotB.id : spotA.id;
+    const victim = await get(victimId);
+    expect(victim).toMatchObject({
+      state: 'active',
+      during: { start: T0, end: T0 + NOTICE },
+      conditions: expect.arrayContaining([
+        expect.objectContaining({ type: 'Preempted', message: regular.id }),
+      ]),
+    });
+    expect(recorded.work).toContainEqual({
+      kind: reservationWork,
+      key: victimId,
+      notBefore: T0 + NOTICE,
+    });
+    expect(recorded.invalidated.length).toBeGreaterThan(0);
+    expect((await get(survivor)).during).toEqual({ start: T0, end: T0 + 8 * HOUR });
+
+    // At the deadline the lifecycle releases it, reason preempted, and refunds its quota.
+    await advance(NOTICE);
+    await reconcile(victimId);
+    expect((await get(victimId)).state).toBe('released');
+    expect(recorded.events.at(-1)).toMatchObject({
+      type: 'reservation.released',
+      data: expect.objectContaining({ reason: 'preempted' }),
+    });
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(8);
+
+    // Billing: the victim bills the spot meter up to the deadline; the regular one bills from its bind.
+    await activate(regular.id);
+    await advance(HOUR);
+    await db.transaction((tx) => meterReservations(tx, clock.now()));
+    const { rows } = await db.query<{ allocation_id: string; meter: string; quantity: string }>(
+      `SELECT w.allocation_id, w.meter, w.quantity::text AS quantity
+         FROM usage_windows w JOIN allocations a ON a.id = w.allocation_id
+        WHERE a.owner_id = $1`,
+      [victimId],
+    );
+    expect(rows.map((row) => [row.meter, Number(row.quantity)])).toEqual([
+      ['gpu.h100.spot.hours', Math.round(4 * (2 / 60) * 1e6) / 1e6],
+    ]);
+    const bookings = await db.query<{ overlaps: string }>(
+      `SELECT count(*)::text AS overlaps FROM device_bookings a JOIN device_bookings b
+          ON a.device_id = b.device_id AND a.allocation_id < b.allocation_id AND a.during && b.during`,
+    );
+    expect(bookings.rows[0]!.overlaps).toBe('0');
+  });
+
+  it('re-queues a spot reservation that has not started, keeping its quota', async () => {
+    const later = T0 + 3 * HOUR;
+    const spot = (await call(
+      'reservations',
+      'create',
+      four('s1', { spot: true, start: later, duration: '2h' }),
+    )) as Rsv;
+    const regularHolder = (await call('reservations', 'create', four('n1'))) as Rsv;
+    expect([spot.state, regularHolder.state]).toEqual(['placed', 'placed']);
+    recorded.events = [];
+
+    const regular = (await call(
+      'reservations',
+      'create',
+      four('r1', { start: later, duration: '2h' }),
+    )) as Rsv;
+    expect(regular).toMatchObject({ state: 'placed', during: { start: later } });
+    expect(await get(spot.id)).toMatchObject({
+      state: 'pending',
+      conditions: [expect.objectContaining({ type: 'Unschedulable', reason: 'SpotPreempted' })],
+    });
+    expect(recorded.events.map((event) => event.type)).toContain('reservation.preempted');
+    const live = await db.query(
+      `SELECT 1 FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+      [spot.id],
+    );
+    expect(live.rows).toEqual([]);
+    expect((await readQuotas(db, 'acme', poolId))[0]!.used).toBe(12);
+  });
+
+  it('preempts every spot reservation a gang needs, all in one notice', async () => {
+    const spots = [
+      (await call('reservations', 'create', four('s1', { spot: true }))) as Rsv,
+      (await call('reservations', 'create', four('s2', { spot: true }))) as Rsv,
+    ];
+    recorded.events = [];
+    const gang = (await call(
+      'reservations',
+      'create',
+      four('g1', { gang: { size: 2 }, duration: '1h' }),
+    )) as Rsv;
+    expect(gang).toMatchObject({ state: 'placed', during: { start: T0 + NOTICE } });
+    const noticed = recorded.events
+      .filter((event) => event.type === 'reservation.preempting')
+      .map((event) => event.subject.replace('reservation/', ''))
+      .sort();
+    expect(noticed).toEqual(spots.map((spot) => spot.id).sort());
+  });
+
+  it('never preempts for spot requests, and never preempts regular work', async () => {
+    const spot = (await call('reservations', 'create', four('s1', { spot: true }))) as Rsv;
+    await call('reservations', 'create', four('n1'));
+    // Spot does not preempt spot.
+    expect(((await call('reservations', 'create', four('s2', { spot: true }))) as Rsv).state).toBe(
+      'pending',
+    );
+    // Once the spot capacity is gone, a regular request waits like any other.
+    await call('reservations', 'create', four('r1'));
+    expect((await get(spot.id)).conditions).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'Preempted' })]),
+    );
+    expect(((await call('reservations', 'create', four('r2'))) as Rsv).state).toBe('pending');
   });
 });

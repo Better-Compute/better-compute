@@ -4,7 +4,9 @@ import type { Json, SqlTx } from '@better-compute/core';
 // IAM usage sink sends to `iam.billing` and marks recorded. The basis is reserved time, from the
 // moment a reservation is active (bound) until it is released or ends. Windows are written only when
 // final (the hour has closed, or the allocation ended), so a window never changes once written, and
-// `ON CONFLICT DO NOTHING` on the idempotency key makes every pass safe to repeat.
+// `ON CONFLICT DO NOTHING` on the idempotency key makes every pass safe to repeat. Spot reservations
+// bill `gpu.<model>.spot.hours`; a preempted one is cut back to its notice deadline, and one that is
+// re-queued never bound its first allocation, so a preempt + re-place bills each hour once.
 
 export const hourMs = 3_600_000;
 
@@ -20,9 +22,9 @@ export type UsageTags = Partial<
   Record<'region' | 'pool' | 'gpuModel' | 'project' | 'agent', string>
 >;
 
-/** The GPU meter of a model: `gpu.<gpuModel>.hours`, lower-cased. */
-export function gpuMeter(gpuModel: string | undefined): string {
-  return `gpu.${(gpuModel ?? 'other').toLowerCase()}.hours`;
+/** The GPU meter of a model: `gpu.<gpuModel>.hours`, lower-cased; spot: `gpu.<gpuModel>.spot.hours`. */
+export function gpuMeter(gpuModel: string | undefined, options: { spot?: boolean } = {}): string {
+  return `gpu.${(gpuModel ?? 'other').toLowerCase()}${options.spot ? '.spot' : ''}.hours`;
 }
 
 /** The idempotency key of one window: `cmp:<allocId>:<windowStartMs>`, plus `:<meter>` for extra meters. */
@@ -151,6 +153,7 @@ interface MeterableReservation {
   gpu_model: string | null;
   region: string;
   gpus: string | number;
+  spot: boolean;
   from_ms: number;
   to_ms: number;
 }
@@ -170,6 +173,7 @@ export async function meterReservations(
             r.project_id, a.pool_id, p.gpu_model, s.region,
             (SELECT COALESCE(sum(${gpuFractionSql('d')}), 0) FROM unnest(a.atoms) atom
                JOIN devices d ON d.id = atom) AS gpus,
+            COALESCE((r.request->>'spot')::boolean, false) AS spot,
             (extract(epoch FROM a.bound_at) * 1000)::float8 AS from_ms,
             (extract(epoch FROM LEAST(COALESCE(a.released_at, upper(a.during)), upper(a.during))) * 1000)::float8 AS to_ms
        FROM allocations a
@@ -197,7 +201,12 @@ export async function meterReservations(
         allocationId: row.allocation_id,
         tenantId: row.tenant_id,
         identityId: row.owner_identity_id,
-        lines: [{ meter: gpuMeter(row.gpu_model ?? undefined), perHour: Number(row.gpus) }],
+        lines: [
+          {
+            meter: gpuMeter(row.gpu_model ?? undefined, { spot: row.spot === true }),
+            perHour: Number(row.gpus),
+          },
+        ],
         tags,
         from: Number(row.from_ms),
         to: Number(row.to_ms),

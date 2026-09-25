@@ -19,3 +19,4 @@ export * from './usage.js';
 export * from './partition.js';
 export * from './gang.js';
 export * from './shortlist.js';
+export * from './spot.js';

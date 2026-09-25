@@ -581,6 +581,8 @@ export interface CapacityModuleOptions extends PlacementOptions {
   rollupEvery?: `${number}${'s' | 'm' | 'h'}`;
   /** How often the usage job writes closed hourly windows (default `5m`). */
   usageEvery?: `${number}${'s' | 'm' | 'h'}`;
+  /** The notice a preempted spot reservation gets before its atoms are taken (default 2 min). */
+  spotNoticeMs?: number;
 }
 
 function depsFrom(
@@ -601,6 +603,7 @@ function depsFrom(
       weights: options.weights ?? {},
       topN: options.topN ?? 5,
     },
+    ...(options.spotNoticeMs !== undefined ? { spotNoticeMs: options.spotNoticeMs } : {}),
   };
 }
 
