@@ -1705,11 +1705,17 @@ describe('node leases: binding node (v0.5)', () => {
     const flip = (healthy: boolean) =>
       db.query(`UPDATE devices SET healthy = $2 WHERE id = $1`, [allocation!.atoms[0], healthy]);
 
+    const unhealthy = async () =>
+      (await get(leased.id)).conditions.find((c) => c.type === 'UnhealthyAtoms') as
+        | { message: string }
+        | undefined;
     await meter(); // 12:00 snapshot: 4 of 5 GPUs healthy
+    expect((await unhealthy())?.message).toMatch(/^1 of 5 GPUs unhealthy, not billed: GPU-la-4$/);
     await advance(30 * 60_000);
     await flip(false); // an XID at 12:30
     await advance(31 * 60_000);
     await meter(); // 13:01: 12:00 is final; 13:00 snapshot: 3 healthy
+    expect((await unhealthy())?.message).toMatch(/^2 of 5 GPUs/);
     await advance(60 * 60_000);
     await meter(); // 14:01: 13:00 is final
     await advance(9 * 60_000);
@@ -1717,6 +1723,7 @@ describe('node leases: binding node (v0.5)', () => {
     await advance(51 * 60_000);
     await meter(); // 15:01: 14:00 is final (its snapshot says 3)
     expect((await meter()).windows).toBe(0); // repeating a pass writes nothing
+    expect((await unhealthy())?.message).toMatch(/^1 of 5 GPUs/);
 
     const { rows } = await db.query<{ start: string; meter: string; quantity: string }>(
       `SELECT to_char(window_start AT TIME ZONE 'UTC', 'HH24:MI') AS start, meter, quantity::text AS quantity
@@ -1731,6 +1738,10 @@ describe('node leases: binding node (v0.5)', () => {
       ['14:00', 'gpu.h100.hours', 3],
       ['14:00', 'node.metal.hours', 1],
     ]);
+    await db.query(`UPDATE devices SET healthy = true WHERE node_id = $1`, [allocation!.node_id]);
+    await advance(HOUR);
+    await meter(); // every GPU healthy at 16:00: the condition goes away
+    expect(await unhealthy()).toBeUndefined();
   });
 
   it('leases gangs of whole nodes', async () => {

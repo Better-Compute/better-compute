@@ -202,7 +202,7 @@ export function billableLines(input: BillableInput): MeterLine[] {
  */
 export async function snapshotLeaseHealth(tx: SqlTx, now: number): Promise<number> {
   const windowStart = Math.floor(now / hourMs) * hourMs;
-  const { rowCount } = await tx.query(
+  const { rows } = await tx.query<{ allocation_id: string }>(
     `INSERT INTO capacity_lease_health (allocation_id, window_start, healthy_gpus)
      SELECT a.id, $2::timestamptz,
             (SELECT COALESCE(sum(${gpuFractionSql('d')}) FILTER (WHERE d.healthy), 0)
@@ -210,10 +210,79 @@ export async function snapshotLeaseHealth(tx: SqlTx, now: number): Promise<numbe
        FROM allocations a JOIN reservations r ON r.id = a.owner_id AND a.owner_kind = 'reservation'
       WHERE r.request->>'binding' = 'node' AND a.bound_at IS NOT NULL AND a.released_at IS NULL
         AND a.during @> $1::timestamptz
-     ON CONFLICT DO NOTHING`,
+     ON CONFLICT DO NOTHING RETURNING allocation_id`,
     [new Date(now).toISOString(), new Date(windowStart).toISOString()],
   );
-  return rowCount;
+  if (rows.length > 0)
+    await markUnhealthyAtoms(
+      tx,
+      rows.map((row) => row.allocation_id),
+      now,
+    );
+  return rows.length;
+}
+
+interface StoredCondition {
+  type: string;
+  status: string;
+  reason?: string;
+  message?: string;
+  since: number;
+}
+
+/**
+ * The `UnhealthyAtoms` condition of a node lease (§12.7): the GPUs it holds but does not pay for,
+ * refreshed with each window's health snapshot and removed once all are healthy. The reservation
+ * is its owner tenant's, so the message may name the atoms.
+ */
+async function markUnhealthyAtoms(
+  tx: SqlTx,
+  allocationIds: readonly string[],
+  now: number,
+): Promise<void> {
+  const { rows } = await tx.query<{
+    reservation_id: string;
+    version: string | number;
+    conditions: StoredCondition[] | string | null;
+    unhealthy: string[] | null;
+    total: string | number;
+  }>(
+    `SELECT r.id AS reservation_id, r.version, r.conditions,
+            array_agg(d.id ORDER BY d.id) FILTER (WHERE NOT d.healthy AND d.class LIKE 'gpu%') AS unhealthy,
+            count(d.id) FILTER (WHERE d.class LIKE 'gpu%') AS total
+       FROM allocations a JOIN reservations r ON r.id = a.owner_id AND a.owner_kind = 'reservation'
+       JOIN devices d ON d.id = ANY(a.atoms)
+      WHERE a.id = ANY($1::text[])
+      GROUP BY r.id, r.version, r.conditions
+      ORDER BY r.id`,
+    [allocationIds],
+  );
+  for (const row of rows) {
+    const conditions: StoredCondition[] =
+      typeof row.conditions === 'string' ? JSON.parse(row.conditions) : (row.conditions ?? []);
+    const previous = conditions.find((entry) => entry.type === 'UnhealthyAtoms');
+    const others = conditions.filter((entry) => entry.type !== 'UnhealthyAtoms');
+    const unhealthy = row.unhealthy ?? [];
+    const next =
+      unhealthy.length === 0
+        ? others
+        : [
+            ...others,
+            {
+              type: 'UnhealthyAtoms',
+              status: 'true',
+              reason: 'NotBilled',
+              message: `${unhealthy.length} of ${Number(row.total)} GPUs unhealthy, not billed: ${unhealthy.slice(0, 16).join(', ')}`,
+              since: previous?.since ?? now,
+            },
+          ];
+    if (JSON.stringify(next) === JSON.stringify(conditions)) continue;
+    // A lifecycle step holding the row wins; the next window refreshes the condition.
+    await tx.query(
+      `UPDATE reservations SET conditions = $3::jsonb, version = version + 1 WHERE id = $1 AND version = $2`,
+      [row.reservation_id, row.version, JSON.stringify(next)],
+    );
+  }
 }
 
 /**

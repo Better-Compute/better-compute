@@ -139,14 +139,50 @@ an empty result, e.g. `no node fits (3 nodes): 2 × fits: 1 of 4 gpu free; 1 × 
 
 `inlinePlacer()` runs this inside the admission transaction:
 
-- It locks the pool (`FOR UPDATE`), loads `NodeView`s, plans, and commits the chosen node inside
-  `SAVEPOINT capacity_place_<n>`.
+- It plans on plain reads. When the request allows it (no selectors, no plugin scorers, no gang),
+  it plans from an exact SQL shortlist (`planFromShortlist`): the best 48 nodes by the
+  count-derived part of the score, used only when no other node could reach the top N. Otherwise
+  it loads every `NodeView`.
+- Then it locks the pool (`FOR UPDATE`) and commits the chosen node inside
+  `SAVEPOINT capacity_place_<n>`. The critical section is the commit alone.
 - The node is locked with `FOR SHARE OF n` under `schedulableSql`, and the atoms with
   `FOR SHARE` where they are healthy and bookable.
 - Bookings use `INSERT … ON CONFLICT DO NOTHING`, which honours the `EXCLUDE` constraint.
 - Scalars use a guarded `UPDATE`. Then come the allocation row and the rollup delta.
 - A lost race rolls back to the savepoint and replans without that node, up to `maxAttempts`
   (default 3). After that it answers `pending`, with the conflict trail.
+
+### Choosing a placer
+
+| | `placer: 'inline'` (default) | `placer: 'pool-lease'` (recommended in production) |
+|---|---|---|
+| `reservations.create` answers | `placed` or `pending` | `pending` with a `Queued` condition, then `placed` once the batch runs |
+| Where placement runs | the admission transaction | the `capacity.placer` worker that owns the pool's shard (`shardBy: 'pool'`) |
+| Pool lock | only around the commit (a few ms) | never at admission; once per batch of ≤64 |
+| Throughput (bench/placements, PGlite, 1k nodes) | ~35 placements/s | ~118 placements/s |
+
+```ts
+capacityModule({ placer: 'pool-lease', maxBatch: 64 });
+```
+
+Both placers use the same guarded commits, so neither can double-book. Instances, gangs,
+BookingRepair and spot preemption always place synchronously. Inline stays the library default
+because it is synchronous and simpler to test; production hosts on Postgres should use pool-lease.
+
+## Spot reservations and node leases (v0.5)
+
+- **Spot.** `spot: true` reservations bill `gpu.<model>.spot.hours`. A regular request that would
+  go pending may preempt them:
+  - A started spot reservation gets a notice. It is cut back to end at `now + spotNoticeMs`
+    (default 2 min), with a `Preempted` condition and a `reservation.preempting` event, and is
+    released at the deadline.
+  - A spot reservation that has not started is re-queued.
+  - Notices never name another tenant's reservation.
+- **Node leases.** `binding: 'node'` with `node: { profileId, profileVersion? }` in a
+  `policy.tenantRoot` pool books a whole `ready` node. Metal deploys the tenant profile from the
+  lease start and marks the allocation bound.
+  - Billing is `node.metal.hours` plus the GPUs healthy at each window's start (`billableLines`).
+  - Unhealthy GPUs show in an `UnhealthyAtoms` condition.
 
 ## Quotas (§10.3, D9)
 

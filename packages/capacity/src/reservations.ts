@@ -1552,7 +1552,9 @@ export async function reconcileReservation(
   if (row.state === 'placed') {
     // BookingRepair (§10.5): from T−15 min, a booking that went bad is re-placed before it starts.
     if (row.during.start - now > repairLeadMs) return wake(row.during.start - repairLeadMs);
-    const repaired = await repairBooking(deps, tx, row);
+    // A node lease whose window has begun is metal's to deploy; its node stops being leasable then.
+    const repaired =
+      isNodeBinding(row) && row.during.start <= now ? row : await repairBooking(deps, tx, row);
     if (repaired.state !== 'placed') return now + pendingRetryMs;
     if (row.during.start > now) return wake(row.during.start);
     const binding = await move(tx, repaired, 'start');
