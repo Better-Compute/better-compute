@@ -192,7 +192,9 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | A/B self-update and Rollout | In progress | Signed releases and wave rollouts are done; the A/B swap on the node is bcd's |
 | `bcd helper` | Not started | Go |
 | Signing of all commands and specs | In progress | Every command is signed; `signDesiredState` exists in pki but the server does not sign NodeSpecs yet |
-| Remote IAM (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) | Done | U0 is an upstream Better IAM item outside this repository |
+| Remote IAM (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) | Done | U0 is an upstream Better IAM item outside this repository; the IAM host's replica does not yet refresh a row before an admission decides, as the embedded port does |
+| Remote-IAM MCP | Done | `remoteMcpIam()` gives `@better-iam/mcp`'s gate an IAM reached over HTTP; see [MCP](/docs/guides/clients/mcp#remote-iam) |
+| Scheduler worker role | In progress | `Reconciler.role` in core and the runtime's scheduler role with its own shard membership are done; moving the pool-lease placer onto it is pending |
 | Partitioned history | Not started | History tables are pruned by `retentionModule()` instead |
 | Merkle audit checkpoints | Done | `@better-compute/audit`, with `better-compute audit verify` |
 | `bcd sim` | In progress | `better-compute sim` runs the FakeDaemon fleet simulator; the Go mode is not built |

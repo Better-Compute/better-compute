@@ -245,6 +245,7 @@ interface Reconciler {
   shardBy: 'node' | 'pool' | 'none';
   run(context: ReconcileContext, key: string): Promise<'DONE' | 'SYNC_AGAIN'>;
   periodic?: readonly { key: string; every: Duration }[];
+  role?: 'controllers' | 'scheduler'; // default 'controllers'
 }
 ```
 
@@ -268,6 +269,11 @@ again while its reconciler runs survives, so no wake-up is lost.
   leases for. Every 5 minutes plus up to 5 minutes of jitter (`worker.resyncMs`), it re-enqueues every node or pool
   of its shards, so a missed wake-up heals.
 - **`none`**: one worker at a time runs the reconciler, under a `singleton:<name>` lease.
+
+`role` picks the worker role that runs it (v0.4). The default, `controllers`, suits almost everything. Placers
+declare `scheduler`: they then run only in processes started with the `scheduler` role (`serve --roles scheduler`),
+under that role's own rendezvous membership (worker rows `scheduler/<id>`, leases `scheduler/shard:<n>`), so
+placement scales apart from the controllers. `serve` with the default `--roles all` runs both roles.
 
 `periodic` keys are seeded once and then come back `every` after each run (at least `1s`), besides any edge
 enqueue. Every transaction a reconciler opens through `ctx.sql.transaction` begins by fencing its lease, so a worker

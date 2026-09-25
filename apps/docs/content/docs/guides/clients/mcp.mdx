@@ -52,8 +52,8 @@ is `@better-compute/client`. `@better-iam/mcp`, which provides the gate, is an o
 
 <Callout type="info" title="A library, not a service">
   No better-compute process mounts an MCP endpoint for you: `serve`, `dev` and the console do not. You host the
-  handler yourself, in any runtime with the Fetch API, as below. A remote-IAM variant that authenticates through
-  Better IAM's `sts.getCallerIdentity` is planned for v0.4.
+  handler yourself, in any runtime with the Fetch API, as below, with Better IAM embedded in the same process or
+  reached over HTTP ([remote IAM](#remote-iam)).
 </Callout>
 
 ## Mount the endpoint
@@ -101,6 +101,37 @@ caller's `tenantId`, which the tools act in.
     newKey: { type: '() => string', description: 'Idempotency keys for tools that create things.', default: 'mcp- and 24 random hex characters' },
   }}
 />
+
+### Remote IAM
+
+When Better IAM runs in another process, give the gate `remoteMcpIam()` instead of a `betterIam()` instance (v0.4).
+It wraps a `createIamClient<BetterIam>()` from `@better-iam/client` and answers the gate's calls over Better IAM's
+HTTP API, each with the caller's own credential (only identity headers are forwarded), so every decision is still
+made and audited as the caller:
+
+| Gate call | Better IAM API |
+| --- | --- |
+| authenticate | `sts.getCallerIdentity` |
+| authorize, authorizeMany | `authorize`, `authorizeMany` |
+| confirmations | the caller's delegation: `delegations.get` and `delegations.requestConfirmation` |
+
+```ts
+import { createIamClient } from '@better-iam/client';
+import type { BetterIam } from '@better-iam/server';
+import { remoteMcpIam } from 'better-compute/mcp';
+
+const gate = createMcpGate({
+  iam: remoteMcpIam(createIamClient<BetterIam>({ baseURL: 'https://iam.example.com' })),
+  tenantId,
+  tools: gateTools(),
+  unlisted: 'deny',
+});
+```
+
+`iamConfirmations()` reads confirmations through the server API's shape (`getConfirmation(credential, input)`), so a
+remote host that wants tools to wait for approval passes an equivalent reader over its IAM client.
+`tests/mcp-e2e-confirmation.test.ts` runs the whole confirmation flow through both the embedded and the remote gate,
+including refusing another organization's owner.
 
 `createComputeMcp()` returns the `tools`, `listTools()` (the `tools/list` entries) and `callTool(name, args, request,
 caller?)` besides `handler`, so you can run a tool without the JSON-RPC wrapper, for example from your own agent

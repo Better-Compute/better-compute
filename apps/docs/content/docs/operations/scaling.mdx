@@ -208,7 +208,9 @@ trigger. Worker tuning:
 | `resyncMs` | 5 min | Level-trigger resync period |
 
 `serve --roles` splits the roles over processes: for example two processes with `controllers,sinks,iam`. The
-`scheduler` role is accepted but starts no loop yet. See [deployment](/docs/operations/deployment).
+`scheduler` role runs reconcilers that declare `role: 'scheduler'` under a membership of its own, so placers scale
+apart from the controllers and a scheduler-only process never takes node shards (the pool-lease placer moves onto it
+in a pending change; until then it runs under `controllers`). See [deployment](/docs/operations/deployment).
 
 ## Choosing a placer
 

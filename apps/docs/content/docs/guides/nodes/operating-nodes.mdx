@@ -124,7 +124,7 @@ stateDiagram-v2
   disconnected --> connected: Hello
   connected --> disconnected: session closed or gateway lost
   disconnected --> unreachable: 40 s plus grace
-  unreachable --> lost: lostAfter, provider pools only
+  unreachable --> lost: lostAfter, provider and vps-host pools only
   unreachable --> connected: Hello
   lost --> connected: Hello
 ```
@@ -145,7 +145,8 @@ down for more than 20 seconds, so ages that could not be flushed meanwhile do no
 None of these transitions releases anything. Allocations, bookings and queued commands stay exactly as they
 were: an unreachable node is only kept out of new placement. A partitioned server usually keeps running its
 workloads, and releasing its GPUs to someone else would double-book hardware that is still in use. `lost` is
-applied automatically only to nodes of `provider` pools with `policy.lostAfter`, never to bare metal. When the
+applied automatically only to nodes of `provider` and `vps-host` pools that set `policy.lostAfter`, never to bare
+metal (a `vps-host` pool opts in so that its hosted instances can be recreated elsewhere). When the
 node reconnects, it resumes where it left off: the gateway replays its unfinished commands and the desired state
 it missed (see [delivery](/docs/daemon/delivery)).
 

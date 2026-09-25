@@ -73,8 +73,16 @@ The resolver runs inside Better IAM's locked decision transaction, so a hit must
   `RESOURCE_RESOLVER_REQUIRED`.
 
 Each process loads the projection at start and then tails `authz_changes` about once a second. Staleness can
-cause a spurious denial, never a wrong mutation, because compute re-validates inside its own transaction. An API
-process also puts the draft it just wrote into memory before deciding, so admissions always hit.
+cause a spurious denial, never a wrong mutation, because compute re-validates inside its own transaction.
+
+Admissions never decide on a stale copy. After an admission's first transaction commits the draft (or the changed
+row, as in `reservations.extend`), the envelope calls the optional `IamPort.refreshResource(tenantId, resource)`
+before `iam.require`. The embedded port from `bridge.embedded()` implements it with `AuthzProjection.refresh(type,
+id, tenantId)`, which re-reads that one row; on a miss or a failed read it drops the row, so the decision takes the
+bounded miss path above and fails closed. Before this, `reservations.extend` decided on the row cached at creation,
+so a `BoundedExtend`-style policy capped at 72 hours could be passed by one extra hour within the tail interval.
+`tests/server-example-policies.test.ts` runs the example policies against real drafts to hold this. In remote mode
+the replica on the IAM host has the same staleness and does not refresh yet.
 
 ## Actions
 

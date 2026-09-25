@@ -347,7 +347,9 @@ instances (`tests/vps-churn.test.ts`).
 
 ## Lost hosts
 
-When a hosted instance's node becomes `lost` (see [inventory and health](/docs/guides/nodes/inventory-and-health)),
+A host becomes `lost` only when its `vps-host` pool sets `policy.lostAfter`: the liveness controller then marks it
+`lost` that long after it became unreachable (see [operating nodes](/docs/guides/nodes/operating-nodes)). Without
+`lostAfter` a host stays `unreachable` and its instances wait for it. When a hosted instance's node becomes `lost`,
 the instance moves to `lost` and `instance.lost` is published with the `nodeId`. The reconciler then looks every 60
 seconds:
 

@@ -218,7 +218,7 @@ Liveness controller in the worker applies the transitions nobody reports:
 | --- | --- | --- |
 | `connected` to `disconnected` | The session's gateway lease expired (the gateway crashed or was partitioned) | Event `node.disconnected` |
 | `disconnected` to `unreachable` | 40 s (the lease TTL) plus grace after the last sign of life | NoSchedule reason `unreachable`, condition `NodeUnreachable` |
-| `unreachable` to `lost` | After the pool's `lostAfter`, only for `provider` pools | Never automatic for metal |
+| `unreachable` to `lost` | After the pool's `lostAfter`, only for `provider` and `vps-host` pools that set it | Never automatic for metal |
 
 The grace is 120 seconds after a gateway loss, so sessions have time to move to another gateway, and 5 minutes after
 the database or the Liveness controller itself was down for more than 20 seconds, so ages nobody could flush do not

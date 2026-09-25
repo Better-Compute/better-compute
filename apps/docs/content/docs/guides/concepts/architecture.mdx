@@ -114,8 +114,11 @@ better-compute serve --roles gateway --no-migrate
 ```
 
 Leases and shard ownership keep every job single-writer, so you can run several processes of each mode. The
-`scheduler` role is accepted today but runs nothing of its own yet; the v0.4 pool-lease placer currently runs as the
-`capacity.placer` reconciler under `controllers` when you choose `capacity: { placer: 'pool-lease' }`. See
+`scheduler` role runs the reconcilers that declare `role: 'scheduler'` (placers), under their own rendezvous
+membership (worker rows `scheduler/<id>`, leases `scheduler/shard:<n>`), so a scheduler-only process never takes node
+shards from the controllers and each role spreads the 256 shards over its own processes. Moving the pool-lease placer
+(`capacity.placer`, used with `capacity: { placer: 'pool-lease' }`) onto that role is in progress; until it lands the
+placer runs under `controllers`. See
 [deployment](/docs/operations/deployment) and [scaling](/docs/operations/scaling).
 
 ## Nodes only dial out

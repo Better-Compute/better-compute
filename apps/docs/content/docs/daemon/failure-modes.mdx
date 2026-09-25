@@ -139,8 +139,8 @@ drops one on its own. Workloads keep running. It journals events (up to 64 MiB a
 dropped oldest-first when full, results and transitions never) and redials with back-off.
 
 On the control plane the node goes `disconnected`, then `unreachable` after the 40-second lease TTL, with a
-NoSchedule reason and the `NodeUnreachable` condition. Only nodes of `provider` pools can become `lost`, after the
-pool's `lostAfter`; metal never does automatically. No step releases an allocation, a booking or a command (I5).
+NoSchedule reason and the `NodeUnreachable` condition. Only nodes of `provider` and `vps-host` pools can become
+`lost`, and only when the pool sets `policy.lostAfter`; metal never does automatically. No step releases an allocation, a booking or a command (I5).
 Commands that pass `not_after` while the node is away are swept to `expired`, or rejected `EXPIRED` by the daemon if
 they were already delivered.
 
