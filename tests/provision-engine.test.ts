@@ -550,6 +550,7 @@ describe('provisionModule', () => {
       'provision/0002_images',
       'provision/0003_workflow_owner',
       'provision/0004_gated_mig_layout',
+      'provision/0005_image_pins',
     ]);
     expect(module.reconcilers!.map((r) => [r.name, r.shardBy])).toEqual([
       ['workflow', 'node'],

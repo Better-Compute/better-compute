@@ -7,9 +7,11 @@ import {
   evictionCandidates,
   imageSigningInput,
   imagesCachedAt,
+  pinImageForWorkflow,
   provisionMigrations,
   provisionModule,
   recordImageLocation,
+  releaseImagePins,
   resolveImageRef,
   revokeImageSigner,
   siteCacheImagesFor,
@@ -305,5 +307,41 @@ describe('site cache pre-warm (§11.5)', () => {
     await register.handler(withDesired, register.validate({ tenantId: 'ten_a', ...image('unrelated@1') }));
     expect(invalidated).toEqual([AGENT]);
     expect((await siteCacheImagesFor(db, AGENT)).map((entry) => entry.url)).toHaveLength(2);
+  });
+
+  it('keeps an image a workflow pinned in the cache list, the locations and out of eviction until it ends', async () => {
+    const desired = {
+      seen: [] as string[],
+      async invalidate(_tx: unknown, nodeId: string) {
+        this.seen.push(nodeId);
+      },
+    };
+    const deployed = await call('register', { tenantId: 'ten_a', ...signed(image('deployed-only@7'), tenantKey, 'team') });
+    for (const id of ['wf_pin_1', 'wf_pin_2'])
+      await db.query(
+        `INSERT INTO workflows (id, tenant_id, instance_id, profile_id, profile_version, state, work_key)
+         VALUES ($1, 'ten_a', $2, 'p', 1, 'running', $1)`,
+        [id, `inst_${id}`],
+      );
+    const before = await siteCacheImagesFor(db, AGENT);
+    expect(before.map((entry) => entry.url)).not.toContain(deployed.source);
+    // Two deploys of the same image: the agents' specs are recomputed on the first pin only.
+    expect(await db.transaction((tx) => pinImageForWorkflow(tx, desired, { workflowId: 'wf_pin_1', imageId: deployed.id, siteId: 'site_w' }))).toBe(true);
+    expect(await db.transaction((tx) => pinImageForWorkflow(tx, desired, { workflowId: 'wf_pin_1', imageId: deployed.id, siteId: 'site_w' }))).toBe(false);
+    await db.transaction((tx) => pinImageForWorkflow(tx, desired, { workflowId: 'wf_pin_2', imageId: deployed.id, siteId: 'site_w' }));
+    expect(desired.seen).toEqual([AGENT, AGENT]);
+    expect((await siteCacheImagesFor(db, AGENT)).map((entry) => entry.url)).toContain(deployed.source);
+    // Ready at the site, then gone from every agent's cache: the pinned location stays, and eviction skips it.
+    await db.transaction((tx) => recordImageLocation(tx, { imageId: deployed.id, siteId: 'site_w', state: 'ready', sizeBytes: 100 }));
+    expect((await db.transaction((tx) => syncSiteImageLocations(tx, 'site_w'))).removed).toBe(0);
+    expect((await evictionCandidates(db, 'site_w', 1_000)).map((p) => p.imageId)).not.toContain(deployed.id);
+    // One workflow ends: still pinned by the other. Both end: evictable, and off the cache list.
+    expect(await db.transaction((tx) => releaseImagePins(tx, desired, 'wf_pin_1'))).toBe(1);
+    expect((await evictionCandidates(db, 'site_w', 1_000)).map((p) => p.imageId)).not.toContain(deployed.id);
+    expect(await db.transaction((tx) => releaseImagePins(tx, desired, 'wf_pin_2'))).toBe(1);
+    expect(await db.transaction((tx) => releaseImagePins(tx, desired, 'wf_pin_2'))).toBe(0);
+    expect((await evictionCandidates(db, 'site_w', 1_000)).map((p) => p.imageId)).toContain(deployed.id);
+    expect((await siteCacheImagesFor(db, AGENT)).map((entry) => entry.url)).toEqual(before.map((entry) => entry.url));
+    expect((await db.transaction((tx) => syncSiteImageLocations(tx, 'site_w'))).removed).toBe(1);
   });
 });

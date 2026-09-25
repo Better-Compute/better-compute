@@ -371,7 +371,8 @@ export async function imagesCachedAt(tx: SqlTx, siteId: string): Promise<Set<str
 
 /**
  * The least recently used ready images at a site whose sizes add up to at least `bytesNeeded`,
- * never pinned ones or those in `inUse`. Fewer than needed means the cache cannot make room.
+ * never pinned ones (by an operator, or by a workflow in `provision_image_pins`) or those in `inUse`.
+ * Fewer than needed means the cache cannot make room.
  */
 export async function evictionCandidates(
   tx: SqlTx,
@@ -380,8 +381,10 @@ export async function evictionCandidates(
   inUse: ReadonlySet<string> = new Set(),
 ): Promise<{ imageId: string; sizeBytes: number }[]> {
   const { rows } = await tx.query<{ image_id: string; size_bytes: number | null }>(
-    `SELECT image_id, size_bytes FROM image_locations
-      WHERE site_id = $1 AND state = 'ready' AND NOT pinned ORDER BY last_used_at, image_id`,
+    `SELECT image_id, size_bytes FROM image_locations l
+      WHERE site_id = $1 AND state = 'ready' AND NOT pinned
+        AND NOT EXISTS (SELECT 1 FROM provision_image_pins pin WHERE pin.site_id = l.site_id AND pin.image_id = l.image_id)
+      ORDER BY last_used_at, image_id`,
     [siteId],
   );
   const picked: { imageId: string; sizeBytes: number }[] = [];

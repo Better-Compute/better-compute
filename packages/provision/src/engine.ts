@@ -23,6 +23,7 @@ import {
   type StepPhase,
   type StepRegistry,
 } from './expand.js';
+import { releaseImagePins } from './site-cache.js';
 
 // The workflow engine (PLAN.md §11.2).
 //
@@ -376,6 +377,7 @@ export async function abortWorkflow(
       stepId: null,
       error: { code: 'CANCELLED', message: options.reason ?? 'aborted' },
     });
+    await releaseImagePins(tx, context.desired, workflow.id);
     await publish(context, tx, workflow, 'workflow.cancelled');
     await notifyOwner(context, tx, workflow);
     return;
@@ -545,6 +547,8 @@ async function finish(context: EngineContext, tx: SqlTx, workflow: WorkflowRow):
   const verb = workflow.outcome === 'failed' ? 'fail' : workflow.outcome === 'cancelled' ? 'cancel' : 'complete';
   const state = assertWorkflowVerb(workflow.state, verb);
   await setWorkflow(tx, workflow, { state, outcome: null, stepId: null });
+  // Images the workflow pinned at a site (a deploy's) may be evicted again.
+  await releaseImagePins(tx, context.desired, workflow.id);
   await publish(context, tx, workflow, `workflow.${state}`, workflow.error ? { error: workflow.error } : {});
   // A profile's hostConfig becomes the node's desired state once the workflow succeeded (§11.2).
   if (state === 'succeeded' && workflow.node_id && context.desired) {

@@ -179,4 +179,21 @@ END
 $fn$;
 `,
   },
+  {
+    name: 'provision/0005_image_pins',
+    sql: `
+-- Images in use at a site (PLAN.md §11.5 "LRU eviction pins in-use images"): a deploy pins its image at
+-- the node's site until its workflow ends. A pinned image stays in the site agents' cacheImages (the
+-- set they keep), its image_locations row is never dropped, and evictionCandidates skips it. One row
+-- per workflow, so concurrent deploys of the same image never unpin each other.
+CREATE TABLE provision_image_pins (
+  workflow_id text NOT NULL REFERENCES workflows ON DELETE CASCADE,
+  image_id text NOT NULL REFERENCES images,
+  site_id text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT compute_now(),
+  PRIMARY KEY (workflow_id, image_id, site_id)
+);
+CREATE INDEX provision_image_pins_site ON provision_image_pins (site_id, image_id);
+`,
+  },
 ]);

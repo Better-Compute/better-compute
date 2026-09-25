@@ -11,6 +11,7 @@ import {
 import {
   awaitCommand,
   defineStep,
+  pinImageForWorkflow,
   renderedUserData,
   resolveImageRef,
   siteAgentFor,
@@ -483,6 +484,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       const userData = await renderedUserData(context.sql, context.workflowId);
       if (pinned?.profile.userData && !userData)
         throw new ComputeError('INVALID_CONFIG', 'The profile has userData but no userdata.render step ran before deploy.deploy');
+      // In use at the site until the workflow ends: its site caches keep it (§11.5).
+      await context.sql.transaction((tx) =>
+        pinImageForWorkflow(tx, context.desired, { workflowId: context.workflowId, imageId: image.id, siteId: node.site_id }),
+      );
       const outcome = await awaitCommand(context, {
         nodeId: node.node_id,
         kind: 'deploy.image',

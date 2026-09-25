@@ -55,8 +55,13 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
   - Pre-warm: a pool names refs in `policy.prewarmImages`, and the site agents of its site get the
     verified ones as desired state (`site.cacheImages`, `siteCacheImagesFor`). Registering or
     promoting an image invalidates the affected site agents.
-  - `recordImageLocation` and `touchImageLocation` (which can also pin an image while a deploy
-    streams it) track what each site holds.
+  - In use: metal's `deploy.deploy` pins its image at the node's site for its workflow
+    (`pinImageForWorkflow`, table `provision_image_pins` from `provision/0005_image_pins`). The
+    image joins the site agents' `cacheImages`, which is the set they keep, and its location is
+    never dropped or evicted. The engine calls `releaseImagePins` when the workflow ends. Each pin
+    belongs to one workflow, so concurrent deploys never unpin each other.
+  - `recordImageLocation` and `touchImageLocation` (which can also pin an image by hand) track what
+    each site holds.
   - `imagesCachedAt(siteId)` lists the ready images at a site.
   - `evictionCandidates(siteId, bytes, inUse)` picks least-recently-used ready images, never
     pinned or in-use ones.
