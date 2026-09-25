@@ -90,8 +90,10 @@ async function bmc(
   operation: string,
   args: Record<string, Json>,
   key?: string,
+  /** The node row the step already read in this run (polling steps save a read per command). */
+  known?: MetalNodeRow,
 ): Promise<Json> {
-  const node = await metalNode(context);
+  const node = known ?? (await metalNode(context));
   if (!node.bmc_credentials) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
   const outcome = await awaitCommand(context, {
     nodeId: await siteAgent(context, node.node_id),
@@ -351,9 +353,9 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       if (await ramdiskConnected(context, node.node_id)) return { ramdisk: 'connected' };
       if (node.macs.length === 0)
         throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC; inspect it out of band first`);
-      await bmc(context, 'bmc.boot', 'management.setBootDevice', { device: 'pxe', persistent: false, uefi: node.uefi }, 'boot-device');
+      await bmc(context, 'bmc.boot', 'management.setBootDevice', { device: 'pxe', persistent: false, uefi: node.uefi }, 'boot-device', node);
       await prepareBootEntries(context, node, 'boot-entry');
-      await bmc(context, 'bmc.power', 'power.setPower', { action: 'cycle' }, 'power-cycle');
+      await bmc(context, 'bmc.power', 'power.setPower', { action: 'cycle' }, 'power-cycle', node);
       if (!(await ramdiskConnected(context, node.node_id))) throw stepNotReady(5_000);
       return { ramdisk: 'booted' };
     },

@@ -128,10 +128,29 @@ export function commandKey(step: Pick<StepRow, 'idempotency_key' | 'attempt'>): 
   return step.attempt === 0 ? step.idempotency_key : `${step.idempotency_key}#${step.attempt}`;
 }
 
-async function lockWorkflow(tx: SqlTx, id: string): Promise<WorkflowRow | undefined> {
-  const { rows } = await tx.query<WorkflowRow>('SELECT * FROM workflows WHERE id = $1 FOR UPDATE', [id]);
+/** A locked workflow row, with the transaction's clock and its node's reference read in the same statement. */
+interface LockedWorkflow extends WorkflowRow {
+  /** `compute_now()` at the lock (epoch ms). */
+  lockedAt: number;
+  node?: NodeRef;
+}
+
+async function lockWorkflow(tx: SqlTx, id: string): Promise<LockedWorkflow | undefined> {
+  const { rows } = await tx.query<WorkflowRow & { locked_at: Date; node_site_id: string | null; node_pool_id: string | null }>(
+    `SELECT w.*, compute_now() AS locked_at, n.site_id AS node_site_id, n.pool_id AS node_pool_id
+       FROM workflows w LEFT JOIN nodes n ON n.id = w.node_id WHERE w.id = $1 FOR UPDATE OF w`,
+    [id],
+  );
   const row = rows[0];
-  return row ? { ...row, profile_version: Number(row.profile_version), version: Number(row.version) } : undefined;
+  if (!row) return undefined;
+  const { locked_at, node_site_id, node_pool_id, ...workflow } = row;
+  return {
+    ...workflow,
+    profile_version: Number(row.profile_version),
+    version: Number(row.version),
+    lockedAt: locked_at.getTime(),
+    ...(row.node_id && node_site_id ? { node: { id: row.node_id, siteId: node_site_id, ...(node_pool_id ? { poolId: node_pool_id } : {}) } } : {}),
+  };
 }
 
 async function loadSteps(tx: SqlTx, workflowId: string): Promise<StepRow[]> {
@@ -448,7 +467,7 @@ type Transition =
   /** Nothing to do until `wakeAt` (epoch ms) or a wake-up. */
   | { kind: 'wait'; wakeAt?: number }
   /** A control-plane step to run outside the transaction. */
-  | { kind: 'run'; step: StepRow; workflow: WorkflowRow; deadline: number }
+  | { kind: 'run'; step: StepRow; workflow: LockedWorkflow; deadline: number }
   | { kind: 'done' };
 
 /**
@@ -478,11 +497,6 @@ async function nodeLabels(tx: SqlTx, nodeId: string | null): Promise<Record<stri
   if (!nodeId) return {};
   const { rows } = await tx.query<{ key: string; value: string }>('SELECT key, value FROM node_labels WHERE node_id = $1', [nodeId]);
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
-}
-
-async function sqlNow(tx: SqlTx): Promise<number> {
-  const { rows } = await tx.query<{ now: Date }>('SELECT compute_now() AS now');
-  return rows[0]!.now.getTime();
 }
 
 /**
@@ -692,7 +706,7 @@ async function transition(context: EngineContext, tx: SqlTx, workflowId: string)
     await publish(context, tx, workflow, 'workflow.started');
     return { kind: 'continue' };
   }
-  const now = await sqlNow(tx);
+  const now = workflow.lockedAt;
   const steps = await loadSteps(tx, workflow.id);
   const inFlight = steps.find((step) => step.state === 'running' || step.state === 'waiting');
   if (inFlight) {
@@ -758,7 +772,7 @@ export interface AdvanceResult {
 async function runControlPlaneStep(
   context: EngineContext & Pick<ModuleContext, 'sql'>,
   options: AdvanceOptions,
-  workflow: WorkflowRow,
+  workflow: LockedWorkflow,
   step: StepRow,
   deadline: number,
   now: () => number,
@@ -772,7 +786,8 @@ async function runControlPlaneStep(
   const onAbort = () => controller.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => controller.abort(new ComputeError('INTERNAL_ERROR', 'step timed out')), Math.max(0, deadline - now()));
-  const node: NodeRef | undefined = workflow.node_id ? await nodeRef(context, workflow.node_id) : undefined;
+  // Read with the workflow's lock; a node row deleted meanwhile has none.
+  const node: NodeRef | undefined = workflow.node;
   const stepContext = {
     ...(options.stepContext ?? {}),
     ...context,
@@ -803,16 +818,6 @@ async function runControlPlaneStep(
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', onAbort);
   }
-}
-
-async function nodeRef(context: Pick<ModuleContext, 'sql'>, nodeId: string): Promise<NodeRef | undefined> {
-  const { rows } = await context.sql.query<{ id: string; site_id: string; pool_id: string | null }>(
-    'SELECT id, site_id, pool_id FROM nodes WHERE id = $1',
-    [nodeId],
-  );
-  const row = rows[0];
-  if (!row) return undefined;
-  return { id: row.id, siteId: row.site_id, ...(row.pool_id ? { poolId: row.pool_id } : {}) };
 }
 
 /**
@@ -847,7 +852,7 @@ export async function advanceWorkflow(
       if (!current || current.state !== 'running' || current.attempt !== step.step.attempt) return undefined;
       if (outcome.outcome === 'succeeded') await completeStep(context, tx, workflow, current, outcome.result);
       else if (outcome.outcome === 'failed') await failStep(context, tx, workflow, current, outcome.error);
-      else return Math.min(step.deadline, (await sqlNow(tx)) + outcome.retryAfterMs);
+      else return Math.min(step.deadline, workflow.lockedAt + outcome.retryAfterMs);
       return undefined;
     });
     transitions++;
