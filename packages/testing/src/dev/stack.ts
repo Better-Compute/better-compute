@@ -52,6 +52,7 @@ import {
   gatewayReportHandlers,
   pkiJoinCrypto,
   type BetterCompute,
+  type ComputeOptions,
   type JoinCrypto,
   type WorkerOptions,
 } from '@better-compute/server';
@@ -671,6 +672,8 @@ export interface DevStackOptions
   log?: Logger;
   /** The gateway's exec-ticket replay cache (`DevFleetOptions.tunnels.jtiCache`). */
   tunnels?: { jtiCache?: ReplayCache };
+  /** Capacity options, as for `betterCompute()` (e.g. `attestedBindings`). */
+  capacity?: ComputeOptions<readonly ComputeModule[], []>['capacity'];
 }
 
 export interface DevStack extends DevFleet {
@@ -741,6 +744,7 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     notifier,
     worker: { pollMs: 100, ...options.worker },
     ...(options.log ? { log: options.log } : {}),
+    ...(options.capacity ? { capacity: options.capacity } : {}),
   });
   let started = false;
   let fleet: DevFleet | undefined;

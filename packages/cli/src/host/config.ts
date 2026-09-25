@@ -78,6 +78,25 @@ export interface HostMetricsConfig {
   path?: string;
 }
 
+/** `host.mcp`: a gated MCP endpoint's handler and where to mount it. */
+export interface HostMcpConfig {
+  /** Default `/mcp`. */
+  path?: string;
+  /** `computeMcpEndpoint(...).handler`: answers MCP and the gate's metadata and challenges. */
+  handler(request: Request): Promise<Response> | Response;
+}
+
+/** The host routes of `host.mcp`: the endpoint and its protected-resource metadata. */
+export function mcpRoutes(mcp: HostMcpConfig | undefined): HostRoute[] {
+  if (!mcp) return [];
+  const path = mcp.path ?? '/mcp';
+  const handler = (request: Request) => mcp.handler(request);
+  return [
+    { path, method: ['POST', 'GET', 'DELETE'], handler },
+    { path: `/.well-known/oauth-protected-resource${path}`, method: 'GET', handler },
+  ];
+}
+
 export interface HostConfig {
   metrics?: HostMetricsConfig;
   /**
@@ -91,6 +110,12 @@ export interface HostConfig {
    * drop this process's IAM caches. The gateway clients use `tunnels.control` TLS.
    */
   iam?: HostIamConfig;
+  /**
+   * The MCP endpoint for AI agents (PLAN.md §9.3): `computeMcpEndpoint({ compute, gate, delegations })` from
+   * @better-compute/mcp, better-iam's gate in front. Mounted at `path` (default `/mcp`, POST/GET/DELETE) and at
+   * its RFC 9728 metadata path `/.well-known/oauth-protected-resource{path}`.
+   */
+  mcp?: HostMcpConfig;
   http?: {
     routes?: readonly HostRoute[];
     upgrade?: readonly HostUpgradeHandler[];
@@ -126,7 +151,17 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       'INVALID_CONFIG',
       'The host export must be defineHost({ … }) or a factory',
     );
-  const { http, gateway, metrics, iam } = value as HostConfig;
+  const { http, gateway, metrics, iam, mcp } = value as HostConfig;
+  if (
+    mcp !== undefined &&
+    (!isRecord(mcp) ||
+      typeof mcp.handler !== 'function' ||
+      (mcp.path !== undefined && (typeof mcp.path !== 'string' || !/^\/[A-Za-z0-9._~-]+(\/[A-Za-z0-9._~-]+)*$/.test(mcp.path))))
+  )
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'host.mcp needs a handler (computeMcpEndpoint(...).handler from @better-compute/mcp) and an absolute path',
+    );
   if (http !== undefined && !isRecord(http))
     throw new ComputeError('INVALID_CONFIG', 'host.http must be an object');
   if (

@@ -4,6 +4,8 @@ import { defineHost, watchAuthorizer } from '@better-compute/cli';
 import { eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
+import { computeMcpEndpoint, gateTools } from '@better-compute/mcp';
+import { createMcpGate } from '@better-iam/mcp';
 import { metal } from '@better-compute/metal';
 import { createMetrics, standardMetrics } from '@better-compute/observability';
 import {
@@ -121,6 +123,20 @@ export async function composedConfig() {
     tunnels: { authorize: async () => false },
     // IAM events reach compute: a revoked delegation closes its tunnels on every gateway.
     iam: { bridge: iam.bridge },
+    // MCP for agents at /mcp: better-iam's gate (decided in the platform's tenant), then the compute tools
+    // as the caller, waiting inside the call for people to confirm held-back actions.
+    mcp: {
+      handler: computeMcpEndpoint({
+        compute,
+        gate: createMcpGate({
+          iam: iam.iam as never,
+          tenantId: iam.root.tenantId,
+          tools: gateTools(),
+          unlisted: 'deny',
+        }) as never,
+        delegations: iam.iam.api.delegations,
+      }).handler,
+    },
     gateway: {
       region: 'eu-1',
       listen: { host: '127.0.0.1', port: 0 },

@@ -552,6 +552,26 @@ export const host = composed.host;
         expect(watch.status).toBe(200);
         expect(watch.headers.get('content-type')).toContain('text/event-stream');
 
+        // host.mcp: the gated MCP endpoint. No credential: the gate challenges; the administrator lists tools.
+        const mcp = (token?: string) =>
+          fetch(`${origin}/mcp`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+              ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+          });
+        expect((await mcp()).status).toBe(401);
+        const listed = await mcp(root.credential.token);
+        expect(listed.status).toBe(200);
+        const tools = ((await listed.json()) as { result: { tools: { name: string }[] } }).result.tools;
+        expect(tools.map((tool) => tool.name)).toEqual(
+          expect.arrayContaining(['list_pools', 'reserve_gpus']),
+        );
+        expect((await fetch(`${origin}/mcp`, { method: 'PUT' })).status).toBe(405);
+
         // A site, a pool and a join token through the API; a machine joins over the gateway's TLS
         // listener (server-authenticated) with a sealed token bound to its CSR.
         const tenantId = root.tenantId;

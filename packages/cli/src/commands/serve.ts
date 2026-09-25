@@ -15,7 +15,7 @@ import {
 import { prepareDevSim, simVariants, type SimVariant } from '../dev-sim.js';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
-import { resolveHost, type HostConfig } from '../host/config.js';
+import { mcpRoutes, resolveHost, type HostConfig } from '../host/config.js';
 import { startGateway, type RunningGateway } from '../host/gateway.js';
 import { hostListener } from '../host/http.js';
 import { installIamHandlers } from '../host/iam.js';
@@ -161,24 +161,33 @@ export async function runServer(
   }
 }
 
-/** The host's HTTP options with `GET /metrics` added when `host.metrics` has a bearer token. */
+/**
+ * The host's HTTP options plus the routes of `host.mcp` (the gated MCP endpoint) and, when `host.metrics` has a
+ * bearer token, `GET /metrics`.
+ */
 function withMetricsRoute(host: HostConfig | undefined): HostConfig['http'] {
   const metrics = host?.metrics;
   const bearerToken = metrics?.bearerToken;
-  if (!metrics || !bearerToken) return host?.http;
+  const mcp = mcpRoutes(host?.mcp);
+  if ((!metrics || !bearerToken) && !mcp.length) return host?.http;
   return {
     ...host?.http,
     routes: [
       ...(host?.http?.routes ?? []),
-      {
-        path: metrics.path ?? '/metrics',
-        method: 'GET',
-        handler: metricsHandler({
-          registry: metrics.registry,
-          bearerToken,
-          timingSafeEqual,
-        }),
-      },
+      ...mcp,
+      ...(metrics && bearerToken
+        ? [
+            {
+              path: metrics.path ?? '/metrics',
+              method: 'GET',
+              handler: metricsHandler({
+                registry: metrics.registry,
+                bearerToken,
+                timingSafeEqual,
+              }),
+            },
+          ]
+        : []),
     ],
   };
 }
@@ -420,6 +429,7 @@ export const serveCommands = [
       const devHost: HostConfig = {
         ...(configured?.http ? { http: configured.http } : {}),
         ...(configured?.metrics ? { metrics: configured.metrics } : {}),
+        ...(configured?.mcp ? { mcp: configured.mcp } : {}),
         // IAM events (revoked delegations close their tunnels): the configuration's bridge, else --sim's.
         ...(configured?.iam
           ? { iam: configured.iam }
