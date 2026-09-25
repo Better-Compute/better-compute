@@ -210,8 +210,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
     - §16 gateway gate: met on the workstation (bc596e5: 5k mTLS sessions in a split process, 0 drops,
       dispatch p99 26 ms, storm back in 39 s; listen backlog 4096 in 03dc281, [c321a3]); only the 30-min
       reference-Postgres run is left. The 30-min PGlite run (14ff010): 0 drops, p99 24 ms, storm OK, but gateway
-      RSS grew 1.24 → 2.02 GiB with a flat 235 MiB heap. The RSS criterion is OPEN (likely PGlite WASM in-process;
-      [c321a3] to confirm with the store out of process).
+      RSS grew 1.24 → 2.02 GiB with a flat 235 MiB heap. RSS: MET on the gateway itself. The growth is attributed to
+      PGlite's WASM database (arrayBuffers +224 of +228 MiB in 5 min), so with Postgres out of process the gateway
+      holds about 1.1 GiB at 5k mTLS sessions ([c321a3] README). It will be re-confirmed on the reference Postgres run.
     - Docs session [75b663] (ex-[731f14]) findings at be1e7d9:
       - HIGH: provision renderers and Robot bootstrap run `bcd join --server/--node-id/--token-file` and
         `bcd node --join-token-file`, which bcd rejects (exit 2), so deployed machines never join. bcd adopts
