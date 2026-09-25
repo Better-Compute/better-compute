@@ -273,8 +273,9 @@ describe('JoinService.join', () => {
     );
     expect(certs.rows).toEqual([{ serial: leaf.serial, role: 'node', identity_gen: 1 }]);
     expect(await usesLeft(s, token)).toBe(0);
+    // The pool runs acceptance checks, which need the daemon's Hello: nothing to wake before it.
     const work = await database.query("SELECT key FROM work_queue WHERE kind = 'node'");
-    expect(work.rows).toEqual([{ key: body.nodeId }]);
+    expect(work.rows).toEqual([]);
     const events = await database.query<{ topic: string }>('SELECT topic FROM outbox ORDER BY seq');
     expect(events.rows.map((row) => row.topic)).toEqual(['node.joined']);
     const audit = await database.query<{ action: string; resource_id: string }>(
@@ -748,8 +749,8 @@ describe('GatewayServices', () => {
       signer: { publicKey: s.signingKey.publicKey },
       csr,
     });
-    // The join woke the node reconciler, which waits for the daemon's Hello before acceptance.
-    expect(await compute.jobs.node!.tick()).toBe(1);
+    // Acceptance waits for the daemon's Hello, so the join wakes no node pass.
+    expect(await compute.jobs.node!.tick()).toBe(0);
     expect(await nodeRow(s, body.nodeId)).toMatchObject({ provision_state: 'adopting' });
     const acceptance = await s.fixture.database.query(
       'SELECT count(*)::int AS n FROM commands WHERE node_id = $1',

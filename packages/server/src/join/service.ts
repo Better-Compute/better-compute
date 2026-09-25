@@ -13,6 +13,7 @@ import {
   type Logger,
   type NodeRole,
   type NodeTrust,
+  type PoolPolicy,
   type SqlExecutor,
   type SqlTx,
   type WorkQueue,
@@ -29,7 +30,7 @@ import {
   type RenewRequest,
   type RenewResponse,
 } from '@better-compute/protocol';
-import { requestAcceptance } from '../controllers/lifecycle.js';
+import { acceptanceChecks, requestAcceptance } from '../controllers/lifecycle.js';
 import { nodeWorkKind, refreshNodeAuthz } from '../controllers/node-state.js';
 import { joinTokenAttestor, type JoinTokenRefusal } from './attestor.js';
 import type { JoinCrypto, JoinSignature, JoinTrustBundle } from './crypto.js';
@@ -237,6 +238,7 @@ interface PoolRow {
   site_id: string;
   class: string;
   agent: string;
+  policy: unknown;
 }
 
 interface ExistingNode {
@@ -521,7 +523,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
       if (result.poolId) {
         pool = (
           await tx.query<PoolRow>(
-            'SELECT id, owner_tenant_id, site_id, class, agent FROM pools WHERE id = $1 FOR SHARE',
+            'SELECT id, owner_tenant_id, site_id, class, agent, policy FROM pools WHERE id = $1 FOR SHARE',
             [result.poolId],
           )
         ).rows[0];
@@ -633,7 +635,15 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
           'INSERT INTO node_sessions (node_id, session_epoch, last_seen) VALUES ($1, 0, compute_now())',
           [nodeId],
         );
-        await work.enqueue(tx, nodeWorkKind, nodeId);
+        // A pool without acceptance checks (and a site agent) adopts at once; with checks the node
+        // is still disconnected, so a pass now would do nothing: its first Hello wakes it.
+        const policy = typeof pool?.policy === 'string' ? JSON.parse(pool.policy) : pool?.policy;
+        const checks = acceptanceChecks({
+          role: nodeRole,
+          pool_id: pool?.id ?? null,
+          policy: (policy ?? null) as PoolPolicy | null,
+        });
+        if (checks.length === 0) await work.enqueue(tx, nodeWorkKind, nodeId);
       }
 
       const ttlSeconds = Math.min(

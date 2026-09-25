@@ -1,4 +1,5 @@
 import type { AuthzRow, AuthzWriter, Condition, SqlTx } from '@better-compute/core';
+import { authzWriter } from '../runtime/authz.js';
 
 // Shared pieces of the node controllers (PLAN.md §8.4): work kinds, conditions and the
 // `no_schedule_reasons` column every writer shares.
@@ -110,12 +111,48 @@ export async function nodeAuthzRow(tx: SqlTx, nodeId: string): Promise<AuthzRow 
   return authz;
 }
 
-/** Writes the node's current projection row in `tx` (no change, no write). */
+/**
+ * `nodeAuthzRow` written through the runtime's authz writer rules in ONE statement: the row is
+ * computed, upserted only when it differs, and the change fed to `authz_changes` (a join runs this
+ * about six times, so the separate read and write were a measurable share of a join storm).
+ */
+const refreshNodeRow = `WITH src AS (
+    SELECT 'node'::text AS type, n.id, n.owner_tenant_id AS tenant_id,
+           jsonb_strip_nulls(jsonb_build_object(
+             'region', s.region,
+             'gpuCount', (SELECT count(*) FROM devices d WHERE d.node_id = n.id AND d.class = 'gpu'),
+             'lifecycle', n.provision_state,
+             'trust', n.trust,
+             'gpuModel', p.gpu_model)) AS attributes,
+           CASE WHEN n.pool_id IS NULL THEN NULL ELSE 'pool' END AS parent_type,
+           n.pool_id AS parent_id
+      FROM nodes n JOIN sites s ON s.id = n.site_id LEFT JOIN pools p ON p.id = n.pool_id
+     WHERE n.id = $1),
+  changed AS (
+    INSERT INTO authz_projection AS a (type, id, tenant_id, attributes, parent_type, parent_id, owner_id)
+    SELECT type, id, tenant_id, attributes, parent_type, parent_id, NULL FROM src
+    ON CONFLICT (type, id, tenant_id) DO UPDATE SET attributes = EXCLUDED.attributes,
+      parent_type = EXCLUDED.parent_type, parent_id = EXCLUDED.parent_id, owner_id = EXCLUDED.owner_id
+    WHERE a.attributes IS DISTINCT FROM EXCLUDED.attributes
+       OR a.parent_type IS DISTINCT FROM EXCLUDED.parent_type
+       OR a.parent_id IS DISTINCT FROM EXCLUDED.parent_id
+       OR a.owner_id IS DISTINCT FROM EXCLUDED.owner_id
+    RETURNING a.type, a.id, a.tenant_id)
+  INSERT INTO authz_changes (type, id, tenant_id, op) SELECT type, id, tenant_id, 'upsert' FROM changed`;
+
+/**
+ * Writes the node's current projection row in `tx` (no change, no write): one statement through
+ * the runtime's own writer, `nodeAuthzRow` + `upsert` through any other (a host's or a test's).
+ */
 export async function refreshNodeAuthz(
   tx: SqlTx,
   authz: AuthzWriter,
   nodeId: string,
 ): Promise<void> {
+  if (authz === authzWriter) {
+    await tx.query(refreshNodeRow, [nodeId]);
+    return;
+  }
   const row = await nodeAuthzRow(tx, nodeId);
   if (row) await authz.upsert(tx, row);
 }

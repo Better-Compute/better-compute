@@ -216,8 +216,8 @@ describe('the v0.1 spine, in process', () => {
     expect(spent.items).toEqual([expect.objectContaining({ id: minted.id, usesLeft: 0 })]);
     iam.reset();
 
-    // 3. Acceptance waits for the daemon's Hello (§3.3 steps 5-7).
-    expect(await compute.jobs.node!.tick()).toBe(1);
+    // 3. Acceptance waits for the daemon's Hello (§3.3 steps 5-7): the join woke nothing.
+    expect(await compute.jobs.node!.tick()).toBe(0);
     expect(
       (await database.query('SELECT 1 FROM commands WHERE node_id = $1', [nodeId])).rowCount,
     ).toBe(0);
