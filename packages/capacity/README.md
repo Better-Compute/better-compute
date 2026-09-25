@@ -9,16 +9,18 @@ Capacity for better-compute (PLAN.md §10.2–§10.6). This package covers:
 It depends on `@better-compute/core` and `@better-compute/inventory`. The server registers it
 before any injected module. Most apps reach it through `better-compute/capacity`.
 
-**Status: v0.1.** Working now:
+**Status: v0.5.** Working now:
 
-- the placement pipeline, the InlinePlacer, quotas, bookings and rollups;
+- the placement pipeline, the InlinePlacer and the v0.4 pool-lease placer, quotas, bookings and
+  rollups;
 - `capacityModule`, which serves the §9.2 `pools`, `capacity`, `reservations` and `quotas` groups.
   Reservation creates and extends run on the server's admission hook.
+- v0.5: fractional GPUs (MIG, timeslice/MPS slots and the atom rule), calendar reservations with
+  BookingRepair, gangs, spot, `binding: 'node'` leases, dedicated nodes and attested bindings.
 
-Still to come:
-
-- `pools.update` and `pools.archive`, `capacity.timeline` and `quotas.set`, in v0.2;
-- shared GPUs and cross-node gangs, in v0.5.
+The exit tests are `tests/capacity-*.test.ts`. They include the §15 torture test on a MIG pool
+(`capacity-torture`) and property tests (`capacity-properties`). `tests/bench/placements.bench.ts`
+measures placements/s, and has a sustained mode for the v0.4 gate.
 
 ## capacityModule
 
@@ -60,7 +62,8 @@ const capacity = capacityModule({ plugins: [], weights: { spread: 0.5 }, topN: 5
   for calendar views.
 - **`pools.update`** changes a pool's policy or GPU model and refreshes every tenant's authz view
   of the pool.
-- **`quotas.set`** is a fleet operation. `pools.archive` waits on a schema column.
+- **`quotas.set`** is a fleet operation. **`pools.archive`** unoffers the pool everywhere and
+  takes no new work; live bookings run out.
 - **`capacity.rollup`** rebuilds every pool's rollup every 5 minutes.
 - **`capacity.usage`** writes hourly `usage_windows` for the IAM usage sink (§12.7, D14).
   - Meter: `gpu.<model>.hours`, billed on reserved time from `active` (`bound_at`) to the release
@@ -71,7 +74,19 @@ const capacity = capacityModule({ plugins: [], weights: { spread: 0.5 }, topN: 5
 - **`nodeSpec`** puts the CDI assignments of started reservations in the node's `devices`
   section.
 - **`pools.offer`** enforces the offering validator. A pool with tenant-owned nodes, or a
-  `timeslice`/`mps` pool, goes only to its owner.
+  `timeslice`/`mps` pool, goes only to its owner. A `policy.singleTenant` pool (container
+  runtimes, §13) goes to one tenant besides its owner, without `includeDescendants`, and
+  `pools.update` refuses to set the flag while more than one tenant holds an offer.
+- **Attested bindings** (`capacityModule({ attestedBindings })`, v0.2, P14). `markAllocationBound`
+  stores the node's signed report as received (`bound_report`, `bound_sig_kid`, `bound_sig`).
+  With the option set, the reservation worker verifies it before the binding counts:
+  - a verified report replaces the binding with the signed devices;
+  - an unsigned, forged or replayed one never counts. In `binding`, `bound_at` is cleared, so
+    nothing is billed and the reservation waits for a real report or its bind timeout. In `active`,
+    the binding is marked lost (`Degraded`). Both publish `reservation.binding-rejected`.
+
+  The server passes a pki-backed check when command signing is configured. Node leases are exempt,
+  since metal binds them.
 - **`capacity.preview`** dry-runs a request without booking it.
 
 ```ts
@@ -120,6 +135,14 @@ A node is schedulable when all of the following hold:
 `nodeBucket` reports where capacity counts: `schedulable`, `provisioning`, `unhealthy`,
 `maintenance`, `unreachable` or `excluded`. `schedulableSql` is the SQL twin that placers lock
 with. A test keeps the two in agreement.
+
+**Dedicated nodes (§10.6).** `nodes.taint { add: ['dedicated=acme'] }` stores
+`taint:dedicated=acme`. Placement for tenant `acme` tolerates that one reason, and every other
+tenant's placement treats it as NoSchedule. A dedication plus any other reason, or two tenants'
+dedications, blocks everyone. Placement paths pass the request's tenant:
+`isSchedulable(node, pool, tenantId)` and `schedulableSqlTolerating('$n::text[]')` bound to
+`[dedicatedTaint(tenantId)]`. Rollups and the generic `schedulableSql` still count a dedicated node
+as NoSchedule (bucket `unhealthy`).
 
 ## Placement (§10.3)
 
