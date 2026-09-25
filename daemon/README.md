@@ -26,10 +26,10 @@ This file is for people working on the daemon. For running it, start with the do
 
 ## Status
 
-`node`, `join`, `status`, `doctor` and `version` work. `site` and `ramdisk` arrive in v0.2, `sim`
-in v0.4. Until then they exit 2 with `bcd: NOT_IMPLEMENTED: bcd <cmd> arrives in <phase>`. NVML is
-not wired yet: `internal/nvml` answers `ErrNotBuilt` in every build, and GPU inventory comes from
-procfs and sysfs.
+Every mode works: `node`, `site`, `ramdisk`, `sim` (fakehw builds), `join`, `status`, `doctor`,
+`update` and `version`. Self-update (A/B slots, v0.4) and the destructive-batch quorum (v1.0) are
+enforced by the daemon. NVML is not wired yet: `internal/nvml` answers `ErrNotBuilt` in every build
+(go-nvml needs cgo and a cross compiler), and GPU inventory comes from procfs and sysfs.
 
 ## Layout
 
@@ -50,6 +50,12 @@ dependencies are connect-go, bbolt and protobuf.
 | `internal/health` | PSI pressure, CPU steal, and the Xid parser for `/dev/kmsg` |
 | `internal/fakehw` | a deterministic 8× H100 SXM HGX node (NVSwitch, 2 NUMA nodes, NVMe, 2 NICs), seeded |
 | `internal/nvml` | the NVML boundary; a stub for now |
+| `internal/selfupdate` | the A/B binary slots, `upgrade.json`, the release floor and the crash-loop rollback units |
+| `internal/bcx` | bcx driver plugins: the sandbox shim (`bcd __bcx-exec`: no-new-privs, seccomp, per-plugin uid), cgroups |
+| `internal/runtime` | instance runtimes: `Libvirt` (virsh, qemu-img, NoCloud seeds, snapshots, serial consoles) and `Fake` |
+| `internal/redfish` | the Redfish client of the site agent's `bmc.*` kinds (power, boot, BIOS, RAID, firmware, accounts) |
+| `internal/bootparams`, `internal/pxe` | the ramdisk's `bc.*` kernel command line; the site agent's proxyDHCP and TFTP |
+| `internal/imds` | the instance metadata service of VPS hosts |
 | `internal/config` | `/etc/bcd/config.toml` in a strict TOML subset |
 | `internal/support` | redaction of keys, tokens, JWTs and URL passwords in logs and support bundles |
 | `gen/` | Go code generated from `proto/` (see [`gen/README.md`](gen/README.md)) |
@@ -107,9 +113,12 @@ The end-to-end test `tests/e2e/bcd.test.ts` runs the real binary against a dev s
 - `inventory.refresh`;
 - a reservation's CDI bind and release;
 - a console tunnel;
-- `node.reboot`.
+- `node.reboot`;
+- `bcd join --server` bootstrapping from the well-known document;
+- `bcd sim`;
+- self-update: `daemon.upgrade` to a signed second build, exec'd and confirmed by its Welcome.
 
-It runs on Linux when Go is present. On Windows it needs `BCD_E2E=1` and WSL; `BCD_E2E_LOG=1`
+`tests/e2e/bcd-vps.test.ts` runs a VPS host. Both run on Linux when Go is present. On Windows it needs `BCD_E2E=1` and WSL; `BCD_E2E_LOG=1`
 streams bcd's log.
 
 CI (`.github/workflows/daemon.yml`, Ubuntu and Windows) runs `go vet`, `go test -tags nonvml,fakehw
@@ -120,8 +129,12 @@ with cgo through `zig cc`. `daemon/bin/` and `daemon/dist/` are gitignored.
 
 | Command | Flags | |
 |---|---|---|
-| `bcd join` | `-config` | reads the `bcjt_…` token from `BCD_JOIN_TOKEN` (unset once read) or the first line of stdin, never from arguments |
+| `bcd join` | `-config`, `-token-file`, `-server`, `-node-id`, `-attestor`, `-serving-ca-pin`, `-join-signing-pin`, `-join-encryption-pin`, `-data-dir` | reads the `bcjt_…` token from `BCD_JOIN_TOKEN` (unset once read), `-token-file` or the first line of stdin, never from arguments. Without config.toml, `-server` plus the three pins bootstrap it from the control plane's well-known document. Re-running on a joined node succeeds |
 | `bcd node` | `-config` | runs the agent until SIGINT or SIGTERM |
+| `bcd site` | `-config` | the site agent: `bmc.*` over Redfish, `site.httpProxy`, and with `[boot]` the iPXE boot server, image cache, proxyDHCP and TFTP |
+| `bcd ramdisk` | `-cmdline`, `-data-dir` | inside the PXE ramdisk: joins from the `bc.*` boot parameters; inspect, diag, wipe, image stream, kexec |
+| `bcd sim` | `-nodes`, `-seed`, `-config` | fakehw builds only: N simulated daemons in one process |
+| `bcd update` | `-config`, `-clear-failed` | shows the self-update slots, release floor, a pending update and failed versions; `-clear-failed` lets a failed version be tried again |
 | `bcd status` | `-socket`, `-json` | asks the running agent over its unix socket |
 | `bcd doctor` | `-config` | checks the config (and its file mode), NVML and hardware collection |
 | `bcd version` | | `bcd <version> <os>/<arch> <go>` plus build tags; set the version with `-ldflags "-X main.version=…"` |
@@ -146,6 +159,12 @@ strings, integers and booleans. Unknown keys, duplicate keys and wrong types are
 | `dev_insecure_h2c` | `false` (fakehw builds only) |
 | `[journal] max_bytes`, `max_events` | 64 MiB, 10 000 (the file may lower these caps, never raise them) |
 | `[log] level`, `json` | `info`, `true` |
+| `approver_set_sha256` | unset; the hex SHA-256 of the approver set a keyless daemon may take first (review 7 M2) |
+| `[update] release_pins`, `release_threshold`, `release_sequence`, `entrypoint` | no pins (self-update refused), 1, 0, `/usr/local/bin/bcd` |
+| `[site] bmc_networks` | unset; CIDRs `site.httpProxy` never reaches |
+| `[plugins] dir`, `user`, `privileged`, `sandbox`, `cgroup`, `memory_max`, `pids_max` | no plugins; per-plugin uids, none, `true` |
+| `[imds] listen` | unset (VPS hosts: the metadata service's address) |
+| `[boot] listen`, `url`, `kernel`, `initrd`, `cmdline`, `server_ip`, `proxy_dhcp`, `tftp`, `tftp_root`, `cache_max_bytes` | site agents only |
 
 Files the daemon owns:
 
@@ -158,6 +177,12 @@ Files the daemon owns:
 | `<data_dir>/fakehw-root/`, `fakehw-boot-id` | fakehw builds only |
 | `/etc/bcd/join-encryption.jwk` | the JoinService encryption key, read from the config file's directory and checked against its pin |
 | `/run/bcd/bcd.sock` | the status socket, 0600 in a 0700 directory |
+| `<data_dir>/bin/bcd-{a,b}`, `current`, `previous`, `slots.json` | self-update slots; the entrypoint links to `current` after the first update |
+| `<data_dir>/upgrade.json` | an update between its swap and its Welcome (or its rollback) |
+| `<data_dir>/update.json` | the highest release sequence run, and versions that failed to start |
+| `<data_dir>/batch-leaves.json`, `unbatched-destructive.json` | quorum: batch leaves that ran, and the last hour's unbatched destructive commands |
+| `<data_dir>/bmc-hosts.json` | site agents: the BMC names and addresses driven (`site.httpProxy` refuses them) |
+| `/etc/systemd/system/bcd-rollback.service`, `bcd.service.d/50-bcd-rollback.conf` | written by the first update under systemd |
 | `/etc/cdi/bcd-<allocationId>.json` | CDI spec per GPU hold |
 | `/run/bcd/allocations/<allocationId>.env` | the hold's environment (`BCD_ALLOCATION_ID`, `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, …) |
 | `/etc/ssh/sshd_config.d/10-better-compute.conf`, `/etc/ssh/bc_ca.pub`, `/etc/ssh/bc_principals/<account>`, `/etc/ssh/bc_krl` | break-glass SSH, written by the access converger |
@@ -199,11 +224,26 @@ the real outcome is reported.
 trust roots, from `JoinResponse.trust` and newer versions in `Welcome.trust` signed by the pinned
 JoinService key:
 
-- any signature present on a command is verified;
-- a signature is required for kinds the daemon's own table marks destructive;
+- every command must carry a signature that verifies (review 7 HIGH-1);
 - every DesiredState must verify.
 
 Attested results and allocation reports carry the node's own signature.
+
+**Quorum** (`agent/quorum.go`, `pki/batch.go`). With approver keys in the trust bundle, a destructive
+command runs only with a batch approval of enough approver signatures for this node's trust domain
+and a Merkle proof of its leaf (subject, kind, payload digest or unbound), each leaf once. A
+`site.httpProxy` other than GET needs a payload-bound leaf. Unbatched destructive commands are
+capped per hour. Approver sets change only at a higher epoch with k-of-current signatures; a
+refused set keeps the held quorum while roots and version still apply.
+
+**Self-update** (`agent/update.go`, `selfupdate/`). `NodeSpec.daemon` and `daemon.upgrade` carry a
+`DaemonSection` whose `signature` is the signed release manifest. The manifest must verify under
+`[update] release_pins`, be bcd's, for that version, at or above the release floor, unexpired on
+both clocks, and list the bare binary `bcd_<version>_<os>_<arch>` with the section's digest. The
+binary is staged in the other slot, `upgrade.json` gets a 120 s deadline, `current` swaps and bcd
+execs the entrypoint. The new binary is confirmed by its first Welcome; without one it swaps back,
+and the old binary records the version as failed. Going back to the version in the other slot
+needs no manifest.
 
 **Server time** (`agent/conn.go`). The daemon keeps a high-water mark of server time, advanced by
 every Welcome and heartbeat and mirrored in `identity.json`. A Welcome more than 5 minutes behind it
@@ -248,6 +288,11 @@ is the full list):
 | `logs.collect` | collects `journalctl` output, redacts it and uploads it to a presigned https URL |
 | `gpu.reset` | resets a GPU that has no live hold (destructive) |
 | `node.reboot` | reboots; self-terminating, so it completes after the restart (destructive) |
+| `daemon.upgrade` | self-update; self-terminating, it completes after the new binary is welcomed |
+| `instance.snapshot` | snapshots a VPS instance and uploads it to a presigned https URL |
+| `driver.invoke` | one operation of a bcx plugin's driver (destructive) |
+| `disk.wipe`, `deploy.image`, `boot.kexec`, `diag.dcgm` | ramdisk kinds; images and boot files are written and read in userspace for ext and FAT |
+| `bmc.*`, `site.httpProxy`, `boot.*`, `site.proxyDhcp` | site agent kinds |
 
 Tunnels (`agent/tunnels.go`, at most 16) are session frames, not kinds. They open only for an exec
 ticket that verifies against the pinned JWKS, whose `jti` is new and whose `sid` matches the tunnel.
