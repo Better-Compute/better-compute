@@ -187,6 +187,8 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
 
   const machines = new Map<string, SimMachine>();
   const seen: { id: string; kind: string; node: string; payload: Record<string, any>; args: Record<string, any> }[] = [];
+  /** Every wipe that ran, in order: `at` is its index in `seen`; `trusted` is the ground truth. */
+  const trustedWipes: { nodeId: string; at: number; trusted: boolean }[] = [];
   /** Switches for failure injection. */
   const faults = {
     /** false: the ramdisk sends its wipe result unsigned. */
@@ -390,6 +392,13 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       }
       if (command.kind === 'disk.wipe' && faults.forgeWipe)
         result = toBinary(WipeResultSchema, create(WipeResultSchema, { disks: [{ id: 'wwn-0x5000', method: 'nvme-format', verified: true }] }));
+      // Ground truth for property tests: this wipe really erased and read back, and the machine itself signed it.
+      if (command.kind === 'disk.wipe')
+        trustedWipes.push({
+          nodeId: command.node_id,
+          at: seen.length,
+          trusted: !faults.failWipeReadBack && faults.attestWipe && !faults.forgeWipe && !faults.foreignSigner && !faults.signWith,
+        });
       await db.query('UPDATE commands SET state = $2, result = $3, result_sig_kid = $4, result_sig = $5 WHERE id = $1', [
         command.id,
         'succeeded',
@@ -461,6 +470,6 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       )
     ).rows[0]!;
 
-  return { db, context, api, provision, bareMetal, queue, events, seen, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, pxeTick, settle, call, state, close: () => db.close() };
+  return { db, context, api, provision, bareMetal, queue, events, seen, trustedWipes, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, pxeTick, settle, call, state, close: () => db.close() };
 }
 export type MetalSim = Awaited<ReturnType<typeof createMetalSim>>;
