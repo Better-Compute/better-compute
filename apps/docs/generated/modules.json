@@ -41,7 +41,8 @@
         "quorum/0004_trust_bundle_approver_set",
         "quorum/0005_batch_request",
         "quorum/0006_trust_bundle_history",
-        "quorum/0007_leaf_payload"
+        "quorum/0007_leaf_payload",
+        "quorum/0008_batch_agent"
       ]
     },
     {
@@ -74,7 +75,8 @@
         "metal/0002_addresses",
         "metal/0003_tenant_root",
         "metal/0004_bmc_credentials",
-        "metal/0005_batch"
+        "metal/0005_batch",
+        "metal/0006_bmc_driver_options"
       ]
     },
     {

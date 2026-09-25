@@ -359,7 +359,7 @@
           "additionalProperties": false
         },
         "summary": "Returns one batch of the tenant: its reason, state, scope root and size, the approvals it needs and has, and how many of its commands are in each state.",
-        "description": "Returns one batch of the tenant: its reason, state, scope root and size, the approvals it needs and has, and how many of its commands are in each state.\n\nThe state is `expired` as soon as `notAfter` passes, even before the minute sweep writes it. A batch of another tenant is `NOT_FOUND`."
+        "description": "Returns one batch of the tenant: its reason, state, scope root and size, the approvals it needs and has, and how many of its commands are in each state.\n\nThe state is `expired` as soon as `notAfter` passes, even before the minute sweep writes it. A batch of another tenant is `NOT_FOUND`.\n\n`createdBy` is the identity that created the batch. When an agent proposed it on that identity's behalf (MCP `propose_command_batch`), `createdByAgent` and `delegationId` say so, and the `reason` is the agent's text, not the person's."
       },
       {
         "method": "list",
@@ -424,8 +424,8 @@
           "required": ["tenantId", "batchId"],
           "additionalProperties": false
         },
-        "summary": "Returns a batch's leaves in leaf order, for approvers to review before signing: each leaf's index, subject, kind and `payloadSha256`.",
-        "description": "Returns a batch's leaves in leaf order, for approvers to review before signing: each leaf's index, subject, kind and `payloadSha256`.\n\nAn empty `payloadSha256` marks a leaf that admits any payload of its kind, which approvers should look at closely. Pages hold 1 to 5,000 leaves (1,000 by default); `next` is the leaf index to pass as `cursor`."
+        "summary": "Returns a batch's leaves in leaf order, for approvers to review before signing: each leaf's index, subject, kind and `payloadSha256`, plus the leaf's `payload` (`{ typeUrl, value }` base64) when its creator stored it. Decode it by the kind's payload type, after checking it against `payloadSha256`.",
+        "description": "Returns a batch's leaves in leaf order, for approvers to review before signing: each leaf's index, subject, kind and `payloadSha256`, plus the leaf's `payload` (`{ typeUrl, value }` base64) when its creator stored it. Decode it by the kind's payload type, after checking it against `payloadSha256`.\n\nAn empty `payloadSha256` marks a leaf that admits any payload of its kind, which approvers should look at closely. Pages hold 1 to 5,000 leaves (1,000 by default); `next` is the leaf index to pass as `cursor`."
       },
       {
         "method": "members",
@@ -2236,6 +2236,10 @@
                   "type": "string",
                   "pattern": "^[0-9A-Fa-f]{64}$",
                   "description": "SHA-256 of the BMC certificate's SubjectPublicKeyInfo, 64 hex digits, to pin its TLS"
+                },
+                "driverOptions": {
+                  "type": "object",
+                  "description": "Options for the BMC driver, sent with every BMC operation (e.g. bcx-ipmi { \"cipherSuite\": 3 } for old BMCs): a JSON object of at most 1 KiB, never credentials. The driver validates its keys"
                 }
               },
               "required": ["address", "driver", "credentials"],
@@ -2248,7 +2252,16 @@
               "items": {
                 "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
               },
-              "description": "The node's MAC addresses (':' or '-' separated), for PXE and matching"
+              "description": "The node's PXE MAC addresses (':' or '-' separated). Required for a pool with an agent when the BMC driver cannot report them (IPMI)"
+            },
+            "addresses": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "string",
+                "maxLength": 45
+              },
+              "description": "The machine's own IP addresses, the only hosts site.httpProxy may reach for it (agentless pools); out-of-band inspection replaces them when it reports some"
             },
             "productUuid": {
               "type": "string",
