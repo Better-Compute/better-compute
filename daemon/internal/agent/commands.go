@@ -70,7 +70,7 @@ type execution struct {
 // deferred is a command waiting for its min_generation.
 type deferred struct {
 	cmd    dispatch.Command
-	badSig bool
+	intent intentVerdict
 	timer  *time.Timer
 }
 
@@ -80,8 +80,9 @@ func (a *Agent) onCommand(c *agentv1.Command) {
 		a.log.Warn("undecodable command dropped")
 		return
 	}
-	badSig := a.badSignature(c, body)
 	cmd := dispatch.FromBody(body, c.GetAttempt())
+	intent := intentVerdict{badSig: a.badSignature(c, body)}
+	intent.quorum, intent.unbatched = a.quorumVerdict(c, body, cmd)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	d, err := journal.Resolve(a.j, cmd.Delivery(), a.runtime())
@@ -95,7 +96,7 @@ func (a *Agent) onCommand(c *agentv1.Command) {
 		a.sendLocked(updateFrame(a.updateOf(cmd.ID, *d.Result)))
 	case journal.ActionReattach:
 	case journal.ActionExecute, journal.ActionReexecute:
-		a.admitLocked(cmd, false, badSig)
+		a.admitLocked(cmd, false, intent)
 	}
 }
 
@@ -127,10 +128,14 @@ func (a *Agent) badSignature(c *agentv1.Command, body *agentv1.CommandBody) bool
 // admitLocked runs the acceptance checks (dispatch.Precheck order), then a lane credit (BUSY), then
 // makes `accepted` durable and hands the command to a lane worker. recheck is set when a deferred
 // command is checked again (a new spec arrived, or its not_after passed).
-func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, badSig bool) {
+func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, intent intentVerdict) {
 	known := a.deferred[cmd.ID]
 	if known != nil && !recheck {
 		return // a duplicate of a command already waiting for its spec
+	}
+	quorum := intent.quorum
+	if intent.unbatched && quorum == "" && !a.unbatchedAllowedLocked(cmd.ID) {
+		quorum = dispatch.RejectUnbatchedLimit
 	}
 	verdict := dispatch.Precheck(cmd, a.reg, dispatch.Env{
 		Now:               a.serverNowLocked(),
@@ -139,19 +144,20 @@ func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, badSig bool) {
 		AppliedGeneration: a.applied,
 		Deferred:          recheck,
 		UpgradeRequired:   a.upgradeNeeded,
-		BadSignature:      badSig,
+		BadSignature:      intent.badSig,
+		Quorum:            quorum,
 	})
 	if verdict.Defer {
 		if known != nil {
 			return
 		}
 		wait := cmd.NotAfter.Sub(a.serverNowLocked())
-		d := &deferred{cmd: cmd, badSig: badSig}
+		d := &deferred{cmd: cmd, intent: intent}
 		d.timer = time.AfterFunc(max(wait, 0), func() {
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			if a.deferred[cmd.ID] == d {
-				a.admitLocked(cmd, true, badSig)
+				a.admitLocked(cmd, true, intent)
 			}
 		})
 		a.deferred[cmd.ID] = d
@@ -199,6 +205,9 @@ func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, badSig bool) {
 		release()
 		a.log.Error("journal: accept", "id", cmd.ID, "error", err.Error())
 		return
+	}
+	if intent.unbatched {
+		a.recordUnbatchedLocked(cmd.ID)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	x := &execution{cmd: cmd, kind: kind, phase: phaseQueued, release: release, cancel: cancel, ctx: ctx}
@@ -346,6 +355,8 @@ var rejectReason = map[string]commonv1.CommandRejectReason{
 	string(dispatch.RejectExpired):         commonv1.CommandRejectReason_COMMAND_REJECT_REASON_EXPIRED,
 	string(dispatch.RejectStaleGeneration): commonv1.CommandRejectReason_COMMAND_REJECT_REASON_STALE_GENERATION,
 	string(dispatch.RejectBusy):            commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BUSY,
+	string(dispatch.RejectBatchUnapproved): commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED,
+	string(dispatch.RejectUnbatchedLimit):  commonv1.CommandRejectReason_COMMAND_REJECT_REASON_UNBATCHED_LIMIT,
 }
 
 // updateOf is the CommandUpdate that reports (or replays) a journaled result. Attested results are

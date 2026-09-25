@@ -42,6 +42,9 @@ type State struct {
 	// intent is not enforced (v0.1).
 	TrustVersion uint64   `json:"trustVersion"`
 	TrustRoots   [][]byte `json:"trustRoots,omitempty"`
+	// TrustBundle is the whole bundle (serialized): its approver keys, thresholds and caps (v1.0
+	// quorum) besides the roots.
+	TrustBundle []byte `json:"trustBundle,omitempty"`
 	// ServerTime mirrors the journal's server time high-water mark at each Welcome, so a lost journal
 	// does not reset it (journal.Meta.ServerTime).
 	ServerTime time.Time `json:"serverTime,omitempty"`

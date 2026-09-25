@@ -16,6 +16,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/session"
 	"github.com/better-compute/better-compute/daemon/internal/transport"
+	"google.golang.org/protobuf/proto"
 )
 
 // Joiner sends a JoinRequest (transport.Client in production).
@@ -171,6 +172,7 @@ func persistJoin(o JoinOptions, key *ecdsa.PrivateKey, body *agentv1.JoinRespons
 	if t := body.GetTrust(); t != nil {
 		state.TrustVersion = t.GetVersion()
 		state.TrustRoots = t.GetCommandSigningRoots()
+		state.TrustBundle, _ = proto.Marshal(t)
 	}
 	if err := os.MkdirAll(o.DataDir, 0o700); err != nil {
 		return nil, err

@@ -167,6 +167,10 @@ const (
 	RejectStaleGeneration Rejection = "STALE_GENERATION"
 	RejectBadSignature    Rejection = "BAD_SIGNATURE"
 	RejectBusy            Rejection = "BUSY"
+	// (v1.0, §13 quorum) A destructive command's batch is not approved for it, or an unbatched one
+	// is over the hourly break-glass cap.
+	RejectBatchUnapproved Rejection = "BATCH_UNAPPROVED"
+	RejectUnbatchedLimit  Rejection = "UNBATCHED_LIMIT"
 )
 
 // Env is what Precheck needs to know about the daemon.
@@ -186,6 +190,8 @@ type Env struct {
 	// BadSignature is the signed-intent verdict on this delivery: a signature that did not verify, or
 	// none where the daemon's kind table requires one.
 	BadSignature bool
+	// Quorum is the batch-quorum verdict (BATCH_UNAPPROVED, UNBATCHED_LIMIT), or "".
+	Quorum Rejection
 }
 
 // Verdict is Precheck's answer: accept, reject with a code, or defer until a newer spec arrives
@@ -201,7 +207,8 @@ func (v Verdict) Accepted() bool { return v.Reject == "" && !v.Defer }
 // Precheck applies the checks before accepting a new or re-executed command, in this order: node
 // and kind (UNSUPPORTED), min_generation (defer, then STALE_GENERATION), not_after (EXPIRED), then
 // the signature (BAD_SIGNATURE). A command first seen past not_after is EXPIRED; one that waited for
-// min_generation until not_after is STALE_GENERATION. Credits (BUSY) are checked by Lanes.Admit.
+// min_generation until not_after is STALE_GENERATION. After the signature, the batch quorum
+// (BATCH_UNAPPROVED, UNBATCHED_LIMIT). Credits (BUSY) are checked by Lanes.Admit.
 func Precheck(cmd Command, reg *Registry, env Env) Verdict {
 	if cmd.NodeID != env.NodeID {
 		return Verdict{Reject: RejectUnsupported}
@@ -226,6 +233,9 @@ func Precheck(cmd Command, reg *Registry, env Env) Verdict {
 	}
 	if env.BadSignature {
 		return Verdict{Reject: RejectBadSignature}
+	}
+	if env.Quorum != "" {
+		return Verdict{Reject: env.Quorum}
 	}
 	return Verdict{}
 }

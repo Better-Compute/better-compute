@@ -30,6 +30,7 @@ const (
 	PurposeDiscoveryAssertion = "discovery-assertion"
 	PurposeX509Pop            = "x509pop"
 	PurposeWorkloadToken      = "workload-token"
+	PurposeBatchApproval      = "batch-approval"
 )
 
 const signingPrefix = "bettercompute.v1/"

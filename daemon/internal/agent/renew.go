@@ -97,6 +97,7 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	}
 	renewed.TrustVersion = state.TrustVersion
 	renewed.TrustRoots = state.TrustRoots
+	renewed.TrustBundle = state.TrustBundle
 	renewed.ServerTime = state.ServerTime
 	if err := SaveState(a.o.DataDir, renewed); err != nil {
 		return err

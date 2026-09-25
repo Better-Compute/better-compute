@@ -295,6 +295,7 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 			next := *a.state
 			next.TrustVersion = bundle.GetVersion()
 			next.TrustRoots = bundle.GetCommandSigningRoots()
+			next.TrustBundle, _ = proto.Marshal(bundle)
 			if err := SaveState(a.o.DataDir, &next); err != nil {
 				a.log.Error("store the trust bundle", "error", err.Error())
 			} else {
