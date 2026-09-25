@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { LiveBadge } from './console-provider';
 
 const areas = [
   { href: '/', label: 'Overview' },
@@ -39,7 +40,9 @@ export function Nav({
   );
   return (
     <nav className="nav">
-      <h1>better-compute</h1>
+      <h1>
+        better-compute <LiveBadge />
+      </h1>
       {areas.map(link)}
       {root && (
         <>

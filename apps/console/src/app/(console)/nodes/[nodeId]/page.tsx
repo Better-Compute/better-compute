@@ -3,7 +3,7 @@
 import { use, useMemo } from 'react';
 import { createDetail } from '@better-compute/console-kit';
 import { useDetail } from '@better-compute/console-kit/react';
-import { useConsole } from '@/components/console-provider';
+import { useConsole, useDetailEvents } from '@/components/console-provider';
 import { DetailActions } from '@/components/detail-actions';
 import { Loading } from '@/components/ui';
 
@@ -16,6 +16,7 @@ export default function NodePage({ params }: { params: Promise<{ nodeId: string 
     [api, tenantId, nodeId],
   );
   const state = useDetail(detail);
+  useDetailEvents(detail);
   const node = state.item;
 
   return (

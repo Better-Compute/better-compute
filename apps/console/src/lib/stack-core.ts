@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { IamPort } from 'better-compute/core';
 
 // One IAM + compute stack per process, kept across Next.js dev reloads. The configuration and the libraries it
 // imports are loaded by Node at runtime (never bundled): better-compute and better-iam run native stores.
@@ -14,7 +15,11 @@ export interface ConsoleStack {
     authorizeMany(input: unknown): Promise<unknown>;
     endpoint?: { origin: string; basePath: string; secure?: boolean };
   };
-  compute: { handler(request: Request): Promise<Response>; endpoint: { basePath: string } };
+  compute: {
+    handler(request: Request): Promise<Response>;
+    endpoint: { basePath: string };
+    context: { sql: unknown; iam: IamPort };
+  };
   rootTenantId: string;
   origin: string;
 }

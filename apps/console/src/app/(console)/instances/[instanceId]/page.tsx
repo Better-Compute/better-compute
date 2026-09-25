@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { use, useMemo } from 'react';
 import { createDetail } from '@better-compute/console-kit';
 import { useDetail } from '@better-compute/console-kit/react';
-import { useConsole } from '@/components/console-provider';
+import { useConsole, useDetailEvents } from '@/components/console-provider';
 import { DetailActions } from '@/components/detail-actions';
 import { Loading } from '@/components/ui';
 
@@ -17,6 +17,7 @@ export default function InstancePage({ params }: { params: Promise<{ instanceId:
     [api, tenantId, instanceId],
   );
   const state = useDetail(detail);
+  useDetailEvents(detail);
   const instance = state.item;
 
   return (

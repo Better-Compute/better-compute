@@ -14,15 +14,15 @@ export default async function ConsoleLayout({ children }: { children: ReactNode 
   if (!session) redirect('/login');
   const { origin } = await getStack();
   return (
-    <div className="shell">
-      <Nav
-        root={session.root}
-        who={session.email ?? session.name ?? session.identityId}
-        signOut={signOut}
-      />
-      <ConsoleProvider tenantId={session.tenantId} root={session.root} origin={origin}>
+    <ConsoleProvider tenantId={session.tenantId} root={session.root} origin={origin}>
+      <div className="shell">
+        <Nav
+          root={session.root}
+          who={session.email ?? session.name ?? session.identityId}
+          signOut={signOut}
+        />
         <main>{children}</main>
-      </ConsoleProvider>
-    </div>
+      </div>
+    </ConsoleProvider>
   );
 }
