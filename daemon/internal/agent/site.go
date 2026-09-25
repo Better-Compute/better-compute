@@ -57,11 +57,15 @@ type bmcCredential struct {
 	Password string `json:"password"`
 }
 
-// parseCredential reads a BMC credential secret: {username, password} JSON as enrolled, or a bare
-// password (what a rotation stores), paired with a fallback username.
+// parseCredential reads a BMC credential secret: {username, password} JSON (as enrolled and as
+// rotations store it, 6abfa79), or a bare password (a rotation of a credential that never had a
+// username), paired with a fallback username; the fallback also fills a JSON without a username.
 func parseCredential(raw []byte, username string) bmcCredential {
 	var c bmcCredential
 	if json.Unmarshal(raw, &c) == nil && c.Password != "" {
+		if c.Username == "" {
+			c.Username = username
+		}
 		return c
 	}
 	return bmcCredential{Username: username, Password: strings.TrimSpace(string(raw))}
