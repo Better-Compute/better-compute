@@ -45,7 +45,7 @@ import { instanceStatusHandler, vps } from '@better-compute/vps';
  * the port too: `iam: meteredIamPort(bridge.embedded(iam, …), standardMetrics(metrics))`.
  */
 export const metrics = createMetrics();
-standardMetrics(metrics);
+const standard = standardMetrics(metrics);
 
 /** Only for PGlite examples on a laptop; Postgres deployments must set BETTER_COMPUTE_SECRET. */
 const DEVELOPMENT_SECRET = 'better-compute-examples-development-secret-not-for-production';
@@ -138,7 +138,14 @@ export async function exampleOptions(
     rootTenantId: env.BETTER_COMPUTE_ROOT_TENANT ?? 'root',
     iam,
     modules: [...everyModule(secret, bundle, env, context.metal), ...(context.modules ?? [])],
-    ...(context.placer ? { capacity: { placer: context.placer } } : {}),
+    capacity: {
+      ...(context.placer ? { placer: context.placer } : {}),
+      // §14 placements_total{outcome} and booking_conflicts_total, from every placement (never throws).
+      onPlacement: (placement) => {
+        standard.placements.inc({ outcome: placement.outcome });
+        if (placement.conflicts) standard.bookingConflicts.inc({}, placement.conflicts);
+      },
+    },
     ...(bundle
       ? {
           pki: {
