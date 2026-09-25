@@ -345,6 +345,9 @@ describe('usage with poison isolation (§12.7)', () => {
     await expect(recordUsageIsolated(billing, events(3))).rejects.toThrow('ECONNREFUSED');
     expect(isPoisonError(new Error('ECONNREFUSED'))).toBe(false);
     expect(isPoisonError(new IamError('CONFLICT', 'x', 409))).toBe(true);
+    expect(isPoisonError(new IamError('NOT_FOUND', 'Meter not found', 404))).toBe(true);
+    // A wrong route fails every event alike: retried, never dead-lettered.
+    expect(isPoisonError(new IamError('NOT_FOUND', 'Endpoint not found', 404))).toBe(false);
     await expect(
       recordUsageIsolated(billing, events(1), { batchSize: 1001 }),
     ).rejects.toMatchObject({

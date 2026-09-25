@@ -50,10 +50,15 @@ function iamError(error: unknown): IamErrorLike | undefined {
   return typeof code === 'string' ? { code, message: error.message } : undefined;
 }
 
-/** Whether an error is specific to the events sent (bisect and isolate) rather than transient. */
+/**
+ * Whether an error is specific to the events sent (bisect and isolate) rather than transient. better-iam's
+ * "Endpoint not found" is also `NOT_FOUND`, but says the route is wrong (a misconfigured base path, a proxy): every
+ * event would fail alike, and dead-lettering them all would lose the usage, so it stays transient.
+ */
 export function isPoisonError(error: unknown): boolean {
   const found = iamError(error);
-  return found !== undefined && poisonCodes.has(found.code);
+  if (found === undefined || !poisonCodes.has(found.code)) return false;
+  return !(found.code === 'NOT_FOUND' && /^Endpoint not found/.test(found.message));
 }
 
 const identityMissing = (error: IamErrorLike) =>
