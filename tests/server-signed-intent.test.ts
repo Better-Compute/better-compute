@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { manualClock, type SqlExecutor } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
+  createApproverKey,
   createCommandSigningAuthority,
   createNodeCa,
   createSigningKey,
@@ -127,6 +128,49 @@ describe('server signed intent', () => {
     ]);
     // Cached: the same signed bytes for every Welcome.
     expect((await s.compute.gatewayServices.trustBundle()).body).toEqual(signed.body);
+  });
+
+  it('publishes the v1.0 quorum (approver keys, threshold, tiers) in the signed trust bundle', async () => {
+    const authority = createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) });
+    const signingKey = createSigningKey({ clock: manualClock(T0 - 60_000) });
+    const join = pkiJoinCrypto({
+      trustDomain: 'compute.test',
+      nodeCa: createNodeCa({ clock: manualClock(T0 - 60_000) }),
+      signingKey,
+      encryptionKey: generateP256KeyPair().privateKey,
+    });
+    const approvers = [createApproverKey(), createApproverKey(), createApproverKey()];
+    const s = await server({
+      join,
+      commandSigning: authority,
+      trustVersion: 4,
+      approvers: {
+        keys: approvers.map((approver) => approver.key.spkiDer),
+        threshold: 2,
+        tiers: [{ maxScopeSize: 5, threshold: 1 }],
+      },
+    });
+    const bundle = verifyTrustBundle(await s.compute.gatewayServices.trustBundle(), {
+      publicKey: signingKey.publicKey,
+    });
+    expect(bundle.approverKeys.map((key) => key.kid)).toEqual(
+      approvers.map((approver) => approver.key.kid),
+    );
+    expect(bundle).toMatchObject({
+      approverThreshold: 2,
+      unbatchedDestructivePerHour: 0,
+      quorumTiers: [{ maxScopeSize: 5, threshold: 1 }],
+    });
+    // Refused: no signed intent, a threshold above the key count, a non-P-256 key.
+    const keys = approvers.map((approver) => approver.key.spkiDer);
+    for (const pki of [
+      { approvers: { keys, threshold: 1 } },
+      { commandSigning: authority, approvers: { keys, threshold: 4 } },
+      { commandSigning: authority, approvers: { keys: [new Uint8Array([1, 2, 3])], threshold: 1 } },
+    ])
+      expect(() => betterCompute({ ...options(db!, fakeIam()), pki } as never)).toThrow(
+        /INVALID_CONFIG|approvers|commandSigning/,
+      );
   });
 
   it('stays v0.1 without pki.commandSigning, and validates the options', async () => {

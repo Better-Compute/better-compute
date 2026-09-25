@@ -1,3 +1,4 @@
+import { createHash, createPublicKey } from 'node:crypto';
 import {
   ComputeError,
   computeResourceTypes,
@@ -165,6 +166,19 @@ export interface ComputeOptions<
      */
     commandSigningRoots?: readonly Uint8Array[];
     trustVersion?: number | bigint;
+    /**
+     * (v1.0, §13) The destructive-batch quorum, published in the trust bundle (bump
+     * `trustVersion` when it changes; needs `commandSigning`). `keys` are the operators' P-256
+     * approver public keys (SPKI DER), held off the control plane. A batch needs `threshold`
+     * distinct approvals, or the first `tiers` entry whose `maxScopeSize` covers it.
+     * `unbatchedDestructivePerHour` is break-glass only (default 0).
+     */
+    approvers?: {
+      keys: readonly Uint8Array[];
+      threshold: number;
+      tiers?: readonly { maxScopeSize: number; threshold: number }[];
+      unbatchedDestructivePerHour?: number;
+    };
   };
   secrets?: SecretStore[];
   /**
@@ -482,8 +496,14 @@ function resolveCommandSigning(
 ): { commandSigner?: CommandSigner; trustBundle?: JoinTrustBundle } {
   const authority = pki?.commandSigning;
   if (authority === undefined) {
-    if (pki?.commandSigningRoots !== undefined || pki?.trustVersion !== undefined)
-      throw invalid('pki.commandSigningRoots and pki.trustVersion need pki.commandSigning');
+    if (
+      pki?.commandSigningRoots !== undefined ||
+      pki?.trustVersion !== undefined ||
+      pki?.approvers !== undefined
+    )
+      throw invalid(
+        'pki.commandSigningRoots, pki.trustVersion and pki.approvers need pki.commandSigning',
+      );
     return {};
   }
   requireMethods(authority, 'pki.commandSigning', ['issueWorkerKey']);
@@ -501,7 +521,63 @@ function resolveCommandSigning(
   const commandSigner = createCommandSigner({ authority, workerId, clock, additionalRoots: extra });
   return {
     commandSigner,
-    trustBundle: { version: BigInt(version), commandSigningRoots: [...commandSigner.roots] },
+    trustBundle: {
+      version: BigInt(version),
+      commandSigningRoots: [...commandSigner.roots],
+      ...resolveApprovers(pki?.approvers),
+    },
+  };
+}
+
+/** `pki.approvers` → the trust bundle's quorum fields (kid = base64url SHA-256 of the SPKI). */
+function resolveApprovers(
+  approvers: NonNullable<ComputeOptions['pki']>['approvers'],
+): Partial<JoinTrustBundle> {
+  if (approvers === undefined) return {};
+  if (!isRecord(approvers)) throw invalid('pki.approvers must be an object');
+  const { keys, threshold, tiers = [], unbatchedDestructivePerHour = 0 } = approvers;
+  if (!Array.isArray(keys) || keys.length === 0 || !keys.every((key) => key instanceof Uint8Array))
+    throw invalid('pki.approvers.keys must be approver public keys (SPKI DER)');
+  const approverKeys = keys.map((spkiDer) => {
+    let kid: string;
+    try {
+      const key = createPublicKey({ key: Buffer.from(spkiDer), format: 'der', type: 'spki' });
+      if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1')
+        throw new Error('not P-256');
+      kid = createHash('sha256').update(spkiDer).digest('base64url');
+    } catch {
+      throw invalid('pki.approvers.keys must be P-256 public keys (SPKI DER)');
+    }
+    return { kid, spkiDer: new Uint8Array(spkiDer) };
+  });
+  const distinct = new Set(approverKeys.map((key) => key.kid)).size;
+  if (distinct !== approverKeys.length) throw invalid('pki.approvers.keys has duplicates');
+  const within = (value: unknown, what: string) => {
+    if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > distinct)
+      throw invalid(`${what} must be a whole number from 1 to the number of approver keys`);
+    return value as number;
+  };
+  within(threshold, 'pki.approvers.threshold');
+  if (!Array.isArray(tiers)) throw invalid('pki.approvers.tiers must be an array');
+  const quorumTiers = tiers.map((tier, index) => {
+    if (
+      !isRecord(tier) ||
+      !Number.isInteger(tier.maxScopeSize) ||
+      (tier.maxScopeSize as number) < 1
+    )
+      throw invalid(`pki.approvers.tiers[${index}].maxScopeSize must be a whole number ≥ 1`);
+    return {
+      maxScopeSize: tier.maxScopeSize as number,
+      threshold: within(tier.threshold, `pki.approvers.tiers[${index}].threshold`),
+    };
+  });
+  if (!Number.isInteger(unbatchedDestructivePerHour) || unbatchedDestructivePerHour < 0)
+    throw invalid('pki.approvers.unbatchedDestructivePerHour must be a whole number ≥ 0');
+  return {
+    approverKeys,
+    approverThreshold: threshold,
+    quorumTiers,
+    unbatchedDestructivePerHour,
   };
 }
 

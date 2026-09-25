@@ -36,6 +36,11 @@ export interface JoinSignature {
 export interface JoinTrustBundle {
   version: bigint;
   commandSigningRoots: readonly Uint8Array[];
+  /** (v1.0 quorum, §13) Operator approver keys: `kid` = base64url SHA-256 of `spkiDer`. */
+  approverKeys?: readonly { kid: string; spkiDer: Uint8Array }[];
+  approverThreshold?: number;
+  quorumTiers?: readonly { maxScopeSize: number; threshold: number }[];
+  unbatchedDestructivePerHour?: number;
 }
 
 /**
