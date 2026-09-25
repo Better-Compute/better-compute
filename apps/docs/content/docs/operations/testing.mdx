@@ -316,7 +316,11 @@ under `/tmp`. It checks that:
   CDI hold appears under the fake root, and it disappears on release;
 - a node console opened with `tunnels.open` (op `console`) through the dev stack's tunnel relay and gateway reaches a
   real shell in bcd: `echo hi-$((6*7))` answers `hi-42`, and `exit 5` comes back as exit code 5;
-- `node.reboot` completes `SUCCEEDED` from the next boot, with the new boot id recorded in `node_sessions`.
+- `node.reboot` completes `SUCCEEDED` from the next boot, with the new boot id recorded in `node_sessions`;
+- a provisioned OS bootstraps with nothing but a token file, the control plane URL and the three pins (what
+  provision's user data and the Robot bootstrap run): `bcd join --server` reads the real server's well-known document,
+  joins through the real gateway and JoinService, removes the token, writes `config.toml` and `join-encryption.jwk`,
+  succeeds again on a re-run without a token, and `bcd node` connects on the written configuration alone (472a424).
 
 `tests/e2e/bcd-vps.test.ts` runs the same fakehw binary as a VPS host: bcd joins a `vps-host` pool over the dev
 stack's mTLS listener, `instances.create` places an instance on it, the `instances` converger defines and starts it

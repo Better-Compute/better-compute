@@ -169,7 +169,9 @@ An older bcd drops `network_policy` as an unknown field and would give the insta
 enforces it advertises the capability `instance.network-policy` (on hosts with a runtime), which the gateway writes as
 the node label `bc.dev/cap.instance.network-policy=1`. An instance with a `private` or `none` policy
 (`instances.network_policy`) is placed only on nodes carrying that label, with any value (cfdb918): where no such host
-has room it waits `Unschedulable` rather than run unisolated. The FakeDaemon advertises the capability on VPS hosts.
+has room it waits `Unschedulable` rather than run unisolated. A warm instance of a `private` or `none` template on a
+host without that label (placed before the rule, or on a downgraded bcd) is never claimed, and the reconciler drains
+it (34f4084). The FakeDaemon advertises the capability on VPS hosts.
 `private` means the pool's whole IPAM subnet, so on a pool offered to several tenants it includes their instances
 too. Whatever
 the policy, bcd also guards every tap whose NIC has a MAC and IPAM addresses (278296e): frames must carry the NIC's
@@ -324,9 +326,10 @@ like any other and the sandbox goes back to `starting`.
 - [extend](/docs/reference/api/sandboxes#extend) moves `expiresAt` later. Give exactly one of `until` (the new expiry,
   epoch ms) or `by` (added to the current expiry: `30m`, `8h`, `7d`, or milliseconds, at most 30 days). It is decided
   as `compute:sandboxes:update` with a pending `ttlSeconds` equal to the whole lifetime after the change, counted from
-  `createdAt`, so a policy that caps `ttlSeconds` caps extensions too and cannot be bypassed in small steps. The
-  handler then refuses a lifetime above the template's `maxTtlSeconds` (`INVALID_INPUT`), even for a template deleted
-  since. The handler applies the absolute expiry that was decided, not "current plus `by`" again, so two concurrent
+  `createdAt`, so a policy that caps `ttlSeconds` caps extensions too and cannot be bypassed in small steps. A lifetime
+  above the template's `maxTtlSeconds` (`INVALID_INPUT`, even for a template deleted since) or past the host
+  certificate is refused before the pending lifetime is written, so a refused extend leaves nothing behind for later
+  decisions (the handler checks again in case the template changed in between). The handler applies the absolute expiry that was decided, not "current plus `by`" again, so two concurrent
   `by` extends cannot add up to a lifetime no decision covered. An `until` not later than the current expiry returns
   the sandbox unchanged without a decision; a repeated `by` extends again. A sandbox being deleted is `INVALID_STATE`. It publishes `sandbox.extended`.
 - [delete](/docs/reference/api/sandboxes#delete) marks the sandbox `deleting`, sets its instance's `desiredState` to
@@ -748,7 +751,9 @@ transaction beside capacity's reservation reactions:
   kept snapshots stay.
 - `reassignSandboxes(tx, context, { tenantId, identityId, successorId?, reason })`, for an owner who is gone, moves
   the owner's open sandboxes and their instances, snapshots and the templates they wrote (with their warm instances)
-  to the successor, authorization rows included (`sandbox.reassigned`). Without a successor it deletes the owner's
+  to the successor, authorization rows included (`sandbox.reassigned`). It clears the departed owner's agent and
+  delegation from those sandboxes, so a later event about that agent cannot delete the successor's work, and it
+  rewrites their authorization attributes from each instance's own shape. Without a successor it deletes the owner's
   open sandboxes; their templates and kept snapshots stay for the tenant's administrators.
 
 `better-compute serve` runs them when the host configuration lists them as a module reaction, right after capacity's
@@ -756,11 +761,12 @@ reservation reactions in the default agent and identity handlers (a throw retrie
 
 ```ts title="better-compute.config.ts"
 import { defineHost } from 'better-compute/cli';
-import { reassignSandboxes, withdrawAgentSandboxes } from 'better-compute/vps';
+import { sandboxIamReactions } from 'better-compute/vps';
 
 export const host = defineHost(async () => ({
-  // also used with the embedded IAM of dev --sim; host.iam.reactions takes the same shape
-  iamReactions: [{ agent: withdrawAgentSandboxes, identity: reassignSandboxes }],
+  // { agent: withdrawAgentSandboxes, identity: reassignSandboxes }; also used with dev --sim's embedded IAM,
+  // and host.iam.reactions takes the same shape
+  iamReactions: [sandboxIamReactions],
 }));
 ```
 
