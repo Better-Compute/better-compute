@@ -33,10 +33,20 @@ export class GrpcError extends Error {
   constructor(
     readonly code: GrpcCode,
     message: string,
+    /**
+     * When to retry, sent as the standard `grpc-retry-pushback-ms` trailer: a refused daemon waits
+     * this long instead of its own back-off, so a herd spreads by the server's measure.
+     */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'GrpcError';
   }
+}
+
+/** A jittered retry delay in [minMs, maxMs): refused clients never come back in step. */
+export function jitteredPushback(minMs: number, maxMs: number): number {
+  return Math.round(minMs + Math.random() * (maxMs - minMs));
 }
 
 const computeToGrpc: Partial<Record<ErrorCode, GrpcCode>> = {
@@ -159,8 +169,10 @@ export const grpcResponseHeaders = {
 } as const;
 
 /** The trailers (or trailers-only headers) carrying a status. */
-export function statusTrailers(code: GrpcCode, message?: string): Record<string, string> {
+export function statusTrailers(code: GrpcCode, message?: string, retryAfterMs?: number): Record<string, string> {
   const trailers: Record<string, string> = { 'grpc-status': String(code) };
   if (message) trailers['grpc-message'] = encodeGrpcMessage(message);
+  if (retryAfterMs !== undefined && Number.isFinite(retryAfterMs) && retryAfterMs >= 0)
+    trailers['grpc-retry-pushback-ms'] = String(Math.round(retryAfterMs));
   return trailers;
 }

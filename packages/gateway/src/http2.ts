@@ -129,7 +129,10 @@ function respondStatus(stream: ServerHttp2Stream, error: GrpcError): void {
     return;
   }
   // Trailers-only: one HEADERS frame with END_STREAM carrying the status.
-  stream.respond({ ...grpcResponseHeaders, ...statusTrailers(error.code, error.message) }, { endStream: true });
+  stream.respond(
+    { ...grpcResponseHeaders, ...statusTrailers(error.code, error.message, error.retryAfterMs) },
+    { endStream: true },
+  );
 }
 
 /** A response stream whose status goes out in trailers once `finish` is called. */
@@ -139,7 +142,7 @@ function openResponse(stream: ServerHttp2Stream) {
   stream.respond({ ...grpcResponseHeaders }, { waitForTrailers: true });
   stream.on('wantTrailers', () => {
     const code = status?.code ?? GrpcCode.OK;
-    stream.sendTrailers(statusTrailers(code, status?.message));
+    stream.sendTrailers(statusTrailers(code, status?.message, status?.retryAfterMs));
     // The response is complete. A client still sending (it was refused mid-stream) is stopped
     // with RST_STREAM(NO_ERROR), which HTTP/2 allows after a full response (RFC 9113 §8.1).
     setImmediate(() => {

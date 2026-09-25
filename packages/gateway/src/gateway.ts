@@ -43,7 +43,7 @@ import {
 } from '@better-compute/protocol';
 import { commandKindAllowed } from '@better-compute/pki';
 import type { GatewayServices } from '@better-compute/server';
-import { GrpcCode, GrpcError, toGrpcError } from './grpc.js';
+import { GrpcCode, GrpcError, jitteredPushback, toGrpcError } from './grpc.js';
 import { sqlEventPublisher, sqlWorkQueue } from './ports.js';
 import {
   createGatewayStore,
@@ -413,7 +413,18 @@ export function createGateway(options: GatewayOptions): Gateway {
   const busyInitialMs = options.busyBackoff?.initialMs ?? 1_000;
   const busyMaxMs = options.busyBackoff?.maxMs ?? 30_000;
   const credits: LaneCreditLimits = { control: 8, provision: 4, bulk: 2, ...options.credits };
-  const handshakes = new TokenBucket(options.handshakesPerSecond ?? 200, clock);
+  const handshakesPerSecond = options.handshakesPerSecond ?? 200;
+  const handshakes = new TokenBucket(handshakesPerSecond, clock);
+  // Refusals in the current second: a refused handshake is told to come back somewhere in the time
+  // the bucket needs to admit everyone refused (refusals ÷ rate), jittered, so a power-on herd
+  // spreads over that window instead of retrying on each daemon's own doubling back-off (§8.6).
+  let refusalWindow = { second: -1, count: 0 };
+  const handshakePushback = (): number => {
+    const second = Math.floor(clock.now() / 1000);
+    if (refusalWindow.second !== second) refusalWindow = { second, count: 0 };
+    refusalWindow.count++;
+    return jitteredPushback(250, Math.max(1_000, (refusalWindow.count / handshakesPerSecond) * 1000));
+  };
   const maxPendingHellos = options.maxPendingHellos ?? 64;
   const protocol: ProtocolRange = options.protocol ?? PROTOCOL_VERSION;
   if (
@@ -566,7 +577,8 @@ export function createGateway(options: GatewayOptions): Gateway {
     // `maxPendingHellos` the daemon retries with jitter instead of growing a queue that would starve
     // this gateway's own lease renewal and fence it.
     if (pendingHellos >= maxPendingHellos)
-      throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway busy; retry with jitter');
+      // The database is the bottleneck: back off briefly, a Hello transaction takes milliseconds.
+      throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway busy; retry with jitter', jitteredPushback(250, 2_000));
     pendingHellos++;
     const sessionId = newId('req');
     const result = await store
@@ -1218,11 +1230,16 @@ export function createGateway(options: GatewayOptions): Gateway {
         if (!started || stopping || !lease) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is not ready');
         if (draining) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is draining');
         if (sessions.size >= maxStreams && !sessions.has(peer.nodeId))
-          throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway is at its stream limit');
+          // A full gateway: come back much later (or to another gateway).
+          throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway is at its stream limit', jitteredPushback(5_000, 30_000));
         if (peer.serial && options.revocations?.has(peer.serial))
           throw new GrpcError(GrpcCode.UNAUTHENTICATED, 'certificate revoked');
         if (!handshakes.take())
-          throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'handshake rate exceeded; retry with jitter');
+          throw new GrpcError(
+            GrpcCode.RESOURCE_EXHAUSTED,
+            'handshake rate exceeded; retry with jitter',
+            handshakePushback(),
+          );
       } catch (error) {
         observeHandshake(handshakeOutcome(error));
         throw error;
@@ -1303,7 +1320,11 @@ export function createGateway(options: GatewayOptions): Gateway {
 
     async join(request) {
       if (!handshakes.take())
-        throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'handshake rate exceeded; retry with jitter');
+        throw new GrpcError(
+          GrpcCode.RESOURCE_EXHAUSTED,
+          'handshake rate exceeded; retry with jitter',
+          handshakePushback(),
+        );
       return options.services.join(request, { gatewayId: id });
     },
 

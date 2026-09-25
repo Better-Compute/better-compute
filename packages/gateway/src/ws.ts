@@ -49,9 +49,16 @@ const httpStatus = (code: number) =>
           : 503;
 
 function refuse(socket: Duplex, status: number, error: GrpcError): void {
+  // A refusal with a retry hint (a busy gateway) says when, as HTTP and as gRPC would.
+  const retry =
+    error.retryAfterMs !== undefined
+      ? `retry-after: ${Math.max(1, Math.ceil(error.retryAfterMs / 1000))}\r\n` +
+        `grpc-retry-pushback-ms: ${Math.round(error.retryAfterMs)}\r\n`
+      : '';
   socket.end(
     `HTTP/1.1 ${status} ${status === 401 ? 'Unauthorized' : 'Refused'}\r\n` +
       `connection: close\r\ncontent-length: 0\r\ngrpc-status: ${error.code}\r\n` +
+      retry +
       `x-bc-reason: ${encodeURIComponent(error.message)}\r\n\r\n`,
   );
 }
