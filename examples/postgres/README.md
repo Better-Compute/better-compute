@@ -51,10 +51,11 @@ const iam = betterIam({
   resolveResource: bridge.resolveResource(),
 });
 // then in the options: iam: bridge.embedded(iam, { rootTenantId }), modules: [...bridge.modules, ...]
-// and in the host export: iam: { bridge, streams: [watches] }
+// and in the host export:
+//   iam: { bridge, streams: [watches], readTenants: iamTenantReader(iam, { credential: computeServiceKey }) }
 ```
 
-`host.iam` makes IAM events act on compute: a revoked delegation or suspended agent closes its tunnels (on every gateway) and `/watch` streams and withdraws its unstarted reservations; a sign-out or revoked session re-checks that person's tunnels; an offboarded owner's reservations go to the successor; a deactivated break-glass role revokes the SSH certificates it allowed; a spent budget applies the offers' `onBudgetExceeded`. Pass the same `createWatchRegistry()` to `handleWatch({ registry })` and `host.iam.streams`. With remote IAM that cannot share its database, add `webhook: { secret }` and subscribe better-iam's root to `POST /iam/events`.
+`host.iam` makes IAM events act on compute: a revoked delegation or suspended agent closes its tunnels (on every gateway) and `/watch` streams and withdraws its unstarted reservations; a sign-out or revoked session re-checks that person's tunnels and revokes their break-glass SSH certificates, as does offboarding; an offboarded owner's reservations go to the successor; a deactivated break-glass role revokes the SSH certificates it allowed (and every minute each outstanding certificate is re-decided for its session); a spent budget applies the offers' `onBudgetExceeded`; a suspended or deleted tenant is refused from then on, and a deleted one is torn down. `readTenants` (`iamTenantReader` from @better-compute/iam, with a credential of compute's service account in the IAM root tenant) lets a suspension or deletion reach the tenant's whole subtree; without it only deletions of the named tenant apply. Pass the same `createWatchRegistry()` to `handleWatch({ registry })` and `host.iam.streams`. With remote IAM that cannot share its database, add `webhook: { secret }` and subscribe better-iam's root to `POST /iam/events`.
 
 ## 5. Join machines
 
