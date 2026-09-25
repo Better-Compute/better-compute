@@ -46,21 +46,9 @@ const compute = betterCompute({ modules: [provisionModule({ modules: [bareMetal]
 - **Verified wipe.** `releasing` completes only when the wipe step's result is attested: the node
   signed it (`CommandUpdate.node_sig`, stored as `commands.result_sig*`), and every disk's read-back
   passed. Otherwise the node fails with `UNVERIFIED_WIPE`, and `recover` releases it again. The
-  default verifier, `nodeSignedResults(check)`, rebuilds the signing input from the stored row and
-  asks `check` (pki's `verifyNodeStatement` over `nodeCertsLookup`) to verify it. It fails closed:
-  without a check, nothing is attested. So a gateway can neither forge nor alter a wipe result.
-
-  ```ts
-  metal({
-    verifyAttestation: nodeSignedResults(async (tx, s) => {
-      try {
-        await verifyNodeStatement(s.input, create(SignatureSchema, { kid: s.kid, sig: s.sig }),
-          { nodeId: s.nodeId, lookup: nodeCertsLookup(tx), now: Date.now() });
-        return true;
-      } catch { return false; }
-    }),
-  });
-  ```
+  default verifier, `nodeSignedResults()`, rebuilds the signing input from the stored row and
+  checks it with pki's `verifyNodeStatement` against `node_certs` (`pkiNodeSignatureCheck`), so a
+  gateway can neither forge nor alter a wipe result. `acceptIngestedAttestation` is for tests only.
 - **`metal.power`** sends `bmc.power` to the site agent directly. It is refused while a
   workflow controls the node.
 - **Recovery.** `recover` follows `metalRecoverTargets`: a failed deploy recovers into

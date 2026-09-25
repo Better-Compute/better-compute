@@ -52,6 +52,7 @@
     "@better-compute/core": "workspace:*",
     "@better-compute/protocol": "workspace:*",
     "@better-compute/inventory": "workspace:*",
-    "@better-compute/provision": "workspace:*"
+    "@better-compute/provision": "workspace:*",
+    "@better-compute/pki": "workspace:*"
   }
 }

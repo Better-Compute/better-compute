@@ -33,8 +33,8 @@ export type AttestationVerifier = (tx: SqlTx, outcome: CommandOutcome, context: 
 
 /**
  * FOR TESTS AND SIMULATIONS ONLY: accepts `commands.attested`, which says only that the kind must be
- * node-signed, not that it was. The default is `nodeSignedResults()` (attestation.ts): without a
- * configured signature check, nothing is attested and releases never reach `ready`.
+ * node-signed, not that it was. The default is `nodeSignedResults()` (attestation.ts), which checks
+ * the stored `node_sig` with pki against `node_certs`.
  */
 export const acceptIngestedAttestation: AttestationVerifier = async (_tx, outcome) => outcome.attested;
 

@@ -1,24 +1,41 @@
 import { createHash } from 'node:crypto';
 import type { SqlTx } from '@better-compute/core';
-import { CommandState, commandUpdateSigningInput } from '@better-compute/protocol';
+import { nodeCertsLookup, verifyNodeStatement } from '@better-compute/pki';
+import { CommandState, commandUpdateSigningInput, type Signature } from '@better-compute/protocol';
 import type { AttestationVerifier } from './steps.js';
 
 // Node-signed results (PLAN.md §6, §13, P14): a wipe or diagnostics result counts only when the node
 // itself signed it. The gateway relays `CommandUpdate.node_sig` and stores it as received
 // (`commands.result_sig_kid`, `result_sig`, core/0012). It is never trusted to judge it: the worker
 // rebuilds the signing input from the stored row (command id, SUCCEEDED, sha256 of the stored result)
-// and checks the signature against the node's certificates. A result the gateway altered, one with no
-// signature, and one signed by another node's key all fail. So does every result when no check is
-// configured (fail closed).
+// and checks the signature against the node's certificates (pki). A result the gateway altered, one
+// with no signature, and one signed by another node's key or a revoked certificate all fail.
 
-/**
- * The cryptographic check, supplied by the host: pki's `verifyNodeStatement(input, { kid, sig },
- * { nodeId, lookup: nodeCertsLookup(tx), now })`, answering false instead of throwing.
- */
+/** The cryptographic check of a node statement; false (never a throw) when it does not hold. */
 export type NodeSignatureCheck = (
   tx: SqlTx,
   statement: { nodeId: string; input: Uint8Array; kid: string; sig: Uint8Array },
 ) => Promise<boolean>;
+
+/**
+ * The default check: pki's `verifyNodeStatement` over `node_certs` (the key the kid names, of that
+ * node, not revoked, within validity plus pki's offline grace). `now` defaults to the system clock.
+ */
+export function pkiNodeSignatureCheck(options: { now?: () => number } = {}): NodeSignatureCheck {
+  return async (tx, statement) => {
+    const signature = { $typeName: 'bettercompute.common.v1.Signature', kid: statement.kid, sig: statement.sig } as Signature;
+    try {
+      await verifyNodeStatement(statement.input, signature, {
+        nodeId: statement.nodeId,
+        lookup: nodeCertsLookup(tx),
+        now: options.now?.() ?? Date.now(),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
 
 interface SignedRow {
   node_id: string;
@@ -38,12 +55,11 @@ export function resultSigningInput(commandId: string, result: Uint8Array | null)
 }
 
 /**
- * An `AttestationVerifier` that accepts a result only with a valid node signature over it.
- * Without `check`, nothing is attested.
+ * An `AttestationVerifier` that accepts a result only with a valid node signature over it; metal's
+ * default, with `pkiNodeSignatureCheck()`.
  */
-export function nodeSignedResults(check?: NodeSignatureCheck): AttestationVerifier {
+export function nodeSignedResults(check: NodeSignatureCheck = pkiNodeSignatureCheck()): AttestationVerifier {
   return async (tx, outcome) => {
-    if (!check) return false;
     const { rows } = await tx.query<SignedRow>(
       'SELECT node_id, state, result, result_sig_kid, result_sig FROM commands WHERE id = $1',
       [outcome.commandId],

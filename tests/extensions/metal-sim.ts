@@ -15,7 +15,6 @@ import { pglite } from '@better-compute/postgres/pglite';
 import {
   CommandState,
   DiagDcgmResultSchema,
-  SignatureSchema,
   InventoryRefreshResultSchema,
   WipeResultSchema,
   site,
@@ -26,35 +25,17 @@ import {
   metalCommandKinds,
   metalMigrations,
   metalWorkKind,
-  nodeSignedResults,
   reconcileMetalNode,
   type MetalApi,
-  type NodeSignatureCheck,
 } from '@better-compute/metal';
 import {
   createCsr,
   createNodeCa,
   generateP256KeyPair,
-  nodeCertsLookup,
   nodeSpiffeId,
   signCommandUpdate,
   spkiSha256,
-  verifyNodeStatement,
 } from '@better-compute/pki';
-
-/** pki's node-signature check, as a host wires it into `metal({ verifyAttestation })`. */
-export const pkiSignatureCheck: NodeSignatureCheck = async (tx, statement) => {
-  try {
-    await verifyNodeStatement(statement.input, create(SignatureSchema, { kid: statement.kid, sig: statement.sig }), {
-      nodeId: statement.nodeId,
-      lookup: nodeCertsLookup(tx),
-      now: Date.now(),
-    });
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 // A simulated metal site for walkthrough and chaos tests: PGlite, the real provision engine and
 // metal module, a site agent, and per-machine BMC state. Booting from PXE brings up the ramdisk;
@@ -88,7 +69,8 @@ export const simNodeId = (n: number) =>
 
 export async function createMetalSim(options: MetalSimOptions = {}) {
   const db: SqlExecutor = pglite();
-  const bareMetal = metal({ verifyAttestation: nodeSignedResults(pkiSignatureCheck) });
+  // metal's default verifier: the stored node_sig, checked by pki against node_certs.
+  const bareMetal = metal();
   const provision = provisionModule({
     modules: [bareMetal, ...(options.modules ?? [])],
     steps: [...(options.steps ?? [])],
