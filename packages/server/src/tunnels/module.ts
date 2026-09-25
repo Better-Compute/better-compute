@@ -156,10 +156,10 @@ export function parseOpenTunnel(raw: unknown): OpenTunnelInput {
     )
       invalid('A tcp tunnel needs a port from 1 to 65535');
   } else if (input.port !== undefined) invalid('port applies to tcp tunnels only');
-  if (input.nodeId !== undefined)
-    // §9.2: `nodes:console` @ node is this row's alternative; it needs the envelope to decide
-    // per-input actions, which lands in core next. Until then refuse rather than decide wrongly.
-    throw new ComputeError('UNSUPPORTED', 'Node console tunnels are not available yet');
+  // §9.2: a node takes a console (`nodes:console` @ node, the row's alternative); an instance
+  // takes exec, ssh or tcp (`instances:exec` @ instance).
+  if (input.nodeId !== undefined && input.op !== 'console')
+    invalid('A node takes a console; exec, ssh and tcp are for instances');
   if (input.nodeId === undefined && input.op === 'console')
     invalid('An instance takes exec, ssh or tcp; console is for nodes');
   return {
@@ -171,10 +171,22 @@ export function parseOpenTunnel(raw: unknown): OpenTunnelInput {
   };
 }
 
+// The envelope decides the alternative's own action for a node (core `MethodResource.action`).
 const resourceOf = (input: OpenTunnelInput): MethodResource =>
   input.instanceId !== undefined
     ? { type: 'instance', id: input.instanceId }
-    : { type: 'node', id: input.nodeId! };
+    : { type: 'node', id: input.nodeId!, action: 'compute:nodes:console' };
+
+/** A node the tenant can see (the authorization projection), or NOT_FOUND. */
+async function visibleNode(tx: SqlTx, tenantId: string, nodeId: string): Promise<void> {
+  const { rows } = await tx.query(
+    `SELECT 1 FROM nodes n
+      WHERE n.id = $1 AND EXISTS (SELECT 1 FROM authz_projection ap
+        WHERE ap.type = 'node' AND ap.id = n.id AND ap.tenant_id = $2)`,
+    [nodeId, tenantId],
+  );
+  if (!rows[0]) throw new ComputeError('NOT_FOUND', `Node ${nodeId} not found`);
+}
 
 async function tableExists(tx: SqlTx, table: string): Promise<boolean> {
   const { rows } = await tx.query<{ found: string | null }>(
@@ -234,9 +246,12 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
           const caller = context.caller;
           if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
           const tx = context.sql as SqlTx;
-          const nodeId = input.instanceId
-            ? await instanceNode(tx, input.tenantId, input.instanceId)
-            : input.nodeId!;
+          let nodeId: string;
+          if (input.instanceId) nodeId = await instanceNode(tx, input.tenantId, input.instanceId);
+          else {
+            nodeId = input.nodeId!;
+            await visibleNode(tx, input.tenantId, nodeId);
+          }
           await checkReachable(tx, nodeId);
           const tunnelId = newId('tun');
           const issued = options.issuer.issue({
@@ -304,13 +319,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             invalid('publicKey must be an Ed25519 or ECDSA P-256 OpenSSH public key');
           }
           const tx = context.sql as SqlTx;
-          const { rows } = await tx.query(
-            `SELECT 1 FROM nodes n
-              WHERE n.id = $1 AND EXISTS (SELECT 1 FROM authz_projection ap
-                WHERE ap.type = 'node' AND ap.id = n.id AND ap.tenant_id = $2)`,
-            [input.nodeId, input.tenantId],
-          );
-          if (!rows[0]) throw new ComputeError('NOT_FOUND', `Node ${input.nodeId} not found`);
+          await visibleNode(tx, input.tenantId, input.nodeId);
           const principal = input.principal ?? 'root';
           const keyId = `bc:${caller.identityId}:${input.nodeId}:${newId('ssh')}`;
           const issued = ca.issueUserCertificate({

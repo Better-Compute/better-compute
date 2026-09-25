@@ -172,8 +172,8 @@ describe('tunnels.open', () => {
     await expect(refused({ op: 'console' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(refused({ op: 'tcp' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(refused({ port: 22 })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
-    await expect(open({ tenantId: 'acme', nodeId: NODE, op: 'console' })).rejects.toMatchObject({
-      code: 'UNSUPPORTED',
+    await expect(open({ tenantId: 'acme', nodeId: NODE, op: 'exec' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
     });
     await expect(refused({ instanceId: 'inst_01jz00000000000000000000zz' })).rejects.toMatchObject({
       code: 'NOT_FOUND',
@@ -185,6 +185,56 @@ describe('tunnels.open', () => {
     await expect(refused({})).rejects.toMatchObject({ code: 'INVALID_STATE' });
     await db.query(`UPDATE instances SET state = 'running', node_id = $1`, [OFFLINE]);
     await expect(refused({})).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+
+  it('opens a node console, decided as compute:nodes:console on the node', async () => {
+    const definition = api.tunnels.open as Definition & {
+      resource(input: unknown): unknown;
+    };
+    expect(
+      definition.resource(definition.validate({ tenantId: 'acme', nodeId: NODE, op: 'console' })),
+    ).toEqual({
+      type: 'node',
+      id: NODE,
+      action: 'compute:nodes:console',
+    });
+    expect(
+      definition.resource(
+        definition.validate({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' }),
+      ),
+    ).toEqual({ type: 'instance', id: INSTANCE });
+
+    // Not visible to acme yet.
+    await expect(open({ tenantId: 'acme', nodeId: NODE, op: 'console' })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    await db.query(
+      `INSERT INTO authz_projection (type, id, tenant_id, attributes) VALUES ('node', $1, 'acme', '{}')
+       ON CONFLICT DO NOTHING`,
+      [NODE],
+    );
+    const opened = await open({ tenantId: 'acme', nodeId: NODE, op: 'console' });
+    expect(opened).toMatchObject({ nodeId: NODE, op: 'console' });
+    expect(opened).not.toHaveProperty('instanceId');
+    const claims = verifyExecTicket(opened.ticket, {
+      jwks: issuer.jwksJson(),
+      nodeId: NODE,
+      now: Date.now(),
+      jtiCache: createReplayCache(),
+    });
+    expect(claims).toMatchObject({ op: 'console', act: 'compute:nodes:console', tnt: 'acme' });
+    expect(claims).not.toHaveProperty('inst');
+    // Connected is still required.
+    await db.query(
+      `INSERT INTO authz_projection (type, id, tenant_id, attributes) VALUES ('node', $1, 'acme', '{}')
+       ON CONFLICT DO NOTHING`,
+      [OFFLINE],
+    );
+    await expect(open({ tenantId: 'acme', nodeId: OFFLINE, op: 'console' })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+    // Later tests expect OFFLINE to stay invisible to acme.
+    await db.query(`DELETE FROM authz_projection WHERE type = 'node' AND id = $1`, [OFFLINE]);
   });
 
   it('puts the issuer’s JWKS into every node’s access section', async () => {
