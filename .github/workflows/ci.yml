@@ -83,6 +83,7 @@ jobs:
     permissions:
       contents: write # tag + GitHub release
       id-token: write # npm provenance
+      actions: write # dispatch release.yml (bcd artifacts) for the new tag
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -137,3 +138,5 @@ jobs:
           prerelease=""
           if [[ "$VERSION" == *-* ]]; then prerelease="--prerelease"; fi
           gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes $prerelease
+          # A tag created with GITHUB_TOKEN triggers no push workflow; a dispatch does.
+          gh workflow run release.yml --ref main -f tag="v$VERSION"

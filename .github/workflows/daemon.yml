@@ -1,7 +1,8 @@
 name: daemon
 # The Go daemon `bcd` (PLAN.md §6). Logic builds and tests use the fake-hardware tags on every OS;
 # the default (NVML, cgo) build is vetted on Linux, the only release target. Release artifacts come
-# from goreleaser in release.yml (v0.1); here `goreleaser check` only validates daemon/.goreleaser.yaml.
+# from goreleaser in release.yml (SBOMs, cosign, SLSA3 provenance); here `goreleaser check` only
+# validates daemon/.goreleaser.yaml.
 on:
   push:
     branches: [main]

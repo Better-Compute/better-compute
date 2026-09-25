@@ -1,8 +1,8 @@
 # goreleaser (v2.6 or later) configuration for bcd, PLAN.md §6 "Release artifacts".
 #
 # Run from daemon/:
-#   goreleaser release --snapshot --clean     local build into daemon/dist/
-#   goreleaser release --clean                tagged release (from .github/workflows/release.yml, v0.1)
+#   goreleaser release --snapshot --clean --skip=sign,sbom   local build into daemon/dist/
+#   goreleaser release --clean                tagged release (from .github/workflows/release.yml)
 #
 # Produces bcd_<version>_linux_{amd64,arm64}.tar.gz with a .sha256 file each. The install script
 # downloads one archive and checks its sha256; the api serves both from
@@ -53,12 +53,27 @@ checksum:
 snapshot:
   version_template: "{{ incpatch .Version }}-dev"
 
-# TODO(v0.1): SBOMs (syft) and cosign signatures once the release pipeline exists (PLAN.md §6, §13).
-# sboms:
-#   - artifacts: archive
-# signs:
-#   - artifacts: checksum
+# Supply chain (PLAN.md §6, §13, v1.0): an SPDX SBOM per archive (syft), and a keyless cosign
+# signature + certificate for every artifact (archives, bare binaries, checksums, SBOMs), bound to
+# the release workflow's OIDC identity. SLSA provenance comes from the release workflow (generic
+# SLSA3 generator over artifacts.json). Local snapshots skip both:
+#   goreleaser release --snapshot --clean --skip=sign,sbom
+sboms:
+  - id: archive
+    artifacts: archive
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - --yes
+      - --output-signature=${signature}
+      - --output-certificate=${certificate}
+      - ${artifact}
+    artifacts: all
 
-# Publishing stays off until .github/workflows/release.yml owns it.
+# Published by .github/workflows/release.yml, appended to the GitHub release of the tag (the npm
+# publish job creates it; a manual tag works too).
 release:
-  disable: true
+  mode: append

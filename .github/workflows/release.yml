@@ -1,0 +1,75 @@
+name: release
+# bcd release artifacts (PLAN.md §6 "Release artifacts", §13, §16 v1.0 "SLSA L3"):
+# - goreleaser builds bcd_<version>_linux_{amd64,arm64} (archives + bare binaries, .sha256 each),
+#   an SPDX SBOM per archive, and keyless cosign signatures for every artifact;
+# - the SLSA3 generic generator (an isolated reusable workflow, so the provenance is L3) signs
+#   provenance over the archives and binaries;
+# - everything is appended to the GitHub release of the tag.
+# Runs on a pushed v* tag, or by dispatch with a tag (ci.yml's publish job dispatches it after it
+# creates the release: GITHUB_TOKEN tags do not trigger `push` workflows, dispatches do).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The existing tag to release bcd for, e.g. v0.5.0'
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload to the release
+      id-token: write # cosign keyless
+    outputs:
+      hashes: ${{ steps.hashes.outputs.hashes }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+      # cgo cross-compiles NVML builds for amd64 and arm64 (CC=zig cc in .goreleaser.yaml).
+      - uses: mlugg/setup-zig@v1
+      - uses: anchore/sbom-action/download-syft@v0
+      - uses: sigstore/cosign-installer@v3
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+          workdir: daemon
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}
+      - id: hashes
+        working-directory: daemon
+        run: |
+          set -euo pipefail
+          subjects=$(jq -r '.[] | select(.type == "Archive" or .type == "Uploadable Binary") | .path' dist/artifacts.json \
+            | while read -r path; do echo "$(sha256sum "$path" | cut -d' ' -f1)  $(basename "$path")"; done)
+          test -n "$subjects"
+          echo "hashes=$(echo "$subjects" | base64 -w0)" >> "$GITHUB_OUTPUT"
+  provenance:
+    needs: [goreleaser]
+    permissions:
+      actions: read # read the workflow run
+      id-token: write # sign the provenance
+      contents: write # upload it to the release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.goreleaser.outputs.hashes }}
+      upload-assets: true
+      upload-tag-name: ${{ needs.goreleaser.outputs.tag }}
+      provenance-name: bcd.intoto.jsonl
