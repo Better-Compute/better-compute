@@ -5,6 +5,8 @@
 //	power.getPower                          chassis power status   → {"power":"on"|"off"}
 //	power.setPower {action}                 chassis power on|off|cycle|reset|soft
 //	management.setBootDevice {device, persistent}   chassis bootdev pxe|disk|cdrom|bios [options=persistent]
+//	inspect.inspect                         fru print 0, chassis power status, mc info, lan print, sdr list
+//	                                        ? the Redfish driver's shape, less the host's NICs and UUID
 //
 // The BMC's address comes as config ({"address": "10.0.0.5[:623]", "cipherSuite": 17|3}) and its
 // credentials as secrets (username, password). The password reaches ipmitool through a pipe it
@@ -68,7 +70,7 @@ type driver struct {
 
 func (d *driver) Describe(context.Context, *connect.Request[driverv1.DescribeRequest]) (*connect.Response[driverv1.DescribeResponse], error) {
 	return connect.NewResponse(&driverv1.DescribeResponse{
-		Drivers:         []*commonv1.DriverManifest{{Id: "ipmi", Version: version, Kinds: []string{"power", "management"}, RunsOn: commonv1.RunsOn_RUNS_ON_SITE, ConfigSchemaJson: `{"type":"object","required":["address"],"properties":{"address":{"type":"string"},"cipherSuite":{"enum":[3,17]}}}`}},
+		Drivers:         []*commonv1.DriverManifest{{Id: "ipmi", Version: version, Kinds: []string{"power", "management", "inspect"}, RunsOn: commonv1.RunsOn_RUNS_ON_SITE, ConfigSchemaJson: `{"type":"object","required":["address"],"properties":{"address":{"type":"string"},"cipherSuite":{"enum":[3,17]}}}`}},
 		PluginVersion:   version,
 		ProtocolVersion: bcx.ProtocolVersion,
 	}), nil
@@ -175,35 +177,52 @@ func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, 
 		}
 	}
 	str := func(k string) string { s, _ := args[k].(string); return strings.ToLower(s) }
-	var command []string
+	argv := []string{"-I", "lanplus", "-H", host, "-U", secrets["username"], "-C", strconv.Itoa(config.CipherSuite), "-f", "/dev/fd/3"}
+	if port != "" {
+		argv = append(argv, "-p", port)
+	}
+	ipmi := func(command ...string) (string, error) {
+		return d.ipmitool(ctx, append(append([]string{}, argv...), command...), secrets["password"])
+	}
 	switch req.GetKind() + "." + req.GetOperation() {
 	case "power.getPower":
-		command = []string{"chassis", "power", "status"}
+		power, err := powerState(ipmi)
+		if err != nil {
+			return "", err
+		}
+		return `{"power":"` + power + `"}`, nil
 	case "power.setPower":
 		verb, ok := powerVerbs[str("action")]
 		if !ok {
 			return "", fail("invalid-args", "power action %q is not one of on, off, cycle, reset, soft", str("action"))
 		}
-		command = []string{"chassis", "power", verb}
+		_, err = ipmi("chassis", "power", verb)
 	case "management.setBootDevice":
 		dev, ok := bootDevs[str("device")]
 		if !ok {
 			return "", fail("invalid-args", "boot device %q is not one of pxe, disk, cdrom, bios", str("device"))
 		}
-		command = []string{"chassis", "bootdev", dev}
+		command := []string{"chassis", "bootdev", dev}
 		if persistent, _ := args["persistent"].(bool); persistent {
 			command = append(command, "options=persistent")
 		}
+		_, err = ipmi(command...)
+	case "inspect.inspect":
+		return inspect(ipmi)
 	default:
 		return "", fail("unsupported-operation", "the ipmi driver does not implement %s.%s", req.GetKind(), req.GetOperation())
 	}
-	argv := []string{"-I", "lanplus", "-H", host, "-U", secrets["username"], "-C", strconv.Itoa(config.CipherSuite), "-f", "/dev/fd/3"}
-	if port != "" {
-		argv = append(argv, "-p", port)
+	if err != nil {
+		return "", err
 	}
+	return `{}`, nil
+}
+
+// ipmitool runs one ipmitool command (argv already checked) and returns its output.
+func (d *driver) ipmitool(ctx context.Context, argv []string, password string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, d.tool, append(argv, command...)...)
+	cmd := exec.CommandContext(ctx, d.tool, argv...)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	// -f /dev/fd/3: the password through a pipe, drained by the one read ipmitool makes. It fits the
 	// pipe's buffer, so it is written before ipmitool starts.
@@ -211,7 +230,7 @@ func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, 
 	if err != nil {
 		return "", err
 	}
-	_, err = pw.Write([]byte(secrets["password"]))
+	_, err = pw.Write([]byte(password))
 	pw.Close()
 	if err != nil {
 		pr.Close()
@@ -227,16 +246,115 @@ func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, 
 		}
 		return "", &failure{code: "bmc-error", msg: firstLine(text), retry: true}
 	}
-	if req.GetOperation() == "getPower" {
-		switch {
-		case strings.Contains(strings.ToLower(text), "is on"):
-			return `{"power":"on"}`, nil
-		case strings.Contains(strings.ToLower(text), "is off"):
-			return `{"power":"off"}`, nil
-		}
-		return "", fail("bmc-error", "unreadable power status: %s", firstLine(text))
+	return text, nil
+}
+
+func powerState(ipmi func(...string) (string, error)) (string, error) {
+	text, err := ipmi("chassis", "power", "status")
+	if err != nil {
+		return "", err
 	}
-	return `{}`, nil
+	switch {
+	case strings.Contains(strings.ToLower(text), "is on"):
+		return "on", nil
+	case strings.Contains(strings.ToLower(text), "is off"):
+		return "off", nil
+	}
+	return "", fail("bmc-error", "unreadable power status: %s", firstLine(text))
+}
+
+// fields parses ipmitool's "Name : value" lines (fru print, mc info, lan print); the first of a
+// repeated name wins.
+func fields(text string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if _, seen := out[name]; !seen && name != "" {
+			out[name] = value
+		}
+	}
+	return out
+}
+
+func first(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// maxProblems bounds the sensors an inspection lists by name.
+const maxProblems = 32
+
+// inspect is inspect.inspect in the shape the Redfish driver answers (manufacturer, model,
+// serialNumber, productUuid, power, macs, ipAddresses), from the builtin FRU, the power state, the
+// BMC's own identity and LAN settings and its sensors. IPMI cannot name the host's NICs or its
+// SMBIOS UUID reliably: macs and ipAddresses are empty and productUuid is left out. The FRU and the
+// power state are required; the rest is best effort.
+func inspect(ipmi func(...string) (string, error)) (string, error) {
+	fru, err := ipmi("fru", "print", "0")
+	if err != nil {
+		return "", err
+	}
+	power, err := powerState(ipmi)
+	if err != nil {
+		return "", err
+	}
+	f := fields(fru)
+	result := map[string]any{
+		"manufacturer": first(f["Product Manufacturer"], f["Board Mfg"]),
+		"model":        first(f["Product Name"], f["Board Product"]),
+		"serialNumber": first(f["Product Serial"], f["Chassis Serial"], f["Board Serial"]),
+		"power":        power,
+		"macs":         []string{},
+		"ipAddresses":  []string{},
+		"board":        map[string]string{"manufacturer": f["Board Mfg"], "product": f["Board Product"], "serial": f["Board Serial"]},
+	}
+	bmc := map[string]string{}
+	if text, err := ipmi("mc", "info"); err == nil {
+		m := fields(text)
+		bmc["firmware"], bmc["manufacturer"] = m["Firmware Revision"], m["Manufacturer Name"]
+	}
+	if text, err := ipmi("lan", "print"); err == nil {
+		l := fields(text)
+		if mac, err := net.ParseMAC(l["MAC Address"]); err == nil {
+			bmc["mac"] = mac.String()
+		}
+		if ip := net.ParseIP(l["IP Address"]); ip != nil && !ip.IsUnspecified() {
+			bmc["ipAddress"] = ip.String()
+		}
+	}
+	result["bmc"] = bmc
+	if text, err := ipmi("sdr", "list"); err == nil {
+		// "Name | reading | status": ok, ns (no reading), or a threshold state (nc, cr, nr) or other.
+		sensors, ok := 0, 0
+		problems := []map[string]string{}
+		for _, line := range strings.Split(text, "\n") {
+			parts := strings.Split(line, "|")
+			if len(parts) != 3 {
+				continue
+			}
+			sensors++
+			switch status := strings.TrimSpace(parts[2]); status {
+			case "ok":
+				ok++
+			case "ns":
+			default:
+				if len(problems) < maxProblems {
+					problems = append(problems, map[string]string{"name": strings.TrimSpace(parts[0]), "reading": strings.TrimSpace(parts[1]), "status": status})
+				}
+			}
+		}
+		result["sensors"] = map[string]any{"count": sensors, "ok": ok, "problems": problems}
+	}
+	raw, err := json.Marshal(result)
+	return string(raw), err
 }
 
 func firstLine(s string) string {

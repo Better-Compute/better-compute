@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -62,6 +63,71 @@ func TestIPMIOperations(t *testing.T) {
 	}
 	if strings.Contains(strings.ReplaceAll(string(calls), "pw=s3cret", ""), "s3cret") {
 		t.Fatal("the password reached ipmitool's arguments")
+	}
+}
+
+// inspect.inspect answers the Redfish driver's shape from fru, mc, lan and sdr.
+func TestIPMIInspect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script")
+	}
+	dir := t.TempDir()
+	outputs := map[string]string{
+		"fru": `FRU Device Description : Builtin FRU Device (ID 0)
+ Chassis Type          : Rack Mount Chassis
+ Chassis Serial        : C0FFEE
+ Board Mfg             : Supermicro
+ Board Product         : X12DPi-NT6
+ Board Serial          : WM12345
+ Product Manufacturer  : Supermicro
+ Product Name          : SYS-220U-TNR
+ Product Serial        : S98765`,
+		"mc": `Device ID                 : 32
+Firmware Revision         : 1.73
+Manufacturer Name         : Supermicro
+Additional Device Support :
+    Sensor Device`,
+		"lan": `IP Address Source       : DHCP Address
+IP Address              : 10.0.0.9
+MAC Address             : 0C:C4:7A:AA:BB:CC`,
+		"sdr": `CPU1 Temp        | 45 degrees C      | ok
+CPU2 Temp        | no reading        | ns
+FAN3             | 0 RPM             | cr
+PS1 Status       | 0x01              | ok`,
+	}
+	script := "#!/bin/sh\ncat /dev/fd/3 >/dev/null\ncase \"$*\" in\n"
+	for key, out := range outputs {
+		file := filepath.Join(dir, key)
+		_ = os.WriteFile(file, []byte(out+"\n"), 0o600)
+		script += "*' " + key + " '*) cat " + file + " ;;\n"
+	}
+	script += "*'power status'*) echo 'Chassis Power is on' ;;\nesac\n"
+	tool := filepath.Join(dir, "ipmitool")
+	_ = os.WriteFile(tool, []byte(script), 0o755)
+	out, err := invoke(&driver{tool: tool}, "inspect", "inspect", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Manufacturer, Model, SerialNumber, Power string
+		Macs                                     []string
+		IPAddresses                              []string `json:"ipAddresses"`
+		ProductUUID                              *string  `json:"productUuid"`
+		Board                                    map[string]string
+		BMC                                      map[string]string `json:"bmc"`
+		Sensors                                  struct {
+			Count, OK int
+			Problems  []map[string]string
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%s: %v", out, err)
+	}
+	if got.Manufacturer != "Supermicro" || got.Model != "SYS-220U-TNR" || got.SerialNumber != "S98765" || got.Power != "on" ||
+		got.Macs == nil || len(got.Macs) != 0 || got.IPAddresses == nil || got.ProductUUID != nil ||
+		got.Board["product"] != "X12DPi-NT6" || got.BMC["firmware"] != "1.73" || got.BMC["mac"] != "0c:c4:7a:aa:bb:cc" || got.BMC["ipAddress"] != "10.0.0.9" ||
+		got.Sensors.Count != 4 || got.Sensors.OK != 2 || len(got.Sensors.Problems) != 1 || got.Sensors.Problems[0]["name"] != "FAN3" {
+		t.Fatalf("inspect = %s", out)
 	}
 }
 
