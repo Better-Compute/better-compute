@@ -33,6 +33,22 @@ export interface CliIO {
   fetch?: typeof globalThis.fetch;
   /** Ends long-running commands (`serve`, `dev`); default: SIGINT or SIGTERM. */
   signal?: AbortSignal;
+  /** The interactive terminal `console` and `exec` attach to (default: the process's own). */
+  terminal?: CliTerminal;
+}
+
+/** A terminal for interactive sessions: keys in, the remote program's output out. */
+export interface CliTerminal {
+  /** Calls `listener` with the bytes typed (in raw mode every key, Ctrl-C included); returns a function that stops. */
+  onInput(listener: (data: Uint8Array) => void): () => void;
+  /** Writes the remote program's output: channel 0 is stdout, 1 is stderr. */
+  write(data: Uint8Array, channel: number): void;
+  /** Rows and columns, when it is a terminal. */
+  size?(): { rows: number; cols: number } | undefined;
+  /** Calls `listener` when the size changes; returns a function that stops. */
+  onResize?(listener: () => void): () => void;
+  /** Passes keys through unprocessed; returns a function that restores the previous mode. */
+  raw?(): () => void;
 }
 
 /** One flag of a command. Keys of a command's `flags` object are the flag names without the leading `--`. */

@@ -12,13 +12,14 @@ import { fileURLToPath } from 'node:url';
 import { isComputeError } from '@better-compute/core';
 import { builtinCommands } from './commands/index.js';
 import { embedCommands, type EmbedOptions, type PortableCommandSpec } from './embed.js';
-import { CliError, errorCode, usageCodes } from './errors.js';
+import { CliError, errorCode, RemoteExitError, usageCodes } from './errors.js';
 import {
   createCliProgram,
   manifestOf,
   type Cli,
   type CliIO,
   type CliManifest,
+  type CliTerminal,
   type CreateCliOptions,
 } from './framework.js';
 
@@ -35,7 +36,7 @@ export {
   type BcdArch,
   type InstallScriptOptions,
 } from './install-script.js';
-export { CliError, errorCode, usageCodes, usageError } from './errors.js';
+export { CliError, errorCode, RemoteExitError, usageCodes, usageError } from './errors.js';
 export {
   commandHelp,
   createCliProgram,
@@ -46,6 +47,7 @@ export {
   type Cli,
   type CliIO,
   type CliManifest,
+  type CliTerminal,
   type CommandContext,
   type CommandSpec,
   type CommandTarget,
@@ -161,6 +163,35 @@ export function processIO(): CliIO {
       for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk as Buffer));
       return Buffer.concat(chunks).toString('utf8');
     },
+    terminal: processTerminal(),
+  };
+}
+
+/** The process's terminal: stdin in, stdout/stderr out, raw mode when stdin is a TTY. */
+function processTerminal(): CliTerminal {
+  return {
+    onInput(listener) {
+      const handler = (chunk: Buffer) => listener(new Uint8Array(chunk));
+      process.stdin.on('data', handler);
+      process.stdin.resume();
+      return () => {
+        process.stdin.off('data', handler);
+        process.stdin.pause();
+      };
+    },
+    write: (data, channel) => void (channel === 1 ? process.stderr : process.stdout).write(data),
+    size: () =>
+      process.stdout.isTTY ? { rows: process.stdout.rows, cols: process.stdout.columns } : undefined,
+    onResize(listener) {
+      process.stdout.on('resize', listener);
+      return () => void process.stdout.off('resize', listener);
+    },
+    raw() {
+      if (!process.stdin.isTTY) return () => undefined;
+      const was = process.stdin.isRaw;
+      process.stdin.setRawMode(true);
+      return () => void process.stdin.setRawMode(was);
+    },
   };
 }
 
@@ -221,6 +252,11 @@ export async function main(
     await cli.run(argv, io);
     return 0;
   } catch (error) {
+    // The remote program's own status, as ssh does; it already said why on the terminal.
+    if (error instanceof RemoteExitError) {
+      if (error.status < 0) err(`REMOTE_EXIT: ${printable(error.message)}`);
+      return error.exitStatus;
+    }
     const code = errorCode(error);
     const message = printable(error instanceof Error ? error.message : String(error));
     // Compute errors (local or remote), the CLI's own and Node system errors (ENOENT, EEXIST) say

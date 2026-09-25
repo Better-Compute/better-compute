@@ -15,6 +15,25 @@ export class CliError extends Error {
   }
 }
 
+/**
+ * The remote program of `console` or `exec` ended with a non-zero status: the binary exits with it
+ * (like ssh), and 255 when the tunnel itself broke (`status` -1).
+ */
+export class RemoteExitError extends CliError {
+  constructor(
+    readonly status: number,
+    readonly reason: string,
+  ) {
+    super('REMOTE_EXIT', status < 0 ? `The tunnel closed: ${reason}` : `Exited with status ${status} (${reason})`);
+    this.name = 'RemoteExitError';
+  }
+
+  /** The process exit status: the remote status (1–255), else 255. */
+  get exitStatus(): number {
+    return this.status > 0 && this.status < 256 ? this.status : 255;
+  }
+}
+
 /** A usage mistake (unknown flag, missing value, bad number): the binary exits with status 2 for these. */
 export function usageError(message: string, hint?: string): CliError {
   return new CliError('INVALID_ARGUMENT', message, hint);
