@@ -9,11 +9,11 @@ Commands reach a node over its gateway session, one lane per kind. _Retry-safe_ 
 
 | Kind                  | Lane      | Roles               | Retry-safe | Self-terminating | Attested | Destructive | Timeout | Payload                                          |
 | --------------------- | --------- | ------------------- | ---------- | ---------------- | -------- | ----------- | ------- | ------------------------------------------------ |
-| `bmc.boot`            | control   | site                | yes        |                  |          |             | `2m`    | `bettercompute.site.v1.BmcOperationRequest`      |
+| `bmc.boot`            | control   | site                | yes        |                  |          | yes         | `2m`    | `bettercompute.site.v1.BmcOperationRequest`      |
 | `bmc.firmware`        | control   | site                |            |                  |          | yes         | `1h`    | `bettercompute.site.v1.BmcOperationRequest`      |
 | `bmc.power`           | control   | site                |            |                  |          | yes         | `5m`    | `bettercompute.site.v1.BmcOperationRequest`      |
 | `bmc.query`           | control   | site                | yes        |                  |          |             | `2m`    | `bettercompute.site.v1.BmcOperationRequest`      |
-| `bmc.rotate`          | control   | site                |            |                  | yes      |             | `5m`    | `bettercompute.site.v1.BmcOperationRequest`      |
+| `bmc.rotate`          | control   | site                |            |                  | yes      | yes         | `5m`    | `bettercompute.site.v1.BmcOperationRequest`      |
 | `bmc.storage`         | control   | site                |            |                  |          | yes         | `1h`    | `bettercompute.site.v1.BmcOperationRequest`      |
 | `boot.cleanUp`        | control   | site                | yes        |                  |          |             | `2m`    | `bettercompute.site.v1.BootCleanUpRequest`       |
 | `boot.kexec`          | control   | ramdisk             |            | yes              |          |             | `15m`   | `bettercompute.agent.v1.KexecRequest`            |

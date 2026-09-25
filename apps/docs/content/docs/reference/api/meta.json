@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "capacity",
+    "command-batches",
     "commands",
     "drivers",
     "events",

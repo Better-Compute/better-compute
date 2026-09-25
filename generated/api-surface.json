@@ -285,6 +285,61 @@
         "additionalProperties": false
       }
     },
+    "commandBatches.approve": {
+      "route": "POST /api/compute/commandBatches/approve",
+      "kind": "mutation",
+      "action": "compute:batches:approve",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": null
+    },
+    "commandBatches.cancel": {
+      "route": "POST /api/compute/commandBatches/cancel",
+      "kind": "mutation",
+      "action": "compute:batches:approve",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": null
+    },
+    "commandBatches.get": {
+      "route": "POST /api/compute/commandBatches/get",
+      "kind": "read",
+      "action": "compute:batches:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": null
+    },
+    "commandBatches.list": {
+      "route": "POST /api/compute/commandBatches/list",
+      "kind": "read",
+      "action": "compute:batches:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": null
+    },
+    "commandBatches.scope": {
+      "route": "POST /api/compute/commandBatches/scope",
+      "kind": "read",
+      "action": "compute:batches:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": null
+    },
     "commands.cancel": {
       "route": "POST /api/compute/commands/cancel",
       "kind": "mutation",

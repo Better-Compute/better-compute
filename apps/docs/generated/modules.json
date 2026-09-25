@@ -31,6 +31,11 @@
       "migrations": ["tenancy/0001_tenant_states", "tenancy/0002_teardown_attempts"]
     },
     {
+      "name": "quorum",
+      "groups": ["commandBatches"],
+      "migrations": ["quorum/0001_batches", "quorum/0002_payload_digest"]
+    },
+    {
       "name": "pki",
       "groups": [],
       "migrations": ["pki/0001_sealed_secrets"]
@@ -83,7 +88,8 @@
         "vps/0009_snapshot_fixes",
         "vps/0010_sandbox_metric_indexes",
         "vps/0011_host_certificates",
-        "vps/0012_host_cert_validity"
+        "vps/0012_host_cert_validity",
+        "vps/0013_sandbox_expiring"
       ]
     },
     {
@@ -133,6 +139,7 @@
     "nodespec",
     "outbox-dispatch",
     "provision.site-cache",
+    "quorum.batches",
     "rollout",
     "site-boot",
     "tenancy",
