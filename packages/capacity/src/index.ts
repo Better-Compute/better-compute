@@ -22,3 +22,4 @@ export * from './shortlist.js';
 export * from './spot.js';
 export * from './node-lease.js';
 export * from './pool-index.js';
+export * from './mig.js';

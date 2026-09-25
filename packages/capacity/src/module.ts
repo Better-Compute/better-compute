@@ -32,6 +32,7 @@ import { capacityMigrations } from './migrations.js';
 import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
 import { inlinePlacer, poolLeasePlacer, type PlacementObserver } from './placer.js';
+import { freezeMigLayouts, migGateWork, runMigGate } from './mig.js';
 import { leaseCandidates, leaseGroups } from './node-lease.js';
 import { PoolIndexCache } from './pool-index.js';
 import { defaultSpotNoticeMs, planPreemption, readSpotAllocations } from './spot.js';
@@ -916,6 +917,16 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           `UPDATE pools SET policy = $2::jsonb, gpu_model = $3, version = version + 1 WHERE id = $1`,
           [pool.id, JSON.stringify(next.policy), next.gpuModel ?? null],
         );
+        // A new MIG layout never repartitions booked GPUs: each node keeps its layout until its
+        // GPUs are idle (the capacity.mig gate).
+        const [before, after] = [pool.policy.migLayout, next.policy.migLayout];
+        if (
+          pool.sharing === 'mig' &&
+          typeof before === 'string' &&
+          typeof after === 'string' &&
+          before !== after
+        )
+          await freezeMigLayouts(tx, context.work, pool.id, before, after);
         // Every tenant view of the pool carries the new attributes.
         const offers = await tx.query<{ tenant_id: string }>(
           `SELECT tenant_id FROM pool_offers WHERE pool_id = $1`,
@@ -1406,6 +1417,7 @@ export function capacityModule(
       reservationsReconciler,
       rollupReconciler,
       usageReconciler,
+      { name: migGateWork, shardBy: 'node', run: runMigGate },
       ...(options.placer === 'pool-lease' ? [placerReconciler] : []),
     ],
     async nodeSpec(context, node) {

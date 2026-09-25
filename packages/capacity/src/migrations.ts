@@ -1,4 +1,5 @@
 import type { Migration } from '@better-compute/core';
+import { migLayoutsMigration } from './mig.js';
 
 /**
  * GPU interconnect per node pair (PLAN.md §10.3 `topology`), materialized from the inventory
@@ -84,4 +85,5 @@ export const capacityMigrations: readonly Migration[] = Object.freeze([
   deviceLinksMigration,
   leaseHealthMigration,
   deviceCountsMigration,
+  migLayoutsMigration,
 ]);

@@ -291,11 +291,13 @@ describe('capacityModule API surface', () => {
       'capacity/0001_device_links',
       'capacity/0002_lease_health',
       'capacity/0003_device_counts',
+      'capacity/0004_mig_layouts',
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       reservationWork,
       'capacity.rollup',
       'capacity.usage',
+      'capacity.mig',
     ]);
     expect(module.reconcilers![1]!.periodic).toEqual([{ key: 'all', every: '5m' }]);
   });
