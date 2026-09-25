@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -14,9 +15,9 @@ import (
 )
 
 // useWebSocket switches the agent's session and renewals to the WebSocket fallback ([websocket],
-// PLAN.md §7.1). The identity is read afresh for every dial, so a renewal takes effect at the next
-// one. Tunnels need the gRPC transport and are refused.
-func useWebSocket(o *agent.Options, cfg *config.Config) error {
+// PLAN.md §7.1). Every dial takes the running agent's identity (current), so a renewal takes
+// effect at the next one. Tunnels need the gRPC transport and are refused.
+func useWebSocket(o *agent.Options, cfg *config.Config, current func() (*agent.State, *ecdsa.PrivateKey)) error {
 	pin, err := config.DecodePin(cfg.ServingCASPKIPin)
 	if err != nil {
 		return err
@@ -35,10 +36,12 @@ func useWebSocket(o *agent.Options, cfg *config.Config) error {
 			return fmt.Errorf("websocket.proxy_ca_file: %s holds no PEM certificate", file)
 		}
 	}
+	// The running agent's identity: renewal replaces it in memory. Never LoadState here: it discards a
+	// node.key.next that a renewal in flight has written.
 	identity := func() (transport.WSOptions, *agent.State, error) {
-		state, key, err := agent.LoadState(cfg.DataDir)
-		if err != nil {
-			return transport.WSOptions{}, nil, err
+		state, key := current()
+		if state == nil || key == nil {
+			return transport.WSOptions{}, nil, errors.New("no identity yet")
 		}
 		ws := base
 		ws.NodeID, ws.Key, ws.Chain = state.NodeID, key, state.Chain

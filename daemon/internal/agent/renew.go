@@ -113,6 +113,12 @@ func (a *Agent) renewOnce(ctx context.Context) error {
 	renewed.TrustRoots = state.TrustRoots
 	renewed.TrustBundle = state.TrustBundle
 	renewed.ServerTime = state.ServerTime
+	// The next key must be on disk before the certificate that names it: whatever removed it during
+	// the request (a LoadState elsewhere discards a node.key.next the certificate does not match), a
+	// stored certificate without its key would leave the node without an identity.
+	if err := pki.SavePrivateKey(nextPath, next); err != nil {
+		return err
+	}
 	if err := SaveState(a.o.DataDir, renewed); err != nil {
 		return err
 	}

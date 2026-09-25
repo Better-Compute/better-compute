@@ -372,6 +372,8 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 			return exitFailure
 		}
 	}
+	// running is the agent once built: the WS dial and renewer take its identity.
+	var running *agent.Agent
 	opts := agent.Options{
 		State:   state,
 		Key:     key,
@@ -410,13 +412,19 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		opts.RenewAfter = d // fakehw builds only: renew soon after start (e2e)
 	}
 	if cfg.WebSocket.URL != "" && (mode == "node" || mode == "site") {
-		if err := useWebSocket(&opts, cfg); err != nil {
+		if err := useWebSocket(&opts, cfg, func() (*agent.State, *ecdsa.PrivateKey) {
+			if running == nil {
+				return nil, nil
+			}
+			return running.Identity()
+		}); err != nil {
 			fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 			return exitFailure
 		}
 		log.Warn("the session uses the WebSocket fallback: signed commands and specs only, no tunnels", "url", cfg.WebSocket.URL)
 	}
 	a, err := agent.New(opts)
+	running = a
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure

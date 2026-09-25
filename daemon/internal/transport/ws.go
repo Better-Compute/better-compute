@@ -99,8 +99,8 @@ func wsConn(ctx context.Context, o *WSOptions) (net.Conn, *url.URL, error) {
 	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "wss" && u.Scheme != "ws") {
 		return nil, nil, fmt.Errorf("transport: bad WebSocket URL %q", o.URL)
 	}
-	if len(o.ServingCAPin) == 0 || o.Key == nil || len(o.Chain) == 0 || o.NodeID == "" {
-		return nil, nil, errors.New("transport: a WebSocket session needs the serving CA pin and the node identity")
+	if len(o.ServingCAPin) == 0 {
+		return nil, nil, errors.New("transport: the WebSocket endpoint needs the serving CA pin")
 	}
 	if o.DialTimeout == 0 {
 		o.DialTimeout = 10 * time.Second
@@ -156,6 +156,9 @@ func wsConn(ctx context.Context, o *WSOptions) (net.Conn, *url.URL, error) {
 // DialSession opens the Session over the WebSocket fallback; ctx bounds the setup and, once
 // connected, ends the stream when it is done.
 func DialSession(ctx context.Context, o WSOptions) (*WSStream, error) {
+	if o.Key == nil || len(o.Chain) == 0 || o.NodeID == "" {
+		return nil, errors.New("transport: a WebSocket session needs the node identity")
+	}
 	if o.DialTimeout == 0 {
 		o.DialTimeout = 10 * time.Second
 	}

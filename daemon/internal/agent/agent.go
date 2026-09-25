@@ -280,6 +280,13 @@ func New(o Options) (*Agent, error) {
 	return a, nil
 }
 
+// Identity returns the node's current identity and key (renewal replaces them).
+func (a *Agent) Identity() (*State, *ecdsa.PrivateKey) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state, a.currentKey()
+}
+
 // NodeID returns the node's id.
 func (a *Agent) NodeID() string { return a.o.State.NodeID }
 

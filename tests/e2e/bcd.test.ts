@@ -11,11 +11,16 @@ import { create } from '@bufbuild/protobuf';
 import {
   buildReleaseManifest,
   createReleaseSigningKey,
+  createServingCa,
+  generateP256KeyPair,
+  privateKeyPem,
+  toPem,
   parseCertificate,
   releaseArtifact,
   signReleaseManifest,
   spkiPin,
 } from '@better-compute/pki';
+import { serveGatewayWs } from '@better-compute/gateway';
 import { TunnelFrameSchema } from '@better-compute/protocol';
 import { pkiAllocationBindingCheck } from '@better-compute/server';
 import { rolloutModule } from '@better-compute/rollout';
@@ -62,6 +67,8 @@ async function until<T>(what: string, probe: () => Promise<T | undefined | false
 
 // The release key self-update trusts (its pin goes into the node's [update] config).
 const releaseKey = createReleaseSigningKey();
+// The gateway serving CA the node pins: the stack's mTLS listener and the WS listener both chain to it.
+const servingCa = createServingCa();
 
 let dev: DevStack;
 let api: any;
@@ -92,8 +99,8 @@ function runLinux(argv: string[], input?: string): Promise<{ status: number | nu
   });
 }
 
-function startNode(exe = toLinux(binary)) {
-  const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=41', exe, 'node', '--config', toLinux(config)]);
+function startNode(exe = toLinux(binary), env: string[] = []) {
+  const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=41', ...env, exe, 'node', '--config', toLinux(config)]);
   node = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
   node.stderr!.on('data', (chunk: Buffer) => {
     nodeLog += chunk.toString();
@@ -118,7 +125,9 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
     const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
     if (!host) throw new Error('no route from WSL to the host');
     dev = await createDevStack({
-      externalTls: { host: '0.0.0.0' },
+      externalTls: { host: '0.0.0.0', servingCa },
+      // Every command and spec signed: bcd holds command-signing roots and verifies all of them.
+      signedIntent: true,
       tunnels: {},
       capacity: { attestedBindings: pkiAllocationBindingCheck() },
       // daemon.upgrade is the rollout module's kind.
@@ -481,4 +490,65 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       served.close();
     }
   }, 300_000);
+
+  it('runs its session over the WebSocket fallback, signed intent only, and renews over it', async () => {
+    const identity = JSON.parse(sh(`cat '${dataDir}/identity.json'`)) as { chain: string[]; trustRoots?: string[] };
+    expect(identity.trustRoots?.length ?? 0, 'the WS fallback needs command-signing roots').toBeGreaterThan(0);
+    // The WS listener next to the stack's gateway: a certificate from the pinned serving CA, the node CA
+    // the joined chain ends in, and the audience the node's proof names.
+    const servingKey = generateP256KeyPair();
+    const issued = await servingCa.issue(servingKey.publicKey, { usage: 'server', dnsSans: ['gw.dev.local', 'localhost'], ttlSeconds: 86_400 });
+    const chain = [issued.certificate, ...issued.chain];
+    const ws = await serveGatewayWs(dev.gateway, {
+      host: '0.0.0.0',
+      tls: { key: privateKeyPem(servingKey.privateKey), cert: chain.map((der) => toPem(der)).join('') },
+      roots: [new Uint8Array(Buffer.from(identity.chain.at(-1)!, 'base64'))],
+      audiences: ['gw.dev.local'],
+      serving: { key: servingKey.privateKey, chain },
+    });
+    try {
+      const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
+      sh(`pkill -f '[n]ode --config ${toLinux(config)}' ; true`);
+      await until('the node to stop', async () => sh(`pgrep -f '[n]ode --config ${toLinux(config)}' || echo gone`) === 'gone', 30_000);
+      writeFileSync(config, `${readFileSync(config, 'utf8')}\n[websocket]\nurl = "wss://${host}:${ws.port}/v1/session"\naudience = "gw.dev.local"\n`);
+      const restarted = new Date();
+      const certs = async () =>
+        (await dev.database.query<{ n: number }>('SELECT count(*)::int AS n FROM node_certs WHERE node_id = $1', [nodeId])).rows[0]!.n;
+      const before = await certs();
+      // The self-update test's entrypoint when it ran, else the build.
+      const entry = sh(`test -x '${dataDir}/entry/bcd' && echo yes`) === 'yes' ? `${dataDir}/entry/bcd` : toLinux(binary);
+      startNode(entry, ['BCD_RENEW_AFTER=3s']);
+      await until(
+        'the node to reconnect over WS',
+        async () =>
+          (
+            await dev.database.query('SELECT 1 FROM node_sessions WHERE node_id = $1 AND connected_at > $2 AND disconnected_at IS NULL', [
+              nodeId,
+              restarted,
+            ])
+          ).rows.length > 0,
+        90_000,
+      ).catch((error) => {
+        throw new Error(`${error}\n--- bcd log ---\n${nodeLog.slice(-4000)}`);
+      });
+      expect(nodeLog).toContain('WebSocket fallback');
+      const refresh = await api.commands.run(dev.root, {
+        tenantId: dev.rootTenantId,
+        nodeId,
+        kind: 'inventory.refresh',
+        payload: { sections: ['gpus'] },
+        idempotencyKey: 'bcd-e2e-ws-refresh',
+      });
+      await until('a signed command over WS', async () => (await commandState(refresh.id)) === 'succeeded', 60_000);
+      // POST /v1/renew on the WS listener: a new certificate without a client certificate.
+      await until('a renewal over WS', async () => (await certs()) > before, 60_000).catch((error) => {
+        throw new Error(`${error}\n--- bcd log ---\n${nodeLog.slice(-4000)}`);
+      });
+      await until('bcd to log the renewal', async () => nodeLog.includes('certificate renewed'), 10_000).catch((error) => {
+        throw new Error(`${error}\n--- bcd log ---\n${nodeLog.slice(-3000)}`);
+      });
+    } finally {
+      await ws.close();
+    }
+  }, 240_000);
 });
