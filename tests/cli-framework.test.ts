@@ -181,6 +181,7 @@ describe('help and the manifest', () => {
       'fleet apply',
       'pki init',
       'pki show',
+      'pki add-sandbox-ca',
       'pki reseal',
       'pki rotate-command-root',
       'pki renew-ca',

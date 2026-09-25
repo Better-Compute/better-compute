@@ -63,6 +63,12 @@ export interface PkiBundle {
   /** The compute SSH CA for break-glass certificates (v0.3). Absent in older bundles. */
   sshCa?: SshCertificateAuthority;
   /**
+   * The sandbox SSH CA (v0.5, §3.7): `sandboxes.exec` certificates (`TunnelsOptions.sandboxSsh`), trusted by sandbox
+   * guests (`vps({ sandboxExec: { caPublicKey } })`). Separate from break-glass: a sandbox certificate never opens a
+   * node. Absent in older bundles.
+   */
+  sandboxSshCa?: SshCertificateAuthority;
+  /**
    * The command-signing root (v0.2 signed intent, `TrustBundle.command_signing_roots`): certifies the
    * workers' 24 h signing keys. Production keeps this root in KMS / Vault; the bundle form serves
    * development and small deployments, as for the CAs. Absent in older bundles.
@@ -95,6 +101,8 @@ export interface PkiPins {
   execTicketKeyId?: string;
   /** The SSH CA's OpenSSH public key (`TrustedUserCAKeys`, NodeSpec `access.sshCaPublicKeys`). */
   sshCaPublicKey?: string;
+  /** The sandbox SSH CA's public key (what sandbox guests' sshd trusts). */
+  sandboxSshCaPublicKey?: string;
   /** Hex SHA-256 of the command-signing root certificate (DER), as trust bundles list it. */
   commandSigningRootSha256?: string;
   /** During a root rotation: the added root (not signing yet) and the former root (still trusted). */
@@ -154,7 +162,8 @@ export function createPkiBundle(options: CreatePkiBundleOptions): PkiBundle {
     joinEncryption: encryption,
     auditSigning: createSigningKey({ clock, commonName: `${organization} audit signing` }),
     execTicketKey: generateP256KeyPair().privateKey,
-    sshCa: createSshCertificateAuthority({ clock, comment: `${organization} ssh ca` }),
+    sshCa: createSshCertificateAuthority({ clock, comment: sshComment(`${organization} ssh ca`) }),
+    sandboxSshCa: createSshCertificateAuthority({ clock, comment: sshComment(`${organization} sandbox ssh ca`) }),
     commandSigning: createCommandSigningAuthority({
       clock,
       commonName: `${organization} command signing root`,
@@ -164,6 +173,10 @@ export function createPkiBundle(options: CreatePkiBundleOptions): PkiBundle {
 }
 
 const sha256Hex = (der: Uint8Array) => createHash('sha256').update(der).digest('hex');
+
+/** An SSH key comment from free text (an organization name): printable ASCII, one line, at most 64 characters. */
+const sshComment = (text: string): string =>
+  text.replace(/[^\x21-\x7e ]+/g, '-').replace(/^[ -]+/, '').slice(0, 64).trimEnd() || 'better-compute';
 
 /** The exec ticket issuer of a bundle (throws `INVALID_CONFIG` for a bundle made before v0.3). */
 export function execTicketIssuer(
@@ -176,6 +189,22 @@ export function execTicketIssuer(
       'The PKI bundle has no exec ticket key; create a new one with pki init',
     );
   return createExecTicketIssuer({ ...options, privateKey: bundle.execTicketKey });
+}
+
+/**
+ * What the server's `tunnels` options take from a bundle: the exec ticket issuer (named for the public base URL),
+ * the break-glass SSH CA and the sandbox SSH CA when the bundle has them. Pair the sandbox CA's public key with
+ * `vps({ sandboxExec: { caPublicKey: bundle.sandboxSshCa.publicKey } })` so sandbox guests trust it.
+ */
+export function tunnelsOptions(
+  bundle: PkiBundle,
+  options: { issuer: string; clock?: Clock },
+): { issuer: ExecTicketIssuer; ssh?: SshCertificateAuthority; sandboxSsh?: SshCertificateAuthority } {
+  return {
+    issuer: execTicketIssuer(bundle, options),
+    ...(bundle.sshCa ? { ssh: bundle.sshCa } : {}),
+    ...(bundle.sandboxSshCa ? { sandboxSsh: bundle.sandboxSshCa } : {}),
+  };
 }
 
 /**
@@ -302,6 +331,7 @@ export function pkiPins(bundle: PkiBundle): PkiPins {
     ...(bundle.auditSigning ? { auditSigningKeyPin: spkiPin(bundle.auditSigning.publicKey) } : {}),
     ...(bundle.execTicketKey ? { execTicketKeyId: execTicketKeyIdOf(bundle.execTicketKey) } : {}),
     ...(bundle.sshCa ? { sshCaPublicKey: bundle.sshCa.publicKey } : {}),
+    ...(bundle.sandboxSshCa ? { sandboxSshCaPublicKey: bundle.sandboxSshCa.publicKey } : {}),
     ...(bundle.commandSigning
       ? { commandSigningRootSha256: sha256Hex(bundle.commandSigning.certificate) }
       : {}),
@@ -358,6 +388,7 @@ export function readPkiPins(
       ? { execTicketKeyId: execTicketKeyIdOf(toPublicKey(stored.execTicketPublicKey)) }
       : {}),
     ...(stored.sshCaPublicKey ? { sshCaPublicKey: stored.sshCaPublicKey } : {}),
+    ...(stored.sandboxSshCaPublicKey ? { sandboxSshCaPublicKey: stored.sandboxSshCaPublicKey } : {}),
     ...(commandSigning
       ? { commandSigningRootSha256: sha256Hex(fromPem(stored.commandSigningCertificate!)[0]!) }
       : {}),
@@ -405,6 +436,8 @@ interface StoredBundle {
   execTicketPublicKey?: string;
   /** OpenSSH public key line of the SSH CA. */
   sshCaPublicKey?: string;
+  /** OpenSSH public key line of the sandbox SSH CA. */
+  sandboxSshCaPublicKey?: string;
   /** PEM of the command-signing root certificate. */
   commandSigningCertificate?: string;
   /** Rotation: the next root (with its key under `commandSigningNext`) and the former root (public only). */
@@ -425,6 +458,7 @@ type KeyName =
   | 'auditSigning'
   | 'execTickets'
   | 'sshCa'
+  | 'sandboxSshCa'
   | 'commandSigning'
   | 'commandSigningNext';
 
@@ -477,6 +511,7 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
   if (bundle.auditSigning) keys.auditSigning = bundle.auditSigning.export().privateKeyPem;
   if (bundle.execTicketKey) keys.execTickets = privateKeyPem(bundle.execTicketKey);
   if (bundle.sshCa) keys.sshCa = bundle.sshCa.export().privateKeyPem;
+  if (bundle.sandboxSshCa) keys.sandboxSshCa = bundle.sandboxSshCa.export().privateKeyPem;
   const commandSigning = bundle.commandSigning?.export();
   if (commandSigning) keys.commandSigning = commandSigning.privateKeyPem;
   const commandSigningNext = bundle.commandSigningNext?.export();
@@ -504,6 +539,7 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
         }
       : {}),
     ...(bundle.sshCa ? { sshCaPublicKey: bundle.sshCa.publicKey } : {}),
+    ...(bundle.sandboxSshCa ? { sandboxSshCaPublicKey: bundle.sandboxSshCa.publicKey } : {}),
     ...(commandSigning ? { commandSigningCertificate: commandSigning.certificatePem } : {}),
     ...(commandSigningNext
       ? { commandSigningNextCertificate: commandSigningNext.certificatePem }
@@ -577,8 +613,9 @@ function parseStored(text: string): StoredBundle {
     throw new ComputeError('INVALID_CONFIG', 'Not a better-compute PKI bundle (version 1)');
   // One line, a key type the CA signs, a short printable comment: every node writes it into sshd's
   // TrustedUserCAKeys, where a second line would be a second trusted CA.
-  if (stored.sshCaPublicKey !== undefined && !sshCaLine.test(stored.sshCaPublicKey))
-    throw new ComputeError('INVALID_CONFIG', 'The PKI bundle has a malformed SSH CA public key');
+  for (const line of [stored.sshCaPublicKey, stored.sandboxSshCaPublicKey])
+    if (line !== undefined && !sshCaLine.test(line))
+      throw new ComputeError('INVALID_CONFIG', 'The PKI bundle has a malformed SSH CA public key');
   return stored;
 }
 
@@ -706,16 +743,17 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
       throw new ComputeError('INVALID_CONFIG', 'The exec ticket key does not match its public key');
     bundle.execTicketKey = key;
   }
-  if (stored.sshCaPublicKey) {
-    const comment = stored.sshCaPublicKey.split(' ').slice(2).join(' ');
-    bundle.sshCa = createSshCertificateAuthority({
-      clock,
-      privateKey: need('sshCa'),
-      ...(comment ? { comment } : {}),
-    });
-    if (bundle.sshCa.publicKey.split(' ')[1] !== stored.sshCaPublicKey.split(' ')[1])
-      throw new ComputeError('INVALID_CONFIG', 'The SSH CA key does not match its public key');
-  }
+  // Each SSH CA is rebuilt from its sealed key; the stored line must be that key's (the comment is free text).
+  const sshCaOf = (line: string, key: KeyName, what: string) => {
+    const comment = line.split(' ').slice(2).join(' ');
+    const ca = createSshCertificateAuthority({ clock, privateKey: need(key), ...(comment ? { comment } : {}) });
+    if (ca.publicKey.split(' ')[1] !== line.split(' ')[1])
+      throw new ComputeError('INVALID_CONFIG', `The ${what} key does not match its public key`);
+    return ca;
+  };
+  if (stored.sshCaPublicKey) bundle.sshCa = sshCaOf(stored.sshCaPublicKey, 'sshCa', 'SSH CA');
+  if (stored.sandboxSshCaPublicKey)
+    bundle.sandboxSshCa = sshCaOf(stored.sandboxSshCaPublicKey, 'sandboxSshCa', 'sandbox SSH CA');
   if (stored.commandSigningCertificate)
     // `existing` checks the key against the certificate (INVALID_CONFIG on a mismatch).
     bundle.commandSigning = createCommandSigningAuthority({

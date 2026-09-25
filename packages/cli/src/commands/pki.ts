@@ -340,6 +340,28 @@ export const pkiCommands = [
     },
   }),
   defineCommand({
+    name: 'pki add-sandbox-ca',
+    group: 'PKI',
+    summary: 'Add the sandbox SSH CA to a bundle made before sandboxes',
+    description:
+      "pki add-sandbox-ca creates the sandbox SSH CA (PLAN.md §3.7) in a bundle that lacks it and writes the bundle back (sealed with BETTER_COMPUTE_SECRET when set). sandboxes.exec signs with it (the tunnels module's sandboxSsh, pki tunnelsOptions()) and sandbox guests trust its public key (vps({ sandboxExec: { caPublicKey } })); it is separate from the break-glass CA, so a sandbox certificate never opens a node. Bundles from pki init already have one.",
+    output: 'json',
+    flags: { pki: pkiFlag },
+    examples: ['better-compute pki add-sandbox-ca'],
+    async run({ flags, env, path, note }) {
+      const target = path(flags.pki ?? defaultPkiPath);
+      const bundle = await loadPkiBundle(target, env);
+      if (bundle.sandboxSshCa)
+        throw new CliError('INVALID_STATE', `${target} already has a sandbox SSH CA`, 'pki show prints its public key.');
+      const { createSshCertificateAuthority } = await import('@better-compute/pki');
+      bundle.sandboxSshCa = createSshCertificateAuthority({ comment: `${bundle.trustDomain} sandbox ssh ca`.slice(0, 64) });
+      const secret = env.BETTER_COMPUTE_SECRET;
+      await replace(target, exportPkiBundle(bundle, { ...(secret ? { secret } : {}), omitRootKey: !bundle.root }));
+      note('Roll the bundle out to every api replica, and give vps() the public key as sandboxExec.caPublicKey.');
+      return { sandboxSshCaPublicKey: bundle.sandboxSshCa.publicKey };
+    },
+  }),
+  defineCommand({
     name: 'pki reseal',
     group: 'PKI',
     summary: 'Seal the bundle in the current format, authenticating its public parts',

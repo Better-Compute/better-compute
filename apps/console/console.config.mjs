@@ -86,6 +86,14 @@ async function tunnelsFor(dataDir, origin) {
     'ssh-ca.pem',
     () => generateKeyPairSync('ed25519').privateKey,
   );
+  // Sandboxes' exec (§3.7) signs with its own CA (CONSOLE_SANDBOX_SSH_CA_KEY_FILE): a sandbox certificate never
+  // opens a node, and a break-glass one never opens a sandbox.
+  const sandboxKey = await keyFile(
+    dataDir,
+    'CONSOLE_SANDBOX_SSH_CA_KEY_FILE',
+    'sandbox-ssh-ca.pem',
+    () => generateKeyPairSync('ed25519').privateKey,
+  );
   return {
     issuer: createExecTicketIssuer({ issuer: origin, privateKey: ticketKey }),
     ...(sshKey
@@ -93,6 +101,14 @@ async function tunnelsFor(dataDir, origin) {
           ssh: createSshCertificateAuthority({
             privateKey: sshKey,
             comment: 'better-compute console',
+          }),
+        }
+      : {}),
+    ...(sandboxKey
+      ? {
+          sandboxSsh: createSshCertificateAuthority({
+            privateKey: sandboxKey,
+            comment: 'better-compute console sandboxes',
           }),
         }
       : {}),
@@ -145,7 +161,14 @@ export async function createStack() {
   const watches = createWatchRegistry();
   const { retentionModule } = await import('better-compute/postgres');
   // Webhooks (the events module), and the store's housekeeping (outbox, authz changes, spent attestations).
-  const modules = [vps(), fleetModule(), eventsModule({ secret }), retentionModule()];
+  const tunnels = await tunnelsFor(dataDir, origin);
+  const modules = [
+    // Sandbox guests trust the sandbox CA for `sandboxes.exec` (no agent in the guest).
+    vps(tunnels?.sandboxSsh ? { sandboxExec: { caPublicKey: tunnels.sandboxSsh.publicKey } } : {}),
+    fleetModule(),
+    eventsModule({ secret }),
+    retentionModule(),
+  ];
   // Signed hourly Merkle checkpoints of the audit log (§13): CONSOLE_AUDIT_KEY_FILE (a P-256 PKCS#8 key every
   // replica shares; `better-compute audit verify` checks against its public key), generated in development.
   const auditKey = await keyFile(
@@ -200,7 +223,6 @@ export async function createStack() {
     const { pglite } = await import('better-compute/pglite');
     database = pglite({ dataDir: join(dataDir, 'compute') });
   }
-  const tunnels = await tunnelsFor(dataDir, origin);
   const compute = betterCompute({
     database,
     secret,
