@@ -96,6 +96,8 @@ describe('JSON-RPC over Streamable HTTP', () => {
       'create_sandbox',
       'list_sandboxes',
       'extend_sandbox',
+      'list_command_batches',
+      'get_command_batch',
       'list_sandbox_snapshots',
       'delete_sandbox_snapshot',
       'get_sandbox',

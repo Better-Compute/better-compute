@@ -640,6 +640,44 @@ export function computeTools(
           by: args.by,
         }),
     },
+    // Destructive-batch quorum (v1.0, §13): read-only. Approving is a person's signature with an
+    // approver key held off the control plane, so there is no approve tool.
+    {
+      name: 'list_command_batches',
+      title: 'List command batches',
+      description:
+        'Lists batches of destructive commands (reimages, wipes, fleet-wide power actions) in this tenant: pending ones wait for operators to approve them with their approver keys.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          state: { type: 'string', enum: ['pending', 'approved', 'expired', 'cancelled'] },
+          limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Page size' },
+          cursor: id('batch', 'The cursor a previous page returned'),
+        },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('commandBatches/list', { tenantId: context.tenantId, ...args }),
+    },
+    {
+      name: 'get_command_batch',
+      title: 'Show a command batch',
+      description:
+        'Shows one batch: its reason, size, the approvals it has and needs, and its commands by state. Approving it needs a person with an approver key (`better-compute batch approve`).',
+      inputSchema: {
+        type: 'object',
+        required: ['batchId'],
+        properties: { batchId: id('batch', 'The batch') },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('commandBatches/get', {
+          tenantId: context.tenantId,
+          batchId: args.batchId,
+        }),
+    },
     {
       name: 'list_sandbox_snapshots',
       title: 'List sandbox snapshots',

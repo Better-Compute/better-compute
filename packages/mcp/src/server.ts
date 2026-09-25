@@ -307,6 +307,8 @@ export function gateTools(
     extend_sandbox: { public: true },
     get_sandbox: { public: true },
     delete_sandbox: { public: true },
+    list_command_batches: { public: true },
+    get_command_batch: { public: true },
     list_sandbox_snapshots: { public: true },
     delete_sandbox_snapshot: { public: true },
   };
