@@ -22,6 +22,7 @@ import {
   MAX_COMMAND_BODY_BYTES,
   type CommandBody,
 } from '@better-compute/protocol';
+import { commandKindAllowed } from '@better-compute/pki';
 import type { CommitHook } from './commit-hooks.js';
 
 // The durable command queue (PLAN.md §7.4, §8.5) and the CommandSweeper. Enqueue runs in the
@@ -298,6 +299,7 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       const found = await existing(tx, command.nodeId, command.idempotencyKey);
       if (found) return replay(found, command.kind);
       const payload = encodePayload(spec, command.payload);
+      await checkAllowedKind(tx, command.nodeId, spec.kind);
 
       const bumped = await tx.query<{ seq: number | bigint; gateway_id: string | null }>(
         `UPDATE nodes n SET next_cmd_seq = n.next_cmd_seq + 1 WHERE n.id = $1
@@ -511,6 +513,31 @@ export async function sweepCommandsOnce(tx: SqlTx, input: SweepInput): Promise<S
   for (const [kind, keys] of wakes) await enqueueAll(input.work, tx, kind, [...keys]);
   await publishAll(input.events, tx, settled);
   return swept;
+}
+
+/**
+ * A restricted identity (`node_certs.allowed_kinds` of the node's current certificate: a
+ * discovery ramdisk) refuses kinds outside its set up front, with the same matcher the gateway's
+ * dispatch uses (`commandKindAllowed`), so a caller learns at enqueue instead of seeing the command
+ * cancelled `kind-not-allowed` later. No current certificate, or an unrestricted one, allows all:
+ * the gateway still checks the session's certificate at dispatch.
+ */
+async function checkAllowedKind(tx: SqlTx, nodeId: string, kind: string): Promise<void> {
+  const { rows } = await tx.query<{ allowed_kinds: string[] | null }>(
+    `SELECT c.allowed_kinds FROM node_certs c JOIN nodes n ON n.id = c.node_id
+      WHERE c.node_id = $1 AND c.revoked_at IS NULL AND c.identity_gen = n.identity_gen
+        AND c.not_after > compute_now()
+      ORDER BY c.not_after DESC LIMIT 1`,
+    [nodeId],
+  );
+  const allowed = rows[0]?.allowed_kinds ?? null;
+  if (!commandKindAllowed(kind, allowed))
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Node ${nodeId} runs a restricted identity that does not accept ${kind} commands`,
+      undefined,
+      { kind, allowedKinds: allowed },
+    );
 }
 
 /** `work.enqueueMany` when the port has it, else one `enqueue` per key. */

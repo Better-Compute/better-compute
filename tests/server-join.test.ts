@@ -840,6 +840,40 @@ describe('JoinService restricted certificates (AttestationResult.allowedKinds, c
     expect(rows[1]!.ttl).toBeLessThanOrEqual(2 * 3600); // the ramdisk cap still applies
   });
 
+  it('makes CommandQueue.enqueue refuse kinds the current certificate does not allow', async () => {
+    const enqueue = async (setup: Awaited<ReturnType<typeof restricted>>, key: string) => {
+      const body = verifyJoinResponse(await setup.service.join(setup.request), {
+        signer: { publicKey: setup.s.signingKey.publicKey },
+        csr: setup.csr,
+      });
+      return setup.s.fixture.database.transaction((tx) =>
+        setup.s.fixture.compute.context.commands.enqueue(tx, {
+          nodeId: body.nodeId,
+          kind: 'diag.nvml',
+          payload: undefined,
+          idempotencyKey: key,
+          notAfter: setup.s.fixture.clock.now() + 3_600_000,
+        }),
+      );
+    };
+    const inventoryOnly = await restricted(['inventory']);
+    const error = await enqueue(inventoryOnly, 'nvml-1').then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(isComputeError(error, 'INVALID_STATE')).toBe(true);
+    expect((error as { details?: unknown }).details).toMatchObject({
+      kind: 'diag.nvml',
+      allowedKinds: ['inventory'],
+    });
+    const commands = await inventoryOnly.s.fixture.database.query('SELECT id FROM commands');
+    expect(commands.rows).toHaveLength(0);
+
+    await expect(enqueue(await restricted(['diag.*']), 'nvml-2')).resolves.toMatchObject({
+      seq: expect.any(Number),
+    });
+  });
+
   it('caps an attestor asking for more than the role allows, and refuses malformed kinds', async () => {
     const long = await restricted(kinds, 86_400);
     const body = verifyJoinResponse(await long.service.join(long.request), {
