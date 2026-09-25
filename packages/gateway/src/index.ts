@@ -47,6 +47,8 @@ export type { TlsFiles, TlsFileWatch, TlsMaterial } from './tls-reload.js';
 export { connectGatewayWs } from './ws-client.js';
 export type { GatewayWsClient, GatewayWsClientOptions } from './ws-client.js';
 export type { GatewayWsOptions, ServedGatewayWs } from './ws.js';
+export { gatewayRenewHandler, RENEW_PATH } from './renew-http.js';
+export type { RenewHttpOptions } from './renew-http.js';
 export {
   agentProofType,
   gatewayProofType,

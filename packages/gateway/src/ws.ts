@@ -7,6 +7,7 @@ import { systemClock, type Clock } from '@better-compute/core';
 import { createReplayCache, type ReplayCache, type RevocationSet } from '@better-compute/pki';
 import { decodeAgentFrame, encodeServerFrame, MAX_FRAME_BYTES } from '@better-compute/protocol';
 import { closeReason } from './frames.js';
+import { gatewayRenewHandler, type RenewHttpOptions } from './renew-http.js';
 import type { Gateway, SessionHandle } from './gateway.js';
 import { frameMessage, GrpcCode, GrpcError, MessageDecoder, toGrpcError } from './grpc.js';
 import { WsConnection, wsAcceptKey } from './websocket.js';
@@ -202,16 +203,27 @@ export interface ServedGatewayWs {
 
 /**
  * A listener just for the WS fallback: HTTPS with the serving cert (what the proxy re-signs), or
- * plain HTTP for tests (`insecure`). Plain HTTP requests get 404.
+ * plain HTTP for tests (`insecure`). Besides the WS upgrade it serves `POST /v1/renew` (certificate
+ * renewal without a TLS client certificate, `renew-http.ts`); other plain HTTP requests get 404.
  */
 export async function serveGatewayWs(
   gateway: Gateway,
-  options: GatewayWsOptions & { port?: number; host?: string; tls?: ServerOptions; insecure?: boolean },
+  options: GatewayWsOptions & {
+    port?: number;
+    host?: string;
+    tls?: ServerOptions;
+    insecure?: boolean;
+    /** Limits of `POST /v1/renew` (body size, renewals per node per hour). */
+    renew?: RenewHttpOptions;
+  },
 ): Promise<ServedGatewayWs> {
   if (!options.tls && !options.insecure)
     throw new GrpcError(GrpcCode.FAILED_PRECONDITION, 'serveGatewayWs needs tls, or insecure for tests');
-  const notFound = (_req: IncomingMessage, res: import('node:http').ServerResponse) => res.writeHead(404).end();
-  const server: Server = options.tls ? createHttpsServer(options.tls, notFound) : createHttpServer(notFound);
+  const renew = gatewayRenewHandler(gateway, { ...(options.clock ? { clock: options.clock } : {}), ...options.renew });
+  const handle = (req: IncomingMessage, res: import('node:http').ServerResponse) => {
+    if (!renew(req, res)) res.writeHead(404).end();
+  };
+  const server: Server = options.tls ? createHttpsServer(options.tls, handle) : createHttpServer(handle);
   const detach = attachGatewayWs(server, gateway, options);
   const sockets = new Set<Duplex>();
   server.on('connection', (socket: Duplex) => {
