@@ -25,6 +25,12 @@ Methods of the `capacity` group, contributed by `capacity`.
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+
 ## byPool
 
 `POST /api/compute/capacity/byPool`
@@ -33,6 +39,13 @@ Methods of the `capacity` group, contributed by `capacity`.
 - **Authorization:** `compute:capacity:read` @ `compute-pool`
 - **Module:** `capacity`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## preview
 
@@ -43,6 +56,35 @@ Methods of the `capacity` group, contributed by `capacity`.
 - **Module:** `capacity`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field                 | Type                                                          | Required | Constraints                                                       |
+| --------------------- | ------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`            | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`              | string                                                        | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `projectId`           | string                                                        |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `devices`             | list of object                                                | yes      | 1-8 items                                                         |
+| `devices[].class`     | one of `gpu`, `gpu.mig`, `gpu.slot`, `nic.vf`, `disk`, `node` | yes      |                                                                   |
+| `devices[].count`     | integer                                                       | yes      | 1-64                                                              |
+| `devices[].selector`  | object                                                        |          |                                                                   |
+| `devices[].topology`  | one of `any`, `nvlink-all`                                    |          |                                                                   |
+| `devices[].sharing`   | one of `exclusive`, `mig`, `timeslice`, `mps`                 |          |                                                                   |
+| `topology`            | one of `any`, `nvlink-all`                                    |          |                                                                   |
+| `start`               | integer                                                       |          | 0-140737488355328                                                 |
+| `duration`            | string,integer                                                | yes      |                                                                   |
+| `binding`             | string                                                        |          | default `"hold"`                                                  |
+| `node`                | object                                                        |          |                                                                   |
+| `node.profileId`      | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:/-]{1,128}$`       |
+| `node.profileVersion` | integer                                                       |          | at least 1                                                        |
+| `leaseSeconds`        | integer                                                       |          | 30-86400                                                          |
+| `spot`                | boolean                                                       |          |                                                                   |
+| `idempotencyKey`      | string                                                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `wait`                | object                                                        |          |                                                                   |
+| `wait.timeoutMs`      | integer                                                       | yes      | 0-30000                                                           |
+| `gang`                | object                                                        |          |                                                                   |
+| `gang.size`           | integer                                                       | yes      | 2-64                                                              |
+| `gang.topologyKey`    | string                                                        |          | at most 128 characters                                            |
+
 ## timeline
 
 `POST /api/compute/capacity/timeline`
@@ -51,3 +93,13 @@ Methods of the `capacity` group, contributed by `capacity`.
 - **Authorization:** `compute:capacity:read` @ `compute-pool`
 - **Module:** `capacity`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field         | Type    | Required | Constraints                                                       |
+| ------------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`    | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`      | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `from`        | integer |          | 0-140737488355328                                                 |
+| `to`          | integer |          | 0-140737488355328                                                 |
+| `stepMinutes` | integer |          | 5-1440                                                            |

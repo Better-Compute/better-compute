@@ -29,6 +29,12 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+
 ## get
 
 `POST /api/compute/pools/get`
@@ -37,6 +43,13 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Authorization:** `compute:pools:read` @ `compute-pool`
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## create
 
@@ -47,6 +60,21 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field               | Type                                                           | Required | Constraints                                                        |
+| ------------------- | -------------------------------------------------------------- | -------- | ------------------------------------------------------------------ |
+| `tenantId`          | string                                                         | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `siteId`            | string                                                         | yes      | at most 57 characters; matches `^site_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `class`             | one of `metal-host`, `metal-dedicated`, `vps-host`, `provider` | yes      |                                                                    |
+| `gpuModel`          | string                                                         |          | at most 32 characters; matches `^[A-Za-z0-9-]{1,32}$`              |
+| `sharing`           | one of `exclusive`, `mig`, `timeslice`, `mps`                  |          | default `"exclusive"`                                              |
+| `agent`             | one of `bcd`, `none`                                           |          |                                                                    |
+| `policy`            | object                                                         |          |                                                                    |
+| `ownerQuota`        | map of integer                                                 |          | keys match `^[A-Za-z][A-Za-z0-9._-]{0,63}$`                        |
+| `providerAccountId` | string                                                         |          | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `idempotencyKey`    | string                                                         |          | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$`     |
+
 ## capacity
 
 `POST /api/compute/pools/capacity`
@@ -55,6 +83,13 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Authorization:** `compute:capacity:read` @ `compute-pool`
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## offer
 
@@ -65,6 +100,17 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field                | Type           | Required | Constraints                                                       |
+| -------------------- | -------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`           | string         | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`             | string         | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `toTenantId`         | string         | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `quota`              | map of integer | yes      | keys match `^[A-Za-z][A-Za-z0-9._-]{0,63}$`                       |
+| `includeDescendants` | boolean        |          | default `false`                                                   |
+| `priority`           | integer        |          | -1000-1000                                                        |
+
 ## unoffer
 
 `POST /api/compute/pools/unoffer`
@@ -73,6 +119,14 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Authorization:** `compute:pools:share` @ `compute-pool`
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`     | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `toTenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
 
 ## update
 
@@ -83,6 +137,15 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Module:** `capacity`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `policy`   | object |          |                                                                   |
+| `gpuModel` | string |          | at most 32 characters; matches `^[A-Za-z0-9-]{1,32}$`             |
+
 ## archive
 
 `POST /api/compute/pools/archive`
@@ -91,3 +154,10 @@ Methods of the `pools` group, contributed by `capacity`.
 - **Authorization:** `compute:pools:manage` @ `compute-pool`
 - **Module:** `capacity`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |

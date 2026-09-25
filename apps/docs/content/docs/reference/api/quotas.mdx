@@ -23,6 +23,13 @@ Methods of the `quotas` group, contributed by `capacity`.
 - **Module:** `capacity`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## set
 
 `POST /api/compute/quotas/set`
@@ -31,3 +38,12 @@ Methods of the `quotas` group, contributed by `capacity`.
 - **Authorization:** `compute:quotas:manage` @ `compute-fleet`
 - **Module:** `capacity`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `resource` | string  | yes      | at most 64 characters; matches `^[A-Za-z][A-Za-z0-9._-]{0,63}$`   |
+| `max`      | integer | yes      | at least 0                                                        |
