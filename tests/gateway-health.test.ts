@@ -32,6 +32,32 @@ describe('session versions', () => {
     await f.connect(node);
     expect(await f.session(node)).toMatchObject({ daemon_version: '0.1.0', proto_max: 1 });
   });
+
+  it('records the trust version from Hello and from a status report that applied a newer bundle (§13)', async () => {
+    f = await gatewayFixture();
+    const node = await f.addNode();
+    const trust = async () =>
+      Number((await f.db.query<{ trust_version: string }>('SELECT trust_version FROM node_sessions WHERE node_id = $1', [node])).rows[0]!.trust_version);
+    const { handle } = await f.connect(node, { trustVersion: 3n });
+    expect(await trust()).toBe(3);
+
+    // 0 is "unchanged"; a newer bundle is acked mid-session; an older number never lowers it.
+    const report = (version: bigint) =>
+      agentFrame({ case: 'status', value: { observedGeneration: 1n, appliedGeneration: 1n, trustVersion: version } });
+    await handle.receive(report(0n));
+    await f.gateway.jobs.status.tick();
+    expect(await trust()).toBe(3);
+    await handle.receive(report(5n));
+    await f.gateway.jobs.status.tick();
+    expect(await trust()).toBe(5);
+    await handle.receive(report(4n));
+    await f.gateway.jobs.status.tick();
+    expect(await trust()).toBe(5);
+
+    // A reconnect reports what the daemon holds now, even an older bundle (a restored disk).
+    await f.connect(node, { trustVersion: 2n, bootId: 'boot-restored' });
+    expect(await trust()).toBe(2);
+  });
 });
 
 describe('xidStatusHandler', () => {

@@ -86,6 +86,11 @@ export interface HelloInput {
   /** `Hello.daemon_version` / `proto_max`, stored on the session row for Rollout (v0.4). */
   daemonVersion?: string;
   protoMax?: number;
+  /**
+   * `Hello.trust_version`: the TrustBundle version the daemon holds (0: none), stored as
+   * `node_sessions.trust_version` so a command-root switch can wait for every connected node (§13).
+   */
+  trustVersion?: bigint;
   /** `Hello.drivers`: each becomes the node label `bc.dev/driver.<id>=<version>`. */
   drivers?: readonly { id: string; version: string }[];
 }
@@ -867,6 +872,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         const bumped = await tx.query<{ session_epoch: number; acked_event_seq: number }>(
           `UPDATE node_sessions SET gateway_id = $2, session_id = $3, session_epoch = session_epoch + 1,
              boot_id = $4, journal_id = $5, role = $6, daemon_version = $7, proto_max = $8,
+             trust_version = $9,
              acked_event_seq = CASE WHEN journal_id IS DISTINCT FROM $5 THEN 0 ELSE acked_event_seq END,
              connected_at = compute_now(), last_seen = compute_now(), disconnected_at = NULL
            WHERE node_id = $1
@@ -881,6 +887,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             // What Rollout (v0.4) reads to see a self-update finish; empty/0 means unknown.
             input.daemonVersion || null,
             input.protoMax && input.protoMax > 0 ? input.protoMax : null,
+            // What the daemon holds now, even if older than before (a restored disk): a root switch
+            // must not count a node that lost the new bundle.
+            String(input.trustVersion ?? 0n),
           ],
         );
         const epoch = Number(bumped.rows[0]!.session_epoch);
@@ -1223,6 +1232,13 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         // The node reconciler waits on convergence: wake it when observed_generation moved, not on
         // every (coalesced, ~1/s) report. Conditions and instances go to the status handlers.
         if (advanced.rowCount) await work.enqueue(tx, 'node', nodeId);
+        // A newer TrustBundle applied mid-session (Welcome.trust) is acked here, not at the next
+        // Hello (§13 root switch). 0 means unchanged, so the usual report adds no statement.
+        if (report.trustVersion > 0n)
+          await tx.query(
+            'UPDATE node_sessions SET trust_version = GREATEST(trust_version, $2::bigint) WHERE node_id = $1',
+            [nodeId, String(report.trustVersion)],
+          );
         // Health, instances, … are the host's; a failing handler must not hold back
         // observed_generation or the other handlers: each runs under its own savepoint.
         const handlers = reports.status === undefined ? [] : Array.isArray(reports.status) ? reports.status : [reports.status];
