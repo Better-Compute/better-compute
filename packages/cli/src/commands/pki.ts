@@ -284,6 +284,49 @@ export function configuredTrustDigest(bundle: PkiBundle, options: AnyComputeOpti
   } as never);
 }
 
+/** Connected daemons that enforce another approver set than the published one (review 10 M5). */
+export interface QuorumLag {
+  connected: number;
+  behind: number;
+  sample: { nodeId: string; epoch: number }[];
+}
+
+/**
+ * Which connected daemons hold another approver set (epoch or digest) than `published`, from what they report
+ * beside their trust version (node_sessions.approver_set_epoch / approver_set_sha256; an empty digest = no keys).
+ * Undefined before those columns exist. A daemon can take a bundle's version while refusing its quorum part, so the
+ * trust version alone says nothing about the set it enforces.
+ */
+export async function quorumLag(
+  sql: Pick<SqlExecutor, 'query'>,
+  published: PublishedTrust,
+  liveWindowMs = 120_000,
+): Promise<QuorumLag | undefined> {
+  const { rows: ready } = await sql.query<{ ok: boolean }>(
+    `SELECT count(*) = 2 AS ok FROM pg_attribute WHERE attrelid = to_regclass('node_sessions')
+        AND attname IN ('approver_set_epoch', 'approver_set_sha256') AND NOT attisdropped`,
+  );
+  if (!ready[0]?.ok) return undefined;
+  const digest = published.approverSet?.approverKeys.length ? Buffer.from(approverSetDigest(published.approverSet)) : Buffer.alloc(0);
+  const live = `gateway_id IS NOT NULL AND disconnected_at IS NULL
+                AND last_seen > compute_now() - make_interval(secs => $3::float8)
+                AND approver_set_epoch IS NOT NULL`;
+  const differs = `(approver_set_epoch <> $1::numeric OR coalesce(approver_set_sha256, '\\x'::bytea) <> $2::bytea)`;
+  const { rows } = await sql.query<{ connected: string | number; behind: string | number }>(
+    `SELECT count(*) AS connected, count(*) FILTER (WHERE ${differs}) AS behind FROM node_sessions WHERE ${live}`,
+    [published.approverSetEpoch, digest, liveWindowMs / 1000],
+  );
+  const { rows: sample } = await sql.query<{ node_id: string; epoch: string | number }>(
+    `SELECT node_id, approver_set_epoch AS epoch FROM node_sessions WHERE ${live} AND ${differs} ORDER BY node_id LIMIT 5`,
+    [published.approverSetEpoch, digest, liveWindowMs / 1000],
+  );
+  return {
+    connected: Number(rows[0]?.connected ?? 0),
+    behind: Number(rows[0]?.behind ?? 0),
+    sample: sample.map((row) => ({ nodeId: row.node_id, epoch: Number(row.epoch) })),
+  };
+}
+
 /**
  * doctor's quorum check (review 6 H1, review 7 M1): a configured approver quorum that differs from the published one
  * reaches the daemons that hold approver keys only when k of the CURRENT approvers signed it for a higher epoch.
@@ -291,8 +334,22 @@ export function configuredTrustDigest(bundle: PkiBundle, options: AnyComputeOpti
 export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: AnyComputeOptions): Promise<Finding[]> {
   const published = await publishedTrust(sql);
   if (!published?.approverSet) return [];
+  // Daemons still enforcing another set than the published one (they refused its change, or have not reconnected).
+  const lag = await quorumLag(sql, published);
+  const lagging: Finding[] = lag?.behind
+    ? [
+        {
+          check: 'pki.quorum-lag',
+          severity: 'warning',
+          message: `${lag.behind} of ${lag.connected} connected node(s) enforce another approver set than the published one (epoch ${published.approverSetEpoch}): ${lag.sample
+            .map((node) => `${node.nodeId} at epoch ${node.epoch}`)
+            .join(', ')}${lag.behind > lag.sample.length ? ', …' : ''}`,
+          fix: 'A refused change keeps their old approvers: check the set signatures (better-compute pki trust-version), or re-pin nodes that missed several changes',
+        },
+      ]
+    : [];
   const configured = configuredApproverSet(options);
-  if (sameApproverSet(published.approverSet, configured)) return [];
+  if (sameApproverSet(published.approverSet, configured)) return lagging;
   const next = published.approverSetEpoch + 1;
   const pki = approversOf(options);
   const epoch = Number(pki?.approvers?.epoch ?? 1);
@@ -325,6 +382,7 @@ export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: A
   const signed = given.length > 0 && refusal === undefined;
   if (!published.approverSet.approverKeys.length)
     return [
+      ...lagging,
       {
         check: 'pki.quorum-change',
         severity: 'info',
@@ -334,6 +392,7 @@ export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: A
     ];
   if (signed)
     return [
+      ...lagging,
       {
         check: 'pki.quorum-change',
         severity: 'info',
@@ -342,6 +401,7 @@ export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: A
       },
     ];
   return [
+    ...lagging,
     {
       check: 'pki.quorum-unsigned',
       severity: 'warning',
@@ -727,6 +787,7 @@ export const pkiCommands = [
         ? !sameApproverSet(published.approverSet, configuredApproverSet(options))
         : false;
       const lag = await trustLag(sql, published.version);
+      const setLag = await quorumLag(sql, published);
       return {
         version: published.version,
         ...(matches === undefined ? {} : { configurationMatches: matches }),
@@ -745,6 +806,8 @@ export const pkiCommands = [
         ...(quorumChanged ? { signQuorumForEpoch: published.approverSetEpoch + 1 } : {}),
         connected: lag.connected,
         behind: lag.behind,
+        // Nodes enforcing another approver set (once daemons report it).
+        ...(setLag ? { approverSetBehind: setLag.behind, approverSetSample: setLag.sample } : {}),
       };
     },
   }),
