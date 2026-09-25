@@ -207,6 +207,9 @@ Rules for v0.1:
   per account listing exactly those lines (never bare account names: a certificate names its node); on OpenTunnel
   re-verify the exec ticket against `exec_ticket_jwks_json` + own jti set (fail closed when full), require
   `sid` == tunnel_id, then open the Tunnel rpc with `opened` first (FakeDaemon 23dfe67 is the reference).
+  SSH KRL (d057cbf): from `AccessSection.ssh_revoked_serials` write the KRL (`ssh-keygen -k -f /etc/ssh/bc_krl -s
+  <ca.pub> -z <generation> <file of serials>`) and `RevokedKeys /etc/ssh/bc_krl` in sshd_config, rewritten on every
+  access-section change (an empty list still writes an empty KRL).
 - 25fcd9c: webhooks rows in core apiSurface are module 'events' (injected `@better-compute/events`, 812ed34:
   eventsModule, handleWatch SSE). W5a: server's `events.list` copies the outbox reader (txid_text alias, qualified
   ORDER BY), never imports events; mount `handleWatch` from the host (GET /watch), not from server.
