@@ -274,10 +274,20 @@ describe('rollouts', () => {
     const first = (await advance(rollout.id))!;
     expect(first.started).toHaveLength(2);
     expect(invalidated).toEqual(first.started);
-    expect(await spec(first.started[0]!)).toEqual({
+    const target = await spec(first.started[0]!);
+    expect(target).toEqual({
       version: '1.1.0',
       url: `${downloadsUrl}/bcd/1.1.0/linux-amd64`,
       sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      signature: expect.any(String),
+    });
+    // bcd takes a binary only with the release's signed manifest, which it checks against its own
+    // release pins: the section carries it as registered (UTF-8 JSON, base64 on the wire).
+    const signed = JSON.parse(Buffer.from(target!.signature!, 'base64').toString('utf8'));
+    expect(signed).toMatchObject({ manifest: expect.any(String), signatures: expect.any(Array) });
+    expect(JSON.parse(Buffer.from(signed.manifest, 'base64').toString('utf8'))).toMatchObject({
+      product: 'bcd',
+      version: expect.stringMatching(/^v?1\.1\.0$/),
     });
     const untouched = nodeId(0, 0) === first.started[0] ? nodeId(0, 1) : nodeId(0, 0);
     if (!first.started.includes(untouched)) expect(await spec(untouched)).toBeUndefined();
@@ -382,6 +392,7 @@ describe('rollouts', () => {
           version: '1.1.0',
           url: `${downloadsUrl}/bcd/1.1.0/linux-amd64`,
           sha256: expect.any(String),
+          signature: expect.any(String),
         },
         idempotencyKey: `rollout:${rollout.id}:${nodeId(0, 3)}`,
         notAfter: expect.any(Number),

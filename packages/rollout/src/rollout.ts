@@ -151,6 +151,24 @@ export async function readRelease(tx: SqlTx, version: string): Promise<DaemonRel
   return rows[0] ? toRelease(rows[0]) : undefined;
 }
 
+/**
+ * `DaemonSection.signature` for a registered release: the UTF-8 JSON of its SignedReleaseManifest
+ * (`{ manifest, signatures }`, as registered), base64 for the wire's bytes. bcd takes a binary only
+ * with it: it verifies the manifest against its own release pins, then that it names this version
+ * and lists the section's sha256 for its platform, so a compromised control plane cannot push a
+ * binary of its own.
+ */
+export async function releaseSignature(tx: SqlTx, version: string): Promise<string | undefined> {
+  const { rows } = await tx.query<{ manifest: unknown }>(
+    'SELECT manifest FROM daemon_releases WHERE version = $1',
+    [version.replace(/^v/, '')],
+  );
+  if (!rows[0]) return undefined;
+  return Buffer.from(JSON.stringify(parse<SignedReleaseManifest>(rows[0].manifest)), 'utf8').toString(
+    'base64',
+  );
+}
+
 export async function listReleases(tx: SqlTx): Promise<DaemonRelease[]> {
   const { rows } = await tx.query<ReleaseRow>(
     'SELECT * FROM daemon_releases ORDER BY sequence DESC',
@@ -877,6 +895,7 @@ async function nudgeRestricted(
   } as unknown as Pick<NodeRecord, 'labels'>);
   const binary = platform ? (await readRelease(tx, input.version))?.binaries[platform] : undefined;
   if (!platform || !binary) return false;
+  const signature = await releaseSignature(tx, input.version);
   await context.commands.enqueue(tx, {
     nodeId: input.nodeId,
     kind: 'daemon.upgrade',
@@ -885,6 +904,7 @@ async function nudgeRestricted(
       version: input.version,
       url: `${downloadsUrl.replace(/\/+$/, '')}/bcd/${input.version}/${platform}`,
       sha256: Buffer.from(binary.sha256, 'hex').toString('base64'),
+      ...(signature ? { signature } : {}),
     },
     idempotencyKey: `rollout:${input.rolloutId}:${input.nodeId}`,
     notAfter: input.now + input.timeoutMs,
@@ -953,9 +973,11 @@ export async function daemonSpecFor(
   const release = await readRelease(tx, version);
   const binary = release?.binaries[platform];
   if (!binary) return undefined;
+  const signature = await releaseSignature(tx, version);
   return {
     version,
     url: `${downloadsUrl.replace(/\/+$/, '')}/bcd/${version}/${platform}`,
     sha256: binary.sha256,
+    ...(signature ? { signature } : {}),
   };
 }
