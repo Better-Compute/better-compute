@@ -168,6 +168,9 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 
 // handle processes one server frame; false ends the session.
 func (a *Agent) handle(ctx context.Context, s *sess, f *agentv1.ServerFrame) bool {
+	a.mu.Lock()
+	a.lastContact = time.Now()
+	a.mu.Unlock()
 	if w := f.GetWelcome(); w != nil {
 		return a.onWelcome(ctx, s, w)
 	}

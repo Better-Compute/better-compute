@@ -215,7 +215,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	a.devices.generation = generation
 	a.access.generation = generation
-	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, []converge.Converger{a.devices, a.access, telemetryConverger{}})
+	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, []converge.Converger{a.devices, a.access, telemetryConverger{}, siteConverger{a}})
 	if err != nil {
 		return false
 	}

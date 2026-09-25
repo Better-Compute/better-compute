@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
@@ -144,9 +145,19 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	defer client.Close()
 	ctx, cancel := signalContext()
 	defer cancel()
+	role := commonv1.AgentRole_AGENT_ROLE_NODE
+	switch fs.Lookup("role").Value.String() {
+	case "node":
+	case "site":
+		role = commonv1.AgentRole_AGENT_ROLE_SITE
+	default:
+		fmt.Fprintln(stderr, "bcd join: --role must be node or site")
+		return exitUsage
+	}
 	state, err := agent.Join(ctx, agent.JoinOptions{
 		Client:        client,
 		Token:         token,
+		Role:          role,
 		EncryptionKey: encKey,
 		SignerPin:     signerPin,
 		Claims:        agent.Claims(inv, host.Hostname(), bootID),
@@ -179,11 +190,11 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd node: %v\n", err)
 		return exitFailure
 	}
-	return runAgent("node", cfg, newLogger(cfg, stderr), stderr)
+	return runAgent("node", cfg, newLogger(cfg, stderr), stderr, nil)
 }
 
 // runAgent runs the agent of a joined identity in cfg.DataDir until a signal (bcd node, bcd ramdisk).
-func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Writer) int {
+func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Writer, alongside func(ctx context.Context, a *agent.Agent)) int {
 	if cfg.DevInsecureH2C {
 		log.Warn("dev_insecure_h2c: cleartext HTTP/2 to a dev gateway; never on a reachable machine")
 	}
@@ -248,6 +259,9 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	defer stopStatus()
 	ctx, cancel := signalContext()
 	defer cancel()
+	if alongside != nil {
+		go alongside(ctx, a)
+	}
 	log.Info("bcd "+mode+" starting", "version", version, "node", state.NodeID, "site", state.SiteID, "gateway", cfg.GatewayURL, "hardware", hardwareBackend)
 	if err := a.Run(ctx); err != nil {
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)

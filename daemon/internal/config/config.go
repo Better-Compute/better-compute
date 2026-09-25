@@ -91,6 +91,9 @@ type Config struct {
 	// Log configures the daemon's logs.
 	Log Log
 
+	// Boot configures a site agent's boot server ([boot]; bcd site only).
+	Boot Boot
+
 	// GatewayServerName, when set, is the name the gateway's certificate must carry instead of the
 	// gateway_url host (a gateway reached by IP address, e.g. behind an L4 load balancer).
 	GatewayServerName string
@@ -99,6 +102,17 @@ type Config struct {
 	// names the node by a header instead of mTLS. Only fakehw builds of bcd accept it (the host build
 	// refuses to start); never set it on a reachable machine.
 	DevInsecureH2C bool
+}
+
+// Boot configures the site agent's boot server: where iPXE fetches scripts, and the site's ramdisk.
+type Boot struct {
+	// Listen is the HTTP address of the boot server (e.g. "0.0.0.0:8080"); empty disables it.
+	Listen string
+	// Kernel and Initrd are the URLs of the site's ramdisk artifacts.
+	Kernel string
+	Initrd string
+	// Cmdline is appended to the ramdisk's kernel command line.
+	Cmdline string
 }
 
 // Journal bounds the journal. Values may lower the PLAN.md §6 caps but never raise them.
@@ -280,6 +294,10 @@ var fields = []field{
 	{section: "journal", key: "max_events", kind: kindInt, set: func(c *Config, v value) { c.Journal.MaxEvents = v.num }},
 	{section: "log", key: "level", kind: kindString, set: func(c *Config, v value) { c.Log.Level = v.str }},
 	{section: "log", key: "json", kind: kindBool, set: func(c *Config, v value) { c.Log.JSON = v.boolean }},
+	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
+	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
+	{section: "boot", key: "initrd", kind: kindString, set: func(c *Config, v value) { c.Boot.Initrd = v.str }},
+	{section: "boot", key: "cmdline", kind: kindString, set: func(c *Config, v value) { c.Boot.Cmdline = v.str }},
 	{key: "gateway_server_name", kind: kindString, set: func(c *Config, v value) { c.GatewayServerName = v.str }},
 	{key: "dev_insecure_h2c", kind: kindBool, set: func(c *Config, v value) { c.DevInsecureH2C = v.boolean }},
 }

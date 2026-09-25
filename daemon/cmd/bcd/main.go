@@ -2,8 +2,8 @@
 // datacenter (site), inside the PXE ramdisk (ramdisk) and on test hosts (sim), plus the local
 // commands join, status, doctor and version (PLAN.md §6).
 //
-// node, ramdisk, join, status, doctor and version work; site and sim parse their flags and then
-// exit 2 with the phase they arrive in. The release version is set at link time:
+// node, site, ramdisk, join, status, doctor and version work; sim parses its flags and then exits
+// 2 with the phase it arrives in. The release version is set at link time:
 //
 //	go build -ldflags "-X main.version=0.1.0" ./cmd/bcd
 package main
@@ -50,14 +50,19 @@ func commands() []command {
 	noFlags := func(*flag.FlagSet) {}
 	return []command{
 		{name: "node", summary: "run the node agent: session, journal, inventory, convergence, commands", flags: withConfig, run: runNode},
-		{name: "site", summary: "run the site agent: proxy DHCP, iPXE, image cache, BMC", flags: withConfig, run: notYet("v0.2")},
+		{name: "site", summary: "run the site agent: proxy DHCP, iPXE, image cache, BMC", flags: withConfig, run: runSite},
 		{name: "ramdisk", summary: "run inside the PXE ramdisk: inspect, diag, wipe, image stream, kexec", flags: ramdiskFlags, run: runRamdisk},
 		{name: "sim", summary: "run simulated daemons on fakehw against a gateway", flags: simFlags, run: notYet("v0.4")},
-		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN or stdin", flags: withConfig, run: runJoin},
+		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN or stdin", flags: joinFlags, run: runJoin},
 		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: runStatus},
 		{name: "doctor", summary: "check this host: configuration, NVML, hardware, KVM, IOMMU, gateway, identity", flags: withConfig, run: runDoctor},
 		{name: "version", summary: "print the version", flags: noFlags, run: runVersion},
 	}
+}
+
+func joinFlags(fs *flag.FlagSet) {
+	fs.String("config", config.DefaultPath, "configuration file written by the install script")
+	fs.String("role", "node", "the agent role to join as: node or site (the token decides what is allowed)")
 }
 
 func simFlags(fs *flag.FlagSet) {

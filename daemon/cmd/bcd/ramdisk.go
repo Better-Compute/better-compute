@@ -118,5 +118,5 @@ func runRamdisk(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd ramdisk: %v\n", err)
 		return exitFailure
 	}
-	return runAgent("ramdisk", cfg, log, stderr)
+	return runAgent("ramdisk", cfg, log, stderr, nil)
 }

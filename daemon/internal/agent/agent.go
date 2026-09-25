@@ -114,14 +114,18 @@ type Agent struct {
 	clockSet bool
 	// trustPending: a newer trust bundle was applied and no status has carried it yet.
 	trustPending bool
-	execs        map[string]*execution
-	deferred     map[string]*deferred
-	overflow     []journal.Event
-	spec         *agentv1.NodeSpec
-	applied      uint64
-	observed     uint64
-	lastStatus   *agentv1.StatusReport
-	revoked      bool
+	// lease is the site:<id>:boot lease (site agents); lastContact the last frame from the gateway.
+	lease       bootLease
+	lastContact time.Time
+	tokens      tokenCache
+	execs       map[string]*execution
+	deferred    map[string]*deferred
+	overflow    []journal.Event
+	spec        *agentv1.NodeSpec
+	applied     uint64
+	observed    uint64
+	lastStatus  *agentv1.StatusReport
+	revoked     bool
 	// execJWKS is the applied access section's exec-ticket JWKS (tunnels).
 	execJWKS string
 	tunnels  int
@@ -338,6 +342,9 @@ func (a *Agent) sweepLoop(ctx context.Context) {
 			now := a.serverNowLocked()
 			a.mu.Unlock()
 			a.boot.Sweep(now)
+			a.tokens.mu.Lock()
+			a.tokens.tokens = nil
+			a.tokens.mu.Unlock()
 			if err != nil {
 				a.log.Warn("journal sweep failed", "error", err.Error())
 			}

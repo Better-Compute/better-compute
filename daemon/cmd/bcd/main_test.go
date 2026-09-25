@@ -45,8 +45,7 @@ func TestHelpAndUsage(t *testing.T) {
 
 func TestUnimplementedModesExitTwo(t *testing.T) {
 	phases := map[string]string{
-		"site": "v0.2",
-		"sim":  "v0.4",
+		"sim": "v0.4",
 	}
 	for name, phase := range phases {
 		code, _, stderr := runBCD(name)
