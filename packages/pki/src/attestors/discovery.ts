@@ -36,11 +36,17 @@ import {
  * serialized `SignedDiscoveryAssertion`).
  */
 export const discoveryCertTtlSeconds = 2 * 3600;
-/** Command kinds a ramdisk certificate allows (§5: inventory, diag, wipe, deploy, kexec). */
+/**
+ * Command kinds a ramdisk certificate allows (§5: inventory, diag, wipe, deploy, kexec, plus logs
+ * for support bundles): exactly the kinds whose `roles` include `ramdisk`, under their registered
+ * names (protocol's `inventory.refresh`/`logs.collect`/`diag.nvml`, metal's `diag.dcgm`,
+ * `disk.wipe`, `deploy.image`, `boot.kexec`). `tests/pki-attestors.test.ts` checks the two agree.
+ */
 export const discoveryAllowedKinds: readonly string[] = Object.freeze([
-  'inventory',
+  'inventory.refresh',
+  'logs.collect',
   'diag.*',
-  'wipe',
+  'disk.wipe',
   'deploy.*',
   'boot.kexec',
 ]);

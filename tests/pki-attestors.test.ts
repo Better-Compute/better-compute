@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { manualClock, type AttestationContext, type SqlExecutor } from '@better-compute/core';
 import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
+import { AgentRole, commandKinds } from '@better-compute/protocol';
+import { metalCommandKinds } from '@better-compute/metal';
 import {
   awsInstanceIdentity,
   base64url,
@@ -643,7 +645,9 @@ describe('discovery', () => {
     const attestor = discoveryAttestor(hook);
     const captured = assertion({ mac: '3c:ec:ef:10:20:30', issuedAt: now - 30_000 });
     const first = await insertToken('discovery', { pool_id: null });
-    await expect(attest(attestor, first.token, captured)).resolves.toMatchObject({ role: 'ramdisk' });
+    await expect(attest(attestor, first.token, captured)).resolves.toMatchObject({
+      role: 'ramdisk',
+    });
     const second = await insertToken('discovery', { pool_id: null });
     await expect(attest(attestor, second.token, captured)).rejects.toMatchObject(denied);
     // The refused join rolled back: the second token is still unspent.
@@ -659,7 +663,9 @@ describe('discovery', () => {
       expect: JSON.stringify({ mac: '3c:ec:ef:10:20:31' }),
     });
     await expect(
-      attest(attestor, forOtherNic.token, assertion({ issuedAt: now - 20_000 }), { claims: twoNics }),
+      attest(attestor, forOtherNic.token, assertion({ issuedAt: now - 20_000 }), {
+        claims: twoNics,
+      }),
     ).rejects.toMatchObject(denied);
     expect(hook.reasons).toEqual(['assertion-reused', 'token-mac-mismatch']);
   });
@@ -686,7 +692,8 @@ describe('discovery', () => {
 
 describe('commandKindAllowed', () => {
   it('matches exact kinds and prefix globs; null is unrestricted, [] allows nothing', () => {
-    expect(commandKindAllowed('wipe', discoveryAllowedKinds)).toBe(true);
+    expect(commandKindAllowed('disk.wipe', discoveryAllowedKinds)).toBe(true);
+    expect(commandKindAllowed('wipe', discoveryAllowedKinds)).toBe(false);
     expect(commandKindAllowed('diag.dcgm', discoveryAllowedKinds)).toBe(true);
     expect(commandKindAllowed('deploy.image', discoveryAllowedKinds)).toBe(true);
     expect(commandKindAllowed('deploy', discoveryAllowedKinds)).toBe(false);
@@ -697,6 +704,32 @@ describe('commandKindAllowed', () => {
     expect(commandKindAllowed('exec.run', null)).toBe(true);
     expect(commandKindAllowed('exec.run', [])).toBe(false);
     expect(commandKindAllowed('x', ['.*'])).toBe(false);
+  });
+
+  it('allows a ramdisk certificate exactly the registered kinds whose roles include ramdisk', () => {
+    const ramdiskKinds = [
+      ...Object.entries(commandKinds)
+        .filter(([, spec]) => spec.roles.includes(AgentRole.RAMDISK))
+        .map(([kind]) => kind),
+      ...metalCommandKinds
+        .filter((spec) => spec.roles.includes('ramdisk'))
+        .map((spec) => spec.kind),
+    ];
+    expect(ramdiskKinds).toEqual(
+      expect.arrayContaining(['inventory.refresh', 'disk.wipe', 'deploy.image', 'boot.kexec']),
+    );
+    for (const kind of ramdiskKinds)
+      expect([kind, commandKindAllowed(kind, discoveryAllowedKinds)]).toEqual([kind, true]);
+    const others = [
+      ...Object.entries(commandKinds)
+        .filter(([, spec]) => !spec.roles.includes(AgentRole.RAMDISK))
+        .map(([kind]) => kind),
+      ...metalCommandKinds
+        .filter((spec) => !spec.roles.includes('ramdisk'))
+        .map((spec) => spec.kind),
+    ].filter((kind) => !ramdiskKinds.includes(kind));
+    for (const kind of others)
+      expect([kind, commandKindAllowed(kind, discoveryAllowedKinds)]).toEqual([kind, false]);
   });
 });
 
@@ -849,15 +882,25 @@ describe('cloud-iid', () => {
     });
     const instance = { ...gcpClaims().google.compute_engine, instance_id: '7770001' };
     const tokenFor = (forCsr: Uint8Array) =>
-      jwt(gcpClaims({ aud: cloudIidAudience(audience, sha256(forCsr)), google: { compute_engine: instance } }));
-    await expect(attest(attestor, { provider: 'gcp', document: tokenFor(csr) })).resolves.toMatchObject({
+      jwt(
+        gcpClaims({
+          aud: cloudIidAudience(audience, sha256(forCsr)),
+          google: { compute_engine: instance },
+        }),
+      );
+    await expect(
+      attest(attestor, { provider: 'gcp', document: tokenFor(csr) }),
+    ).resolves.toMatchObject({
       tenantId: tenant,
     });
     const other = createCsr(generateP256KeyPair().privateKey);
     await expect(
       db.transaction((tx) =>
         attestor.verify(
-          { attestor: 'cloud-iid', payload: createCloudIidEvidence({ provider: 'gcp', document: tokenFor(other) }) },
+          {
+            attestor: 'cloud-iid',
+            payload: createCloudIidEvidence({ provider: 'gcp', document: tokenFor(other) }),
+          },
           context(tx, { csrSha256: sha256(other) }),
         ),
       ),
