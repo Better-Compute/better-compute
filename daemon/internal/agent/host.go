@@ -106,7 +106,7 @@ func (h *RealHost) RemoveFile(abs string) error {
 // FirewallFile is where a host under a fake root keeps the ruleset it was asked to load.
 const FirewallFile = "/run/bcd/instances.nft"
 
-// CheckFirewall lists bcd's tables as JSON (nft -j list table bridge bcd_instances, inet bcd_taps)
+// CheckFirewall lists bcd's tables as JSON (bridge bcd_instances, inet and arp bcd_taps)
 // and counts their rules; a host under a fake root checks its ruleset file.
 func (h *RealHost) CheckFirewall(ctx context.Context, rules int) error {
 	if h.Helper != nil {
@@ -120,10 +120,10 @@ func (h *RealHost) CheckFirewall(ctx context.Context, rules int) error {
 		return err
 	}
 	n := 0
-	for _, table := range [][2]string{{"bridge", firewallTable}, {"inet", backstopTable}} {
+	for _, table := range [][2]string{{"bridge", firewallTable}, {"inet", backstopTable}, {"arp", backstopTable}} {
 		out, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", table[0], table[1]).Output()
 		if err != nil {
-			if table[0] == "inet" {
+			if table[0] != "bridge" {
 				continue // absent: no rules (a ruleset without NICs has none)
 			}
 			return fmt.Errorf("nft: %v", err)

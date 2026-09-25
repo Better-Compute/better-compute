@@ -121,8 +121,8 @@ func Classify(abs string) (kind, name string, ok bool) {
 var gpuUUID = regexp.MustCompile(`^GPU-[0-9A-Fa-f-]{8,64}$`)
 
 // firewallTables are the only tables a ruleset may name: the instances' bridge rules and the inet
-// backstop for taps off their bridge.
-var firewallTables = []string{"bridge bcd_instances", "inet bcd_taps"}
+// and arp backstops for taps off their bridge.
+var firewallTables = []string{"bridge bcd_instances", "inet bcd_taps", "arp bcd_taps"}
 
 // CheckRuleset accepts only the shape bcd node renders (agent/netpolicy.go): at the top level,
 // "table", "delete table" and "flush table" of bcd's tables and "table … {" blocks of them; inside a

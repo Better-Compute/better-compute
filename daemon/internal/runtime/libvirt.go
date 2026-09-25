@@ -130,6 +130,7 @@ type instanceMetaXML struct {
 	ID         string `xml:"id,attr"`
 	Allocation string `xml:"allocation,omitempty"`
 	Image      string `xml:"image,omitempty"`
+	Format     string `xml:"format,omitempty"` // the base image's
 	Restored   string `xml:"restored,omitempty"`
 	Addresses  string `xml:"addresses,omitempty"`
 	UserData   bool   `xml:"userData,omitempty"`
@@ -390,13 +391,14 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 			if err != nil {
 				return err
 			}
-			meta.Image = hex.EncodeToString(img.GetSha256())
+			meta.Image, meta.Format = hex.EncodeToString(img.GetSha256()), img.GetFormat()
 			size := strconv.FormatUint(spec.GetDiskBytes(), 10)
 			if img.GetFormat() == "iso" {
 				cdrom = base
 				_, err = l.run(ctx, "qemu-img", "create", "-f", "qcow2", filepath.Join(dir, "disk.qcow2"), size)
 			} else {
-				_, err = l.run(ctx, "qemu-img", "create", "-f", "qcow2", "-F", img.GetFormat(), "-b", base, filepath.Join(dir, "disk.qcow2"), size)
+				// -u: the base (checked above) is not opened; its format is stated.
+				_, err = l.run(ctx, "qemu-img", "create", "-f", "qcow2", "-u", "-F", img.GetFormat(), "-b", base, filepath.Join(dir, "disk.qcow2"), size)
 			}
 			if err != nil {
 				return err
@@ -411,6 +413,9 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 			cdrom = l.basePath(meta.Image, "iso")
 		}
 		// A disk only grows (qemu-img while stopped, blockresize while running).
+		if err := l.checkDisk(dir, meta); err != nil {
+			return err
+		}
 		if err := l.grow(ctx, id, dir, spec.GetDiskBytes()); err != nil {
 			return err
 		}
@@ -438,7 +443,7 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	}
 	dst := l.basePath(hex.EncodeToString(img.GetSha256()), format)
 	if _, err := os.Stat(dst); err == nil {
-		return dst, l.checkImage(ctx, dst, format)
+		return dst, checkBase(dst, format)
 	}
 	if !strings.HasPrefix(img.GetUrl(), "https://") {
 		return "", errors.New("images are fetched over https only")
@@ -476,84 +481,21 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	if !bytes.Equal(h.Sum(nil), img.GetSha256()) {
 		return "", fmt.Errorf("image sha256 %x is not the pinned %x", h.Sum(nil), img.GetSha256())
 	}
-	if err := l.checkImage(ctx, tmp.Name(), format); err != nil {
+	if err := checkBase(tmp.Name(), format); err != nil {
+		return "", err
+	}
+	// Readable by the unprivileged VMM a runtime binds it into (images/ itself stays root's, 0700).
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
 		return "", err
 	}
 	return dst, os.Rename(tmp.Name(), dst)
 }
 
-// checkRestored checks a restored snapshot's disk (a flat qcow2) and seed (raw) like a base image.
-func (l *Libvirt) checkRestored(ctx context.Context, dir string) error {
-	if err := l.checkImage(ctx, filepath.Join(dir, "disk.qcow2"), "qcow2"); err != nil {
+// checkRestored checks a restored snapshot's disk: a flat qcow2 naming no other file. Its seed is
+// attached as raw, never probed.
+func (l *Libvirt) checkRestored(_ context.Context, dir string) error {
+	if err := checkOverlay(filepath.Join(dir, "disk.qcow2"), "", ""); err != nil {
 		return fmt.Errorf("the snapshot's disk: %w", err)
-	}
-	if seed := filepath.Join(dir, "seed.iso"); fileExists(seed) {
-		if err := l.checkImage(ctx, seed, "raw"); err != nil {
-			return fmt.Errorf("the snapshot's seed: %w", err)
-		}
-	}
-	return nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// qemuImgInfo is what checkImage reads of `qemu-img info --output=json`.
-type qemuImgInfo struct {
-	Format          string `json:"format"`
-	BackingFilename string `json:"backing-filename"`
-	FormatSpecific  struct {
-		Data struct {
-			DataFile string `json:"data-file"`
-		} `json:"data"`
-	} `json:"format-specific"`
-}
-
-func (l *Libvirt) imageInfo(ctx context.Context, path string, format ...string) (*qemuImgInfo, error) {
-	args := []string{"info", "-U", "--output=json"}
-	if len(format) > 0 {
-		args = append(args, "-f", format[0])
-	}
-	out, err := l.run(ctx, "qemu-img", append(args, path)...)
-	if err != nil {
-		return nil, err
-	}
-	var info qemuImgInfo
-	if err := json.Unmarshal(out, &info); err != nil {
-		return nil, fmt.Errorf("qemu-img info: %w", err)
-	}
-	return &info, nil
-}
-
-// checkImage refuses a tenant's base image that would make the hypervisor (root) open another
-// file: a qcow2 naming a backing file or an external data file (/dev/nvme0n1, another instance's
-// disk), or a raw or iso image whose content probes as another format. qemu-img info never opens
-// a backing file itself.
-func (l *Libvirt) checkImage(ctx context.Context, path, format string) error {
-	declared := format
-	if declared == "iso" {
-		declared = "raw"
-	}
-	info, err := l.imageInfo(ctx, path, declared)
-	if err != nil {
-		return fmt.Errorf("the image is not %s: %w", format, err)
-	}
-	if info.BackingFilename != "" {
-		return errors.New("the image names a backing file")
-	}
-	if info.FormatSpecific.Data.DataFile != "" {
-		return errors.New("the image names an external data file")
-	}
-	if declared == "raw" {
-		probed, err := l.imageInfo(ctx, path)
-		if err != nil {
-			return err
-		}
-		if probed.Format != "raw" {
-			return fmt.Errorf("the %s image's content is %s", format, probed.Format)
-		}
 	}
 	return nil
 }
@@ -586,20 +528,36 @@ func (l *Libvirt) seed(ctx context.Context, id string, userData []byte, dir stri
 	return nil
 }
 
-var virtualSize = regexp.MustCompile(`"virtual-size":\s*(\d+)`)
+// checkDisk checks a domain's disk before anything opens it again: bcd's overlay on the domain's base
+// image, or a flat disk (restored, or installed from an iso), naming no other file.
+func (l *Libvirt) checkDisk(dir string, meta instanceMetaXML) error {
+	base, format := "", ""
+	if meta.Image != "" && meta.Restored == "" {
+		format = meta.Format
+		if format == "" { // a domain defined before the format was recorded
+			format = "raw"
+			if fileExists(l.basePath(meta.Image, "qcow2")) {
+				format = "qcow2"
+			}
+		}
+		if format != "iso" {
+			base = l.basePath(meta.Image, format)
+		} else {
+			format = ""
+		}
+	}
+	return checkOverlay(filepath.Join(dir, "disk.qcow2"), base, format)
+}
+
 
 // grow enlarges the disk to size bytes; a smaller size is refused.
 func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 	disk := filepath.Join(dir, "disk.qcow2")
-	info, err := l.run(ctx, "qemu-img", "info", "-U", "-f", "qcow2", "--output=json", disk)
+	h, err := readQcow2(disk)
 	if err != nil {
 		return err
 	}
-	m := virtualSize.FindSubmatch(info)
-	if m == nil {
-		return errors.New("qemu-img info: no virtual size")
-	}
-	current, _ := strconv.ParseUint(string(m[1]), 10, 64)
+	current := h.Size
 	switch {
 	case size < current:
 		return errors.New("a disk cannot shrink")
@@ -622,7 +580,8 @@ func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 func (l *Libvirt) SetState(ctx context.Context, id, state string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if exists, managed, _ := l.managed(ctx, id); !exists || !managed {
+	exists, managed, meta := l.managed(ctx, id)
+	if !exists || !managed {
 		return fmt.Errorf("no managed domain %s", id)
 	}
 	out, err := l.virsh(ctx, "domstate", id)
@@ -632,6 +591,9 @@ func (l *Libvirt) SetState(ctx context.Context, id, state string) error {
 	current := stateOf(string(out))
 	memory := filepath.Join(l.instanceDir(id), "memory.state")
 	start := func(paused bool) error {
+		if err := l.checkDisk(l.instanceDir(id), meta); err != nil {
+			return err
+		}
 		if _, err := os.Stat(memory); err == nil {
 			args := []string{"restore", memory, "--xml", filepath.Join(l.instanceDir(id), "domain.xml")}
 			if paused {
@@ -739,10 +701,14 @@ type libvirtSnapshot struct {
 func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if exists, managed, _ := l.managed(ctx, id); !exists || !managed {
+	exists, managed, dom := l.managed(ctx, id)
+	if !exists || !managed {
 		return "", fmt.Errorf("no managed domain %s", id)
 	}
 	dir := l.instanceDir(id)
+	if err := l.checkDisk(dir, dom); err != nil {
+		return "", err
+	}
 	work, err := os.MkdirTemp(dir, ".snapshot-")
 	if err != nil {
 		return "", err

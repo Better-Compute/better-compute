@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,8 +30,10 @@ import (
 // unit (bcd-ch-<id>) so a VM outlives bcd:
 //   - the disk is a qcow2 overlay on a base image downloaded once and verified (shared with
 //     libvirt-kvm's layout), the user data a NoCloud seed disk (volume "cidata");
-//   - NICs are taps named TapName (bcd's network rules exist before them), attached to their
-//     network's bridge once the VM runs; GPUs pass through with VFIO;
+//   - NICs are persistent taps named TapName (bcd's network rules exist before them), created and
+//     bridged by bcd before the VMM starts; the VMM gets their fds, never their names; GPUs pass
+//     through with VFIO;
+//   - each VMM runs as its instance's own unprivileged uid, confined (unitProperties);
 //   - instances/<id>/vm.json is bcd's record: a directory without one is not bcd's;
 //   - the serial console is a unix socket;
 //   - a snapshot is a tar of the flattened disk, the seed and, with memory, cloud-hypervisor's own
@@ -44,8 +49,15 @@ type CloudHypervisor struct {
 	Firmware string
 	// Exec runs a command and returns its standard output (tests replace it).
 	Exec func(ctx context.Context, name string, args ...string) ([]byte, error)
-	// API calls a VMM's REST API on its socket (tests replace it).
-	API func(ctx context.Context, socket, method, path string, body any) ([]byte, int, error)
+	// API calls a VMM's REST API on its socket, sending files (tap fds) with the request as
+	// SCM_RIGHTS (tests replace it).
+	API func(ctx context.Context, socket, method, path string, body any, files []*os.File) ([]byte, int, error)
+	// OpenTap opens a queue of a persistent tap (tests replace it).
+	OpenTap func(name string) (*os.File, error)
+	// Chown gives a path to a VMM's user (tests replace it).
+	Chown func(path string, uid, gid int) error
+	// VFIOGroup is a PCI device's IOMMU group (tests replace it; default from sysfs).
+	VFIOGroup func(addr string) (string, error)
 	// GPUAddress maps a GPU device id to its PCI address ("0000:3b:00.0") for VFIO.
 	GPUAddress func(id string) (string, bool)
 	// HTTP downloads base images (https only).
@@ -65,6 +77,8 @@ type chRecord struct {
 	AllocationID string          `json:"allocationId,omitempty"`
 	Image        string          `json:"image,omitempty"`
 	Base         string          `json:"base,omitempty"` // the base image the overlay reads
+	BaseFormat   string          `json:"baseFormat,omitempty"`
+	UID          uint32          `json:"uid,omitempty"` // the VMM's user
 	RestoredFrom string          `json:"restoredFrom,omitempty"`
 	Addresses    []string        `json:"addresses,omitempty"`
 	Networks     []string        `json:"networks,omitempty"`
@@ -104,11 +118,16 @@ func unitName(id string) string { return "bcd-ch-" + id + ".service" }
 
 // api calls the VMM of instance id; a status above 299 is an error.
 func (c *CloudHypervisor) api(ctx context.Context, id, method, path string, body any) ([]byte, error) {
+	return c.apiFiles(ctx, id, method, path, body, nil)
+}
+
+// apiFiles is api sending files with the request.
+func (c *CloudHypervisor) apiFiles(ctx context.Context, id, method, path string, body any, files []*os.File) ([]byte, error) {
 	call := c.API
 	if call == nil {
 		call = unixAPI
 	}
-	out, status, err := call(ctx, c.socket(id), method, "/api/v1/"+path, body)
+	out, status, err := call(ctx, c.socket(id), method, "/api/v1/"+path, body, files)
 	if err != nil {
 		return nil, err
 	}
@@ -116,35 +135,6 @@ func (c *CloudHypervisor) api(ctx context.Context, id, method, path string, body
 		return out, fmt.Errorf("cloud-hypervisor %s: HTTP %d: %s", path, status, strings.TrimSpace(string(out)))
 	}
 	return out, nil
-}
-
-// unixAPI calls a VMM's API over its unix socket.
-func unixAPI(ctx context.Context, socket, method, path string, body any) ([]byte, int, error) {
-	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-	}}}
-	var r io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, 0, err
-		}
-		r = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, r)
-	if err != nil {
-		return nil, 0, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	out, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	return out, resp.StatusCode, err
 }
 
 func (c *CloudHypervisor) record(id string) (*chRecord, error) {
@@ -250,7 +240,8 @@ func (c *CloudHypervisor) vmConfig(spec *agentv1.InstanceSpec, dir string, overl
 	}
 	var nets []any
 	for i, nic := range spec.GetNics() {
-		nets = append(nets, map[string]any{"id": fmt.Sprintf("net%d", i), "tap": TapName(spec.GetInstanceId(), i), "mac": nic.GetMac()})
+		// No tap name: the VMM gets the tap's fd (start).
+		nets = append(nets, map[string]any{"id": fmt.Sprintf("net%d", i), "mac": nic.GetMac()})
 	}
 	var devices []any
 	for _, gpu := range spec.GetGpuDeviceIds() {
@@ -300,7 +291,12 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		r = &chRecord{ID: id, Managed: chManaged, AllocationID: spec.GetAllocationId()}
+		uid, err := c.freeUID()
+		if err != nil {
+			os.RemoveAll(dir)
+			return err
+		}
+		r = &chRecord{ID: id, Managed: chManaged, AllocationID: spec.GetAllocationId(), UID: uid}
 		st := c.storage()
 		switch {
 		case restore != nil:
@@ -325,8 +321,9 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 				os.RemoveAll(dir)
 				return err
 			}
-			r.Image, r.Base = hex.EncodeToString(img.GetSha256()), base
-			if _, err := c.run(ctx, "qemu-img", "create", "-f", "qcow2", "-F", img.GetFormat(), "-b", base,
+			r.Image, r.Base, r.BaseFormat = hex.EncodeToString(img.GetSha256()), base, img.GetFormat()
+			// -u: the base (checked by baseImage) is not opened; its format is stated.
+			if _, err := c.run(ctx, "qemu-img", "create", "-f", "qcow2", "-u", "-F", img.GetFormat(), "-b", base,
 				filepath.Join(dir, "disk.qcow2"), strconv.FormatUint(spec.GetDiskBytes(), 10)); err != nil {
 				os.RemoveAll(dir)
 				return err
@@ -338,6 +335,9 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 		}
 	} else if spec.GetDiskBytes() > r.DiskBytes && r.DiskBytes > 0 {
 		if state, _ := c.state(ctx, id); state == StateStopped {
+			if err := c.checkDisk(r); err != nil {
+				return err
+			}
 			if _, err := c.run(ctx, "qemu-img", "resize", "-f", "qcow2", filepath.Join(dir, "disk.qcow2"), strconv.FormatUint(spec.GetDiskBytes(), 10)); err != nil {
 				return err
 			}
@@ -372,32 +372,69 @@ func (c *CloudHypervisor) poll() time.Duration {
 	return 200 * time.Millisecond
 }
 
-// unitProperties confine a VMM (security review 12 H2, M3). It runs as root, since it opens taps and
-// VFIO groups, but:
-//   - its only capabilities are CAP_NET_ADMIN and CAP_IPC_LOCK (pinned guest memory);
-//   - the only devices it can open are KVM, the tun clone device and, with GPUs, VFIO;
-//   - of bcd's directory it sees only its own instance (read-write) and its base image (read-only),
-//     so a disk naming another file finds nothing to open;
+// VMM users: each instance's VMM runs as its own uid (and group) from this block, recorded in its
+// vm.json; the plugin sandbox's block starts right after it.
+const (
+	vmmUIDBase = 0x7FFD0000
+	vmmUIDs    = 0x10000
+)
+
+// freeUID is the lowest VMM uid no instance's record holds.
+func (c *CloudHypervisor) freeUID() (uint32, error) {
+	used := map[uint32]bool{}
+	entries, _ := os.ReadDir(filepath.Join(c.Dir, "instances"))
+	for _, e := range entries {
+		if r, err := c.record(e.Name()); err == nil && r.UID != 0 {
+			used[r.UID] = true
+		}
+	}
+	for i := uint32(0); i < vmmUIDs; i++ {
+		if !used[vmmUIDBase+i] {
+			return vmmUIDBase + i, nil
+		}
+	}
+	return 0, errors.New("no free VMM uid")
+}
+
+// unitProperties confine a VMM (security review 12 H2, M3, and the verification of 933c51b):
+//   - it runs as its instance's own uid with no capabilities at all, so no VMM can read another's
+//     /proc, files or memory, and a VMM holds no root file it could open;
+//   - it has no network: its taps come as open fds (bcd opens and bridges them), so it needs neither
+//     CAP_NET_ADMIN nor any socket family but AF_UNIX (its API, by path);
+//   - its mount namespace hides /run (systemd's, D-Bus's and every daemon's sockets), /var (bcd's
+//     data, libvirt's, other instances) and bcd's and sshd's configuration; only its own instance
+//     (read-write) and its base image (read-only) are bound back;
+//   - the only devices it can open are KVM and, with GPUs, VFIO;
 //   - its memory, tasks and CPU are bounded by its flavor, plus overhead.
 func (c *CloudHypervisor) unitProperties(r *chRecord) []string {
 	dir := c.instanceDir(r.ID)
+	id := strconv.FormatUint(uint64(r.UID), 10)
 	props := []string{
-		"DevicePolicy=closed", "DeviceAllow=/dev/kvm rw", "DeviceAllow=/dev/net/tun rw",
-		"CapabilityBoundingSet=CAP_NET_ADMIN CAP_IPC_LOCK", "NoNewPrivileges=yes",
-		"ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "ProtectKernelTunables=yes",
-		"ProtectKernelModules=yes", "ProtectKernelLogs=yes", "ProtectControlGroups=yes", "ProtectClock=yes",
-		"ProtectHostname=yes", "RestrictSUIDSGID=yes", "RestrictRealtime=yes", "RestrictNamespaces=yes",
-		"LockPersonality=yes", "IPAddressDeny=any", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
-		"TemporaryFileSystem=" + filepath.Join(c.Dir, "instances") + ":ro",
-		"TemporaryFileSystem=" + filepath.Join(c.Dir, "images") + ":ro",
+		"User=" + id, "Group=" + id, "CapabilityBoundingSet=", "AmbientCapabilities=", "NoNewPrivileges=yes",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX", "IPAddressDeny=any",
+		"DevicePolicy=closed", "DeviceAllow=/dev/kvm rw",
+		"ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "ProtectProc=invisible",
+		"ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectKernelLogs=yes", "ProtectControlGroups=yes",
+		"ProtectClock=yes", "ProtectHostname=yes", "RestrictSUIDSGID=yes", "RestrictRealtime=yes", "RestrictNamespaces=yes",
+		"LockPersonality=yes", "UMask=0077",
+		"SystemCallFilter=~@debug @mount @reboot @swap @module @raw-io @clock @cpu-emulation @obsolete",
+		"TemporaryFileSystem=/run:ro", "TemporaryFileSystem=/var:ro",
+		"InaccessiblePaths=-/etc/bcd -/etc/ssh -/etc/libvirt -/etc/shadow -/etc/gshadow",
 		"BindPaths=" + dir, "ReadWritePaths=" + dir,
 		"LimitMEMLOCK=infinity",
 		fmt.Sprintf("MemoryMax=%d", r.MemoryBytes+r.MemoryBytes/32+256<<20),
 		fmt.Sprintf("TasksMax=%d", 4*r.VCPU+128),
 		fmt.Sprintf("CPUQuota=%d%%", 100*(r.VCPU+1)),
 	}
+	if !strings.HasPrefix(filepath.Clean(c.Dir)+"/", "/var/") {
+		props = append(props, "TemporaryFileSystem="+filepath.Join(c.Dir, "instances")+":ro",
+			"TemporaryFileSystem="+filepath.Join(c.Dir, "images")+":ro")
+	}
 	if r.Base != "" {
 		props = append(props, "BindReadOnlyPaths="+r.Base)
+	}
+	if kvm, err := user.LookupGroup("kvm"); err == nil {
+		props = append(props, "SupplementaryGroups="+kvm.Gid)
 	}
 	if len(r.GPUs) > 0 {
 		props = append(props, "DeviceAllow=/dev/vfio/vfio rw", "DeviceAllow=char-vfio rw")
@@ -444,9 +481,9 @@ func (c *CloudHypervisor) launch(ctx context.Context, r *chRecord) error {
 }
 
 // taps creates the instance's taps before its VMM starts (security review 12 H1). They are
-// persistent, on their network's bridge and up, so neither a guest reboot (the VMM reopens them)
-// nor a failed step leaves a tap of a running VM off its bridge, where bcd's bridge rules do not
-// see it. A NIC without a network is refused.
+// persistent, on their network's bridge and up, so neither a guest reboot nor a failed step leaves
+// a tap of a running VM off its bridge, where bcd's bridge rules do not see it. A NIC without a
+// network is refused.
 func (c *CloudHypervisor) taps(ctx context.Context, r *chRecord) error {
 	c.deleteTaps(ctx, r)
 	for i, network := range r.Networks {
@@ -466,6 +503,30 @@ func (c *CloudHypervisor) taps(ctx context.Context, r *chRecord) error {
 		}
 	}
 	return nil
+}
+
+// openTaps opens one queue of each tap for the VMM (it gets the fds, never the tap by name).
+func (c *CloudHypervisor) openTaps(r *chRecord) ([]*os.File, error) {
+	open := c.OpenTap
+	if open == nil {
+		open = openTap
+	}
+	var files []*os.File
+	for i := range r.Networks {
+		f, err := open(TapName(r.ID, i))
+		if err != nil {
+			closeAll(files)
+			return nil, fmt.Errorf("open tap %s: %w", TapName(r.ID, i), err)
+		}
+		files = append(files, f)
+	}
+	return files, nil
+}
+
+func closeAll(files []*os.File) {
+	for _, f := range files {
+		f.Close()
+	}
 }
 
 // deleteTaps removes the instance's taps: those of its NICs, and any other of its name (a NIC
@@ -493,17 +554,114 @@ func (c *CloudHypervisor) deleteTaps(ctx context.Context, r *chRecord) {
 	}
 }
 
-// start creates the taps, then boots the VM (or restores its memory snapshot).
+func (c *CloudHypervisor) chown(path string, uid int) error {
+	if c.Chown != nil {
+		return c.Chown(path, uid, uid)
+	}
+	return os.Lchown(path, uid, uid)
+}
+
+// vfioGroups are the /dev/vfio group devices of the instance's GPUs.
+func (c *CloudHypervisor) vfioGroups(r *chRecord) ([]string, error) {
+	group := c.VFIOGroup
+	if group == nil {
+		group = func(addr string) (string, error) {
+			link, err := os.Readlink("/sys/bus/pci/devices/" + addr + "/iommu_group")
+			return filepath.Base(link), err
+		}
+	}
+	var out []string
+	for _, gpu := range r.GPUs {
+		addr := ""
+		if c.GPUAddress != nil {
+			addr, _ = c.GPUAddress(gpu)
+		}
+		if pciAddress.FindStringSubmatch(addr) == nil {
+			return nil, fmt.Errorf("GPU %s has no PCI address on this host", gpu)
+		}
+		g, err := group(addr)
+		if err != nil || !numeric.MatchString(g) {
+			return nil, fmt.Errorf("GPU %s has no IOMMU group: %v", gpu, err)
+		}
+		out = append(out, "/dev/vfio/"+g)
+	}
+	return out, nil
+}
+
+var numeric = regexp.MustCompile(`^[0-9]+$`)
+
+// giveFiles hands the instance's files (and its GPUs' VFIO groups) to its VMM's user; uid 0 gives
+// them back to root.
+func (c *CloudHypervisor) giveFiles(r *chRecord, uid int) error {
+	err := filepath.WalkDir(c.instanceDir(r.ID), func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return c.chown(path, uid)
+	})
+	if err != nil {
+		return err
+	}
+	groups, err := c.vfioGroups(r)
+	if err != nil {
+		return err
+	}
+	for _, g := range groups {
+		if err := c.chown(g, uid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkDisk checks the instance's disk before anything opens it: bcd's overlay on its recorded
+// base, or a flat disk naming no other file (security review 12's verification: a VMM that ran it
+// could have rewritten its header).
+func (c *CloudHypervisor) checkDisk(r *chRecord) error {
+	return checkOverlay(filepath.Join(c.instanceDir(r.ID), "disk.qcow2"), r.Base, r.BaseFormat)
+}
+
+// start creates and bridges the taps, gives the instance to its VMM's user, then creates and boots
+// the VM with the taps' fds (or restores its memory snapshot with them).
 func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) error {
+	if r.UID == 0 { // a record from before VMM users
+		uid, err := c.freeUID()
+		if err != nil {
+			return err
+		}
+		r.UID = uid
+		if err := c.save(r); err != nil {
+			return err
+		}
+	}
+	if err := c.checkDisk(r); err != nil {
+		return err
+	}
 	if err := c.taps(ctx, r); err != nil {
+		return err
+	}
+	if err := c.giveFiles(r, int(r.UID)); err != nil {
 		return err
 	}
 	if err := c.launch(ctx, r); err != nil {
 		return err
 	}
+	taps, err := c.openTaps(r)
+	if err != nil {
+		return err
+	}
+	defer closeAll(taps)
 	snapshot := filepath.Join(c.instanceDir(r.ID), "snapshot")
 	if _, err := os.Stat(filepath.Join(snapshot, "state.json")); err == nil {
-		if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.restore", map[string]any{"source_url": "file://" + snapshot}); err != nil {
+		body := map[string]any{"source_url": "file://" + snapshot}
+		if len(taps) > 0 {
+			var nets []any
+			for i := range taps {
+				nets = append(nets, map[string]any{"id": fmt.Sprintf("net%d", i), "num_fds": 1})
+			}
+			body["net_fds"] = nets
+		}
+		if _, err := c.apiFiles(ctx, r.ID, http.MethodPut, "vm.restore", body, taps); err != nil {
 			return err
 		}
 		_ = os.RemoveAll(snapshot)
@@ -515,8 +673,20 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 		return nil
 	}
 	if _, err := c.api(ctx, r.ID, http.MethodGet, "vm.info", nil); err != nil {
-		if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.create", json.RawMessage(r.Config)); err != nil {
+		// vm.create takes no fds: the NICs are added to the created VM, each with its tap's.
+		var cfg map[string]any
+		if err := json.Unmarshal(r.Config, &cfg); err != nil {
 			return err
+		}
+		delete(cfg, "net")
+		if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.create", cfg); err != nil {
+			return err
+		}
+		for i, tap := range taps {
+			nic := map[string]any{"id": fmt.Sprintf("net%d", i), "mac": r.MACs[i]}
+			if _, err := c.apiFiles(ctx, r.ID, http.MethodPut, "vm.add-net", nic, []*os.File{tap}); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.boot", nil); err != nil {
@@ -601,6 +771,12 @@ func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
 		return fmt.Errorf("the VMM's unit %s is %q after the stop", unitName(id), s)
 	}
 	c.deleteTaps(ctx, r)
+	// The GPUs' VFIO groups go back to root.
+	if groups, err := c.vfioGroups(r); err == nil {
+		for _, g := range groups {
+			_ = c.chown(g, 0)
+		}
+	}
 	return nil
 }
 
@@ -634,8 +810,12 @@ var chSnapshotFiles = map[string]bool{"config.json": true, "state.json": true, "
 func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, err := c.record(id); err != nil {
+	r, err := c.record(id)
+	if err != nil {
 		return "", fmt.Errorf("no managed domain %s", id)
+	}
+	if err := c.checkDisk(r); err != nil {
+		return "", err
 	}
 	dir := c.instanceDir(id)
 	work, err := os.MkdirTemp(dir, ".snapshot-")
@@ -654,6 +834,13 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 	chDir := filepath.Join(work, "ch")
 	if memory {
 		if err := os.MkdirAll(chDir, 0o700); err != nil {
+			return "", err
+		}
+		// The VMM (its own user) writes its snapshot there.
+		if err := c.chown(work, int(r.UID)); err != nil {
+			return "", err
+		}
+		if err := c.chown(chDir, int(r.UID)); err != nil {
 			return "", err
 		}
 		if _, err := c.api(ctx, id, http.MethodPut, "vm.snapshot", map[string]any{"destination_url": "file://" + chDir}); err != nil {
@@ -832,7 +1019,8 @@ func restoredConfig(saved, fresh map[string]any, spec *agentv1.InstanceSpec) (ma
 	}
 	cfg := map[string]any{
 		"cpus":   keep(cpus, "boot_vcpus", "max_vcpus", "topology", "kvm_hyperv", "max_phys_bits", "features"),
-		"memory": keep(memory, "size", "mergeable", "shared", "hugepages", "hugepage_size", "prefault", "thp"),
+		// No hugepages: they are not charged to the unit's MemoryMax.
+		"memory": keep(memory, "size", "mergeable", "shared", "prefault", "thp"),
 	}
 	if p := section(saved, "platform"); p != nil {
 		cfg["platform"] = keep(p, "num_pci_segments", "iommu_segments", "serial_number", "uuid", "oem_strings")

@@ -82,6 +82,16 @@ func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset stri
 		}
 		var nics []nicRules
 		var problem string
+		// A bridge named like a tap ("bc…") would match every tap rule and the backstop's drops.
+		for i, nic := range spec.GetNics() {
+			if strings.HasPrefix(nic.GetNetwork(), "bc") && !deleted {
+				problem = fmt.Sprintf("NIC %d's network %q is named like bcd's taps (bc…)", i, nic.GetNetwork())
+			}
+		}
+		if problem != "" {
+			failed[spec.GetInstanceId()] = problem
+			continue
+		}
 		for i, nic := range spec.GetNics() {
 			anyNIC = true
 			r := nicRules{tap: runtime.TapName(spec.GetInstanceId(), i)}
@@ -232,11 +242,18 @@ func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset stri
 	// tap off its bridge (a runtime that recreated it, a failed attach) would reach the host's stack,
 	// and through forwarding other networks, unfiltered. Frames of a tap on its bridge reach the inet
 	// hooks as the bridge's, so these rules drop only what the bridge table cannot see.
+	// The arp table does the same for ARP, which the inet hooks never see.
 	fmt.Fprintf(&b, "table inet %s\ndelete table inet %s\n", backstopTable, backstopTable)
+	fmt.Fprintf(&b, "table arp %s\ndelete table arp %s\n", backstopTable, backstopTable)
 	if anyNIC {
 		fmt.Fprintf(&b, "table inet %s {\n", backstopTable)
 		fmt.Fprintf(&b, "\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tiifname \"bc*\" drop\n\t}\n")
 		fmt.Fprintf(&b, "\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n\t\tiifname \"bc*\" drop\n\t\toifname \"bc*\" drop\n\t}\n")
+		fmt.Fprintf(&b, "\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n\t\toifname \"bc*\" drop\n\t}\n")
+		b.WriteString("}\n")
+		fmt.Fprintf(&b, "table arp %s {\n", backstopTable)
+		fmt.Fprintf(&b, "\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tiifname \"bc*\" drop\n\t}\n")
+		fmt.Fprintf(&b, "\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n\t\toifname \"bc*\" drop\n\t}\n")
 		b.WriteString("}\n")
 	}
 	return b.String(), failed, guarded

@@ -5,8 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/xml"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -158,43 +159,62 @@ func (f *fakeVirt) virsh(args []string) ([]byte, error) {
 }
 
 func (f *fakeVirt) qemuImg(args []string) ([]byte, error) {
+	flag := func(name string) string {
+		for i, a := range args {
+			if a == name && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
 	switch args[0] {
 	case "create":
 		file, size := args[len(args)-2], args[len(args)-1]
-		return nil, os.WriteFile(file, []byte(`{"virtual-size": `+size+`}`), 0o600)
-	case "info":
-		raw, err := os.ReadFile(args[len(args)-1])
-		if err != nil || bytes.HasPrefix(raw, []byte("{")) {
-			return raw, err // a disk qemu-img created
-		}
-		// A base image: "QFI\xfb" probes as qcow2; "backing=<file>" in it names a backing file.
-		format := "raw"
-		if bytes.HasPrefix(raw, []byte("QFI\xfb")) || bytes.HasPrefix(raw, []byte("flat ")) {
-			format = "qcow2"
-		}
-		for i, a := range args {
-			if a == "-f" {
-				if args[i+1] == "qcow2" && format != "qcow2" {
-					return nil, errors.New("qemu-img: Image is not in qcow2 format")
-				}
-				format = args[i+1]
-			}
-		}
-		info := map[string]any{"format": format}
-		if _, backing, ok := bytes.Cut(raw, []byte("backing=")); ok {
-			info["backing-filename"] = string(backing)
-		}
-		return json.Marshal(info)
+		n, _ := strconv.ParseUint(size, 10, 64)
+		return nil, os.WriteFile(file, qcow2Image(n, flag("-b"), flag("-F"), nil), 0o600)
 	case "resize":
-		return nil, os.WriteFile(args[len(args)-2], []byte(`{"virtual-size": `+args[len(args)-1]+`}`), 0o600)
+		file := args[len(args)-2]
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+		n, _ := strconv.ParseUint(args[len(args)-1], 10, 64)
+		binary.BigEndian.PutUint64(raw[24:], n)
+		return nil, os.WriteFile(file, raw, 0o600)
 	case "convert":
 		raw, err := os.ReadFile(args[len(args)-2])
 		if err != nil {
 			return nil, err
 		}
-		return nil, os.WriteFile(args[len(args)-1], append([]byte("flat "), raw...), 0o600)
+		return nil, os.WriteFile(args[len(args)-1], qcow2Image(binary.BigEndian.Uint64(raw[24:]), "", "", append([]byte("flat "), raw...)), 0o600)
 	}
 	return nil, errors.New("qemu-img: unknown")
+}
+
+// qcow2Image is a minimal qcow2 v3 image: its header, a backing format extension and the backing
+// file's name when backing is set, then payload.
+func qcow2Image(size uint64, backing, format string, payload []byte) []byte {
+	h := make([]byte, 104)
+	binary.BigEndian.PutUint32(h[0:], 0x514649fb)
+	binary.BigEndian.PutUint32(h[4:], 3)
+	binary.BigEndian.PutUint32(h[20:], 16)
+	binary.BigEndian.PutUint64(h[24:], size)
+	binary.BigEndian.PutUint32(h[96:], 4)
+	binary.BigEndian.PutUint32(h[100:], 104)
+	var ext []byte
+	if format != "" {
+		ext = binary.BigEndian.AppendUint32(ext, qcow2ExtBackingFormat)
+		ext = binary.BigEndian.AppendUint32(ext, uint32(len(format)))
+		ext = append(ext, format...)
+		ext = append(ext, make([]byte, (8-len(format)%8)%8)...)
+	}
+	ext = append(ext, make([]byte, 8)...) // end
+	if backing != "" {
+		binary.BigEndian.PutUint64(h[8:], uint64(len(h)+len(ext)))
+		binary.BigEndian.PutUint32(h[16:], uint32(len(backing)))
+	}
+	out := append(append(append(h, ext...), backing...), payload...)
+	return out
 }
 
 func tarNames(t *testing.T, raw []byte) map[string]string {
@@ -215,7 +235,7 @@ func tarNames(t *testing.T, raw []byte) map[string]string {
 }
 
 func TestLibvirtRuntime(t *testing.T) {
-	image := []byte("QFI\xfbubuntu base image")
+	image := qcow2Image(2<<30, "", "", []byte("ubuntu base image"))
 	sum := sha256.Sum256(image)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(image) }))
 	defer srv.Close()
@@ -302,7 +322,7 @@ func TestLibvirtRuntime(t *testing.T) {
 		t.Fatalf("snapshot = %q, %v", cpu, err)
 	}
 	files := tarNames(t, snap.Bytes())
-	if !strings.Contains(files["meta.json"], `"includeMemory":true`) || !strings.HasPrefix(files["disk.qcow2"], "flat ") || files["memory.state"] != "memory of inst_web" || files["seed.iso"] == "" {
+	if !strings.Contains(files["meta.json"], `"includeMemory":true`) || !strings.Contains(files["disk.qcow2"], "flat ") || files["memory.state"] != "memory of inst_web" || files["seed.iso"] == "" {
 		t.Fatalf("snapshot files = %v", files)
 	}
 	if virt.domains["inst_web"].state != "running" {
@@ -372,21 +392,26 @@ func TestLibvirtRuntime(t *testing.T) {
 
 // Security review 12 H2: a tenant's image never makes the hypervisor open another file.
 func TestBaseImageChecks(t *testing.T) {
+	dataFile := qcow2Image(1<<30, "", "", nil)
+	binary.BigEndian.PutUint64(dataFile[72:], 1<<2) // incompatible: external data file
+	encrypted := qcow2Image(1<<30, "", "", nil)
+	binary.BigEndian.PutUint32(encrypted[32:], 2)
 	images := map[string][]byte{
-		"backing.qcow2": []byte("QFI\xfbbacking=/dev/nvme0n1"),
-		"probed.raw":    []byte("QFI\xfba qcow2 posing as raw"),
-		"probed.iso":    []byte("QFI\xfban iso that is a qcow2"),
-		"notqcow.qcow2": []byte("plain bytes"),
-		"good.raw":      []byte("a raw disk"),
-		"good.qcow2":    []byte("QFI\xfba qcow2 disk"),
+		"backing.qcow2":   qcow2Image(1<<30, "/dev/nvme0n1", "raw", nil),
+		"datafile.qcow2":  dataFile,
+		"encrypted.qcow2": encrypted,
+		"notqcow.qcow2":   []byte("plain bytes"),
+		"good.raw":        []byte("a raw disk"),
+		"qcow2as.raw":     qcow2Image(1<<30, "/dev/nvme0n1", "raw", nil), // opened as raw: data only
+		"good.qcow2":      qcow2Image(1<<30, "", "", []byte("a qcow2 disk")),
 	}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(images[r.URL.Path[1:]]) }))
 	defer srv.Close()
 	dir := t.TempDir()
 	l := &Libvirt{Dir: dir, Exec: (&fakeVirt{domains: map[string]*fakeDomain{}}).exec, HTTP: srv.Client()}
 	for name, want := range map[string]string{
-		"backing.qcow2": "backing file", "probed.raw": "content is qcow2", "probed.iso": "content is qcow2",
-		"notqcow.qcow2": "not qcow2", "good.raw": "", "good.qcow2": "",
+		"backing.qcow2": "backing file", "datafile.qcow2": "incompatible features", "encrypted.qcow2": "encrypted",
+		"notqcow.qcow2": "not a qcow2", "good.raw": "", "qcow2as.raw": "", "good.qcow2": "",
 	} {
 		sum := sha256.Sum256(images[name])
 		base, err := l.baseImage(context.Background(), &agentv1.ImageRef{Url: srv.URL + "/" + name, Sha256: sum[:], Format: strings.Split(name, ".")[1]})
@@ -409,5 +434,33 @@ func TestBaseImageChecks(t *testing.T) {
 	_ = os.WriteFile(cached, images["backing.qcow2"], 0o600)
 	if _, err := l.baseImage(context.Background(), &agentv1.ImageRef{Url: srv.URL + "/backing.qcow2", Sha256: sum[:], Format: "qcow2"}); err == nil {
 		t.Fatal("a cached image with a backing file was used")
+	}
+	// Base images are readable by a VMM's own user (images/ itself stays root's).
+	good := sha256.Sum256(images["good.qcow2"])
+	if fi, err := os.Stat(l.basePath(fmt.Sprintf("%x", good), "qcow2")); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("base image mode: %v %v", fi, err)
+	}
+}
+
+// An instance's disk is checked before every use: bcd's overlay on its own base, or flat.
+func TestCheckOverlay(t *testing.T) {
+	dir := t.TempDir()
+	disk := filepath.Join(dir, "disk.qcow2")
+	for _, c := range []struct {
+		image                []byte
+		base, format, errors string
+	}{
+		{qcow2Image(1, "/b/base.qcow2", "qcow2", nil), "/b/base.qcow2", "qcow2", ""},
+		{qcow2Image(1, "", "", nil), "", "", ""},
+		{qcow2Image(1, "/dev/nvme0n1", "raw", nil), "/b/base.qcow2", "qcow2", "names backing file"},
+		{qcow2Image(1, "/b/base.qcow2", "raw", nil), "/b/base.qcow2", "qcow2", "names backing file"},
+		{qcow2Image(1, "/other/disk.qcow2", "qcow2", nil), "", "", "names backing file"},
+		{[]byte("QFI\xfbshort"), "", "", "not a qcow2"},
+	} {
+		_ = os.WriteFile(disk, c.image, 0o600)
+		err := checkOverlay(disk, c.base, c.format)
+		if (c.errors == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), c.errors)) {
+			t.Fatalf("checkOverlay(%q) = %v, want %q", c.base, err, c.errors)
+		}
 	}
 }

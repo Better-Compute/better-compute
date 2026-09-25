@@ -29,6 +29,15 @@ type fakeCH struct {
 	calls []string
 	// stuck: vmm.shutdown and systemctl stop leave the VMM running.
 	stuck bool
+	// chowns records Chown: "<path> <uid>".
+	chowns []string
+}
+
+func (f *fakeCH) chown(path string, uid, _ int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chowns = append(f.chowns, fmt.Sprintf("%s %d", path, uid))
+	return nil
 }
 
 type fakeVMM struct {
@@ -74,7 +83,7 @@ func (f *fakeCH) exec(ctx context.Context, name string, args ...string) ([]byte,
 	return f.virt.exec(ctx, name, args...)
 }
 
-func (f *fakeCH) api(_ context.Context, socket, method, path string, body any) ([]byte, int, error) {
+func (f *fakeCH) api(_ context.Context, socket, method, path string, body any, files []*os.File) ([]byte, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	vmm := f.vmms[socket]
@@ -82,7 +91,11 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any) (
 		return nil, 0, errors.New("connect: no such file or directory")
 	}
 	op := strings.TrimPrefix(path, "/api/v1/")
-	f.calls = append(f.calls, method+" "+op)
+	call := method + " " + op
+	if len(files) > 0 {
+		call += fmt.Sprintf(" files=%d", len(files))
+	}
+	f.calls = append(f.calls, call)
 	switch op {
 	case "vmm.ping":
 		return []byte(`{"version":"v43.0"}`), 200, nil
@@ -92,8 +105,15 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any) (
 		}
 		return []byte(`{"state":"` + vmm.state + `"}`), 200, nil
 	case "vm.create":
+		if _, ok := body.(map[string]any)["net"]; ok {
+			return []byte("vm.create takes no fds: no NICs"), 400, nil
+		}
 		vmm.config, _ = json.Marshal(body)
 		vmm.state = "Created"
+	case "vm.add-net":
+		if vmm.state != "Created" || len(files) != 1 || body.(map[string]any)["tap"] != nil {
+			return []byte("a NIC is its tap's fd"), 400, nil
+		}
 	case "vm.boot":
 		if vmm.state == "" {
 			return nil, 500, nil
@@ -117,6 +137,9 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any) (
 		_ = os.WriteFile(filepath.Join(dst, "memory-ranges"), []byte("guest memory"), 0o600)
 	case "vm.restore":
 		src := strings.TrimPrefix(body.(map[string]any)["source_url"].(string), "file://")
+		if nets, _ := body.(map[string]any)["net_fds"].([]any); len(nets) != len(files) {
+			return []byte("net_fds and the fds sent differ"), 400, nil
+		}
 		cfg, err := os.ReadFile(filepath.Join(src, "config.json"))
 		if err != nil {
 			return nil, 500, nil
@@ -129,13 +152,15 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any) (
 }
 
 func TestCloudHypervisorRuntime(t *testing.T) {
-	image := []byte("QFI\xfbubuntu base image")
+	image := qcow2Image(2<<30, "", "", []byte("ubuntu base image"))
 	sum := sha256.Sum256(image)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(image) }))
 	defer srv.Close()
 	ch := &fakeCH{virt: &fakeVirt{domains: map[string]*fakeDomain{}}, vmms: map[string]*fakeVMM{}, units: map[string]string{}}
 	dir := t.TempDir()
-	c := &CloudHypervisor{Dir: dir, Exec: ch.exec, API: ch.api, HTTP: srv.Client(), Poll: 1, ShutdownTimeout: 1,
+	c := &CloudHypervisor{Dir: dir, Exec: ch.exec, API: ch.api, HTTP: srv.Client(), Poll: 1, ShutdownTimeout: 1, Chown: ch.chown,
+		OpenTap:   func(string) (*os.File, error) { return os.CreateTemp(t.TempDir(), "tap") },
+		VFIOGroup: func(string) (string, error) { return "42", nil },
 		GPUAddress: func(id string) (string, bool) { return map[string]string{"GPU-1": "0000:3b:00.0"}[id], id == "GPU-1" }}
 	ctx := context.Background()
 	spec := &agentv1.InstanceSpec{
@@ -153,7 +178,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	_ = json.Compact(&compact, indented)
 	rec := compact.Bytes()
 	for _, want := range []string{
-		filepath.Join(web, "disk.qcow2"), `"tap":"` + TapName("inst_web", 0) + `"`, `"mac":"52:54:00:00:00:07"`,
+		filepath.Join(web, "disk.qcow2"), `"mac":"52:54:00:00:00:07"`, fmt.Sprintf(`"uid":%d`, vmmUIDBase),
 		`/sys/bus/pci/devices/0000:3b:00.0/`, `"boot_vcpus":4`, `"image_type":"Qcow2"`, `"backing_files":true`, `"image_type":"Raw"`, `CLOUDHV.fd`, filepath.Join(web, "serial.sock"), `"readonly":true`,
 	} {
 		if !strings.Contains(string(rec), strings.ReplaceAll(want, `\`, `\\`)) {
@@ -185,7 +210,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	calls := strings.Join(ch.calls, "\n")
 	tap := TapName("inst_web", 0)
 	for _, want := range []string{"ip tuntap add dev " + tap + " mode tap", "ip link set " + tap + " master br0", "ip link set " + tap + " up",
-		"systemd-run --unit=bcd-ch-inst_web.service", "PUT vm.create", "PUT vm.boot"} {
+		"systemd-run --unit=bcd-ch-inst_web.service", "PUT vm.create", "PUT vm.add-net files=1", "PUT vm.boot"} {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("calls lack %q:\n%s", want, calls)
 		}
@@ -195,12 +220,26 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 		t.Fatalf("the tap was bridged after the VMM started:\n%s", calls)
 	}
 	// Review 12 H2, M3: the VMM's unit is confined and bounded.
-	for _, want := range []string{"-p DevicePolicy=closed", "-p DeviceAllow=char-vfio rw", "-p CapabilityBoundingSet=CAP_NET_ADMIN CAP_IPC_LOCK",
+	// Verification of 933c51b: its own uid, no capabilities, no network, /run and /var hidden.
+	uid := fmt.Sprint(vmmUIDBase)
+	for _, want := range []string{"-p User=" + uid + " -p Group=" + uid, "-p CapabilityBoundingSet= ", "-p PrivateNetwork=yes", "-p RestrictAddressFamilies=AF_UNIX",
+		"-p TemporaryFileSystem=/run:ro", "-p TemporaryFileSystem=/var:ro", "-p ProtectProc=invisible", "-p SystemCallFilter=~@debug",
+		"-p DevicePolicy=closed", "-p DeviceAllow=char-vfio rw",
 		"-p TemporaryFileSystem=" + filepath.Join(dir, "instances") + ":ro", "-p BindPaths=" + web,
 		"-p BindReadOnlyPaths=" + filepath.Join(dir, "images", fmt.Sprintf("%x.qcow2", sum)),
 		fmt.Sprintf("-p MemoryMax=%d", 8<<30+(8<<30)/32+256<<20), "-p TasksMax=144", "-p CPUQuota=500%"} {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("the VMM's unit lacks %q:\n%s", want, calls)
+		}
+	}
+	if strings.Contains(calls, "/dev/net/tun") || strings.Contains(calls, "CAP_NET_ADMIN") {
+		t.Fatalf("the VMM can still open or configure taps:\n%s", calls)
+	}
+	// Its files and its GPU's VFIO group are its user's.
+	chowns := strings.Join(ch.chowns, "\n")
+	for _, want := range []string{web + " " + uid, filepath.Join(web, "disk.qcow2") + " " + uid, "/dev/vfio/42 " + uid} {
+		if !strings.Contains(chowns, want) {
+			t.Fatalf("chowns lack %q:\n%s", want, chowns)
 		}
 	}
 
@@ -239,11 +278,14 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	}
 	cfg, _ := os.ReadFile(filepath.Join(dir, "instances", "inst_clone", "snapshot", "config.json"))
 	if !strings.Contains(string(cfg), "inst_clone") || strings.Contains(string(cfg), filepath.Join("instances", "inst_web")) ||
-		!strings.Contains(string(cfg), TapName("inst_clone", 0)) {
+		!strings.Contains(string(cfg), `"mac":"52:54:00:00:00:08"`) || strings.Contains(string(cfg), "tap") {
 		t.Fatalf("restored config = %s", cfg)
 	}
 	if err := c.SetState(ctx, "inst_clone", StateRunning); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(ch.calls, "\n"), "PUT vm.restore files=1") || !strings.Contains(strings.Join(ch.chowns, "\n"), fmt.Sprintf("inst_clone %d", vmmUIDBase+1)) {
+		t.Fatalf("the clone was not restored with its tap's fd as its own user:\n%s\n%s", ch.calls, ch.chowns)
 	}
 	if got, _ := c.state(ctx, "inst_clone"); got != StateRunning {
 		t.Fatalf("clone = %s", got)
@@ -257,8 +299,13 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, _ := c.state(ctx, "inst_web"); got != StateStopped || !strings.Contains(strings.Join(ch.calls, "\n"), "systemctl stop bcd-ch-inst_web.service") ||
-		!strings.Contains(strings.Join(ch.calls, "\n"), "ip link delete "+tap) {
+		!strings.Contains(strings.Join(ch.calls, "\n"), "ip link delete "+tap) || !strings.Contains(strings.Join(ch.chowns, "\n"), "/dev/vfio/42 0") {
 		t.Fatalf("stop: %s", got)
+	}
+	// A VMM that rewrote its overlay's header to name another file never starts again.
+	_ = os.WriteFile(filepath.Join(web, "disk.qcow2"), qcow2Image(40<<30, "/dev/nvme0n1", "raw", nil), 0o600)
+	if err := c.SetState(ctx, "inst_web", StateRunning); err == nil || !strings.Contains(err.Error(), "names backing file") {
+		t.Fatalf("a rewritten overlay started: %v", err)
 	}
 	// Review 12 M2: a VMM that survives its stop is never forgotten.
 	ch.stuck = true

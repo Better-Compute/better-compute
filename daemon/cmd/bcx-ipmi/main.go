@@ -170,6 +170,10 @@ func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, 
 	if len(secrets["password"]) > 20 {
 		return "", fail("credentials-unavailable", "an IPMI 2.0 password has at most 20 bytes")
 	}
+	// ipmitool -f keeps the file's first word: a password with whitespace would be cut short.
+	if strings.ContainsAny(secrets["password"], " \t\r\n\v\f") {
+		return "", fail("credentials-unavailable", "ipmitool cannot pass a password with whitespace")
+	}
 	var args map[string]any
 	if s := req.GetArgsJson(); s != "" && s != "null" {
 		if err := json.Unmarshal([]byte(s), &args); err != nil {

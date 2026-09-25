@@ -126,18 +126,25 @@ func TestFirewallRuleset(t *testing.T) {
 	if rs, _, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}, host); !strings.Contains(rs, `iifname "bc*" udp sport { 67, 547 } drop`) || strings.Contains(rs, tap("inst_bare")) {
 		t.Fatalf("unguarded ruleset = %q", rs)
 	}
-	if empty, _, _ := firewallRuleset(nil, host); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\ntable inet bcd_taps\ndelete table inet bcd_taps\n" {
+	if empty, _, _ := firewallRuleset(nil, host); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\ntable inet bcd_taps\ndelete table inet bcd_taps\ntable arp bcd_taps\ndelete table arp bcd_taps\n" {
 		t.Fatalf("empty ruleset = %q", empty)
 	}
 	// Security review 12 H1: a tap off its bridge reaches neither the host nor, forwarded, anything.
 	backstop := ruleset[strings.Index(ruleset, "table inet bcd_taps {"):]
-	for _, want := range []string{"hook input priority filter; policy accept;\n\t\tiifname \"bc*\" drop", "hook forward priority filter; policy accept;\n\t\tiifname \"bc*\" drop\n\t\toifname \"bc*\" drop"} {
+	for _, want := range []string{"hook input priority filter; policy accept;\n\t\tiifname \"bc*\" drop", "hook forward priority filter; policy accept;\n\t\tiifname \"bc*\" drop\n\t\toifname \"bc*\" drop",
+		"hook output priority filter; policy accept;\n\t\toifname \"bc*\" drop", "table arp bcd_taps {\n\tchain input"} {
 		if !strings.Contains(backstop, want) {
 			t.Fatalf("the backstop lacks %q:\n%s", want, backstop)
 		}
 	}
 	if err := helper.CheckRuleset(ruleset); err != nil {
 		t.Fatalf("the helper refuses bcd's ruleset: %v", err)
+	}
+	// A bridge named like the taps fails its instance.
+	odd2 := vm("inst_bcbridge", running)
+	odd2.Nics[0].Network = "bcbr0"
+	if rs, failed, _ := firewallRuleset([]*agentv1.InstanceSpec{odd2}, host); failed["inst_bcbridge"] == "" || strings.Contains(rs, tap("inst_bcbridge")) {
+		t.Fatalf("a bc* bridge: %v", failed)
 	}
 	if ll := eui64(net.HardwareAddr{0x52, 0x54, 0x00, 0x00, 0x00, 0x01}); ll != "fe80::5054:ff:fe00:1" {
 		t.Fatalf("eui64 = %s", ll)
