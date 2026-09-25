@@ -191,6 +191,15 @@ describe('an IPMI machine on the simulated site', () => {
     await expect(bad({ password: 'hunter2' })).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringContaining('credential') });
     await expect(bad({ blob: 'x'.repeat(2000) })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(bad([3])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    // bcd's built-in Redfish takes no options at all.
+    await expect(
+      s.call('enroll', {
+        tenantId: 'root',
+        siteId: 'site_a',
+        poolId: 'pool_metal',
+        bmc: { address: 'https://10.10.0.46', driver: 'redfish', credentials: 'secret://root/bmc', driverOptions: { cipherSuite: 3 } },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringContaining('redfish') });
   });
 
   it("takes an agentless machine's addresses at enroll, for site.httpProxy, without PXE MACs", async () => {

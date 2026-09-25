@@ -250,6 +250,8 @@ function validateEnroll(raw: unknown): EnrollInput {
     // Credentials travel only as bmc.credentials (a secret ref), never in options the agent logs and relays.
     const secretish = Object.keys(options as object).find((key) => /pass|secret|token|credential|user(name)?$|key$/i.test(key));
     if (secretish) fail(`bmc.driverOptions.${secretish} looks like a credential: pass credentials in bmc.credentials`);
+    // bcd's built-in Redfish refuses any options (7753df0): every operation would fail.
+    if (out.bmc.driver === 'redfish' && Object.keys(options as object).length > 0) fail('The redfish driver takes no bmc.driverOptions');
     out.bmc.driverOptions = options as Record<string, Json>;
   }
   if (input.addresses !== undefined) {
