@@ -3,6 +3,7 @@ import type { ImageUseOptions } from '@better-compute/provision';
 import { metalApi, type MetalApi } from './api.js';
 import { metalCommandKinds } from './commands.js';
 import { metalFindings } from './findings.js';
+import { teardownTenantMetal } from './tenancy.js';
 import { metalMigrations } from './migrations.js';
 import type { HardwareProfile } from './module-types.js';
 import { metalProfiles } from './profiles.js';
@@ -59,6 +60,10 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
       commandKinds: [...metalCommandKinds],
       reconcilers: [reconciler],
       selfCheck: (context) => metalFindings(context.sql),
+      // A deleted tenant's machines are retired, one legal transition per sweep, until none is left.
+      async tenantDeleted(context, tenantId) {
+        return (await teardownTenantMetal(context, tenantId)).remaining > 0 ? 'SYNC_AGAIN' : 'DONE';
+      },
       api: () => metalApi(hardwareProfiles),
     }),
   );

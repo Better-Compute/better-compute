@@ -21,6 +21,7 @@ import {
 } from './engine.js';
 import { driverInvokeKind, stepRegistry } from './expand.js';
 import { provisionFindings } from './findings.js';
+import { teardownTenantProvisioning } from './tenancy.js';
 import { provisionMigrations } from './migrations.js';
 import type { ImageSignatureVerifier } from './images.js';
 import { profileSource } from './profiles.js';
@@ -135,6 +136,11 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
     ),
     commandKinds: [driverInvokeCommandKind],
     selfCheck: (context: ModuleContext) => provisionFindings(context.sql),
+    // A deleted tenant: its workflows, private images, profiles and signers (bounded, re-asked until done).
+    async tenantDeleted(context: ModuleContext, tenantId: string) {
+      const result = await context.sql.transaction((tx) => teardownTenantProvisioning(tx, context, tenantId));
+      return result.more ? 'SYNC_AGAIN' : 'DONE';
+    },
     reconcilers: remediation
       ? [
           reconciler,

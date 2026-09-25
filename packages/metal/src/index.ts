@@ -17,6 +17,7 @@ export * from './results.js';
 export * from './attestation.js';
 export * from './tenant-root.js';
 export * from './findings.js';
+export * from './tenancy.js';
 export { applyProvisionVerb, readMetalNode, resolveDriverBindings, type MetalNodeRow } from './store.js';
 
 export type { PowerAction, PowerState, WipeMode } from '@better-compute/core';

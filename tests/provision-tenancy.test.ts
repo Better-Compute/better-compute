@@ -60,7 +60,7 @@ describe('teardownTenantProvisioning', () => {
       module.workflowEngine(context).start(tx, { tenantId: 'ten_gone', profileId: 'gone-host', profileVersion: 1, nodeId: 'node_gone' }),
     );
     const result = await db.transaction((tx) => teardownTenantProvisioning(tx, context, 'ten_gone'));
-    expect(result).toEqual({ workflowsAborted: 1, imagesDeleted: 1, profilesDeleted: 1, signersRevoked: 1 });
+    expect(result).toEqual({ workflowsAborted: 1, imagesDeleted: 1, profilesDeleted: 1, signersRevoked: 1, more: false });
     expect(removed.sort()).toEqual(['image/' + (await imageId('mine@1')), 'profile/gone-host'].sort());
     const wf = await db.query<{ state: string; outcome: string | null }>('SELECT state, outcome FROM workflows WHERE id = $1', [workflowId]);
     expect(wf.rows[0]!.state === 'cancelled' || wf.rows[0]!.outcome === 'cancelled').toBe(true);
@@ -71,7 +71,24 @@ describe('teardownTenantProvisioning', () => {
       imagesDeleted: 0,
       profilesDeleted: 0,
       signersRevoked: 0,
+      more: false,
     });
+    expect(await module.tenantDeleted!(context as never, 'ten_gone')).toBe('DONE');
+  });
+
+  it('works in bounded batches: SYNC_AGAIN until the last one', async () => {
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < 3; i++)
+        await registerImage(tx, undefined, 'ten_many', 'root', {
+          ref: `many-${i}@1`,
+          format: 'raw',
+          sha256: String(i).repeat(64),
+          source: `https://images.example/many-${i}`,
+        });
+    });
+    const pass = () => db.transaction((tx) => teardownTenantProvisioning(tx, context, 'ten_many', { limit: 2 }));
+    expect(await pass()).toMatchObject({ imagesDeleted: 2, more: true });
+    expect(await pass()).toMatchObject({ imagesDeleted: 1, more: false });
   });
 });
 
