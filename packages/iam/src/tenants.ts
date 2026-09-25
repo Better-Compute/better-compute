@@ -5,6 +5,7 @@
 
 import { ComputeError, type Credential } from '@better-compute/core';
 import { fromIamError } from './embedded.js';
+import { credentialHeaders } from './remote.js';
 
 type CredentialInput = Pick<Credential, 'headers' | 'token'>;
 
@@ -14,13 +15,27 @@ interface IamTenant {
   parentId?: string | null;
 }
 
-/** The part of a better-iam instance (or client) the reader uses; `betterIam()`'s result satisfies it. */
+/** The part of a better-iam instance the reader uses (embedded mode); `betterIam()`'s result satisfies it. */
 export interface TenantReaderHost {
   api: {
     tenants: {
       get(credential: CredentialInput, input: { tenantId: string }): Promise<IamTenant>;
       listChildren(credential: CredentialInput, input: { tenantId: string }): Promise<IamTenant[]>;
     };
+  };
+}
+
+/**
+ * The part of a better-iam HTTP client the reader uses (remote mode): `createIamClient()`'s result satisfies it. The
+ * credential goes in each call's headers.
+ */
+export interface TenantReaderClient {
+  tenants: {
+    get(input: { tenantId: string }, options?: { headers?: HeadersInit }): Promise<IamTenant>;
+    listChildren(
+      input: { tenantId: string },
+      options?: { headers?: HeadersInit },
+    ): Promise<IamTenant[]>;
   };
 }
 
@@ -64,7 +79,7 @@ const notFound = (error: unknown) => {
  * (its own, or an ancestor's when that is worse). A tenant IAM no longer knows is `missing`.
  */
 export function iamTenantReader(
-  iam: TenantReaderHost,
+  iam: TenantReaderHost | TenantReaderClient,
   options: TenantReaderOptions,
 ): (tenantId: string) => Promise<TenantStatus[]> {
   const maxTenants = options.maxTenants ?? 10_000;
@@ -76,11 +91,24 @@ export function iamTenantReader(
       ...(value.token === undefined ? {} : { token: value.token }),
     };
   };
+  // Embedded: the credential is the first argument; over HTTP: headers on each call.
+  const calls = (input: CredentialInput) =>
+    'api' in iam
+      ? {
+          get: (tenantId: string) => iam.api.tenants.get(input, { tenantId }),
+          children: (tenantId: string) => iam.api.tenants.listChildren(input, { tenantId }),
+        }
+      : {
+          get: (tenantId: string) =>
+            iam.tenants.get({ tenantId }, { headers: credentialHeaders(input) }),
+          children: (tenantId: string) =>
+            iam.tenants.listChildren({ tenantId }, { headers: credentialHeaders(input) }),
+        };
   return async (tenantId) => {
-    const input = await credential();
+    const api = calls(await credential());
     const get = async (id: string): Promise<IamTenant | undefined> => {
       try {
-        return await iam.api.tenants.get(input, { tenantId: id });
+        return await api.get(id);
       } catch (error) {
         if (notFound(error)) return undefined;
         throw fromIamError(error);
@@ -118,7 +146,7 @@ export function iamTenantReader(
       out.push({ tenantId: tenant.id, status });
       let children: IamTenant[];
       try {
-        children = await iam.api.tenants.listChildren(input, { tenantId: tenant.id });
+        children = await api.children(tenant.id);
       } catch (error) {
         if (notFound(error)) continue;
         throw fromIamError(error);
