@@ -141,6 +141,36 @@ describe('tunnelAuthorizer', () => {
   });
 });
 
+describe('tunnelAuthorizer actions', () => {
+  it('re-decides the action the ticket was issued for, failing closed on anything else', async () => {
+    const { f, port, alice, caller } = await setup();
+    f.project('compute-node', 'node_1');
+    f.project('compute-instance', 'inst_1');
+    await f.grant(alice.id, {
+      version: 1,
+      statements: [
+        { effect: 'allow', actions: ['compute:nodes:console'], resources: ['compute-node/*'] },
+      ],
+    });
+    const authorize = tunnelAuthorizer(port);
+    const ticket = (extra: Record<string, unknown>) => ({
+      aud: 'node:node_1',
+      sub: caller.identityId,
+      ses: caller.sessionId,
+      op: 'console',
+      tnt: f.tenantId,
+      ...extra,
+    });
+    // A node ticket is the console of the node.
+    expect(await authorize({ claims: ticket({}) })).toBe(true);
+    expect(await authorize({ claims: ticket({ act: 'compute:nodes:console' }) })).toBe(true);
+    // An instance ticket needs exec on the instance, which Alice lacks.
+    expect(await authorize({ claims: ticket({ inst: 'inst_1', op: 'exec' }) })).toBe(false);
+    // A stamped action that does not match the target, or is unknown, fails closed.
+    expect(await authorize({ claims: ticket({ act: 'compute:instances:exec' }) })).toBe(false);
+    expect(await authorize({ claims: ticket({ act: 'compute:nodes:delete' }) })).toBe(false);
+  });
+});
 describe('authorizeSession (remote)', () => {
   it('uses the service credential for the administrator reads, only when enabled', async () => {
     const calls: { method: string; authorization: string | null }[] = [];

@@ -76,9 +76,23 @@ export function sessionAuthorization(
   };
 }
 
+/** The actions a tunnel ticket may be re-decided for: exec into an instance, the console of a node. */
+const tunnelActions: ReadonlySet<string> = new Set([
+  'compute:instances:exec',
+  'compute:nodes:console',
+]);
+
 /** What `tunnels.authorize` receives (`@better-compute/server`'s `TunnelReauthorization`, structurally). */
 export interface TunnelReauthorizationLike {
-  claims: { sub: string; ses?: string; tnt?: string; inst?: string; aud: string; op: string };
+  claims: {
+    sub: string;
+    ses?: string;
+    tnt?: string;
+    inst?: string;
+    aud: string;
+    op: string;
+    act?: string;
+  };
   credential?: Credential;
 }
 
@@ -86,8 +100,9 @@ export interface TunnelAuthorizerOptions {
   /** The IAM resource type prefix, the same as `betterCompute({ typePrefix })` (default `compute-`). */
   typePrefix?: string;
   /**
-   * The decision re-checked for a ticket. Default: what `tunnels.open` decided, `compute:instances:exec` on the
-   * instance (`inst`) or else on the node (`aud` = `node:<id>`), in the ticket's tenant (`tnt`).
+   * The decision re-checked for a ticket. Default: the action the ticket was issued for, from its `act` claim or
+   * else by target: `compute:instances:exec` on the instance (`inst`), `compute:nodes:console` on the node
+   * (`aud` = `node:<id>`), in the ticket's tenant (`tnt`). An unknown or mismatched action fails closed.
    */
   decisionFor?(claims: TunnelReauthorizationLike['claims']): Decision | undefined;
 }
@@ -113,9 +128,14 @@ export function tunnelAuthorizer(
         : node
           ? { type: `${prefix}node`, id: node }
           : undefined;
-      return resource
-        ? { tenantId: claims.tnt, action: 'compute:instances:exec', resource }
-        : undefined;
+      if (!resource) return undefined;
+      // The action the ticket was issued for: its `act` claim when stamped, else what tunnels.open decides for
+      // the target. Anything else fails closed.
+      const action =
+        claims.act ?? (claims.inst ? 'compute:instances:exec' : 'compute:nodes:console');
+      const expected = claims.inst ? 'compute:instances:exec' : 'compute:nodes:console';
+      if (!tunnelActions.has(action) || action !== expected) return undefined;
+      return { tenantId: claims.tnt, action, resource };
     });
   return async ({ claims, credential }) => {
     const decision = decisionFor(claims);
