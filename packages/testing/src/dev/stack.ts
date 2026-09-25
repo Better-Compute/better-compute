@@ -232,7 +232,13 @@ export interface DevFleetOptions {
    * The certificate names `dnsNames` (default `localhost`, `gw.dev.local`); a daemon dialing an IP
    * sets its TLS server name to one of them.
    */
-  externalTls?: { host?: string; port?: number; dnsNames?: readonly string[] };
+  externalTls?: {
+    host?: string;
+    port?: number;
+    dnsNames?: readonly string[];
+    /** The serving CA its certificate comes from (default: a new dev one); the stack passes the one it publishes. */
+    servingCa?: ReturnType<typeof createServingCa>;
+  };
 }
 
 export interface DevFleet {
@@ -527,7 +533,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       },
     });
     if (options.externalTls) {
-      const servingCa = createServingCa();
+      const servingCa = options.externalTls.servingCa ?? createServingCa();
       const servingKey = generateP256KeyPair();
       const issued = await servingCa.issue(servingKey.publicKey, {
         usage: 'server',
@@ -872,6 +878,16 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     issuerName,
     ...(options.tunnels?.jtiCache ? { jtiCache: options.tunnels.jtiCache } : {}),
   };
+  // The mTLS listener for outside daemons, known before the control plane starts: its port and serving CA are
+  // published in /.well-known/better-compute, so a real `bcd join --server` configures itself against the stack.
+  const external = options.externalTls
+    ? {
+        ...options.externalTls,
+        servingCa: options.externalTls.servingCa ?? createServingCa(),
+        port: options.externalTls.port || (await freePort()),
+      }
+    : undefined;
+  const externalHost = external?.host && external.host !== '0.0.0.0' ? external.host : '127.0.0.1';
   const compute = betterCompute<readonly ComputeModule[], []>({
     database,
     iam: iam.port,
@@ -880,7 +896,15 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     baseURL,
     // The store's housekeeping (outbox and authz changes behind cursors, spent attestations, expired joins).
     modules: [...(iam.modules ?? []), ...(options.modules ?? []), retentionModule()],
-    pki: keys.pki,
+    pki: { ...keys.pki, ...(external ? { servingCa: external.servingCa } : {}) },
+    ...(external
+      ? {
+          gateway: {
+            url: `https://${externalHost}:${external.port}`,
+            serverName: (external.dnsNames ?? ['localhost'])[0]!,
+          },
+        }
+      : {}),
     tunnels: { issuer: tunnels.issuer },
     notifier,
     worker: { pollMs: 100, ...options.worker },
@@ -913,7 +937,7 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
       ...(options.daemon ? { daemon: options.daemon } : {}),
       ...(options.reports ? { reports: options.reports } : {}),
       ...(options.admitExternalJoins ? { admitExternalJoins: true } : {}),
-      ...(options.externalTls ? { externalTls: options.externalTls } : {}),
+      ...(external ? { externalTls: external } : {}),
     });
   } catch (error) {
     await close().catch(() => {});

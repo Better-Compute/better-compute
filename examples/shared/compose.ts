@@ -12,6 +12,8 @@
 //   rollout module. BETTER_COMPUTE_DOWNLOADS_URL: where bcd binaries are served.
 // - BETTER_COMPUTE_GATEWAY_CERT / _KEY: `better-compute pki issue-gateway` output. With them (and the
 //   bundle): `host.gateway` over mTLS on BETTER_COMPUTE_GATEWAY_PORT (default 8443) in BETTER_COMPUTE_REGION.
+// - BETTER_COMPUTE_GATEWAY_URL (https://gw.example.com:8443) and optionally _SERVER_NAME: published in
+//   /.well-known/better-compute with the serving CA's pin, for `bcd join --server <control plane>`.
 // - BETTER_COMPUTE_METRICS_TOKEN: ≥ 16 characters; mounts GET /metrics for Prometheus.
 //
 // IAM: until you wire better-iam (see the README of examples/postgres), no credential authenticates.
@@ -152,10 +154,21 @@ export async function exampleOptions(
       // §14 placements_total{outcome}, booking_conflicts_total and placement_seconds{placer}, from every placement.
       onPlacement: placementObserver(standard, metrics),
     },
+    // Where daemons dial, published in /.well-known/better-compute (with the serving CA's pin), so
+    // `bcd join --server <this control plane>` configures itself.
+    ...(env.BETTER_COMPUTE_GATEWAY_URL
+      ? {
+          gateway: {
+            url: env.BETTER_COMPUTE_GATEWAY_URL,
+            ...(env.BETTER_COMPUTE_GATEWAY_SERVER_NAME ? { serverName: env.BETTER_COMPUTE_GATEWAY_SERVER_NAME } : {}),
+          },
+        }
+      : {}),
     ...(bundle
       ? {
           pki: {
             nodeCa: bundle.nodeCa,
+            servingCa: bundle.servingCa,
             join: pkiJoinCrypto({
               trustDomain: bundle.trustDomain,
               nodeCa: bundle.nodeCa,

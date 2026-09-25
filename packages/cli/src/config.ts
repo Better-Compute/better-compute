@@ -259,6 +259,8 @@ export async function importOptional<T = unknown>(specifier: string, feature: st
  *   `@electric-sql/pglite`.
  * - `BETTER_COMPUTE_SECRET` (required): at least 32 characters.
  * - `BETTER_COMPUTE_BASE_URL` (default `http://localhost:3000`).
+ * - `BETTER_COMPUTE_GATEWAY_URL` (https) and `BETTER_COMPUTE_GATEWAY_SERVER_NAME`: the gateway daemons dial,
+ *   published in `/.well-known/better-compute` for `bcd join --server`.
  *
  * P0 has no IAM bridge, so the deployment uses `unconfiguredIam()`: only public methods answer
  * until v0.1 wires in embedded better-iam.
@@ -308,5 +310,14 @@ export async function configFromEnv(
     // Without IAM no caller authenticates, so the root tenant is never consulted.
     rootTenantId: 'root',
     iam: unconfiguredIam(),
+    // Published in /.well-known/better-compute for `bcd join --server` (no pin without a PKI bundle here).
+    ...(env.BETTER_COMPUTE_GATEWAY_URL
+      ? {
+          gateway: {
+            url: env.BETTER_COMPUTE_GATEWAY_URL,
+            ...(env.BETTER_COMPUTE_GATEWAY_SERVER_NAME ? { serverName: env.BETTER_COMPUTE_GATEWAY_SERVER_NAME } : {}),
+          },
+        }
+      : {}),
   };
 }

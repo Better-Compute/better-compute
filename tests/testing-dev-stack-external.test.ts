@@ -1,8 +1,8 @@
-import { createPublicKey } from 'node:crypto';
+import { createPublicKey, X509Certificate } from 'node:crypto';
 import { connect, type ClientHttp2Session } from 'node:http2';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AGENT_GATEWAY_SERVICE, frameMessage, MessageDecoder } from '@better-compute/gateway';
-import { privateKeyPem, toPem } from '@better-compute/pki';
+import { privateKeyPem, spkiPin, toPem } from '@better-compute/pki';
 import { AgentFrameSchema, AgentRole, decodeServerFrame, encodeAgentFrame, PROTOCOL_VERSION, type ServerFrame } from '@better-compute/protocol';
 import { create } from '@bufbuild/protobuf';
 import {
@@ -86,6 +86,17 @@ describe('external joins on the dev stack', () => {
   it('serves outside daemons over mTLS: the JoinService certificate opens a Session, no header needed', { timeout: 60_000 }, async () => {
     dev = await createDevStack({ externalTls: {} });
     expect(dev.externalGatewayUrl).toMatch(/^https:\/\/127\.0\.0\.1:\d+$/);
+    // The control plane publishes where daemons dial and what to pin, for `bcd join --server <control plane>`.
+    const wellKnown = (await (
+      await dev.compute.handler(
+        new Request(`http://127.0.0.1:3000${dev.compute.endpoint.basePath}/.well-known/better-compute`),
+      )
+    ).json()) as { gateway?: { url: string; serverName?: string; servingCaPin?: string } };
+    expect(wellKnown.gateway).toEqual({
+      url: dev.externalGatewayUrl,
+      serverName: 'localhost',
+      servingCaPin: spkiPin(new X509Certificate(Buffer.from(dev.servingCaCertificate!)).publicKey),
+    });
     const outside = await joinOutside(dev, await tokenFor(dev), 'outside-tls');
     const h2: ClientHttp2Session = connect(dev.externalGatewayUrl!, {
       ca: toPem(dev.servingCaCertificate!),
