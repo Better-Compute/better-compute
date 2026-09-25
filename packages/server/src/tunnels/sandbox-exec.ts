@@ -58,6 +58,11 @@ export interface SandboxExec {
   hostPrincipal: string;
   /** The guest presents a host certificate from the sandbox CA (else: no pinning is possible). */
   hostCertified: boolean;
+  /**
+   * Why or why not: `valid` (= `hostCertified`), `expired` (it had one; within a minute of its end
+   * counts), or `none` (never certified: no `certifyHostKey` when it was created).
+   */
+  hostCertificate: 'valid' | 'expired' | 'none';
 }
 
 const tenantPattern = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -273,6 +278,11 @@ export function sandboxExecMethod(
         validBefore,
       });
       const serial = issued.serial.toString();
+      const hostCertificate = !hostCertified
+        ? 'none'
+        : hostCertValidBefore === null || hostCertValidBefore - now > 60_000
+          ? 'valid'
+          : 'expired';
       await context.events.publish(tx, {
         type: 'tunnel.issued',
         tenantId: input.tenantId,
@@ -316,8 +326,8 @@ export function sandboxExecMethod(
         validBefore: issued.validBefore,
         hostPrincipal: principalInstanceId,
         // Only while the guest's certificate still holds (with a minute to connect).
-        hostCertified:
-          hostCertified && (hostCertValidBefore === null || hostCertValidBefore - now > 60_000),
+        hostCertified: hostCertificate === 'valid',
+        hostCertificate,
       };
     },
   });

@@ -1273,6 +1273,35 @@ describe('snapshots', () => {
     );
     expect(rows[0]!.restore_from.principalInstanceId).toBe(sandbox.instanceId);
   });
+
+  it("refuse a memory restore that would outlive the guest's host certificate", async () => {
+    const { template, sandbox } = await running();
+    const snapshot = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+    })) as SnapshotView;
+    await settle(recorded.commands[0]!.id, 'succeeded');
+    await reconcileWith(snapshot.id);
+    await db.query(
+      `UPDATE sandbox_snapshots SET host_certified = true, host_cert_valid_before = $2::timestamptz
+        WHERE id = $1`,
+      [snapshot.id, new Date(clock.now() + 30 * 60_000).toISOString()],
+    );
+    const restore = (key: string, extra: Record<string, unknown> = {}) =>
+      callStore('create', {
+        tenantId: 'acme',
+        templateId: template.id,
+        fromSnapshot: snapshot.id,
+        idempotencyKey: key,
+        ...extra,
+      }) as Promise<SandboxView>;
+    await expect(restore('hour')).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('at most 1800s from now'),
+    });
+    const restored = await restore('half', { ttlSeconds: 1800 });
+    expect(restored.expiresAt).toBe(clock.now() + 1800_000);
+  });
 });
 
 describe('template network and versions', () => {
@@ -1348,6 +1377,50 @@ describe('template network and versions', () => {
       [old!.id]: 'deleted',
     });
     expect(warm.rows.filter((row) => row.desired_state === 'paused')).toHaveLength(1);
+  });
+
+  it('never lets a sandbox outlive its host certificate: claims, extends and warm recycling', async () => {
+    const certify = (id: string, validBefore: number) =>
+      db.query(
+        `UPDATE instances SET host_certified = true, host_cert_valid_before = $2::timestamptz WHERE id = $1`,
+        [id, new Date(validBefore).toISOString()],
+      );
+    const warmIds = async () =>
+      (
+        await db.query<{ id: string }>(
+          `SELECT id FROM instances WHERE warm_template_id = $1 AND desired_state <> 'deleted'`,
+          [template.id],
+        )
+      ).rows.map((row) => row.id);
+    const template = await createTemplate({ warm: { min: 1 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const [warm] = await warmIds();
+    // 50 minutes of certificate left: not enough for the default hour, so that create goes cold...
+    await certify(warm!, clock.now() + 50 * 60_000);
+    expect((await createSandbox(template.id)).warm).toBe(false);
+    // ...while a 30-minute one fits it.
+    const claimed = await createSandbox(template.id, { idempotencyKey: 'short', ttlSeconds: 1800 });
+    expect(claimed).toMatchObject({ warm: true, instanceId: warm });
+    await expect(
+      call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: claimed.id, by: '30m' }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('host certificate is valid until'),
+    });
+    expect(
+      await call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: claimed.id, by: '10m' }),
+    ).toMatchObject({ expiresAt: T0 + 40 * 60_000 });
+
+    // A warm instance whose certificate no longer covers the default TTL is replaced.
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const [refill] = await warmIds();
+    await certify(refill!, clock.now() + 59 * 60_000);
+    await reconcileSandboxes();
+    const after = await warmIds();
+    expect(after).toHaveLength(1);
+    expect(after).not.toContain(refill);
   });
 
   it('stamps readyAt the moment the instance runs, not a sandbox pass later', async () => {
@@ -1491,6 +1564,29 @@ describe('template env', () => {
     expect(recorded.fleetDecisions).toBe(1);
   });
 
+  it('refuses a fleet-scoped secret outright, whoever may manage it', async () => {
+    broker = {
+      resolve: async (ref) => `value:${ref}`,
+      put: async (tenantId) => `secret://${tenantId}/sealed`,
+      delete: async () => {},
+    };
+    await db.query(
+      `INSERT INTO secret_refs (ref, tenant_id, name, version, store, last_idempotency_key, scope)
+       VALUES ('secret://root/fleet-token', 'root', 'fleet-token', 1, 'local', 'k', 'fleet')`,
+    );
+    await expect(
+      call(
+        'sandboxTemplates',
+        'create',
+        templateInput({ tenantId: 'root', env: { TOKEN: 'secret://root/fleet-token' } }),
+        root,
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('fleet secret'),
+    });
+  });
+
   it("resolves the tenant's secrets into /etc/sandbox/env, sealed by the broker, never inline", async () => {
     await putSecret('secret://acme/api-token', 'api-token');
     await putSecret('secret://acme/db', 'db');
@@ -1616,6 +1712,25 @@ describe('exec trust', () => {
       const certificate = parseSshCertificate(line);
       expect(certificate.principals).toEqual([sandbox.instanceId]);
       expect(certificate.certType).toBe('host');
+
+      // The certificate falls a minute short of 30 days: a 30-day sandbox ends with it.
+      const month = 30 * 24 * 3600;
+      const long = await createTemplate({
+        name: 'month',
+        defaultTtlSeconds: month,
+        maxTtlSeconds: month,
+      });
+      const monthLong = (await run(
+        (certifyingApi.sandboxes as Record<string, Definition>).create!,
+        { tenantId: 'acme', templateId: long.id, idempotencyKey: 'month' },
+        alice,
+      )) as SandboxView;
+      const valid = await db.query<{ ms: number }>(
+        `SELECT (extract(epoch FROM host_cert_valid_before) * 1000)::float8 AS ms FROM instances WHERE id = $1`,
+        [monthLong.instanceId],
+      );
+      expect(monthLong.expiresAt).toBe(Number(valid.rows[0]!.ms));
+      expect(monthLong.expiresAt).toBe(clock.now() + month * 1000 - 60_000);
     } finally {
       broker = undefined;
     }

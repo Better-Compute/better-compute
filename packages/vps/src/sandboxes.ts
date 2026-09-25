@@ -611,25 +611,38 @@ export function templateSecretRefs(input: {
  * platform-minted ones (join tokens, BMC credentials, sealed user data), which live in the same store
  * under the root tenant. Secrets are write-only (§6): a sandbox that gets one in its env or user data
  * reads it, so `sandboxTemplates.create/update` also decide `compute:secrets:manage` for them.
+ * Fleet-scoped secrets (`secret_refs.scope`, put on `fleet/global`) are the platform's, never a
+ * guest's: refused outright. Rows from before that column read `tenant`, so the root tenant's
+ * templates also decide the fleet permission (admission check).
  */
 async function assertTenantSecrets(tx: SqlTx, tenantId: string, refs: readonly string[]) {
   if (refs.length === 0) return;
-  const present = await tx.query<{ found: string | null }>(
-    `SELECT to_regclass('secret_refs')::text AS found`,
+  const present = await tx.query<{ found: string | null; scoped: boolean }>(
+    `SELECT to_regclass('secret_refs')::text AS found,
+            EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_name = 'secret_refs' AND column_name = 'scope'
+                       AND table_schema = current_schema()) AS scoped`,
   );
   const known = present.rows[0]?.found
     ? (
-        await tx.query<{ ref: string }>(
-          `SELECT ref FROM secret_refs WHERE tenant_id = $1 AND ref = ANY($2::text[])`,
+        await tx.query<{ ref: string; scope: string }>(
+          `SELECT ref, ${present.rows[0].scoped ? 'scope' : `'tenant'`} AS scope
+             FROM secret_refs WHERE tenant_id = $1 AND ref = ANY($2::text[])`,
           [tenantId, [...refs]],
         )
-      ).rows.map((row) => row.ref)
+      ).rows
     : [];
-  const unknown = refs.filter((ref) => !known.includes(ref));
+  const unknown = refs.filter((ref) => !known.some((row) => row.ref === ref));
   if (unknown.length > 0)
     throw new ComputeError(
       'INVALID_INPUT',
       `${unknown[0]} is not a secret this tenant put (secrets.put); templates use only those`,
+    );
+  const fleet = known.find((row) => row.scope === 'fleet');
+  if (fleet)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${fleet.ref} is a fleet secret; a sandbox's guest reads what it is given, so templates use tenant secrets only`,
     );
 }
 
@@ -1060,7 +1073,7 @@ const instanceIdOf = (tenantId: string, sandboxId: string) =>
  * draft row and its authz row. The decision is on `compute-sandbox/{draftId}`.
  */
 export async function prepareCreateSandbox(
-  deps: Pick<InstanceDeps, 'authz'>,
+  deps: Pick<InstanceDeps, 'authz' | 'clock'>,
   context: MethodContext,
   input: CreateSandboxInput,
   tx: SqlTx,
@@ -1103,6 +1116,16 @@ export async function prepareCreateSandbox(
         'INVALID_INPUT',
         `Snapshot ${source.snapshotId} was taken on ${source.runtime}; template ${template.name} runs ${template.runtime}`,
       );
+    // A memory restore resumes the source guest's certified host key; it must cover the new TTL.
+    if (source.includeMemory && source.hostCertified) {
+      const now = deps.clock.now();
+      assertCertificateCovers(
+        source.hostCertValidBefore,
+        now + ttlSeconds * second,
+        now,
+        `Snapshot ${source.snapshotId}`,
+      );
+    }
   }
   if (!existing)
     await tx.query(
@@ -1417,6 +1440,34 @@ async function instanceUserData(
 /** Host certificates live as long as the sandbox CA allows (30 days), a minute short of it. */
 const hostCertificateMs = 30 * 24 * 3600_000 - 60_000;
 
+/**
+ * A certified guest's host certificate outlives its sandbox: nothing renews it, and past it exec
+ * clients can no longer pin the guest. So a claim takes only warm instances whose certificate covers
+ * the new sandbox's TTL, a fresh sandbox's expiry is capped at its certificate (a minute short at
+ * 30 days), and restores and extends that would outlive it are refused.
+ *
+ * Warm instances are recycled once their certificate no longer covers the template's default TTL,
+ * or `warmCertificateFloorSeconds` for templates whose default is longer (else a 30-day default
+ * would recycle every instance at once): longer claims then boot a fresh instance.
+ */
+const warmCertificateFloorSeconds = 15 * 24 * 3600;
+
+function assertCertificateCovers(
+  validBefore: number | undefined,
+  until: number,
+  now: number,
+  what: string,
+): void {
+  if (validBefore === undefined || until <= validBefore) return;
+  const left = Math.floor((validBefore - now) / second);
+  throw new ComputeError(
+    left < minTtlSeconds ? 'INVALID_STATE' : 'INVALID_INPUT',
+    left < minTtlSeconds
+      ? `${what}'s host certificate has expired (${new Date(validBefore).toISOString()})`
+      : `${what}'s host certificate is valid until ${new Date(validBefore).toISOString()}: at most ${left}s from now`,
+  );
+}
+
 /** An OpenSSH `ecdsa-sha2-nistp256` public key line. */
 function opensshEcdsaP256(publicKey: KeyObject): string {
   const jwk = publicKey.export({ format: 'jwk' });
@@ -1496,13 +1547,21 @@ async function claimWarm(
   tx: SqlTx,
   template: TemplateRow,
   sandbox: RawSandbox,
+  until: number,
 ): Promise<InstanceRow | undefined> {
   const { rows } = await tx.query<{ id: string }>(
     `SELECT id FROM instances
       WHERE warm_template_id = $1 AND tenant_id = $2 AND NOT draft AND desired_state <> 'deleted'
         AND state = ANY($3::text[]) AND warm_template_version = $4
+        AND (NOT host_certified OR host_cert_valid_before >= $5::timestamptz)
       ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`,
-    [template.id, template.tenantId, claimable, template.instanceVersion],
+    [
+      template.id,
+      template.tenantId,
+      claimable,
+      template.instanceVersion,
+      new Date(until).toISOString(),
+    ],
   );
   if (!rows[0]) return undefined;
   await tx.query(
@@ -1559,7 +1618,9 @@ export async function completeCreateSandbox(
       : await restoreSource(tx, raw.tenant_id, raw.from_snapshot, raw.owner_identity_id, {
           lock: true,
         });
-  const claimed = source ? undefined : await claimWarm(deps, tx, template, raw);
+  const now = deps.clock.now();
+  const until = now + raw.ttl_seconds * second;
+  const claimed = source ? undefined : await claimWarm(deps, tx, template, raw, until);
   const instance =
     claimed ??
     (await createManagedInstance(deps, tx, {
@@ -1592,17 +1653,16 @@ export async function completeCreateSandbox(
           }
         : {}),
     }));
-  const now = deps.clock.now();
+  // Never past the host certificate (a claim covers the TTL; a fresh one falls a minute short at 30 days).
+  const expires =
+    instance.hostCertValidBefore === undefined
+      ? until
+      : Math.min(until, instance.hostCertValidBefore);
   await tx.query(
     `UPDATE sandboxes SET draft = false, instance_id = $2, warm = $3, expires_at = $4::timestamptz,
                           version = version + 1
       WHERE id = $1`,
-    [
-      raw.id,
-      instance.id,
-      claimed !== undefined,
-      new Date(now + raw.ttl_seconds * second).toISOString(),
-    ],
+    [raw.id, instance.id, claimed !== undefined, new Date(expires).toISOString()],
   );
   const created = (await readSandbox(tx, raw.id))!;
   await publishSandbox(deps, tx, created, 'sandbox.created', {
@@ -1749,6 +1809,15 @@ export async function extendSandbox(
       'INVALID_INPUT',
       `A sandbox of template ${template.name} lives at most ${template.maxTtlSeconds}s`,
     );
+  if (expires > Number(raw.expires_ms)) {
+    const instance = await readInstance(tx, raw.instance_id);
+    assertCertificateCovers(
+      instance?.hostCertValidBefore,
+      expires,
+      deps.clock.now(),
+      `Sandbox ${raw.id}`,
+    );
+  }
   await context.authz.setPending(
     tx,
     { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id },
@@ -1878,21 +1947,21 @@ export async function reconcileSandboxes(
   await purgeSnapshots(options.store, deps.log, dropped);
 
   // Warm pools: what each template holds, then one transaction per change.
-  // Only instances of the template's current version count; older ones are drained.
+  // Only instances of the template's current version count; older ones are drained, as are those
+  // whose host certificate no longer covers the template's TTL (`warmCertificateFloorSeconds`).
   const { rows: pools } = await sql.query<
     RawTemplate & { live: string | number; stale: string | number }
   >(
     `SELECT ${templateColumnsOf('t.')},
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
-                                  AND i.state NOT IN ('error', 'lost')
-                                  AND i.warm_template_version = t.instance_version) AS live,
+                                  AND NOT ${warmStale('i.', 't.instance_version', '$1', 'least(t.default_ttl_seconds, $2)')}) AS live,
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
-                                  AND (i.warm_template_version IS DISTINCT FROM t.instance_version
-                                       OR i.state IN ('error', 'lost'))) AS stale
+                                  AND ${warmStale('i.', 't.instance_version', '$1', 'least(t.default_ttl_seconds, $2)')}) AS stale
        FROM sandbox_templates t
        LEFT JOIN instances i ON i.warm_template_id = t.id
       WHERE (NOT t.deleted AND t.warm_min > 0) OR i.id IS NOT NULL
       GROUP BY t.id`,
+    [at, warmCertificateFloorSeconds],
   );
   for (const raw of pools) {
     const template = toTemplate(raw);
@@ -2004,8 +2073,16 @@ export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
 }
 
 /**
- * Deletes up to `count` of a template's warm instances: those made from an older template version
- * (`stale`), or else current ones newest first (the oldest are claimed first).
+ * A warm instance no claim takes: made from an older template version, failed, or with a host
+ * certificate that ends within `cover` seconds of `now`.
+ */
+const warmStale = (a: string, version: string, now: string, cover: string) =>
+  `(${a}warm_template_version IS DISTINCT FROM ${version} OR ${a}state IN ('error', 'lost')
+    OR (${a}host_certified AND ${a}host_cert_valid_before < ${now}::timestamptz + make_interval(secs => ${cover})))`;
+
+/**
+ * Deletes up to `count` of a template's warm instances: stale ones (`warmStale`), or else current
+ * ones newest first (the oldest are claimed first).
  */
 async function drainWarm(
   deps: InstanceDeps,
@@ -2018,9 +2095,16 @@ async function drainWarm(
     const { rows } = await tx.query<{ id: string }>(
       `SELECT id FROM instances
         WHERE warm_template_id = $1 AND desired_state <> 'deleted' AND state NOT IN ('deleting', 'deleted')
-          AND (warm_template_version IS DISTINCT FROM $3 OR state IN ('error', 'lost')) = $4
+          AND ${warmStale('', '$3', '$5', '$6')} = $4
         ORDER BY created_at DESC, id DESC LIMIT $2 FOR UPDATE SKIP LOCKED`,
-      [template.id, count, template.instanceVersion, stale],
+      [
+        template.id,
+        count,
+        template.instanceVersion,
+        stale,
+        new Date(deps.clock.now()).toISOString(),
+        Math.min(template.defaultTtlSeconds, warmCertificateFloorSeconds),
+      ],
     );
     for (const { id: instanceId } of rows) {
       const row = (await readInstance(tx, instanceId, { lock: true }))!;

@@ -178,7 +178,15 @@ show it.
   - `sandboxes.exec` answers `hostPrincipal` and `hostCertified`, so clients pin guests with
     `@cert-authority` and `StrictHostKeyChecking=yes`;
   - a memory restore keeps its source guest's key and principal;
-  - `hostCertified` is reported only while the certificate is still valid (30 days).
+  - `hostCertified` is reported only while the certificate is still valid (30 days);
+    `hostCertificate` says `valid`, `expired` or `none`.
+
+  Nothing renews a host certificate, so a sandbox never outlives its guest's:
+  - a claim takes only warm instances whose certificate covers the new TTL;
+  - the reconciler recycles warm instances whose certificate no longer covers the template's default
+    TTL (at most 15 days);
+  - a fresh sandbox's expiry is capped at its certificate, a minute short at 30 days;
+  - a memory restore or an extend past the certificate is refused, naming how long is left.
 
 - **Network.** A template's `network` becomes the instance's `InstanceSpec.networkPolicy`. bcd
   enforces it on the instance's taps with nftables and fails closed without NIC addresses, so
@@ -188,8 +196,10 @@ show it.
   includes theirs.
 - **Secrets.** Secrets are write-only, but a sandbox reads whatever its template names. A template's
   env and `secret://` user data must therefore be secrets the tenant wrote with `secrets.put` (a
-  `secret_refs` row), so platform-minted ones are refused. Writing such a template also decides
-  `compute:secrets:manage` on the tenant, outside any transaction.
+  `secret_refs` row), so platform-minted ones are refused, and so are fleet-scoped ones
+  (`secret_refs.scope`). Writing such a template also decides `compute:secrets:manage` on the tenant,
+  outside any transaction. In the root tenant, where rows from before the scope column read
+  `tenant`, it also decides it on `fleet/global`.
 
   Sandbox user data is rendered and then sealed through the broker before the instance row is
   written. Without a broker, env and a `secret://` user data that vps would have to render are

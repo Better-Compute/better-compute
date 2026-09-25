@@ -218,6 +218,7 @@ describe('sandboxes.exec', () => {
     expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({
       hostPrincipal: INSTANCE,
       hostCertified: false,
+      hostCertificate: 'none',
     });
     await db.query(`UPDATE instances SET host_certified = true, host_cert_valid_before = $1`, [
       new Date(T0 + 3_600_000).toISOString(),
@@ -225,6 +226,7 @@ describe('sandboxes.exec', () => {
     expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({
       hostPrincipal: INSTANCE,
       hostCertified: true,
+      hostCertificate: 'valid',
     });
     // An expired host certificate cannot be pinned: say so rather than fail the client's check.
     await db.query(`UPDATE instances SET host_cert_valid_before = $1`, [
@@ -232,6 +234,7 @@ describe('sandboxes.exec', () => {
     ]);
     expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({
       hostCertified: false,
+      hostCertificate: 'expired',
     });
   });
 
