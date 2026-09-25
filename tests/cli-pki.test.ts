@@ -335,6 +335,10 @@ describe('daemon install-script', () => {
       expect(spawnSync(shell, ['-n', file], { encoding: 'utf8' }).status).toBe(0);
     }
     expect(await run([...withManifest, '--release-threshold', '2'], pins)).toMatchObject({ ok: false });
+    // The release floor: a config key beside the pins; a repeated pin is one key.
+    const floored = await run([...withManifest, '--release-sequence', '41'], { BCD_RELEASE_PINS: `${pins.BCD_RELEASE_PINS},${pins.BCD_RELEASE_PINS}` });
+    expect(floored.stdout).toContain(`release_pins = "${pins.BCD_RELEASE_PINS}"\nrelease_threshold = 1\nrelease_sequence = 41\n`);
+    expect(await run([...base, '--release-sequence', '41'])).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
 
     const other = createReleaseSigningKey();
     expect(await run(withManifest, { BCD_RELEASE_PINS: spkiPin(other.publicKey) })).toMatchObject({

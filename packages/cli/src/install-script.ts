@@ -45,7 +45,12 @@ export interface InstallScriptOptions {
    * bcd self-update (PLAN.md §6): the release keys' pins and how many must have signed, as an [update] section
    * (without pins bcd refuses every self-update).
    */
-  update?: { releasePins: readonly string[]; threshold?: number };
+  update?: {
+    releasePins: readonly string[];
+    threshold?: number;
+    /** The release floor (the release sequence bcd never goes below, beside its own embedded one and its state). */
+    sequence?: number;
+  };
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -94,12 +99,16 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
   if (options.approverSetSha256 !== undefined && !hexPattern.test(options.approverSetSha256))
     throw invalid('--approver-set-sha256', 'must be 64 lower-case hex digits (pki trust-version prints it)');
   if (options.update) {
-    const pins = options.update.releasePins;
-    if (pins.length === 0 || !pins.every((pin) => pinPattern.test(pin)))
+    const pins = new Set(options.update.releasePins);
+    if (pins.size === 0 || ![...pins].every((pin) => pinPattern.test(pin)))
       throw invalid('--release-pins', 'must be sha256/<base64 of 32 bytes> pins, comma-separated');
+    // bcd counts distinct pins.
     const threshold = options.update.threshold ?? 1;
-    if (!Number.isInteger(threshold) || threshold < 1 || threshold > pins.length)
-      throw invalid('--release-threshold', `must be from 1 to the ${pins.length} release pin(s)`);
+    if (!Number.isInteger(threshold) || threshold < 1 || threshold > pins.size)
+      throw invalid('--release-threshold', `must be from 1 to the ${pins.size} distinct release pin(s)`);
+    const sequence = options.update.sequence;
+    if (sequence !== undefined && !(Number.isSafeInteger(sequence) && sequence >= 1))
+      throw invalid('--release-sequence', 'must be a whole number of at least 1');
   }
   for (const name of options.plugins?.privileged ?? [])
     if (!idPattern.test(name)) throw invalid('--privileged-plugins', 'must name plugins by letters, digits and . _ -');
@@ -137,9 +146,22 @@ export function renderBcdConfig(
   ].join('\n');
 }
 
-/** The [update] section: bcd self-updates only to releases signed by `threshold` of these keys. */
-export function renderBcdUpdateSection(update: { releasePins: readonly string[]; threshold?: number }): string {
-  return ['[update]', `release_pins = "${update.releasePins.join(',')}"`, `release_threshold = ${update.threshold ?? 1}`, ''].join('\n');
+/**
+ * The [update] section: bcd self-updates only to releases signed by `threshold` of these keys, and never to one
+ * below `sequence` (its floor is the highest of this, its own state and the sequence built into it).
+ */
+export function renderBcdUpdateSection(update: {
+  releasePins: readonly string[];
+  threshold?: number;
+  sequence?: number;
+}): string {
+  return [
+    '[update]',
+    `release_pins = "${[...new Set(update.releasePins)].join(',')}"`,
+    `release_threshold = ${update.threshold ?? 1}`,
+    ...(update.sequence === undefined ? [] : [`release_sequence = ${update.sequence}`]),
+    '',
+  ].join('\n');
 }
 
 /** Where plugins live (root-owned, 0755: each runs under its own uid and must reach its binary). */

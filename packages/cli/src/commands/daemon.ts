@@ -178,6 +178,12 @@ export const daemonCommands = [
         value: 'NAMES',
         description: 'Plugins that run as root without the seccomp filter (comma-separated; implies --plugins)',
       },
+      'release-sequence': {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        description: "bcd's release floor ([update] release_sequence): it never installs an older release",
+      },
       pki: pkiFlag,
       out: {
         type: 'string',
@@ -192,6 +198,8 @@ export const daemonCommands = [
     validate(flags) {
       if ((flags.sha256 === undefined) === (flags['release-manifest'] === undefined))
         throw usageError('Give exactly one of --sha256 or --release-manifest');
+      if (flags['release-sequence'] !== undefined && !flags['release-pins'])
+        throw usageError('--release-sequence needs --release-pins: bcd self-updates only under release keys');
     },
     async run({ flags, path, note, program, env }) {
       const version = flags['bcd-version']!.replace(/^v/, '');
@@ -249,6 +257,7 @@ export const daemonCommands = [
                   .map((pin) => pin.trim())
                   .filter(Boolean),
                 ...(flags['release-threshold'] === undefined ? {} : { threshold: flags['release-threshold'] }),
+                ...(flags['release-sequence'] === undefined ? {} : { sequence: flags['release-sequence'] }),
               },
             }
           : {}),
