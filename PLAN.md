@@ -1863,6 +1863,15 @@ A phase closes only when its exit tests are green in CI. `bench/REFERENCE.md` de
 | D18 | Propose R1 upstream | **Only if the v0.1 IAM-lane ceiling is below G5 with lock wait >50%** |
 | D19 | Co-host the better-iam console on compute's IAM database | **Only after U0**; until then compute is the only IAM host family (§12.1) |
 | D20 | Rewrite the gateway in Go | **Only if the v0.1 Node gateway gate fails**; decided before v0.2 starts |
+| D21 | Billing of whole-node leases (`binding: 'node'`, v0.5) | **`node.metal.hours` plus `gpu.<model>.hours` for the GPUs healthy at each window's start**; unhealthy atoms are booked only to exclude others and show as the `UnhealthyAtoms` condition. Spot + `binding: 'node'` is refused. One pricing function (`billableLines`) |
+| D22 | Default placer | **Inline** (synchronous admission); the batched `pool-lease` placer is opt-in and recommended for production (`capacityModule({ placer: 'pool-lease' })`), revisited at the v0.4 exit after a real Postgres run |
+| D23 | Next.js major for `apps/console` | **15.x** (better-iam's `@better-iam/next` peers `next ^15`); `apps/docs` follows better-iam's docs on 16.x |
+
+Implementation notes (2026-09-24), recorded where the code settled a question the plan left open:
+- **Two-round joins.** An attestor may return an `AttestationDeferral` (`approval` for discovery → `joinRequests`, `challenge` for tpm credential activation). JoinService commits the attestor's rows, issues nothing, and answers with a signed, CSR-bound `JoinResponseBody.deferral` (agent/v1 field 9). Attestors consume tokens and single-use evidence only on the final round.
+- **Per-input actions.** A method may name an alternative's own action on its resource (`MethodResource.action`, e.g. `tunnels.open` on a node decides `compute:nodes:console`). The envelope refuses any `(action, resource)` pair its §9.2 row does not list.
+- **Default secret store.** Without `ComputeOptions.secrets`, `ctx.secrets`, the `secrets` group and the secret broker use `sealed_secrets` in the compute database, sealed under the deployment secret (pki `localSealedSecretStore`).
+- **Revocation push.** Each gateway runs pki's `createRevocationFeed`, which polls `node_certs.revoked_at` with a look-back window; every revocation path is covered without events, and a revoked node disconnects in about 1 s.
 
 ## 18. Risks & mitigations
 
