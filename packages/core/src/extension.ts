@@ -836,6 +836,8 @@ export interface UsageRecorder {
 /** The secret broker (v0.2). */
 export interface SecretBroker extends SecretResolver {
   put(tenantId: string, value: string): Promise<SecretRef>;
+  /** Destroys a secret no longer referenced (e.g. a superseded BMC credential); unknown refs are a no-op. */
+  delete?(ref: SecretRef): Promise<void>;
 }
 
 /** Join credentials for agents a module brings up (`provisioned`, `discovery` tokens; v0.2). */
