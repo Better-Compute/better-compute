@@ -106,11 +106,25 @@ export function inventoryHealthFindings(section: GpusSection | undefined): Healt
 }
 
 async function upsertCondition(tx: SqlTx, nodeId: string, type: string, status: 'true' | 'false', reason: string | null) {
+  await upsertNodeConditions(tx, nodeId, [{ type, status, reason }]);
+}
+
+/**
+ * Sets several conditions of one node in one statement; `since` moves only when a status flips.
+ * Types must be distinct (one statement cannot upsert a row twice).
+ */
+export async function upsertNodeConditions(
+  tx: SqlTx,
+  nodeId: string,
+  conditions: readonly { type: string; status: 'true' | 'false' | 'unknown'; reason?: string | null | undefined }[],
+): Promise<void> {
+  if (conditions.length === 0) return;
   await tx.query(
-    `INSERT INTO node_conditions (node_id, type, status, reason, since) VALUES ($1, $2, $3, $4, compute_now())
+    `INSERT INTO node_conditions (node_id, type, status, reason, since)
+     SELECT $1, c.type, c.status, c.reason, compute_now() FROM unnest($2::text[], $3::text[], $4::text[]) AS c(type, status, reason)
      ON CONFLICT (node_id, type) DO UPDATE SET status = EXCLUDED.status, reason = EXCLUDED.reason,
        since = CASE WHEN node_conditions.status = EXCLUDED.status THEN node_conditions.since ELSE EXCLUDED.since END`,
-    [nodeId, type, status, reason],
+    [nodeId, conditions.map((c) => c.type), conditions.map((c) => c.status), conditions.map((c) => c.reason ?? null)],
   );
 }
 
@@ -127,16 +141,21 @@ export async function applyInventoryHealth(
   currentReasons: readonly string[],
 ): Promise<string[]> {
   await tx.query(`DELETE FROM device_health WHERE node_id = $1 AND source = 'inventory'`, [nodeId]);
-  for (const finding of findings)
+  if (findings.length > 0)
     await tx.query(
-      `INSERT INTO device_health (device_id, node_id, reason, source, message) VALUES ($1, $2, $3, 'inventory', $4)
+      `INSERT INTO device_health (device_id, node_id, reason, source, message)
+       SELECT f.device_id, $1, f.reason, 'inventory', f.message FROM unnest($2::text[], $3::text[], $4::text[]) AS f(device_id, reason, message)
        ON CONFLICT (device_id, reason) DO NOTHING`,
-      [finding.deviceId, nodeId, finding.condition, finding.message],
+      [nodeId, findings.map((f) => f.deviceId), findings.map((f) => f.condition), findings.map((f) => f.message)],
     );
-  for (const type of inventoryHealthConditions) {
-    const hits = findings.filter((finding) => finding.condition === type);
-    await upsertCondition(tx, nodeId, type, hits.length ? 'true' : 'false', hits.length ? hits.map((h) => h.deviceId).join(',').slice(0, 512) : null);
-  }
+  await upsertNodeConditions(
+    tx,
+    nodeId,
+    inventoryHealthConditions.map((type) => {
+      const hits = findings.filter((finding) => finding.condition === type);
+      return { type, status: hits.length ? 'true' : 'false', reason: hits.length ? hits.map((h) => h.deviceId).join(',').slice(0, 512) : null };
+    }),
+  );
   return mergeNoScheduleReasons(
     currentReasons,
     inventoryHealthConditions,

@@ -15,6 +15,7 @@ import {
   applyInventory,
   gpuAtomFamily,
   ingestInventorySection,
+  ingestInventorySections,
   inventoryModule,
   inventoryReconciler,
   latestInventory,
@@ -340,6 +341,74 @@ describe('inventory.history and inventory.diff', () => {
     await expect(call('diff', { tenantId: 'ten_root', nodeId: node, from: 'f'.repeat(64) })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(call('history', { tenantId: 'ten_other', nodeId: node })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(() => api.inventory.history.validate({ tenantId: 'ten_root', nodeId: node, limit: 500 })).toThrow();
+  });
+});
+
+describe('ingestInventorySections (the batched pull)', () => {
+  it('stores many nodes sections in one go, with one slot per entry, and enqueues each node once', async () => {
+    const other = `node_${++seq}`;
+    await db.transaction((tx) => addNode(tx, other));
+    const hashes = { gpus: encoded.gpus(8), system: encoded.system('S-batch'), os: encoded.os() };
+    for (const id of [node, other])
+      await db.transaction((tx) =>
+        recordInventoryHashes(tx, work, id, Object.fromEntries(Object.entries(hashes).map(([name, bytes]) => [name, sha256Hex(bytes)]))),
+      );
+    const entry = (nodeId: string, name: InventorySectionName, content: Uint8Array, sha256 = sha256Hex(content)) => ({
+      nodeId,
+      section: { section: name, content, sha256 },
+    });
+    enqueued.length = 0;
+    const results = await db.transaction((tx) =>
+      ingestInventorySections(tx, work, [
+        entry(node, 'gpus', hashes.gpus),
+        entry(node, 'system', encoded.system('stale')), // superseded by the next one
+        entry(node, 'system', hashes.system),
+        entry(node, 'os', hashes.os),
+        entry(other, 'gpus', hashes.gpus),
+        entry(other, 'system', hashes.system, 'ab'.repeat(32)), // bytes that do not match their hash
+        entry('node_missing', 'os', hashes.os),
+        entry(other, 'system', hashes.system),
+        entry(other, 'os', hashes.os),
+      ]),
+    );
+    expect(results.map((result) => (result as { code?: string } | undefined)?.code)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'INVALID_INPUT',
+      'NOT_FOUND',
+      undefined,
+      undefined,
+    ]);
+    expect(enqueued.sort()).toEqual([`inventory:${node}`, `inventory:${other}`].sort());
+    // Both nodes now hold a complete, verified set: the reconciler applies it. They reported the same
+    // GPU UUIDs, so the second finds every device claimed by the first (the set-based upsert's
+    // RETURNING tells them apart).
+    expect((await applyInventory(db, node, { events, work })).status).toBe('applied');
+    const second = await applyInventory(db, other, { events, work });
+    expect(second.status === 'applied' && second.devices).toMatchObject({ upserted: 0, claimedElsewhere: expect.arrayContaining([`GPU-${node}-0`]) });
+    expect(second.status === 'applied' && second.devices.claimedElsewhere).toHaveLength(8);
+    expect(second.status === 'applied' && second.conditions.find((c) => c.type === 'DuplicateIdentity')?.status).toBe('true');
+    const { rows } = await db.query<{ node_id: string; n: number }>(
+      `SELECT node_id, count(*)::int AS n FROM devices WHERE node_id = ANY($1) AND class = 'gpu' GROUP BY node_id`,
+      [[node, other]],
+    );
+    expect(rows).toEqual([{ node_id: node, n: 8 }]);
+    expect(await db.transaction((tx) => ingestInventorySections(tx, work, []))).toEqual([]);
+  });
+
+  it('uses the set-based enqueue when the work queue has one', async () => {
+    const many: string[][] = [];
+    const batching: WorkQueue = {
+      ...work,
+      async enqueueMany(_tx, kind, keys) {
+        many.push([kind, ...keys]);
+      },
+    };
+    await db.transaction((tx) => ingestInventorySections(tx, batching, [{ nodeId: node, section: { section: 'os', content: encoded.os(), sha256: sha256Hex(encoded.os()) } }]));
+    expect(many).toEqual([['inventory', node]]);
   });
 });
 

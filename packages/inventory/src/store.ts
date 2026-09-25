@@ -13,7 +13,7 @@ import { devicesFromGpus, planDevices, poolSharing, type GpuSharing, type Stored
 import { applyImageCache } from './image-cache.js';
 import { diffInventory } from './diff.js';
 import { hardwareKey } from './hardware-key.js';
-import { applyInventoryHealth, healthWorkKind, inventoryHealthFindings, type HealthFinding } from './health.js';
+import { applyInventoryHealth, healthWorkKind, inventoryHealthFindings, upsertNodeConditions as upsertConditions, type HealthFinding } from './health.js';
 import {
   inventoryConditions,
   inventoryLabels,
@@ -108,6 +108,67 @@ export async function ingestInventorySection(
   );
   if (result.rowCount === 0) throw nodeNotFound(nodeId);
   await work.enqueue(tx, inventoryWorkKind, nodeId);
+}
+
+/** One pulled section of one node, for `ingestInventorySections`. */
+export interface InventorySectionEntry {
+  nodeId: string;
+  section: ReportedSection;
+}
+
+/**
+ * Many pulled sections, of many nodes, in two statements (the gateway's batched ingest; join storms):
+ * the set-based `ingestInventorySection`. Each entry is verified on its own; the result has one slot
+ * per entry, `undefined` when it was stored, else its error (`INVALID_INPUT` for bytes that do not
+ * match their hash, `NOT_FOUND` for an unknown node). When one batch carries a section of a node
+ * twice, the last one wins (the earlier slots succeed too: they were superseded, as by a later frame).
+ */
+export async function ingestInventorySections(
+  tx: SqlTx,
+  work: WorkQueue,
+  entries: readonly InventorySectionEntry[],
+): Promise<(Error | undefined)[]> {
+  const results: (Error | undefined)[] = new Array(entries.length).fill(undefined);
+  // (node, section) → the last valid entry for it: one statement cannot upsert a row twice.
+  const latest = new Map<string, { nodeId: string; name: string; sha256: string; content: Uint8Array }>();
+  for (const [index, entry] of entries.entries()) {
+    try {
+      const verified = verifySection(entry.section);
+      latest.set(`${entry.nodeId}\u0000${verified.name}`, {
+        nodeId: entry.nodeId,
+        name: verified.name,
+        sha256: verified.sha256,
+        content: entry.section.content,
+      });
+    } catch (error) {
+      results[index] = error instanceof Error ? error : new ComputeError('INVALID_INPUT', String(error));
+    }
+  }
+  const rows = [...latest.values()];
+  if (rows.length === 0) return results;
+  const { rows: stored } = await tx.query<{ node_id: string }>(
+    `INSERT INTO node_inventory_sections (node_id, section, sha256, content, received_at)
+     SELECT n.id, e.section, e.sha256, decode(e.content_hex, 'hex'), compute_now()
+       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS e(node_id, section, sha256, content_hex)
+       JOIN nodes n ON n.id = e.node_id
+     ON CONFLICT (node_id, section) DO UPDATE SET sha256 = EXCLUDED.sha256,
+       content = EXCLUDED.content, received_at = EXCLUDED.received_at
+     RETURNING node_id`,
+    // Bytes travel as hex: bytea[] parameters are not portable across drivers.
+    [
+      rows.map((row) => row.nodeId),
+      rows.map((row) => row.name),
+      rows.map((row) => row.sha256),
+      rows.map((row) => Buffer.from(row.content).toString('hex')),
+    ],
+  );
+  const known = new Set(stored.map((row) => row.node_id));
+  for (const [index, entry] of entries.entries())
+    if (results[index] === undefined && !known.has(entry.nodeId)) results[index] = nodeNotFound(entry.nodeId);
+  const nodes = [...known].sort();
+  if (work.enqueueMany) await work.enqueueMany(tx, inventoryWorkKind, nodes);
+  else for (const nodeId of nodes) await work.enqueue(tx, inventoryWorkKind, nodeId);
+  return results;
 }
 
 /** JSON for `inventory_snapshots.sections`: protobuf-es messages without `$typeName`, bigints as strings. */
@@ -288,14 +349,7 @@ export async function applyInventory(
             }
           : { type: 'DuplicateIdentity', status: 'false', noSchedule: false },
     ];
-    for (const condition of conditions)
-      await tx.query(
-        `INSERT INTO node_conditions (node_id, type, status, reason, since)
-         VALUES ($1, $2, $3, $4, compute_now())
-         ON CONFLICT (node_id, type) DO UPDATE SET status = EXCLUDED.status, reason = EXCLUDED.reason,
-           since = CASE WHEN node_conditions.status = EXCLUDED.status THEN node_conditions.since ELSE EXCLUDED.since END`,
-        [nodeId, condition.type, condition.status, condition.reason ?? null],
-      );
+    await upsertConditions(tx, nodeId, conditions);
 
     const reasons = mergeNoScheduleReasons(healthReasons, inventoryOwnedConditions, conditions);
     const currentKey = node.hardware_key ? Buffer.from(node.hardware_key).toString('hex') : null;
@@ -317,19 +371,17 @@ export async function applyInventory(
     if (options.events) {
       const subject = `node/${nodeId}`;
       const tenantId = node.owner_tenant_id;
-      await options.events.publish(tx, {
-        type: 'node.inventory.changed',
-        tenantId,
-        subject,
-        data: { snapshotId, digest, sections: reportedNames, changes: changes.length },
-      });
-      for (const change of changes)
-        await options.events.publish(tx, {
+      const events = [
+        { type: 'node.inventory.changed', tenantId, subject, data: { snapshotId, digest, sections: reportedNames, changes: changes.length } },
+        ...changes.map((change) => ({
           type: `node.${change.type}`,
           tenantId,
           subject,
           data: { snapshotId, ...(change as unknown as Record<string, Json>) },
-        });
+        })),
+      ];
+      if (options.events.publishMany) await options.events.publishMany(tx, events);
+      else for (const event of events) await options.events.publish(tx, event);
     }
     return { status: 'applied', snapshotId, digest, changes, conditions, devices, health };
   });
@@ -371,20 +423,33 @@ async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySectio
     unhealthy: new Set(quarantined.rows.map((row) => row.device_id)),
   });
 
-  // Parents before children on insert; the plan lists devices in that order.
+  // One statement for every device (the foreign key to a parent in the same batch is checked at the
+  // statement's end). A device not returned belongs to another node (a GPU moved without its old
+  // node reporting it gone, or a cloned identity): the other node keeps it until its own inventory
+  // drops it.
   const claimedElsewhere: string[] = [];
-  for (const device of plan.upsert) {
-    const result = await tx.query(
+  if (plan.upsert.length > 0) {
+    const { rows: written } = await tx.query<{ id: string }>(
       `INSERT INTO devices (id, node_id, parent_id, class, bookable, healthy, attributes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+       SELECT d.id, $1, d.parent_id, d.class, d.bookable, d.healthy, d.attributes::jsonb
+         FROM unnest($2::text[], $3::text[], $4::text[], $5::bool[], $6::bool[], $7::text[])
+              AS d(id, parent_id, class, bookable, healthy, attributes)
        ON CONFLICT (id) DO UPDATE SET parent_id = EXCLUDED.parent_id, class = EXCLUDED.class,
          bookable = EXCLUDED.bookable, healthy = EXCLUDED.healthy, attributes = EXCLUDED.attributes
-       WHERE devices.node_id = EXCLUDED.node_id`,
-      [device.id, nodeId, device.parentId ?? null, device.class, device.bookable, device.healthy, JSON.stringify(device.attributes)],
+       WHERE devices.node_id = EXCLUDED.node_id
+       RETURNING id`,
+      [
+        nodeId,
+        plan.upsert.map((device) => device.id),
+        plan.upsert.map((device) => device.parentId ?? null),
+        plan.upsert.map((device) => device.class),
+        plan.upsert.map((device) => device.bookable),
+        plan.upsert.map((device) => device.healthy),
+        plan.upsert.map((device) => JSON.stringify(device.attributes)),
+      ],
     );
-    // 0 rows: the id belongs to another node (a GPU moved without its old node reporting it gone,
-    // or a cloned identity). The other node keeps it until its own inventory drops it.
-    if (result.rowCount === 0) claimedElsewhere.push(device.id);
+    const mine = new Set(written.map((row) => row.id));
+    for (const device of plan.upsert) if (!mine.has(device.id)) claimedElsewhere.push(device.id);
   }
   if (plan.quarantine.length > 0)
     await tx.query('UPDATE devices SET healthy = false WHERE node_id = $1 AND id = ANY($2)', [nodeId, plan.quarantine]);
@@ -394,8 +459,7 @@ async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySectio
       `DELETE FROM device_bookings WHERE device_id = ANY($1) AND NOT upper_inf(during) AND upper(during) <= compute_now()`,
       [plan.remove],
     );
-    for (const id of plan.remove)
-      await tx.query('DELETE FROM devices WHERE node_id = $1 AND id = $2', [nodeId, id]);
+    await tx.query('DELETE FROM devices WHERE node_id = $1 AND id = ANY($2::text[])', [nodeId, plan.remove]);
   }
   return {
     upserted: plan.upsert.length - claimedElsewhere.length,
@@ -411,12 +475,13 @@ async function applyLabels(tx: SqlTx, nodeId: string, sections: InventorySection
     `DELETE FROM node_labels WHERE node_id = $1 AND source = 'inventory' AND NOT (key = ANY($2))`,
     [nodeId, labels.map((label) => label.key)],
   );
-  for (const label of labels)
+  if (labels.length > 0)
     await tx.query(
-      `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, $3, 'inventory')
+      `INSERT INTO node_labels (node_id, key, value, source)
+       SELECT $1, l.key, l.value, 'inventory' FROM unnest($2::text[], $3::text[]) AS l(key, value)
        ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value
        WHERE node_labels.source = 'inventory' AND node_labels.value <> EXCLUDED.value`,
-      [nodeId, label.key, label.value],
+      [nodeId, labels.map((label) => label.key), labels.map((label) => label.value)],
     );
 }
 
