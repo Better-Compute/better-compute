@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/debug"
 
+	"github.com/better-compute/better-compute/daemon/internal/bcx"
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/nvml"
@@ -33,6 +34,11 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == bcx.ShimCommand {
+		// bcd as the plugin sandbox's shim (bcx.StartOptions.Shim): returns only on failure.
+		fmt.Fprintf(os.Stderr, "%v\n", bcx.RunShim(os.Args[2:]))
+		os.Exit(exitFailure)
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 

@@ -33,8 +33,12 @@ func (echoPlugin) Describe(context.Context, *connect.Request[driverv1.DescribeRe
 
 func (echoPlugin) Invoke(_ context.Context, req *connect.Request[driverv1.InvokeRequest], out *connect.ServerStream[driverv1.InvokeResponse]) error {
 	_ = out.Send(&driverv1.InvokeResponse{Msg: &driverv1.InvokeResponse_Progress{Progress: &driverv1.Progress{Percent: 50, Phase: "working"}}})
-	if req.Msg.GetOperation() == "fail" {
+	switch req.Msg.GetOperation() {
+	case "fail":
 		return out.Send(&driverv1.InvokeResponse{Msg: &driverv1.InvokeResponse_Error{Error: &driverv1.DriverError{Code: "unreachable", Message: "no BMC"}}})
+	case "probe":
+		// What a denied system call answers in this process (the sandbox test).
+		return out.Send(&driverv1.InvokeResponse{Msg: &driverv1.InvokeResponse_ResultJson{ResultJson: `"` + probeDenied() + `"`}})
 	}
 	secret := ""
 	for _, s := range req.Msg.GetSecrets() {
@@ -50,6 +54,12 @@ func (echoPlugin) Health(context.Context, *connect.Request[driverv1.HealthReques
 
 // TestMain turns this test binary into the echo plugin when the host runs it as one.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == ShimCommand {
+		// The host ran this binary as the sandbox shim.
+		err := RunShim(os.Args[2:])
+		os.Stderr.WriteString(err.Error() + "\n")
+		os.Exit(1)
+	}
 	if os.Getenv("BCX_TEST_PLUGIN") == "1" {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()

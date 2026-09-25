@@ -342,7 +342,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
-	plugins := startPlugins(context.Background(), cfg.PluginsDir, log)
+	plugins := startPlugins(context.Background(), cfg.PluginsDir, cfg.Plugins, log)
 	defer func() {
 		for _, p := range plugins {
 			p.Close()

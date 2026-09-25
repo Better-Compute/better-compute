@@ -47,6 +47,22 @@ type StartOptions struct {
 	HandshakeTimeout time.Duration
 	// Stderr receives the plugin's own logs (default: discarded).
 	Stderr io.Writer
+
+	// The sandbox (PLAN.md §5.5; Linux). Shim, when set, is an executable that runs the plugin with
+	// no new privileges and a seccomp filter (bcd itself: its ShimCommand runs RunShim).
+	Shim string
+	// Credential runs the plugin as another user (bcd runs as root; its plugins should not).
+	Credential *Credential
+	// CgroupDir is a delegated cgroup v2 directory; each plugin runs in CgroupDir/bcx-<name>, limited
+	// by MemoryMax bytes and PidsMax tasks (0: no limit).
+	CgroupDir string
+	MemoryMax int64
+	PidsMax   int
+}
+
+// Credential is a user and group a plugin runs as.
+type Credential struct {
+	UID, GID uint32
 }
 
 // Start verifies and runs a plugin, completes the handshake and asks it what it serves.
@@ -54,14 +70,15 @@ func Start(ctx context.Context, name, path string, o StartOptions) (*Plugin, err
 	if o.Sha256 == "" {
 		return nil, fmt.Errorf("bcx: plugin %s has no sha256 pin", name)
 	}
+	// The binary is hashed through the file it is then executed from (Linux: /proc/self/fd), so what
+	// runs is what was hashed even if the path is replaced in between.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 	h := sha256.New()
-	_, err = io.Copy(h, f)
-	f.Close()
-	if err != nil {
+	if _, err := io.Copy(h, f); err != nil {
 		return nil, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != o.Sha256 {
@@ -83,6 +100,12 @@ func Start(ctx context.Context, name, path string, o StartOptions) (*Plugin, err
 		ClientCertEnv + "=" + host.pem(),
 	}, o.Env...)
 	cmd.Stderr = o.Stderr
+	release, err := prepare(cmd, f, path, name, o, dir)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("bcx: plugin %s: %w", name, err)
+	}
+	defer release()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		os.RemoveAll(dir)
@@ -158,7 +181,7 @@ func (p *Plugin) Close() {
 			p.http.CloseIdleConnections()
 		}
 		if p.cmd != nil && p.cmd.Process != nil {
-			_ = p.cmd.Process.Kill()
+			killGroup(p.cmd)
 			_ = p.cmd.Wait()
 		}
 		_ = os.RemoveAll(p.dir)

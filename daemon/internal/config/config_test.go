@@ -167,6 +167,20 @@ func TestParseValidatesValues(t *testing.T) {
 	}
 }
 
+func TestPluginsSection(t *testing.T) {
+	cfg, err := Parse([]byte(required()))
+	if err != nil || !cfg.Plugins.Sandbox || cfg.Plugins.User != "" {
+		t.Fatalf("defaults = %+v, %v", cfg.Plugins, err)
+	}
+	cfg, err = Parse([]byte(required() + "[plugins]\ndir = \"/etc/bcd/plugins\"\nuser = \"bcx\"\nsandbox = false\ncgroup = \"/sys/fs/cgroup/bcd.plugins\"\nmemory_max = 1_073_741_824\npids_max = 256\n"))
+	if err != nil || cfg.Plugins.User != "bcx" || cfg.Plugins.Sandbox || cfg.Plugins.Cgroup != "/sys/fs/cgroup/bcd.plugins" || cfg.Plugins.MemoryMax != 1<<30 || cfg.Plugins.PidsMax != 256 {
+		t.Fatalf("plugins = %+v, %v", cfg.Plugins, err)
+	}
+	if _, err := Parse([]byte(required() + "[plugins]\ncgroup = \"relative\"\n")); err == nil {
+		t.Fatal("a relative cgroup was accepted")
+	}
+}
+
 func TestDecodePin(t *testing.T) {
 	digest, err := DecodePin(testPin)
 	if err != nil {

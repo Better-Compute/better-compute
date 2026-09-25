@@ -1,0 +1,135 @@
+//go:build linux
+
+package bcx
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
+)
+
+// ShimCommand is the argument that makes the shim executable (bcd) run RunShim:
+// `<shim> __bcx-exec <plugin name> <plugin args>...`, with the verified binary on fd 3.
+const ShimCommand = "__bcx-exec"
+
+// prepare makes cmd run the verified binary from its open file bin (fd 3 in the child, executed as
+// /proc/self/fd/3, never by path again), through the shim when there is one, as o.Credential, in
+// its own process group and cgroup. release closes what the parent no longer needs once the child
+// started.
+func prepare(cmd *exec.Cmd, bin *os.File, _ string, name string, o StartOptions, socketDir string) (release func(), err error) {
+	cmd.ExtraFiles = []*os.File{bin}
+	if o.Shim != "" {
+		cmd.Path = o.Shim
+		cmd.Args = append([]string{o.Shim, ShimCommand, name}, o.Args...)
+	} else {
+		cmd.Path = "/proc/self/fd/3"
+		cmd.Args = append([]string{name}, o.Args...)
+	}
+	attr := &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if c := o.Credential; c != nil {
+		// No supplementary groups: none of root's.
+		attr.Credential = &syscall.Credential{Uid: c.UID, Gid: c.GID, Groups: []uint32{}}
+		// The plugin creates its socket there.
+		if err := os.Chown(socketDir, int(c.UID), int(c.GID)); err != nil {
+			return nil, err
+		}
+	}
+	release = func() {}
+	if o.CgroupDir != "" {
+		dir := filepath.Join(o.CgroupDir, "bcx-"+name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("cgroup: %w", err)
+		}
+		limits := map[string]string{}
+		if o.MemoryMax > 0 {
+			limits["memory.max"] = strconv.FormatInt(o.MemoryMax, 10)
+		}
+		if o.PidsMax > 0 {
+			limits["pids.max"] = strconv.Itoa(o.PidsMax)
+		}
+		for file, value := range limits {
+			if err := os.WriteFile(filepath.Join(dir, file), []byte(value), 0o644); err != nil {
+				return nil, fmt.Errorf("cgroup %s: %w", file, err)
+			}
+		}
+		fd, err := unix.Open(dir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, fmt.Errorf("cgroup: %w", err)
+		}
+		attr.UseCgroupFD, attr.CgroupFD = true, fd
+		release = func() { _ = unix.Close(fd) }
+	}
+	cmd.SysProcAttr = attr
+	return release, nil
+}
+
+// killGroup kills the plugin and whatever it started (its process group).
+func killGroup(cmd *exec.Cmd) {
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_ = cmd.Process.Kill()
+}
+
+// RunShim runs inside the plugin's process, before the plugin (args: the plugin's name and
+// arguments): no new privileges, the seccomp filter, then the verified binary on fd 3. It returns
+// only on failure.
+func RunShim(args []string) error {
+	if len(args) < 1 {
+		return errors.New("bcx shim: no plugin name")
+	}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("bcx shim: no_new_privs: %w", err)
+	}
+	if err := installSeccomp(); err != nil {
+		return fmt.Errorf("bcx shim: seccomp: %w", err)
+	}
+	// fd 3 stays open across the exec: a script plugin's interpreter opens /proc/self/fd/3 again.
+	return unix.Exec("/proc/self/fd/3", args, os.Environ())
+}
+
+// Seccomp return values (linux/seccomp.h).
+const (
+	seccompRetKillProcess = 0x80000000
+	seccompRetErrno       = 0x00050000
+	seccompRetAllow       = 0x7fff0000
+)
+
+// installSeccomp denies what no driver plugin needs and a compromised one could abuse: loading
+// kernels and modules, mounts, swap, reboot, eBPF, tracing other processes, the kernel keyring,
+// perf, userfaultfd, handle-based opens, raw I/O ports, the system clock, accounting and quotas.
+// Denied calls fail with EPERM; a call from another ABI (x32, a foreign arch) kills the process.
+func installSeccomp() error {
+	arch, denied, x32 := seccompArch()
+	if arch == 0 {
+		return nil // no filter for this architecture
+	}
+	ld := func(k uint32) unix.SockFilter {
+		return unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: k}
+	}
+	ret := func(k uint32) unix.SockFilter { return unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: k} }
+	prog := []unix.SockFilter{
+		ld(4), // seccomp_data.arch
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, Jf: 0, K: arch},
+		ret(seccompRetKillProcess),
+		ld(0), // seccomp_data.nr
+	}
+	if x32 {
+		prog = append(prog,
+			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K, Jt: 0, Jf: 1, K: 0x40000000},
+			ret(seccompRetKillProcess))
+	}
+	for _, nr := range denied {
+		prog = append(prog,
+			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: uint32(nr)},
+			ret(seccompRetErrno|uint32(unix.EPERM)))
+	}
+	prog = append(prog, ret(seccompRetAllow))
+	fprog := unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]}
+	return unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&fprog)), 0, 0)
+}

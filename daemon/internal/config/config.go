@@ -98,6 +98,9 @@ type Config struct {
 	// PluginsDir holds the bcx driver plugins and their sha256 pins ([plugins] dir); empty: none.
 	PluginsDir string
 
+	// Plugins sandbox the bcx plugins (PLAN.md §5.5).
+	Plugins Plugins
+
 	// IMDSListen is where a VPS host serves its instances' metadata service ([imds] listen, e.g.
 	// "169.254.169.254:80" on the instances' bridge); empty disables it.
 	IMDSListen string
@@ -144,6 +147,20 @@ type Boot struct {
 	CacheMaxBytes int64
 }
 
+// Plugins is how bcx plugins run ([plugins]).
+type Plugins struct {
+	// User is who they run as when bcd runs as root (default "nobody"); "root" keeps root, for a
+	// runtime plugin that needs it.
+	User string
+	// Sandbox runs them with no new privileges and a seccomp filter (default true).
+	Sandbox bool
+	// Cgroup is a delegated cgroup v2 directory (e.g. /sys/fs/cgroup/bcd.plugins, with Delegate=yes);
+	// each plugin runs in its own child, limited by MemoryMax bytes and PidsMax tasks.
+	Cgroup    string
+	MemoryMax int64
+	PidsMax   int64
+}
+
 // Journal bounds the journal. Values may lower the PLAN.md §6 caps but never raise them.
 type Journal struct {
 	// MaxBytes caps the journal's size (default and maximum 64 MiB).
@@ -169,6 +186,7 @@ func Defaults() *Config {
 		SocketPath: DefaultSocketPath,
 		Journal:    Journal{MaxBytes: journal.DefaultMaxBytes, MaxEvents: journal.DefaultMaxEvents},
 		Log:        Log{Level: "info", JSON: true},
+		Plugins:    Plugins{Sandbox: true},
 	}
 }
 
@@ -281,6 +299,12 @@ func (c *Config) Validate() error {
 	if c.Journal.MaxEvents <= 0 || c.Journal.MaxEvents > journal.DefaultMaxEvents {
 		return fmt.Errorf("journal.max_events must be between 1 and %d, got %d", journal.DefaultMaxEvents, c.Journal.MaxEvents)
 	}
+	if c.Plugins.Cgroup != "" && !path.IsAbs(c.Plugins.Cgroup) {
+		return fmt.Errorf("plugins.cgroup must be an absolute path, got %q", c.Plugins.Cgroup)
+	}
+	if c.Plugins.MemoryMax < 0 || c.Plugins.PidsMax < 0 {
+		return errors.New("plugins.memory_max and plugins.pids_max may not be negative")
+	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -324,6 +348,11 @@ var fields = []field{
 	{section: "log", key: "level", kind: kindString, set: func(c *Config, v value) { c.Log.Level = v.str }},
 	{section: "log", key: "json", kind: kindBool, set: func(c *Config, v value) { c.Log.JSON = v.boolean }},
 	{section: "plugins", key: "dir", kind: kindString, set: func(c *Config, v value) { c.PluginsDir = v.str }},
+	{section: "plugins", key: "user", kind: kindString, set: func(c *Config, v value) { c.Plugins.User = v.str }},
+	{section: "plugins", key: "sandbox", kind: kindBool, set: func(c *Config, v value) { c.Plugins.Sandbox = v.boolean }},
+	{section: "plugins", key: "cgroup", kind: kindString, set: func(c *Config, v value) { c.Plugins.Cgroup = v.str }},
+	{section: "plugins", key: "memory_max", kind: kindInt, set: func(c *Config, v value) { c.Plugins.MemoryMax = v.num }},
+	{section: "plugins", key: "pids_max", kind: kindInt, set: func(c *Config, v value) { c.Plugins.PidsMax = v.num }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
