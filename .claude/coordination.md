@@ -349,6 +349,16 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - the root VMM follows a tenant qcow2 backing file (host or other-tenant disk).
       libvirt-kvm is being checked for the same backing-file issue. The docs mark cloud-hypervisor not production-safe
       until both are fixed.
+    - Security review 14 ([402c97], MCP + confirmations), CLOSED:
+      - H1: describe() on every confirm-capable admission ([097b34] ec36c63); MCP create_instance takes no sshKeys.
+      - M1: approvals bound to the request text, in the envelope (06d7f04).
+      - M2: gate ids checked, and createMcpGate({ confirmations: false }).
+      - M3: batches record createdByAgent and delegationId (f3c5c4e; CLI/console bd80209).
+      - L1-L5: 7890821, 48d41a4. L3's sourceIp: core Credential.sourceIp (e7092bf), compute.handler(request, { peer })
+        (d269738); host wiring with host.trustProxy is [402c97]'s. L6: b491aed.
+    - IPMI: capability-aware BMC workflows (a3ec8d0), driverOptions and enroll addresses (3f19859), bcx-ipmi inspect
+      (7818f19), driver options passthrough (7753df0). Open with [6a20b8]: report unknown-MAC PXE hits; an ISO sanboot
+      boot entry (the proto is mine).
     - FULL head-check GREEN at 1b2dadc (2026-09-25): 322 files, 2693 tests, 54 skipped (Postgres-only and WSL e2e).
     - Clock sweep after the fixed test dates passed: [097b34], [6a20b8], [c321a3], [31c64a] clean; [402c97] fixed
       6891ba1.
