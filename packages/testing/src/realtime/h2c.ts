@@ -39,6 +39,8 @@ export const TEST_NODE_HEADER = 'x-bc-test-node';
 export interface GrpcStatus {
   code: number;
   message: string;
+  /** `grpc-retry-pushback-ms`: when a refusal asks to be retried. */
+  retryAfterMs?: number;
 }
 
 /**
@@ -49,9 +51,11 @@ function statusOf(headers: IncomingHttpHeaders): GrpcStatus | undefined {
   const raw = headers['grpc-status'];
   if (raw === undefined) return undefined;
   const message = headers['grpc-message'];
+  const pushback = Number(headers['grpc-retry-pushback-ms']);
   return {
     code: Number(Array.isArray(raw) ? raw[0] : raw),
     message: typeof message === 'string' ? decodeGrpcMessage(message) : '',
+    ...(Number.isFinite(pushback) && pushback >= 0 ? { retryAfterMs: pushback } : {}),
   };
 }
 
@@ -221,7 +225,11 @@ function sessionConn(
         ? 'closed'
         : `grpc-${status.code}: ${status.message}`
       : 'stream-reset';
-    finish({ reason, by: 'remote' });
+    finish({
+      reason,
+      by: 'remote',
+      ...(status?.retryAfterMs === undefined ? {} : { retryAfterMs: status.retryAfterMs }),
+    });
   });
 
   return {

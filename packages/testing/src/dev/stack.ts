@@ -339,7 +339,11 @@ function gatewayTunnelConn(
     pause() {},
     resume() {},
     close: (error) =>
-      finish({ reason: error ? `grpc-${error.code}: ${error.message}` : 'closed', by: 'remote' }),
+      finish({
+        reason: error ? `grpc-${error.code}: ${error.message}` : 'closed',
+        by: 'remote',
+        ...(error?.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+      }),
   });
   return {
     id,
