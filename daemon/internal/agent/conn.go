@@ -192,6 +192,10 @@ func (a *Agent) handle(ctx context.Context, s *sess, f *agentv1.ServerFrame) boo
 		s.after = &d
 		a.mu.Unlock()
 		return false
+	case *agentv1.ServerFrame_Secret:
+		a.onSecretResponse(m.Secret)
+	case *agentv1.ServerFrame_WorkloadToken:
+		a.onWorkloadTokenResponse(m.WorkloadToken)
 	case *agentv1.ServerFrame_OpenTunnel:
 		a.onOpenTunnel(m.OpenTunnel)
 	case *agentv1.ServerFrame_Revoked:

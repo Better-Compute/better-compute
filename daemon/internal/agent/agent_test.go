@@ -707,3 +707,40 @@ func TestStatusReportsTheSession(t *testing.T) {
 		t.Fatalf("status = %+v", st)
 	}
 }
+
+func TestSecretAndWorkloadTokenRequests(t *testing.T) {
+	h := newHarness(t, nil)
+	s, _ := h.open()
+	type answer struct {
+		value []byte
+		err   error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		v, err := h.agent.RequestSecret(context.Background(), "secret://t/user-data", pki.SecretBinding{AllocationID: "alloc_1"})
+		got <- answer{v, err}
+	}()
+	req := s.next(t, "SecretRequest", func(f *agentv1.AgentFrame) bool { return f.GetSecretRequest() != nil }).GetSecretRequest()
+	if !pki.VerifyP1363(&h.key.PublicKey, pki.SecretRequestSigningInput(req), req.GetNodeSig().GetSig()) || req.GetAllocationId() != "alloc_1" {
+		t.Fatalf("request = %v", req)
+	}
+	epk, _ := pki.PublicKeyFromPoint(req.GetEpk())
+	jwe, _ := pki.SealJWE([]byte("user-data!"), epk, map[string]any{"typ": pki.SecretResponseType, "ref": req.GetRef(), "rid": req.GetRequestId()})
+	// An answer to nothing is ignored; the real one is opened.
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_Secret{Secret: &agentv1.SecretResponse{RequestId: "req_other", Jwe: jwe}}})
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_Secret{Secret: &agentv1.SecretResponse{Ref: req.GetRef(), RequestId: req.GetRequestId(), Jwe: jwe}}})
+	if a := <-got; a.err != nil || string(a.value) != "user-data!" {
+		t.Fatalf("secret = %q, %v", a.value, a.err)
+	}
+
+	tokens := make(chan error, 1)
+	go func() {
+		_, _, err := h.agent.RequestWorkloadToken(context.Background(), "inst_1", "sts")
+		tokens <- err
+	}()
+	wreq := s.next(t, "WorkloadTokenRequest", func(f *agentv1.AgentFrame) bool { return f.GetWorkloadTokenRequest() != nil }).GetWorkloadTokenRequest()
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_WorkloadToken{WorkloadToken: &agentv1.WorkloadTokenResponse{RequestId: wreq.GetRequestId(), Error: "disabled"}}})
+	if err := <-tokens; err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("refusal = %v", err)
+	}
+}

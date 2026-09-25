@@ -118,6 +118,8 @@ type Agent struct {
 	// execJWKS is the applied access section's exec-ticket JWKS (tunnels).
 	execJWKS      string
 	tunnels       int
+	secrets       map[string]*pendingSecret
+	workloads     map[string]*pendingWorkload
 	upgradeNeeded bool
 
 	invMu       sync.Mutex

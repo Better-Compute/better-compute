@@ -77,6 +77,23 @@ const trust = pki.signTrustBundle({ version: 7n, commandSigningRoots: [authority
 const tickets = pki.createExecTicketIssuer({ issuer: 'https://compute.test', clock });
 const ticket = tickets.issue({ nodeId, sid: 'ts_tunnel_1', op: 'console', subject: 'user_1' });
 
+// A SecretRequest and a WorkloadTokenRequest made by TS with the node key, each answered with a JWE
+// to its one-time key: Go checks it builds the same signing inputs and opens the answers.
+const { createPublicKey: pub } = await import('node:crypto');
+const { SecretRequestSchema, SecretResponseSchema, WorkloadTokenRequestSchema, WorkloadTokenResponseSchema } = await import('@better-compute/protocol');
+const secret = pki.createSecretRequest({ nodeKey, ref: 'secret://tenant/user-data', allocationId: 'alloc_go' });
+const secretResponse = pki.sealSecretResponse(
+  { ...secret.request, recipient: pub(secret.ephemeralKey) },
+  'hello secret',
+  { expiresAt: now + 60_000 },
+);
+const workload = pki.createWorkloadTokenRequest({ nodeKey, instanceId: 'inst_go', audience: 'sts.example' });
+const workloadResponse = pki.sealWorkloadTokenResponse(
+  { ...workload.request, recipient: pub(workload.ephemeralKey) },
+  'eyJ.workload.jwt',
+  now + 300_000,
+);
+
 const out = {
   now,
   nodeId,
@@ -96,6 +113,12 @@ const out = {
   execTicket: ticket.token,
   execTicketJti: ticket.jti,
   execTicketJwks: tickets.jwksJson(),
+  secretRequest: hex(toBinary(SecretRequestSchema, secret.request)),
+  secretEphemeralPkcs8: hex(secret.ephemeralKey.export({ type: 'pkcs8', format: 'der' })),
+  secretResponse: hex(toBinary(SecretResponseSchema, secretResponse)),
+  workloadRequest: hex(toBinary(WorkloadTokenRequestSchema, workload.request)),
+  workloadEphemeralPkcs8: hex(workload.ephemeralKey.export({ type: 'pkcs8', format: 'der' })),
+  workloadResponse: hex(toBinary(WorkloadTokenResponseSchema, workloadResponse)),
 };
 const file = join(root, 'daemon/internal/pki/testdata/interop.json');
 mkdirSync(dirname(file), { recursive: true });
