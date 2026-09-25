@@ -8,7 +8,9 @@ import {
   meteredAttestor,
   meteredGatewayServices,
   meteredProvider,
+  placementObserver,
   revocationFeedCollector,
+  standardMetrics,
 } from '@better-compute/observability';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { defineProvider } from '@better-compute/vps';
@@ -167,6 +169,31 @@ describe('gatewayCollector', () => {
     sessions = sessions.slice(0, 1);
     text = registry.expose();
     expect(text).toContain('better_compute_gateway_stream_headroom{gateway="gw_1"} 9');
+  });
+});
+
+describe('placementObserver', () => {
+  it("feeds placements_total, booking_conflicts_total and placement_seconds from capacity's observations", () => {
+    const registry = createMetrics();
+    const observe = placementObserver(standardMetrics(registry), registry);
+    observe({ placer: 'inline', outcome: 'placed', conflicts: 0, seconds: 0.004 });
+    observe({ placer: 'batch', outcome: 'placed', conflicts: 2, seconds: 0.02 });
+    observe({ placer: 'inline', outcome: 'pending', conflicts: 1, seconds: 0.01 });
+    expect(registry.value('placements_total', { outcome: 'placed' })).toBe(2);
+    expect(registry.value('placements_total', { outcome: 'pending' })).toBe(1);
+    expect(registry.value('booking_conflicts_total')).toBe(3);
+    expect(registry.expose()).toContain(
+      'better_compute_placement_seconds_count{placer="inline"} 2',
+    );
+    // Without a registry, only the standard counters.
+    const bare = createMetrics();
+    placementObserver(standardMetrics(bare))({
+      placer: 'x',
+      outcome: 'error',
+      conflicts: 0,
+      seconds: 1,
+    });
+    expect(bare.value('placements_total', { outcome: 'error' })).toBe(1);
   });
 });
 

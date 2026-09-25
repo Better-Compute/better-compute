@@ -1,9 +1,10 @@
 // The §14 gauges that describe the whole deployment rather than one process, sampled from compute's tables on a
 // timer (PLAN.md §14): due work by kind, queue backlogs, nodes by connectivity and generation lag, GPUs by state,
 // the soonest node certificate expiry, this process's clock against compute_now(), and command latency (enqueue
-// to terminal) for commands settled since the last poll. Run it in one process per deployment (the worker), so
-// the histogram counts each command once. Every statement is read-only and bounded; a table a deployment does
-// not have (an optional module's) is skipped.
+// to terminal) for commands settled since the last poll. It may run in every worker: the gauges are the same
+// everywhere, and the histogram is observed only by the holder of one `leases` row, so each command counts once.
+// Every statement except that lease's upsert is read-only and bounded; a table a deployment does not have (an
+// optional module's) is skipped.
 
 import type { SqlExecutor } from '@better-compute/core';
 import { labelValue, type Labels } from './registry.js';
@@ -24,6 +25,14 @@ export interface DatabaseCollectorOptions {
   certificates?: () => readonly { kind: string; notAfter: number }[];
   /** Poll failures (never thrown from the timer). */
   onError?: (error: unknown) => void;
+  /**
+   * The command-latency histogram is observed by one process of the deployment at a time: the holder of this
+   * `leases` row (default `metrics:command-latency`), so running the collector in every worker counts each
+   * command once. The gauges are sampled everywhere. `false` observes in this process unconditionally.
+   */
+  latencyLease?: string | false;
+  /** This process's lease owner id (default a random id). */
+  owner?: string;
 }
 
 export interface DatabaseCollector {
@@ -62,6 +71,31 @@ export function databaseCollector(
   let latencySince: string | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let running: Promise<void> | undefined;
+  const intervalMs = options.intervalMs ?? 15_000;
+  const lease =
+    options.latencyLease === undefined ? 'metrics:command-latency' : options.latencyLease;
+  const owner = options.owner ?? `collector-${globalThis.crypto.randomUUID()}`;
+  // Three polls without a renewal hand the histogram to another process.
+  const leaseSeconds = Math.max(5, (3 * intervalMs) / 1000);
+
+  let stopped = false;
+
+  /** Takes or renews the latency lease; false while another live process holds it, or after `stop()`. */
+  async function holdsLatencyLease(): Promise<boolean> {
+    if (lease === false) return true;
+    if (stopped) return false;
+    const { rows } = await sql.query(
+      `INSERT INTO leases (name, owner, epoch, expires_at)
+       VALUES ($1, $2, 1, compute_now() + make_interval(secs => $3))
+       ON CONFLICT (name) DO UPDATE SET owner = EXCLUDED.owner,
+              epoch = CASE WHEN leases.owner = EXCLUDED.owner THEN leases.epoch ELSE leases.epoch + 1 END,
+              expires_at = EXCLUDED.expires_at
+        WHERE leases.owner = EXCLUDED.owner OR leases.expires_at < compute_now()
+       RETURNING epoch`,
+      [lease, owner, leaseSeconds],
+    );
+    return rows.length > 0;
+  }
 
   async function exists(table: string): Promise<boolean> {
     let found = tables.get(table);
@@ -164,6 +198,8 @@ export function databaseCollector(
     await count('iam_inbox', 'iam_inbox', 'processed_at IS NULL');
     await count('usage', 'usage_windows', 'recorded_at IS NULL');
     await count('webhooks', 'webhook_deliveries', `state = 'pending'`);
+    // Events a sink gave up on (poison isolation, core/0019): they wait for an operator.
+    await count('outbox_dead_letters', 'outbox_dead_letters', 'true');
     if (await exists('outbox_cursors')) {
       // Each sink's cursor: rows published after it are its backlog.
       const { rows: cursors } = await sql.query<{ name: string; txid: string; seq: string }>(
@@ -203,7 +239,10 @@ export function databaseCollector(
       [...expiries].map(([kind, seconds]) => [{ kind }, seconds]),
     );
 
-    if (await hasColumn('commands', 'created_at')) {
+    if (!(await holdsLatencyLease())) {
+      // Another process observes; if this one takes over later, it starts from then.
+      latencySince = undefined;
+    } else if (await hasColumn('commands', 'created_at')) {
       if (latencySince === undefined) {
         // Start from now: history before the collector ran is not re-observed after a restart.
         latencySince = clock[0]!.now_text;
@@ -244,6 +283,7 @@ export function databaseCollector(
     refresh,
     start() {
       if (timer) return;
+      stopped = false;
       timer = setInterval(() => {
         refresh().catch((error: unknown) => {
           try {
@@ -252,12 +292,22 @@ export function databaseCollector(
             // A broken reporter changes nothing.
           }
         });
-      }, options.intervalMs ?? 15_000);
+      }, intervalMs);
       timer.unref?.();
     },
     stop() {
       if (timer) clearInterval(timer);
       timer = undefined;
+      stopped = true;
+      // Hand the histogram over at once rather than at the lease's expiry (best effort).
+      if (lease !== false)
+        void sql
+          .query(
+            `UPDATE leases SET expires_at = compute_now() - interval '1 second'
+              WHERE name = $1 AND owner = $2`,
+            [lease, owner],
+          )
+          .catch(() => undefined);
     },
   };
 }

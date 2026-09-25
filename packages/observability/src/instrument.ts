@@ -11,6 +11,7 @@ import {
   type ProviderImpl,
 } from '@better-compute/core';
 import { labelValue, type MetricsRegistry } from './registry.js';
+import type { StandardMetrics } from './standard.js';
 
 const outcomeOf = (error: unknown): string =>
   isComputeError(error) ? (error as { code: string }).code : 'error';
@@ -271,6 +272,38 @@ export function revocationFeedCollector(
     for (const [name, feed] of Object.entries(feeds()))
       failing.set({ feed: labelValue(name) }, feed.consecutiveFailures);
   });
+}
+
+/** One placement attempt as capacity reports it (`capacityModule({ onPlacement })`), typed structurally. */
+export interface PlacementObservationLike {
+  placer: string;
+  outcome: string;
+  conflicts: number;
+  seconds: number;
+}
+
+/**
+ * Capacity's `onPlacement` observer feeding the §14 series: `placements_total{outcome}`,
+ * `booking_conflicts_total` (replans forced by a booking conflict) and `placement_seconds{placer}`.
+ *
+ * ```ts
+ * capacityModule({ onPlacement: placementObserver(standardMetrics(registry), registry) })
+ * ```
+ */
+export function placementObserver(
+  metrics: Pick<StandardMetrics, 'placements' | 'bookingConflicts'>,
+  registry?: MetricsRegistry,
+): (observation: PlacementObservationLike) => void {
+  const duration = registry
+    ? once(registry, 'placement.seconds', () =>
+        registry.histogram('placement_seconds', 'One placement attempt, by placer', ['placer']),
+      )
+    : undefined;
+  return (observation) => {
+    metrics.placements.inc({ outcome: labelValue(observation.outcome) });
+    if (observation.conflicts > 0) metrics.bookingConflicts.inc(undefined, observation.conflicts);
+    duration?.observe({ placer: labelValue(observation.placer) }, observation.seconds);
+  };
 }
 
 /**

@@ -148,6 +148,8 @@ describe('databaseCollector', () => {
     const collector = databaseCollector(standardMetrics(registry), {
       sql: db,
       laneOf: (kind) => (kind === 'diag.nvml' ? 'control' : undefined),
+      // One process here: no lease (the multi-worker case is below).
+      latencyLease: false,
     });
     await setSimClock(db, T0 + 10_000);
     await collector.refresh();
@@ -169,6 +171,68 @@ describe('databaseCollector', () => {
       'better_compute_command_latency_seconds_count{kind="inventory.refresh",lane="(unknown)"} 1',
     );
     expect(registry.value('backlog', { queue: 'commands' })).toBe(1);
+  });
+
+  it('with several workers, one observes the latency histogram and hands it over when it stops', async () => {
+    await db.query(
+      'ALTER TABLE commands ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT compute_now()',
+    );
+    await db.query('DELETE FROM commands');
+    await db.query(`DELETE FROM leases WHERE name = 'metrics:command-latency'`);
+    const worker = (owner: string) => {
+      const registry = createMetrics();
+      return {
+        registry,
+        collector: databaseCollector(standardMetrics(registry), {
+          sql: db,
+          owner,
+          intervalMs: 5_000,
+        }),
+        count: () =>
+          Number(
+            /better_compute_command_latency_seconds_count\{kind="diag.nvml",lane="\(unknown\)"\} (\d+)/.exec(
+              registry.expose(),
+            )?.[1] ?? 0,
+          ),
+      };
+    };
+    const a = worker('worker-a');
+    const b = worker('worker-b');
+    let seq = 100;
+    const settle = (at: number) =>
+      db.query(
+        `INSERT INTO commands (id, node_id, seq, kind, body, state, retry_safe, self_terminating, attested,
+                               idempotency_key, not_after, created_at, updated_at)
+         VALUES ($1, 'node-a', $2, 'diag.nvml', '\\x00', 'succeeded', true, false, false, $1,
+                 $3::timestamptz + interval '1 hour', $3::timestamptz - interval '1 second', $3::timestamptz)`,
+        [`cmd-w${++seq}`, seq, new Date(at).toISOString()],
+      );
+    let now = T0 + 100_000;
+    const tick = async () => {
+      now += 1_000;
+      await setSimClock(db, now);
+      await a.collector.refresh();
+      await b.collector.refresh();
+    };
+    await tick();
+    for (let i = 0; i < 3; i++) {
+      await settle(now + 500);
+      await tick();
+    }
+    // Each command counted once across both workers.
+    expect(a.count() + b.count()).toBe(3);
+    expect(Math.min(a.count(), b.count())).toBe(0);
+
+    // The holder stops: the other takes over on its next poll, from then on.
+    const [holder, other] = a.count() > 0 ? [a, b] : [b, a];
+    holder.collector.stop();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await tick();
+    await settle(now + 500);
+    await tick();
+    await holder.collector.refresh().catch(() => undefined);
+    expect(other.count()).toBe(1);
+    expect(holder.count() + other.count()).toBe(4);
   });
 
   it('polls on a timer and reports failures without throwing', async () => {
