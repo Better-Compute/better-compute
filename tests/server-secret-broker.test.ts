@@ -15,8 +15,7 @@ import {
   spkiSha256,
 } from '@better-compute/pki';
 import { agentFrame, gatewayFixture } from './support/gateway.js';
-// Until `export { createSecretBroker } from './secret-broker.js'` lands in server's join/index.ts.
-import { createSecretBroker } from '../packages/server/src/join/secret-broker.js';
+import { createSecretBroker } from '@better-compute/server';
 
 // The v0.2 secret broker (PLAN.md §6 "Secrets", §13): signed by the node's current key, bound to
 // its current work, one-time, short-lived, audited without the value.
