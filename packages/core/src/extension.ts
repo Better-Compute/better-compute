@@ -766,8 +766,16 @@ export interface CommandBatchInput {
   /**
    * subject: the node id; `bmc:<site agent>/<address>` for bmc.* kinds; `node:<target>` for
    * site.httpProxy. `payloadSha256` binds a leaf to one exact payload (absent: any payload).
+   * `payload` (the command's `Any`) binds it too, and is what approvers are shown
+   * (`commandBatches.scope`): pass it whenever the payload is known, so an approver sees the image,
+   * firmware or power action it signs, not only a digest.
    */
-  scope: readonly { subject: string; kind: string; payloadSha256?: Uint8Array }[];
+  scope: readonly {
+    subject: string;
+    kind: string;
+    payloadSha256?: Uint8Array;
+    payload?: { typeUrl: string; value: Uint8Array };
+  }[];
   reason: string;
   /** When the batch stops admitting commands (default 24 h). */
   notAfterMs?: number;

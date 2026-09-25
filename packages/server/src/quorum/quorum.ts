@@ -3,7 +3,9 @@ import {
   ComputeError,
   defineMethod,
   defineModule,
+  describedBy,
   newId,
+  strictObject,
   type ComputeModule,
   type MethodDefinition,
   type Migration,
@@ -113,6 +115,15 @@ ALTER TABLE command_batch_members ADD COLUMN payload_sha256 bytea NOT NULL DEFAU
 `,
 };
 
+/** A leaf's payload, stored for approvers to decode (review 7 #3): they see what they sign. */
+export const quorumLeafPayloadMigration: Migration = {
+  name: 'quorum/0007_leaf_payload',
+  sql: `
+ALTER TABLE command_batch_scope ADD COLUMN payload_type_url text;
+ALTER TABLE command_batch_scope ADD COLUMN payload bytea;
+`,
+};
+
 /** `commandBatches.create` retries: the request a caller's key stands for. */
 export const quorumRequestMigration: Migration = {
   name: 'quorum/0005_batch_request',
@@ -171,9 +182,15 @@ export interface CommandBatchView {
   createdBy?: string;
 }
 
+/** A leaf, optionally with the payload approvers are shown (its digest is then derived from it). */
+export type BatchLeaf = BatchScopeEntry & { payload?: { typeUrl: string; value: Uint8Array } };
+
+/** The largest payload a leaf stores for approvers to read. */
+export const maxLeafPayloadBytes = 64 * 1024;
+
 export interface CreateBatchInput {
   tenantId: string;
-  scope: readonly BatchScopeEntry[];
+  scope: readonly BatchLeaf[];
   reason: string;
   /** When the batch stops admitting commands (default 24 h); approvals are signed up to it. */
   notAfterMs?: number;
@@ -215,8 +232,27 @@ export async function createCommandBatch(
       !/^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$/.test(entry.kind)
     )
       throw new ComputeError('INVALID_INPUT', 'Batch scope entries are { subject, kind }');
+  // A leaf given its payload is bound to it: the digest comes from the payload itself.
+  const entries: BatchLeaf[] = input.scope.map((entry) => {
+    if (entry.payload === undefined) return entry;
+    const { typeUrl, value } = entry.payload;
+    if (
+      typeof typeUrl !== 'string' ||
+      !/^type\.googleapis\.com\/[A-Za-z][A-Za-z0-9_.]{0,200}$/.test(typeUrl) ||
+      !(value instanceof Uint8Array) ||
+      value.length > maxLeafPayloadBytes
+    )
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `A leaf payload is { typeUrl, value } of at most ${maxLeafPayloadBytes} bytes`,
+      );
+    const digest = new Uint8Array(createHash('sha256').update(value).digest());
+    if (entry.payloadSha256?.length && !Buffer.from(entry.payloadSha256).equals(Buffer.from(digest)))
+      throw new ComputeError('INVALID_INPUT', 'A leaf payload does not match its payloadSha256');
+    return { ...entry, payloadSha256: digest };
+  });
   const batchId = input.batchId ?? newId('batch');
-  const scope = batchScope(batchId, input.scope);
+  const scope = batchScope(batchId, entries);
   if (scope.size > maxBatchLeaves)
     throw new ComputeError('INVALID_INPUT', `A batch holds at most ${maxBatchLeaves} leaves`);
   const notAfter = input.notAfterMs ?? options.now + defaultBatchTtlMs;
@@ -267,14 +303,20 @@ export async function createCommandBatch(
     return { batchId, held: stored > 0, required: stored, size: Number(existing.scope_size), replayed: true };
   }
   const hexOf = (digest: Uint8Array | undefined) => Buffer.from(digest ?? []).toString('hex');
-  const leaves = new Map<string, BatchScopeEntry>();
-  for (const entry of input.scope)
-    leaves.set(`${entry.subject}\0${entry.kind}\0${hexOf(entry.payloadSha256)}`, entry);
+  const leaves = new Map<string, BatchLeaf>();
+  for (const entry of entries) {
+    const key = `${entry.subject}\0${entry.kind}\0${hexOf(entry.payloadSha256)}`;
+    // The same leaf twice keeps the entry that carries its payload.
+    if (!leaves.get(key)?.payload) leaves.set(key, entry);
+  }
   const rows = [...leaves.values()].map((entry) => {
     const proof = scope.proofOf(entry.subject, entry.kind, entry.payloadSha256)!;
     return {
-      ...entry,
-      payload: hexOf(entry.payloadSha256),
+      subject: entry.subject,
+      kind: entry.kind,
+      digest: hexOf(entry.payloadSha256),
+      typeUrl: entry.payload?.typeUrl ?? null,
+      value: entry.payload ? hexOf(entry.payload.value) : null,
       index: proof.index,
       proof: Buffer.from(
         encodeMessage(BatchProofSchema, {
@@ -289,17 +331,21 @@ export async function createCommandBatch(
   for (let start = 0; start < rows.length; start += 5_000) {
     const chunk = rows.slice(start, start + 5_000);
     await tx.query(
-      `INSERT INTO command_batch_scope (batch_id, subject, kind, payload_sha256, leaf_index, proof)
-       SELECT $1, v.subject, v.kind, decode(v.payload, 'hex'), v.leaf_index, decode(v.proof, 'hex')
-         FROM unnest($2::text[], $3::text[], $4::text[], $5::int[], $6::text[])
-              AS v(subject, kind, payload, leaf_index, proof)`,
+      `INSERT INTO command_batch_scope (batch_id, subject, kind, payload_sha256, leaf_index, proof,
+                                        payload_type_url, payload)
+       SELECT $1, v.subject, v.kind, decode(v.digest, 'hex'), v.leaf_index, decode(v.proof, 'hex'),
+              v.type_url, decode(v.value, 'hex')
+         FROM unnest($2::text[], $3::text[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
+              AS v(subject, kind, digest, leaf_index, proof, type_url, value)`,
       [
         batchId,
         chunk.map((row) => row.subject),
         chunk.map((row) => row.kind),
-        chunk.map((row) => row.payload),
+        chunk.map((row) => row.digest),
         chunk.map((row) => row.index),
         chunk.map((row) => row.proof),
+        chunk.map((row) => row.typeUrl),
+        chunk.map((row) => row.value),
       ],
     );
   }
@@ -476,6 +522,17 @@ export interface BatchScopeInput extends BatchRef {
   cursor?: number;
   limit?: number;
 }
+/** One leaf of a batch as approvers page through it. */
+export interface BatchScopeItem {
+  leafIndex: number;
+  subject: string;
+  kind: string;
+  /** Hex; '' = any payload of the kind. */
+  payloadSha256: string;
+  /** The payload a bound leaf admits (`value` base64), when its creator stored it. */
+  payload?: { typeUrl: string; value: string };
+}
+
 export interface CreateBatchRequest {
   tenantId: string;
   /** Shown to approvers (at most 500 characters). */
@@ -483,10 +540,16 @@ export interface CreateBatchRequest {
   /**
    * The leaves approvers sign: `subject` is the node id for kinds a node runs on itself,
    * `bmc:<site agent node id>/<address>` for bmc.*, `node:<target>` for site.httpProxy.
-   * `payloadSha256` (hex) binds a leaf to one exact payload; without it the leaf admits any payload
-   * of its kind (approvers see it flagged).
+   * `payload` (`value` base64) binds a leaf to one exact payload and shows it to approvers;
+   * `payloadSha256` (hex) binds it by digest only. Without either the leaf admits any payload of its
+   * kind (approvers see it flagged).
    */
-  scope: { subject: string; kind: string; payloadSha256?: string }[];
+  scope: {
+    subject: string;
+    kind: string;
+    payloadSha256?: string;
+    payload?: { typeUrl: string; value: string };
+  }[];
   /** How long the batch admits commands (and approvals), 60 s to 72 h; 24 h by default. */
   notAfterSeconds?: number;
   /** Scoped to (tenant, caller identity): a retry returns the same batch, never a second one. */
@@ -508,6 +571,50 @@ const parseRef = (
 
 const idempotencyKeyPattern = /^[A-Za-z0-9._~:/+=-]{1,128}$/;
 
+// The inputs as JSON Schema (the generated reference and MCP tool schemas); the validators below
+// apply the patterns and ranges.
+const text = { type: 'string' } as const;
+const whole = { type: 'integer' } as const;
+const refSchema = { tenantId: text, batchId: text };
+const schemas = {
+  create: strictObject(
+    {
+      tenantId: text,
+      reason: text,
+      scope: {
+        type: 'array',
+        items: strictObject(
+          {
+            subject: text,
+            kind: text,
+            payloadSha256: text,
+            payload: strictObject({ typeUrl: text, value: text }, ['typeUrl', 'value']),
+          },
+          ['subject', 'kind'],
+        ),
+      },
+      notAfterSeconds: whole,
+      idempotencyKey: text,
+    },
+    ['tenantId', 'reason', 'scope', 'idempotencyKey'],
+  ),
+  ref: strictObject(refSchema, ['tenantId', 'batchId']),
+  list: strictObject(
+    {
+      tenantId: text,
+      state: { enum: ['pending', 'approved', 'expired', 'cancelled'] },
+      limit: whole,
+      cursor: text,
+    },
+    ['tenantId'],
+  ),
+  scope: strictObject({ ...refSchema, cursor: whole, limit: whole }, ['tenantId', 'batchId']),
+  approve: strictObject(
+    { ...refSchema, signature: strictObject({ kid: text, sig: text }, ['kid', 'sig']) },
+    ['tenantId', 'batchId', 'signature'],
+  ),
+};
+
 function parseCreate(raw: unknown): CreateBatchRequest {
   const input = record(raw, ['tenantId', 'reason', 'scope', 'notAfterSeconds', 'idempotencyKey']);
   if (typeof input.reason !== 'string' || !input.reason.trim() || input.reason.length > 500)
@@ -517,7 +624,7 @@ function parseCreate(raw: unknown): CreateBatchRequest {
   if (!Array.isArray(input.scope) || input.scope.length === 0 || input.scope.length > maxBatchLeaves)
     throw new ComputeError('INVALID_INPUT', `scope is 1 to ${maxBatchLeaves} leaves`);
   const scope = input.scope.map((raw, index) => {
-    const entry = record(raw, ['subject', 'kind', 'payloadSha256']);
+    const entry = record(raw, ['subject', 'kind', 'payloadSha256', 'payload']);
     if (typeof entry.subject !== 'string' || !entry.subject || entry.subject.length > 512)
       throw new ComputeError('INVALID_INPUT', `scope[${index}].subject is invalid`);
     if (typeof entry.kind !== 'string' || !/^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$/.test(entry.kind))
@@ -527,10 +634,26 @@ function parseCreate(raw: unknown): CreateBatchRequest {
       (typeof entry.payloadSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.payloadSha256))
     )
       throw new ComputeError('INVALID_INPUT', `scope[${index}].payloadSha256 is a hex SHA-256`);
+    let payload: { typeUrl: string; value: string } | undefined;
+    if (entry.payload !== undefined) {
+      const given = record(entry.payload, ['typeUrl', 'value']);
+      if (
+        typeof given.typeUrl !== 'string' ||
+        typeof given.value !== 'string' ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(given.value) ||
+        given.value.length > Math.ceil(maxLeafPayloadBytes / 3) * 4
+      )
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `scope[${index}].payload is { typeUrl, value (base64, at most ${maxLeafPayloadBytes} bytes) }`,
+        );
+      payload = { typeUrl: given.typeUrl, value: given.value };
+    }
     return {
       subject: entry.subject,
       kind: entry.kind,
       ...(entry.payloadSha256 ? { payloadSha256: entry.payloadSha256 as string } : {}),
+      ...(payload ? { payload } : {}),
     };
   });
   const result: CreateBatchRequest = {
@@ -556,13 +679,7 @@ export type CommandBatchesApi = {
     create: MethodDefinition<CreateBatchRequest, CommandBatchView>;
     get: MethodDefinition<BatchRef, CommandBatchView>;
     list: MethodDefinition<ListBatchesInput, { items: CommandBatchView[]; next?: string }>;
-    scope: MethodDefinition<
-      BatchScopeInput,
-      {
-        items: { leafIndex: number; subject: string; kind: string; payloadSha256: string }[];
-        next?: number;
-      }
-    >;
+    scope: MethodDefinition<BatchScopeInput, { items: BatchScopeItem[]; next?: number }>;
     approve: MethodDefinition<ApproveBatchInput, CommandBatchView>;
     cancel: MethodDefinition<BatchRef, CommandBatchView>;
   };
@@ -583,7 +700,7 @@ export function commandBatchesApi(options: {
         action: 'compute:batches:create',
         kind: 'mutation',
         resource: tenant,
-        validate: parseCreate,
+        validate: describedBy(schemas.create, parseCreate),
         handler: async (context, input) => {
           const tx = context.sql as unknown as SqlTx;
           const scope = input.scope.map((entry) => ({
@@ -591,6 +708,14 @@ export function commandBatchesApi(options: {
             kind: entry.kind,
             ...(entry.payloadSha256
               ? { payloadSha256: new Uint8Array(Buffer.from(entry.payloadSha256, 'hex')) }
+              : {}),
+            ...(entry.payload
+              ? {
+                  payload: {
+                    typeUrl: entry.payload.typeUrl,
+                    value: new Uint8Array(Buffer.from(entry.payload.value, 'base64')),
+                  },
+                }
               : {}),
           }));
           // What the key stands for: the same leaves (in any order), reason and lifetime.
@@ -600,7 +725,13 @@ export function commandBatchesApi(options: {
                 input.reason.trim(),
                 input.notAfterSeconds ?? defaultBatchTtlMs / 1000,
                 input.scope
-                  .map((entry) => [entry.subject, entry.kind, entry.payloadSha256 ?? ''])
+                  .map((entry) => [
+                    entry.subject,
+                    entry.kind,
+                    entry.payloadSha256 ?? '',
+                    entry.payload?.typeUrl ?? '',
+                    entry.payload?.value ?? '',
+                  ])
                   .sort((a, b) => (a.join('\0') < b.join('\0') ? -1 : 1)),
               ]),
             )
@@ -636,7 +767,7 @@ export function commandBatchesApi(options: {
         action: 'compute:batches:read',
         kind: 'read',
         resource: tenant,
-        validate: (raw) => parseRef(raw),
+        validate: describedBy(schemas.ref, (raw) => parseRef(raw)),
         handler: async (context, input) =>
           batchView(context.sql, await readBatch(context.sql, input.tenantId, input.batchId), trustDomain),
       }),
@@ -644,7 +775,7 @@ export function commandBatchesApi(options: {
         action: 'compute:batches:read',
         kind: 'read',
         resource: tenant,
-        validate: (raw): ListBatchesInput => {
+        validate: describedBy(schemas.list, (raw): ListBatchesInput => {
           const input = record(raw, ['tenantId', 'state', 'limit', 'cursor']);
           const result: ListBatchesInput = { tenantId: tenantOf(input.tenantId) };
           if (input.state !== undefined) {
@@ -655,7 +786,7 @@ export function commandBatchesApi(options: {
           if (input.limit !== undefined) result.limit = limitOf(input.limit, 200, 50);
           if (input.cursor !== undefined) result.cursor = batchIdOf(input.cursor);
           return result;
-        },
+        }),
         handler: async (context, input) => {
           const limit = input.limit ?? 50;
           const { rows } = await context.sql.query<BatchRow>(
@@ -674,17 +805,11 @@ export function commandBatchesApi(options: {
           return rows.length > limit ? { items, next: page.at(-1)!.id } : { items };
         },
       }),
-      scope: defineMethod<
-        BatchScopeInput,
-        {
-          items: { leafIndex: number; subject: string; kind: string; payloadSha256: string }[];
-          next?: number;
-        }
-      >({
+      scope: defineMethod<BatchScopeInput, { items: BatchScopeItem[]; next?: number }>({
         action: 'compute:batches:read',
         kind: 'read',
         resource: tenant,
-        validate: (raw): BatchScopeInput => {
+        validate: describedBy(schemas.scope, (raw): BatchScopeInput => {
           const input = parseRef(raw, ['cursor', 'limit']);
           const result: BatchScopeInput = { tenantId: input.tenantId, batchId: input.batchId };
           if (input.cursor !== undefined) {
@@ -694,7 +819,7 @@ export function commandBatchesApi(options: {
           }
           if (input.limit !== undefined) result.limit = limitOf(input.limit, 5_000, 1_000);
           return result;
-        },
+        }),
         handler: async (context, input) => {
           await readBatch(context.sql, input.tenantId, input.batchId);
           const limit = input.limit ?? 1_000;
@@ -703,17 +828,30 @@ export function commandBatchesApi(options: {
             subject: string;
             kind: string;
             payload_sha256: Uint8Array;
+            payload_type_url: string | null;
+            payload: Uint8Array | null;
           }>(
-            `SELECT leaf_index, subject, kind, payload_sha256 FROM command_batch_scope
+            `SELECT leaf_index, subject, kind, payload_sha256, payload_type_url, payload
+               FROM command_batch_scope
               WHERE batch_id = $1 AND leaf_index >= $2 ORDER BY leaf_index LIMIT $3`,
             [input.batchId, input.cursor ?? 0, limit + 1],
           );
-          // payloadSha256 '' = the leaf admits any payload of its kind (flag it to approvers).
+          // payloadSha256 '' = the leaf admits any payload of its kind (flag it to approvers). A
+          // bound leaf's payload, when its creator stored it, is what an approver decodes, after
+          // checking it against payloadSha256 (the digest is what the daemon enforces).
           const items = rows.slice(0, limit).map((row) => ({
             leafIndex: Number(row.leaf_index),
             subject: row.subject,
             kind: row.kind,
             payloadSha256: Buffer.from(row.payload_sha256).toString('hex'),
+            ...(row.payload_type_url && row.payload
+              ? {
+                  payload: {
+                    typeUrl: row.payload_type_url,
+                    value: Buffer.from(row.payload).toString('base64'),
+                  },
+                }
+              : {}),
           }));
           return rows.length > limit ? { items, next: Number(rows[limit]!.leaf_index) } : { items };
         },
@@ -722,7 +860,7 @@ export function commandBatchesApi(options: {
         action: 'compute:batches:approve',
         kind: 'mutation',
         resource: tenant,
-        validate: (raw): ApproveBatchInput => {
+        validate: describedBy(schemas.approve, (raw): ApproveBatchInput => {
           const input = parseRef(raw, ['signature']);
           const signed = record(input.signature, ['kid', 'sig']);
           if (typeof signed.kid !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(signed.kid))
@@ -734,7 +872,7 @@ export function commandBatchesApi(options: {
             batchId: input.batchId,
             signature: { kid: signed.kid, sig: signed.sig },
           };
-        },
+        }),
         handler: async (context, input) => {
           const tx = context.sql as unknown as SqlTx;
           const row = await readBatch(tx, input.tenantId, input.batchId, true);
@@ -816,7 +954,7 @@ export function commandBatchesApi(options: {
         action: 'compute:batches:approve',
         kind: 'mutation',
         resource: tenant,
-        validate: (raw) => parseRef(raw),
+        validate: describedBy(schemas.ref, (raw) => parseRef(raw)),
         handler: async (context, input) => {
           const tx = context.sql as unknown as SqlTx;
           const row = await readBatch(tx, input.tenantId, input.batchId, true);
@@ -865,6 +1003,7 @@ export function createQuorumModule(options: {
         trustBundleApproverSetMigration,
         quorumRequestMigration,
         trustBundleHistoryMigration,
+        quorumLeafPayloadMigration,
       ],
       api: () => commandBatchesApi(options),
       reconcilers: [expiryReconciler()],

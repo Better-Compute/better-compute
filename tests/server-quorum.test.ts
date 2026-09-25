@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { fromBinary } from '@bufbuild/protobuf';
 import { afterEach, describe, expect, it } from 'vitest';
 import { manualClock, type SqlExecutor } from '@better-compute/core';
@@ -328,6 +329,52 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
     });
     expect(approved).toMatchObject({ state: 'approved', commands: { pending: 1 } });
     expect(await due()).toBe(true);
+  });
+
+  it('stores a leaf payload for approvers and binds the leaf to its digest (review 7 #3)', async () => {
+    const s = await setup();
+    const value = Buffer.from('reimage with ubuntu-24.04 sha256:abc');
+    const typeUrl = 'type.googleapis.com/bettercompute.agent.v1.DeployImageRequest';
+    const created = await s.api.create(s.cred, {
+      tenantId: ACME,
+      reason: 'reimage one node',
+      idempotencyKey: 'reimage-1',
+      scope: [
+        { subject: 'node_a', kind: 'deploy.image', payload: { typeUrl, value: value.toString('base64') } },
+        { subject: 'node_b', kind: 'disk.wipe' },
+      ],
+    });
+    const { items } = await s.api.scope(s.cred, { tenantId: ACME, batchId: created.batchId });
+    const bound = items.find((item: { kind: string }) => item.kind === 'deploy.image');
+    // The digest is derived from the payload; the payload is there for the approver to decode.
+    expect(bound).toMatchObject({
+      subject: 'node_a',
+      payloadSha256: createHash('sha256').update(value).digest('hex'),
+      payload: { typeUrl, value: value.toString('base64') },
+    });
+    // The unbound leaf is flagged by its empty digest and carries no payload.
+    expect(items.find((item: { kind: string }) => item.kind === 'disk.wipe')).toEqual({
+      leafIndex: expect.any(Number),
+      subject: 'node_b',
+      kind: 'disk.wipe',
+      payloadSha256: '',
+    });
+    // A payload that does not match the digest given with it is refused.
+    await expect(
+      s.api.create(s.cred, {
+        tenantId: ACME,
+        reason: 'mismatch',
+        idempotencyKey: 'reimage-2',
+        scope: [
+          {
+            subject: 'node_a',
+            kind: 'deploy.image',
+            payloadSha256: '00'.repeat(32),
+            payload: { typeUrl, value: value.toString('base64') },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 
   it('needs no approvals where the deployment publishes no approver keys', async () => {
