@@ -161,6 +161,8 @@ describe('batch commands against commandBatches', () => {
     expect(released).toMatchObject({ state: 'approved' });
     expect(released.approvals).toHaveLength(2);
     await expect(s.run(['batch', 'cancel', '--batch', s.batchId])).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    const members = await s.run(['batch', 'members', '--batch', s.batchId]);
+    expect(members).toMatchObject({ items: expect.any(Array) });
     const listed = await s.run(['batch', 'list', '--state', 'approved']);
     expect(listed.items.map((item: { batchId: string }) => item.batchId)).toEqual([s.batchId]);
   });

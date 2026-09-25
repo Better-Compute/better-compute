@@ -902,6 +902,33 @@ export const batchCommands = [
     },
   }),
   defineCommand({
+    name: 'batch members',
+    group: 'Quorum',
+    summary: "List a batch's commands: node, kind, state, whether held for approval",
+    description:
+      'batch members pages commandBatches.members: every command enqueued into the batch with its node (the site agent for bmc: subjects), subject, kind and state; held ones are awaitingApproval until the batch is approved. Needs compute:batches:read.',
+    target: 'token',
+    output: 'json',
+    flags: {
+      tenant: tenantFlag,
+      batch: batchFlag,
+      state: { type: 'string', value: 'STATE', description: 'Only commands in this state (pending, succeeded, …)' },
+      limit: { type: 'integer', value: 'N', min: 1, max: 500, default: 100, description: 'Commands per page' },
+      cursor: { type: 'string', value: 'ID', description: "The previous page's next" },
+    },
+    validate: checkBatchId,
+    examples: ['better-compute batch members --tenant org_acme --batch batch_01k5w… --state pending'],
+    async run({ flags, api }) {
+      return (await api()).call('commandBatches/members', {
+        tenantId: flags.tenant,
+        batchId: flags.batch,
+        limit: flags.limit ?? 100,
+        ...(flags.state ? { state: flags.state } : {}),
+        ...(flags.cursor ? { cursor: flags.cursor } : {}),
+      });
+    },
+  }),
+  defineCommand({
     name: 'batch cancel',
     group: 'Quorum',
     summary: 'Cancel a pending batch and its held commands',
