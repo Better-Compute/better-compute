@@ -100,6 +100,9 @@ export function renderTable(value: unknown): string {
   );
   if (columns.length > shown.length)
     lines.push(`(${columns.length - shown.length} more column(s); use --format json to see them)`);
+  // A page of a list method: say how to get the next one, which a table would otherwise hide.
+  const next = !Array.isArray(value) && value && typeof value === 'object' ? (value as { nextCursor?: unknown }).nextCursor : undefined;
+  if (typeof next === 'string' && next) lines.push(`(more rows: --cursor ${cell(next)})`);
   return lines.join('\n');
 }
 

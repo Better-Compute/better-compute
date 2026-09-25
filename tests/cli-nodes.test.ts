@@ -136,6 +136,32 @@ describe('nodes, join-tokens and instances (request bodies)', () => {
   });
 });
 
+describe('list tables', () => {
+  it('show a page as columns and say how to get the next one', async () => {
+    const out: string[] = [];
+    await createCli().run(['nodes', 'list', '--url', 'https://compute.test'], {
+      out: (line) => out.push(line),
+      env: { BETTER_COMPUTE_TOKEN: 'biam_ses_0123456789abcdefghij', BETTER_COMPUTE_TENANT: 'org_acme' },
+      fetch: async () =>
+        Response.json({
+          data: {
+            items: [
+              { id: NODE, cordoned: false, noScheduleReasons: ['taint:gpu'] },
+              { id: 'node_2', cordoned: true, noScheduleReasons: [] },
+            ],
+            // A server string: never an escape sequence on the terminal.
+            nextCursor: 'abc\u001b[2J',
+          },
+        }),
+    });
+    const text = out.join('\n');
+    expect(text).toMatch(/^ID +CORDONED +NOSCHEDULEREASONS/);
+    expect(text).toContain(`${NODE}  false`);
+    expect(text).toContain('(more rows: --cursor abc [2J)');
+    expect(text).not.toContain('\u001b');
+  });
+});
+
 describe('nodes and join-tokens against dev --sim', () => {
   it('lists, reads, cordons, labels and taints a node, and runs a join token through its life', { timeout: 180_000 }, async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'bc-nodes-'));
