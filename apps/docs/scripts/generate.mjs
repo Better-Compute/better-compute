@@ -625,3 +625,12 @@ if (check) {
     `apps/docs: wrote ${drift.length} of ${files.size} files (${api.length} API groups, ${registry.methods.length} registered methods, ${commandKinds.length} command kinds)${leftovers.length ? `; removed ${leftovers.length} stale` : ''}.`,
   );
 }
+// Not an error (a new method lands before its prose), but worth seeing on every run.
+const undescribed = api.flatMap((entry) =>
+  entry.methods.filter((method) => !method.description).map((method) => `${entry.group}.${method.method}`),
+);
+const unexplained = errors.filter((error) => !error.description).map((error) => error.code);
+if (undescribed.length || unexplained.length)
+  console.log(
+    `apps/docs: no description yet for ${[...undescribed, ...unexplained].slice(0, 8).join(', ')}${undescribed.length + unexplained.length > 8 ? ` and ${undescribed.length + unexplained.length - 8} more` : ''} (apps/docs/descriptions/).`,
+  );

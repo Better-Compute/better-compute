@@ -115,6 +115,7 @@
     "site-boot",
     "tenancy",
     "tunnels.ssh-certificates-gc",
+    "tunnels.ssh-certificates-reauthorize",
     "vps.bootstraps",
     "vps.hosts",
     "vps.instances",
