@@ -55,7 +55,7 @@ func commands() []command {
 		{name: "sim", summary: "run simulated daemons on fakehw against a gateway", flags: simFlags, run: notYet("v0.4")},
 		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN or stdin", flags: withConfig, run: runJoin},
 		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: runStatus},
-		{name: "doctor", summary: "check this host: configuration, NVML, hardware backend", flags: withConfig, run: runDoctor},
+		{name: "doctor", summary: "check this host: configuration, NVML, hardware, KVM, IOMMU, gateway, identity", flags: withConfig, run: runDoctor},
 		{name: "version", summary: "print the version", flags: noFlags, run: runVersion},
 	}
 }
@@ -170,8 +170,8 @@ func buildTags() string {
 	return ""
 }
 
-// runDoctor checks what the skeleton can check: the configuration file, NVML and the hardware
-// backend. IOMMU, KVM, clock and reachability checks arrive in v0.1 (PLAN.md §14).
+// runDoctor checks this host (PLAN.md §14): the configuration file, NVML, the hardware backend, and
+// hostChecks (KVM, IOMMU, the gateway reachable, the node's identity). It has no clock check yet.
 func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
 	file := fs.Lookup("config").Value.String()
 	failed := false

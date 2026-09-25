@@ -799,6 +799,17 @@ func TestXidBecomesADeviceCondition(t *testing.T) {
 			t.Fatalf("condition = %v", c)
 		}
 	}
+	// A restart in the same boot keeps it (the kernel log is read from its end).
+	restarted := &Agent{o: Options{DataDir: h.agent.o.DataDir}, bootID: "boot-1"}
+	restarted.loadFaults()
+	if len(restarted.faults) != 1 || restarted.faults[0].GetType() != "Xid79" {
+		t.Fatalf("restored = %v", restarted.faults)
+	}
+	nextBoot := &Agent{o: Options{DataDir: h.agent.o.DataDir}, bootID: "boot-2"}
+	nextBoot.loadFaults()
+	if len(nextBoot.faults) != 0 {
+		t.Fatal("a new boot kept the XIDs")
+	}
 	// The next converger pass keeps it (this boot's faults stay active).
 	s.push(desired(2, &agentv1.NodeSpec{}))
 	again := s.next(t, "next status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 2 }).GetStatus()

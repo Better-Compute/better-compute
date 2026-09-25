@@ -111,15 +111,17 @@ type Agent struct {
 	sess   *sess
 	offset time.Duration
 	// clockSet: a Welcome set offset in this process (its server clock is then a floor too).
-	clockSet   bool
-	execs      map[string]*execution
-	deferred   map[string]*deferred
-	overflow   []journal.Event
-	spec       *agentv1.NodeSpec
-	applied    uint64
-	observed   uint64
-	lastStatus *agentv1.StatusReport
-	revoked    bool
+	clockSet bool
+	// trustPending: a newer trust bundle was applied and no status has carried it yet.
+	trustPending bool
+	execs        map[string]*execution
+	deferred     map[string]*deferred
+	overflow     []journal.Event
+	spec         *agentv1.NodeSpec
+	applied      uint64
+	observed     uint64
+	lastStatus   *agentv1.StatusReport
+	revoked      bool
 	// execJWKS is the applied access section's exec-ticket JWKS (tunnels).
 	execJWKS string
 	tunnels  int
@@ -216,6 +218,7 @@ func New(o Options) (*Agent, error) {
 	}
 	a.devices = &devicesConverger{a: a}
 	a.boot = newBootEntries(o.DataDir)
+	a.loadFaults()
 	a.access = &accessConverger{a: a}
 	a.key.Store(o.Key)
 	return a, nil

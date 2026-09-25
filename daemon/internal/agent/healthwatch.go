@@ -2,14 +2,17 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/health"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -99,10 +102,55 @@ func (a *Agent) onXid(x health.Xid) {
 			Type: kind, Status: agentv1.ConditionStatus_CONDITION_STATUS_TRUE, Reason: kind, Message: x.Message, DeviceId: device,
 		})
 	}
+	a.saveFaultsLocked()
 	if a.lastStatus != nil {
 		a.lastStatus = proto.Clone(a.lastStatus).(*agentv1.StatusReport)
 		a.lastStatus.Conditions = append(withoutFaults(a.lastStatus.Conditions), cloneConditions(a.faults)...)
 		a.sendStatusLocked()
+	}
+}
+
+// faultsFile keeps this boot's XID conditions, so a daemon restart without a reboot keeps them
+// (the kernel log is read from its end); a new boot id discards them.
+const faultsFile = "faults.json"
+
+type storedFaults struct {
+	BootID     string            `json:"bootId"`
+	Conditions []json.RawMessage `json:"conditions"`
+}
+
+func (a *Agent) saveFaultsLocked() {
+	out := storedFaults{BootID: a.bootID}
+	for _, c := range a.faults {
+		raw, err := protojson.Marshal(c)
+		if err == nil {
+			out.Conditions = append(out.Conditions, raw)
+		}
+	}
+	data, err := json.Marshal(out)
+	if err == nil {
+		err = writeFile(filepath.Join(a.o.DataDir, faultsFile), data, 0o600)
+	}
+	if err != nil {
+		a.log.Warn("store the XID conditions", "error", err.Error())
+	}
+}
+
+// loadFaults restores the conditions of this boot.
+func (a *Agent) loadFaults() {
+	raw, err := os.ReadFile(filepath.Join(a.o.DataDir, faultsFile))
+	if err != nil {
+		return
+	}
+	var stored storedFaults
+	if json.Unmarshal(raw, &stored) != nil || stored.BootID != a.bootID {
+		return
+	}
+	for _, r := range stored.Conditions {
+		c := &agentv1.Condition{}
+		if protojson.Unmarshal(r, c) == nil {
+			a.faults = append(a.faults, c)
+		}
 	}
 }
 

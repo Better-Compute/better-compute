@@ -285,7 +285,7 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 				// The ack of the new trust (?13 root switch) rides the next StatusReport.
 				if a.lastStatus != nil {
 					a.lastStatus = proto.Clone(a.lastStatus).(*agentv1.StatusReport)
-					a.lastStatus.TrustVersion = next.TrustVersion
+					a.trustPending = true
 				}
 			}
 		}

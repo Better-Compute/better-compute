@@ -258,7 +258,6 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	status.ObservedGeneration = a.observed
 	status.Pressure = a.pressure
-	status.TrustVersion = a.state.TrustVersion
 	status.Conditions = append(status.Conditions, cloneConditions(a.faults)...)
 	if stored, ok, err := a.j.Spec(); err == nil && ok {
 		status.AppliedSpecHash = stored.Hash
@@ -284,11 +283,20 @@ func errText(err error) string {
 	return err.Error()
 }
 
+// sendStatusLocked sends the last status. trust_version rides only the first status sent after a
+// newer trust bundle was applied (0 means unchanged; Hello carries it at session start).
 func (a *Agent) sendStatusLocked() {
 	if a.lastStatus == nil {
 		return
 	}
-	a.sendLocked(&agentv1.AgentFrame{Msg: &agentv1.AgentFrame_Status{Status: a.lastStatus}})
+	status := a.lastStatus
+	if a.trustPending {
+		status = proto.Clone(a.lastStatus).(*agentv1.StatusReport)
+		status.TrustVersion = a.state.TrustVersion
+	}
+	if a.sendLocked(&agentv1.AgentFrame{Msg: &agentv1.AgentFrame_Status{Status: status}}) {
+		a.trustPending = false
+	}
 }
 
 // unknownFields lists the field numbers in raw unknown bytes (sections this daemon does not know).
