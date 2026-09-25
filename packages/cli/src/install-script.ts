@@ -63,6 +63,12 @@ export interface InstallScriptOptions {
    * connection only; `audience` the gateway's public host (default: the URL's).
    */
   websocket?: { url: string; audience?: string; proxyCaPem?: string };
+  /**
+   * Privilege separation (bcd 28dc2ae): `bcd node` runs as the unprivileged `bcd` user and asks a root
+   * `bcd helper` (its own unit, on a unix socket) for typed privileged operations. Self-update is off in this mode
+   * until bcd adds an update helper operation.
+   */
+  unprivileged?: boolean;
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -80,6 +86,47 @@ const certificatesOnly = /^(-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----E
 
 /** Where the install script writes the WebSocket proxy's CA. */
 export const bcdProxyCaPath = '/etc/bcd/websocket-proxy-ca.pem';
+
+/**
+ * The [helper] section of an unprivileged node: the helper's socket and the account `bcd node` runs as. The socket
+ * lives in the helper's own root-owned runtime directory, not in /run/bcd: bcd owns that one, and root chmods and
+ * chowns the socket by path after binding it, which a bcd-writable directory would let bcd redirect with a symlink.
+ */
+export const bcdHelperSection = ['[helper]', 'socket = "/run/bcd-helper/helper.sock"', 'user = "bcd"', ''].join('\n');
+
+/** The root helper's unit: typed privileged operations for `bcd node` (peer checked by uid, gid and executable). */
+export const bcdHelperUnit = `[Unit]
+Description=better-compute node agent privileged helper (bcd helper)
+Documentation=https://github.com/better-compute/better-compute
+Before=bcd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bcd helper --config /etc/bcd/config.toml
+Restart=always
+RestartSec=2s
+UMask=0077
+RuntimeDirectory=bcd-helper
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+/**
+ * The drop-in (bcd.service.d/unprivileged.conf) of a node with [helper]: `bcd node` as the `bcd` user (systemd
+ * chowns its state and runtime directories to it), after the helper. The script adds the libvirt group on VPS hosts
+ * that have it.
+ */
+export const bcdUnprivilegedDropIn = `[Unit]
+Requires=bcd-helper.service
+After=bcd-helper.service
+
+[Service]
+User=bcd
+Group=bcd
+SupplementaryGroups=systemd-journal adm
+`;
 
 /** The [websocket] section: the fallback URL, the proxy CA file, the audience. */
 export function renderBcdWebSocketSection(ws: { url: string; audience?: string; proxyCaPem?: string }): string {
@@ -394,6 +441,15 @@ fi
   sed -n '/^[[:space:]]*\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
 fi
 ${
+  options.unprivileged
+    ? `# Privilege separation: a [helper] section unless the operator's config already has one.
+if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*helper[[:space:]]*\\]' /etc/bcd/config.toml.new; then
+  cat >> /etc/bcd/config.toml.new <<'BCD_HELPER'
+${bcdHelperSection}BCD_HELPER
+fi
+`
+    : ''
+}${
   options.websocket
     ? `${
         options.websocket.proxyCaPem
@@ -478,6 +534,36 @@ ${bcdPrivilegedPluginsDropIn}BCD_DROPIN
 else
   rm -f /etc/systemd/system/bcd.service.d/plugins.conf
 fi
+# Privilege separation exactly when config.toml has a [helper] section (an upgrade keeps the node's mode).
+BCD_HELPER=
+if grep -Eq '^[[:space:]]*\\[[[:space:]]*helper[[:space:]]*\\]' /etc/bcd/config.toml; then
+  BCD_HELPER=1
+  if ! id -u bcd >/dev/null 2>&1; then
+    if command -v useradd >/dev/null 2>&1; then
+      useradd --system --no-create-home --home-dir /var/lib/bcd --shell /usr/sbin/nologin bcd
+    else
+      adduser -S -D -H -h /var/lib/bcd -s /sbin/nologin bcd
+    fi
+  fi
+  cat > /etc/systemd/system/bcd-helper.service.new <<'BCD_HELPER_UNIT'
+${bcdHelperUnit}BCD_HELPER_UNIT
+  chmod 0644 /etc/systemd/system/bcd-helper.service.new
+  mv -f /etc/systemd/system/bcd-helper.service.new /etc/systemd/system/bcd-helper.service
+  cat > /etc/systemd/system/bcd.service.d/unprivileged.conf.new <<'BCD_UNPRIVILEGED'
+${bcdUnprivilegedDropIn}BCD_UNPRIVILEGED
+  # VPS hosts: the libvirt socket's group, when there is one.
+  if getent group libvirt >/dev/null 2>&1; then
+    printf 'SupplementaryGroups=libvirt\\n' >> /etc/systemd/system/bcd.service.d/unprivileged.conf.new
+  fi
+  chmod 0644 /etc/systemd/system/bcd.service.d/unprivileged.conf.new
+  mv -f /etc/systemd/system/bcd.service.d/unprivileged.conf.new /etc/systemd/system/bcd.service.d/unprivileged.conf
+  # bcd node reads its config as the bcd group; nothing else of /etc/bcd becomes readable to it.
+  chgrp bcd /etc/bcd /etc/bcd/config.toml
+  chmod 0750 /etc/bcd
+  chmod 0640 /etc/bcd/config.toml
+else
+  rm -f /etc/systemd/system/bcd.service.d/unprivileged.conf
+fi
 systemctl daemon-reload
 
 /usr/local/bin/bcd doctor --config /etc/bcd/config.toml >/dev/null 2>&1 ||
@@ -487,9 +573,19 @@ if [ -n "$TOKEN" ]; then
   # printf is a shell builtin: the token never appears in a process listing.
   printf '%s\\n' "$TOKEN" | /usr/local/bin/bcd join --config /etc/bcd/config.toml || fail 'bcd join failed'
   TOKEN=
+  if [ -n "$BCD_HELPER" ]; then
+    # The identity bcd join wrote (as root) belongs to the bcd user; the helper runs first.
+    chown -R bcd:bcd /var/lib/bcd
+    systemctl enable --now bcd-helper.service
+  fi
   systemctl enable --now bcd.service
   printf 'bcd %s joined pool ${options.poolId} and is running.\\n' "$BCD_VERSION"
 else
+  if [ -n "$BCD_HELPER" ]; then
+    chown -R bcd:bcd /var/lib/bcd
+    systemctl enable bcd-helper.service
+    systemctl restart bcd-helper.service
+  fi
   systemctl restart bcd.service
   printf 'bcd upgraded to %s and restarted.\\n' "$BCD_VERSION"
 fi

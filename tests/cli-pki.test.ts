@@ -484,6 +484,81 @@ describe('daemon install-script', () => {
     expect(await run([...base, '--privileged-plugins', 'kata;rm'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 
+  it('runs bcd node unprivileged beside a root bcd helper with --unprivileged, and keeps the mode on upgrade', async () => {
+    const shell = posixShell();
+    if (!shell) return;
+    const root = (await mkdtemp(join(tmpdir(), 'bc-install-helper-'))).replace(/\\/g, '/');
+    const calls = `${root}/calls`;
+    // The config and unit steps against a scratch root; the account commands only record what they would do.
+    const apply = async (extra: string[], { account = false, libvirt = false } = {}) => {
+      const script = (await run([...base, ...extra])).stdout;
+      const block = script
+        .slice(script.indexOf("cat > /etc/bcd/config.toml.new"), script.indexOf('systemctl daemon-reload'))
+        .split('/etc/')
+        .join(`${root}/etc/`);
+      const file = join(scratch, 'helper-check.sh');
+      const shims = [
+        'command -v chmod >/dev/null 2>&1 || chmod() { :; }',
+        'command -v install >/dev/null 2>&1 || install() { [ "$1" = -d ] || return 1; shift; [ "$1" = -m ] && shift 2; mkdir -p "$@"; }',
+        `id() { ${account ? 'return 0' : 'return 1'}; }`,
+        `getent() { ${libvirt ? 'return 0' : 'return 1'}; }`,
+        `useradd() { echo "useradd $*" >> ${calls}; }`,
+        `chgrp() { echo "chgrp $*" >> ${calls}; }`,
+      ].join('\n');
+      await writeFile(file, `set -eu\n${shims}\n: > ${calls}\nmkdir -p ${root}/etc/bcd ${root}/etc/systemd/system\n${block}`);
+      const result = spawnSync(shell, [file], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${dirname(shell)}${delimiter}${process.env.PATH ?? ''}` },
+      });
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      const read = async (path: string) => readFile(`${root}${path}`, 'utf8').catch(() => undefined);
+      return {
+        script,
+        config: (await read('/etc/bcd/config.toml'))!,
+        helperUnit: await read('/etc/systemd/system/bcd-helper.service'),
+        dropIn: await read('/etc/systemd/system/bcd.service.d/unprivileged.conf'),
+        calls: (await readFile(calls, 'utf8')).trim().split('\n').filter(Boolean),
+      };
+    };
+    // By default bcd node stays root: no section, no helper, nothing to create.
+    let node = await apply([]);
+    expect(node.config).not.toContain('[helper]');
+    expect(node.dropIn).toBeUndefined();
+    expect(node.calls).toEqual([]);
+    // --unprivileged: the section, the account, the helper unit and the node's drop-in.
+    node = await apply(['--unprivileged']);
+    expect(node.config).toContain('[helper]\nsocket = "/run/bcd-helper/helper.sock"\nuser = "bcd"\n');
+    expect(node.calls).toEqual([
+      'useradd --system --no-create-home --home-dir /var/lib/bcd --shell /usr/sbin/nologin bcd',
+      `chgrp bcd ${root}/etc/bcd ${root}/etc/bcd/config.toml`,
+    ]);
+    expect(node.helperUnit).toContain(`ExecStart=/usr/local/bin/bcd helper --config ${root}/etc/bcd/config.toml`);
+    expect(node.helperUnit).toContain('Before=bcd.service');
+    // The helper's socket is in a directory only root writes (root chmods and chowns it by path).
+    expect(node.helperUnit).toContain('RuntimeDirectory=bcd-helper');
+    expect(node.dropIn).toContain('User=bcd\nGroup=bcd\nSupplementaryGroups=systemd-journal adm\n');
+    expect(node.dropIn).toContain('Requires=bcd-helper.service');
+    expect(node.dropIn).not.toContain('libvirt');
+    // The first start: the identity bcd join wrote belongs to bcd, and the helper starts before the node.
+    const start = node.script.slice(node.script.indexOf('bcd join --config'));
+    expect(start.indexOf('chown -R bcd:bcd /var/lib/bcd')).toBeGreaterThan(0);
+    expect(start.indexOf('systemctl enable --now bcd-helper.service')).toBeLessThan(start.indexOf('systemctl enable --now bcd.service'));
+    // An upgrade without the flag keeps the node unprivileged (one [helper]); an existing account is reused; libvirt on VPS hosts.
+    node = await apply([], { account: true, libvirt: true });
+    expect(node.config.match(/^\s*\[\s*helper\s*\]/gm)).toHaveLength(1);
+    expect(node.calls.some((c) => c.startsWith('useradd'))).toBe(false);
+    expect(node.dropIn).toContain('SupplementaryGroups=libvirt');
+    node = await apply(['--unprivileged'], { account: true });
+    expect(node.config.match(/^\s*\[\s*helper\s*\]/gm)).toHaveLength(1);
+    // The operator removes [helper]: the next run removes the drop-in and bcd node is root again.
+    await writeFile(`${root}/etc/bcd/config.toml`, node.config.replace(/\[helper\][^[]*/, ''));
+    node = await apply([]);
+    expect(node.dropIn).toBeUndefined();
+    // bcd node cannot start plugins without root.
+    expect(await run([...base, '--unprivileged', '--plugins'])).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
+  });
+
   it('reads the token from the environment or stdin only, and refuses anything else', async () => {
     const shell = posixShell();
     if (!shell) return;

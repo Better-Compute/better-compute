@@ -199,6 +199,10 @@ export const daemonCommands = [
         description: 'Release keys that must have signed (default 1)',
       },
       plugins: { type: 'boolean', description: 'Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)' },
+      unprivileged: {
+        type: 'boolean',
+        description: 'Run bcd node as the unprivileged bcd user beside a root bcd helper (privilege separation)',
+      },
       'websocket-url': {
         type: 'string',
         value: 'URL',
@@ -249,6 +253,8 @@ export const daemonCommands = [
     validate(flags) {
       if ((flags.sha256 === undefined) === (flags['release-manifest'] === undefined))
         throw usageError('Give exactly one of --sha256 or --release-manifest');
+      if (flags.unprivileged && (flags.plugins || flags['privileged-plugins'] !== undefined))
+        throw usageError('--unprivileged cannot host bcx plugins yet: bcd node would need root to start them');
       if ((flags['websocket-audience'] !== undefined || flags['proxy-ca-file'] !== undefined) && !flags['websocket-url'])
         throw usageError('--websocket-audience and --proxy-ca-file need --websocket-url');
       if (flags['release-sequence'] !== undefined && !flags['release-pins'])
@@ -301,6 +307,7 @@ export const daemonCommands = [
           y: string;
         },
         ...(flags['approver-set-sha256'] ? { approverSetSha256: flags['approver-set-sha256'] } : {}),
+        ...(flags.unprivileged ? { unprivileged: true } : {}),
         ...(flags['websocket-url']
           ? {
               websocket: {
@@ -346,6 +353,10 @@ export const daemonCommands = [
         generatedAt: new Date().toISOString(),
         generator: `better-compute ${program.version}`,
       });
+      if (flags.unprivileged && flags['release-pins'])
+        note(
+          'Note: with --unprivileged, bcd self-updates only from a release whose bcd helper serves the update operations; before that, upgrade with this script.',
+        );
       if (!flags.out) return script;
       const target = path(flags.out);
       try {
