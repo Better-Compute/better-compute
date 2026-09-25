@@ -7,7 +7,7 @@ description: 'The nodes API group (server): 13 methods.'
 
 Methods of the `nodes` group, contributed by `server`.
 
-11 of 13 methods are served by this release; the others are planned for the phase shown.
+13 of 13 methods are served by this release; the others are planned for the phase shown.
 
 | Method                              | Kind     | Authorization                                    | Phase | Status     |
 | ----------------------------------- | -------- | ------------------------------------------------ | ----- | ---------- |
@@ -22,8 +22,8 @@ Methods of the `nodes` group, contributed by `server`.
 | [`adopt`](#adopt)                   | mutation | `compute:nodes:provision` @ `compute-node`       | v0.1  | registered |
 | [`revokeIdentity`](#revokeidentity) | mutation | `compute:nodes:revoke-identity` @ `compute-node` | v0.1  | registered |
 | [`delete`](#delete)                 | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | registered |
-| [`issueSshCert`](#issuesshcert)     | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned    |
-| [`revokeSshCert`](#revokesshcert)   | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned    |
+| [`issueSshCert`](#issuesshcert)     | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | registered |
+| [`revokeSshCert`](#revokesshcert)   | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | registered |
 
 ## list
 
@@ -214,7 +214,7 @@ Methods of the `nodes` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:nodes:ssh-root` @ `compute-node`
 - **Module:** `tunnels`
-- **Phase:** v0.3 (planned)
+- **Phase:** v0.3 (registered)
 
 ## revokeSshCert
 
@@ -223,4 +223,4 @@ Methods of the `nodes` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:nodes:ssh-root` @ `compute-node`
 - **Module:** `tunnels`
-- **Phase:** v0.3 (planned)
+- **Phase:** v0.3 (registered)

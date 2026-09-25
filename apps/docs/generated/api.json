@@ -1247,7 +1247,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "metal",
-        "status": "planned",
+        "status": "registered",
         "input": null,
         "summary": "",
         "description": ""
@@ -1746,7 +1746,7 @@
         "list": false,
         "phase": "v0.3",
         "module": "tunnels",
-        "status": "planned",
+        "status": "registered",
         "input": null,
         "summary": "",
         "description": ""
@@ -1761,7 +1761,7 @@
         "list": false,
         "phase": "v0.3",
         "module": "tunnels",
-        "status": "planned",
+        "status": "registered",
         "input": null,
         "summary": "",
         "description": ""
@@ -3538,7 +3538,7 @@
         "list": false,
         "phase": "v0.3",
         "module": "tunnels",
-        "status": "planned",
+        "status": "registered",
         "input": null,
         "summary": "",
         "description": ""

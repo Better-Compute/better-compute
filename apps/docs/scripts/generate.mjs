@@ -88,6 +88,8 @@ const compute = server.betterCompute({
   secret: 'docs-generator-placeholder-secret-0123456789',
   baseURL: 'https://compute.example.com',
   rootTenantId: 'root',
+  // Tunnels (tunnels.open, nodes.issueSshCert/revokeSshCert) register only with an exec-ticket issuer.
+  tunnels: { issuer: pki.createExecTicketIssuer({ issuer: 'https://docs.invalid' }) },
   modules: [
     provisionModule({ modules: [metalModule] }),
     metalModule,
