@@ -1,7 +1,14 @@
 import type { KeyObject } from 'node:crypto';
 import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
-import { signCommandUpdate, type ReplayCache } from '@better-compute/pki';
+import { isComputeError } from '@better-compute/core';
+import {
+  signCommandUpdate,
+  verifyCommand,
+  verifyTrustBundle,
+  type ReplayCache,
+  type SignerTrust,
+} from '@better-compute/pki';
 import {
   AccessSectionSchema,
   AgentFrameSchema,
@@ -28,7 +35,9 @@ import {
   SignatureSchema,
   SpecRequestReason,
   TelemetrySectionSchema,
+  commandKinds,
   encodeCommandResult,
+  isCommandKind,
   site,
   unwrapCommand,
   unwrapDesiredState,
@@ -144,6 +153,18 @@ export interface FakeDaemonOptions {
    * an `OpenTunnel` is ignored (the gateway's open times out), as a daemon without tunnels would.
    */
   tunnels?: FakeTunnelOptions;
+  /**
+   * Signed intent (§6, §13; v0.2), as bcd enforces it: destructive kinds need a worker signature
+   * chaining to a command-signing root, and any signature present is checked; a failure is
+   * `BAD_SIGNATURE`. `roots` come from `JoinResponse.trust`; a newer `Welcome.trust` (verified with
+   * `trustSigner`, the pinned join-signing key) replaces them. Without this option the daemon runs
+   * v0.1-style and checks nothing (bcd from v0.2 always enforces).
+   */
+  intent?: {
+    roots: readonly Uint8Array[];
+    version?: bigint;
+    trustSigner?: SignerTrust;
+  };
 }
 
 interface Session {
@@ -270,6 +291,11 @@ export class FakeDaemon {
   private readonly rng: Rng;
   private readonly options: FakeDaemonOptions;
   private readonly kinds: Map<string, FakeKind>;
+  /** Command-signing roots in force (signed intent), and their trust-bundle version. */
+  private intentRoots: readonly Uint8Array[] | undefined;
+  private intentVersion: bigint | undefined;
+  /** Commands whose signature failed (precheck answers BAD_SIGNATURE in its place). */
+  private readonly badSignatures = new Set<string>();
   private readonly fs = new Map<string, string>();
   private hw: FakeHardware;
   private journalValue: MemoryJournal;
@@ -289,6 +315,10 @@ export class FakeDaemon {
     if (!options.nodeId) throw new TypeError('FakeDaemon needs a nodeId');
     this.options = options;
     this.nodeId = options.nodeId;
+    if (options.intent) {
+      this.intentRoots = [...options.intent.roots];
+      this.intentVersion = options.intent.version;
+    }
     this.role = options.role ?? AgentRole.NODE;
     this.daemonVersion = options.daemonVersion ?? '0.1.0';
     this.scheduler = options.scheduler;
@@ -758,6 +788,19 @@ export class FakeDaemon {
     for (const credit of welcome.credits) session.credits.set(credit.lane, credit.credits);
     session.heartbeatIntervalMs = welcome.heartbeatIntervalMs > 0 ? welcome.heartbeatIntervalMs : 10_000;
     session.upgradeRequired = welcome.upgradeRequired;
+    // Go: intent.ApplyTrustBundle. Only a bundle signed by the pinned join key, and newer.
+    if (this.options.intent?.trustSigner && welcome.trust) {
+      try {
+        const bundle = verifyTrustBundle(welcome.trust, this.options.intent.trustSigner, this.intentVersion);
+        this.intentRoots = [...bundle.commandSigningRoots];
+        this.intentVersion = bundle.version;
+        this.log('trust.updated', { version: Number(bundle.version), roots: bundle.commandSigningRoots.length });
+      } catch (error) {
+        this.log('trust.ignored', {
+          reason: isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error),
+        });
+      }
+    }
     proc.reconnectAttempt = 0;
     this.log('session.welcome', { epoch: session.epoch, acked: Number(welcome.ackedEventSeq), sections: welcome.requestSections });
     const wanted = new Set(welcome.requestSections);
@@ -815,6 +858,24 @@ export class FakeDaemon {
       this.log('command.undecodable', { error: 'missing id' });
       return;
     }
+    // Go: intent.VerifyCommand. The verdict is applied by precheck, in its place in the order.
+    if (this.intentRoots) {
+      const kind = this.kinds.get(body.kind);
+      // The daemon's own kind table decides, never the body.
+      const required =
+        kind?.destructive ?? (isCommandKind(body.kind) && commandKinds[body.kind].destructive);
+      try {
+        verifyCommand(command, { roots: this.intentRoots, now: this.serverNow(), nodeId: this.nodeId, required });
+        this.badSignatures.delete(body.id);
+      } catch (error) {
+        this.badSignatures.add(body.id);
+        this.log('command.bad-signature', {
+          id: body.id,
+          kind: body.kind,
+          reason: isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error),
+        });
+      }
+    }
     const delivery = this.deliveryOf(body);
     const decision = resolve(this.journalValue, delivery, this.runtime(), this.hooks);
     this.log('command.deliver', { id: body.id, kind: body.kind, attempt: command.attempt, action: decision.action });
@@ -844,6 +905,7 @@ export class FakeDaemon {
       if (deferred) return { reject: 'STALE_GENERATION' };
     }
     if (pastDeadline) return { reject: 'EXPIRED' };
+    if (this.badSignatures.has(body.id)) return { reject: 'BAD_SIGNATURE' };
     return { accept: true };
   }
 

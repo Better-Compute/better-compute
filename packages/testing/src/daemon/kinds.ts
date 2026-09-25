@@ -73,6 +73,11 @@ export interface FakeKind {
   durationMs?: number | ((body: CommandBody) => number);
   /** `reboot`: the side effect reboots the node (node.reboot); `run` is not called. */
   effect?: 'reboot';
+  /**
+   * The daemon's own verdict (never the body's): a destructive kind runs only with a valid worker
+   * signature when the daemon enforces signed intent (§6, v0.2). Defaults to the wire kind table.
+   */
+  destructive?: boolean;
   run?(context: FakeKindContext): FakeKindOutcome;
 }
 
@@ -220,6 +225,7 @@ export const fakeLogsCollect: FakeKind = {
 export const fakeNodeReboot: FakeKind = {
   lane: commandKinds['node.reboot'].lane,
   roles: commandKinds['node.reboot'].roles,
+  destructive: commandKinds['node.reboot'].destructive,
   effect: 'reboot',
   durationMs: (body) => {
     try {
@@ -237,6 +243,7 @@ export const fakeNodeReboot: FakeKind = {
 export const fakeGpuReset: FakeKind = {
   lane: commandKinds['gpu.reset'].lane,
   roles: commandKinds['gpu.reset'].roles,
+  destructive: commandKinds['gpu.reset'].destructive,
   durationMs: 3_000,
   run(ctx) {
     let request;
