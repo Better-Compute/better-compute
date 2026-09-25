@@ -17,6 +17,8 @@ import { SignatureSchema, type SignedTrustBundle } from '@better-compute/protoco
 export interface CommandSigner {
   /** `commands.signature`: an encoded `Signature` over the encoded CommandBody. */
   sign(body: Uint8Array): Uint8Array;
+  /** `nodes.spec_signature`: an encoded `Signature` (purpose `desired-state`) over the encoded DesiredStateBody. */
+  signDesiredState(body: Uint8Array): Uint8Array;
   /** The root certificates daemons must trust (TrustBundle.command_signing_roots). */
   readonly roots: readonly Uint8Array[];
 }
@@ -57,6 +59,9 @@ export function createCommandSigner(options: CommandSignerOptions): CommandSigne
   return {
     sign(body) {
       return toBinary(SignatureSchema, current().sign('command', [body]));
+    },
+    signDesiredState(body) {
+      return toBinary(SignatureSchema, current().sign('desired-state', [body]));
     },
     roots: [options.authority.certificate, ...(options.additionalRoots ?? [])],
   };

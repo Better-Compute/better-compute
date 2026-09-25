@@ -13,6 +13,7 @@ import {
   type ProvisionState,
   type SqlTx,
 } from '@better-compute/core';
+import { storedDesiredState } from '@better-compute/pki';
 import { toMs } from './node-state.js';
 
 // NodeSpec (PLAN.md §7.3, §8.4): a node's desired state is the base sections plus every registered
@@ -293,6 +294,8 @@ export async function reconcileNodeSpec(
   hooks: {
     /** Runs in the transaction that wrote a new generation (the runtime pokes the gateway). */
     changed?(tx: SqlTx, nodeId: string, generation: number): Promise<void>;
+    /** Signs the new generation's DesiredStateBody (signed intent); without it the spec goes unsigned. */
+    signer?: { signDesiredState(body: Uint8Array): Uint8Array };
   } = {},
 ): Promise<NodeSpecOutcome | undefined> {
   return context.sql.transaction(async (tx) => {
@@ -310,11 +313,20 @@ export async function reconcileNodeSpec(
     const next = await wireNodeSpec(tx, mergeNodeSpecs(parts));
     if (stored !== null && canonicalJson(stored) === canonicalJson(next))
       return { generation: record.generation, changed: false, spec: next };
+    // Signed intent: the exact DesiredStateBody of the generation this UPDATE writes (the gateway relays it
+    // verbatim). Every bump rewrites both columns, so a stored signature never outlives its generation.
+    let body: Uint8Array | null = null;
+    let signature: Uint8Array | null = null;
+    if (hooks.signer) {
+      body = storedDesiredState({ nodeId, generation: record.generation + 1, spec: next }).body;
+      signature = hooks.signer.signDesiredState(body);
+    }
     const updated = await tx.query<{ generation: string | number }>(
-      `UPDATE nodes SET spec = $2::jsonb, generation = generation + 1, version = version + 1
+      `UPDATE nodes SET spec = $2::jsonb, generation = generation + 1, version = version + 1,
+              spec_body = $4, spec_signature = $5
         WHERE id = $1 AND generation = $3
         RETURNING generation`,
-      [nodeId, JSON.stringify(next), record.generation],
+      [nodeId, JSON.stringify(next), record.generation, body, signature],
     );
     const generation = Number(updated.rows[0]?.generation ?? record.generation);
     const changed = updated.rowCount === 1;

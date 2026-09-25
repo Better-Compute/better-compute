@@ -24,6 +24,7 @@ import {
   refreshNodeAuthz,
 } from './controllers/node-state.js';
 import { reconcileNodeSpec } from './controllers/nodespec.js';
+import type { CommandSigner } from './runtime/command-signing.js';
 
 // The built-in node controllers (PLAN.md §3.3, §7.5, §8.4, §11.1), registered before every other
 // module. Reconcilers, so `start()` runs them under shard leases and tests step them with
@@ -49,6 +50,8 @@ export interface NodesModuleOptions {
   liveness?: LivenessOptions;
   /** Runs in the transaction that wrote a node's new spec generation (gateway pokes). */
   specChanged?(tx: SqlTx, nodeId: string, generation: number): Promise<void>;
+  /** Signs each new spec generation (signed intent, `pki.commandSigning`): nodes.spec_body/spec_signature. */
+  signer?: Pick<CommandSigner, 'signDesiredState'>;
 }
 
 /**
@@ -111,12 +114,10 @@ export function createNodesModule(
       name: nodeSpecWorkKind,
       shardBy: 'node',
       async run(context: ReconcileContext, key: string) {
-        await reconcileNodeSpec(
-          context,
-          key,
-          options.modules(),
-          options.specChanged ? { changed: options.specChanged } : {},
-        );
+        await reconcileNodeSpec(context, key, options.modules(), {
+          ...(options.specChanged ? { changed: options.specChanged } : {}),
+          ...(options.signer ? { signer: options.signer } : {}),
+        });
         return 'DONE';
       },
     },
