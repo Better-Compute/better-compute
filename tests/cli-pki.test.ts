@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -351,6 +352,129 @@ describe('daemon install-script', () => {
       ok: false,
       code: 'INVALID_ARGUMENT',
     });
+  });
+
+  it('installs bcx plugins from the release: the signed archive digest, only the plugin’s regular member, its pin', async () => {
+    const key = createReleaseSigningKey();
+    const pins = { BCD_RELEASE_PINS: spkiPin(key.publicKey) };
+    const shell = posixShell();
+    const work = (await mkdtemp(join(tmpdir(), 'bc-plugin-'))).replace(/\\/g, '/');
+    // Real archives from the shell's own tar: a good one, a symlink as the plugin, a member outside the archive.
+    let archives: Record<'good' | 'link' | 'dotdot', Uint8Array> = {
+      good: new TextEncoder().encode('good archive'),
+      link: new Uint8Array(1),
+      dotdot: new Uint8Array(2),
+    };
+    // GitHub Desktop's minimal git shell has no sha256sum: a node stand-in (sha256sum FILE… and -c -) there.
+    const bin = join(work, 'bin');
+    await mkdir(bin);
+    await writeFile(
+      join(bin, 'sha256sum.cjs'),
+      [
+        "const { createHash } = require('node:crypto'); const { readFileSync } = require('node:fs');",
+        "const sum = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');",
+        "const args = process.argv.slice(2);",
+        "if (args[0] === '-c') { let ok = true; for (const line of readFileSync(0, 'utf8').split('\\n').filter(Boolean)) { const [want, file] = line.split(/ [ *]/); try { if (sum(file) !== want) ok = false; } catch { ok = false; } } process.exit(ok ? 0 : 1); }",
+        "for (const file of args) process.stdout.write(sum(file) + '  ' + file + '\\n');",
+      ].join('\n'),
+    );
+    await writeFile(join(bin, 'sha256sum'), `#!/bin/sh\nexec node '${join(bin, 'sha256sum.cjs').replace(/\\\\/g, '/')}' "$@"\n`, { mode: 0o755 });
+    const shellEnv = {
+      ...process.env,
+      PATH: [...(process.platform === 'win32' ? [bin] : []), ...(shell ? [dirname(shell)] : []), process.env.PATH ?? ''].join(delimiter),
+    };
+    if (shell) {
+      const build = [
+        'set -eu',
+        `cd '${work}'`,
+        'mkdir good link dotdot',
+        "printf 'the bcx-ipmi binary' > good/bcx-ipmi",
+        "printf 'readme' > good/README.md",
+        'tar -czf good.tar.gz -C good bcx-ipmi README.md',
+        // (No ln, or no right to make symlinks, on some Windows shells: that case is then skipped.)
+        'if ln -s /etc/passwd link/bcx-ipmi 2>/dev/null; then tar -czf link.tar.gz -C link bcx-ipmi; fi',
+        "printf 'x' > dotdot/bcx-ipmi",
+        'cd dotdot && tar -czPf ../dotdot.tar.gz bcx-ipmi ../good/README.md && cd ..',
+      ].join('\n');
+      await writeFile(join(work, 'build.sh'), build);
+      const built = spawnSync(shell, [join(work, 'build.sh')], { encoding: 'utf8', env: shellEnv });
+      expect(built.status, built.stderr).toBe(0);
+      archives = {
+        good: await readFile(join(work, 'good.tar.gz')),
+        link: await readFile(join(work, 'link.tar.gz')).catch(() => new Uint8Array()),
+        dotdot: await readFile(join(work, 'dotdot.tar.gz')),
+      };
+    }
+    const manifest = buildReleaseManifest({
+      product: 'bcd',
+      version: '0.1.0',
+      sequence: 3,
+      signers: [key],
+      artifacts: [
+        releaseArtifact('bcd_0.1.0_linux_amd64', new TextEncoder().encode('bcd'), 'linux-amd64'),
+        releaseArtifact('bcx-ipmi_0.1.0_linux_amd64.tar.gz', archives.good, 'linux-amd64'),
+      ],
+    });
+    await writeFile(join(scratch, 'release-plugins.json'), JSON.stringify(signReleaseManifest(manifest, [key])));
+    const withManifest = [...base.slice(0, -2), '--release-manifest', 'release-plugins.json'];
+    const result = await run([...withManifest, '--install-plugins', 'bcx-ipmi'], pins);
+    expect(result.ok, JSON.stringify(result).slice(0, 400)).toBe(true);
+    const archiveSum = manifest.artifacts[1]!.sha256;
+    expect(result.stdout).toContain(`amd64) PLUGIN_SHA256='${archiveSum}' ;;\n  arm64) PLUGIN_SHA256='' ;;`);
+    expect(result.stdout).toContain(`install_plugin 'bcx-ipmi' "$PLUGIN_SHA256"`);
+    // Installing a plugin prepares the node for plugins.
+    expect(result.stdout).toContain('[plugins]\ndir = "/usr/local/lib/bcd/plugins"');
+    expect(await run([...withManifest, '--install-plugins', 'bcx-evil'], pins)).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
+    expect(await run([...base, '--install-plugins', 'bcx-ipmi'])).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
+    expect(await run([...withManifest, '--install-plugins', 'bcx-ipmi', '--unprivileged'], pins)).toMatchObject({ ok: false });
+    if (!shell) return;
+    const checked = join(scratch, 'install-plugins-check.sh');
+    await writeFile(checked, result.stdout);
+    expect(spawnSync(shell, ['-n', checked], { encoding: 'utf8' }).status).toBe(0);
+
+    // The function itself against a scratch plugins directory, with curl answering from the local archives.
+    const fn = result.stdout.slice(result.stdout.indexOf('install_plugin() {'), result.stdout.indexOf('\n}\n', result.stdout.indexOf('install_plugin() {')) + 3);
+    const root = `${work}/root`;
+    const install = async (archive: 'good' | 'link' | 'dotdot', sum: string) => {
+      const script = [
+        'set -eu',
+        "fail() { printf 'bcd install: %s\\n' \"$1\" >&2; exit 1; }",
+        'command -v chmod >/dev/null 2>&1 || chmod() { :; }',
+        `curl() { while [ $# -gt 0 ]; do if [ "$1" = -o ]; then out=$2; shift; fi; shift; done; cp '${work}/${archive}.tar.gz' "$out"; }`,
+        // A path node understands too (the sha256sum stand-in on Windows), fresh per run.
+        `TMP='${work}/tmp-${archive}-${Math.random().toString(36).slice(2)}'; mkdir "$TMP"; DOWNLOADS=https://compute.test/api/compute/downloads; BCD_VERSION=0.1.0; ARCH=amd64`,
+        `mkdir -p '${root}/usr/local/lib/bcd/plugins'`,
+        fn.split('/usr/local/lib/bcd/plugins').join(`${root}/usr/local/lib/bcd/plugins`),
+        `install_plugin bcx-ipmi '${sum}'`,
+      ].join('\n');
+      await writeFile(join(work, 'install.sh'), script);
+      return spawnSync(shell, [join(work, 'install.sh')], { encoding: 'utf8', env: shellEnv });
+    };
+    const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+    // An operator's own pin line stays; the plugin's line is replaced, never duplicated.
+    await mkdir(`${root}/usr/local/lib/bcd/plugins`, { recursive: true });
+    await writeFile(`${root}/usr/local/lib/bcd/plugins/pins`, `${'ab'.repeat(32)}  bcx-other\n${'cd'.repeat(32)}  bcx-ipmi\n`);
+    let run1 = await install('good', sha(archives.good));
+    expect(run1.stderr).toBe('');
+    expect(run1.status).toBe(0);
+    const binary = await readFile(`${root}/usr/local/lib/bcd/plugins/bcx-ipmi`);
+    expect(new TextDecoder().decode(binary)).toBe('the bcx-ipmi binary');
+    const pinned = `${sha(binary)}  bcx-ipmi`;
+    run1 = await install('good', sha(archives.good));
+    expect(run1.status).toBe(0);
+    expect(await readFile(`${root}/usr/local/lib/bcd/plugins/pins`, 'utf8')).toBe(`${'ab'.repeat(32)}  bcx-other\n${pinned}\n`);
+    // Only the plugin's member: the README stayed in the archive.
+    await expect(stat(`${root}/usr/local/lib/bcd/plugins/README.md`)).rejects.toThrow();
+    const refused = async (archive: 'good' | 'link' | 'dotdot', sum: string, why: RegExp) => {
+      const outcome = await install(archive, sum);
+      expect(outcome.status).not.toBe(0);
+      expect(outcome.stderr).toMatch(why);
+    };
+    await refused('good', 'ef'.repeat(32), /does not match its pinned SHA-256/);
+    if (archives.link.length) await refused('link', sha(archives.link), /not a regular file/);
+    await refused('dotdot', sha(archives.dotdot), /paths outside/);
+    // The refused installs left the good plugin and its pin in place.
+    expect(await readFile(`${root}/usr/local/lib/bcd/plugins/pins`, 'utf8')).toContain(pinned);
   });
 
   it('is valid POSIX sh', async () => {

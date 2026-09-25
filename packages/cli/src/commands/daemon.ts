@@ -8,7 +8,7 @@ import {
 import type { Finding, SqlExecutor } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
-import { renderInstallScript, type BcdArch } from '../install-script.js';
+import { bcxPluginNames, renderInstallScript, type BcdArch, type BcxPluginName } from '../install-script.js';
 import { defaultPkiPath, pkiFlag, pkiUnlockOptions } from './pki.js';
 
 /** Parses `amd64=<hex>,arm64=<hex>`. */
@@ -55,13 +55,32 @@ export function binaryDigests(manifest: ReleaseManifest): Partial<Record<BcdArch
   return out;
 }
 
+/**
+ * A bcx plugin's archive digests from a verified release manifest: per architecture, the goreleaser archive
+ * `{name}_{version}_linux_{arch}.tar.gz` (what `{downloads}/{name}/{version}/linux-{arch}` serves).
+ */
+export function pluginArchiveDigests(
+  manifest: ReleaseManifest,
+  name: string,
+  version: string,
+): Partial<Record<BcdArch, string>> {
+  const out: Partial<Record<BcdArch, string>> = {};
+  for (const arch of ['amd64', 'arm64'] as const) {
+    const archive = manifest.artifacts.find((artifact) => artifact.name === `${name}_${version}_linux_${arch}.tar.gz`);
+    if (archive) out[arch] = archive.sha256.toLowerCase();
+  }
+  if (!out.amd64 && !out.arm64)
+    throw new CliError('RELEASE_INCOMPLETE', `The manifest lists no linux ${name} archive for ${version}`);
+  return out;
+}
+
 /** Verifies `--release-manifest` under `--release-pins` for bcd at `version`. */
-async function digestsFromManifest(
+async function verifiedManifest(
   file: string,
   pins: string | undefined,
   threshold: number | undefined,
   version: string,
-): Promise<Partial<Record<BcdArch, string>>> {
+): Promise<ReleaseManifest> {
   const list = (pins ?? '')
     .split(',')
     .map((pin) => pin.trim())
@@ -93,7 +112,7 @@ async function digestsFromManifest(
       'RELEASE_MISMATCH',
       `The manifest releases bcd ${manifest.version}, not ${version}`,
     );
-  return binaryDigests(manifest);
+  return manifest;
 }
 
 /**
@@ -132,7 +151,7 @@ export const daemonCommands = [
     group: 'Fleet',
     summary: 'Write the POSIX sh script that installs bcd on a server and joins it to a pool',
     description:
-      "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band. --plugins prepares the node for bcx driver plugins: a [plugins] section (dir /usr/local/lib/bcd/plugins, a child of bcd's delegated cgroup) and a bcd.service.d drop-in that lets bcd run each plugin under its own uid in its own cgroup (CAP_SETUID/CAP_SETGID/CAP_KILL, Delegate=yes); --privileged-plugins names the ones that run as root and make namespaces (Kata). Any node whose config.toml has a [plugins] section gets the drop-in, and an upgrade keeps the sections the operator configured.",
+      "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band. --plugins prepares the node for bcx driver plugins: a [plugins] section (dir /usr/local/lib/bcd/plugins, a child of bcd's delegated cgroup) and a bcd.service.d drop-in that lets bcd run each plugin under its own uid in its own cgroup (CAP_SETUID/CAP_SETGID/CAP_KILL, Delegate=yes); --privileged-plugins names the ones that run as root and make namespaces (Kata). --install-plugins bcx-ipmi also installs plugins a release ships: each archive from {base-url}{base-path}/downloads/{name}/{version}/linux-{arch} is checked against its digest in the verified --release-manifest, only the plugin's own regular file is taken from it, and its binary digest becomes its line in the plugins' pins file. Any node whose config.toml has a [plugins] section gets the drop-in, and an upgrade keeps the sections the operator configured.",
     output: 'text',
     flags: {
       pool: {
@@ -199,6 +218,11 @@ export const daemonCommands = [
         description: 'Release keys that must have signed (default 1)',
       },
       plugins: { type: 'boolean', description: 'Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)' },
+      'install-plugins': {
+        type: 'string',
+        value: 'NAMES',
+        description: `Install these bcx plugins from the release, pinned by --release-manifest (${bcxPluginNames.join(', ')}; implies --plugins)`,
+      },
       unprivileged: {
         type: 'boolean',
         description: 'Run bcd node as the unprivileged bcd user beside a root bcd helper (privilege separation)',
@@ -253,7 +277,9 @@ export const daemonCommands = [
     validate(flags) {
       if ((flags.sha256 === undefined) === (flags['release-manifest'] === undefined))
         throw usageError('Give exactly one of --sha256 or --release-manifest');
-      if (flags.unprivileged && (flags.plugins || flags['privileged-plugins'] !== undefined))
+      if (flags['install-plugins'] !== undefined && !flags['release-manifest'])
+        throw usageError('--install-plugins needs --release-manifest: plugin archives are pinned by its signed digests');
+      if (flags.unprivileged && (flags.plugins || flags['privileged-plugins'] !== undefined || flags['install-plugins'] !== undefined))
         throw usageError('--unprivileged cannot host bcx plugins yet: bcd node would need root to start them');
       if ((flags['websocket-audience'] !== undefined || flags['proxy-ca-file'] !== undefined) && !flags['websocket-url'])
         throw usageError('--websocket-audience and --proxy-ca-file need --websocket-url');
@@ -262,14 +288,25 @@ export const daemonCommands = [
     },
     async run({ flags, path, note, program, env }) {
       const version = flags['bcd-version']!.replace(/^v/, '');
-      const sha256 = flags['release-manifest']
-        ? await digestsFromManifest(
-            path(flags['release-manifest']),
-            flags['release-pins'],
-            flags['release-threshold'],
-            version,
-          )
-        : parseSha256Flag(flags.sha256!);
+      const manifest = flags['release-manifest']
+        ? await verifiedManifest(path(flags['release-manifest']), flags['release-pins'], flags['release-threshold'], version)
+        : undefined;
+      const sha256 = manifest ? binaryDigests(manifest) : parseSha256Flag(flags.sha256!);
+      const installs = [
+        ...new Set(
+          (flags['install-plugins'] ?? '')
+            .split(',')
+            .map((name) => name.trim())
+            .filter(Boolean),
+        ),
+      ];
+      for (const name of installs)
+        if (!(bcxPluginNames as readonly string[]).includes(name))
+          throw usageError(`--install-plugins: ${name} is not a plugin a release ships (${bcxPluginNames.join(', ')})`);
+      const pluginInstalls = installs.map((name) => ({
+        name: name as BcxPluginName,
+        sha256: pluginArchiveDigests(manifest!, name, version),
+      }));
       const basePath = (flags['base-path'] ?? '/api/compute').replace(/\/+$/, '');
       if (!/^(\/[A-Za-z0-9._~-]+)*$/.test(basePath))
         throw usageError('--base-path must look like /api/compute');
@@ -340,7 +377,8 @@ export const daemonCommands = [
               },
             }
           : {}),
-        ...(flags.plugins || flags['privileged-plugins']
+        ...(pluginInstalls.length ? { pluginInstalls } : {}),
+        ...(flags.plugins || flags['privileged-plugins'] || pluginInstalls.length
           ? {
               plugins: {
                 privileged: (flags['privileged-plugins'] ?? '')

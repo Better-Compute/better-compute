@@ -17,6 +17,10 @@ import { CliError } from './errors.js';
 
 export type BcdArch = 'amd64' | 'arm64';
 
+/** The bcx plugins a release ships and the downloads route serves (server downloadArtifact's products). */
+export const bcxPluginNames = ['bcx-ipmi'] as const;
+export type BcxPluginName = (typeof bcxPluginNames)[number];
+
 export interface InstallScriptOptions {
   poolId: string;
   siteId: string;
@@ -37,6 +41,12 @@ export interface InstallScriptOptions {
    * `privileged` names the plugins that run as root without the seccomp filter (a Kata runtime plugin).
    */
   plugins?: { privileged?: readonly string[] };
+  /**
+   * bcx plugins the script installs from the release (`{downloadsBase}/{name}/{version}/linux-{arch}`, a tar.gz):
+   * each archive is checked against its digest from the signed release manifest, only the plugin's own regular
+   * file is taken from it, and its binary digest becomes its line in the plugins' `pins` file.
+   */
+  pluginInstalls?: readonly { name: BcxPluginName; sha256: Partial<Record<BcdArch, string>> }[];
   /**
    * (review 7 M2) Hex SHA-256 of the deployment's approver set (`better-compute pki trust-version`): bcd takes only
    * that set as its first, and refuses destructive commands until it has it.
@@ -208,6 +218,15 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
   if (options.bmcNetworks && options.bmcNetworks.length === 0) throw invalid('--bmc-networks', 'lists no network');
   for (const name of options.plugins?.privileged ?? [])
     if (!idPattern.test(name)) throw invalid('--privileged-plugins', 'must name plugins by letters, digits and . _ -');
+  for (const plugin of options.pluginInstalls ?? []) {
+    if (!(bcxPluginNames as readonly string[]).includes(plugin.name))
+      throw invalid('--install-plugins', `names ${JSON.stringify(plugin.name)}, not one of ${bcxPluginNames.join(', ')}`);
+    const sums = Object.entries(plugin.sha256);
+    if (!sums.length || sums.some(([arch, sum]) => !['amd64', 'arm64'].includes(arch) || !hexPattern.test(sum ?? '')))
+      throw invalid('--install-plugins', `needs a lowercase hex SHA-256 per architecture for ${plugin.name}`);
+  }
+  if (options.pluginInstalls?.length && !options.plugins)
+    throw invalid('--install-plugins', 'needs the node prepared for plugins (--plugins)');
   const jwk = options.joinEncryptionJwk;
   if (
     jwk.kty !== 'EC' ||
@@ -348,6 +367,63 @@ CapabilityBoundingSet=CAP_SYS_BOOT CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_DAC_READ_SEAR
 WantedBy=multi-user.target
 `;
 
+/**
+ * The script's plugin installs: per plugin, its archive from the downloads route, checked against the signed digest
+ * for this architecture; only the plugin's own member, a regular file with no path, is extracted (no links, no
+ * other member, nothing with / or ..); installed 0755 beside the others; its binary digest replaces its line in
+ * `pins` (bcd refuses a plugin whose digest is not its pin). Other lines of `pins` are the operator's and stay.
+ */
+export function renderPluginInstalls(
+  plugins: readonly { name: BcxPluginName; sha256: Partial<Record<BcdArch, string>> }[],
+): string {
+  const calls = plugins
+    .map(
+      (plugin) => `case "$ARCH" in
+  amd64) PLUGIN_SHA256='${plugin.sha256.amd64 ?? ''}' ;;
+  arm64) PLUGIN_SHA256='${plugin.sha256.arm64 ?? ''}' ;;
+esac
+install_plugin '${plugin.name}' "$PLUGIN_SHA256"`,
+    )
+    .join('\n');
+  return `
+# bcx plugins from this release, pinned by the signed release manifest.
+install_plugin() {
+  name=$1
+  sum=$2
+  [ -n "$sum" ] || fail "this script carries no $name build for $ARCH"
+  url="$DOWNLOADS/$name/$BCD_VERSION/linux-$ARCH"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --proto '=https' --tlsv1.2 --retry 3 -o "$TMP/$name.tar.gz" "$url" || fail "download failed: $url"
+  else
+    wget -q --https-only -O "$TMP/$name.tar.gz" "$url" || fail "download failed: $url"
+  fi
+  printf '%s  %s\\n' "$sum" "$TMP/$name.tar.gz" | sha256sum -c - >/dev/null 2>&1 ||
+    fail "the downloaded $name does not match its pinned SHA-256"
+  # Nothing with a path or a parent reference, and the plugin's own member a regular file (not a link).
+  tar -tzf "$TMP/$name.tar.gz" > "$TMP/$name.list" || fail "$name: not a tar.gz archive"
+  if grep -Eq '(^/|(^|/)\\.\\.(/|$))' "$TMP/$name.list"; then fail "$name: the archive names paths outside it"; fi
+  grep -qx "$name" "$TMP/$name.list" || fail "$name: the archive has no $name"
+  case "$(tar -tvzf "$TMP/$name.tar.gz" "$name" | head -n 1)" in
+    -*) ;;
+    *) fail "$name: its member is not a regular file" ;;
+  esac
+  mkdir "$TMP/$name.x"
+  tar -xzf "$TMP/$name.tar.gz" -C "$TMP/$name.x" "$name" || fail "$name: extracting it failed"
+  [ -f "$TMP/$name.x/$name" ] && [ ! -L "$TMP/$name.x/$name" ] || fail "$name: not a regular file"
+  cp "$TMP/$name.x/$name" "${bcdPluginsDir}/$name.new"
+  chmod 0755 "${bcdPluginsDir}/$name.new"
+  mv -f "${bcdPluginsDir}/$name.new" "${bcdPluginsDir}/$name"
+  bin=$(sha256sum "${bcdPluginsDir}/$name" | cut -d ' ' -f 1)
+  # Its pin replaces its old line; the operator's other lines stay.
+  touch "${bcdPluginsDir}/pins"
+  { grep -v " [ *]$name\$" "${bcdPluginsDir}/pins" || true; printf '%s  %s\\n' "$bin" "$name"; } > "${bcdPluginsDir}/pins.new"
+  chmod 0644 "${bcdPluginsDir}/pins.new"
+  mv -f "${bcdPluginsDir}/pins.new" "${bcdPluginsDir}/pins"
+}
+${calls}
+`;
+}
+
 /** Renders the install script. Throws `INVALID_INPUT` when an option is unsafe or malformed. */
 export function renderInstallScript(input: InstallScriptOptions): string {
   const options = checkInstallScriptOptions(input);
@@ -424,7 +500,7 @@ install -d -m 0755 /etc/cdi${options.plugins ? ` /usr/local/lib/bcd ${bcdPlugins
 cp "$TMP/bcd" /usr/local/bin/bcd.new
 chmod 0755 /usr/local/bin/bcd.new
 mv -f /usr/local/bin/bcd.new /usr/local/bin/bcd
-
+${options.pluginInstalls?.length ? renderPluginInstalls(options.pluginInstalls) : ''}
 cat > /etc/bcd/config.toml.new <<'BCD_CONFIG'
 ${renderBcdConfig(options)}BCD_CONFIG
 ${
