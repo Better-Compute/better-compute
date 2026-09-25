@@ -47,5 +47,7 @@ export default {
   confirms this action), `reserve_gpus` and `create_instance` return
   `{ status: 'confirmation-required', confirmationId, idempotencyKey }`. The model retries with the
   same `idempotencyKey` after the approval. With `confirmations: { status(id) }`, the tool instead
-  polls and retries once itself.
+  polls and retries once itself. `confirmations: iamConfirmations(iam.api.delegations)` polls
+  better-iam's `getConfirmation` per request with the caller's own bearer token and tenant
+  (`rejected` → `confirmation-denied`, a lapsed pending request → `confirmation-expired`).
 - **Tenant.** Tools act in `tenantId` (fixed or per caller); by default, the gate caller's tenant.

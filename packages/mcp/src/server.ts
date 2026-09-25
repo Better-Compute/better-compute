@@ -33,8 +33,13 @@ export interface ComputeMcpOptions {
   execCommand?: boolean;
   /** Build the read-only `fleet_export` and `fleet_plan` tools (off by default; platform admins only). */
   fleet?: boolean;
-  /** Wait for people to approve held-back actions inside the tool call (see `ConfirmationPolling`). */
-  confirmations?: ConfirmationPolling;
+  /**
+   * Wait for people to approve held-back actions inside the tool call (see `ConfirmationPolling`):
+   * fixed, or per request so the poll runs with the caller's credential (`iamConfirmations`).
+   */
+  confirmations?:
+    | ConfirmationPolling
+    | ((request: Request, caller?: McpCallerLike) => ConfirmationPolling | undefined);
   serverInfo?: { name: string; version: string };
   /** Shown to the model at initialize. */
   instructions?: string;
@@ -144,12 +149,16 @@ export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
     if (problem) return errorResult('INVALID_INPUT', problem);
     const tenantId = tenantFor(caller);
     if (!tenantId) return errorResult('ACCESS_DENIED', 'No tenant to act in');
+    const confirmations =
+      typeof options.confirmations === 'function'
+        ? options.confirmations(request, caller)
+        : options.confirmations;
     const context: ToolContext = {
       api: apiFor(request, caller),
       tenantId,
       newKey: options.newKey ?? randomKey,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      ...(options.confirmations ? { confirmations: options.confirmations } : {}),
+      ...(confirmations ? { confirmations } : {}),
     };
     try {
       return toolResult(await tool.run(input as Record<string, unknown>, context));

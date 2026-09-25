@@ -82,10 +82,16 @@ owners: each area's new owner finishes (or discards) the orphan files in its are
 | gateway + server runtime (work queue/reconcilers/leases/workers) + docs generator ([18810e]) | [c321a3] | `packages/gateway/src/store.ts` |
 | iam, events, audit, observability, realtime/sim ([3afca2]) | [31c64a] | `packages/iam/src/{streams.ts,index.ts}`, `bench/realtime-*/results/*` |
 | CLI, examples, testing dev stack ([7fe4f7]) + pki, tunnels, console-kit, apps/console, security reviews ([df4a91], [0b2be8]) | [402c97] | `packages/cli/src/{config,index}.ts`, `examples/shared/compose.ts`, `tests/cli-serve-compose.test.ts`, `packages/testing/src/dev/stack.ts` |
+| mcp, fleet, rollout ([9ec62d]; unlisted until now) | [f85da7] | — |
 | apps/docs shell + hand-written pages ([ebe83b]) | "Docs app with better-iam styling" [731f14] | `apps/docs/**` untracked files |
 
 All earlier rules apply: private-index commits (the pre-commit hook enforces it), orchestrator-only installs/lockfile/
 umbrella files, the migration writer is the only one adding `core/00NN`, message the owner before touching their files.
+
+- [c321a3] round 4: orphan store.ts done (d430815); tunnel filters tenantId/anyAgent + reauthorizeTunnels for [31c64a]/
+  [402c97] (6aeb5c4); docs generator MDX escaping + check-content MDX compile (bd57184). NOW: v0.4 shard rebalancing
+  (§8.5): `packages/server/src/runtime/{workers,leases,reconcilers}.ts`, `tests/server-runtime-*`. No core/migration
+  changes expected; column asks go to [f02367].
 
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
@@ -472,3 +478,8 @@ Rules for v0.1:
   the `descriptions/**` format (the prose in `descriptions/api/*.md` and `errors.md` is [ebe83b]'s, agreed), the
   generated reference pages and `tests/docs-generate.test.ts`. Installs by [37c0ab] (done 2026-09-24);
   `next build` stays out of `pnpm check`.
+- ([731f14] "Docs app with better-iam styling" = continuation of [ebe83b], 2026-09-24/25) apps/docs shell + hand-written content, same file set as
+  [ebe83b] above plus `apps/docs/data/**`. Writing the ~41 missing pages other pages link to: daemon/{install,
+  protocol,sessions,delivery,gateway,failure-modes}, extending/**, operations/**, guides/clients/**,
+  guides/events/{webhooks,watch,audit}, reference/{index,meta.json,glossary,ai,roadmap,changelog} + glossary data.
+  The generator stays [c321a3]'s; lockfile commit by [f85da7] with apps/docs/package.json.
