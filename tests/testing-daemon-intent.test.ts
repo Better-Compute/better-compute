@@ -343,11 +343,14 @@ describe('FakeDaemon signed intent', () => {
     };
     // Approved by both keys, in scope: runs.
     const approved = sendBatched('test.destroy', approvalBy([0, 1]));
+    // Each leaf runs once: a second command on the same approved leaf is refused.
+    const again = sendBatched('test.destroy', approvalBy([0, 1]));
     // One approval of two, or no approval at all: refused.
     const short = sendBatched('test.destroy', approvalBy([0]));
     const bare = sendBatched('test.destroy', undefined);
     await h.advance(5);
     accepted(h, approved.id);
+    expect(states(h, again.id)).toEqual(['REJECTED:BATCH_UNAPPROVED']);
     expect(states(h, short.id)).toEqual(['REJECTED:BATCH_UNAPPROVED']);
     expect(states(h, bare.id)).toEqual(['REJECTED:BATCH_UNAPPROVED']);
     // Unbatched destructive commands: one per rolling hour here, then UNBATCHED_LIMIT.

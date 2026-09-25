@@ -1,7 +1,7 @@
 import { createHash, type KeyObject } from 'node:crypto';
 import { create, equals, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
-import { isComputeError } from '@better-compute/core';
+import { ComputeError, isComputeError } from '@better-compute/core';
 import {
   createSecretRequest,
   createWorkloadTokenRequest,
@@ -384,6 +384,8 @@ export class FakeDaemon {
   private readonly batchVerdicts = new Map<string, 'BATCH_UNAPPROVED' | 'UNBATCHED_LIMIT'>();
   /** Unbatched destructive commands admitted: id → server time, for the rolling-hour cap. */
   private readonly unbatched = new Map<string, number>();
+  /** Batch leaves used: `<batch_id>#<leaf index>` → the command that used it (each leaf runs once). */
+  private readonly batchLeaves = new Map<string, string>();
   /** Desired states refused by signed intent, in arrival order. */
   private readonly specRejectionsValue: { generation: number; reason: string }[] = [];
   private readonly fs = new Map<string, string>();
@@ -1216,6 +1218,13 @@ export class FakeDaemon {
             trustDomain: quorum.trustDomain,
           },
         );
+        // Each leaf runs at most once per batch: an approval for N machines is N operations, not N
+        // kinds of operation to repeat. A redelivery of the same command keeps its leaf.
+        const leaf = `${body.batchId}#${command.batchProof!.index}`;
+        const holder = this.batchLeaves.get(leaf);
+        if (holder !== undefined && holder !== body.id)
+          throw new ComputeError('ACCESS_DENIED', 'This batch leaf already ran', undefined, { reason: 'leaf-used' });
+        this.batchLeaves.set(leaf, body.id);
         this.batchVerdicts.delete(body.id);
       } catch (error) {
         this.batchVerdicts.set(body.id, 'BATCH_UNAPPROVED');

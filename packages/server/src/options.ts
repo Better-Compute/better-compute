@@ -170,7 +170,8 @@ export interface ComputeOptions<
      * (v1.0, §13) The destructive-batch quorum, published in the trust bundle (bump
      * `trustVersion` when it changes; needs `commandSigning`). `keys` are the operators' P-256
      * approver public keys (SPKI DER), held off the control plane. A batch needs `threshold`
-     * distinct approvals, or the first `tiers` entry whose `maxScopeSize` covers it.
+     * distinct approvals, or the first `tiers` entry whose `maxScopeSize` covers it. Tiers are
+     * ascending by `maxScopeSize` with non-decreasing thresholds, none above `threshold`.
      * `unbatchedDestructivePerHour` is break-glass only (default 0).
      */
     approvers?: {
@@ -570,6 +571,19 @@ function resolveApprovers(
       maxScopeSize: tier.maxScopeSize as number,
       threshold: within(tier.threshold, `pki.approvers.tiers[${index}].threshold`),
     };
+  });
+  // Review #6 L3: a larger batch never needs fewer approvals than a smaller one, so padding a
+  // scope can never move it into a cheaper tier.
+  quorumTiers.forEach((tier, index) => {
+    const previous = quorumTiers[index - 1];
+    if (previous && tier.maxScopeSize <= previous.maxScopeSize)
+      throw invalid('pki.approvers.tiers must have ascending maxScopeSize');
+    if (previous && tier.threshold < previous.threshold)
+      throw invalid('pki.approvers.tiers thresholds must not decrease as maxScopeSize grows');
+    if (tier.threshold > threshold)
+      throw invalid(
+        `pki.approvers.tiers[${index}].threshold must not exceed pki.approvers.threshold (batches above every tier)`,
+      );
   });
   if (!Number.isInteger(unbatchedDestructivePerHour) || unbatchedDestructivePerHour < 0)
     throw invalid('pki.approvers.unbatchedDestructivePerHour must be a whole number ≥ 0');

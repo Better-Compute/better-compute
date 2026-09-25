@@ -171,6 +171,25 @@ describe('server signed intent', () => {
       expect(() => betterCompute({ ...options(db!, fakeIam()), pki } as never)).toThrow(
         /INVALID_CONFIG|approvers|commandSigning/,
       );
+    // Tiers (review #6 L3): ascending sizes, thresholds that never drop as batches grow, none
+    // above the base threshold. Padding a scope must never make it cheaper to approve.
+    for (const tiers of [
+      [
+        { maxScopeSize: 10, threshold: 1 },
+        { maxScopeSize: 5, threshold: 1 },
+      ],
+      [
+        { maxScopeSize: 5, threshold: 2 },
+        { maxScopeSize: 10, threshold: 1 },
+      ],
+      [{ maxScopeSize: 5, threshold: 3 }],
+    ])
+      expect(() =>
+        betterCompute({
+          ...options(db!, fakeIam()),
+          pki: { commandSigning: authority, approvers: { keys, threshold: 2, tiers } },
+        } as never),
+      ).toThrow(/tiers/);
   });
 
   it('stays v0.1 without pki.commandSigning, and validates the options', async () => {
