@@ -1197,6 +1197,99 @@ const concurrencyCases: StoreConformanceCase[] = [
   },
 ];
 
+/** A month no other case touches (cases may share a database, and partitions outlive them). */
+function randomMonth(): { at: number; name: string } {
+  const bytes = globalThis.crypto.getRandomValues(new Uint16Array(1));
+  const index = bytes[0]! % 600; // 2050-01 .. 2099-12
+  const year = 2050 + Math.floor(index / 12);
+  const month = index % 12;
+  return { at: Date.UTC(year, month, 15, 12), name: `${year}${String(month + 1).padStart(2, '0')}` };
+}
+
+const insertAudit = `INSERT INTO audit_events (id, tenant_id, occurred_at, action, resource_type, resource_id)
+  VALUES ($1, 'root', $2, 'conformance', 'node', 'n')`;
+
+const historyCases: StoreConformanceCase[] = [
+  {
+    name: 'history: rows route to their month; the default partition catches the rest until the month is created',
+    async run(db) {
+      await db.migrate();
+      const month = randomMonth();
+      const partition = `audit_events_p${month.name}`;
+      const id = unique();
+      const where = async () =>
+        (await db.query<{ part: string }>('SELECT tableoid::regclass::text AS part FROM audit_events WHERE id = $1', [id]))
+          .rows[0]?.part;
+      const existed = (await db.query<{ t: string | null }>('SELECT to_regclass($1)::text AS t', [partition])).rows[0]!.t;
+      await db.query(insertAudit, [id, at(month.at)]);
+      if (existed === null) {
+        checkEqual(await where(), 'audit_events_default', 'a month without a partition lands in the default one');
+        const created = await db.transaction((tx) =>
+          tx.query<{ created: string | null }>(`SELECT compute_history_partition('audit_events', $1) AS created`, [at(month.at)]),
+        );
+        checkEqual(created.rows[0]!.created, partition, 'the month partition is created');
+      }
+      checkEqual(await where(), partition, 'the row lives in its month (moved out of the default partition)');
+      const again = await db.query<{ created: string | null }>(`SELECT compute_history_partition('audit_events', $1) AS created`, [
+        at(month.at),
+      ]);
+      checkEqual(again.rows[0]!.created, null, 'creating it again is a no-op');
+      await db.query(insertAudit, [id, at(month.at + 1000)]);
+      // The primary key includes the partition column: the same id in another instant is another row.
+      checkEqual(
+        (await db.query('SELECT 1 FROM audit_events WHERE id = $1', [id])).rowCount,
+        2,
+        'the key is (id, occurred_at)',
+      );
+    },
+  },
+  {
+    name: 'concurrency: two sessions creating the same month partition serialize; the second finds it',
+    postgresOnly: true,
+    async run(db) {
+      await db.migrate();
+      const month = randomMonth();
+      const holding = deferred();
+      const finish = deferred();
+      const first = db.transaction(async (tx) => {
+        const { rows } = await tx.query<{ created: string | null }>(
+          `SELECT compute_history_partition('inventory_snapshots', $1) AS created`,
+          [at(month.at)],
+        );
+        holding.resolve();
+        await finish.promise;
+        return rows[0]!.created;
+      });
+      try {
+        await holding.promise;
+        const second = db.transaction(async (tx) => {
+          await tx.query(lockTimeout);
+          return (
+            await tx.query<{ created: string | null }>(`SELECT compute_history_partition('inventory_snapshots', $1) AS created`, [
+              at(month.at),
+            ])
+          ).rows[0]!.created;
+        });
+        const settled = track(second);
+        await pause(blockedMs);
+        check(!settled(), 'the second creator waits for the first');
+        finish.resolve();
+        const created = [await first, await second];
+        check(
+          created.filter((name) => name !== null).length <= 1,
+          `at most one session creates the partition (got ${JSON.stringify(created)})`,
+        );
+        const exists = await db.query<{ t: string | null }>('SELECT to_regclass($1)::text AS t', [
+          `inventory_snapshots_p${month.name}`,
+        ]);
+        check(exists.rows[0]!.t !== null, 'the partition exists afterwards');
+      } finally {
+        finish.resolve();
+      }
+    },
+  },
+];
+
 /**
  * What the base schema guarantees, as store conformance cases (PLAN.md §15): exclusion and
  * extension conflicts, guarded counters and quota, idempotency keys, lease fencing, work-queue
@@ -1210,6 +1303,7 @@ export function storeConformanceCases(): StoreConformanceCase[] {
     ...clockCases,
     ...invariantCases,
     ...queueCases,
+    ...historyCases,
     ...concurrencyCases,
   ].map((test) => ({ ...test }));
 }
