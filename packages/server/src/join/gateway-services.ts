@@ -8,7 +8,9 @@
  *   join-signing key.
  * - `renew(RenewRequest)` → `RenewResponse`. mTLS; the api verifies the current certificate against
  *   `node_certs` and the proof of possession (±60 s, 120 s replay cache) itself.
- * - `secret(SecretRequest)` → `SecretResponse` (v0.2; answers `NOT_IMPLEMENTED` in v0.1).
+ * - `secret(SecretRequest)` → `SecretResponse` (v0.2): the secret broker (`secret-broker.ts`),
+ *   given SecretStores; without any it answers `NOT_IMPLEMENTED`. Refusals are answers
+ *   (`SecretResponse.error`), not errors.
  *
  * Errors are `ComputeError`s: `ACCESS_DENIED` (one generic refusal; `details.reason` is for logs),
  * `INVALID_INPUT`, `UNSUPPORTED`, `CONFLICT` (retry), `INVALID_CONFIG` (JoinService keys missing).
@@ -22,9 +24,11 @@ import {
   type Clock,
   type EventPublisher,
   type Logger,
+  type SecretStore,
   type SqlExecutor,
   type WorkQueue,
 } from '@better-compute/core';
+import { createSecretBroker, type SecretBrokerOptions } from './secret-broker.js';
 import type {
   JoinRequest,
   JoinResponse,
@@ -59,6 +63,13 @@ export interface GatewayServicesInput {
   log?: Logger;
   /** The IAM root tenant, for `security.join.refused` events no token attributes. */
   rootTenantId?: string;
+  /**
+   * `ComputeOptions.secrets`: the SecretStores behind the broker. Without any, `secret` answers
+   * `NOT_IMPLEMENTED` (no broker configured).
+   */
+  secrets?: readonly SecretStore[];
+  /** Allocation-bound refs a module knows about (see `SecretBrokerOptions.allocationRefs`). */
+  allocationRefs?: SecretBrokerOptions['allocationRefs'];
 }
 
 /** JoinService behind the gateway-facing interface. */
@@ -74,11 +85,26 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
     ...(input.log ? { log: input.log } : {}),
     ...(input.rootTenantId ? { rootTenantId: input.rootTenantId } : {}),
   });
+  const broker = input.secrets?.length
+    ? createSecretBroker({
+        database: input.database,
+        clock: input.clock,
+        events: input.events,
+        stores: input.secrets,
+        ...(input.rootTenantId ? { rootTenantId: input.rootTenantId } : {}),
+        ...(input.log ? { log: input.log } : {}),
+        ...(input.allocationRefs ? { allocationRefs: input.allocationRefs } : {}),
+      })
+    : undefined;
   return Object.freeze({
     join: (request: JoinRequest, context?: GatewayCallContext) => service.join(request, context),
     renew: (request: RenewRequest, context?: GatewayCallContext) => service.renew(request, context),
-    secret: async (): Promise<SecretResponse> => {
-      throw notImplemented('The secret broker', 'v0.2');
+    secret: async (
+      request: SecretRequest,
+      context?: GatewayCallContext,
+    ): Promise<SecretResponse> => {
+      if (!broker) throw notImplemented('The secret broker', 'v0.2');
+      return broker.secret(request, context);
     },
   });
 }

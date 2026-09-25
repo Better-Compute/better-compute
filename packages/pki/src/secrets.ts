@@ -336,8 +336,15 @@ export async function openSecretRequest(
   return opened;
 }
 
-/** A `SecretResponse` carrying `value` as a JWE to the request's one-time key. */
-export function sealSecretResponse(request: OpenedSecretRequest, value: string): SecretResponse {
+/**
+ * A `SecretResponse` carrying `value` as a JWE to the request's one-time key. With `expiresAt`
+ * (epoch ms) the authenticated header carries `exp` (seconds), and agents refuse it afterwards.
+ */
+export function sealSecretResponse(
+  request: OpenedSecretRequest,
+  value: string,
+  options: { expiresAt?: number } = {},
+): SecretResponse {
   return create(SecretResponseSchema, {
     ref: request.ref,
     requestId: request.requestId,
@@ -345,6 +352,7 @@ export function sealSecretResponse(request: OpenedSecretRequest, value: string):
       typ: secretResponseType,
       ref: request.ref,
       rid: request.requestId,
+      ...(options.expiresAt !== undefined ? { exp: Math.floor(options.expiresAt / 1000) } : {}),
     }),
   });
 }
@@ -395,7 +403,7 @@ export function createSecretRequest(options: {
 export function openSecretResponse(
   response: SecretResponse,
   ephemeralKey: KeyObject,
-  expect: { ref: string; requestId: string },
+  expect: { ref: string; requestId: string; now?: number },
 ): string {
   if (response.error)
     throw new ComputeError('ACCESS_DENIED', `Secret refused: ${response.error}`, undefined, {
@@ -404,5 +412,10 @@ export function openSecretResponse(
   const opened = openJwe(response.jwe, ephemeralKey, { typ: secretResponseType });
   if (opened.header.ref !== expect.ref || opened.header.rid !== expect.requestId)
     throw new ComputeError('ACCESS_DENIED', 'The secret response answers another request');
+  const exp = opened.header.exp;
+  if (exp !== undefined) {
+    if (typeof exp !== 'number' || (expect.now ?? Date.now()) > exp * 1000)
+      throw new ComputeError('ACCESS_DENIED', 'The secret response has expired');
+  }
   return new TextDecoder().decode(opened.plaintext);
 }
