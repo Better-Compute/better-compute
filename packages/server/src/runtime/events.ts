@@ -288,11 +288,15 @@ function isAfter(a: OutboxCursor, b: OutboxCursor): boolean {
 
 export interface SinkDispatch {
   /**
-   * One pass over every sink; returns how many events were delivered in total. `epoch` is the
-   * outbox-dispatch lease's: a new one (this process just became the holder) reloads the stored
-   * cursors before anything is read.
+   * One pass over every sink with the same lease epoch (tests, single-lease hosts); returns how
+   * many events were delivered in total.
    */
   dispatch(epoch?: number): Promise<number>;
+  /**
+   * One pass for one sink, under that sink's own lease (§8.4: one lease per sink). `epoch` is that
+   * lease's: a new one (this process just became its holder) reloads the stored cursor first.
+   */
+  dispatchSink(sinkId: string, epoch?: number): Promise<number>;
   /** The cursor of each sink, by sink id. */
   cursors(): Record<string, OutboxCursor>;
 }
@@ -340,32 +344,47 @@ export function createSinkDispatch(
     limit: batchSize,
     /** The lone event that keeps failing (its sequence) and how often it failed. */
     suspect: undefined as { sequence: string; attempts: number } | undefined,
+    /** Whether the stored cursor was loaded, and under which lease epoch. */
+    loaded: false,
+    loadedEpoch: undefined as number | undefined,
   }));
+  const byId = new Map(state.map((entry) => [entry.sink.id, entry]));
   let deadLetters: boolean | undefined;
-  /** Whether cursors are stored (probed once per load until the table exists). */
+  /** Whether cursors are stored (probed until the table exists). */
   let durable = false;
-  let loaded = false;
-  let loadedEpoch: number | undefined;
+  let warned = false;
 
-  /** Takes each sink's stored cursor when it is ahead of the one in memory. */
-  async function load(): Promise<void> {
+  /** Takes the sinks' stored cursors when they are ahead of the ones in memory. */
+  async function load(entries: readonly (typeof state)[number][]): Promise<void> {
     if (!durable) {
       const { rows } = await database.query<{ present: boolean }>(cursorTablePresent);
       durable = rows[0]?.present === true;
-      if (!durable && !loaded)
+      if (!durable && !warned)
         log.warn('outbox_cursors is missing (core/0009_runtime): sink cursors stay in memory', {});
+      warned = true;
     }
     if (!durable) return;
     const { rows } = await database.query<{ name: string; txid_text: string; seq_text: string }>(
       loadCursors,
-      [state.map((entry) => entry.name)],
+      [entries.map((entry) => entry.name)],
     );
     const stored = new Map(
       rows.map((row) => [row.name, { txid: row.txid_text, seq: row.seq_text }]),
     );
-    for (const entry of state) {
+    for (const entry of entries) {
       const cursor = stored.get(entry.name);
       if (cursor && isAfter(cursor, entry.cursor)) entry.cursor = cursor;
+    }
+  }
+
+  /** Reloads the entries whose lease changed hands since their last load. */
+  async function ensureLoaded(entries: readonly (typeof state)[number][], epoch: number | undefined) {
+    const stale = entries.filter((entry) => !entry.loaded || entry.loadedEpoch !== epoch);
+    if (!stale.length) return;
+    await load(stale);
+    for (const entry of stale) {
+      entry.loaded = true;
+      entry.loadedEpoch = epoch;
     }
   }
 
@@ -447,44 +466,48 @@ export function createSinkDispatch(
     return 1;
   }
 
+  /** One delivery attempt for one sink (its cursor loaded); returns events delivered. */
+  async function pass(entry: (typeof state)[number]): Promise<number> {
+    if (now() < entry.retryAt) return 0;
+    const page = await readEvents(database, entry.cursor, entry.limit);
+    if (!page.events.length) return 0;
+    try {
+      await entry.sink.deliver(page.events);
+    } catch (error) {
+      if (page.events.length > 1) {
+        // Bisect: the next pass delivers the first half alone (no back-off yet: the failure may be
+        // one event's, and a halved batch finds it in log2(batchSize) passes).
+        entry.limit = Math.ceil(page.events.length / 2);
+        log.warn('An event sink failed a batch; retrying a smaller one', {
+          sink: entry.sink.id,
+          events: page.events.length,
+          error: message(error),
+        });
+        return 0;
+      }
+      return lone(entry, page.events[0]!, page.cursor, error);
+    }
+    entry.cursor = page.cursor;
+    entry.failures = 0;
+    entry.suspect = undefined;
+    entry.limit = Math.min(batchSize, entry.limit * 2);
+    await save(entry);
+    return page.events.length;
+  }
+
   return {
     async dispatch(epoch) {
       if (!state.length) return 0;
-      if (!loaded || epoch !== loadedEpoch) {
-        await load();
-        loaded = true;
-        loadedEpoch = epoch;
-      }
+      await ensureLoaded(state, epoch);
       let delivered = 0;
-      for (const entry of state) {
-        if (now() < entry.retryAt) continue;
-        const page = await readEvents(database, entry.cursor, entry.limit);
-        if (!page.events.length) continue;
-        try {
-          await entry.sink.deliver(page.events);
-        } catch (error) {
-          if (page.events.length > 1) {
-            // Bisect: the next pass delivers the first half alone (no back-off yet: the failure
-            // may be one event's, and a halved batch finds it in log2(batchSize) passes).
-            entry.limit = Math.ceil(page.events.length / 2);
-            log.warn('An event sink failed a batch; retrying a smaller one', {
-              sink: entry.sink.id,
-              events: page.events.length,
-              error: message(error),
-            });
-            continue;
-          }
-          delivered += await lone(entry, page.events[0]!, page.cursor, error);
-          continue;
-        }
-        entry.cursor = page.cursor;
-        entry.failures = 0;
-        entry.suspect = undefined;
-        entry.limit = Math.min(batchSize, entry.limit * 2);
-        delivered += page.events.length;
-        await save(entry);
-      }
+      for (const entry of state) delivered += await pass(entry);
       return delivered;
+    },
+    async dispatchSink(sinkId, epoch) {
+      const entry = byId.get(sinkId);
+      if (!entry) return 0;
+      await ensureLoaded([entry], epoch);
+      return pass(entry);
     },
     cursors: () => Object.fromEntries(state.map((entry) => [entry.sink.id, { ...entry.cursor }])),
   };

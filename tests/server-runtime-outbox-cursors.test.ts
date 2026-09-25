@@ -106,7 +106,7 @@ describe('durable sink cursors', () => {
     );
     await fixture.database.query(
       `UPDATE leases SET owner = 'another-worker', epoch = epoch + 1, expires_at = compute_now()
-        WHERE name = 'singleton:outbox-dispatch'`,
+        WHERE name = 'singleton:outbox-dispatch:reload'`,
     );
     await fixture.advance(11_000); // past the renewal point: the next pass goes to the table
     await publish(compute, 'node.c');

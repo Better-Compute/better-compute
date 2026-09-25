@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ComputeError,
   type CapacityPort,
@@ -120,6 +121,11 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** A sink id as a lease-name segment: kept when it is lease-safe, else its sha256 prefix. */
+function leaseSafe(id: string): string {
+  return /^[A-Za-z0-9._@-]{1,100}$/.test(id) ? id : `h-${createHash('sha256').update(id).digest('hex').slice(0, 32)}`;
+}
+
 /** The worker roles that run reconcilers, each with its own shard membership. */
 const shardedRoles = ['controllers', 'scheduler'] as const;
 type ShardedRole = (typeof shardedRoles)[number];
@@ -233,13 +239,21 @@ export function createRuntime(options: ResolvedOptions): Runtime {
     return swept.length;
   }
 
-  const outboxLease = singleton('outbox-dispatch');
-  async function dispatchOutbox(): Promise<number> {
-    if (!options.eventSinks.length) return 0;
-    const lease = await outboxLease.ensure();
+  // One lease per sink (§8.4): `singleton:outbox-dispatch:<sink>`, so the sinks spread over the
+  // `sinks` workers and a slow one never holds the others back.
+  const sinkLeases = new Map(
+    options.eventSinks.map((sink) => [sink.id, singleton(`outbox-dispatch:${leaseSafe(sink.id)}`)] as const),
+  );
+  async function dispatchSink(sinkId: string): Promise<number> {
+    const lease = await sinkLeases.get(sinkId)?.ensure();
     if (!lease) return 0;
-    // A new epoch means this process just took the lease: it resumes from the stored cursors.
-    return sinkDispatch.dispatch(lease.epoch);
+    // A new epoch means this process just took the lease: it resumes from the stored cursor.
+    return sinkDispatch.dispatchSink(sinkId, lease.epoch);
+  }
+  async function dispatchOutbox(): Promise<number> {
+    let delivered = 0;
+    for (const sinkId of sinkLeases.keys()) delivered += await dispatchSink(sinkId);
+    return delivered;
   }
 
   const fenced = (lease: Lease) => fencedExecutor(database, leases, lease, options.inTransaction);
@@ -362,7 +376,8 @@ export function createRuntime(options: ResolvedOptions): Runtime {
             if (runnerRoles.get(name) === role) loop(name, () => runner.tick(settings.concurrency), poll);
           if (role === 'controllers') loop('command-sweeper', sweep, settings.sweepMs);
         } else if (role === 'sinks') {
-          loop('outbox-dispatch', dispatchOutbox, poll);
+          for (const sinkId of sinkLeases.keys())
+            loop(`outbox-dispatch:${sinkId}`, () => dispatchSink(sinkId), poll);
         } else if (role === 'iam') {
           for (const job of options.iamJobs) {
             const tick = jobs[`iam:${job.name}`]!.tick;

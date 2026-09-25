@@ -246,13 +246,15 @@ describe('OutboxDispatch', () => {
     });
   });
 
-  it('delivers only while holding its singleton lease', async () => {
+  it("delivers each sink only while holding that sink's own lease (one lease per sink, §8.4)", async () => {
     const fixture = await computeFixture();
-    const sink = collectingSink('only');
-    const compute = await sibling(fixture, { sinks: { events: [sink.sink] } });
+    const only = collectingSink('only');
+    const other = collectingSink('other');
+    const compute = await sibling(fixture, { sinks: { events: [only.sink, other.sink] } });
+    // Another worker holds the lease of `only`; `other` is free.
     await fixture.database.query(
       `INSERT INTO leases (name, owner, epoch, expires_at)
-       VALUES ('singleton:outbox-dispatch', 'another-worker', 1, compute_now() + interval '1 minute')`,
+       VALUES ('singleton:outbox-dispatch:only', 'another-worker', 1, compute_now() + interval '1 minute')`,
     );
     await compute.context.sql.transaction((tx) =>
       compute.context.events.publish(tx, {
@@ -262,8 +264,13 @@ describe('OutboxDispatch', () => {
         data: null,
       }),
     );
-    expect(await compute.jobs['outbox-dispatch']!.tick()).toBe(0);
-    expect(sink.delivered).toEqual([]);
+    expect(await compute.jobs['outbox-dispatch']!.tick()).toBe(1);
+    expect(only.delivered).toEqual([]);
+    expect(other.delivered.flat().map((event) => event.type)).toEqual(['node.x']);
+    const { rows } = await fixture.database.query<{ name: string }>(
+      "SELECT name FROM leases WHERE name LIKE 'singleton:outbox-dispatch%' ORDER BY name",
+    );
+    expect(rows.map((row) => row.name)).toEqual(['singleton:outbox-dispatch:only', 'singleton:outbox-dispatch:other']);
   });
 });
 
