@@ -126,6 +126,7 @@ export interface ComputeOptions<
     /**
      * JoinService's keys and node CA (`pkiJoinCrypto({ trustDomain, nodeCa, signingKey,
      * encryptionKey })`); without them `gatewayServices.join` and `renew` are `INVALID_CONFIG`.
+     * Their public halves (`publicKeys()`) are served in `/.well-known/better-compute` as `join`.
      */
     join?: JoinCrypto;
   };
@@ -268,7 +269,15 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
   if (options.notifier !== undefined)
     requireMethods(options.notifier, 'notifier', ['publish', 'subscribe']);
   const eventSinks = [...(options.sinks?.events ?? [])];
-  for (const sink of eventSinks) requireMethods(sink, 'sinks.events[]', ['deliver']);
+  const sinkIds = new Set<string>();
+  for (const sink of eventSinks) {
+    requireMethods(sink, 'sinks.events[]', ['deliver']);
+    // Each sink's outbox cursor is stored under its id.
+    if (typeof sink.id !== 'string' || !sink.id)
+      throw invalid('sinks.events[].id must be a non-empty string');
+    if (sinkIds.has(sink.id)) throw invalid(`Event sink ${sink.id} is listed twice`);
+    sinkIds.add(sink.id);
+  }
   const ports = resolvePorts(options.ports);
   const capacity = resolveCapacity(options.capacity, options.scheduler);
   const join = options.pki?.join;
@@ -281,6 +290,8 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
       'sign',
     ]);
     requireMethods(join.nodeCa, 'pki.join.nodeCa', ['certificates', 'sign']);
+    if (join.publicKeys !== undefined && typeof join.publicKeys !== 'function')
+      throw invalid('pki.join.publicKeys must be a function');
   }
   const log = options.log ?? defaultLogger;
   const hooks = withCommitHooks(options.database, log);

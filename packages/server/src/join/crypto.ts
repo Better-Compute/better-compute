@@ -38,6 +38,22 @@ export interface JoinTrustBundle {
   commandSigningRoots: readonly Uint8Array[];
 }
 
+/**
+ * The public halves of JoinService's two keys, as `/.well-known/better-compute` publishes them for
+ * daemons that were installed without them (PLAN.md §6 Install). A daemon accepts them only if they
+ * match the pins in its config; nothing here is secret.
+ */
+export interface JoinPublicKeys {
+  /** The P-256 encryption key join tokens are sealed to, as a public JWK (`{kty, crv, x, y}`). */
+  encryptionJwk: { kty: string; crv: string; x: string; y: string };
+  /** `sha256/<base64>` of its SubjectPublicKeyInfo: `bcd`'s `join_encryption_key_pin`. */
+  encryptionKeyPin: string;
+  /** DER certificate of the signing key (the `Signature.chain[0]` of join responses). */
+  signingCertificate: Uint8Array;
+  /** `sha256/<base64>` of the signing key's SubjectPublicKeyInfo: `join_signing_key_pin`. */
+  signingKeyPin: string;
+}
+
 export interface JoinCrypto {
   /** SPIFFE trust domain of node certificates: `spiffe://<td>/site/<site>/node/<id>`. */
   readonly trustDomain: string;
@@ -68,4 +84,9 @@ export interface JoinCrypto {
     purpose: Extract<SigningPurpose, 'join-response' | 'trust-bundle'>,
     parts: readonly Uint8Array[],
   ): JoinSignature | Promise<JoinSignature>;
+  /**
+   * The public halves of the encryption and signing keys, for `/.well-known/better-compute`. Never
+   * private material. Without it the well-known document carries no `join` section.
+   */
+  publicKeys?(): JoinPublicKeys | Promise<JoinPublicKeys>;
 }

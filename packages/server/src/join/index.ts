@@ -4,6 +4,7 @@ export type {
   CertificateInfo,
   CsrInfo,
   JoinCrypto,
+  JoinPublicKeys,
   JoinSignature,
   JoinTrustBundle,
 } from './crypto.js';

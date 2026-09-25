@@ -1,8 +1,9 @@
 import { ComputeError, shardOf, type SqlTx, type WorkQueue } from '@better-compute/core';
 
 // The coalescing work queue (PLAN.md §8.4). Enqueue runs in the state-change transaction: a key
-// already queued gets `gen + 1` and the earlier `not_before`. Claims take ready rows of owned shards
-// with FOR UPDATE SKIP LOCKED and stamp `claimed_until`; completion deletes the row only at the
+// already queued gets `gen + 1` and the earlier `not_before` (`enqueueMany`: the same for a batch,
+// in one INSERT … SELECT FROM unnest, equal to the single enqueues). Claims take ready rows of owned
+// shards with FOR UPDATE SKIP LOCKED and stamp `claimed_until`; completion deletes the row only at the
 // claimed `gen`, so a key re-dirtied while its reconciler ran survives and no wake-up is lost.
 // `shard` is `shardOf(key)` for every kind, so node-keyed work lands on the node's own shard.
 //
@@ -19,9 +20,15 @@ const enqueueWork = `INSERT INTO work_queue (kind, key, shard, gen, not_before)
   ON CONFLICT (kind, key) DO UPDATE SET gen = work_queue.gen + 1,
     not_before = LEAST(work_queue.not_before, EXCLUDED.not_before)`;
 
+/**
+ * Set-based enqueue. ON CONFLICT cannot touch a row twice in one statement, so each distinct key
+ * comes once with how many times the call named it (`n`): inserted at `gen = n`, or bumped by `n`,
+ * exactly what `n` single enqueues would leave.
+ */
 const enqueueMany = `INSERT INTO work_queue (kind, key, shard, gen, not_before)
-  SELECT $1, k.key, k.shard, 1, compute_now() FROM unnest($2::text[], $3::smallint[]) AS k(key, shard)
-  ON CONFLICT (kind, key) DO UPDATE SET gen = work_queue.gen + 1,
+  SELECT $1, k.key, k.shard, k.n, COALESCE($5::timestamptz, compute_now())
+    FROM unnest($2::text[], $3::smallint[], $4::bigint[]) AS k(key, shard, n)
+  ON CONFLICT (kind, key) DO UPDATE SET gen = work_queue.gen + EXCLUDED.gen,
     not_before = LEAST(work_queue.not_before, EXCLUDED.not_before)`;
 
 const seedWork = `INSERT INTO work_queue (kind, key, shard, gen, not_before)
@@ -87,27 +94,67 @@ function checkKey(key: unknown): asserts key is string {
 export const isWorkKind = (name: unknown): name is string =>
   typeof name === 'string' && kindPattern.test(name);
 
+/** `options.notBefore` as a timestamp parameter (`null`: due now). */
+function notBeforeParam(options: { notBefore?: number } | undefined): Date | null {
+  const notBefore = options?.notBefore;
+  if (notBefore === undefined) return null;
+  if (typeof notBefore !== 'number' || !Number.isFinite(notBefore))
+    throw new ComputeError('INVALID_INPUT', 'notBefore is epoch milliseconds');
+  return new Date(notBefore);
+}
+
+/**
+ * One statement for many keys of one kind. Repeated keys are counted, not repeated; distinct keys
+ * go in sorted order so concurrent batches over overlapping keys lock rows in the same order.
+ */
+async function enqueueCounted(
+  tx: SqlTx,
+  kind: string,
+  keys: readonly string[],
+  notBefore: Date | null,
+): Promise<void> {
+  if (!keys.length) return;
+  const counts = new Map<string, number>();
+  for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+  const distinct = [...counts.keys()].sort();
+  await tx.query(enqueueMany, [
+    kind,
+    distinct,
+    distinct.map(shardOf),
+    distinct.map((key) => counts.get(key)!),
+    notBefore,
+  ]);
+}
+
 /** `ctx.work`: enqueue in the caller's transaction. */
 export const workQueue: WorkQueue = Object.freeze({
   async enqueue(tx: SqlTx, kind: string, key: string, options: { notBefore?: number } = {}) {
     checkKind(kind);
     checkKey(key);
-    const notBefore = options?.notBefore;
-    if (notBefore !== undefined && (typeof notBefore !== 'number' || !Number.isFinite(notBefore)))
-      throw new ComputeError('INVALID_INPUT', 'notBefore is epoch milliseconds');
-    await tx.query(enqueueWork, [
-      kind,
-      key,
-      shardOf(key),
-      notBefore === undefined ? null : new Date(notBefore),
-    ]);
+    await tx.query(enqueueWork, [kind, key, shardOf(key), notBeforeParam(options)]);
+  },
+  /**
+   * The set-based enqueue: one statement for the whole batch, leaving exactly the rows the same
+   * `enqueue` calls one by one would (a key named `n` times is inserted at `gen = n` or bumped by
+   * `n`; `not_before` is the earlier one). Every key is checked before anything is written.
+   */
+  async enqueueMany(
+    tx: SqlTx,
+    kind: string,
+    keys: readonly string[],
+    options: { notBefore?: number } = {},
+  ) {
+    checkKind(kind);
+    if (!Array.isArray(keys))
+      throw new ComputeError('INVALID_INPUT', 'enqueueMany() takes an array of keys');
+    for (const key of keys) checkKey(key);
+    await enqueueCounted(tx, kind, keys, notBeforeParam(options));
   },
 });
 
 /** Enqueues many keys of one kind, due now (the level-trigger resync). */
 export async function enqueueKeys(tx: SqlTx, kind: string, keys: readonly string[]): Promise<void> {
-  if (!keys.length) return;
-  await tx.query(enqueueMany, [kind, keys, keys.map(shardOf)]);
+  await enqueueCounted(tx, kind, keys, null);
 }
 
 /** Inserts keys that are not queued yet, due now (periodic keys on first sight). */

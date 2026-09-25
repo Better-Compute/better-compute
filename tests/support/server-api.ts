@@ -272,7 +272,7 @@ export async function serverHarness(options: HarnessOptions = {}) {
         log,
       }),
   });
-  const operations = createOperations(resolved, context!);
+  const operations = createOperations(resolved, context!, registry);
 
   /** Calls `path` as the holder of `token` (no credential when `token` is undefined). */
   async function call<T = any>(

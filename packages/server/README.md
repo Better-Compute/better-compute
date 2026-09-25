@@ -76,6 +76,17 @@ modules, then `modules` and `plugins`. Configuration errors throw `INVALID_CONFI
    then decides the page's items with `authorizeMany` (≤ 50 per call, never inside a compute
    transaction). A failed batch fails the request; a resolver `NOT_FOUND` retries the page once.
    Owner-scoped kinds listing the caller's own (`scope` absent or `mine`) keep the SQL filter.
+9. **Composite mutations** (`transaction: 'manual'`, e.g. `fleet.apply`; mutations without an
+   `admission` only): after their own decision the handler runs with no transaction open.
+   `ctx.check(path, input)` (outside any transaction, else `INVALID_STATE`) decides another
+   method's call for the same caller as steps 4-6 would: tenant pre-check, validation, one
+   decision. A replay-only admission runs `prepare` in a short transaction of its own (`decide`:
+   one `require`; `replay`: allowed). Admissions with a `denied` hook, list-recipe reads and other
+   composites are `UNSUPPORTED`. `ctx.invoke(tx, path, input)` then runs an allowed call inside
+   `tx`, under a savepoint, with its own audit row and no IAM call. Calls match by path plus
+   canonical JSON of the raw input, one `invoke` per `check` (else `ACCESS_DENIED`), and grants
+   end with the call. The composite's own audit row is written after the handler succeeds.
+   Every other method's `ctx.check`/`ctx.invoke` refuse with `INVALID_STATE`.
 
 ## HTTP (PLAN.md §9.1)
 
@@ -94,6 +105,13 @@ modules, then `modules` and `plugins`. Configuration errors throw `INVALID_CONFI
 - `GET` serves only `{basePath}/health` (one store round trip; `503` when it fails) and
   `{basePath}/.well-known/better-compute` (version, base path, agent protocol range). Other
   methods answer `METHOD_NOT_ALLOWED`. Unknown routes answer `NOT_FOUND`.
+- When `pki.join` offers `publicKeys()` (`pkiJoinCrypto` does when its signing key carries its
+  certificate), the well-known document adds a `join` section: `encryptionJwk` (public members
+  only), `encryptionKeyPin`, `signingCertificate` (base64 DER) and `signingKeyPin` (`sha256/`
+  SPKI pins). It is the join-key fallback of PLAN.md §6 Install: a daemon uses the keys only
+  when they match its pins. The keys are read once; a failing or malformed answer omits `join`
+  and is retried a minute later. `wellKnownJoinKeys()` builds the same section for hosts that
+  serve their own document.
 
 ## Registry, initialize and selfCheck
 
@@ -123,6 +141,13 @@ subject, data, time}`, topic = type), `authz` (`authz_projection` plus the `auth
   feed), `capacity` (the capacity module's quota + inline placer) and `inventory` (the latest
   snapshot). All write in the caller's transaction. New commands and new node specs poke
   `gw:<gatewayId>` with `{"nodeIds": [...]}` after commit (`options.notifier`, best effort).
+- `work.enqueueMany` and `events.publishMany` are the set-based forms: one statement per batch
+  (`INSERT … SELECT FROM unnest`), leaving exactly the rows the single calls would (a key named
+  n times is inserted at `gen = n` or bumped by n; `seq` follows the event order). Every item is
+  checked before anything is written. The CommandSweeper uses them.
+- `afterCommit(hook)` runs best-effort side effects once the outermost transaction commits;
+  `caches` is the envelope's cache object (`compute.caches`). Reconcilers also get `lease`
+  (`shard:<n>` or `singleton:<name>`).
 - **Clock**: without `options.clock`, business time is the process clock anchored to
   `compute_now()`, sampled at `initialize()` and at every lease renewal; a difference beyond 1 s
   logs ClockSkew and adds a `clock.skew` selfCheck warning.
@@ -132,6 +157,10 @@ subject, data, time}`, topic = type), `authz` (`authz_projection` plus the `auth
   1 s → 5 min; periodic keys due `every` after their last run; owned keys re-enqueued every
   5-10 min), `command-sweeper`, `outbox-dispatch` (event sinks, at least once),
   `event-subscribers` (`compute.events.subscribe`) and `iam:<name>` (`options.iamJobs`).
+- **Sink cursors**: each event sink's position is saved in `outbox_cursors` (`sink:<id>`, stream
+  `outbox`, forward only) after every delivered batch and reloaded whenever this process takes
+  the outbox-dispatch lease, so a new holder resumes where the last one saved. Sink ids must be
+  unique. Without the table (before `core/0009_runtime`) cursors stay in memory.
 - **`start({ roles })`** runs the same passes on timers: `controllers` (reconcilers, sweeper),
   `sinks` (outbox dispatch), `iam` (IAM jobs); `stop()` releases every lease and leaves `workers`.
 
@@ -157,6 +186,8 @@ subject, data, time}`, topic = type), `authz` (`authz_projection` plus the `auth
 ## Not yet
 
 - `gatewayServices.secret` answers `NOT_IMPLEMENTED` until v0.2.
-- Outbox sink cursors and reconciler back-off counts live in memory (a new dispatcher redelivers
-  from the start) until the schema has a cursor table.
+- Reconciler back-off counts live in memory (`work_queue.attempts` is not used yet).
+- No runtime job prunes the outbox behind the stored cursors yet (`pruneBehindCursors` in
+  `@better-compute/postgres` needs host wiring); in-process subscribers and SSE watch keep no
+  stored cursor and rely on retention's minimum age.
 - `logs.collect` has no upload destination until the downloads BlobStore presigns one.

@@ -68,8 +68,8 @@ export type {
 export type { SelfCheckReport } from './self-check.js';
 export { validateNoInput } from './system.js';
 export type { CallerIdentity, NoInput, SystemApi, WhoAmI } from './system.js';
-export { serverVersion } from './version.js';
-export type { ServerInfo } from './version.js';
+export { serverVersion, wellKnownJoinKeys } from './version.js';
+export type { ServerInfo, WellKnownJoinKeys } from './version.js';
 export * from './join/index.js';
 export * from './controllers/index.js';
 export * from './nodes-module.js';
@@ -212,7 +212,7 @@ export function betterCompute<
     modules: [...hosted, { name: 'runtime', selfCheck: async () => runtime.findings() }],
     context: moduleContext,
   });
-  const operations = createOperations(resolved, moduleContext);
+  const operations = createOperations(resolved, moduleContext, registry);
   const http = createHttp({ options: resolved, registry, operations });
 
   const api: Record<string, unknown> = {};

@@ -3,7 +3,7 @@ import { ComputeError, isComputeError, newId, type ComputeErrorBody } from '@bet
 import type { Operations } from './operations.js';
 import type { ResolvedOptions } from './options.js';
 import type { RegisteredMethod, Registry } from './registry.js';
-import { serverInfo } from './version.js';
+import { serverInfo, wellKnownJoinKeys, type WellKnownJoinKeys } from './version.js';
 
 /** JSON request bodies above this are refused with `PAYLOAD_TOO_LARGE` (PLAN.md §9.1). */
 export const maxBodyBytes = 65_536;
@@ -106,6 +106,9 @@ export interface HttpHost {
   operations: Operations;
 }
 
+/** How long a failed `pki.join.publicKeys()` is not retried (the well-known document omits `join`). */
+const joinKeysRetryMs = 60_000;
+
 /**
  * The fetch and Node transports (PLAN.md §9.1). `POST {basePath}/{group}/{method}` and
  * `POST {basePath}/plugins/{id}/{group}/{method}` take JSON objects with `X-Better-Compute: 1`;
@@ -113,6 +116,27 @@ export interface HttpHost {
  */
 export function createHttp({ options, registry, operations }: HttpHost) {
   const { basePath, database, log } = options;
+
+  // The well-known `join` section (PLAN.md §6 Install): JoinService's public keys, read once; the
+  // keys live as long as the process. A failing port is logged and retried a minute later.
+  let joinKeys: Promise<WellKnownJoinKeys | undefined> | undefined;
+  let joinRetryAt = 0;
+  function wellKnownJoin(): Promise<WellKnownJoinKeys | undefined> {
+    const join = options.join;
+    if (typeof join?.publicKeys !== 'function') return Promise.resolve(undefined);
+    if (!joinKeys && Date.now() >= joinRetryAt)
+      joinKeys = (async () => wellKnownJoinKeys(await join.publicKeys!()))().catch(
+        (error: unknown) => {
+          joinKeys = undefined;
+          joinRetryAt = Date.now() + joinKeysRetryMs;
+          log.error('Reading the join public keys failed; the well-known document omits them', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return undefined;
+        },
+      );
+    return joinKeys ?? Promise.resolve(undefined);
+  }
 
   /** A route below the base path; the registry's Map never answers for inherited names. */
   function route(path: string): RegisteredMethod | undefined {
@@ -140,8 +164,13 @@ export function createHttp({ options, registry, operations }: HttpHost) {
         );
       }
     }
-    if (path === '.well-known/better-compute')
-      return Response.json(serverInfo(basePath), { headers: hardened });
+    if (path === '.well-known/better-compute') {
+      const join = await wellKnownJoin();
+      return Response.json(
+        { ...serverInfo(basePath), ...(join ? { join } : {}) },
+        { headers: hardened },
+      );
+    }
     throw notFound();
   }
 

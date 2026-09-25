@@ -474,12 +474,14 @@ export async function sweepCommandsOnce(tx: SqlTx, input: SweepInput): Promise<S
     owner_tenant_id: string | null;
   }>(sweepCommands, [kinds, timeouts, defaultCommandTimeoutMs / 1000, input.batchSize]);
   const swept: SweptCommand[] = [];
-  const woken = new Set<string>();
-  const wake = async (kind: string, key: string) => {
-    if (woken.has(`${kind}\u0000${key}`)) return;
-    woken.add(`${kind}\u0000${key}`);
-    await input.work.enqueue(tx, kind, key);
+  // Each key once per pass, by kind; events in row order. Written set-based below.
+  const wakes = new Map<string, Set<string>>();
+  const wake = (kind: string, key: string) => {
+    let keys = wakes.get(kind);
+    if (!keys) wakes.set(kind, (keys = new Set()));
+    keys.add(key);
   };
+  const settled: Parameters<EventPublisher['publish']>[1][] = [];
   for (const row of rows) {
     swept.push({
       id: row.id,
@@ -489,11 +491,11 @@ export async function sweepCommandsOnce(tx: SqlTx, input: SweepInput): Promise<S
       reason: row.reason,
       idempotencyKey: row.idempotency_key,
     });
-    await wake('node', row.node_id);
+    wake('node', row.node_id);
     const owner = commandOwner(row.idempotency_key, input.registered);
-    if (owner) await wake(owner.kind, owner.key);
+    if (owner) wake(owner.kind, owner.key);
     if (row.owner_tenant_id)
-      await input.events.publish(tx, {
+      settled.push({
         type: 'command.settled',
         tenantId: row.owner_tenant_id,
         subject: `command/${row.id}`,
@@ -506,5 +508,30 @@ export async function sweepCommandsOnce(tx: SqlTx, input: SweepInput): Promise<S
         },
       });
   }
+  for (const [kind, keys] of wakes) await enqueueAll(input.work, tx, kind, [...keys]);
+  await publishAll(input.events, tx, settled);
   return swept;
+}
+
+/** `work.enqueueMany` when the port has it, else one `enqueue` per key. */
+export async function enqueueAll(
+  work: WorkQueue,
+  tx: SqlTx,
+  kind: string,
+  keys: readonly string[],
+): Promise<void> {
+  if (!keys.length) return;
+  if (work.enqueueMany) return work.enqueueMany(tx, kind, keys);
+  for (const key of keys) await work.enqueue(tx, kind, key);
+}
+
+/** `events.publishMany` when the port has it, else one `publish` per event, in order. */
+export async function publishAll(
+  events: EventPublisher,
+  tx: SqlTx,
+  list: readonly Parameters<EventPublisher['publish']>[1][],
+): Promise<void> {
+  if (!list.length) return;
+  if (events.publishMany) return events.publishMany(tx, list);
+  for (const event of list) await events.publish(tx, event);
 }

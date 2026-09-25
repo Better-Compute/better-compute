@@ -16,9 +16,10 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { cachesFor, publicCaches, type ComputeCaches } from './caches.js';
+import { checkPlan, createComposites, outsideComposite, type CompositeCall } from './composite.js';
 import { createListRecipe, readOnlyExecutor, runsOutsideTransaction } from './list.js';
 import type { ResolvedOptions } from './options.js';
-import { rowResourceKinds, type RegisteredMethod } from './registry.js';
+import { rowResourceKinds, type RegisteredMethod, type Registry } from './registry.js';
 
 /** Per-call details the transport supplies. */
 export interface CallOptions {
@@ -51,7 +52,12 @@ export interface Operations {
    *    executor, so their per-item IAM checks never wait inside a compute transaction. Other
    *    methods of a §9.2 "+ items" row (a module's `pools.list`) run in a read-only transaction
    *    and the envelope decides the page's items after it (the list recipe, §9.2): owner-scoped
-   *    kinds listing the caller's own (`scope` absent or `mine`) keep the SQL owner filter alone.
+   *    kinds listing the caller's own (`scope` absent or `mine`) keep the SQL owner filter alone;
+   * 7. composite mutations (`transaction: 'manual'`, e.g. `fleet.apply`): after their own decision
+   *    the handler runs with no transaction open, with `ctx.check` (phase 1: each sub-call decided
+   *    for the same caller, outside any transaction) and `ctx.invoke` (phase 2: checked sub-calls
+   *    run in the handler's transaction, each with its own audit row); the composite's audit row
+   *    is written in a transaction of its own after the handler succeeds.
    */
   call(
     method: RegisteredMethod,
@@ -102,6 +108,23 @@ function withinTransaction(database: SqlExecutor, tx: SqlTx): SqlExecutor {
     kind: database.kind,
     query: (text, params) => tx.query(text, params),
     // Nested transactions become savepoints of the method's transaction (the executors' contract).
+    transaction: (fn, options) => database.transaction(fn, options),
+    migrate: refuse('migrate()'),
+    close: refuse('close()'),
+  };
+}
+
+/**
+ * The executor a composite handler sees (`transaction: 'manual'`): no transaction is open; each
+ * statement runs on its own and each `transaction` is a real one (IAM-free, like any other).
+ */
+function outsideTransaction(database: SqlExecutor): SqlExecutor {
+  const refuse = (what: string) => () =>
+    Promise.reject(new ComputeError('INVALID_STATE', `${what} cannot run inside a method`));
+  return {
+    dialect: database.dialect,
+    kind: database.kind,
+    query: (text, params) => database.query(text, params),
     transaction: (fn, options) => database.transaction(fn, options),
     migrate: refuse('migrate()'),
     close: refuse('close()'),
@@ -182,7 +205,15 @@ function listItemKind(entry: RegisteredMethod): string | undefined {
   return apiMethod(entry.group, 'get')?.resource ?? undefined;
 }
 
-export function createOperations(options: ResolvedOptions, context: ModuleContext): Operations {
+/**
+ * The envelope. `registry` resolves the targets of composite methods' `ctx.check`; without it
+ * (unit harnesses) every `check` is `UNSUPPORTED`.
+ */
+export function createOperations(
+  options: ResolvedOptions,
+  context: ModuleContext,
+  registry?: Pick<Registry, 'method'>,
+): Operations {
   const { database, iam, rootTenantId, typePrefix, acceptIamCookie, clock, log } = options;
   const caches = cachesFor(options, { now: () => clock.now() });
   const lists = createListRecipe({ typePrefix, caches });
@@ -261,11 +292,12 @@ export function createOperations(options: ResolvedOptions, context: ModuleContex
   ): Promise<unknown> {
     const { definition, path } = entry;
     // Transaction 1: idempotency lookup, draft and projection rows. Never an IAM call.
-    const plan: AdmissionPlan<unknown> = await database.transaction((tx) =>
-      admission.prepare(contextFor(withinTransaction(database, tx)), input, tx),
+    const plan: AdmissionPlan<unknown> = checkPlan(
+      path,
+      await database.transaction((tx) =>
+        admission.prepare(contextFor(withinTransaction(database, tx)), input, tx),
+      ),
     );
-    if (!isRecord(plan) || (plan.status !== 'replay' && plan.status !== 'decide'))
-      throw new ComputeError('INVALID_CONFIG', `${path}: admission.prepare returned no plan`);
     // The same request again from its owner: the stored result, and no second decision.
     if (plan.status === 'replay') return plan.result;
 
@@ -315,6 +347,29 @@ export function createOperations(options: ResolvedOptions, context: ModuleContex
     });
   }
 
+  // Composite methods reuse the envelope's own steps for their sub-calls (./composite.ts).
+  const composites = createComposites({
+    database,
+    iam,
+    clock,
+    inTransaction: () => options.inTransaction(),
+    ...(registry ? { method: (path: string) => registry.method(path) } : {}),
+    envelope: {
+      resourceOf: checkResource,
+      tenantOf,
+      decisionTenant,
+      decisionOf,
+      preCheck,
+      admissionOf,
+      authorize: (caller, credential, decision) =>
+        caches.authorize(caller, decision, () => iam.authorize(credential, decision)),
+      refused,
+      refusal: refusalOf,
+      within: (tx) => withinTransaction(database, tx),
+      recordAudit,
+    },
+  });
+
   return {
     caches: publicCaches(caches),
     async call(entry, raw, rawInput, { requestId, signal }) {
@@ -347,12 +402,19 @@ export function createOperations(options: ResolvedOptions, context: ModuleContex
       // puts no traffic on the tenant's audit chain.
       preCheck(caller, tenantId, inputTenant);
 
-      const contextFor = (sql: SqlExecutor, admitted?: AdmissionContext): MethodContext => ({
+      const contextFor = (
+        sql: SqlExecutor,
+        admitted?: AdmissionContext,
+        composite: Pick<CompositeCall, 'check' | 'invoke'> = outsideComposite,
+      ): MethodContext => ({
         ...base,
         sql,
         caller,
         credential,
         ...(admitted ? { admission: admitted } : {}),
+        check: (path, input) => composite.check(path, input),
+        invoke: <O>(tx: SqlTx, path: `${string}/${string}`, input: unknown) =>
+          composite.invoke(tx, path, input) as Promise<O>,
       });
 
       if (admission)
@@ -374,6 +436,31 @@ export function createOperations(options: ResolvedOptions, context: ModuleContex
         !(await caches.authorize(caller, decision, () => iam.authorize(credential, decision)))
       )
         throw accessDenied();
+
+      if (mutation && definition.transaction === 'manual') {
+        // A composite: its handler opens its own transactions and composes checked sub-calls.
+        const admitted = admissionOf(caller, decision, requestId, clock.now());
+        const composite = composites.begin({
+          entry,
+          caller,
+          credential,
+          requestId,
+          contextFor: (sql, admission, kind) =>
+            kind === 'public' ? { ...base, sql, credential } : contextFor(sql, admission),
+        });
+        let value: unknown;
+        try {
+          value = await definition.handler(
+            contextFor(outsideTransaction(database), admitted, composite),
+            input,
+          );
+        } finally {
+          // Grants live only for this call.
+          composite.end();
+        }
+        await database.transaction((tx) => recordAudit(tx, admitted));
+        return value;
+      }
 
       if (!mutation && runsOutsideTransaction(definition))
         return definition.handler(contextFor(readOnlyExecutor(database)), input);

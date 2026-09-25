@@ -139,6 +139,16 @@ function checkMethod(path: string, value: unknown): MethodDefinition {
     if (admission.denied !== undefined && typeof admission.denied !== 'function')
       throw invalid(`${path}: admission.denied must be a function`);
   }
+  const { transaction } = value;
+  if (transaction !== undefined && transaction !== 'auto' && transaction !== 'manual')
+    throw invalid(`${path}: transaction must be auto or manual`);
+  if (transaction === 'manual') {
+    // Composite methods (`ctx.check` then `ctx.invoke`): a mutation decided once for itself, whose
+    // sub-calls are decided one by one; its audit row follows the handler.
+    if (kind !== 'mutation') throw invalid(`${path}: only mutations run with transaction manual`);
+    if (admission !== undefined)
+      throw invalid(`${path}: a method with transaction manual takes no admission`);
+  }
   return value as unknown as MethodDefinition;
 }
 

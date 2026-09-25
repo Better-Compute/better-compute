@@ -205,7 +205,8 @@ export function createRuntime(options: ResolvedOptions): Runtime {
     if (!options.eventSinks.length) return 0;
     const lease = await outboxLease.ensure();
     if (!lease) return 0;
-    return sinkDispatch.dispatch();
+    // A new epoch means this process just took the lease: it resumes from the stored cursors.
+    return sinkDispatch.dispatch(lease.epoch);
   }
 
   const fenced = (lease: Lease) => fencedExecutor(database, leases, lease, options.inTransaction);
