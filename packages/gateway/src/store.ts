@@ -13,7 +13,7 @@ import {
   type SqlTx,
   type WorkQueue,
 } from '@better-compute/core';
-import { ingestInventorySection, recordInventoryHashes } from '@better-compute/inventory';
+import { ingestInventorySection, ingestInventorySections, recordInventoryHashes } from '@better-compute/inventory';
 import { desiredStateBodyFromJson, desiredStateFromStored } from '@better-compute/pki';
 import {
   AttestedReportBodySchema,
@@ -168,6 +168,15 @@ export interface InventoryIngest {
     nodeId: string,
     section: { section: string; content: Uint8Array; sha256: Uint8Array },
   ): Promise<void>;
+  /**
+   * Many sections (of many nodes) set-wise, each failing only its own slot (`INVALID_INPUT`,
+   * `NOT_FOUND`). Optional: without it the gateway calls `ingestSection` once per section.
+   */
+  ingestSections?(
+    tx: SqlTx,
+    work: WorkQueue,
+    entries: readonly { nodeId: string; section: { section: string; content: Uint8Array; sha256: Uint8Array } }[],
+  ): Promise<(Error | undefined)[]>;
 }
 
 /** Where a node's report came from, for the handlers below. */
@@ -221,6 +230,7 @@ export const inventoryStore: InventoryIngest = {
   recordHashes: (tx, work, nodeId, hashes, options) =>
     recordInventoryHashes(tx, work, nodeId, hashes, options),
   ingestSection: (tx, work, nodeId, section) => ingestInventorySection(tx, work, nodeId, section),
+  ingestSections: (tx, work, entries) => ingestInventorySections(tx, work, entries),
 };
 
 /** Raised inside a fenced transaction when this process no longer holds its gateway lease. */
@@ -1204,8 +1214,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
 
     /**
      * Group commit of inventory work from many sessions: pulled sections and heartbeat hash reports
-     * in one transaction, each under its own SAVEPOINT so a corrupt section (`INVALID_INPUT`) fails
-     * only itself. The slot of a failed entry holds its error.
+     * in one transaction. Sections go set-wise (`ingestSections`: a few statements for the whole
+     * batch, a corrupt section failing only its slot); hash reports, and sections without it, each
+     * under their own SAVEPOINT. The slot of a failed entry holds its error.
      */
     async inventoryBatch(
       entries: readonly (
@@ -1214,8 +1225,29 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       )[],
     ): Promise<(undefined | Error)[]> {
       return db.transaction(async (tx) => {
-        const results: (undefined | Error)[] = [];
-        for (const entry of entries) {
+        const results: (undefined | Error)[] = new Array(entries.length).fill(undefined);
+        const sections = entries.flatMap((entry, index) => (entry.kind === 'section' ? [{ entry, index }] : []));
+        const setWise = inventory.ingestSections && sections.length > 1;
+        if (setWise) {
+          await tx.query('SAVEPOINT gateway_inventory');
+          try {
+            const outcomes = await inventory.ingestSections!(
+              tx,
+              work,
+              sections.map(({ entry }) => ({
+                nodeId: entry.nodeId,
+                section: { section: entry.section.section, content: entry.section.content, sha256: entry.section.sha256 },
+              })),
+            );
+            sections.forEach(({ index }, position) => (results[index] = outcomes[position]));
+            await tx.query('RELEASE SAVEPOINT gateway_inventory');
+          } catch (error) {
+            await tx.query('ROLLBACK TO SAVEPOINT gateway_inventory');
+            for (const { index } of sections) results[index] = error instanceof Error ? error : new Error(String(error));
+          }
+        }
+        for (const [index, entry] of entries.entries()) {
+          if (setWise && entry.kind === 'section') continue;
           await tx.query('SAVEPOINT gateway_inventory');
           try {
             if (entry.kind === 'section')
@@ -1226,10 +1258,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
               });
             else await inventory.recordHashes(tx, work, entry.nodeId, entry.hashes, { bootId: entry.bootId });
             await tx.query('RELEASE SAVEPOINT gateway_inventory');
-            results.push(undefined);
           } catch (error) {
             await tx.query('ROLLBACK TO SAVEPOINT gateway_inventory');
-            results.push(error instanceof Error ? error : new Error(String(error)));
+            results[index] = error instanceof Error ? error : new Error(String(error));
           }
         }
         return results;
