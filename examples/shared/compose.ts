@@ -34,7 +34,7 @@ import {
   type HostConfig,
 } from '@better-compute/cli';
 import type { ComputeModule, IamPort, SqlExecutor } from '@better-compute/core';
-import { eventsModule, handleWatch } from '@better-compute/events';
+import { createWatchRegistry, eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { metal } from '@better-compute/metal';
 import {
@@ -225,7 +225,11 @@ export async function exampleOptions(
 /** The `host` export: SSE events, Prometheus metrics, and the gateway role when its certificate exists. */
 export const exampleHost = defineHost(async ({ compute, env, cwd }) => {
   const watch = watchAuthorizer(compute);
+  // The process's open /watch streams: a revoked session, identity or delegation closes them at once (with the
+  // IAM bridge of host.iam, or the embedded IAM of `dev --sim`), not only at the next re-check.
+  const watches = createWatchRegistry();
   const host: HostConfig = {
+    streams: [watches],
     http: {
       routes: [
         {
@@ -237,6 +241,7 @@ export const exampleHost = defineHost(async ({ compute, env, cwd }) => {
               sql: (compute as BetterCompute<any, any>).context.sql,
               // Decided like events.list: compute:events:read on the tenant, not just "signed in".
               authorize: watch,
+              registry: watches,
             }),
         },
       ],

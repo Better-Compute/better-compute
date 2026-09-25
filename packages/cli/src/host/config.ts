@@ -4,7 +4,7 @@ import type { MetricsRegistry } from '@better-compute/observability';
 import type { RevocationSet } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
 import type { HostRoute, HostUpgradeHandler } from './http.js';
-import type { HostIamConfig } from './iam.js';
+import type { HostIamConfig, HostStreamRegistry } from './iam.js';
 import type { HostTunnelsConfig } from './tunnels.js';
 
 // The named `host` export of `better-compute.config.ts`: what `serve` runs around the control plane that the
@@ -133,6 +133,12 @@ export interface HostConfig {
    */
   iam?: HostIamConfig;
   /**
+   * This process's own streams that IAM revocations close at once, e.g. the `createWatchRegistry()`
+   * (@better-compute/events) your `GET /watch` route passes to `handleWatch({ registry })`. Added to
+   * `iam.streams`; unlike those, also used with the embedded IAM of `dev --sim`.
+   */
+  streams?: readonly HostStreamRegistry[];
+  /**
    * The MCP endpoint for AI agents (PLAN.md §9.3): `computeMcpEndpoint({ compute, gate, delegations })` from
    * @better-compute/mcp, better-iam's gate in front. Mounted at `path` (default `/mcp`, POST/GET/DELETE) and at
    * its RFC 9728 metadata path `/.well-known/oauth-protected-resource{path}`.
@@ -173,7 +179,15 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       'INVALID_CONFIG',
       'The host export must be defineHost({ … }) or a factory',
     );
-  const { http, gateway, metrics, iam, mcp } = value as HostConfig;
+  const { http, gateway, metrics, iam, mcp, streams } = value as HostConfig;
+  if (
+    streams !== undefined &&
+    (!Array.isArray(streams) || !streams.every((registry) => isRecord(registry) && typeof registry.closeWhere === 'function'))
+  )
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'host.streams must be stream registries (createWatchRegistry() from @better-compute/events)',
+    );
   if (
     mcp !== undefined &&
     (!isRecord(mcp) ||

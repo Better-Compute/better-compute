@@ -60,6 +60,11 @@ describe('host.iam', () => {
     });
     const bridge = { setHandlers() {} };
     await expect(resolveHost({ iam: { bridge } }, context)).resolves.toEqual({ iam: { bridge } });
+    // host.streams: registries revocations close (the /watch one), checked for closeWhere.
+    const registry = { closeWhere: () => 0 };
+    await expect(resolveHost({ streams: [registry] }, context)).resolves.toEqual({ streams: [registry] });
+    await expect(resolveHost({ streams: [{}] }, context)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    await expect(resolveHost({ streams: registry }, context)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
   });
 
   it('doctor warns when the IAM bridge is registered but its events have no reactions', async () => {

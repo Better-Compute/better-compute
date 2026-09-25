@@ -96,12 +96,18 @@ export async function runServer(
   try {
     // IAM events reach compute through the inbox the worker roles drain: install the reactions first.
     const iamConfig = options.hostConfig?.iam;
+    // host.streams (e.g. the /watch registry) close on revocations too, beside host.iam.streams.
+    const hostStreams = options.hostConfig?.streams ?? [];
     if (iamConfig)
-      iamHandlers = installIamHandlers(compute, iamConfig, {
-        ...(options.hostConfig?.tunnels?.control?.tls
-          ? { tls: options.hostConfig.tunnels.control.tls }
-          : {}),
-      });
+      iamHandlers = installIamHandlers(
+        compute,
+        hostStreams.length ? { ...iamConfig, streams: [...(iamConfig.streams ?? []), ...hostStreams] } : iamConfig,
+        {
+          ...(options.hostConfig?.tunnels?.control?.tls
+            ? { tls: options.hostConfig.tunnels.control.tls }
+            : {}),
+        },
+      );
     if (options.roles.length) await compute.start({ roles: [...options.roles] });
     // The database-side metrics (backlogs, command ages, certificate expiries) beside the worker roles.
     if (options.roles.length && options.hostConfig && options.computeOptions)
@@ -442,6 +448,8 @@ export const serveCommands = [
         ...(configured?.http ? { http: configured.http } : {}),
         ...(configured?.metrics ? { metrics: configured.metrics } : {}),
         ...(configured?.mcp ? { mcp: configured.mcp } : {}),
+        // The configuration's streams (its /watch registry) close on the embedded IAM's revocations as well.
+        ...(configured?.streams ? { streams: configured.streams } : {}),
         // IAM events (revoked delegations close their tunnels): the configuration's bridge, else --sim's.
         ...(configured?.iam
           ? { iam: configured.iam }
