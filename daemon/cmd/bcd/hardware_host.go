@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
@@ -22,9 +23,28 @@ func collectInventory() (*inventory.NodeInventory, error) {
 	return inventory.Collector{}.Collect()
 }
 
-// newRuntimes: the host build's instance runtimes (libvirt-kvm, cloud-hypervisor) are not built in
-// yet, so a host build runs no instances.
-func newRuntimes(string, string) []runtime.Runtime { return nil }
+// newRuntimes: libvirt-kvm when virsh is installed (a VPS host), its GPUs' PCI addresses from the
+// inventory for VFIO; a host without libvirt runs no instances.
+func newRuntimes(dataDir, _ string) []runtime.Runtime {
+	if _, err := exec.LookPath("virsh"); err != nil {
+		return nil
+	}
+	return []runtime.Runtime{&runtime.Libvirt{
+		Dir: filepath.Join(dataDir, "libvirt"),
+		GPUAddress: func(id string) (string, bool) {
+			inv, err := collectInventory()
+			if err != nil || inv == nil || inv.Gpus == nil {
+				return "", false
+			}
+			for _, g := range inv.Gpus.Gpus {
+				if g.Uuid == id {
+					return pciAddress(g.PciBusId)
+				}
+			}
+			return "", false
+		},
+	}}
+}
 
 // newSimHost: simulated machines exist only in fakehw builds.
 func newSimHost(string, uint64, func()) (agent.Host, error) {
