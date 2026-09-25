@@ -135,6 +135,21 @@ export async function pkiFindings(
         fix: `Before it expires, ${renewalFor(name)}, and roll the bundle out`,
       });
   }
+  // A command-signing root rotation left half done (§13): a reminder, not a problem.
+  if (pins.commandSigningNextRootSha256)
+    findings.push({
+      check: 'pki.rotation',
+      severity: 'info',
+      message: `A new command-signing root is published (trust version ${pins.trustVersion}) but not signing yet`,
+      fix: 'Once every daemon has this trust version: better-compute pki rotate-command-root --stage switch',
+    });
+  if (pins.commandSigningPreviousRootSha256)
+    findings.push({
+      check: 'pki.rotation',
+      severity: 'info',
+      message: 'The former command-signing root is still trusted',
+      fix: 'At least 24 hours after the switch: better-compute pki rotate-command-root --stage drop',
+    });
   try {
     importPkiBundle(text, env.BETTER_COMPUTE_SECRET ? { secret: env.BETTER_COMPUTE_SECRET } : {});
   } catch (error) {

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
+import { pkiFindings } from '../packages/cli/src/commands/pki.js';
 import {
   commandSigningOptions,
   createPkiBundle,
@@ -97,6 +98,9 @@ describe('command-signing root rotation', () => {
     const initial = await run(['pki', 'init', '--trust-domain', 'compute.test']);
     const added = await run(['pki', 'rotate-command-root', '--stage', 'add']);
     expect(added).toMatchObject({ stage: 'add', trustVersion: 2, signingRoot: initial.commandSigningRootSha256 });
+    // doctor reminds that the rotation is half done.
+    const reminders = await pkiFindings(join(cwd, '.better-compute', 'pki.json'), { BETTER_COMPUTE_SECRET: SECRET });
+    expect(reminders.map((finding) => `${finding.severity} ${finding.check}`)).toEqual(['info pki.rotation']);
     const switched = await run(['pki', 'rotate-command-root', '--stage', 'switch']);
     expect(switched).toMatchObject({
       signingRoot: added.nextRoot,
