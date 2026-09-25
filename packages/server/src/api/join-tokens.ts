@@ -218,7 +218,7 @@ export function joinTokensApi(minter: JoinTokenMinter = defaultJoinTokenMinter):
         action: 'compute:join-tokens:create',
         kind: 'mutation',
         resource: (input) => ({ type: 'pool', id: input.poolId }),
-        validate: createInput,
+        validate: Object.assign(createInput, { jsonSchema: parseCreate.jsonSchema }),
         admission: {
           // A replay answers with the token's record; the secret was shown once and is gone.
           async prepare(context, input, tx) {

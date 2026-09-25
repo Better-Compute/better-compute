@@ -125,7 +125,7 @@ export function sitesManageApi(): SitesManageApi {
         action: 'compute:sites:manage',
         kind: 'mutation',
         resource: (input) => ({ type: 'site', id: input.siteId }),
-        validate: updateInput,
+        validate: Object.assign(updateInput, { jsonSchema: parseUpdate.jsonSchema }),
         async handler(context, input) {
           const row = await lockSite(context, input);
           if (row.deleted_at !== null) throw notFound('Site');

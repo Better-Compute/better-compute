@@ -499,7 +499,7 @@ export function nodesApi(lists: ListRecipe): NodesApi {
         await publish(context, input.tenantId, node.id, 'node.draining', reasonData(input.reason));
         return node;
       }),
-      label: nodeMutation('compute:nodes:update', labelInput, async (context, input) => {
+      label: nodeMutation('compute:nodes:update', Object.assign(labelInput, { jsonSchema: parseLabel.jsonSchema }), async (context, input) => {
         const row = await lockNode(context, input);
         const set = Object.entries(input.set ?? {});
         if (set.length) {
@@ -534,7 +534,7 @@ export function nodesApi(lists: ListRecipe): NodesApi {
         });
         return detail(context.sql, updated);
       }),
-      taint: nodeMutation('compute:nodes:update', taintInput, async (context, input) => {
+      taint: nodeMutation('compute:nodes:update', Object.assign(taintInput, { jsonSchema: parseTaint.jsonSchema }), async (context, input) => {
         const row = await lockNode(context, input);
         const add = (input.add ?? []).map((key) => `${taintPrefix}${key}`);
         const remove = (input.remove ?? []).map((key) => `${taintPrefix}${key}`);

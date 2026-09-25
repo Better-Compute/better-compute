@@ -267,7 +267,8 @@ export function commandsApi(bundles?: SupportBundlesOptions): CommandsApi {
         action: 'compute:nodes:exec',
         kind: 'mutation',
         resource: (input) => ({ type: 'node', id: input.nodeId }),
-        validate: runInput,
+        // Described by its parser's schema (the payload per kind and the allowlist are checked after).
+        validate: Object.assign(runInput, { jsonSchema: parseRun.jsonSchema }),
         async handler(context, input) {
           const { rows: nodes } = await context.sql.query(
             `SELECT n.id FROM nodes n WHERE n.id = $2 AND ${visibleIn('node', 'n.id', '$1')}

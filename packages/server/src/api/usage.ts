@@ -197,7 +197,7 @@ export function usageApi(): UsageApi {
           input.projectId === undefined
             ? { type: 'tenant', id: input.tenantId }
             : { type: 'project', id: input.projectId },
-        validate: listInput,
+        validate: Object.assign(listInput, { jsonSchema: parseList.jsonSchema }),
         async handler(context, input) {
           const size = input.limit ?? 100;
           const [afterStart, afterKey] =
@@ -235,7 +235,7 @@ export function usageApi(): UsageApi {
           input.projectId === undefined
             ? { type: 'tenant', id: input.tenantId }
             : { type: 'project', id: input.projectId },
-        validate: exportInput,
+        validate: Object.assign(exportInput, { jsonSchema: parseExport.jsonSchema }),
         async handler(context, input) {
           const { rows } = await context.sql.query<WindowRow>(
             `SELECT idempotency_key, allocation_id, tenant_id, identity_id, meter, quantity,

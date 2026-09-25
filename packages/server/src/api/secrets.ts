@@ -124,7 +124,7 @@ export function secretsApi(source?: SecretStoreSource): SecretsApi {
         action: 'compute:secrets:manage',
         kind: 'mutation',
         resource: scopeOf,
-        validate: putInput,
+        validate: Object.assign(putInput, { jsonSchema: parsePut.jsonSchema }),
         async handler(context, input) {
           checkScope(context, input);
           const store = storeOf(context);
