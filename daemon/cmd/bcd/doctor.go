@@ -6,10 +6,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/config"
+	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 )
 
 type doctorCheck struct{ status, check, detail string }
@@ -45,6 +47,36 @@ func toolChecks(lookPath func(string) (string, error)) []doctorCheck {
 		out = append(out, doctorCheck{"ok", "nftables", path})
 	} else {
 		out = append(out, doctorCheck{"fail", "nftables", "no nft: instances run without anti-spoofing or network policies, and the metadata service and instance dials stay off"})
+	}
+	return out
+}
+
+// configChecks look at what the configuration leaves off: self-update without release pins, an
+// update pending or failed, and a site agent without its local BMC deny list.
+func configChecks(cfg *config.Config, role string) []doctorCheck {
+	var out []doctorCheck
+	pins, _ := cfg.Update.Pins()
+	if len(pins) == 0 {
+		out = append(out, doctorCheck{"warn", "update", "no [update] release_pins: self-update is refused (reinstall to upgrade)"})
+	} else {
+		out = append(out, doctorCheck{"ok", "update", fmt.Sprintf("%d release pins, threshold %d", len(pins), cfg.Update.ReleaseThreshold)})
+	}
+	slots := selfupdate.Slots{Dir: filepath.Join(cfg.DataDir, "bin"), Entrypoint: cfg.Update.Entrypoint}
+	if cur, err := slots.Current(); err == nil && cur != "" {
+		if target, _ := os.Readlink(cfg.Update.Entrypoint); target != filepath.Join(slots.Dir, "current") {
+			out = append(out, doctorCheck{"fail", "slots", fmt.Sprintf("%s does not link to %s: bcd.service would not start the current slot", cfg.Update.Entrypoint, filepath.Join(slots.Dir, "current"))})
+		} else {
+			out = append(out, doctorCheck{"ok", "slots", fmt.Sprintf("running slot %s (%s)", cur, slots.Versions()[cur])})
+		}
+	}
+	if p, err := selfupdate.LoadPending(cfg.DataDir); err == nil && p != nil {
+		out = append(out, doctorCheck{"warn", "update", fmt.Sprintf("update %s -> %s is %s", p.FromVersion, p.Version, p.State)})
+	}
+	for v, why := range selfupdate.LoadRecord(cfg.DataDir).Failed {
+		out = append(out, doctorCheck{"warn", "update", fmt.Sprintf("bcd %s failed (%s); bcd update --clear-failed lets a rollout retry it", v, why)})
+	}
+	if role == "site" && cfg.BMCNetworks == "" {
+		out = append(out, doctorCheck{"warn", "bmc", "no [site] bmc_networks: site.httpProxy's BMC refusal relies on the BMCs this agent has driven"})
 	}
 	return out
 }
@@ -86,6 +118,10 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 		}
 	}
 	state, _, err := agent.LoadState(cfg.DataDir)
+	role := ""
+	if err == nil {
+		role = state.Role
+	}
 	switch {
 	case err != nil:
 		out = append(out, doctorCheck{"warn", "identity", err.Error()})
@@ -95,5 +131,5 @@ func hostChecks(cfg *config.Config) []doctorCheck {
 		out = append(out, doctorCheck{"ok", "identity", fmt.Sprintf("node %s (site %s, role %s), certificate valid for %s",
 			state.NodeID, state.SiteID, state.Role, time.Until(state.NotAfter).Round(time.Minute))})
 	}
-	return out
+	return append(out, configChecks(cfg, role)...)
 }
