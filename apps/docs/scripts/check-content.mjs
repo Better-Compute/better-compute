@@ -38,12 +38,14 @@ const routeOf = (path) => {
   return route ? `/docs/${route}` : '/docs';
 };
 
+// As github-slugger (Fumadocs): underscores are kept (`## SPEND_LIMIT_REACHED` → `#spend_limit_reached`);
+// emphasis markers are gone by the time a heading renders, so an `_` left in heading text is literal.
 const slug = (text) =>
   text
     .toLowerCase()
     .replace(/<[^>]+>/g, '')
-    .replace(/[`*_~[\]()]/g, '')
-    .replace(/[^\p{L}\p{N}\s-]/gu, '')
+    .replace(/[`*~[\]()]/g, '')
+    .replace(/[^\p{L}\p{M}\p{N}\p{Pc}\s-]/gu, '')
     .trim()
     .replace(/\s/g, '-');
 
