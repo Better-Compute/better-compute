@@ -375,6 +375,12 @@ func (l *Libvirt) Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userDa
 		switch {
 		case restore != nil:
 			if err := l.unpack(restore, dir); err != nil {
+				os.RemoveAll(dir)
+				return err
+			}
+			// A snapshot is the tenant's bytes: its disk may name no backing file (review 12 H2).
+			if err := l.checkRestored(ctx, dir); err != nil {
+				os.RemoveAll(dir)
 				return err
 			}
 			meta.Restored = restore.Sha256
@@ -432,7 +438,7 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	}
 	dst := l.basePath(hex.EncodeToString(img.GetSha256()), format)
 	if _, err := os.Stat(dst); err == nil {
-		return dst, nil
+		return dst, l.checkImage(ctx, dst, format)
 	}
 	if !strings.HasPrefix(img.GetUrl(), "https://") {
 		return "", errors.New("images are fetched over https only")
@@ -470,7 +476,86 @@ func (l *Libvirt) baseImage(ctx context.Context, img *agentv1.ImageRef) (string,
 	if !bytes.Equal(h.Sum(nil), img.GetSha256()) {
 		return "", fmt.Errorf("image sha256 %x is not the pinned %x", h.Sum(nil), img.GetSha256())
 	}
+	if err := l.checkImage(ctx, tmp.Name(), format); err != nil {
+		return "", err
+	}
 	return dst, os.Rename(tmp.Name(), dst)
+}
+
+// checkRestored checks a restored snapshot's disk (a flat qcow2) and seed (raw) like a base image.
+func (l *Libvirt) checkRestored(ctx context.Context, dir string) error {
+	if err := l.checkImage(ctx, filepath.Join(dir, "disk.qcow2"), "qcow2"); err != nil {
+		return fmt.Errorf("the snapshot's disk: %w", err)
+	}
+	if seed := filepath.Join(dir, "seed.iso"); fileExists(seed) {
+		if err := l.checkImage(ctx, seed, "raw"); err != nil {
+			return fmt.Errorf("the snapshot's seed: %w", err)
+		}
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// qemuImgInfo is what checkImage reads of `qemu-img info --output=json`.
+type qemuImgInfo struct {
+	Format          string `json:"format"`
+	BackingFilename string `json:"backing-filename"`
+	FormatSpecific  struct {
+		Data struct {
+			DataFile string `json:"data-file"`
+		} `json:"data"`
+	} `json:"format-specific"`
+}
+
+func (l *Libvirt) imageInfo(ctx context.Context, path string, format ...string) (*qemuImgInfo, error) {
+	args := []string{"info", "-U", "--output=json"}
+	if len(format) > 0 {
+		args = append(args, "-f", format[0])
+	}
+	out, err := l.run(ctx, "qemu-img", append(args, path)...)
+	if err != nil {
+		return nil, err
+	}
+	var info qemuImgInfo
+	if err := json.Unmarshal(out, &info); err != nil {
+		return nil, fmt.Errorf("qemu-img info: %w", err)
+	}
+	return &info, nil
+}
+
+// checkImage refuses a tenant's base image that would make the hypervisor (root) open another
+// file: a qcow2 naming a backing file or an external data file (/dev/nvme0n1, another instance's
+// disk), or a raw or iso image whose content probes as another format. qemu-img info never opens
+// a backing file itself.
+func (l *Libvirt) checkImage(ctx context.Context, path, format string) error {
+	declared := format
+	if declared == "iso" {
+		declared = "raw"
+	}
+	info, err := l.imageInfo(ctx, path, declared)
+	if err != nil {
+		return fmt.Errorf("the image is not %s: %w", format, err)
+	}
+	if info.BackingFilename != "" {
+		return errors.New("the image names a backing file")
+	}
+	if info.FormatSpecific.Data.DataFile != "" {
+		return errors.New("the image names an external data file")
+	}
+	if declared == "raw" {
+		probed, err := l.imageInfo(ctx, path)
+		if err != nil {
+			return err
+		}
+		if probed.Format != "raw" {
+			return fmt.Errorf("the %s image's content is %s", format, probed.Format)
+		}
+	}
+	return nil
 }
 
 // seed writes the NoCloud seed ISO (volume "cidata") with the user data and the instance id.
@@ -506,7 +591,7 @@ var virtualSize = regexp.MustCompile(`"virtual-size":\s*(\d+)`)
 // grow enlarges the disk to size bytes; a smaller size is refused.
 func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 	disk := filepath.Join(dir, "disk.qcow2")
-	info, err := l.run(ctx, "qemu-img", "info", "-U", "--output=json", disk)
+	info, err := l.run(ctx, "qemu-img", "info", "-U", "-f", "qcow2", "--output=json", disk)
 	if err != nil {
 		return err
 	}
@@ -523,7 +608,7 @@ func (l *Libvirt) grow(ctx context.Context, id, dir string, size uint64) error {
 	}
 	st, _ := l.virsh(ctx, "domstate", id)
 	if stateOf(string(st)) == StateStopped {
-		_, err = l.run(ctx, "qemu-img", "resize", disk, strconv.FormatUint(size, 10))
+		_, err = l.run(ctx, "qemu-img", "resize", "-f", "qcow2", disk, strconv.FormatUint(size, 10))
 	} else {
 		_, err = l.virsh(ctx, "blockresize", id, "vda", strconv.FormatUint(size, 10)+"B")
 	}
@@ -689,7 +774,7 @@ func (l *Libvirt) Snapshot(ctx context.Context, id string, includeMemory bool, c
 		defer func() { _, _ = l.virsh(context.WithoutCancel(ctx), "resume", id) }()
 	}
 	flat := filepath.Join(work, "disk.qcow2")
-	if _, err := l.run(ctx, "qemu-img", "convert", "-U", "-O", "qcow2", filepath.Join(dir, "disk.qcow2"), flat); err != nil {
+	if _, err := l.run(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2", filepath.Join(dir, "disk.qcow2"), flat); err != nil {
 		return "", err
 	}
 	meta := libvirtSnapshot{Runtime: l.Name(), IncludeMemory: includeMemory && state != StateStopped}

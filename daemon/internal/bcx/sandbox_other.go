@@ -20,7 +20,7 @@ func prepare(cmd *exec.Cmd, _ *os.File, path, _ string, o StartOptions, _ string
 	return func() {}, nil
 }
 
-func killGroup(cmd *exec.Cmd) { _ = cmd.Process.Kill() }
+func killGroup(cmd *exec.Cmd, _ string) { _ = cmd.Process.Kill() }
 
 // PrepareCgroup is Linux only.
 func PrepareCgroup(string) error { return errors.New("plugin cgroups need Linux") }

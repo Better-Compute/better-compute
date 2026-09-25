@@ -118,10 +118,15 @@ func PrepareCgroup(dir string) error {
 	return nil
 }
 
-// killGroup kills the plugin and whatever it started (its process group).
-func killGroup(cmd *exec.Cmd) {
+// killGroup kills the plugin and whatever it started: its process group and, with a cgroup, every
+// process in it (cgroup.kill, Linux 5.14), which a child that left the group with setsid cannot
+// escape (security review 12 L3).
+func killGroup(cmd *exec.Cmd, cgroup string) {
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	_ = cmd.Process.Kill()
+	if cgroup != "" {
+		_ = os.WriteFile(filepath.Join(cgroup, "cgroup.kill"), []byte("1"), 0o644)
+	}
 }
 
 // RunShim runs inside the plugin's process, before the plugin (args: the plugin's name and

@@ -51,6 +51,9 @@ func (s *Supervised) loop(p *Plugin) {
 		started := time.Now()
 		select {
 		case <-s.ctx.Done():
+			// Close may have swapped out the plugin before this loop stored it: stop it here too
+			// (security review 12 L1; Close is idempotent).
+			p.Close()
 			return
 		case <-p.Done():
 		}

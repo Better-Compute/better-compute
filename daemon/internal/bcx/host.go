@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -32,6 +33,8 @@ type Plugin struct {
 	client driverv1connect.DriverPluginClient
 	cmd    *exec.Cmd
 	dir    string
+	// cgroup is the plugin's own cgroup (empty without one): Close kills everything in it.
+	cgroup string
 	http   *http.Client
 	once   sync.Once
 	// done is closed when the process has exited.
@@ -118,6 +121,9 @@ func Start(ctx context.Context, name, path string, o StartOptions) (*Plugin, err
 		return nil, err
 	}
 	p := &Plugin{Name: name, cmd: cmd, dir: dir, done: make(chan struct{})}
+	if o.CgroupDir != "" {
+		p.cgroup = filepath.Join(o.CgroupDir, "bcx-"+name)
+	}
 	go func() {
 		_ = cmd.Wait()
 		close(p.done)
@@ -128,9 +134,13 @@ func Start(ctx context.Context, name, path string, o StartOptions) (*Plugin, err
 	}
 	lines := make(chan string, 1)
 	go func() {
-		r := bufio.NewReader(stdout)
-		line, _ := r.ReadString('\n')
-		lines <- line
+		// The handshake is one line of at most handshakeMax bytes; a longer one is no handshake.
+		r := bufio.NewReaderSize(stdout, handshakeMax)
+		line, err := r.ReadSlice('\n')
+		if err != nil {
+			line = nil
+		}
+		lines <- string(line)
 		_, _ = io.Copy(io.Discard, r) // keep the pipe drained
 	}()
 	var line string
@@ -166,8 +176,11 @@ func Start(ctx context.Context, name, path string, o StartOptions) (*Plugin, err
 	}
 	transport.Protocols.SetHTTP2(true)
 	p.http = &http.Client{Transport: transport}
-	p.client = driverv1connect.NewDriverPluginClient(p.http, "https://localhost", connect.WithGRPC())
-	resp, err := p.client.Describe(ctx, connect.NewRequest(&driverv1.DescribeRequest{}))
+	p.client = driverv1connect.NewDriverPluginClient(p.http, "https://localhost", connect.WithGRPC(), connect.WithReadMaxBytes(responseMax))
+	// A plugin that never answers does not hold up bcd's start (security review 12 L2).
+	describeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	resp, err := p.client.Describe(describeCtx, connect.NewRequest(&driverv1.DescribeRequest{}))
 	if err != nil {
 		p.Close()
 		return nil, fmt.Errorf("bcx: describe %s: %w", name, err)
@@ -180,6 +193,12 @@ func Start(ctx context.Context, name, path string, o StartOptions) (*Plugin, err
 	return p, nil
 }
 
+// handshakeMax bounds the handshake line; responseMax each message a plugin sends.
+const (
+	handshakeMax = 64 << 10
+	responseMax  = 16 << 20
+)
+
 // Close stops the plugin.
 func (p *Plugin) Close() {
 	p.once.Do(func() {
@@ -187,7 +206,7 @@ func (p *Plugin) Close() {
 			p.http.CloseIdleConnections()
 		}
 		if p.cmd != nil && p.cmd.Process != nil {
-			killGroup(p.cmd)
+			killGroup(p.cmd, p.cgroup)
 			<-p.done
 		}
 		_ = os.RemoveAll(p.dir)

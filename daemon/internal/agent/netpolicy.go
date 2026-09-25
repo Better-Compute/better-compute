@@ -38,6 +38,9 @@ const NetworkPolicyCapability = "instance.network-policy"
 // firewallTable is the nftables table bcd owns.
 const firewallTable = "bcd_instances"
 
+// backstopTable is bcd's inet table: instance taps that are not bridge ports reach nothing.
+const backstopTable = "bcd_taps"
+
 // policyEnforced reports whether a policy needs rules.
 func policyEnforced(p agentv1.InstanceNetworkPolicy) bool {
 	return p == agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_PRIVATE || p == agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_NONE
@@ -223,6 +226,17 @@ func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset stri
 		chain("input", input)
 		chain("forward", forward)
 		chain("output", output)
+		b.WriteString("}\n")
+	}
+	// The backstop (security review 12 H1): the bridge table sees only taps that are bridge ports; a
+	// tap off its bridge (a runtime that recreated it, a failed attach) would reach the host's stack,
+	// and through forwarding other networks, unfiltered. Frames of a tap on its bridge reach the inet
+	// hooks as the bridge's, so these rules drop only what the bridge table cannot see.
+	fmt.Fprintf(&b, "table inet %s\ndelete table inet %s\n", backstopTable, backstopTable)
+	if anyNIC {
+		fmt.Fprintf(&b, "table inet %s {\n", backstopTable)
+		fmt.Fprintf(&b, "\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tiifname \"bc*\" drop\n\t}\n")
+		fmt.Fprintf(&b, "\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n\t\tiifname \"bc*\" drop\n\t\toifname \"bc*\" drop\n\t}\n")
 		b.WriteString("}\n")
 	}
 	return b.String(), failed, guarded

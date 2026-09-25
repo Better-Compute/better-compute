@@ -12,7 +12,8 @@ import (
 	driverv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/driver/v1"
 )
 
-// fakeTool is an ipmitool that records its arguments and whether the password came by environment.
+// fakeTool is an ipmitool that records its arguments, the password it read from fd 3 and its
+// environment's.
 func fakeTool(t *testing.T, status string) (string, string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -20,7 +21,7 @@ func fakeTool(t *testing.T, status string) (string, string) {
 	}
 	dir := t.TempDir()
 	log := filepath.Join(dir, "calls")
-	script := "#!/bin/sh\necho \"$@ pw=${IPMI_PASSWORD}\" >> " + log + "\n" +
+	script := "#!/bin/sh\necho \"$@ pw=$(cat /dev/fd/3) env=${IPMI_PASSWORD}\" >> " + log + "\n" +
 		"case \"$*\" in *'power status'*) echo '" + status + "' ;; esac\n"
 	tool := filepath.Join(dir, "ipmitool")
 	if err := os.WriteFile(tool, []byte(script), 0o755); err != nil {
@@ -51,7 +52,7 @@ func TestIPMIOperations(t *testing.T) {
 	}
 	calls, _ := os.ReadFile(log)
 	for _, want := range []string{
-		"-I lanplus -H 10.0.0.9 -U admin -E -p 6230 chassis power status pw=s3cret",
+		"-I lanplus -H 10.0.0.9 -U admin -C 17 -f /dev/fd/3 -p 6230 chassis power status pw=s3cret env=\n",
 		"chassis power cycle",
 		"chassis bootdev pxe options=persistent",
 	} {
@@ -75,6 +76,21 @@ func TestIPMIRefusals(t *testing.T) {
 		"address": func() error {
 			_, err := d.run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower", ConfigJson: `{"address":"-oProxyCommand=x"}`,
 				Secrets: []*driverv1.SecretValue{{Field: "username", Value: []byte("admin")}, {Field: "password", Value: []byte("x")}}})
+			return err
+		},
+		"pinned": func() error {
+			_, err := d.run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower", ConfigJson: `{"address":"10.0.0.9","tlsSpkiSha256":"ab"}`,
+				Secrets: []*driverv1.SecretValue{{Field: "username", Value: []byte("admin")}, {Field: "password", Value: []byte("x")}}})
+			return err
+		},
+		"cipher suite": func() error {
+			_, err := d.run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower", ConfigJson: `{"address":"10.0.0.9","cipherSuite":0.5}`,
+				Secrets: []*driverv1.SecretValue{{Field: "username", Value: []byte("admin")}, {Field: "password", Value: []byte("x")}}})
+			return err
+		},
+		"long password": func() error {
+			_, err := d.run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower", ConfigJson: `{"address":"10.0.0.9"}`,
+				Secrets: []*driverv1.SecretValue{{Field: "username", Value: []byte("admin")}, {Field: "password", Value: []byte(strings.Repeat("p", 21))}}})
 			return err
 		},
 		"username": func() error {

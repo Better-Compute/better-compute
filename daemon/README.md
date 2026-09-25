@@ -53,7 +53,7 @@ dependencies are connect-go, bbolt and protobuf.
 | `internal/nvml` | the NVML boundary; a stub for now |
 | `internal/selfupdate` | the A/B binary slots, `upgrade.json`, the release floor and the crash-loop rollback units |
 | `internal/bcx` | bcx driver plugins: the sandbox shim (`bcd __bcx-exec`: no-new-privs, seccomp, per-plugin uid), cgroups |
-| `internal/runtime` | instance runtimes: `Libvirt` (virsh, qemu-img, NoCloud seeds, snapshots, serial consoles), `CloudHypervisor` (a VMM per instance in a `bcd-ch-<id>` systemd unit, driven over its REST socket; VFIO GPUs, memory snapshots bound to the CPU model) and `Fake` |
+| `internal/runtime` | instance runtimes: `Libvirt` (virsh, qemu-img, NoCloud seeds, snapshots, serial consoles), `CloudHypervisor` (a VMM per instance in a confined `bcd-ch-<id>.service` unit, driven over its REST socket: only KVM, tun and VFIO devices, only its own instance and base image visible, bounded by its flavor; persistent taps bridged before it starts; VFIO GPUs, memory snapshots bound to the CPU model and flavor) and `Fake` |
 | `internal/redfish` | the Redfish client of the site agent's `bmc.*` kinds (power, boot, BIOS, RAID, firmware, accounts) |
 | `internal/bootparams`, `internal/pxe` | the ramdisk's `bc.*` kernel command line; the site agent's proxyDHCP and TFTP |
 | `internal/imds` | the instance metadata service of VPS hosts |

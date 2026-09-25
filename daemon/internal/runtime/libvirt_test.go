@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/xml"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -162,9 +163,30 @@ func (f *fakeVirt) qemuImg(args []string) ([]byte, error) {
 		file, size := args[len(args)-2], args[len(args)-1]
 		return nil, os.WriteFile(file, []byte(`{"virtual-size": `+size+`}`), 0o600)
 	case "info":
-		return os.ReadFile(args[len(args)-1])
+		raw, err := os.ReadFile(args[len(args)-1])
+		if err != nil || bytes.HasPrefix(raw, []byte("{")) {
+			return raw, err // a disk qemu-img created
+		}
+		// A base image: "QFI\xfb" probes as qcow2; "backing=<file>" in it names a backing file.
+		format := "raw"
+		if bytes.HasPrefix(raw, []byte("QFI\xfb")) || bytes.HasPrefix(raw, []byte("flat ")) {
+			format = "qcow2"
+		}
+		for i, a := range args {
+			if a == "-f" {
+				if args[i+1] == "qcow2" && format != "qcow2" {
+					return nil, errors.New("qemu-img: Image is not in qcow2 format")
+				}
+				format = args[i+1]
+			}
+		}
+		info := map[string]any{"format": format}
+		if _, backing, ok := bytes.Cut(raw, []byte("backing=")); ok {
+			info["backing-filename"] = string(backing)
+		}
+		return json.Marshal(info)
 	case "resize":
-		return nil, os.WriteFile(args[1], []byte(`{"virtual-size": `+args[2]+`}`), 0o600)
+		return nil, os.WriteFile(args[len(args)-2], []byte(`{"virtual-size": `+args[len(args)-1]+`}`), 0o600)
 	case "convert":
 		raw, err := os.ReadFile(args[len(args)-2])
 		if err != nil {
@@ -193,7 +215,7 @@ func tarNames(t *testing.T, raw []byte) map[string]string {
 }
 
 func TestLibvirtRuntime(t *testing.T) {
-	image := []byte("ubuntu base image")
+	image := []byte("QFI\xfbubuntu base image")
 	sum := sha256.Sum256(image)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(image) }))
 	defer srv.Close()
@@ -345,5 +367,47 @@ func TestLibvirtRuntime(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "images", fmt.Sprintf("%x.qcow2", bad))); err == nil {
 		t.Fatal("a mismatched image was kept")
+	}
+}
+
+// Security review 12 H2: a tenant's image never makes the hypervisor open another file.
+func TestBaseImageChecks(t *testing.T) {
+	images := map[string][]byte{
+		"backing.qcow2": []byte("QFI\xfbbacking=/dev/nvme0n1"),
+		"probed.raw":    []byte("QFI\xfba qcow2 posing as raw"),
+		"probed.iso":    []byte("QFI\xfban iso that is a qcow2"),
+		"notqcow.qcow2": []byte("plain bytes"),
+		"good.raw":      []byte("a raw disk"),
+		"good.qcow2":    []byte("QFI\xfba qcow2 disk"),
+	}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(images[r.URL.Path[1:]]) }))
+	defer srv.Close()
+	dir := t.TempDir()
+	l := &Libvirt{Dir: dir, Exec: (&fakeVirt{domains: map[string]*fakeDomain{}}).exec, HTTP: srv.Client()}
+	for name, want := range map[string]string{
+		"backing.qcow2": "backing file", "probed.raw": "content is qcow2", "probed.iso": "content is qcow2",
+		"notqcow.qcow2": "not qcow2", "good.raw": "", "good.qcow2": "",
+	} {
+		sum := sha256.Sum256(images[name])
+		base, err := l.baseImage(context.Background(), &agentv1.ImageRef{Url: srv.URL + "/" + name, Sha256: sum[:], Format: strings.Split(name, ".")[1]})
+		if want == "" {
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s = %v, want %q", name, err, want)
+		}
+		if _, err := os.Stat(base); base != "" && err == nil {
+			t.Fatalf("%s was kept", name)
+		}
+	}
+	// An image cached before this check is checked again when used.
+	sum := sha256.Sum256(images["backing.qcow2"])
+	cached := l.basePath(fmt.Sprintf("%x", sum), "qcow2")
+	_ = os.WriteFile(cached, images["backing.qcow2"], 0o600)
+	if _, err := l.baseImage(context.Background(), &agentv1.ImageRef{Url: srv.URL + "/backing.qcow2", Sha256: sum[:], Format: "qcow2"}); err == nil {
+		t.Fatal("a cached image with a backing file was used")
 	}
 }

@@ -64,6 +64,7 @@ type chRecord struct {
 	Managed      string          `json:"managed"` // chManaged: this directory is bcd's
 	AllocationID string          `json:"allocationId,omitempty"`
 	Image        string          `json:"image,omitempty"`
+	Base         string          `json:"base,omitempty"` // the base image the overlay reads
 	RestoredFrom string          `json:"restoredFrom,omitempty"`
 	Addresses    []string        `json:"addresses,omitempty"`
 	Networks     []string        `json:"networks,omitempty"`
@@ -97,7 +98,9 @@ func (c *CloudHypervisor) instanceDir(id string) string { return filepath.Join(c
 func (c *CloudHypervisor) socket(id string) string {
 	return filepath.Join(c.instanceDir(id), "api.sock")
 }
-func unitName(id string) string { return "bcd-ch-" + id }
+// unitName always carries its ".service" suffix: an instance id ending in ".slice" or ".mount"
+// never names another kind of unit (security review 12 L7).
+func unitName(id string) string { return "bcd-ch-" + id + ".service" }
 
 // api calls the VMM of instance id; a status above 299 is an error.
 func (c *CloudHypervisor) api(ctx context.Context, id, method, path string, body any) ([]byte, error) {
@@ -236,11 +239,14 @@ func (c *CloudHypervisor) firmware() string {
 	return "/usr/share/cloud-hypervisor/CLOUDHV.fd"
 }
 
-// vmConfig is the VM's cloud-hypervisor configuration (VmConfig).
-func (c *CloudHypervisor) vmConfig(spec *agentv1.InstanceSpec, dir string) (map[string]any, error) {
+// vmConfig is the VM's cloud-hypervisor configuration (VmConfig). overlay: disk0 is bcd's qcow2
+// overlay on a base image (a restored disk is flat and may name no backing file).
+func (c *CloudHypervisor) vmConfig(spec *agentv1.InstanceSpec, dir string, overlay bool) (map[string]any, error) {
+	// Formats are explicit, never probed; disk0's backing file is the checked base bcd named when it
+	// created the overlay (checkImage refused any other).
 	disks := []any{
-		map[string]any{"id": "disk0", "path": filepath.Join(dir, "disk.qcow2")},
-		map[string]any{"id": "seed", "path": filepath.Join(dir, "seed.iso"), "readonly": true},
+		map[string]any{"id": "disk0", "path": filepath.Join(dir, "disk.qcow2"), "image_type": "Qcow2", "backing_files": overlay},
+		map[string]any{"id": "seed", "path": filepath.Join(dir, "seed.iso"), "readonly": true, "image_type": "Raw"},
 	}
 	var nets []any
 	for i, nic := range spec.GetNics() {
@@ -302,6 +308,11 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 				os.RemoveAll(dir)
 				return err
 			}
+			// A snapshot is the tenant's bytes: its disk may name no backing file (review 12 H2).
+			if err := st.checkRestored(ctx, dir); err != nil {
+				os.RemoveAll(dir)
+				return err
+			}
 			r.RestoredFrom = restore.Sha256
 		default:
 			img := spec.GetImage()
@@ -314,7 +325,7 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 				os.RemoveAll(dir)
 				return err
 			}
-			r.Image = hex.EncodeToString(img.GetSha256())
+			r.Image, r.Base = hex.EncodeToString(img.GetSha256()), base
 			if _, err := c.run(ctx, "qemu-img", "create", "-f", "qcow2", "-F", img.GetFormat(), "-b", base,
 				filepath.Join(dir, "disk.qcow2"), strconv.FormatUint(spec.GetDiskBytes(), 10)); err != nil {
 				os.RemoveAll(dir)
@@ -327,7 +338,7 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 		}
 	} else if spec.GetDiskBytes() > r.DiskBytes && r.DiskBytes > 0 {
 		if state, _ := c.state(ctx, id); state == StateStopped {
-			if _, err := c.run(ctx, "qemu-img", "resize", filepath.Join(dir, "disk.qcow2"), strconv.FormatUint(spec.GetDiskBytes(), 10)); err != nil {
+			if _, err := c.run(ctx, "qemu-img", "resize", "-f", "qcow2", filepath.Join(dir, "disk.qcow2"), strconv.FormatUint(spec.GetDiskBytes(), 10)); err != nil {
 				return err
 			}
 		} else if _, err := c.api(ctx, id, http.MethodPut, "vm.resize-disk", map[string]any{"disk": "disk0", "desired_size": spec.GetDiskBytes()}); err != nil {
@@ -336,7 +347,7 @@ func (c *CloudHypervisor) Ensure(ctx context.Context, spec *agentv1.InstanceSpec
 	} else if spec.GetDiskBytes() < r.DiskBytes {
 		return errors.New("a disk cannot shrink")
 	}
-	cfg, err := c.vmConfig(spec, dir)
+	cfg, err := c.vmConfig(spec, dir, r.RestoredFrom == "")
 	if err != nil {
 		return err
 	}
@@ -361,23 +372,64 @@ func (c *CloudHypervisor) poll() time.Duration {
 	return 200 * time.Millisecond
 }
 
-// launch starts the instance's VMM as a transient unit and waits for its API.
-func (c *CloudHypervisor) launch(ctx context.Context, id string) error {
-	if _, err := c.api(ctx, id, http.MethodGet, "vmm.ping", nil); err == nil {
+// unitProperties confine a VMM (security review 12 H2, M3). It runs as root, since it opens taps and
+// VFIO groups, but:
+//   - its only capabilities are CAP_NET_ADMIN and CAP_IPC_LOCK (pinned guest memory);
+//   - the only devices it can open are KVM, the tun clone device and, with GPUs, VFIO;
+//   - of bcd's directory it sees only its own instance (read-write) and its base image (read-only),
+//     so a disk naming another file finds nothing to open;
+//   - its memory, tasks and CPU are bounded by its flavor, plus overhead.
+func (c *CloudHypervisor) unitProperties(r *chRecord) []string {
+	dir := c.instanceDir(r.ID)
+	props := []string{
+		"DevicePolicy=closed", "DeviceAllow=/dev/kvm rw", "DeviceAllow=/dev/net/tun rw",
+		"CapabilityBoundingSet=CAP_NET_ADMIN CAP_IPC_LOCK", "NoNewPrivileges=yes",
+		"ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "ProtectKernelTunables=yes",
+		"ProtectKernelModules=yes", "ProtectKernelLogs=yes", "ProtectControlGroups=yes", "ProtectClock=yes",
+		"ProtectHostname=yes", "RestrictSUIDSGID=yes", "RestrictRealtime=yes", "RestrictNamespaces=yes",
+		"LockPersonality=yes", "IPAddressDeny=any", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+		"TemporaryFileSystem=" + filepath.Join(c.Dir, "instances") + ":ro",
+		"TemporaryFileSystem=" + filepath.Join(c.Dir, "images") + ":ro",
+		"BindPaths=" + dir, "ReadWritePaths=" + dir,
+		"LimitMEMLOCK=infinity",
+		fmt.Sprintf("MemoryMax=%d", r.MemoryBytes+r.MemoryBytes/32+256<<20),
+		fmt.Sprintf("TasksMax=%d", 4*r.VCPU+128),
+		fmt.Sprintf("CPUQuota=%d%%", 100*(r.VCPU+1)),
+	}
+	if r.Base != "" {
+		props = append(props, "BindReadOnlyPaths="+r.Base)
+	}
+	if len(r.GPUs) > 0 {
+		props = append(props, "DeviceAllow=/dev/vfio/vfio rw", "DeviceAllow=char-vfio rw")
+	}
+	return props
+}
+
+// launch starts the instance's VMM as a confined transient unit and waits for its API.
+func (c *CloudHypervisor) launch(ctx context.Context, r *chRecord) error {
+	if _, err := c.api(ctx, r.ID, http.MethodGet, "vmm.ping", nil); err == nil {
 		return nil
 	}
-	_ = os.Remove(c.socket(id))
+	_ = os.Remove(c.socket(r.ID))
+	// The unit's TemporaryFileSystem= mounts need both directories to exist.
+	if err := os.MkdirAll(filepath.Join(c.Dir, "images"), 0o700); err != nil {
+		return err
+	}
 	binary := c.Binary
 	if binary == "" {
 		binary = "cloud-hypervisor"
 	}
-	if _, err := c.run(ctx, "systemd-run", "--unit="+unitName(id), "--collect", "--quiet", "--",
-		binary, "--api-socket", "path="+c.socket(id)); err != nil {
+	args := []string{"--unit=" + unitName(r.ID), "--collect", "--quiet", "--slice=bcd-instances.slice"}
+	for _, p := range c.unitProperties(r) {
+		args = append(args, "-p", p)
+	}
+	args = append(args, "--", binary, "--api-socket", "path="+c.socket(r.ID))
+	if _, err := c.run(ctx, "systemd-run", args...); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, err := c.api(ctx, id, http.MethodGet, "vmm.ping", nil); err == nil {
+		if _, err := c.api(ctx, r.ID, http.MethodGet, "vmm.ping", nil); err == nil {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -391,9 +443,62 @@ func (c *CloudHypervisor) launch(ctx context.Context, id string) error {
 	}
 }
 
-// start boots the VM (or restores its memory snapshot), then attaches its taps to their bridges.
+// taps creates the instance's taps before its VMM starts (security review 12 H1). They are
+// persistent, on their network's bridge and up, so neither a guest reboot (the VMM reopens them)
+// nor a failed step leaves a tap of a running VM off its bridge, where bcd's bridge rules do not
+// see it. A NIC without a network is refused.
+func (c *CloudHypervisor) taps(ctx context.Context, r *chRecord) error {
+	c.deleteTaps(ctx, r)
+	for i, network := range r.Networks {
+		if network == "" {
+			return fmt.Errorf("NIC %d has no network", i)
+		}
+		tap := TapName(r.ID, i)
+		for _, args := range [][]string{
+			{"tuntap", "add", "dev", tap, "mode", "tap"},
+			{"link", "set", tap, "master", network},
+			{"link", "set", tap, "up"},
+		} {
+			if _, err := c.run(ctx, "ip", args...); err != nil {
+				c.deleteTaps(ctx, r)
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// deleteTaps removes the instance's taps: those of its NICs, and any other of its name (a NIC
+// removed since).
+func (c *CloudHypervisor) deleteTaps(ctx context.Context, r *chRecord) {
+	names := map[string]bool{}
+	for i := range r.Networks {
+		names[TapName(r.ID, i)] = true
+	}
+	prefix := strings.TrimSuffix(TapName(r.ID, 0), "0")
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, iface := range ifaces {
+			if strings.HasPrefix(iface.Name, prefix) {
+				names[iface.Name] = true
+			}
+		}
+	}
+	sorted := make([]string, 0, len(names))
+	for n := range names {
+		sorted = append(sorted, n)
+	}
+	sort.Strings(sorted)
+	for _, n := range sorted {
+		_, _ = c.run(ctx, "ip", "link", "delete", n) // absent: nothing to delete
+	}
+}
+
+// start creates the taps, then boots the VM (or restores its memory snapshot).
 func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) error {
-	if err := c.launch(ctx, r.ID); err != nil {
+	if err := c.taps(ctx, r); err != nil {
+		return err
+	}
+	if err := c.launch(ctx, r); err != nil {
 		return err
 	}
 	snapshot := filepath.Join(c.instanceDir(r.ID), "snapshot")
@@ -407,33 +512,21 @@ func (c *CloudHypervisor) start(ctx context.Context, r *chRecord, paused bool) e
 				return err
 			}
 		}
-	} else {
-		if _, err := c.api(ctx, r.ID, http.MethodGet, "vm.info", nil); err != nil {
-			if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.create", json.RawMessage(r.Config)); err != nil {
-				return err
-			}
-		}
-		if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.boot", nil); err != nil {
-			if strings.Contains(err.Error(), "Cannot allocate memory") || strings.Contains(err.Error(), "ENOMEM") {
-				return ErrNoCapacity
-			}
+		return nil
+	}
+	if _, err := c.api(ctx, r.ID, http.MethodGet, "vm.info", nil); err != nil {
+		if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.create", json.RawMessage(r.Config)); err != nil {
 			return err
-		}
-		if paused {
-			if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.pause", nil); err != nil {
-				return err
-			}
 		}
 	}
-	for i, network := range r.Networks {
-		if network == "" {
-			continue
+	if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.boot", nil); err != nil {
+		if strings.Contains(err.Error(), "Cannot allocate memory") || strings.Contains(err.Error(), "ENOMEM") {
+			return ErrNoCapacity
 		}
-		tap := TapName(r.ID, i)
-		if _, err := c.run(ctx, "ip", "link", "set", tap, "master", network); err != nil {
-			return err
-		}
-		if _, err := c.run(ctx, "ip", "link", "set", tap, "up"); err != nil {
+		return err
+	}
+	if paused {
+		if _, err := c.api(ctx, r.ID, http.MethodPut, "vm.pause", nil); err != nil {
 			return err
 		}
 	}
@@ -466,16 +559,18 @@ func (c *CloudHypervisor) SetState(ctx context.Context, id, state string) error 
 			err = c.start(ctx, r, true)
 		}
 	case StateStopped:
-		if current != StateStopped {
-			err = c.stop(ctx, id)
-		}
+		err = c.stop(ctx, r)
 	default:
 		err = fmt.Errorf("state %q", state)
 	}
 	return err
 }
 
-func (c *CloudHypervisor) stop(ctx context.Context, id string) error {
+// stop shuts the VM down and ends its VMM's unit; it fails unless systemd reports the unit
+// stopped, so a VMM that outlived it is never forgotten while it runs (security review 12 M2).
+// The taps go with it.
+func (c *CloudHypervisor) stop(ctx context.Context, r *chRecord) error {
+	id := r.ID
 	timeout := c.ShutdownTimeout
 	if timeout <= 0 {
 		timeout = time.Minute
@@ -494,26 +589,36 @@ func (c *CloudHypervisor) stop(ctx context.Context, id string) error {
 			}
 		}
 	}
+	// Each step may find nothing to do (no VM, no VMM, no unit); only the unit's state decides.
 	_, _ = c.api(ctx, id, http.MethodPut, "vm.shutdown", nil)
 	_, _ = c.api(ctx, id, http.MethodPut, "vmm.shutdown", nil)
 	_, _ = c.run(ctx, "systemctl", "stop", unitName(id))
+	out, err := c.run(ctx, "systemctl", "show", "--property=ActiveState", "--value", unitName(id))
+	if err != nil {
+		return fmt.Errorf("the VMM's unit: %w", err)
+	}
+	if s := strings.TrimSpace(string(out)); s != "inactive" && s != "failed" {
+		return fmt.Errorf("the VMM's unit %s is %q after the stop", unitName(id), s)
+	}
+	c.deleteTaps(ctx, r)
 	return nil
 }
 
-// Destroy stops a managed instance and removes its directory (its taps go with the VMM).
+// Destroy stops a managed instance and removes its taps and directory.
 func (c *CloudHypervisor) Destroy(ctx context.Context, id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !instanceID.MatchString(id) {
 		return nil
 	}
-	if _, err := c.record(id); err != nil {
+	r, err := c.record(id)
+	if err != nil {
 		if _, statErr := os.Stat(c.instanceDir(id)); statErr == nil {
 			return fmt.Errorf("instances/%s is not bcd's", id)
 		}
 		return nil
 	}
-	if err := c.stop(ctx, id); err != nil {
+	if err := c.stop(ctx, r); err != nil {
 		return err
 	}
 	return os.RemoveAll(c.instanceDir(id))
@@ -556,7 +661,7 @@ func (c *CloudHypervisor) Snapshot(ctx context.Context, id string, includeMemory
 		}
 	}
 	flat := filepath.Join(work, "disk.qcow2")
-	if _, err := c.run(ctx, "qemu-img", "convert", "-U", "-O", "qcow2", filepath.Join(dir, "disk.qcow2"), flat); err != nil {
+	if _, err := c.run(ctx, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2", filepath.Join(dir, "disk.qcow2"), flat); err != nil {
 		return "", err
 	}
 	meta := libvirtSnapshot{Runtime: c.Name(), IncludeMemory: memory}
@@ -678,23 +783,66 @@ func (c *CloudHypervisor) unpack(restore *Restore, dir string, spec *agentv1.Ins
 	if err != nil {
 		return errors.New("the memory snapshot has no config.json")
 	}
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var saved map[string]any
+	if err := dec.Decode(&saved); err != nil {
 		return errors.New("the memory snapshot's config.json is not JSON")
 	}
-	fresh, err := c.vmConfig(spec, dir)
+	fresh, err := c.vmConfig(spec, dir, false)
 	if err != nil {
 		return err
 	}
-	for _, k := range []string{"disks", "net", "serial", "console", "devices"} {
-		if v, ok := fresh[k]; ok {
-			cfg[k] = v
-		} else {
-			delete(cfg, k)
-		}
+	cfg, err := restoredConfig(saved, fresh, spec)
+	if err != nil {
+		return err
 	}
 	patched, _ := json.Marshal(cfg)
 	return os.WriteFile(cfgPath, patched, 0o600)
+}
+
+// restoredConfig is the configuration a memory snapshot restores with (security review 12 M1). The
+// snapshot's own config.json is the tenant's: its vCPUs and memory must be the flavor's (the VM
+// is accounted by the flavor), and only what its saved state needs is kept from it. Disks, NICs,
+// console, devices, rng and firmware are bcd's, and anything else (fs, pmem, vsock, memory zones,
+// CPU affinity, a debug console, landlock rules) is dropped.
+func restoredConfig(saved, fresh map[string]any, spec *agentv1.InstanceSpec) (map[string]any, error) {
+	section := func(m map[string]any, key string) map[string]any {
+		s, _ := m[key].(map[string]any)
+		return s
+	}
+	number := func(m map[string]any, key string) string {
+		n, _ := m[key].(json.Number)
+		return n.String()
+	}
+	cpus, memory := section(saved, "cpus"), section(saved, "memory")
+	vcpu, mem := strconv.FormatUint(uint64(spec.GetVcpu()), 10), strconv.FormatUint(spec.GetMemoryBytes(), 10)
+	if number(cpus, "boot_vcpus") != vcpu || number(cpus, "max_vcpus") != vcpu || number(memory, "size") != mem {
+		return nil, fmt.Errorf("the memory snapshot's VM has %s vCPUs (at most %s) and %s bytes of memory, the instance %s and %s",
+			number(cpus, "boot_vcpus"), number(cpus, "max_vcpus"), number(memory, "size"), vcpu, mem)
+	}
+	keep := func(m map[string]any, keys ...string) map[string]any {
+		out := map[string]any{}
+		for _, k := range keys {
+			if v, ok := m[k]; ok {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	cfg := map[string]any{
+		"cpus":   keep(cpus, "boot_vcpus", "max_vcpus", "topology", "kvm_hyperv", "max_phys_bits", "features"),
+		"memory": keep(memory, "size", "mergeable", "shared", "hugepages", "hugepage_size", "prefault", "thp"),
+	}
+	if p := section(saved, "platform"); p != nil {
+		cfg["platform"] = keep(p, "num_pci_segments", "iommu_segments", "serial_number", "uuid", "oem_strings")
+	}
+	for _, k := range []string{"payload", "disks", "net", "serial", "console", "rng", "devices"} {
+		if v, ok := fresh[k]; ok {
+			cfg[k] = v
+		}
+	}
+	return cfg, nil
 }
 
 // Console opens a running managed instance's serial console (its socket).

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"testing"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeCH stands in for cloud-hypervisor VMMs (one per API socket, started by systemd-run) and their
@@ -23,7 +25,10 @@ type fakeCH struct {
 	virt  *fakeVirt
 	mu    sync.Mutex
 	vmms  map[string]*fakeVMM
+	units map[string]string // unit ? its VMM's API socket
 	calls []string
+	// stuck: vmm.shutdown and systemctl stop leave the VMM running.
+	stuck bool
 }
 
 type fakeVMM struct {
@@ -35,15 +40,32 @@ func (f *fakeCH) exec(ctx context.Context, name string, args ...string) ([]byte,
 	f.mu.Lock()
 	switch name {
 	case "systemd-run":
-		f.calls = append(f.calls, "systemd-run "+args[0])
+		f.calls = append(f.calls, "systemd-run "+strings.Join(args, " "))
 		for _, a := range args {
 			if strings.HasPrefix(a, "path=") {
 				f.vmms[strings.TrimPrefix(a, "path=")] = &fakeVMM{}
+				f.units[strings.TrimPrefix(args[0], "--unit=")] = strings.TrimPrefix(a, "path=")
 			}
 		}
 		f.mu.Unlock()
 		return nil, nil
-	case "systemctl", "ip":
+	case "systemctl":
+		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+		defer f.mu.Unlock()
+		socket := f.units[args[len(args)-1]]
+		switch args[0] {
+		case "stop":
+			if !f.stuck {
+				delete(f.vmms, socket)
+			}
+		case "show":
+			if f.vmms[socket] != nil {
+				return []byte("active\n"), nil
+			}
+			return []byte("inactive\n"), nil
+		}
+		return nil, nil
+	case "ip":
 		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
 		f.mu.Unlock()
 		return nil, nil
@@ -84,7 +106,9 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any) (
 	case "vm.power-button", "vm.shutdown":
 		vmm.state = "Shutdown"
 	case "vmm.shutdown":
-		delete(f.vmms, socket)
+		if !f.stuck {
+			delete(f.vmms, socket)
+		}
 	case "vm.resize-disk":
 	case "vm.snapshot":
 		dst := strings.TrimPrefix(body.(map[string]any)["destination_url"].(string), "file://")
@@ -105,11 +129,11 @@ func (f *fakeCH) api(_ context.Context, socket, method, path string, body any) (
 }
 
 func TestCloudHypervisorRuntime(t *testing.T) {
-	image := []byte("ubuntu base image")
+	image := []byte("QFI\xfbubuntu base image")
 	sum := sha256.Sum256(image)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(image) }))
 	defer srv.Close()
-	ch := &fakeCH{virt: &fakeVirt{domains: map[string]*fakeDomain{}}, vmms: map[string]*fakeVMM{}}
+	ch := &fakeCH{virt: &fakeVirt{domains: map[string]*fakeDomain{}}, vmms: map[string]*fakeVMM{}, units: map[string]string{}}
 	dir := t.TempDir()
 	c := &CloudHypervisor{Dir: dir, Exec: ch.exec, API: ch.api, HTTP: srv.Client(), Poll: 1, ShutdownTimeout: 1,
 		GPUAddress: func(id string) (string, bool) { return map[string]string{"GPU-1": "0000:3b:00.0"}[id], id == "GPU-1" }}
@@ -130,7 +154,7 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	rec := compact.Bytes()
 	for _, want := range []string{
 		filepath.Join(web, "disk.qcow2"), `"tap":"` + TapName("inst_web", 0) + `"`, `"mac":"52:54:00:00:00:07"`,
-		`/sys/bus/pci/devices/0000:3b:00.0/`, `"boot_vcpus":4`, `CLOUDHV.fd`, filepath.Join(web, "serial.sock"), `"readonly":true`,
+		`/sys/bus/pci/devices/0000:3b:00.0/`, `"boot_vcpus":4`, `"image_type":"Qcow2"`, `"backing_files":true`, `"image_type":"Raw"`, `CLOUDHV.fd`, filepath.Join(web, "serial.sock"), `"readonly":true`,
 	} {
 		if !strings.Contains(string(rec), strings.ReplaceAll(want, `\`, `\\`)) {
 			t.Errorf("vm.json lacks %s:\n%s", want, rec)
@@ -159,9 +183,24 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 		}
 	}
 	calls := strings.Join(ch.calls, "\n")
-	for _, want := range []string{"systemd-run --unit=bcd-ch-inst_web", "PUT vm.create", "PUT vm.boot", "ip link set " + TapName("inst_web", 0) + " master br0"} {
+	tap := TapName("inst_web", 0)
+	for _, want := range []string{"ip tuntap add dev " + tap + " mode tap", "ip link set " + tap + " master br0", "ip link set " + tap + " up",
+		"systemd-run --unit=bcd-ch-inst_web.service", "PUT vm.create", "PUT vm.boot"} {
 		if !strings.Contains(calls, want) {
 			t.Fatalf("calls lack %q:\n%s", want, calls)
+		}
+	}
+	// Review 12 H1: the tap is on its bridge before the VMM exists.
+	if strings.Index(calls, "master br0") > strings.Index(calls, "systemd-run") {
+		t.Fatalf("the tap was bridged after the VMM started:\n%s", calls)
+	}
+	// Review 12 H2, M3: the VMM's unit is confined and bounded.
+	for _, want := range []string{"-p DevicePolicy=closed", "-p DeviceAllow=char-vfio rw", "-p CapabilityBoundingSet=CAP_NET_ADMIN CAP_IPC_LOCK",
+		"-p TemporaryFileSystem=" + filepath.Join(dir, "instances") + ":ro", "-p BindPaths=" + web,
+		"-p BindReadOnlyPaths=" + filepath.Join(dir, "images", fmt.Sprintf("%x.qcow2", sum)),
+		fmt.Sprintf("-p MemoryMax=%d", 8<<30+(8<<30)/32+256<<20), "-p TasksMax=144", "-p CPUQuota=500%"} {
+		if !strings.Contains(calls, want) {
+			t.Fatalf("the VMM's unit lacks %q:\n%s", want, calls)
 		}
 	}
 
@@ -189,6 +228,12 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	if err := c.Ensure(ctx, clone, nil, &Restore{Path: file, Sha256: "ab", CPUModel: "Intel Xeon"}); err == nil {
 		t.Fatal("a memory snapshot restored on another CPU model")
 	}
+	// Review 12 M1: an 8 GiB VM never restores into a 1 GiB flavor.
+	small := proto.Clone(clone).(*agentv1.InstanceSpec)
+	small.MemoryBytes = 1 << 30
+	if err := c.Ensure(ctx, small, nil, &Restore{Path: file, Sha256: "ab", CPUModel: "AMD EPYC 9654"}); err == nil || !strings.Contains(err.Error(), "bytes of memory") {
+		t.Fatalf("a memory snapshot restored into a smaller flavor: %v", err)
+	}
 	if err := c.Ensure(ctx, clone, nil, &Restore{Path: file, Sha256: "ab", CPUModel: "AMD EPYC 9654"}); err != nil {
 		t.Fatal(err)
 	}
@@ -211,13 +256,55 @@ func TestCloudHypervisorRuntime(t *testing.T) {
 	if err := c.SetState(ctx, "inst_web", StateStopped); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := c.state(ctx, "inst_web"); got != StateStopped || !strings.Contains(strings.Join(ch.calls, "\n"), "systemctl stop bcd-ch-inst_web") {
+	if got, _ := c.state(ctx, "inst_web"); got != StateStopped || !strings.Contains(strings.Join(ch.calls, "\n"), "systemctl stop bcd-ch-inst_web.service") ||
+		!strings.Contains(strings.Join(ch.calls, "\n"), "ip link delete "+tap) {
 		t.Fatalf("stop: %s", got)
 	}
-	if err := c.Destroy(ctx, "inst_web"); err != nil {
-		t.Fatal(err)
+	// Review 12 M2: a VMM that survives its stop is never forgotten.
+	ch.stuck = true
+	if err := c.Destroy(ctx, "inst_clone"); err == nil || !strings.Contains(err.Error(), `"active"`) {
+		t.Fatalf("destroying a VM whose VMM would not stop = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instances", "inst_clone")); err != nil {
+		t.Fatal("the running VM's directory was removed")
+	}
+	ch.stuck = false
+	for _, id := range []string{"inst_web", "inst_clone"} {
+		if err := c.Destroy(ctx, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := os.Stat(web); err == nil {
 		t.Fatal("the instance directory survived")
+	}
+}
+
+// Review 12 M1: a memory snapshot's configuration keeps only what its saved state needs.
+func TestRestoredConfig(t *testing.T) {
+	saved := map[string]any{}
+	dec := json.NewDecoder(strings.NewReader(`{"cpus":{"boot_vcpus":2,"max_vcpus":2,"affinity":[{"vcpu":0,"host_cpus":[0]}],"topology":{"threads_per_core":1}},
+		"memory":{"size":1073741824,"zones":[{"id":"z","size":1}],"shared":false},"fs":[{"tag":"x","socket":"/run/x"}],"vsock":{"cid":3,"socket":"/x"},
+		"pmem":[{"file":"/dev/nvme0n1"}],"debug_console":{"mode":"File","file":"/etc/shadow"},"landlock_rules":[{"path":"/","access":"rw"}],
+		"platform":{"num_pci_segments":1,"tdx":true},"disks":[{"path":"/dev/sda"}]}`))
+	dec.UseNumber()
+	_ = dec.Decode(&saved)
+	fresh := map[string]any{"disks": []any{"bcd's"}, "payload": "bcd's"}
+	cfg, err := restoredConfig(saved, fresh, &agentv1.InstanceSpec{Vcpu: 2, MemoryBytes: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(cfg)
+	for _, gone := range []string{"affinity", "zones", "fs", "vsock", "pmem", "debug_console", "landlock_rules", "tdx", "/dev/sda"} {
+		if strings.Contains(string(raw), gone) {
+			t.Fatalf("the restored config keeps %s: %s", gone, raw)
+		}
+	}
+	for _, kept := range []string{`"boot_vcpus":2`, `"threads_per_core":1`, `"size":1073741824`, `"num_pci_segments":1`, `"disks":["bcd's"]`} {
+		if !strings.Contains(string(raw), kept) {
+			t.Fatalf("the restored config lacks %s: %s", kept, raw)
+		}
+	}
+	if _, err := restoredConfig(saved, fresh, &agentv1.InstanceSpec{Vcpu: 4, MemoryBytes: 1 << 30}); err == nil {
+		t.Fatal("a 2-vCPU VM restored as 4")
 	}
 }

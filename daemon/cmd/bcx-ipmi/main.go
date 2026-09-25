@@ -6,9 +6,12 @@
 //	power.setPower {action}                 chassis power on|off|cycle|reset|soft
 //	management.setBootDevice {device, persistent}   chassis bootdev pxe|disk|cdrom|bios [options=persistent]
 //
-// The BMC's address comes as config ({"address": "10.0.0.5[:623]"}) and its credentials as secrets
-// (username, password). The password reaches ipmitool through its environment (-E), never its
-// arguments, so it never shows in a process listing. Every argument is checked against a fixed set.
+// The BMC's address comes as config ({"address": "10.0.0.5[:623]", "cipherSuite": 17|3}) and its
+// credentials as secrets (username, password). The password reaches ipmitool through a pipe it
+// reads once (-f /dev/fd/3): never its arguments (a process listing) nor its environment (readable
+// in /proc by any process of the same user). The cipher suite is explicit (17: HMAC-SHA256,
+// AES-128; 3 only for BMCs without it), and ipmitool is run by absolute path. Every argument is
+// checked against a fixed set. IPMI has no TLS: a BMC with a key pin is refused, not run unpinned.
 package main
 
 import (
@@ -22,6 +25,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,10 +44,20 @@ var version = "0.0.0-dev"
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if err := bcx.Serve(ctx, &driver{tool: "ipmitool"}, os.Stdout); err != nil {
+	if err := bcx.Serve(ctx, &driver{tool: findTool()}, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "bcx-ipmi:", err)
 		os.Exit(1)
 	}
+}
+
+// findTool is ipmitool's absolute path, never looked up in PATH.
+func findTool() string {
+	for _, p := range []string{"/usr/bin/ipmitool", "/usr/sbin/ipmitool", "/usr/local/bin/ipmitool", "/usr/local/sbin/ipmitool"} {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			return p
+		}
+	}
+	return "/usr/bin/ipmitool"
 }
 
 // driver is the "ipmi" driver.
@@ -54,7 +68,7 @@ type driver struct {
 
 func (d *driver) Describe(context.Context, *connect.Request[driverv1.DescribeRequest]) (*connect.Response[driverv1.DescribeResponse], error) {
 	return connect.NewResponse(&driverv1.DescribeResponse{
-		Drivers:         []*commonv1.DriverManifest{{Id: "ipmi", Version: version, Kinds: []string{"power", "management"}, RunsOn: commonv1.RunsOn_RUNS_ON_SITE, ConfigSchemaJson: `{"type":"object","required":["address"],"properties":{"address":{"type":"string"}}}`}},
+		Drivers:         []*commonv1.DriverManifest{{Id: "ipmi", Version: version, Kinds: []string{"power", "management"}, RunsOn: commonv1.RunsOn_RUNS_ON_SITE, ConfigSchemaJson: `{"type":"object","required":["address"],"properties":{"address":{"type":"string"},"cipherSuite":{"enum":[3,17]}}}`}},
 		PluginVersion:   version,
 		ProtocolVersion: bcx.ProtocolVersion,
 	}), nil
@@ -123,10 +137,22 @@ func target(address string) (host, port string, err error) {
 
 func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, error) {
 	var config struct {
-		Address string `json:"address"`
+		Address       string `json:"address"`
+		CipherSuite   int    `json:"cipherSuite"`
+		TLSSpkiSha256 string `json:"tlsSpkiSha256"`
 	}
 	if err := json.Unmarshal([]byte(req.GetConfigJson()), &config); err != nil || config.Address == "" {
 		return "", fail("invalid-config", "the ipmi driver needs config.address")
+	}
+	if config.TLSSpkiSha256 != "" {
+		return "", fail("pin-unsupported", "this BMC has a key pin, and IPMI has no TLS to check it against: use a Redfish driver, or remove the pin")
+	}
+	switch config.CipherSuite {
+	case 0:
+		config.CipherSuite = 17
+	case 3, 17:
+	default:
+		return "", fail("invalid-config", "cipherSuite %d is not 17 or 3", config.CipherSuite)
 	}
 	host, port, err := target(config.Address)
 	if err != nil {
@@ -138,6 +164,9 @@ func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, 
 	}
 	if !userName.MatchString(secrets["username"]) || secrets["password"] == "" {
 		return "", fail("credentials-unavailable", "the ipmi driver needs a username and a password")
+	}
+	if len(secrets["password"]) > 20 {
+		return "", fail("credentials-unavailable", "an IPMI 2.0 password has at most 20 bytes")
 	}
 	var args map[string]any
 	if s := req.GetArgsJson(); s != "" && s != "null" {
@@ -168,16 +197,29 @@ func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, 
 	default:
 		return "", fail("unsupported-operation", "the ipmi driver does not implement %s.%s", req.GetKind(), req.GetOperation())
 	}
-	argv := []string{"-I", "lanplus", "-H", host, "-U", secrets["username"], "-E"}
+	argv := []string{"-I", "lanplus", "-H", host, "-U", secrets["username"], "-C", strconv.Itoa(config.CipherSuite), "-f", "/dev/fd/3"}
 	if port != "" {
 		argv = append(argv, "-p", port)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.tool, append(argv, command...)...)
-	// -E: the password from IPMI_PASSWORD, never from argv (a process listing would show it).
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "IPMI_PASSWORD=" + secrets["password"]}
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	// -f /dev/fd/3: the password through a pipe, drained by the one read ipmitool makes. It fits the
+	// pipe's buffer, so it is written before ipmitool starts.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	_, err = pw.Write([]byte(secrets["password"]))
+	pw.Close()
+	if err != nil {
+		pr.Close()
+		return "", err
+	}
+	cmd.ExtraFiles = []*os.File{pr}
 	output, err := cmd.CombinedOutput()
+	pr.Close()
 	text := strings.TrimSpace(string(output))
 	if err != nil {
 		if ctx.Err() != nil {

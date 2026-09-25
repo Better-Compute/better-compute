@@ -129,6 +129,7 @@ func TestHelperOperations(t *testing.T) {
 		"unknown gpu":   {Op: "gpu.reset", GPU: "GPU-99999999-0000"},
 		"not a gpu":     {Op: "gpu.reset", GPU: "0000:18:00.0; reboot"},
 		"other table":   {Op: "firewall.apply", Ruleset: "table inet filter {\n}\n"},
+		"other family":  {Op: "firewall.apply", Ruleset: "table ip bcd_taps {\n}\n"},
 		"flush ruleset": {Op: "firewall.apply", Ruleset: "flush ruleset\n"},
 		"include":       {Op: "firewall.apply", Ruleset: "include \"/etc/x\"\n"},
 		"rule outside":  {Op: "firewall.apply", Ruleset: "add rule inet filter input drop\n"},

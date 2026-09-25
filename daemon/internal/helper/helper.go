@@ -120,14 +120,19 @@ func Classify(abs string) (kind, name string, ok bool) {
 
 var gpuUUID = regexp.MustCompile(`^GPU-[0-9A-Fa-f-]{8,64}$`)
 
-// firewallTable is the only table a ruleset may name.
-const firewallTable = "bridge bcd_instances"
+// firewallTables are the only tables a ruleset may name: the instances' bridge rules and the inet
+// backstop for taps off their bridge.
+var firewallTables = []string{"bridge bcd_instances", "inet bcd_taps"}
 
 // CheckRuleset accepts only the shape bcd node renders (agent/netpolicy.go): at the top level,
-// "table", "delete table" and "flush table" of bcd's table and "table … {" blocks of it; inside a
+// "table", "delete table" and "flush table" of bcd's tables and "table … {" blocks of them; inside a
 // block, chains and rules, which cannot reach another table. No include, define or ruleset verbs.
 func CheckRuleset(ruleset string) error {
-	own := "table " + firewallTable
+	allowed := map[string]bool{}
+	for _, t := range firewallTables {
+		own := "table " + t
+		allowed[own], allowed["delete "+own], allowed["flush "+own], allowed[own+" {"] = true, true, true, true
+	}
 	depth := 0
 	for _, line := range strings.Split(ruleset, "\n") {
 		l := strings.TrimSpace(line)
@@ -139,9 +144,7 @@ func CheckRuleset(ruleset string) error {
 			return fmt.Errorf("ruleset line %q reaches beyond bcd's table", l)
 		}
 		if depth == 0 {
-			switch l {
-			case own, "delete " + own, "flush " + own, own + " {":
-			default:
+			if !allowed[l] {
 				return fmt.Errorf("ruleset line %q is not bcd's table", l)
 			}
 		} else if strings.HasPrefix(lower, "table ") {
