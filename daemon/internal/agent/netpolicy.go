@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
@@ -42,18 +44,20 @@ func policyEnforced(p agentv1.InstanceNetworkPolicy) bool {
 }
 
 // firewallRuleset renders the table for specs. Instances whose policy cannot be enforced (a NIC
-// without IPAM addresses) are left out and returned in failed: they must not run.
-func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[string]string) {
-	failed = map[string]string{}
-	var guard, input, forward, output []string
+// without IPAM addresses) are left out and returned in failed: they must not run. guarded maps each
+// address the rules bind to its instance's tap (address → instance id): only those may name an
+// instance to the metadata service or an instance tunnel.
+func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[string]string, guarded map[string]string) {
+	failed, guarded = map[string]string{}, map[string]string{}
+	var claims, guard, input, forward, output []string
 	sorted := append([]*agentv1.InstanceSpec(nil), specs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].GetInstanceId() < sorted[j].GetInstanceId() })
 	for _, spec := range sorted {
-		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
-			continue
-		}
+		// A deleted instance keeps its guard until its domain is gone (a destroy can fail); its policy
+		// no longer matters.
+		deleted := spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED
 		policy := spec.GetNetworkPolicy()
-		enforced := policyEnforced(policy)
+		enforced := policyEnforced(policy) && !deleted
 		type nicRules struct {
 			tap            string
 			v4, v6         []string // subnets
@@ -89,10 +93,26 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 			if mac, err := net.ParseMAC(nic.GetMac()); err == nil && len(mac) == 6 {
 				in := fmt.Sprintf("iifname %q", r.tap)
 				guard = append(guard,
+					// Its own MAC and addresses only (0.0.0.0 and :: for DHCP, link-local for NDP).
 					in+" ether saddr != "+mac.String()+" drop",
 					in+" ether type ip ip saddr != "+set(append(r.hosts4, "0.0.0.0"))+" drop",
 					in+" ether type arp arp saddr ip != "+set(append(r.hosts4, "0.0.0.0"))+" drop",
-					in+" ether type ip6 ip6 saddr != "+set(append(r.hosts6, "fe80::/10", "::"))+" drop")
+					in+" ether type ip6 ip6 saddr != "+set(append(r.hosts6, "fe80::/10", "::"))+" drop",
+					// Never a DHCP server or a router, and neighbour adverts only for its own addresses.
+					in+" udp sport { 67, 547 } drop",
+					in+" icmpv6 type { nd-router-advert, nd-redirect } drop",
+					in+" icmpv6 type nd-neighbor-advert icmpv6 taddr != "+set(append(r.hosts6, "fe80::/10"))+" drop")
+				// Its addresses belong to its tap: no other port of the bridge (another tap, bcd's or
+				// not, an uplink) may send from them or claim them in ARP or NDP.
+				tap := fmt.Sprintf("iifname != %q", r.tap)
+				for _, a := range r.hosts4 {
+					claims = append(claims, "ip saddr "+a+" "+tap+" drop", "ether type arp arp saddr ip "+a+" "+tap+" drop")
+					guarded[a] = spec.GetInstanceId()
+				}
+				for _, a := range r.hosts6 {
+					claims = append(claims, "ip6 saddr "+a+" "+tap+" drop", "icmpv6 type nd-neighbor-advert icmpv6 taddr "+a+" "+tap+" drop")
+					guarded[a] = spec.GetInstanceId()
+				}
 			}
 			nics = append(nics, r)
 		}
@@ -150,7 +170,8 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 	// transaction, so the old rules are replaced atomically.
 	fmt.Fprintf(&b, "table bridge %s\ndelete table bridge %s\n", firewallTable, firewallTable)
 	// Spoofed frames are dropped before any policy accepts them.
-	input, forward = append(append([]string{}, guard...), input...), append(append([]string{}, guard...), forward...)
+	first := append(append([]string{}, claims...), guard...)
+	input, forward = append(append([]string{}, first...), input...), append(append([]string{}, first...), forward...)
 	if len(input)+len(forward)+len(output) > 0 {
 		fmt.Fprintf(&b, "table bridge %s {\n", firewallTable)
 		chain := func(name string, rules []string) {
@@ -165,11 +186,40 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 		chain("output", output)
 		b.WriteString("}\n")
 	}
-	return b.String(), failed
+	return b.String(), failed, guarded
 }
 
 func set(items []string) string { return "{ " + strings.Join(items, ", ") + " }" }
 
 func policyName(p agentv1.InstanceNetworkPolicy) string {
 	return strings.ToLower(strings.TrimPrefix(p.String(), "INSTANCE_NETWORK_POLICY_"))
+}
+
+// firewallLoop notices when bcd's table disappears (an nftables reload, "flush ruleset"): the
+// metadata service and instance dials stop trusting addresses at once, and the next pass loads the
+// table again.
+func (a *Agent) firewallLoop(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.checkFirewall(ctx)
+		}
+	}
+}
+
+func (a *Agent) checkFirewall(ctx context.Context) {
+	if !a.tableLoaded.Load() {
+		return
+	}
+	if err := a.host.CheckFirewall(ctx); err != nil {
+		a.log.Warn("the instance firewall is gone; loading it again", "error", err.Error())
+		a.spoofGuard.Store(false)
+		a.tableLoaded.Store(false)
+		a.instances.stale.Store(true)
+		a.triggerConverge()
+	}
 }

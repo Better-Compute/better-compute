@@ -44,6 +44,12 @@ func (a *Agent) instanceOf(r *http.Request) (string, bool) {
 	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
 		return "", false
 	}
+	a.mu.Lock()
+	owner := a.guarded[ip.String()]
+	a.mu.Unlock()
+	if owner == "" {
+		return "", false // an address no rule binds to a tap names nobody
+	}
 	found := ""
 	for _, rt := range a.o.Runtimes {
 		domains, err := rt.List(r.Context())
@@ -69,7 +75,7 @@ func (a *Agent) instanceOf(r *http.Request) (string, bool) {
 			}
 		}
 	}
-	return found, found != ""
+	return found, found != "" && found == owner
 }
 
 // ServeIMDS serves the metadata service on listen (the host's link-local metadata address) until

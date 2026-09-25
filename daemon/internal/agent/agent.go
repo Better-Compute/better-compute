@@ -116,6 +116,11 @@ type Agent struct {
 	instances   *instancesConverger
 	// spoofGuard: the instances' anti-spoofing rules are loaded (netpolicy.go); IMDS needs it.
 	spoofGuard atomic.Bool
+	// tableLoaded: the loaded ruleset defines the bcd_instances table (firewallLoop checks it is
+	// still there).
+	tableLoaded atomic.Bool
+	// guarded maps the addresses the loaded rules bind to their instance's tap to that instance.
+	guarded map[string]string
 	// uploads are the snapshot files instance.snapshot is uploading (collectSnapshots keeps them).
 	uploads sync.Map
 	cache   *imageCache
@@ -319,6 +324,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.sweepLoop(ctx)
 	go a.healthLoop(ctx)
 	go a.watchXids(ctx)
+	if len(a.o.Runtimes) > 0 {
+		go a.firewallLoop(ctx)
+	}
 	if a.o.Renewer != nil {
 		go a.renewLoop(ctx)
 	}

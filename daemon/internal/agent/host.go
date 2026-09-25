@@ -40,6 +40,9 @@ type Host interface {
 	ResetGPU(ctx context.Context, uuid string) error
 	// ApplyFirewall loads an nftables ruleset (one transaction; the instances' network policies).
 	ApplyFirewall(ctx context.Context, ruleset string) error
+	// CheckFirewall reports whether bcd's table is still loaded (an nftables reload or a
+	// "flush ruleset" removes it).
+	CheckFirewall(ctx context.Context) error
 
 	// The ramdisk's operations (ramdisk.go, ramdisk_host.go).
 	SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (method string, verified bool, err error)
@@ -73,6 +76,22 @@ type RealHost struct {
 
 // FirewallFile is where a host under a fake root keeps the ruleset it was asked to load.
 const FirewallFile = "/run/bcd/instances.nft"
+
+// CheckFirewall lists bcd's table (nft list table bridge bcd_instances); a host under a fake root
+// checks its ruleset file.
+func (h *RealHost) CheckFirewall(ctx context.Context) error {
+	if h.FirewallFunc != nil {
+		return nil
+	}
+	if h.Root != "" && h.Root != "/" {
+		_, err := os.Stat(h.Path(FirewallFile))
+		return err
+	}
+	if out, err := exec.CommandContext(ctx, "nft", "list", "table", "bridge", firewallTable).CombinedOutput(); err != nil {
+		return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 // ApplyFirewall runs nft -f with the ruleset on its standard input. A host under a fake root (fakehw)
 // writes it to FirewallFile instead.

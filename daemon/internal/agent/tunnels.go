@@ -296,6 +296,12 @@ func (a *Agent) instanceAddress(ctx context.Context, id string) (net.IP, error) 
 				if other, taken := claimed[ip.String()]; taken {
 					return nil, fmt.Errorf("instance %s shares its address with %s; not dialled", id, other)
 				}
+				a.mu.Lock()
+				owner := a.guarded[ip.String()]
+				a.mu.Unlock()
+				if owner != id {
+					continue // no rule binds this address to the instance's tap
+				}
 				return ip, nil
 			}
 			return nil, fmt.Errorf("instance %s has no address the host may dial", id)

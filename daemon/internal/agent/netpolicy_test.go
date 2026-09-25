@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
@@ -28,7 +29,7 @@ func TestFirewallRuleset(t *testing.T) {
 	unaddressed.Nics[0].Addresses = nil
 	gone := withPolicy(vm("inst_gone", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED), agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_NONE)
 
-	ruleset, failed := firewallRuleset([]*agentv1.InstanceSpec{none, egress, private, unaddressed, gone})
+	ruleset, failed, guarded := firewallRuleset([]*agentv1.InstanceSpec{none, egress, private, unaddressed, gone})
 	if len(failed) != 1 || !strings.Contains(failed["inst_noipam"], "needs IPAM addresses") {
 		t.Fatalf("failed = %v", failed)
 	}
@@ -58,10 +59,29 @@ func TestFirewallRuleset(t *testing.T) {
 	if strings.Contains(ruleset, "iifname "+tap("inst_none")+" ip daddr") {
 		t.Errorf("a NONE instance may reach its subnet:\n%s", ruleset)
 	}
-	for _, id := range []string{"inst_noipam", "inst_gone"} {
-		if strings.Contains(ruleset, tap(id)) {
-			t.Errorf("%s has rules", id)
+	if strings.Contains(ruleset, tap("inst_noipam")) {
+		t.Error("inst_noipam has rules")
+	}
+	// A deleted instance keeps its guard (its domain may outlive a failed destroy), not its policy.
+	if !strings.Contains(ruleset, "iifname "+tap("inst_gone")+" ether saddr != ") || strings.Contains(ruleset, "iifname "+tap("inst_gone")+" drop") {
+		t.Errorf("inst_gone rules:\n%s", ruleset)
+	}
+	// Each guarded address belongs to its tap: nothing else on the bridge sends from it or claims it.
+	for _, want := range []string{
+		"ip saddr 10.0.0.6 iifname != " + tap("inst_private") + " drop",
+		"ether type arp arp saddr ip 10.0.0.6 iifname != " + tap("inst_private") + " drop",
+		"ip6 saddr fd00::6 iifname != " + tap("inst_private") + " drop",
+		"icmpv6 type nd-neighbor-advert icmpv6 taddr fd00::6 iifname != " + tap("inst_private") + " drop",
+		"iifname " + tap("inst_egress") + " udp sport { 67, 547 } drop",
+		"iifname " + tap("inst_egress") + " icmpv6 type { nd-router-advert, nd-redirect } drop",
+		"iifname " + tap("inst_private") + " icmpv6 type nd-neighbor-advert icmpv6 taddr != { fd00::6, fe80::/10 } drop",
+	} {
+		if !strings.Contains(ruleset, want) {
+			t.Errorf("ruleset lacks %q", want)
 		}
+	}
+	if guarded["10.0.0.6"] != "inst_private" || guarded["fd00::6"] != "inst_private" || guarded["10.0.0.5"] == "" {
+		t.Errorf("guarded = %v", guarded)
 	}
 	// Every addressed NIC is guarded against spoofing, whatever its policy, before any accept.
 	for _, want := range []string{
@@ -74,7 +94,7 @@ func TestFirewallRuleset(t *testing.T) {
 			t.Errorf("ruleset lacks %q", want)
 		}
 	}
-	if strings.Contains(ruleset, tap("inst_egress")+" drop\n") || strings.Contains(ruleset, "oifname "+tap("inst_egress")) {
+	if strings.Contains(ruleset, "iifname "+tap("inst_egress")+" drop\n") || strings.Contains(ruleset, "oifname "+tap("inst_egress")) {
 		t.Errorf("an egress instance is restricted beyond anti-spoofing:\n%s", ruleset)
 	}
 	input := ruleset[strings.Index(ruleset, "chain input"):strings.Index(ruleset, "chain forward")]
@@ -84,13 +104,13 @@ func TestFirewallRuleset(t *testing.T) {
 	// A malformed MAC never reaches the ruleset.
 	odd := vm("inst_odd", running)
 	odd.Nics[0].Mac = `52:54:00:00:00:01" accept; drop "`
-	if rs, _ := firewallRuleset([]*agentv1.InstanceSpec{odd}); strings.Contains(rs, "accept;") {
+	if rs, _, g := firewallRuleset([]*agentv1.InstanceSpec{odd}); strings.Contains(rs, "accept;") || len(g) != 0 {
 		t.Fatalf("the MAC was injected:\n%s", rs)
 	}
 	// Nothing addressed: the table is only removed.
 	bare := vm("inst_bare", running)
 	bare.Nics[0].Addresses = nil
-	if empty, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\n" {
+	if empty, _, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\n" {
 		t.Fatalf("empty ruleset = %q", empty)
 	}
 	if n := len(runtime.TapName("inst_"+strings.Repeat("x", 200), 99)); n > 15 {
@@ -180,5 +200,42 @@ func TestNetworkPoliciesAreEnforcedBeforeInstancesRun(t *testing.T) {
 	// Without the anti-spoofing rules the metadata service names no instance.
 	if h.agent.spoofGuard.Load() {
 		t.Fatal("the guard is on although the rules did not load")
+	}
+}
+
+// An external "flush ruleset" takes bcd's table away: trust in addresses ends at once, and the next
+// pass loads the table again.
+func TestFirewallReloadsAfterAFlush(t *testing.T) {
+	h := newHarness(t, func(o *Options) {
+		o.Runtimes = []runtime.Runtime{&runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(t.TempDir(), "runtime.json"), BootID: "boot-1"}}
+	})
+	s, _ := h.open()
+	web := vm("inst_web", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
+	s.push(desired(1, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web}}}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 1 })
+	loads := func() int {
+		h.host.mu.Lock()
+		defer h.host.mu.Unlock()
+		return len(h.host.firewalls)
+	}
+	if !h.agent.spoofGuard.Load() || loads() != 1 {
+		t.Fatalf("guard %v after %d loads", h.agent.spoofGuard.Load(), loads())
+	}
+	h.host.mu.Lock()
+	h.host.firewallGone = true
+	h.host.mu.Unlock()
+	h.agent.checkFirewall(context.Background())
+	if h.agent.spoofGuard.Load() {
+		t.Fatal("addresses stayed trusted without the table")
+	}
+	h.host.mu.Lock()
+	h.host.firewallGone = false
+	h.host.mu.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for loads() < 2 || !h.agent.spoofGuard.Load() {
+		if time.Now().After(deadline) {
+			t.Fatalf("the table was not loaded again (%d loads)", loads())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

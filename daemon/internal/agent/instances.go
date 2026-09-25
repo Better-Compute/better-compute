@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/converge"
@@ -32,6 +33,8 @@ type instancesConverger struct {
 	specErrors map[string]string
 	// firewall is the network-policy ruleset last loaded (netpolicy.go); "" before the first pass.
 	firewall string
+	// stale: the loaded table went missing (an external flush); the next pass loads it again.
+	stale atomic.Bool
 }
 
 // enforceNetworkPolicies loads the instances' firewall (anti-spoofing and network policies) when it
@@ -39,13 +42,22 @@ type instancesConverger struct {
 // that failed to load (fail closed). Egress instances run without the rules, but the metadata
 // service stays off; a failed load is retried on the next pass.
 func (c *instancesConverger) enforceNetworkPolicies(ctx context.Context, specs []*agentv1.InstanceSpec) map[string]string {
-	ruleset, failed := firewallRuleset(specs)
-	if ruleset == c.firewall {
+	ruleset, failed, guarded := firewallRuleset(specs)
+	if ruleset == c.firewall && !c.stale.Swap(false) {
 		return failed
 	}
 	err := c.a.host.ApplyFirewall(ctx, ruleset)
-	// The metadata service names instances by address: it serves only while spoofing is dropped.
+	// The metadata service and instance tunnels name instances by address: they trust only the
+	// addresses these rules bind to their taps, and only while the rules are loaded.
+	c.a.mu.Lock()
+	if err == nil {
+		c.a.guarded = guarded
+	} else {
+		c.a.guarded = nil
+	}
+	c.a.mu.Unlock()
 	c.a.spoofGuard.Store(err == nil)
+	c.a.tableLoaded.Store(err == nil && strings.Contains(ruleset, "chain input"))
 	if err == nil {
 		c.firewall = ruleset
 		return failed

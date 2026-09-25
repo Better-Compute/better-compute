@@ -142,9 +142,20 @@ type fakeHost struct {
 	sshReloads int
 	kmsg       io.ReadCloser
 	resets     []string
-	// firewalls are the rulesets loaded; firewallErr fails the next loads.
-	firewalls   []string
-	firewallErr error
+	// firewalls are the rulesets loaded; firewallErr fails the next loads; firewallGone says the
+	// table was flushed away.
+	firewalls    []string
+	firewallErr  error
+	firewallGone bool
+}
+
+func (h *fakeHost) CheckFirewall(context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.firewallGone {
+		return errors.New("no such table")
+	}
+	return nil
 }
 
 func (h *fakeHost) ApplyFirewall(_ context.Context, ruleset string) error {
