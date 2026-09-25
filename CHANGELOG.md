@@ -34,7 +34,19 @@
       - The trust bundle version follows its content; `pki.trustVersion` is now a floor.
       - `pki.approvers.setSignatures` are published for the version they sign, and an unsigned quorum change is
         logged.
-    - Envelope: `MethodAdmission.abandoned` cleans up after an allowed handler throws.
+    - Envelope: `MethodAdmission.abandoned` cleans up after any failure following transaction 1 (not the IAM
+      refusal, which runs `denied`).
+    - Quorum API:
+      - `commandBatches.create` (`batches:create`, idempotent), and `commands.run({ batchId })`; CommandInfo gains
+        `batchId` and `awaitingApproval`.
+      - Leaves may carry their payload, which approvers see in `scope`; its type must be the kind's, at most
+        8 MiB per batch.
+      - Batch subjects must be the tenant's own nodes.
+      - MCP `propose_command_batch` (there is no approve tool).
+    - The approver set has its own epoch (`pki.approvers.epoch`, TrustBundle field 8). A stale replica refuses to
+      start rather than republish an old trust bundle.
+    - `SiteSpec.proxy_targets` bounds `site.httpProxy` to the listed machines.
+    - Rollout sends the signed release manifest with `NodeSpec.daemon` and `daemon.upgrade`, for bcd's self-update.
     - `lint:repo` checks the generated docs reference before the API freeze.
   - Tests: the §16 v0.3 MCP confirmation acceptance and §12.6 example policies end to end, §5.6 walkthrough 2 (acme-cloud), the authz matrix known-key replay step; `pnpm check` runs the remote-IAM suites, `proto-gen --check` and `buf breaking`. Tools: `scripts/private-commit.mjs` (compare-and-swap commits), `scripts/head-check.mjs` (tests the committed tree in a worktree).
 

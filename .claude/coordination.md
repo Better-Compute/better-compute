@@ -299,6 +299,15 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - LOW-6 FakeDaemon run-once keyed by index: leaf hash (c589c5d).
       - LOW denyPending cleared others' pending, and concurrent extends could interleave: per-row in-flight
         marker ([097b34], in progress).
+    - Review 7 follow-ups DONE: M1 epoch (c6214dc), M2 pin (9b7a199), HIGH-1 every kind signed (12ccfa1), SiteSpec
+      proxy_targets (proto 0ae1a70, metal 8391d74; bcd enforces), metal.power payload-bound (844794e).
+    - Security review 8 (subagent over 46afe75..171ad2f), all DONE: batch subjects must be the tenant's nodes, and a
+      leaf payload's typeUrl must be its kind's (fc2df7d); an 8 MiB payload cap per batch; a stale replica refuses to
+      start (e10715b); MCP proposals get a deterministic key (e10715b). Also: `abandoned` runs on every failure after
+      tx1 (18d9ad1, [097b34]).
+    - bcd self-update (de9f380, [6a20b8]): rollout sends the signed release manifest in DaemonSection.signature
+      (ecf7cd0). Open: the install script's [update] release_pins ([402c97]); the docs callouts ([75b663]).
+    - Next for [f02367]: a quorum sim scenario (tests/sim, with [31c64a]).
     - Ramdisk image mount: REDUCED. ext* is written with debugfs, never mounted (1ae1789). The xfs/btrfs/vfat
       fallbacks and the Ignition boot partition remain ([6a20b8]).
       - proto: 525c199, 4f11548;
