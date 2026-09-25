@@ -99,6 +99,12 @@ export {
 export { hostFindings } from './host/findings.js';
 export { mountTunnels, type HostTunnelsConfig, type TunnelMount } from './host/tunnels.js';
 export {
+  buildSupportBundle,
+  knownSecrets,
+  type SupportBundle,
+  type SupportBundleInput,
+} from './commands/support.js';
+export {
   installIamHandlers,
   liveGateways,
   type HostIamConfig,

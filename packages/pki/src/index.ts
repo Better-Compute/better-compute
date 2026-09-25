@@ -37,6 +37,7 @@ export * from './join-token.js';
 export * from './jwe.js';
 export * from './keys.js';
 export * from './pop.js';
+export * from './redact.js';
 export * from './release.js';
 export * from './revocation.js';
 export * from './revocation-feed.js';

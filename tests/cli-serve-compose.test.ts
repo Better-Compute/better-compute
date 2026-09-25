@@ -395,8 +395,64 @@ describe('serve composition audit', () => {
     ).toEqual(['warning host.gateway.notifier']);
   });
 
-  // ([37c0ab]) createModuleContext sets no ctx.workflows yet, so metal verbs fail under betterCompute().
-  it.todo('runs a metal verb as a provision workflow under betterCompute()');
+  it(
+    'runs a metal verb as a provision workflow under betterCompute()',
+    { timeout: 60_000 },
+    async () => {
+      iam = await createEmbeddedTestIam({ now: () => Date.now() });
+      const database = pglite();
+      compute = betterCompute({
+        database,
+        iam: iam.port,
+        secret: COMPOSE_SECRET,
+        baseURL: 'http://127.0.0.1:3000',
+        modules: [...iam.bridge.modules, ...everyModule()],
+        pki: createDevJoinKeys().pki,
+      } as any);
+      await compute.initialize();
+      const api = compute.api as any;
+      const root = iam.root.credential;
+      const tenantId = iam.root.tenantId;
+      const site = await api.sites.create(root, {
+        tenantId,
+        kind: 'shared',
+        region: 'eu-1',
+        idempotencyKey: 'compose-metal-site',
+      });
+      const pool = await api.pools.create(root, {
+        tenantId,
+        siteId: site.id,
+        class: 'metal-host',
+        agent: 'none',
+        policy: { allowUnverifiedRelease: true, provisioningCidrs: ['10.30.0.0/16'] },
+        idempotencyKey: 'compose-metal-pool',
+      });
+      // The verb runs through ctx.workflows (provision's engine): enrolling starts commissioning.
+      const enrolled = await api.metal.enroll(root, {
+        tenantId,
+        siteId: site.id,
+        poolId: pool.id,
+        bmc: {
+          address: 'https://10.20.0.9',
+          driver: 'redfish',
+          credentials: `secret://${tenantId}/bmc-compose`,
+        },
+      });
+      // The metal reconciler picks the enrollment up and hands it to the workflow engine.
+      const workflows = async () =>
+        (
+          await database.query<{ profile_id: string; state: string }>(
+            'SELECT profile_id, state FROM workflows WHERE node_id = $1',
+            [enrolled.nodeId],
+          )
+        ).rows;
+      for (let pass = 0; pass < 5 && (await workflows()).length === 0; pass++)
+        for (const job of Object.values(compute.jobs)) await job.tick().catch(() => undefined);
+      const rows = await workflows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.state).not.toBe('failed');
+    },
+  );
 
   it(
     'serve runs the API, host routes and the gateway role over mTLS from one configuration',

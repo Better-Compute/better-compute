@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { create } from '@bufbuild/protobuf';
+import { redactSecrets } from '@better-compute/pki';
 import {
   AgentRole,
   DiagNvmlResultSchema,
@@ -176,8 +177,6 @@ export const fakeInventoryRefresh: FakeKind = {
   },
 };
 
-const tokenPattern = /\b(bcjt|biam)_[A-Za-z0-9._-]+/g;
-
 /** logs.collect: "uploads" a small bundle to the presigned URL (the fake object store). */
 export const fakeLogsCollect: FakeKind = {
   lane: commandKinds['logs.collect'].lane,
@@ -203,7 +202,8 @@ export const fakeLogsCollect: FakeKind = {
       'env: BCD_JOIN_TOKEN=bcjt_01example.secret',
     ];
     if (request.supportBundle) lines.push('support-bundle: status, doctor, journal metadata, inventory');
-    let bytes: Uint8Array = new TextEncoder().encode(`${lines.join('\n').replace(tokenPattern, '$1_[redacted]')}\n`);
+    // pki's scanner: join and IAM tokens, JWTs, private keys, URL passwords (bcd mirrors the patterns).
+    let bytes: Uint8Array = new TextEncoder().encode(`${redactSecrets(lines.join('\n')).text}\n`);
     let truncated = false;
     const max = Number(request.maxBytes);
     if (max > 0 && bytes.byteLength > max) {

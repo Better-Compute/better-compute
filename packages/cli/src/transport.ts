@@ -137,5 +137,6 @@ export function listRoutes(compute: AnyCompute): RouteEntry[] {
       access: method.kind === 'public' ? ('public' as const) : ('token' as const),
       action: method.action,
     }))
-    .sort((a, b) => a.route.localeCompare(b.route));
+    // Code-unit order: the same on every machine, whatever its locale (`siteTokens` before `sites`).
+    .sort((a, b) => (a.route < b.route ? -1 : a.route > b.route ? 1 : 0));
 }

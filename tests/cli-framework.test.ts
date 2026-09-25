@@ -175,6 +175,7 @@ describe('help and the manifest', () => {
       'release sign',
       'release cosign',
       'release verify',
+      'support bundle',
     ]);
     const api = manifest.commands.find((command: { name: string }) => command.name === 'api');
     expect(api.target).toBe('token');
