@@ -23,6 +23,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"github.com/better-compute/better-compute/daemon/internal/transport"
 )
 
@@ -175,6 +176,15 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+// runtimesFor gives node agents the build's instance runtimes (site agents and ramdisks run none).
+func runtimesFor(mode, dataDir string, host agent.Host) []runtime.Runtime {
+	if mode != "node" {
+		return nil
+	}
+	bootID, _ := host.BootID()
+	return newRuntimes(dataDir, bootID)
+}
+
 // clientRenewer calls Renew on whichever client is current.
 type clientRenewer struct {
 	client *atomic.Pointer[transport.Client]
@@ -249,6 +259,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		},
 		SignerPin:  signerPin,
 		ImageCache: cfg.ImageCache,
+		Runtimes:   runtimesFor(mode, cfg.DataDir, host),
 		Version:    version,
 		Log:        log,
 	})

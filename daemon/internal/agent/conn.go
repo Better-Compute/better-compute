@@ -153,15 +153,21 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 	a.invMu.Lock()
 	gpus := len(gpuUUIDs(a.inv))
 	a.invMu.Unlock()
+	for _, r := range a.o.Runtimes {
+		h.Drivers = append(h.Drivers, &commonv1.DriverManifest{
+			Id: r.Name(), Version: a.o.Version, Kinds: []string{"runtime"}, RunsOn: commonv1.RunsOn_RUNS_ON_NODE,
+			ConfigSchemaJson: `{"type":"object"}`,
+		})
+	}
 	if gpus > 0 {
 		h.Capabilities = []string{"cdi", "nvml"}
-		h.Drivers = []*commonv1.DriverManifest{{
+		h.Drivers = append(h.Drivers, &commonv1.DriverManifest{
 			Id:               "nvidia",
 			Version:          a.o.Version,
 			Kinds:            []string{"config"},
 			RunsOn:           commonv1.RunsOn_RUNS_ON_NODE,
 			ConfigSchemaJson: `{"type":"object"}`,
-		}}
+		})
 	}
 	return h, nil
 }

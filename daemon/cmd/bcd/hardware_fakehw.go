@@ -13,6 +13,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/fakehw"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 )
 
 // hardwareBackend names the inventory source this binary was built with.
@@ -55,6 +56,11 @@ func newHost(dataDir string) (agent.Host, error) {
 			return reexec()
 		},
 	}, nil
+}
+
+// newRuntimes is the fake instance runtime of a fakehw VPS host (FakeHypervisor's default id).
+func newRuntimes(dataDir, bootID string) []runtime.Runtime {
+	return []runtime.Runtime{&runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(dataDir, "fakehw-runtime.json"), BootID: bootID}}
 }
 
 func newUUID() string {

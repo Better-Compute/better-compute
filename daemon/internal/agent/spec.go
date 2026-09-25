@@ -219,11 +219,16 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	a.devices.generation = generation
 	a.access.generation = generation
-	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, []converge.Converger{a.devices, a.access, telemetryConverger{}, siteConverger{a}})
+	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, []converge.Converger{a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}})
 	if err != nil {
 		return false
 	}
 	status := &agentv1.StatusReport{AppliedGeneration: generation}
+	if len(a.o.Runtimes) > 0 {
+		// Everything the runtimes hold, managed or not: the control plane finds leaks by it.
+		status.Instances = a.instances.report(ctx, a.instances.specErrors, a.instances.specs)
+		status.InstancesComplete = true
+	}
 	for _, r := range report.Sections {
 		if r.Section == "site" && spec.Site == nil {
 			continue
@@ -274,8 +279,11 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 }
 
 func failedReason(s converge.Section) string {
-	if s == converge.SectionDevices {
+	switch s {
+	case converge.SectionDevices:
 		return "AllocationFailed"
+	case converge.SectionInstances:
+		return "InstanceFailed"
 	}
 	return "ConvergeFailed"
 }

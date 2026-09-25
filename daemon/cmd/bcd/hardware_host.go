@@ -7,6 +7,7 @@ import (
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 )
 
 // hardwareBackend names the inventory source this binary was built with.
@@ -19,6 +20,10 @@ const devBuild = false
 func collectInventory() (*inventory.NodeInventory, error) {
 	return inventory.Collector{}.Collect()
 }
+
+// newRuntimes: the host build's instance runtimes (libvirt-kvm, cloud-hypervisor) are not built in
+// yet, so a host build runs no instances.
+func newRuntimes(string, string) []runtime.Runtime { return nil }
 
 // newHost is the machine bcd runs on; a reboot goes through systemd so units stop cleanly.
 func newHost(string) (agent.Host, error) {

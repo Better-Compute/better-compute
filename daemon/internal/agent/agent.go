@@ -27,6 +27,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
 	"github.com/better-compute/better-compute/daemon/internal/inventory"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
+	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"github.com/better-compute/better-compute/daemon/internal/session"
 )
 
@@ -79,6 +80,8 @@ type Options struct {
 	HTTPClient *http.Client
 	// ImageCache is the site image cache's base URL a ramdisk tries before an image's source.
 	ImageCache string
+	// Runtimes are the instance runtimes this host runs (VPS hosts; none elsewhere).
+	Runtimes []runtime.Runtime
 	// DialTunnel opens Tunnel streams; nil refuses every OpenTunnel.
 	DialTunnel TunnelDialer
 	// TunnelProgram runs a tunnel's program (default DefaultTunnelProgram).
@@ -102,6 +105,7 @@ type Agent struct {
 	laneConfig  map[dispatch.Lane]dispatch.LaneConfig
 	devices     *devicesConverger
 	boot        *BootEntries
+	instances   *instancesConverger
 	cache       *imageCache
 	access      *accessConverger
 	convergeCh  chan struct{}
@@ -225,6 +229,7 @@ func New(o Options) (*Agent, error) {
 		return nil, err
 	}
 	a.devices = &devicesConverger{a: a}
+	a.instances = &instancesConverger{a: a}
 	a.boot = newBootEntries(o.DataDir)
 	a.cache = newImageCache(filepath.Join(o.DataDir, "cache"))
 	a.cache.changed = a.refreshSections
