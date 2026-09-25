@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Metal attestation and dedicated-root leases:
+  - Security fix: a wipe or diagnostics result counts as attested only when the node signed it. The gateway stores `CommandUpdate.node_sig` (`commands.result_sig*`, `core/0012_v02_evidence`), and metal's default `nodeSignedResults()` verifies it with pki against `node_certs`. Before this, the kind's `attested` flag was trusted, so a gateway could forge a wipe. A lessee's `node-tenant` certificate never attests.
+  - v0.5 `binding: 'node'` (metal side): a dedicated-root lease deploys the lessee's profile under `tenant-controlled` trust with a revoked platform identity, and marks the allocation bound. Its release runs the §13 teardown (fence, attested secure erase, DCGM, firmware baseline check with quarantine on drift, new identity generation).
+  - `core/0012` also adds `node_bindings`, which `nodes.delete` and retirement clear. Provision exports `provisionedTargetResolver()` and `discoveryWorkflowNodeResolver()` for pki's attestors.
 - v0.2 server groups and schema:
   - `joinRequests` list/approve/reject: the approval queue behind deferred joins (`discovery`, placeholder DMI). Decisions are idempotent, and an approval admits one join (the retry with the recorded CSR consumes it in the join transaction).
   - `siteTokens` create/revoke (role `site`), and the SiteBoot lease `site:<id>:boot`: one connected site agent holds it, and the standby is promoted only after it expires, under a new epoch.
