@@ -124,6 +124,13 @@ const identityEnds = new Set([
   'iam:identities:delete',
 ]);
 
+/** Session revocations whose subject is the identity whose sessions ended. */
+const identitySessionEnds = new Set([
+  'auth:session:revoke',
+  'auth:session:revoke-others',
+  'identity:revoke-sessions',
+]);
+
 /**
  * Installs compute's IAM event handlers on `config.bridge` (see `HostIamConfig.handlers` for the defaults).
  * Returns `close()` for the gateway clients the `agent` handler opened.
@@ -151,28 +158,38 @@ export function installIamHandlers(
     { onError: (error, filter) => report(error, { filter }) },
   );
   /**
-   * A revoked session or offboarded identity: its SSE streams in this process at once, and (for an identity) the
-   * tunnels its tickets opened on every gateway. Never without an id: a bare filter would close too much.
+   * better-iam audits session revocations and identity changes with the IDENTITY as the subject (its audit
+   * helper sets `resourceId: identity.id`; the revoked session is not in the event). So:
+   * - `end`: an identity that is gone. Its SSE streams here and its tunnels on every gateway close.
+   * - `sessions`: some of its sessions ended. Its SSE streams here close (clients reconnect with Last-Event-ID
+   *   and are re-authorized at once), and every gateway re-authorizes its tunnels now: the revoked sessions'
+   *   shells close, the others keep running.
+   * Never without an id: a bare filter would close too much.
    */
-  const closeFor = (event: IamInboxEvent, by: 'session' | 'identity') => {
-    const id = text(event.subjectId);
-    if (!id) return;
+  const closeFor = (event: IamInboxEvent, mode: 'end' | 'sessions') => {
+    const identityId = text(event.subjectId);
+    if (!identityId) return;
     for (const registry of streams)
       try {
-        registry.closeWhere(by === 'session' ? { sessionId: id } : { identityId: id }, event.action);
+        registry.closeWhere({ identityId }, event.action);
       } catch (error) {
         report(error, { event });
       }
-    if (by === 'identity')
-      void gateways
-        .list()
-        .then((clients) =>
-          Promise.allSettled(clients.map((client) => client.closeTunnels({ subject: id }, event.action))),
-        )
-        .then((results) => {
-          for (const result of results) if (result.status === 'rejected') report(result.reason, { event });
-        })
-        .catch((error: unknown) => report(error, { event }));
+    void gateways
+      .list()
+      .then((clients) =>
+        Promise.allSettled(
+          clients.map((client) =>
+            mode === 'end'
+              ? client.closeTunnels({ subject: identityId }, event.action)
+              : client.reauthorizeTunnels({ subject: identityId }),
+          ),
+        ),
+      )
+      .then((results) => {
+        for (const result of results) if (result.status === 'rejected') report(result.reason, { event });
+      })
+      .catch((error: unknown) => report(error, { event }));
   };
   const caches = compute.caches;
   const own = config.handlers ?? {};
@@ -195,18 +212,16 @@ export function installIamHandlers(
         if (identityId) caches.dropIdentity(identityId);
         else caches.clear();
         // An identity that is gone keeps no streams (an update, such as a rename, keeps them).
-        if (identityEnds.has(event.action)) closeFor(event, 'identity');
+        if (identityEnds.has(event.action)) closeFor(event, 'end');
       }),
-    // Session revocations name a session, an identity, a role or a tenant; dropping every cached
-    // authentication is exact for all of them and costs one IAM call per caller. Streams close where the event
-    // names the session or identity exactly; the others (revoke-others, role- and tenant-wide) are left to the
-    // streams' periodic re-authorization.
+    // Session revocations name an identity, a role or a tenant; dropping every cached authentication is exact
+    // for all of them and costs one IAM call per caller. An identity's own revocations close or re-check its
+    // streams at once; role- and tenant-wide ones are left to the streams' periodic re-authorization.
     sessions:
       own.sessions ??
       (async (_tx, event) => {
         caches.clear();
-        if (event.action === 'auth:session:revoke') closeFor(event, 'session');
-        else if (event.action === 'identity:revoke-sessions') closeFor(event, 'identity');
+        if (identitySessionEnds.has(event.action)) closeFor(event, 'sessions');
       }),
     authz: own.authz ?? (async () => caches.dropDecisions()),
     onError(error, event, reaction) {

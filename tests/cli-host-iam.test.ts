@@ -136,7 +136,7 @@ describe('host.iam', () => {
       'dropIdentity:agt_1',
       'dropIdentity:agt_2',
     ]);
-    // Local streams close by exact session or identity only; revoke-others and updates are left to re-checks.
+    // better-iam names the identity in every session revocation: its local streams close; updates keep them.
     const closed: [object, string][] = [];
     const registry = {
       closeWhere(filter: object, reason: string) {
@@ -148,15 +148,17 @@ describe('host.iam', () => {
       bridge: { setHandlers: (handlers) => (installed = handlers) },
       streams: [registry],
     });
-    await installed.sessions!(tx, event('auth:session:revoke', 'ses_9'));
-    await installed.sessions!(tx, event('auth:session:revoke-others', 'ses_keep'));
-    await installed.sessions!(tx, event('identity:revoke-sessions', 'idn_9'));
+    await installed.sessions!(tx, event('auth:session:revoke', 'idn_1'));
+    await installed.sessions!(tx, event('auth:session:revoke-others', 'idn_2'));
+    await installed.sessions!(tx, event('identity:revoke-sessions', 'idn_3'));
+    await installed.sessions!(tx, event('tenant:revoke-sessions', 'ten_a'));
     await installed.identity!(tx, event('identity:offboard', 'idn_8'));
     await installed.identity!(tx, event('iam:identities:update', 'idn_7'));
     await installed.sessions!(tx, event('auth:session:revoke'));
     expect(closed).toEqual([
-      [{ sessionId: 'ses_9' }, 'auth:session:revoke'],
-      [{ identityId: 'idn_9' }, 'identity:revoke-sessions'],
+      [{ identityId: 'idn_1' }, 'auth:session:revoke'],
+      [{ identityId: 'idn_2' }, 'auth:session:revoke-others'],
+      [{ identityId: 'idn_3' }, 'identity:revoke-sessions'],
       [{ identityId: 'idn_8' }, 'identity:offboard'],
     ]);
     // Your own agent handler replaces the default one.

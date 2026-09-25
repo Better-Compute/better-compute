@@ -240,6 +240,60 @@ describe('v0.3 access exit', () => {
       await persons.session.until('echo: still here');
       persons.tunnel.close();
 
+      // A person signing out: better-iam audits auth:session:revoke with the identity as subject, so the
+      // identity's /watch streams close at once (a client reconnects and is re-authorized).
+      const member = await t.iam.api.identities.create(t.root.credential, {
+        tenantId,
+        email: 'watcher@root.test',
+        name: 'watcher',
+        password: 'a strong watcher test password',
+      });
+      await t.iam.api.policies
+        .create(t.root.credential, {
+          tenantId,
+          name: 'watch-events',
+          document: {
+            version: 1,
+            statements: [{ effect: 'allow', actions: ['compute:events:read'], resources: ['compute-tenant/*'] }],
+          },
+        })
+        .then((policy: { id: string }) =>
+          t.iam.api.roles.create(t.root.credential, { tenantId, name: 'watchers', policyIds: [policy.id] }),
+        )
+        .then((role: { id: string }) =>
+          t.iam.api.bindings.create(t.root.credential, {
+            tenantId,
+            roleId: role.id,
+            subjectType: 'identity',
+            subjectId: member.id,
+          }),
+        );
+      const signedIn = await t.iam.api.auth.signIn({
+        tenantId,
+        email: 'watcher@root.test',
+        password: 'a strong watcher test password',
+      });
+      const memberToken = (signedIn as { token: string }).token;
+      const memberWatch = await handleWatch(
+        new Request('http://127.0.0.1:3000/watch', { headers: { authorization: `Bearer ${memberToken}` } }),
+        { sql: stack.database, authorize: watchAuthorizer(stack.compute), registry: watches, pollMs: 50 },
+      );
+      expect(memberWatch.status).toBe(200);
+      const memberSse = { closed: false };
+      void (async () => {
+        const reader = memberWatch.body!.getReader();
+        try {
+          while (!(await reader.read()).done);
+        } catch {
+          // Cancelled.
+        }
+        memberSse.closed = true;
+      })();
+      const signedOutAt = Date.now();
+      await t.iam.api.auth.signOut({ token: memberToken });
+      while (!memberSse.closed && Date.now() - signedOutAt < 5_000) await sleep(25);
+      expect(memberSse.closed).toBe(true);
+
       // The revoked delegation opens nothing new.
       await expect(
         api.tunnels.open(acting, { tenantId, nodeId, op: 'console' }),
