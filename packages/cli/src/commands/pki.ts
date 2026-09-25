@@ -383,9 +383,18 @@ export const pkiCommands = [
     description:
       "pki reseal rewrites the bundle sealed with BETTER_COMPUTE_SECRET in the current format, where the seal also covers every certificate and pin, so a file changed without the secret no longer loads. Bundles sealed before that format, or left unsealed while a secret is set, are refused everywhere else. First compare the pins it prints (the same as pki show) with the ones your install scripts and join tokens use: it seals whatever the file holds now. Needs BETTER_COMPUTE_SECRET; the current key and certificates are kept, nothing is rotated.",
     output: 'json',
-    flags: { pki: pkiFlag },
-    examples: ['better-compute pki show && better-compute pki reseal'],
-    async run({ flags, env, path, note }) {
+    flags: {
+      pki: pkiFlag,
+      'accept-unauthenticated': {
+        type: 'boolean',
+        description: 'Seal a bundle nothing authenticates, after comparing the pins printed without it',
+      },
+    },
+    examples: [
+      'better-compute pki reseal',
+      'better-compute pki reseal --accept-unauthenticated',
+    ],
+    async run({ flags, env, path, note, print }) {
       const target = path(flags.pki ?? defaultPkiPath);
       const secret = env.BETTER_COMPUTE_SECRET;
       if (!secret || secret.length < minSecret)
@@ -394,6 +403,27 @@ export const pkiCommands = [
           `Set BETTER_COMPUTE_SECRET (at least ${minSecret} characters): the bundle is sealed under it`,
         );
       const text = await readBundleText(target);
+      // Resealing vouches for whatever the file holds: an unauthenticated bundle (the former seal, or unsealed) is
+      // sealed only when asked explicitly, after its pins and key fingerprints have been shown and compared.
+      let authenticated = true;
+      try {
+        importPkiBundle(text, { secret });
+      } catch {
+        authenticated = false;
+      }
+      if (!authenticated && !flags['accept-unauthenticated']) {
+        const unverified = readPkiPins(text);
+        print({
+          ...unverified,
+          authenticated: false,
+          expires: Object.fromEntries(Object.entries(unverified.expires).map(([name, ms]) => [name, iso(ms)])),
+        });
+        throw new CliError(
+          'INVALID_STATE',
+          `${target} is not authenticated (sealed in the former format, or not sealed): nothing vouches for the pins above`,
+          'Compare them with your records (install scripts, join tokens, pinned CAs), then run pki reseal --accept-unauthenticated.',
+        );
+      }
       const bundle = importPkiBundle(text, { secret, allowUnauthenticated: true });
       await replace(target, exportPkiBundle(bundle, { secret, omitRootKey: !bundle.root }));
       const pins = readPkiPins(await readFile(target, 'utf8'), { secret });

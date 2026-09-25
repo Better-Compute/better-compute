@@ -188,8 +188,15 @@ describe('command-signing root rotation', () => {
     });
     // …until resealed; the pins stay the same.
     const before = readPkiPins(await readFile(target, 'utf8'));
+    // First it only shows what it would vouch for, and asks for an explicit acceptance.
     out.length = 0;
-    await createCli().run(['pki', 'reseal'], io);
+    await expect(createCli().run(['pki', 'reseal'], io)).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: /not authenticated/,
+    });
+    expect(JSON.parse(out.join('\n'))).toMatchObject({ authenticated: false, servingCaSpkiPin: before.servingCaSpkiPin });
+    out.length = 0;
+    await createCli().run(['pki', 'reseal', '--accept-unauthenticated'], io);
     const after = JSON.parse(out.join('\n'));
     expect(after).toMatchObject({ authenticated: true, servingCaSpkiPin: before.servingCaSpkiPin });
     expect(await readFile(target, 'utf8')).toContain('"sealed"');

@@ -152,7 +152,7 @@ export const sandboxCommands = [
       all: { type: 'boolean', description: 'Every sandbox of the tenant, not only yours' },
       deleted: { type: 'boolean', description: 'Include deleted sandboxes' },
       template: { type: 'string', value: 'ID', description: 'Only this template’s (sbxt_…)' },
-      limit: { type: 'integer', value: 'N', min: 1, max: 500, description: 'Page size' },
+      limit: { type: 'integer', value: 'N', min: 1, max: 200, description: 'Page size (at most 200)' },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
     examples: ['better-compute sandbox list', 'better-compute sandbox list --all --query "items[*].id"'],

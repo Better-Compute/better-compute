@@ -631,7 +631,7 @@ function openKeys(
   options: Pick<ImportPkiBundleOptions, 'secret' | 'allowUnauthenticated'>,
 ): { keys: Partial<Record<KeyName, string>>; authenticated: boolean } {
   const reseal =
-    'check its pins (better-compute pki show), then re-seal it: better-compute pki reseal (BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1 for that run)';
+    'run better-compute pki reseal: it prints the pins it would vouch for; compare them with your records, then run it again with --accept-unauthenticated';
   if (!stored.sealed) {
     if (options.secret !== undefined && !options.allowUnauthenticated)
       throw new ComputeError(
