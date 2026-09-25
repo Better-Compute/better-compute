@@ -2771,6 +2771,71 @@
       ]
     },
     {
+      "name": "batch sign-approvers",
+      "aliases": [],
+      "group": "Quorum",
+      "summary": "Sign a change of the approver set with a current approver key",
+      "description": "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version. Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
+      "usage": "better-compute batch sign-approvers --key PATH --version N [--approvers PATHS] [--threshold K] [--tiers SIZE:K,…] [--unbatched N]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--key",
+          "value": "PATH",
+          "optional": false,
+          "description": "Your CURRENT approver private key (PEM)"
+        },
+        {
+          "flag": "--version",
+          "value": "N",
+          "optional": false,
+          "description": "The trust bundle version that publishes the new set"
+        },
+        {
+          "flag": "--approvers",
+          "value": "PATHS",
+          "optional": true,
+          "description": "The new set: approver public keys (.pub files, comma-separated); empty lifts the quorum"
+        },
+        {
+          "flag": "--threshold",
+          "value": "K",
+          "optional": true,
+          "description": "Approvals a batch needs in the new set"
+        },
+        {
+          "flag": "--tiers",
+          "value": "SIZE:K,…",
+          "optional": true,
+          "description": "Per-size thresholds, ascending, e.g. 5:1,100:2"
+        },
+        {
+          "flag": "--unbatched",
+          "value": "N",
+          "optional": true,
+          "description": "Unbatched destructive commands per hour",
+          "default": 0
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute batch sign-approvers --key alice.pem --version 4 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2"
+      ]
+    },
+    {
       "name": "batch list",
       "aliases": [],
       "group": "Quorum",
