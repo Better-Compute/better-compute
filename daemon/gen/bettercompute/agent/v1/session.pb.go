@@ -1543,8 +1543,11 @@ type Hello struct {
 	// DesiredStateBody.spec_hash of the applied generation, echoed so the control plane can detect a
 	// divergent spec and resend a full one.
 	AppliedSpecHash []byte `protobuf:"bytes,16,opt,name=applied_spec_hash,json=appliedSpecHash,proto3" json:"applied_spec_hash,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// TrustBundle.version the daemon holds and verifies with (0: none). The gateway records it
+	// (node_sessions.trust_version) so a command-root switch waits for every connected node (§13).
+	TrustVersion  uint64 `protobuf:"varint,17,opt,name=trust_version,json=trustVersion,proto3" json:"trust_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -1687,6 +1690,13 @@ func (x *Hello) GetAppliedSpecHash() []byte {
 		return x.AppliedSpecHash
 	}
 	return nil
+}
+
+func (x *Hello) GetTrustVersion() uint64 {
+	if x != nil {
+		return x.TrustVersion
+	}
+	return 0
 }
 
 type Welcome struct {
@@ -3672,7 +3682,10 @@ type StatusReport struct {
 	InstancesComplete bool `protobuf:"varint,7,opt,name=instances_complete,json=instancesComplete,proto3" json:"instances_complete,omitempty"`
 	// (v0.3) Host resource pressure for the Disk/Memory/CpuPressure conditions (§10.1). Absent when
 	// the kernel exposes no PSI.
-	Pressure      *HostPressure `protobuf:"bytes,8,opt,name=pressure,proto3" json:"pressure,omitempty"`
+	Pressure *HostPressure `protobuf:"bytes,8,opt,name=pressure,proto3" json:"pressure,omitempty"`
+	// TrustBundle.version the daemon holds, as in Hello.trust_version, reported again once it applies
+	// a newer bundle mid-session (Welcome.trust), so the ack does not wait for a reconnect. 0: unchanged.
+	TrustVersion  uint64 `protobuf:"varint,9,opt,name=trust_version,json=trustVersion,proto3" json:"trust_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3761,6 +3774,13 @@ func (x *StatusReport) GetPressure() *HostPressure {
 		return x.Pressure
 	}
 	return nil
+}
+
+func (x *StatusReport) GetTrustVersion() uint64 {
+	if x != nil {
+		return x.TrustVersion
+	}
+	return 0
 }
 
 // Linux pressure stall information (/proc/pressure/*, "some" avg10, percent of wall time) and CPU
@@ -5608,7 +5628,7 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x06secret\x18\t \x01(\v2&.bettercompute.agent.v1.SecretResponseH\x00R\x06secret\x12V\n" +
 	"\x0eworkload_token\x18\n" +
 	" \x01(\v2-.bettercompute.agent.v1.WorkloadTokenResponseH\x00R\rworkloadTokenB\x05\n" +
-	"\x03msg\"\x9b\x06\n" +
+	"\x03msg\"\xc0\x06\n" +
 	"\x05Hello\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x17\n" +
 	"\aboot_id\x18\x02 \x01(\tR\x06bootId\x12\x1d\n" +
@@ -5628,7 +5648,8 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x13running_command_ids\x18\r \x03(\tR\x11runningCommandIds\x12$\n" +
 	"\x0elast_event_seq\x18\x0e \x01(\x04R\flastEventSeq\x12]\n" +
 	"\x10inventory_hashes\x18\x0f \x03(\v22.bettercompute.agent.v1.Hello.InventoryHashesEntryR\x0finventoryHashes\x12*\n" +
-	"\x11applied_spec_hash\x18\x10 \x01(\fR\x0fappliedSpecHash\x1aB\n" +
+	"\x11applied_spec_hash\x18\x10 \x01(\fR\x0fappliedSpecHash\x12#\n" +
+	"\rtrust_version\x18\x11 \x01(\x04R\ftrustVersion\x1aB\n" +
 	"\x14InventoryHashesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xbe\x04\n" +
@@ -5794,7 +5815,7 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\tsignature\x18\x04 \x01(\fR\tsignature\"y\n" +
 	"\vSpecRequest\x12'\n" +
 	"\x0fhave_generation\x18\x01 \x01(\x04R\x0ehaveGeneration\x12A\n" +
-	"\x06reason\x18\x02 \x01(\x0e2).bettercompute.agent.v1.SpecRequestReasonR\x06reason\"\xd7\x03\n" +
+	"\x06reason\x18\x02 \x01(\x0e2).bettercompute.agent.v1.SpecRequestReasonR\x06reason\"\xfc\x03\n" +
 	"\fStatusReport\x12/\n" +
 	"\x13observed_generation\x18\x01 \x01(\x04R\x12observedGeneration\x12-\n" +
 	"\x12applied_generation\x18\x02 \x01(\x04R\x11appliedGeneration\x12*\n" +
@@ -5805,7 +5826,8 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"conditions\x12D\n" +
 	"\tinstances\x18\x06 \x03(\v2&.bettercompute.agent.v1.InstanceStatusR\tinstances\x12-\n" +
 	"\x12instances_complete\x18\a \x01(\bR\x11instancesComplete\x12@\n" +
-	"\bpressure\x18\b \x01(\v2$.bettercompute.agent.v1.HostPressureR\bpressure\"\xa1\x01\n" +
+	"\bpressure\x18\b \x01(\v2$.bettercompute.agent.v1.HostPressureR\bpressure\x12#\n" +
+	"\rtrust_version\x18\t \x01(\x04R\ftrustVersion\"\xa1\x01\n" +
 	"\fHostPressure\x12$\n" +
 	"\x0ecpu_some_avg10\x18\x01 \x01(\x02R\fcpuSomeAvg10\x12*\n" +
 	"\x11memory_some_avg10\x18\x02 \x01(\x02R\x0fmemorySomeAvg10\x12\"\n" +

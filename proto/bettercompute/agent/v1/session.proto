@@ -227,6 +227,9 @@ message Hello {
   // DesiredStateBody.spec_hash of the applied generation, echoed so the control plane can detect a
   // divergent spec and resend a full one.
   bytes applied_spec_hash = 16;
+  // TrustBundle.version the daemon holds and verifies with (0: none). The gateway records it
+  // (node_sessions.trust_version) so a command-root switch waits for every connected node (§13).
+  uint64 trust_version = 17;
 }
 
 message Welcome {
@@ -588,6 +591,9 @@ message StatusReport {
   // (v0.3) Host resource pressure for the Disk/Memory/CpuPressure conditions (§10.1). Absent when
   // the kernel exposes no PSI.
   HostPressure pressure = 8;
+  // TrustBundle.version the daemon holds, as in Hello.trust_version, reported again once it applies
+  // a newer bundle mid-session (Welcome.trust), so the ack does not wait for a reconnect. 0: unchanged.
+  uint64 trust_version = 9;
 }
 
 // Linux pressure stall information (/proc/pressure/*, "some" avg10, percent of wall time) and CPU
