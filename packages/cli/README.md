@@ -149,6 +149,12 @@ better-compute batch cancel --batch batch_…
 - **`batch sign-approvers`** is how the quorum itself changes. Each CURRENT approver signs the new set's keys,
   threshold, tiers and unbatched cap for one trust-bundle `--version`. Daemons that hold approver keys refuse a
   changed quorum, including its removal, without their threshold of such signatures.
+- Approvals and set changes sign the deployment's trust domain. The approver pins it with `--trust-domain` or
+  `BETTER_COMPUTE_TRUST_DOMAIN`, or it comes from the local PKI bundle; never from the server. A batch or scope
+  file of another domain is refused with `TRUST_DOMAIN_MISMATCH`.
+- `batch approve` and `batch sign` also show each operation a leaf binds, decoded from the stored payload the leaf's
+  digest covers. A payload that isn't the bound one is `SCOPE_MISMATCH`. Leaves shown only as a digest need
+  `--allow-opaque`.
 - Key files readable by others are refused, as ssh does.
 
 ## Output and exit codes

@@ -19,7 +19,7 @@ import { BatchApprovalSchema, encodeMessageJson } from '@better-compute/protocol
 // is what pki.approvers.keys takes, and batch sign recomputes the scope root from the listed commands, shows every
 // subject and signs it for one trust domain, so the signature verifies exactly as a daemon checks it.
 
-async function harness(env: NodeJS.ProcessEnv = {}) {
+async function harness(env: NodeJS.ProcessEnv = { BETTER_COMPUTE_TRUST_DOMAIN: 'compute.test' }) {
   const cwd = await mkdtemp(join(tmpdir(), 'bc-batch-'));
   const out: string[] = [];
   const err: string[] = [];
@@ -74,15 +74,15 @@ describe('batch keygen', () => {
   });
 
   it('encrypts the key under BETTER_COMPUTE_APPROVER_PASSPHRASE, which signing then needs', async () => {
-    const h = await harness({ BETTER_COMPUTE_APPROVER_PASSPHRASE: 'correct horse battery staple' });
+    const h = await harness({ BETTER_COMPUTE_APPROVER_PASSPHRASE: 'correct horse battery staple', BETTER_COMPUTE_TRUST_DOMAIN: 'compute.test' });
     await h.run(['batch', 'keygen', '--out', 'alice.pem']);
     expect(await readFile(join(h.cwd, 'alice.pem'), 'utf8')).toContain('ENCRYPTED PRIVATE KEY');
     await writeFile(join(h.cwd, 'scope.json'), JSON.stringify({ batchId, trustDomain, scope: entries }));
     const sign = ['batch', 'sign', '--key', 'alice.pem', '--scope', 'scope.json', '--not-after', later()];
     await expect(h.run(sign)).resolves.toMatchObject({ batchId });
-    h.io.env = {};
+    h.io.env = { BETTER_COMPUTE_TRUST_DOMAIN: 'compute.test' };
     await expect(h.run(sign)).rejects.toMatchObject({ code: 'MISSING_ENV' });
-    h.io.env = { BETTER_COMPUTE_APPROVER_PASSPHRASE: 'wrong' };
+    h.io.env = { BETTER_COMPUTE_APPROVER_PASSPHRASE: 'wrong', BETTER_COMPUTE_TRUST_DOMAIN: 'compute.test' };
     await expect(h.run(sign)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 
@@ -136,7 +136,9 @@ describe('batch sign-approvers', () => {
     // Another deployment sharing these approver keys does not take it.
     expect(() => verifyApproverSetChange(current, { ...next, approverSetSignatures: signatures, trustDomain: 'prod.test' })).toThrow();
     // Without a PKI bundle to read the trust domain from, it must be given.
+    h.io.env = {};
     await expect(h.run(argv('alice').slice(0, -2))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT', message: /--trust-domain/ });
+    h.io.env = { BETTER_COMPUTE_TRUST_DOMAIN: 'compute.test' };
     // Removing the quorum is said out loud; bad thresholds and tier orders are refused.
     await h.run(['batch', 'sign-approvers', '--key', 'alice.pem', '--epoch', '5', '--trust-domain', 'compute.test']);
     expect(h.err.join('\n')).toMatch(/REMOVAL of the quorum/);
@@ -253,10 +255,17 @@ describe('batch sign', () => {
     const far = String(Date.now() + 100 * 3_600_000);
     await expect(h.run([...base, '--not-after', far])).rejects.toMatchObject({ code: 'INVALID_STATE', message: /more than 72 h/ });
     await expect(h.run([...base, '--not-after', far, '--max-hours', '120'])).resolves.toMatchObject({ batchId });
-    // No trust domain: refused.
+    // No trust domain pinned (no flag, no variable, no PKI bundle): refused, the scope file's word is not enough.
+    h.io.env = {};
     await expect(
       h.run(['batch', 'sign', '--key', 'alice.pem', '--batch', batchId, '--scope', 'scope.json', '--not-after', later()]),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    h.io.env = { BETTER_COMPUTE_TRUST_DOMAIN: 'compute.test' };
+    // A scope file of another deployment: refused.
+    await writeFile(join(h.cwd, 'staging.json'), JSON.stringify({ batchId, trustDomain: 'staging.test', scope: entries }));
+    await expect(
+      h.run(['batch', 'sign', '--key', 'alice.pem', '--scope', 'staging.json', '--not-after', later()]),
+    ).rejects.toMatchObject({ code: 'TRUST_DOMAIN_MISMATCH' });
     // Another batch's scope file.
     await writeFile(join(h.cwd, 'other.json'), JSON.stringify({ batchId: 'batch_other', scope: entries }));
     await expect(

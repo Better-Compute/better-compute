@@ -98,7 +98,13 @@ async function setup() {
     out: (line) => out.push(line),
     err: (line) => err.push(line),
     cwd,
-    env: { BETTER_COMPUTE_URL: BASE_URL, BETTER_COMPUTE_TOKEN: TOKEN, BETTER_COMPUTE_TENANT: ACME },
+    env: {
+      BETTER_COMPUTE_URL: BASE_URL,
+      BETTER_COMPUTE_TOKEN: TOKEN,
+      BETTER_COMPUTE_TENANT: ACME,
+      // The deployment this approver approves for (not the server's word for it).
+      BETTER_COMPUTE_TRUST_DOMAIN: 'compute.test',
+    },
     fetch: async (input, init) => compute!.handler(new Request(input, init)),
   };
   const run = async (argv: string[]) => {
@@ -134,6 +140,10 @@ describe('batch commands against commandBatches', () => {
     expect(s.err.join('\n')).toMatch(/node\.reboot ×2: \{"reason":"rack 7 reimage"\}/);
     expect(s.err.join('\n')).toMatch(/gpu\.reset ×1: \{"gpuUuids":\["GPU-0a1b"\]\}/);
 
+    // A server of another deployment (or one lying about its own): refused before anything is signed.
+    await expect(
+      s.run(['batch', 'approve', '--batch', s.batchId, '--key', 'alice.pem', '--yes', '--trust-domain', 'prod.test']),
+    ).rejects.toMatchObject({ code: 'TRUST_DOMAIN_MISMATCH' });
     // A reviewed root that changed is refused; the reviewed one is approved.
     await expect(
       s.run(['batch', 'approve', '--batch', s.batchId, '--key', 'alice.pem', '--root', '00'.repeat(32)]),

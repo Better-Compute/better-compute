@@ -170,6 +170,32 @@ function checkOpaque(opaque: readonly ScopeLeaf[], allow: boolean, note: (line: 
   note(`Warning: ${message}.`);
 }
 
+const trustDomainFlag = {
+  type: 'string',
+  value: 'DOMAIN',
+  env: 'BETTER_COMPUTE_TRUST_DOMAIN',
+  description: "The deployment you approve for (default: the PKI bundle's trust domain); any other is refused",
+} as const satisfies FlagSpec;
+
+/**
+ * The trust domain this approver signs for (review 7 LOW-5): --trust-domain (BETTER_COMPUTE_TRUST_DOMAIN), else the
+ * local PKI bundle's; never the server's word for it, or a compromised deployment could collect signatures that
+ * admit its batches in another one.
+ */
+async function pinnedTrustDomain(
+  flags: { 'trust-domain'?: string | undefined; pki?: string | undefined },
+  path: (value: string) => string,
+): Promise<string> {
+  if (flags['trust-domain']) return flags['trust-domain'];
+  try {
+    return readPkiPins(await readFile(path(flags.pki ?? defaultPkiPath), 'utf8')).trustDomain;
+  } catch {
+    throw usageError(
+      "Pass --trust-domain (or set BETTER_COMPUTE_TRUST_DOMAIN): the deployment you approve for, which the server's word does not settle",
+    );
+  }
+}
+
 const allowOpaqueFlag = {
   type: 'boolean',
   description: 'Approve commands whose operation the batch shows only as a digest',
@@ -513,11 +539,8 @@ export const batchCommands = [
         value: 'TIME',
         description: "The batch's expiry: ISO-8601 or epoch milliseconds (default: the scope file's notAfter)",
       },
-      'trust-domain': {
-        type: 'string',
-        value: 'DOMAIN',
-        description: "The deployment's trust domain (default: the scope file's)",
-      },
+      'trust-domain': trustDomainFlag,
+      pki: pkiFlag,
       expect: expectFlag,
       'allow-unbound': allowUnboundFlag,
       'allow-opaque': allowOpaqueFlag,
@@ -542,7 +565,7 @@ export const batchCommands = [
       let root: Uint8Array | undefined = flags.root === undefined ? undefined : new Uint8Array(Buffer.from(flags.root, 'hex'));
       let size = flags.size;
       let notAfterText = flags['not-after'];
-      let trustDomain = flags['trust-domain'];
+      const trustDomain = await pinnedTrustDomain(flags, path);
       if (flags.scope !== undefined) {
         const file = path(flags.scope);
         const scope = parseScope(await readFile(file, 'utf8'), file);
@@ -558,9 +581,8 @@ export const batchCommands = [
         root = tree.root;
         size = tree.size;
         notAfterText ??= scope.notAfter;
-        if (trustDomain !== undefined && scope.trustDomain !== undefined && scope.trustDomain !== trustDomain)
-          throw new CliError('INVALID_INPUT', `${file} is for trust domain ${scope.trustDomain}, not ${trustDomain}`);
-        trustDomain ??= scope.trustDomain;
+        if (scope.trustDomain !== undefined && scope.trustDomain !== trustDomain)
+          throw new CliError('TRUST_DOMAIN_MISMATCH', `${file} is a batch of ${printable(scope.trustDomain)}, not of ${trustDomain}`);
         note(`Approving batch ${batchId}: ${scopeLine(size, scope.entries)}:`);
         for (const line of subjectLines(scope.entries)) note(line);
         if (flags.expect !== undefined) {
@@ -574,7 +596,6 @@ export const batchCommands = [
         note(`Signing root ${flags.root} of batch ${batchId} unchecked: pass --scope to see what it contains.`);
       }
       if (notAfterText === undefined) throw usageError("Pass --not-after: the batch's expiry");
-      if (!trustDomain) throw usageError("Pass --trust-domain: the deployment's (the approval admits nothing elsewhere)");
       const notAfter = parseNotAfter(notAfterText, Date.now());
       checkWindow(notAfter, Date.now(), flags['max-hours'] ?? 72);
       note(`The approval admits them in ${trustDomain} until ${new Date(notAfter).toISOString()}.`);
@@ -607,11 +628,7 @@ export const batchCommands = [
       threshold: { type: 'integer', value: 'K', min: 0, description: 'Approvals a batch needs in the new set' },
       tiers: { type: 'string', value: 'SIZE:K,…', description: 'Per-size thresholds, ascending, e.g. 5:1,100:2' },
       unbatched: { type: 'integer', value: 'N', min: 0, default: 0, description: 'Unbatched destructive commands per hour' },
-      'trust-domain': {
-        type: 'string',
-        value: 'DOMAIN',
-        description: "The deployment's trust domain (default: the PKI bundle's)",
-      },
+      'trust-domain': trustDomainFlag,
       pki: pkiFlag,
     },
     examples: [
@@ -620,14 +637,7 @@ export const batchCommands = [
     async run({ flags, env, path, note }) {
       const { privateKey, kid } = await loadApproverKey(path(flags.key!), env);
       // The signature is for one deployment: its trust domain from the flag, else the (public) PKI bundle's.
-      let trustDomain = flags['trust-domain'];
-      if (trustDomain === undefined) {
-        try {
-          trustDomain = readPkiPins(await readFile(path(flags.pki ?? defaultPkiPath), 'utf8')).trustDomain;
-        } catch {
-          throw usageError("Pass --trust-domain: the deployment's (no PKI bundle here to read it from)");
-        }
-      }
+      const trustDomain = await pinnedTrustDomain(flags, path);
       const files = (flags.approvers ?? '')
         .split(',')
         .map((item) => item.trim())
@@ -774,6 +784,8 @@ export const batchCommands = [
       'allow-unbound': allowUnboundFlag,
       'allow-opaque': allowOpaqueFlag,
       'max-hours': maxHoursFlag,
+      'trust-domain': trustDomainFlag,
+      pki: pkiFlag,
       yes: { type: 'boolean', description: 'Sign and submit without stopping after the summary' },
     },
     validate(flags) {
@@ -790,9 +802,16 @@ export const batchCommands = [
       const client = await api();
       const view = await readBatch(client, flags.tenant!, flags.batch!);
       if (view.state !== 'pending') throw new CliError('INVALID_STATE', `Batch ${view.batchId} is ${view.state}`);
+      const trustDomain = await pinnedTrustDomain(flags, path);
+      if (view.trustDomain !== trustDomain)
+        throw new CliError(
+          'TRUST_DOMAIN_MISMATCH',
+          `Batch ${view.batchId} is for ${printable(view.trustDomain)}, not ${trustDomain}`,
+          'This server is not the deployment you approve for: do not sign its batches.',
+        );
       checkWindow(view.notAfter, Date.now(), flags['max-hours'] ?? 72);
       const entries = await verifiedScope(client, view);
-      note(`Batch ${view.batchId}: ${printable(view.reason)}`);
+      note(`Batch ${view.batchId} of ${trustDomain}: ${printable(view.reason)}`);
       note(`${scopeLine(view.scopeSize, entries)}:`);
       for (const line of subjectLines(entries)) note(line);
       if (flags.expect !== undefined) {
