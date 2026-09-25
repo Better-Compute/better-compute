@@ -217,7 +217,8 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
     - Docs-session sandbox gaps:
       - MCP gate rules: fixed (e2ead0e);
       - iam setup meter vps.sandbox.warm, console snapshot store, CLI list limit, pki reseal auth: [402c97];
-      - bcd network_policy nftables: [6a20b8];
+      - bcd network_policy nftables: DONE (6db49c8, fails closed); Redfish system paths + an @odata.id guard
+        (4e4c1d7);
       - deleting a kept snapshot: [097b34];
       - the sandbox-templates reference regen: [c321a3];
       - SDK exec/files helpers: deferred (PLAN §3.7).
