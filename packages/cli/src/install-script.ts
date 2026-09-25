@@ -65,8 +65,8 @@ export interface InstallScriptOptions {
   websocket?: { url: string; audience?: string; proxyCaPem?: string };
   /**
    * Privilege separation (bcd 28dc2ae): `bcd node` runs as the unprivileged `bcd` user and asks a root
-   * `bcd helper` (its own unit, on a unix socket) for typed privileged operations. Self-update is off in this mode
-   * until bcd adds an update helper operation.
+   * `bcd helper` (its own unit, on a unix socket) for typed privileged operations, self-update's swap included (bcd
+   * 2d67b25: the slots move to root's /usr/local/lib/bcd).
    */
   unprivileged?: boolean;
   /** Generation stamp for the header comment. */

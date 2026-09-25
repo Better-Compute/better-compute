@@ -353,10 +353,6 @@ export const daemonCommands = [
         generatedAt: new Date().toISOString(),
         generator: `better-compute ${program.version}`,
       });
-      if (flags.unprivileged && flags['release-pins'])
-        note(
-          'Note: with --unprivileged, bcd self-updates only from a release whose bcd helper serves the update operations; before that, upgrade with this script.',
-        );
       if (!flags.out) return script;
       const target = path(flags.out);
       try {
