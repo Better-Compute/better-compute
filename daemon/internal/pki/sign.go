@@ -31,6 +31,7 @@ const (
 	PurposeX509Pop            = "x509pop"
 	PurposeWorkloadToken      = "workload-token"
 	PurposeBatchApproval      = "batch-approval"
+	PurposeApproverSet        = "approver-set"
 )
 
 const signingPrefix = "bettercompute.v1/"

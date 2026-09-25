@@ -84,8 +84,8 @@ func (a *Agent) onCommand(c *agentv1.Command) {
 		return
 	}
 	cmd := dispatch.FromBody(body, c.GetAttempt())
-	intent := intentVerdict{badSig: a.badSignature(c, body)}
-	intent.quorum, intent.unbatched = a.quorumVerdict(c, body, cmd)
+	intent := a.quorumVerdict(c, body, cmd)
+	intent.badSig = a.badSignature(c, body)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	d, err := journal.Resolve(a.j, cmd.Delivery(), a.runtime())
@@ -138,7 +138,9 @@ func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, intent intentVer
 	}
 	if recheck && c != nil {
 		// Checked again now: an approval that expired while the command waited admits nothing.
-		intent.quorum, intent.unbatched = a.quorumVerdictLocked(c, body, cmd)
+		badSig := intent.badSig
+		intent = a.intentLocked(c, body, cmd)
+		intent.badSig = badSig
 	}
 	quorum := intent.quorum
 	if intent.unbatched && quorum == "" && !a.unbatchedAllowedLocked(cmd.ID) {
@@ -215,6 +217,9 @@ func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, intent intentVer
 	}
 	if intent.unbatched {
 		a.recordUnbatchedLocked(cmd.ID)
+	}
+	if intent.leaf != "" {
+		a.recordLeafLocked(intent.leaf, cmd.ID, intent.leafUntil)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	x := &execution{cmd: cmd, kind: kind, phase: phaseQueued, release: release, cancel: cancel, ctx: ctx}

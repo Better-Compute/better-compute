@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -18,8 +20,10 @@ import (
 
 // The destructive-batch quorum (PLAN.md §13, v1.0). With approver keys in the trust bundle, a
 // destructive command (the daemon's own kind table decides) carrying a batch_id runs only with a
-// BatchApproval of enough distinct approver signatures, unexpired, and a proof that its own leaf
-// (batch, subject, kind) is in the approved scope: BATCH_UNAPPROVED otherwise. One without a
+// BatchApproval of enough distinct approver signatures for this deployment's trust domain,
+// unexpired, and a proof that its own leaf (batch, subject, kind, payload digest, or the unbound
+// leaf without a digest) is in the approved scope, and each leaf runs at most once per batch:
+// BATCH_UNAPPROVED otherwise. One without a
 // batch_id is break-glass, capped per rolling hour (unbatched_destructive_per_hour, default 0):
 // UNBATCHED_LIMIT beyond it. The count survives restarts.
 
@@ -31,6 +35,42 @@ type intentVerdict struct {
 	// unbatched: a destructive command without a batch id under an approver quorum (the hourly cap
 	// is checked, and the command counted, at admission).
 	unbatched bool
+	// leaf is the batch leaf the command proved (hex), recorded once it is accepted, until the
+	// approval's not_after: it runs at most once per batch.
+	leaf      string
+	leafUntil time.Time
+}
+
+// batchLeavesFile holds the batch leaves that ran (leaf hex → command id, until when it matters).
+const batchLeavesFile = "batch-leaves.json"
+
+type ranLeaf struct {
+	Command string    `json:"command"`
+	Until   time.Time `json:"until"`
+}
+
+// ranLeavesLocked reads the leaves that ran and still matter (their approval has not expired).
+func (a *Agent) ranLeavesLocked(now time.Time) map[string]ranLeaf {
+	ran := map[string]ranLeaf{}
+	if raw, err := os.ReadFile(filepath.Join(a.o.DataDir, batchLeavesFile)); err == nil {
+		_ = json.Unmarshal(raw, &ran)
+	}
+	for leaf, r := range ran {
+		if !now.Before(r.Until) {
+			delete(ran, leaf)
+		}
+	}
+	return ran
+}
+
+// recordLeafLocked stores that a command ran a batch leaf.
+func (a *Agent) recordLeafLocked(leaf, command string, until time.Time) {
+	ran := a.ranLeavesLocked(a.serverNowLocked())
+	ran[leaf] = ranLeaf{Command: command, Until: until}
+	raw, _ := json.Marshal(ran)
+	if err := pki.WriteFileAtomic(filepath.Join(a.o.DataDir, batchLeavesFile), raw, 0o600); err != nil {
+		a.log.Error("store the batch leaves that ran", "error", err.Error())
+	}
 }
 
 // unbatchedFile holds the unbatched destructive commands of the last hour (command id → local
@@ -50,29 +90,9 @@ func (a *Agent) trustBundleLocked() (b *commonv1.TrustBundle, ok bool) {
 	return b, true
 }
 
-// quorumChange reports why next may not replace current: once approver keys are held, the quorum
-// (approver keys, thresholds, tiers, the unbatched cap) changes only with the approvers' own
-// signatures, which the trust bundle cannot carry yet, so it does not change at all. A JoinService
-// key alone could otherwise drop the approvers or swap in its own.
-func quorumChange(current, next *commonv1.TrustBundle) string {
-	if len(current.GetApproverKeys()) == 0 {
-		return ""
-	}
-	strip := func(b *commonv1.TrustBundle) *commonv1.TrustBundle {
-		return &commonv1.TrustBundle{
-			ApproverKeys: b.GetApproverKeys(), ApproverThreshold: b.GetApproverThreshold(),
-			UnbatchedDestructivePerHour: b.GetUnbatchedDestructivePerHour(), QuorumTiers: b.GetQuorumTiers(),
-		}
-	}
-	if !proto.Equal(strip(current), strip(next)) {
-		return "it changes the approver quorum without the approvers' signatures"
-	}
-	return ""
-}
-
 // commandSubject is what a command acts on, from its signed body: the BMC a site agent drives
-// ("bmc:" + address), the node a site.httpProxy request reaches ("node:" + target), or the node
-// itself.
+// ("bmc:" + the site agent's own node id + "/" + address: BMC addresses are site-local), the node a
+// site.httpProxy request reaches ("node:" + target), or the node itself.
 func commandSubject(cmd dispatch.Command) (string, error) {
 	switch {
 	case strings.HasPrefix(cmd.Kind, "bmc."):
@@ -80,7 +100,7 @@ func commandSubject(cmd dispatch.Command) (string, error) {
 		if err := payloadOf(cmd, req); err != nil || req.GetAddress() == "" {
 			return "", errors.New("a BMC command without its BMC address")
 		}
-		return "bmc:" + req.GetAddress(), nil
+		return "bmc:" + cmd.NodeID + "/" + req.GetAddress(), nil
 	case cmd.Kind == "site.httpProxy":
 		req := &sitev1.HttpProxyRequest{}
 		if err := payloadOf(cmd, req); err != nil || req.GetTargetNodeId() == "" {
@@ -92,15 +112,22 @@ func commandSubject(cmd dispatch.Command) (string, error) {
 }
 
 // quorumVerdict checks a destructive command's batch approval, or reports it unbatched.
-func (a *Agent) quorumVerdict(c *agentv1.Command, body *agentv1.CommandBody, cmd dispatch.Command) (dispatch.Rejection, bool) {
+func (a *Agent) quorumVerdict(c *agentv1.Command, body *agentv1.CommandBody, cmd dispatch.Command) intentVerdict {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.quorumVerdictLocked(c, body, cmd)
+	return a.intentLocked(c, body, cmd)
+}
+
+// intentLocked is the quorum part of the intent verdict, with a.mu held.
+func (a *Agent) intentLocked(c *agentv1.Command, body *agentv1.CommandBody, cmd dispatch.Command) intentVerdict {
+	var v intentVerdict
+	v.quorum, v.unbatched = a.quorumVerdictLocked(c, body, cmd, &v.leaf, &v.leafUntil)
+	return v
 }
 
 // quorumVerdictLocked is quorumVerdict with a.mu held (a deferred command is checked again at
 // admission: its approval may have expired meanwhile).
-func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBody, cmd dispatch.Command) (dispatch.Rejection, bool) {
+func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBody, cmd dispatch.Command, leafOut *string, leafUntil *time.Time) (dispatch.Rejection, bool) {
 	if k := a.kinds[body.GetKind()]; k == nil || !k.Destructive {
 		return "", false
 	}
@@ -124,18 +151,38 @@ func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBod
 	if approval.GetBatchId() != body.GetBatchId() {
 		return refuse("no approval of this batch")
 	}
-	if err := pki.VerifyBatchApproval(approval, bundle, now); err != nil {
+	// The trust domain is this node's own (from its join), never the message's.
+	if err := pki.VerifyBatchApproval(approval, bundle, now, a.state.TrustDomain); err != nil {
 		return refuse(err.Error())
 	}
 	subject, err := commandSubject(cmd)
 	if err != nil {
 		return refuse(err.Error())
 	}
-	leaf := pki.BatchLeaf(body.GetBatchId(), subject, body.GetKind())
+	// The approvers may have bound the leaf to this very payload, or left it unbound ("any payload
+	// of this kind"): either proves it.
 	proof := c.GetBatchProof()
-	if !pki.VerifyBatchProof(leaf, proof.GetIndex(), approval.GetScopeSize(), proof.GetSiblings(), approval.GetScopeRoot()) {
+	var leaf []byte
+	var candidates [][]byte
+	if value := body.GetPayload().GetValue(); len(value) > 0 {
+		digest := sha256.Sum256(value)
+		candidates = append(candidates, pki.BatchLeaf(body.GetBatchId(), subject, body.GetKind(), digest[:]))
+	}
+	candidates = append(candidates, pki.BatchLeaf(body.GetBatchId(), subject, body.GetKind(), nil))
+	for _, l := range candidates {
+		if pki.VerifyBatchProof(l, proof.GetIndex(), approval.GetScopeSize(), proof.GetSiblings(), approval.GetScopeRoot()) {
+			leaf = l
+			break
+		}
+	}
+	if leaf == nil {
 		return refuse("the command (" + subject + ", " + body.GetKind() + ") is not in the approved scope")
 	}
+	// Each leaf runs once per batch (the same command re-executed after a restart is not a second run).
+	if ran, done := a.ranLeavesLocked(now)[hex.EncodeToString(leaf)]; done && ran.Command != body.GetId() {
+		return refuse("this leaf of the batch already ran (command " + ran.Command + ")")
+	}
+	*leafOut, *leafUntil = hex.EncodeToString(leaf), approval.GetNotAfter().AsTime()
 	return "", false
 }
 

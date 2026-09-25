@@ -293,9 +293,10 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 			current, ok := a.trustBundleLocked()
 			if !ok {
 				err = errors.New("the stored trust bundle is unreadable")
-			} else if why := quorumChange(current, bundle); why != "" {
-				err = errors.New(why)
-				a.log.Warn("trust bundle refused", "version", bundle.GetVersion(), "reason", why)
+			} else if qerr := pki.VerifyApproverSet(current, bundle); qerr != nil {
+				// Once approvers exist, the JoinService key alone cannot change them.
+				err = qerr
+				a.log.Warn("trust bundle refused", "version", bundle.GetVersion(), "reason", qerr.Error())
 			}
 		}
 		if err != nil {

@@ -19,16 +19,28 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// testTrustDomain is the harness node's trust domain, which approvals are signed for.
+const testTrustDomain = "compute.test"
+
 // scope builds a batch's Merkle scope as the control plane does (leaves sorted by hash, an odd node
-// promoted) and returns its root and each leaf's proof, keyed by subject+"|"+kind.
-func scope(batchID string, items [][2]string) ([]byte, map[string]*agentv1.BatchProof) {
+// promoted) and returns its root and each leaf's proof, keyed by subject+"|"+kind (+"|bound" for a
+// leaf bound to a payload: items may carry a third element, the payload the leaf binds).
+func scope(batchID string, items [][]any) ([]byte, map[string]*agentv1.BatchProof) {
 	type leaf struct {
 		hash []byte
 		key  string
 	}
 	var leaves []leaf
 	for _, it := range items {
-		leaves = append(leaves, leaf{pki.BatchLeaf(batchID, it[0], it[1]), it[0] + "|" + it[1]})
+		subject, kind := it[0].(string), it[1].(string)
+		var digest []byte
+		key := subject + "|" + kind
+		if len(it) > 2 {
+			value, _ := proto.Marshal(it[2].(proto.Message))
+			sum := sha256.Sum256(value)
+			digest, key = sum[:], key+"|bound"
+		}
+		leaves = append(leaves, leaf{pki.BatchLeaf(batchID, subject, kind, digest), key})
 	}
 	sort.Slice(leaves, func(i, j int) bool { return bytes.Compare(leaves[i].hash, leaves[j].hash) < 0 })
 	level := make([][]byte, len(leaves))
@@ -85,7 +97,7 @@ func (a approvers) approve(batchID string, root []byte, size uint32, signers int
 	approval := &agentv1.BatchApproval{BatchId: batchID, ScopeRoot: root, ScopeSize: size, NotAfter: timestamppb.New(time.Now().Add(time.Hour))}
 	for _, k := range a.keys[:signers] {
 		der, _ := x509.MarshalPKIXPublicKey(&k.PublicKey)
-		sig, _ := pki.SignP1363(k, pki.BatchApprovalInput(approval))
+		sig, _ := pki.SignP1363(k, pki.BatchApprovalInput(approval, testTrustDomain))
 		approval.Signatures = append(approval.Signatures, &commonv1.Signature{Kid: pki.ApproverKid(der), Sig: sig})
 	}
 	return approval
@@ -99,7 +111,7 @@ func batched(b *agentv1.CommandBody, approval *agentv1.BatchApproval, proof *age
 func TestBatchQuorum(t *testing.T) {
 	quorum := newApprovers(t, 3, 2, 1)
 	raw, _ := proto.Marshal(quorum.bundle)
-	h := newHarness(t, func(o *Options) { o.State.TrustBundle = raw })
+	h := newHarness(t, func(o *Options) { o.State.TrustBundle, o.State.TrustDomain = raw, testTrustDomain })
 	s, _ := h.open()
 	reset := func(id, batch string) *agentv1.CommandBody {
 		b := body(id, "gpu.reset", &agentv1.GpuResetRequest{GpuUuids: []string{"GPU-missing"}})
@@ -113,12 +125,26 @@ func TestBatchQuorum(t *testing.T) {
 		}
 	}
 
-	root, proofs := scope("batch_1", [][2]string{{testNode, "gpu.reset"}, {"node_other", "gpu.reset"}, {testNode, "disk.wipe"}})
+	root, proofs := scope("batch_1", [][]any{{testNode, "gpu.reset"}, {"node_other", "gpu.reset"}, {testNode, "disk.wipe"}})
 	mine := proofs[testNode+"|gpu.reset"]
 
-	// Two of three approvers and this node's leaf: it runs.
+	// Two of three approvers and this node's (unbound) leaf: it runs, once.
 	s.push(batched(reset("q1", "batch_1"), quorum.approve("batch_1", root, 3, 2), mine))
 	s.update(t, "q1", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	s.push(batched(reset("q1b", "batch_1"), quorum.approve("batch_1", root, 3, 2), mine))
+	rejected("q1b", commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED)
+
+	// A leaf bound to one payload admits that payload and no other.
+	bound := &agentv1.GpuResetRequest{GpuUuids: []string{"GPU-bound"}}
+	broot, bproofs := scope("batch_b", [][]any{{testNode, "gpu.reset", bound}, {"node_other", "gpu.reset"}})
+	exact := body("b1", "gpu.reset", bound)
+	exact.BatchId = "batch_b"
+	s.push(batched(exact, quorum.approve("batch_b", broot, 2, 2), bproofs[testNode+"|gpu.reset|bound"]))
+	s.update(t, "b1", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	swapped := body("b2", "gpu.reset", &agentv1.GpuResetRequest{GpuUuids: []string{"GPU-other"}})
+	swapped.BatchId = "batch_b"
+	s.push(batched(swapped, quorum.approve("batch_b", broot, 2, 2), bproofs[testNode+"|gpu.reset|bound"]))
+	rejected("b2", commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED)
 	// One approver is not a quorum.
 	s.push(batched(reset("q2", "batch_1"), quorum.approve("batch_1", root, 3, 1), mine))
 	rejected("q2", commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED)
@@ -144,35 +170,6 @@ func TestBatchQuorum(t *testing.T) {
 	s.update(t, "l1", commonv1.CommandState_COMMAND_STATE_ACKED)
 }
 
-// Once approvers exist, a trust bundle signed by the JoinService key alone cannot drop them, swap
-// them or weaken their quorum; other fields may change.
-func TestTheQuorumIsFrozenOnceSet(t *testing.T) {
-	current := newApprovers(t, 2, 2, 0).bundle
-	if quorumChange(nil, current) != "" || quorumChange(&commonv1.TrustBundle{}, current) != "" {
-		t.Fatal("a first quorum was refused")
-	}
-	same := proto.Clone(current).(*commonv1.TrustBundle)
-	same.Version, same.CommandSigningRoots = 3, [][]byte{{1}}
-	if why := quorumChange(current, same); why != "" {
-		t.Fatalf("a roots-only change was refused: %s", why)
-	}
-	for name, change := range map[string]func(b *commonv1.TrustBundle){
-		"dropped":   func(b *commonv1.TrustBundle) { b.ApproverKeys = nil },
-		"swapped":   func(b *commonv1.TrustBundle) { b.ApproverKeys = newApprovers(t, 1, 1, 0).bundle.ApproverKeys },
-		"threshold": func(b *commonv1.TrustBundle) { b.ApproverThreshold = 1 },
-		"unbatched": func(b *commonv1.TrustBundle) { b.UnbatchedDestructivePerHour = 100 },
-		"tiers": func(b *commonv1.TrustBundle) {
-			b.QuorumTiers = []*commonv1.QuorumTier{{MaxScopeSize: 1000, Threshold: 1}}
-		},
-	} {
-		next := proto.Clone(current).(*commonv1.TrustBundle)
-		change(next)
-		if quorumChange(current, next) == "" {
-			t.Errorf("a bundle that %s the quorum was accepted", name)
-		}
-	}
-}
-
 // A stored bundle bcd cannot read never switches the quorum off.
 func TestAnUnreadableBundleRefusesDestructiveCommands(t *testing.T) {
 	h := newHarness(t, func(o *Options) { o.State.TrustBundle = []byte{0xff, 0xff, 0xff} })
@@ -188,9 +185,12 @@ func TestAnUnreadableBundleRefusesDestructiveCommands(t *testing.T) {
 func TestBatchQuorumBindsTheBMC(t *testing.T) {
 	quorum := newApprovers(t, 1, 1, 0)
 	raw, _ := proto.Marshal(quorum.bundle)
-	h := newHarness(t, func(o *Options) { o.State.Role = "site"; o.State.TrustBundle = raw })
+	h := newHarness(t, func(o *Options) {
+		o.State.Role, o.State.TrustBundle, o.State.TrustDomain = "site", raw, testTrustDomain
+	})
 	s, _ := h.open()
-	root, proofs := scope("batch_bmc", [][2]string{{"bmc:10.0.0.9", "bmc.power"}, {"bmc:10.0.0.10", "bmc.power"}})
+	// BMC addresses are site-local: the subject names this site agent too.
+	root, proofs := scope("batch_bmc", [][]any{{"bmc:" + testNode + "/10.0.0.9", "bmc.power"}, {"bmc:node_other_site/10.0.0.10", "bmc.power"}})
 	approval := quorum.approve("batch_bmc", root, 2, 1)
 	power := func(id, address string) *agentv1.CommandBody {
 		b := body(id, "bmc.power", &sitev1.BmcOperationRequest{Driver: "redfish", Address: address, CredentialsRef: "secret://t/bmc", Operation: "power.setPower", ArgsJson: `{"action":"off"}`})
@@ -198,10 +198,10 @@ func TestBatchQuorumBindsTheBMC(t *testing.T) {
 		return b
 	}
 	// The approved BMC's own proof admits it (it then fetches its credentials).
-	s.push(batched(power("p1", "10.0.0.9"), approval, proofs["bmc:10.0.0.9|bmc.power"]))
+	s.push(batched(power("p1", "10.0.0.9"), approval, proofs["bmc:"+testNode+"/10.0.0.9|bmc.power"]))
 	s.update(t, "p1", commonv1.CommandState_COMMAND_STATE_ACKED)
 	// Another BMC with the approved one's proof: refused.
-	s.push(batched(power("p2", "10.0.0.8"), approval, proofs["bmc:10.0.0.9|bmc.power"]))
+	s.push(batched(power("p2", "10.0.0.8"), approval, proofs["bmc:"+testNode+"/10.0.0.9|bmc.power"]))
 	if u := s.update(t, "p2", commonv1.CommandState_COMMAND_STATE_REJECTED); u.GetRejectReason() != commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED {
 		t.Fatalf("p2 = %v", u)
 	}
