@@ -139,13 +139,83 @@ export interface OpenedTunnel {
   path: string;
 }
 
+export interface ListSshCertsInput {
+  tenantId: string;
+  nodeId: string;
+  /** Also certificates past their expiry (kept a day, then dropped). Default: only unexpired ones. */
+  includeExpired?: boolean;
+  /** 1–500, default 100. */
+  limit?: number;
+  /** `nextCursor` of the previous page. */
+  cursor?: string;
+}
+
+/** One break-glass certificate issued for a node in the tenant (never the certificate or key itself). */
+export interface SshCertRecord {
+  serial: string;
+  nodeId: string;
+  /** Who asked for it. */
+  identityId: string;
+  principal: string;
+  keyId: string;
+  issuedAt: number;
+  expiresAt: number;
+  state: 'active' | 'expired' | 'revoked';
+  revokedAt?: number;
+  /** An identity, or `iam` for IAM-driven revocations. */
+  revokedBy?: string;
+  revokeReason?: string;
+}
+
 export type TunnelsApi = {
   tunnels: { open: MethodDefinition<OpenTunnelInput, OpenedTunnel> };
   nodes: {
     issueSshCert: MethodDefinition<IssueSshCertInput, IssuedSshCert>;
     revokeSshCert: MethodDefinition<RevokeSshCertInput, RevokedSshCert>;
+    listSshCerts: MethodDefinition<ListSshCertsInput, { items: SshCertRecord[]; nextCursor?: string }>;
   };
 };
+
+/** The page cursor: newest first by issuance, the serial breaking ties. */
+const certCursor = {
+  encode: (issuedAt: number, serial: string) => Buffer.from(`${issuedAt}:${serial}`).toString('base64url'),
+  decode(cursor: string): { issuedAt: number; serial: string } {
+    const match = /^(\d{1,16}):(\d{1,20})$/.exec(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (!match) invalid('cursor is invalid');
+    return { issuedAt: Number(match[1]), serial: match[2]! };
+  },
+};
+
+export function parseListSshCerts(raw: unknown): ListSshCertsInput {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+    invalid('input must be an object');
+  const input = raw as Record<string, unknown>;
+  for (const key of Object.keys(input))
+    if (!['tenantId', 'nodeId', 'includeExpired', 'limit', 'cursor'].includes(key))
+      invalid(`${key} is not a known field`);
+  if (typeof input.tenantId !== 'string' || !tenantPattern.test(input.tenantId))
+    invalid('tenantId is invalid');
+  if (typeof input.nodeId !== 'string' || !idPattern('node').test(input.nodeId))
+    invalid('nodeId is invalid');
+  if (input.includeExpired !== undefined && typeof input.includeExpired !== 'boolean')
+    invalid('includeExpired must be a boolean');
+  if (
+    input.limit !== undefined &&
+    (!Number.isInteger(input.limit) || (input.limit as number) < 1 || (input.limit as number) > 500)
+  )
+    invalid('limit must be 1 to 500');
+  if (input.cursor !== undefined) {
+    if (typeof input.cursor !== 'string' || input.cursor.length > 128) invalid('cursor is invalid');
+    certCursor.decode(input.cursor as string);
+  }
+  return {
+    tenantId: input.tenantId,
+    nodeId: input.nodeId,
+    ...(input.includeExpired !== undefined ? { includeExpired: input.includeExpired as boolean } : {}),
+    ...(input.limit !== undefined ? { limit: input.limit as number } : {}),
+    ...(input.cursor !== undefined ? { cursor: input.cursor as string } : {}),
+  };
+}
 
 export function parseRevokeSshCert(raw: unknown): RevokeSshCertInput {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
@@ -263,6 +333,20 @@ const inputSchemas = {
       reason: { type: 'string', maxLength: 500 },
     },
     ['tenantId', 'nodeId', 'serial'],
+  ),
+  listSshCerts: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      nodeId: nodeIdSchema,
+      includeExpired: {
+        type: 'boolean',
+        default: false,
+        description: 'Also certificates past their expiry (kept one day)',
+      },
+      limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
+      cursor: { type: 'string', maxLength: 128, description: 'nextCursor of the previous page' },
+    },
+    ['tenantId', 'nodeId'],
   ),
 };
 
@@ -612,6 +696,73 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             },
           });
           return revoked;
+        },
+      }),
+      // Who holds (or held) break-glass access to a node, for the tenant that issued it: audit information, the same
+      // the node's events already show, so it is decided as compute:nodes:read. Never the certificate itself.
+      listSshCerts: defineMethod<ListSshCertsInput, { items: SshCertRecord[]; nextCursor?: string }>({
+        action: 'compute:nodes:read',
+        kind: 'read',
+        resource: (input) => ({ type: 'node', id: input.nodeId }),
+        validate: describedBy(inputSchemas.listSshCerts, parseListSshCerts),
+        async handler(context, input) {
+          const tx = context.sql as SqlTx;
+          await visibleNode(tx, input.tenantId, input.nodeId);
+          const limit = input.limit ?? 100;
+          const after = input.cursor ? certCursor.decode(input.cursor) : undefined;
+          const { rows } = await tx.query<{
+            serial: string;
+            node_id: string;
+            identity_id: string;
+            principal: string;
+            key_id: string;
+            issued_ms: string | number;
+            expires_ms: string | number;
+            revoked_ms: string | number | null;
+            revoked_by: string | null;
+            revoke_reason: string | null;
+            expired: boolean;
+          }>(
+            `SELECT serial, node_id, identity_id, principal, key_id,
+                    floor(extract(epoch FROM issued_at) * 1000)::bigint AS issued_ms,
+                    floor(extract(epoch FROM expires_at) * 1000)::bigint AS expires_ms,
+                    floor(extract(epoch FROM revoked_at) * 1000)::bigint AS revoked_ms,
+                    revoked_by, revoke_reason, expires_at <= compute_now() AS expired
+               FROM ssh_certificates
+              WHERE tenant_id = $1 AND node_id = $2 AND ($3 OR expires_at > compute_now())
+                AND ($4::bigint IS NULL
+                     OR (floor(extract(epoch FROM issued_at) * 1000)::bigint, serial) < ($4::bigint, $5::text))
+              ORDER BY issued_ms DESC, serial DESC
+              LIMIT $6`,
+            [
+              input.tenantId,
+              input.nodeId,
+              input.includeExpired ?? false,
+              after?.issuedAt ?? null,
+              after?.serial ?? '',
+              limit + 1,
+            ],
+          );
+          const items = rows.slice(0, limit).map(
+            (row): SshCertRecord => ({
+              serial: row.serial,
+              nodeId: row.node_id,
+              identityId: row.identity_id,
+              principal: row.principal,
+              keyId: row.key_id,
+              issuedAt: Number(row.issued_ms),
+              expiresAt: Number(row.expires_ms),
+              state: row.revoked_ms !== null ? 'revoked' : row.expired ? 'expired' : 'active',
+              ...(row.revoked_ms !== null ? { revokedAt: Number(row.revoked_ms) } : {}),
+              ...(row.revoked_by ? { revokedBy: row.revoked_by } : {}),
+              ...(row.revoke_reason ? { revokeReason: row.revoke_reason } : {}),
+            }),
+          );
+          const last = items.at(-1);
+          return {
+            items,
+            ...(rows.length > limit && last ? { nextCursor: certCursor.encode(last.issuedAt, last.serial) } : {}),
+          };
         },
       }),
     },

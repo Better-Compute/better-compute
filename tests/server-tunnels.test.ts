@@ -602,6 +602,46 @@ describe('nodes.issueSshCert', () => {
     expect(spec.access?.sshRevokedSerials).toContain(gone.serial);
   });
 
+  it('lists the tenant’s certificates for a node, newest first, with their state and without the certificate', async () => {
+    const definition = (withSsh.api!({} as ModuleContext) as unknown as { nodes: { listSshCerts: Definition } }).nodes
+      .listSshCerts;
+    type Listed = { items: { serial: string; state: string; identityId: string }[]; nextCursor?: string };
+    const list = (raw: Record<string, unknown>) =>
+      db.transaction(
+        async (tx) =>
+          (await definition.handler(
+            { sql: within(tx), clock: { now: () => Date.now() }, caller: alice, requestId: 'r' } as unknown as MethodContext,
+            definition.validate({ tenantId: 'acme', nodeId: NODE, ...raw }),
+          )) as Listed,
+      );
+    const fresh = (await issue({})) as unknown as { serial: string };
+    const gone = (await issue({})) as unknown as { serial: string };
+    await revoke({ serial: gone.serial, reason: 'done' });
+    const all: Listed['items'] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await list({ includeExpired: true, limit: 2, ...(cursor ? { cursor } : {}) });
+      expect(page.items.length).toBeLessThanOrEqual(2);
+      all.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor);
+    // Every page joined: no duplicates, nothing lost.
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT count(*) AS n FROM ssh_certificates WHERE tenant_id = 'acme' AND node_id = $1`,
+      [NODE],
+    );
+    expect(new Set(all.map((item) => item.serial)).size).toBe(Number(rows[0]!.n));
+    expect(all.find((item) => item.serial === fresh.serial)).toMatchObject({ state: 'active', identityId: 'usr_alice' });
+    expect(all.find((item) => item.serial === gone.serial)).toMatchObject({ state: 'revoked', revokeReason: 'done' });
+    expect(JSON.stringify(all)).not.toContain('ssh-ed25519');
+    // Without includeExpired: only unexpired ones.
+    const live = await list({ limit: 500 });
+    expect(live.items.every((item) => item.state !== 'expired')).toBe(true);
+    // Another tenant sees nothing of acme's (the node is not theirs).
+    await expect(list({ tenantId: 'other' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(list({ cursor: 'bm9wZQ' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('allows only the configured accounts', async () => {
     await expect(issue({ principal: 'ubuntu' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     const ubuntu = tunnelsModule({ issuer, ssh: ca, sshAccounts: ['root', 'ubuntu'] });
