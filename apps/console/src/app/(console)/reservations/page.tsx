@@ -5,6 +5,7 @@ import { useMemo } from 'react';
 import { createReservationForm } from '@better-compute/console-kit';
 import { useList, useStore } from '@better-compute/console-kit/react';
 import { useConsole } from '@/components/console-provider';
+import { EarliestStart } from '@/components/earliest-start';
 import { ErrorLine, Loading } from '@/components/ui';
 
 /** The organization's reservations, and the reservation form (preview, confirmation, idempotent submit). */
@@ -87,6 +88,7 @@ export default function ReservationsPage() {
             />
             All GPUs on one NVLink domain
           </label>
+          <EarliestStart poolId={values.poolId} gpus={values.gpus} duration={values.duration} />
           {state.previewing && <p className="muted">Checking capacity…</p>}
           {state.preview && (
             <p className={state.preview.fits ? 'ok' : 'warning'}>
