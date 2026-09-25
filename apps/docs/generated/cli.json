@@ -485,6 +485,82 @@
       "examples": ["better-compute auth logout", "better-compute auth logout --profile ci"]
     },
     {
+      "name": "ssh-cert",
+      "aliases": [],
+      "group": "Access",
+      "summary": "Get a break-glass SSH certificate for one node, next to your key",
+      "description": "ssh-cert asks nodes.issueSshCert for a short-lived OpenSSH user certificate for your own public key (--key, default ~/.ssh/id_ed25519.pub, else id_ecdsa.pub) and writes it beside the key as <key>-cert.pub, where ssh -i <key> finds it. The certificate is bound to the node (principal <account>@<nodeId>): it opens that node only, as --account (default root), for --minutes (default 15, at most 60, and never past your session). It needs compute:nodes:ssh-root and a session verified with MFA. The private key never leaves your machine. Revoke it early with api nodes.revokeSshCert.",
+      "usage": "better-compute ssh-cert --tenant ID --node ID [--key PATH] [--account NAME] [--minutes N] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--node",
+          "value": "ID",
+          "optional": false,
+          "description": "The node"
+        },
+        {
+          "flag": "--key",
+          "value": "PATH",
+          "optional": true,
+          "description": "Your OpenSSH public key (.pub)"
+        },
+        {
+          "flag": "--account",
+          "value": "NAME",
+          "optional": true,
+          "description": "The Unix account on the node",
+          "default": "root"
+        },
+        {
+          "flag": "--minutes",
+          "value": "N",
+          "optional": true,
+          "description": "Validity in minutes",
+          "default": 15
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute ssh-cert --tenant org_acme --node node_01k5w… && ssh -i ~/.ssh/id_ed25519 root@10.0.0.5",
+        "better-compute ssh-cert --tenant org_acme --node node_01k5w… --key ./ops.pub --minutes 5"
+      ]
+    },
+    {
       "name": "reserve",
       "aliases": [],
       "group": "Capacity",
