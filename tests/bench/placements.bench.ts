@@ -9,7 +9,10 @@ import {
   inlinePlacer,
   lockPool,
   placeFromIndex,
+  placeQueued,
+  poolLeasePlacer,
   PoolIndexCache,
+  type ReservationDeps,
 } from '@better-compute/capacity';
 
 // The v0.1 placements/s measurement (PLAN.md §16, bench/REFERENCE.md "placements"): the inline placer
@@ -233,11 +236,14 @@ describe('placements', () => {
     for (let done = 0; done < count; done += 64) {
       const size = Math.min(64, count - done);
       const batchStart = performance.now();
+      let keep: (() => void) | undefined;
       placed += await db.transaction(async (tx) => {
         const pool = await lockPool(tx, 'pool_bench');
         // As the capacity.placer worker does: the index is kept between batches (5 s max age).
         const loadStart = performance.now();
-        const index = await indexes.get(tx, pool, T0 + Math.floor(done / 64) * 1_000);
+        const checkout = await indexes.checkout(tx, pool, T0 + Math.floor(done / 64) * 1_000);
+        const index = checkout.index;
+        keep = checkout.keep;
         loads.push(performance.now() - loadStart);
         let ok = 0;
         for (let i = 0; i < size; i++) {
@@ -257,6 +263,7 @@ describe('placements', () => {
         }
         return ok;
       });
+      keep?.();
       batches.push(performance.now() - batchStart);
     }
     const seconds = (performance.now() - started) / 1000;
@@ -278,6 +285,69 @@ describe('placements', () => {
       'index load ms',
       summary(loads),
     );
+    expect(placed).toBe(count);
+  });
+
+  // End to end: the capacity.placer worker's placeQueued over queued reservation rows, with an event
+  // and a work-queue write per reservation (one INSERT each, standing in for outbox and work_queue).
+  it(`places ${count} queued reservations through placeQueued`, async () => {
+    for (const table of ['device_bookings', 'allocations', 'pool_capacity_rollup', 'reservations'])
+      await db.query(`DELETE FROM ${table}`);
+    await db.query(`CREATE TABLE IF NOT EXISTS bench_side (kind text, key text)`);
+    await db.query(
+      `INSERT INTO reservations (id, tenant_id, pool_id, state, request, request_hash, owner_identity_id,
+                                 idempotency_key, version, conditions)
+       SELECT 'rsv_q' || lpad(i::text, 6, '0'), 'acme', 'pool_bench', 'pending',
+              jsonb_build_object('poolId', 'pool_bench', 'devices', jsonb_build_array(
+                jsonb_build_object('class', 'gpu', 'count', $2::int)), 'duration', '3600000ms', 'binding', 'hold'),
+              '\\x00'::bytea, 'usr_bench', 'k' || i, 1,
+              '[{"type": "Queued", "status": "true", "reason": "PoolPlacer", "since": 0}]'::jsonb
+         FROM generate_series(1, $1::int) i`,
+      [count, gpus],
+    );
+    const side = async (tx: SqlTx, kind: string, key: string) => {
+      await tx.query(`INSERT INTO bench_side VALUES ($1, $2)`, [kind, key]);
+    };
+    const deps = {
+      clock: { now: () => T0 },
+      events: {
+        publish: (tx: SqlTx, event: { type: string; subject: string }) =>
+          side(tx, event.type, event.subject),
+      },
+      work: { enqueue: (tx: SqlTx, kind: string, key: string) => side(tx, kind, key) },
+      authz: {},
+      desired: { async invalidate() {} },
+      placer: poolLeasePlacer(),
+      inline: inlinePlacer(),
+      placement: { random: Math.random, plugins: [], weights: {}, topN: 5 },
+    } as unknown as ReservationDeps;
+    const indexes = new PoolIndexCache();
+    let placed = 0;
+    const batches: number[] = [];
+    const started = performance.now();
+    for (let more = true; more; ) {
+      const batchStart = performance.now();
+      const result = await db.transaction((tx) =>
+        placeQueued(deps, tx, 'pool_bench', { cache: indexes }),
+      );
+      batches.push(performance.now() - batchStart);
+      placed += result.placed;
+      more = result.more;
+      result.keep?.();
+    }
+    const seconds = (performance.now() - started) / 1000;
+    const step: Step = {
+      concurrency: -1,
+      placements: placed,
+      pending: count - placed,
+      errors: 0,
+      seconds: Math.round(seconds * 100) / 100,
+      placementsPerSecond: Math.round((placed / seconds) * 10) / 10,
+      latencyMs: summary(batches),
+      lockHeldMs: summary(batches),
+    };
+    steps.push(step);
+    console.log('placements placeQueued', JSON.stringify(step));
     expect(placed).toBe(count);
   });
 });

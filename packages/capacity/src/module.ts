@@ -1270,19 +1270,15 @@ export function capacityModule(
     shardBy: 'pool',
     async run(context, poolId) {
       const deps = depsFrom(context, placers, options);
-      try {
-        const { more } = await inTx(context, (tx) =>
-          placeQueued(deps, tx, poolId, {
-            cache: indexes,
-            ...(options.maxBatch ? { maxBatch: options.maxBatch } : {}),
-          }),
-        );
-        return more ? 'SYNC_AGAIN' : 'DONE';
-      } catch (error) {
-        // The batch's records never committed: rebuild the index next time.
-        indexes.drop(poolId);
-        throw error;
-      }
+      const { more, keep } = await inTx(context, (tx) =>
+        placeQueued(deps, tx, poolId, {
+          cache: indexes,
+          ...(options.maxBatch ? { maxBatch: options.maxBatch } : {}),
+        }),
+      );
+      // Committed: the index (with this batch's records) serves the next batch.
+      keep?.();
+      return more ? 'SYNC_AGAIN' : 'DONE';
     },
   };
   // §12.7: hourly usage windows for the IAM usage sink, which flushes hourly before closePeriod.

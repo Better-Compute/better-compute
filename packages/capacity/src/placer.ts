@@ -362,9 +362,6 @@ export async function placeFromIndex(
   const ids = options.ids ?? newId;
   const excluded = new Set(request.excludeNodes ?? []);
   const lock = async () => pool;
-  let whole: NodeView[] | undefined;
-  const views = () => (whole ??= index.views(request.during));
-  const fast = shortlistable(request, context.plugins);
   const outcome =
     request.gang !== undefined
       ? await placeGang(
@@ -372,7 +369,7 @@ export async function placeFromIndex(
           request,
           request.gang,
           pool,
-          views(),
+          index.views(request.during),
           excluded,
           context,
           maxAttempts,
@@ -382,22 +379,7 @@ export async function placeFromIndex(
       : await placeSingle(
           tx,
           request,
-          async (without) => {
-            const short = fast
-              ? await shortlistPlan(pool, request, without, context, {
-                  counts: () => index.counts(request, without),
-                  views: (nodeIds) => index.views(request.during, nodeIds),
-                  linked: () => index.linked(),
-                })
-              : undefined;
-            return (
-              short?.plan ??
-              planPlacement({ ...request, excludeNodes: without }, views(), pool, {
-                plugins: context.plugins,
-                weights: context.weights,
-              })
-            );
-          },
+          indexPlanner(index, request, context),
           excluded,
           context,
           maxAttempts,
@@ -407,6 +389,215 @@ export async function placeFromIndex(
   if (outcome.status === 'placed')
     for (const allocation of outcome.allocations) index.record(allocation);
   return outcome;
+}
+
+/** Plans a single-node request on a `PoolIndex`: the exact shortlist when it decides, else every node. */
+function indexPlanner(
+  index: PoolIndex,
+  request: PlacementRequest,
+  context: Pick<PlacementContext, 'plugins' | 'weights' | 'topN'>,
+): (excluded: string[]) => Promise<PlacementPlan> {
+  const pool = index.pool;
+  const fast = shortlistable(request, context.plugins);
+  let whole: NodeView[] | undefined;
+  return async (without) => {
+    const short = fast
+      ? await shortlistPlan(pool, request, without, context, {
+          counts: () => index.counts(request, without),
+          views: (nodeIds) => index.views(request.during, nodeIds),
+          linked: () => index.linked(),
+        })
+      : undefined;
+    return (
+      short?.plan ??
+      planPlacement(
+        { ...request, excludeNodes: without },
+        (whole ??= index.views(request.during)),
+        pool,
+        { plugins: context.plugins, weights: context.weights },
+      )
+    );
+  };
+}
+
+/** Whether a request can go through `commitPlansBulk`: one node, devices only. */
+export function bulkCommittable(request: PlacementRequest): boolean {
+  return (
+    request.gang === undefined &&
+    request.reservationId !== undefined &&
+    Object.values(request.resources ?? {}).every((amount) => !(amount > 0))
+  );
+}
+
+/**
+ * Plans one request on the index and records it there tentatively (for the requests planned after
+ * it in the same batch). `undefined` when nothing fits; call `index.forget` if the commit fails.
+ */
+export async function planOnIndex(
+  index: PoolIndex,
+  request: PlacementRequest,
+  context: PlacementContext,
+): Promise<NodePlan | undefined> {
+  assertPlacementRequest(request);
+  const { ranked } = await indexPlanner(index, request, context)([...(request.excludeNodes ?? [])]);
+  const choice = choosePlan(ranked, () => context.random(), context.topN);
+  if (choice)
+    index.record({
+      nodeId: choice.nodeId,
+      atoms: choice.atoms,
+      resources: choice.resources,
+      during: request.during,
+    });
+  return choice;
+}
+
+/** One planned request of a bulk commit. */
+export interface BulkPlan {
+  request: PlacementRequest;
+  plan: NodePlan;
+}
+
+/**
+ * Commits many planned single-node requests with set-based guarded statements (the pool-lease
+ * batch, §10.3): the nodes are locked `FOR SHARE` under `schedulableSql` and the atoms `FOR SHARE`
+ * where healthy and bookable, all at once; every booking is inserted in one statement (`ON CONFLICT
+ * DO NOTHING` honours `EXCLUDE`); an allocation whose atoms did not all land is removed again;
+ * allocations and rollup deltas are written in one statement each. Returns the allocation of each
+ * plan that committed (by index) and why the others did not; the caller replans those. Runs in its
+ * own savepoint, so a failure leaves nothing behind. The caller holds the pool lock.
+ */
+export async function commitPlansBulk(
+  tx: SqlTx,
+  pool: PoolRow,
+  items: readonly BulkPlan[],
+  ids: IdGenerator = newId,
+): Promise<{ placed: Map<number, Allocation>; failed: Map<number, string> }> {
+  const placed = new Map<number, Allocation>();
+  const failed = new Map<number, string>();
+  if (items.length === 0) return { placed, failed };
+  await tx.query(`SAVEPOINT capacity_bulk`);
+  try {
+    const nodeIds = [...new Set(items.map((item) => item.plan.nodeId))];
+    const nodes = await tx.query<{ id: string }>(
+      `SELECT n.id FROM nodes n JOIN pools p ON p.id = n.pool_id
+        WHERE n.id = ANY($1::text[]) AND n.pool_id = $2 AND ${schedulableSql}
+        ORDER BY n.id FOR SHARE OF n`,
+      [nodeIds, pool.id],
+    );
+    const okNodes = new Set(nodes.rows.map((row) => row.id));
+    const atomIds = items.flatMap((item) => item.plan.atoms);
+    const atoms = await tx.query<{ id: string; class: string }>(
+      `SELECT id, class FROM devices WHERE id = ANY($1::text[]) AND healthy AND bookable
+        ORDER BY id FOR SHARE`,
+      [atomIds],
+    );
+    const classes = new Map(atoms.rows.map((row) => [row.id, row.class]));
+
+    const allocationIds = new Map<number, string>();
+    items.forEach((item, index) => {
+      if (!okNodes.has(item.plan.nodeId))
+        failed.set(index, `${item.plan.nodeId} is no longer schedulable`);
+      else if (!item.plan.atoms.every((atom) => classes.has(atom)))
+        failed.set(index, `an atom on ${item.plan.nodeId} turned unhealthy or unbookable`);
+      else allocationIds.set(index, ids('alloc'));
+    });
+
+    const devices: string[] = [];
+    const owners: string[] = [];
+    const starts: string[] = [];
+    const ends: string[] = [];
+    for (const [index, allocationId] of allocationIds) {
+      const { request, plan } = items[index]!;
+      for (const atom of plan.atoms) {
+        devices.push(atom);
+        owners.push(allocationId);
+        starts.push(iso(request.during.start));
+        ends.push(iso(request.during.end));
+      }
+    }
+    if (devices.length > 0) {
+      const booked = await tx.query<{ allocation_id: string }>(
+        `INSERT INTO device_bookings (device_id, allocation_id, during)
+         SELECT d, a, tstzrange(s, e)
+           FROM unnest($1::text[], $2::text[], $3::timestamptz[], $4::timestamptz[]) AS t(d, a, s, e)
+         ON CONFLICT DO NOTHING RETURNING allocation_id`,
+        [devices, owners, starts, ends],
+      );
+      const landed = new Map<string, number>();
+      for (const row of booked.rows)
+        landed.set(row.allocation_id, (landed.get(row.allocation_id) ?? 0) + 1);
+      const partial: string[] = [];
+      for (const [index, allocationId] of allocationIds)
+        if ((landed.get(allocationId) ?? 0) !== items[index]!.plan.atoms.length) {
+          failed.set(index, `an atom on ${items[index]!.plan.nodeId} was booked concurrently`);
+          partial.push(allocationId);
+          allocationIds.delete(index);
+        }
+      if (partial.length > 0)
+        await tx.query(`DELETE FROM device_bookings WHERE allocation_id = ANY($1::text[])`, [
+          partial,
+        ]);
+    }
+
+    const rows = [...allocationIds].map(([index, allocationId]) => {
+      const { request, plan } = items[index]!;
+      return {
+        id: allocationId,
+        tenant: request.tenantId,
+        node: plan.nodeId,
+        owner: request.reservationId!,
+        atoms: plan.atoms,
+        s: iso(request.during.start),
+        e: iso(request.during.end),
+      };
+    });
+    if (rows.length > 0) {
+      const inserted = await tx.query<{ id: string; current: boolean }>(
+        `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, atoms,
+                                  resources, during, version)
+         SELECT x.id, x.tenant, $2, x.node, 'reservation', x.owner,
+                ARRAY(SELECT jsonb_array_elements_text(x.atoms)), '{}'::jsonb,
+                tstzrange(x.s, x.e), 1
+           FROM jsonb_to_recordset($1::jsonb)
+                AS x(id text, tenant text, node text, owner text, atoms jsonb, s timestamptz, e timestamptz)
+         RETURNING id, during @> compute_now() AS current`,
+        [JSON.stringify(rows), pool.id],
+      );
+      const current = new Map(inserted.rows.map((row) => [row.id, row.current === true]));
+      const deltas = new Map<string, { allocated: number; reserved: number }>();
+      for (const [index, allocationId] of allocationIds) {
+        const { request, plan } = items[index]!;
+        for (const atom of plan.atoms) {
+          const resource = rollupResource(classes.get(atom)!);
+          const delta = deltas.get(resource) ?? { allocated: 0, reserved: 0 };
+          if (current.get(allocationId)) delta.allocated++;
+          else delta.reserved++;
+          deltas.set(resource, delta);
+        }
+        placed.set(index, {
+          id: allocationId,
+          tenantId: request.tenantId,
+          poolId: pool.id,
+          nodeId: plan.nodeId,
+          owner: { kind: 'reservation', id: request.reservationId! },
+          atoms: [...plan.atoms],
+          resources: {},
+          during: { ...request.during },
+        });
+      }
+      for (const [resource, delta] of deltas)
+        await applyRollupDelta(tx, pool.id, resource, {
+          ...(delta.allocated ? { allocated: delta.allocated } : {}),
+          ...(delta.reserved ? { reserved: delta.reserved } : {}),
+        });
+    }
+    await tx.query(`RELEASE SAVEPOINT capacity_bulk`);
+    return { placed, failed };
+  } catch (error) {
+    await tx.query(`ROLLBACK TO SAVEPOINT capacity_bulk`);
+    await tx.query(`RELEASE SAVEPOINT capacity_bulk`);
+    throw error;
+  }
 }
 
 /**

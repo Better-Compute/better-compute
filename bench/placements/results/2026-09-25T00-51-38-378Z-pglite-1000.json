@@ -1,0 +1,53 @@
+{
+  "suite": "placements",
+  "time": "2026-09-25T00:51:38.378Z",
+  "database": "pglite",
+  "nodes": 1000,
+  "gpusPerPlacement": 1,
+  "host": {
+    "cpus": 64,
+    "memoryGiB": 255
+  },
+  "steps": [
+    {
+      "concurrency": 0,
+      "placements": 640,
+      "pending": 0,
+      "errors": 0,
+      "seconds": 1.6,
+      "placementsPerSecond": 399.2,
+      "latencyMs": {
+        "p50": 142.3,
+        "p90": 239,
+        "p99": 239,
+        "max": 239
+      },
+      "lockHeldMs": {
+        "p50": 142.3,
+        "p90": 239,
+        "p99": 239,
+        "max": 239
+      }
+    },
+    {
+      "concurrency": -1,
+      "placements": 640,
+      "pending": 0,
+      "errors": 0,
+      "seconds": 0.59,
+      "placementsPerSecond": 1092.4,
+      "latencyMs": {
+        "p50": 52,
+        "p90": 126,
+        "p99": 126,
+        "max": 126
+      },
+      "lockHeldMs": {
+        "p50": 52,
+        "p90": 126,
+        "p99": 126,
+        "max": 126
+      }
+    }
+  ]
+}

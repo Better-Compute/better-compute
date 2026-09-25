@@ -1,0 +1,33 @@
+{
+  "suite": "placements",
+  "time": "2026-09-25T00:45:14.065Z",
+  "database": "pglite",
+  "nodes": 1000,
+  "gpusPerPlacement": 1,
+  "host": {
+    "cpus": 64,
+    "memoryGiB": 255
+  },
+  "steps": [
+    {
+      "concurrency": 0,
+      "placements": 640,
+      "pending": 0,
+      "errors": 0,
+      "seconds": 1.95,
+      "placementsPerSecond": 328.8,
+      "latencyMs": {
+        "p50": 176.7,
+        "p90": 304.4,
+        "p99": 304.4,
+        "max": 304.4
+      },
+      "lockHeldMs": {
+        "p50": 176.7,
+        "p90": 304.4,
+        "p99": 304.4,
+        "max": 304.4
+      }
+    }
+  ]
+}

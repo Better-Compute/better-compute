@@ -41,6 +41,14 @@ At 10k nodes × 8 GPUs (PGlite, 1 GPU per placement):
 | pool-lease, index rebuilt every batch, whole-pool plans | 21.1 |
 | pool-lease, in-memory shortlist, index kept between batches | 93.3 |
 
+End to end through `placeQueued`, with reservation rows, one event and one work-queue write each,
+set-based commits give:
+
+| | 1k nodes | 10k nodes |
+|---|---|---|
+| one reservation at a time | 224 | not measured |
+| set-based: one bookings INSERT, one allocations INSERT and one reservations UPDATE per batch | 1,092 | 161 |
+
 PLAN's G5 target is ≥200 placements/s per region on Postgres. Pools batch independently on the
 workers that own their shards.
 

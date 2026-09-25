@@ -20,7 +20,9 @@ import {
   type ModuleContext,
   type NodeBindingSpec,
   type PlacementContext,
+  type Allocation,
   type PlacementOutcome,
+  type PlacementRequest,
   type Placer,
   type Reservation,
   type ReservationSpec,
@@ -47,7 +49,8 @@ import {
   truncateAllocation,
 } from './spot.js';
 import { lockPool, readPool, readPoolNodes } from './store.js';
-import { placeFromIndex } from './placer.js';
+import { bulkCommittable, commitPlansBulk, placeFromIndex, planOnIndex } from './placer.js';
+import type { NodePlan } from './pipeline.js';
 import { PoolIndex, type PoolIndexCache } from './pool-index.js';
 import {
   isTenantRootPool,
@@ -885,7 +888,7 @@ export async function placeQueued(
   tx: SqlTx,
   poolId: string,
   options: { maxBatch?: number; cache?: PoolIndexCache } = {},
-): Promise<{ placed: number; pending: number; more: boolean }> {
+): Promise<{ placed: number; pending: number; more: boolean; keep?: () => void }> {
   const limit = Math.min(Math.max(1, options.maxBatch ?? maxPlacementBatch), maxPlacementBatch);
   const pool = await readPool(tx, poolId);
   if (!pool) return { placed: 0, pending: 0, more: false };
@@ -899,19 +902,60 @@ export async function placeQueued(
   const batch = rows.slice(0, limit);
   const now = deps.clock.now();
   if (batch.length === 0) return { placed: 0, pending: 0, more: false };
-  const index = options.cache
-    ? await options.cache.get(tx, pool, now)
-    : await PoolIndex.load(tx, pool, now);
-  let placed = 0;
+  const checkout = options.cache ? await options.cache.checkout(tx, pool, now) : undefined;
+  const index = checkout?.index ?? (await PoolIndex.load(tx, pool, now));
+  const context = { ...deps.placement, clock: deps.clock };
+  const { rows: raw } = await tx.query<RawReservation>(
+    `SELECT ${reservationColumns} FROM reservations WHERE id = ANY($1::text[])`,
+    [batch.map((entry) => entry.id)],
+  );
+  const byId = new Map(raw.map((entry) => [entry.id, toReservation(entry)]));
+
+  // 1. Plan every simple request on the index (each recorded tentatively for the next ones), then
+  //    commit them with set-based statements. The rest, and whatever lost a race, go one by one.
+  type Entry = { row: ReservationRow; during: TimeRange; request: PlacementRequest };
+  const planned: (Entry & { plan: NodePlan })[] = [];
+  const oneByOne: Entry[] = [];
   for (const { id } of batch) {
-    const row = await readReservationById(tx, id, false);
+    const row = byId.get(id);
     if (!row || row.state !== 'pending') continue;
     const start = Math.max(row.request.start ?? now, now);
-    let during = { start, end: start + requestedDuration(row) };
-    let outcome = await placeFromIndex(tx, index, placementRequest(row, during), {
-      ...deps.placement,
-      clock: deps.clock,
+    const during = { start, end: start + requestedDuration(row) };
+    const request = placementRequest(row, during);
+    const plan = bulkCommittable(request) ? await planOnIndex(index, request, context) : undefined;
+    if (plan) planned.push({ row, during, request, plan });
+    else oneByOne.push({ row, during, request });
+  }
+  const committed = await commitPlansBulk(
+    tx,
+    pool,
+    planned.map(({ request, plan }) => ({ request, plan })),
+  );
+  const settled: { row: ReservationRow; during: TimeRange; allocations: Allocation[] }[] = [];
+  planned.forEach((entry, at) => {
+    const allocation = committed.placed.get(at);
+    if (allocation) {
+      settled.push({ row: entry.row, during: entry.during, allocations: [allocation] });
+      return;
+    }
+    index.forget({ atoms: entry.plan.atoms, during: entry.during });
+    oneByOne.push({
+      row: entry.row,
+      during: entry.during,
+      request: {
+        ...entry.request,
+        excludeNodes: [...(entry.request.excludeNodes ?? []), entry.plan.nodeId],
+      },
     });
+  });
+  await settlePlacedMany(deps, tx, settled);
+
+  // 2. One by one: requests with scalars, lost races, and what did not fit (which may preempt spot).
+  let placed = settled.length;
+  for (const entry of oneByOne) {
+    const row = entry.row;
+    let during = entry.during;
+    let outcome = await placeFromIndex(tx, index, entry.request, context);
     if (outcome.status === 'pending' && row.request.spot !== true) {
       const preempted = await preemptFor(deps, tx, row, during);
       if (preempted) {
@@ -923,7 +967,78 @@ export async function placeQueued(
     const next = await settlePlacement(deps, tx, row, during, outcome);
     if (next.state === 'placed') placed++;
   }
-  return { placed, pending: batch.length - placed, more: rows.length > limit };
+  return {
+    placed,
+    pending: batch.length - placed,
+    more: rows.length > limit,
+    // Hand the index back to the cache only after this transaction commits.
+    ...(checkout ? { keep: checkout.keep } : {}),
+  };
+}
+
+/**
+ * `settlePlacement` for many placed reservations at once (the pool-lease batch): one version-guarded
+ * UPDATE, the lifecycle wake-ups per start time (`enqueueMany` when the queue has it), and the
+ * `reservation.placed` events (`publishMany` when the publisher has it).
+ */
+async function settlePlacedMany(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  entries: readonly { row: ReservationRow; during: TimeRange; allocations: Allocation[] }[],
+): Promise<void> {
+  if (entries.length === 0) return;
+  const now = deps.clock.now();
+  const state = transition(reservationStateTable, 'pending', 'place');
+  const updates = entries.map(({ row, during }) => ({
+    id: row.id,
+    version: row.version,
+    s: new Date(during.start).toISOString(),
+    e: new Date(during.end).toISOString(),
+    conditions: withoutCondition(withoutCondition(row.conditions, 'Unschedulable'), 'Queued'),
+    lease:
+      row.request.leaseSeconds !== undefined
+        ? new Date(now + row.request.leaseSeconds * 1000).toISOString()
+        : null,
+  }));
+  const { rows } = await tx.query<{ id: string }>(
+    `UPDATE reservations r
+        SET state = $2, during = tstzrange(x.s, x.e), conditions = x.conditions,
+            lease_expires_at = COALESCE(x.lease, r.lease_expires_at), version = r.version + 1
+       FROM jsonb_to_recordset($1::jsonb)
+            AS x(id text, version bigint, s timestamptz, e timestamptz, conditions jsonb, lease timestamptz)
+      WHERE r.id = x.id AND r.version = x.version AND r.state = 'pending'
+      RETURNING r.id`,
+    [JSON.stringify(updates), state],
+  );
+  if (rows.length !== updates.length)
+    throw new ComputeError(
+      'CONFLICT',
+      'A queued reservation changed concurrently; retry the batch',
+    );
+
+  const byStart = new Map<number, string[]>();
+  for (const { row, during } of entries)
+    byStart.set(during.start, [...(byStart.get(during.start) ?? []), row.id]);
+  for (const [start, ids] of byStart)
+    if (deps.work.enqueueMany)
+      await deps.work.enqueueMany(tx, reservationWork, ids, { notBefore: start });
+    else
+      for (const id of ids) await deps.work.enqueue(tx, reservationWork, id, { notBefore: start });
+
+  const events = entries.map(({ row, during, allocations }) => ({
+    type: 'reservation.placed',
+    tenantId: row.tenantId,
+    subject: `reservation/${row.id}`,
+    data: {
+      state,
+      poolId: row.poolId,
+      nodeIds: allocations.map((allocation) => allocation.nodeId),
+      start: during.start,
+      end: during.end,
+    },
+  }));
+  if (deps.events.publishMany) await deps.events.publishMany(tx, events);
+  else for (const event of events) await deps.events.publish(tx, event);
 }
 
 const preemptable: readonly ReservationState[] = ['placed', 'binding', 'active'];

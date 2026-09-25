@@ -37,17 +37,24 @@ export class PoolIndexCache {
   private readonly entries = new Map<string, { index: PoolIndex; at: number; version: number }>();
   constructor(private readonly maxAgeMs = 5_000) {}
 
-  async get(tx: SqlTx, pool: PoolRow, now: number): Promise<PoolIndex> {
+  /**
+   * Takes a pool's index out of the cache (loading it when missing, too old or the pool changed).
+   * Call `keep()` once the batch's transaction committed; until then no other batch sees it, and a
+   * batch that fails simply never gives it back.
+   */
+  async checkout(
+    tx: SqlTx,
+    pool: PoolRow,
+    now: number,
+  ): Promise<{ index: PoolIndex; keep(): void }> {
     const hit = this.entries.get(pool.id);
-    if (hit && now - hit.at < this.maxAgeMs && now >= hit.at && hit.version === pool.version)
-      return hit.index;
-    const index = await PoolIndex.load(tx, pool, now);
-    this.entries.set(pool.id, { index, at: now, version: pool.version });
-    return index;
-  }
-
-  drop(poolId: string): void {
-    this.entries.delete(poolId);
+    this.entries.delete(pool.id);
+    const fresh =
+      hit && now - hit.at < this.maxAgeMs && now >= hit.at && hit.version === pool.version;
+    const entry = fresh
+      ? hit
+      : { index: await PoolIndex.load(tx, pool, now), at: now, version: pool.version };
+    return { index: entry.index, keep: () => this.entries.set(pool.id, entry) };
   }
 }
 
@@ -208,6 +215,18 @@ export class PoolIndex {
       if (links) view.links = links;
       return view;
     });
+  }
+
+  /** Undoes a tentative `record` of atoms whose commit failed (scalars are not part of bulk plans). */
+  forget(allocation: { atoms: readonly string[]; during: TimeRange }): void {
+    for (const atom of allocation.atoms) {
+      const intervals = this.bookings.get(atom);
+      if (!intervals) continue;
+      const at = intervals.findIndex(
+        ([start, end]) => start === allocation.during.start && end === allocation.during.end,
+      );
+      if (at >= 0) intervals.splice(at, 1);
+    }
   }
 
   /** Records an allocation this worker committed: its atoms are busy in `during`, its scalars claimed. */
