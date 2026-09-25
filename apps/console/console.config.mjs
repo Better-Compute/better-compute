@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -39,6 +39,73 @@ async function iamDatabase(dataDir) {
   }
   const { libsqlAdapter } = await import('better-iam/adapter-libsql');
   return libsqlAdapter({ url: pathToFileURL(env.CONSOLE_IAM_DB ?? join(dataDir, 'iam.db')).href });
+}
+
+/**
+ * A PKCS#8 PEM private key: the file `env[variable]` names, or in development one generated once under the data
+ * directory. Undefined in production without the variable (the feature stays off).
+ */
+async function keyFile(dataDir, variable, name, generate) {
+  const file = env[variable] ?? (env.NODE_ENV === 'production' ? undefined : join(dataDir, name));
+  if (!file) return undefined;
+  try {
+    return await readFile(file, 'utf8');
+  } catch (error) {
+    if (env[variable]) throw error;
+    const pem = generate().export({ type: 'pkcs8', format: 'pem' });
+    await writeFile(file, pem, { mode: 0o600, flag: 'wx' }).catch(() => undefined);
+    return readFile(file, 'utf8');
+  }
+}
+
+/**
+ * Tunnels (browser terminals, node consoles) and break-glass SSH (PLAN.md §7.6, §13): the exec ticket issuer and
+ * the compute SSH CA, from CONSOLE_EXEC_TICKET_KEY_FILE / CONSOLE_SSH_CA_KEY_FILE (every replica and the gateways
+ * must share them; nodes pin their public keys). Development generates both under the data directory.
+ */
+async function tunnelsFor(dataDir, origin) {
+  const ticketKey = await keyFile(
+    dataDir,
+    'CONSOLE_EXEC_TICKET_KEY_FILE',
+    'exec-ticket.pem',
+    () => generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey,
+  );
+  if (!ticketKey) return undefined;
+  const { createExecTicketIssuer, createSshCertificateAuthority } = await import(
+    'better-compute/pki'
+  );
+  const sshKey = await keyFile(
+    dataDir,
+    'CONSOLE_SSH_CA_KEY_FILE',
+    'ssh-ca.pem',
+    () => generateKeyPairSync('ed25519').privateKey,
+  );
+  return {
+    issuer: createExecTicketIssuer({ issuer: origin, privateKey: ticketKey }),
+    ...(sshKey
+      ? {
+          ssh: createSshCertificateAuthority({
+            privateKey: sshKey,
+            comment: 'better-compute console',
+          }),
+        }
+      : {}),
+  };
+}
+
+/** The api → gateway mTLS client identity for tunnel relays (CONSOLE_GATEWAY_TLS_{CERT,KEY,CA} files). */
+async function gatewayTls() {
+  const files = {
+    cert: env.CONSOLE_GATEWAY_TLS_CERT,
+    key: env.CONSOLE_GATEWAY_TLS_KEY,
+    ca: env.CONSOLE_GATEWAY_TLS_CA,
+  };
+  const entries = await Promise.all(
+    Object.entries(files)
+      .filter(([, file]) => file)
+      .map(async ([name, file]) => [name, await readFile(file, 'utf8')]),
+  );
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 /** Creates the stack. Imported at runtime by `src/lib/stack.ts` (never bundled). */
@@ -96,6 +163,7 @@ export async function createStack() {
     const { pglite } = await import('better-compute/pglite');
     database = pglite({ dataDir: join(dataDir, 'compute') });
   }
+  const tunnels = await tunnelsFor(dataDir, origin);
   const compute = betterCompute({
     database,
     secret,
@@ -103,10 +171,27 @@ export async function createStack() {
     acceptIamCookie: true,
     modules: [...modules, ...bridge.modules],
     iam: bridge.embedded(iam, { rootTenantId, runIamJobs: true }),
+    ...(tunnels ? { tunnels } : {}),
   });
   await compute.initialize();
   await compute.start();
-  return { iam, compute, rootTenantId, origin };
+
+  // What `server.mjs` needs to serve `GET /api/compute/tunnels/{ticket}` upgrades (Next route handlers cannot).
+  let tunnelHost;
+  if (tunnels) {
+    const { gatewayTunnelRelay } = await import('better-compute/gateway');
+    const { tunnelAuthorizer } = await import('better-compute/iam');
+    const tls = await gatewayTls();
+    tunnelHost = {
+      sql: compute.context.sql,
+      issuer: tunnels.issuer,
+      issuerName: origin,
+      relay: gatewayTunnelRelay({ sql: compute.context.sql, ...(tls ? { tls } : {}) }),
+      authorize: tunnelAuthorizer(compute.context.iam),
+      basePath: '/api/compute',
+    };
+  }
+  return { iam, compute, rootTenantId, origin, tunnels: tunnelHost };
 }
 
 /** The root tenant: bootstrapped once, then read back from `.console-data/root.json`. */

@@ -5,8 +5,11 @@ The better-compute web console (PLAN.md §9.3): better-iam and better-compute in
 `@better-compute/console-kit`.
 
 ```bash
-node ../../node_modules/next/dist/bin/next dev -p 3100
+node server.mjs
 ```
+
+`server.mjs` runs Next.js plus the WebSocket upgrade of `/api/compute/tunnels/{ticket}` (terminals and node
+consoles), which Next route handlers cannot serve; `node server.mjs --prod` after `next build`.
 
 On first start the root administrator is created and, unless `CONSOLE_ADMIN_PASSWORD` is set, its generated password
 is printed once. Sign in at `/login`; organization members use `/login?org=<slug>`.
@@ -22,15 +25,20 @@ is printed once. Sign in at `/login`; organization members use `/login?org=<slug
 
 ## Configuration
 
-| Variable                                                       | Default                                     |
-| -------------------------------------------------------------- | ------------------------------------------- |
-| `CONSOLE_ORIGIN`                                               | `http://localhost:3100`                     |
-| `CONSOLE_SECRET`                                               | generated into `.console-data/secret` (dev) |
-| `CONSOLE_DATA_DIR`                                             | `.console-data`                             |
-| `CONSOLE_IAM_DATABASE_URL`                                     | libSQL file `.console-data/iam.db`          |
-| `BETTER_COMPUTE_DATABASE_URL`                                  | PGlite in `.console-data/compute`           |
-| `CONSOLE_ADMIN_EMAIL` / `CONSOLE_ADMIN_PASSWORD`               | `admin@console.local` / generated           |
-| `CONSOLE_RELEASE_PINS`, `CONSOLE_DOWNLOADS_URL`, `…_THRESHOLD` | unset: the rollout module is not mounted    |
+| Variable                                                       | Default                                                             |
+| -------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `CONSOLE_ORIGIN`                                               | `http://localhost:3100`                                             |
+| `CONSOLE_SECRET`                                               | generated into `.console-data/secret` (dev)                         |
+| `CONSOLE_DATA_DIR`                                             | `.console-data`                                                     |
+| `CONSOLE_IAM_DATABASE_URL`                                     | libSQL file `.console-data/iam.db`                                  |
+| `BETTER_COMPUTE_DATABASE_URL`                                  | PGlite in `.console-data/compute`                                   |
+| `CONSOLE_ADMIN_EMAIL` / `CONSOLE_ADMIN_PASSWORD`               | `admin@console.local` / generated                                   |
+| `CONSOLE_RELEASE_PINS`, `CONSOLE_DOWNLOADS_URL`, `…_THRESHOLD` | unset: the rollout module is not mounted                            |
+| `CONSOLE_EXEC_TICKET_KEY_FILE`                                 | generated `exec-ticket.pem` (dev); unset in production: tunnels off |
+| `CONSOLE_SSH_CA_KEY_FILE`                                      | generated `ssh-ca.pem` (dev): break-glass SSH certificates          |
+| `CONSOLE_GATEWAY_TLS_CERT` / `_KEY` / `_CA`                    | the api's mTLS identity toward gateways (tunnel relays)             |
+| `PORT` / `HOSTNAME`                                            | `3100` / `localhost`                                                |
 
-The terminal needs the host to serve the tunnel WebSocket upgrade (`handleTunnel`) and a gateway relay; until then
-it shows the server's refusal.
+Every replica and gateway must share the exec ticket key and nodes pin its public key (and the SSH CA's), so production
+supplies the key files. Tunnels relay through the gateway holding the node's session (`gatewayTunnelRelay`), and the
+caller is re-authorized for the tunnel's lifetime.
