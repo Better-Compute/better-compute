@@ -3,6 +3,7 @@ import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/p
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
 import { isComputeError } from '@better-compute/core';
 import {
+  signAttestedReport,
   signCommandUpdate,
   verifyCommand,
   verifyTrustBundle,
@@ -145,7 +146,8 @@ export interface FakeDaemonOptions {
   log?: EventLog;
   /**
    * The node key the daemon joined with. Results of kinds whose outcome asks for it (`attest`) carry
-   * `node_sig` made with it, as bcd signs wipe and diagnostics results. Without a key they go unsigned.
+   * `node_sig` made with it, as bcd signs wipe and diagnostics results, and so do its attested
+   * reports (AllocationBound/Released). Without a key they go unsigned.
    */
   nodeKey?: KeyObject;
   /**
@@ -1280,11 +1282,13 @@ export class FakeDaemon {
     return { state: SectionState.CONVERGED };
   }
 
-  /** An AttestedReport for an allocation (node_sig unset: optional in v0.1). */
+  /**
+   * An AttestedReport for an allocation, signed with the node key when the daemon has one (as bcd
+   * signs them from v0.2, so a gateway cannot forge a binding); unsigned otherwise (v0.1).
+   */
   private attested(report: MessageInitShape<typeof AttestedReportBodySchema>['report']): AttestedReport {
-    return wrapAttestedReport(
-      create(AttestedReportBodySchema, { nodeId: this.nodeId, bootId: this.bootIdValue, report }),
-    );
+    const body = create(AttestedReportBodySchema, { nodeId: this.nodeId, bootId: this.bootIdValue, report });
+    return this.nodeKey ? signAttestedReport(this.nodeKey, body) : wrapAttestedReport(body);
   }
 
   // ---- events, status, inventory ----------------------------------------------------------------

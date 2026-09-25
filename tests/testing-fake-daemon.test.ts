@@ -1,10 +1,14 @@
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { timestampFromMs } from '@bufbuild/protobuf/wkt';
 import { WireType } from '@bufbuild/protobuf/wire';
-import { createHash } from 'node:crypto';
+import { createHash, verify } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { generateP256KeyPair, nodeKeyId } from '@better-compute/pki';
 import {
   AgentRole,
+  AttestedReportBodySchema,
+  signingInput,
+  type AttestedReportBody,
   Binding,
   CommandRejectReason,
   CommandState,
@@ -838,6 +842,27 @@ describe('desired state and the devices converger', () => {
       e.body.case === 'attested' ? [unwrapAttestedReport(e.body.value).report] : [],
     );
 
+  it('signs AllocationBound with its node key, so only the node can vouch for a binding (v0.2)', async () => {
+    const key = generateP256KeyPair();
+    const h = await daemon({ nodeKey: key.privateKey });
+    const [g0] = h.daemon.hardware.gpuUuids;
+    h.sendSpec(2, { devices: { assignments: [hold('alloc_1', [g0!])] } });
+    await h.advance(5);
+    const reports = events(h).flatMap((e) => (e.body.case === 'attested' ? [e.body.value] : []));
+    expect(reports).toHaveLength(1);
+    const signature = reports[0]!.nodeSig!;
+    expect(signature.kid).toBe(nodeKeyId(key.privateKey));
+    const input = signingInput('attested-report', [reports[0]!.body]);
+    expect(verify('sha256', input, { key: key.publicKey, dsaEncoding: 'ieee-p1363' }, signature.sig)).toBe(true);
+    // A body the gateway swapped (another allocation) no longer matches the signature.
+    const swapped = toBinary(AttestedReportBodySchema, {
+      ...unwrapAttestedReport(reports[0]!),
+      report: { case: 'allocationBound', value: { ...unwrapAttestedReport(reports[0]!).report.value!, allocationId: 'alloc_x' } },
+    } as AttestedReportBody);
+    const swappedInput = signingInput('attested-report', [swapped]);
+    expect(verify('sha256', swappedInput, { key: key.publicKey, dsaEncoding: 'ieee-p1363' }, signature.sig)).toBe(false);
+  });
+
   it('writes the CDI hold and env file, reports AllocationBound and the observed generation', async () => {
     const h = await daemon();
     const [g0, g1, g2] = h.daemon.hardware.gpuUuids;
@@ -871,6 +896,10 @@ describe('desired state and the devices converger', () => {
       }),
       expect.objectContaining({ allocationId: 'alloc_2' }),
     ]);
+    // Without a node key (v0.1) the reports go unsigned.
+    expect(
+      events(h).flatMap((e) => (e.body.case === 'attested' ? [e.body.value.nodeSig?.sig.byteLength ?? 0] : [])),
+    ).toEqual([0, 0]);
     const status = h.server.of('status').at(-1)!;
     expect(status).toMatchObject({
       observedGeneration: 4n,
