@@ -2,11 +2,18 @@ package agent
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	"github.com/better-compute/better-compute/daemon/internal/imds"
+	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func vm(id string, state agentv1.InstanceDesiredState) *agentv1.InstanceSpec {
@@ -91,5 +98,57 @@ func TestInstancesConverger(t *testing.T) {
 		if d.ID == "inst_web" && d.Boots != 2 {
 			t.Fatalf("web booted %d times", d.Boots)
 		}
+	}
+}
+
+func TestIMDSMintsForTheCallingInstance(t *testing.T) {
+	var fake *runtime.Fake
+	h := newHarness(t, func(o *Options) {
+		fake = &runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(t.TempDir(), "runtime.json"), BootID: "boot-1"}
+		o.Runtimes = []runtime.Runtime{fake}
+	})
+	s, _ := h.open()
+	web := vm("inst_web", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
+	web.Nics[0].Addresses = []string{"127.0.0.1/8"}
+	s.push(desired(1, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web}}}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return len(f.GetStatus().GetInstances()) == 1 })
+	srv := httptest.NewServer(h.agent.IMDS())
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/latest/api/token", nil)
+	req.Header.Set(imds.SessionTTLHeader, "60")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("session: %v %v", err, resp)
+	}
+	session, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	type got struct {
+		code int
+		body string
+	}
+	out := make(chan got, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/latest/identity-token?audience=sts", nil)
+		req.Header.Set(imds.SessionHeader, string(session))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			out <- got{0, err.Error()}
+			return
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		out <- got{resp.StatusCode, string(b)}
+	}()
+	wreq := s.next(t, "WorkloadTokenRequest", func(f *agentv1.AgentFrame) bool { return f.GetWorkloadTokenRequest() != nil }).GetWorkloadTokenRequest()
+	if wreq.GetInstanceId() != "inst_web" || wreq.GetAudience() != "sts" {
+		t.Fatalf("request = %v", wreq)
+	}
+	epk, _ := pki.PublicKeyFromPoint(wreq.GetEpk())
+	exp := time.Now().Add(5 * time.Minute)
+	jwe, _ := pki.SealJWE([]byte("eyJ.workload"), epk, map[string]any{"typ": pki.WorkloadTokenResponseType, "rid": wreq.GetRequestId(), "iid": "inst_web", "exp": exp.Unix()})
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_WorkloadToken{WorkloadToken: &agentv1.WorkloadTokenResponse{
+		RequestId: wreq.GetRequestId(), Jwe: jwe, ExpiresAt: timestamppb.New(exp)}}})
+	if r := <-out; r.code != 200 || r.body != "eyJ.workload" {
+		t.Fatalf("identity token = %+v", r)
 	}
 }

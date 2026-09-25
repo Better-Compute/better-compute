@@ -200,7 +200,16 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd node: %v\n", err)
 		return exitFailure
 	}
-	return runAgent("node", cfg, newLogger(cfg, stderr), stderr, nil)
+	log := newLogger(cfg, stderr)
+	var imds func(ctx context.Context, a *agent.Agent)
+	if cfg.IMDSListen != "" {
+		imds = func(ctx context.Context, a *agent.Agent) {
+			if err := a.ServeIMDS(ctx, cfg.IMDSListen); err != nil {
+				log.Error("metadata service stopped", "error", err.Error())
+			}
+		}
+	}
+	return runAgent("node", cfg, log, stderr, imds)
 }
 
 // runAgent runs the agent of a joined identity in cfg.DataDir until a signal (bcd node, bcd ramdisk).
