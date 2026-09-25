@@ -2,8 +2,8 @@
 
 VPS for better-compute (PLAN.md §3.6). The package holds:
 
-- `vps()`, the module behind the `instances`, `flavors`, `providerAccounts`, `sandboxes` and
-  `sandboxTemplates` API groups;
+- `vps()`, the module behind the `instances`, `flavors`, `providerAccounts`, `sandboxes`,
+  `sandboxTemplates` and `sandboxSnapshots` API groups;
 - `defineProvider`;
 - the `runtime` driver kind;
 - pool IPAM;
@@ -149,11 +149,17 @@ show it.
   `instance.snapshot` (registered through `commandKinds`), keyed `vps.sandboxes:<snapshotId>:snapshot`.
   - The snapshot is `pending` until the command settles, then `ready` or `failed`
     (`sandbox.snapshot.ready` and `.failed`).
-  - Snapshots live in vps's `sandbox_snapshots` table. They are tenant-private, cannot be promoted,
-    and are deleted with their sandbox unless kept. All of them go at tenant teardown.
-  - `create({ fromSnapshot })` restores the tenant's own ready snapshot, taken on the same runtime.
-    A memory snapshot places only on nodes labelled with the same `cpu.model`. Another tenant's
-    snapshot is `NOT_FOUND`.
+  - Snapshots live in vps's `sandbox_snapshots` table as their own IAM resource
+    (`compute-sandbox-snapshot`, owned by whoever took it). They cannot be promoted.
+  - `sandboxSnapshots.list/get/delete` manage them, including kept ones whose sandbox is gone.
+  - Snapshots are deleted with their sandbox unless kept, and all of them go at tenant teardown.
+  - Objects are deleted by the reconciler, outside request transactions. A pending upload's object
+    waits until its command settles.
+  - `create({ fromSnapshot })` restores the caller's own ready snapshot, taken on the same runtime.
+    Another identity's or tenant's snapshot is `NOT_FOUND`.
+  - A memory snapshot places only on nodes labelled with the same `cpu.model`. Its guest resumes
+    without cloud-init, so it keeps the source instance's exec principal
+    (`restore_from.principalInstanceId`), and `sandboxes.exec` signs for it.
 - **Exec without an in-guest agent.** `vps({ sandboxExec: { caPublicKey, account = 'sandbox' } })`
   makes every sandbox instance's user data a multipart whose vps cloud-config part:
   - creates the account;
@@ -164,8 +170,12 @@ show it.
   `/etc/sandbox/env` (0600) inside user data that the broker seals. Without a broker, env is
   `INVALID_CONFIG`.
 
-- **Network.** A template's `network` becomes the instance's `InstanceSpec.networkPolicy`, which the
-  host enforces on the instance's taps.
+- **Network.** A template's `network` becomes the instance's `InstanceSpec.networkPolicy`. bcd
+  enforces it on the instance's taps with nftables and fails closed without NIC addresses, so
+  `private` and `none` need the pool's IP range.
+- **Secrets.** Sandbox user data is rendered and then sealed through the broker before the instance
+  row is written. Without a broker, env and a `secret://` user data that vps would have to render
+  are `INVALID_CONFIG`.
 
 ## Tenant teardown (§12.8)
 
