@@ -1,5 +1,15 @@
 Destructive-command batches (v1.0 quorum). A batch fixes a set of (subject, kind) leaves, optionally bound to exact payloads, under one Merkle root when it is created (modules create them through `commands.createBatch`). When the deployment publishes approver keys (`pki.approvers`), the batch's commands wait until enough approvers, holding keys off the control plane, have signed its root for the trust domain. The gateway then sends each command with the approval and its leaf's proof, and the daemon verifies both. Without approver keys a batch is recorded for audit and its commands go out at once. See [Security](/docs/operations/security).
 
+## create
+
+Creates a batch from its (subject, kind) leaves, each optionally bound to a payload's SHA-256, a reason and a lifetime; returns it `pending`, with the approvals its size needs.
+
+- The tree is fixed now: its root, size and every leaf's proof are stored, so what approvers review is what the daemons check. Subjects are computed as the executing agent does (see pki `batchSubject`): the node id, `bmc:<site agent>/<address>` for BMC kinds, `node:<target>` for `site.httpProxy`. A leaf without `payloadSha256` admits any payload of its kind, and `scope` flags it to approvers.
+- **Idempotency.** The batch id derives from the tenant, the caller and `idempotencyKey`. The same request again (the same leaves in any order, reason and lifetime) returns the stored batch without a new event; a different request under the key is `CONFLICT`.
+- The lifetime is `notAfterSeconds` (default 24 hours): after it the batch admits no commands and can no longer be approved. At most 50,000 leaves.
+
+Publishes `command.batch.created` with the scope size and the approvals required.
+
 ## get
 
 Returns one batch of the tenant: its reason, state, scope root and size, the approvals it needs and has, and how many of its commands are in each state.
