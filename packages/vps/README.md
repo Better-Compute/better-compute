@@ -2,7 +2,8 @@
 
 VPS for better-compute (PLAN.md §3.6). The package holds:
 
-- `vps()`, the module behind the `instances`, `flavors` and `providerAccounts` API groups;
+- `vps()`, the module behind the `instances`, `flavors`, `providerAccounts`, `sandboxes` and
+  `sandboxTemplates` API groups;
 - `defineProvider`;
 - the `runtime` driver kind;
 - pool IPAM;
@@ -11,9 +12,11 @@ VPS for better-compute (PLAN.md §3.6). The package holds:
 It depends on `@better-compute/core`, `protocol`, `provision` and `capacity`. The application
 injects it, and the server never imports it.
 
-**Status: v0.3 control plane.** Hosted instances, provider instances, flavors, provider accounts
-and IPAM work, and so do the daemon report and node-spec seams. The Hetzner provider ships
-separately.
+**Status: v0.3 control plane, plus v0.5 sandboxes.** Hosted instances, provider instances, flavors,
+provider accounts and IPAM work, and so do the daemon report and node-spec seams. Sandboxes are
+on the control plane side: templates, TTL, warm pools, snapshots, exec trust, env and network. bcd's
+enforcement of `networkPolicy` and its `instance.snapshot` kind are still to come. The Hetzner
+provider ships separately.
 
 ```ts
 import { vps } from 'better-compute/vps';
@@ -97,6 +100,80 @@ There is no `nodes` row. The reconciler drives the account's `ProviderImpl`:
 Provider errors become a `ProviderError` condition and are retried. A machine that vanishes marks
 the instance `lost`. User data carries only the tenant's keys or the tenant's own cloud-init. No
 join token ever goes into tenant-readable user data.
+
+## Sandboxes (§3.7, v0.5)
+
+A sandbox is a hosted instance with a template, a lifetime and a fast start. It has no placement or
+tenancy path of its own. Admission, placement, quota, IPAM, user-data sealing, metering and deletion
+all go through the instance it drives (`instances.sandbox_id`). Instance item methods (`start`,
+`stop`, `resize`, `delete`) refuse that instance with `INVALID_STATE`, while `get` and `list` still
+show it.
+
+- **Templates** (`sandboxTemplates.*`, per tenant) hold:
+  - `poolId`, `flavor` and `imageId`, checked against a hosted pool once. `runtime`, when given,
+    must be the pool's runtime;
+  - `userData`, and `env` (`{ NAME: 'secret://<tenant>/<id>' }`);
+  - `network`: `egress`, `private` or `none`;
+  - `defaultTtlSeconds` and `maxTtlSeconds` (default 1 h and 24 h);
+  - `warm: { min, max }`.
+
+  Pool and runtime are fixed once a template exists. Changes to flavor, image, user data, env or
+  network bump the template's `instance_version`.
+- **`sandboxes.create({ tenantId, templateId, ttlSeconds?, fromSnapshot?, idempotencyKey, wait? })`**
+  takes a decision on `compute-sandbox/{draftId}`, with attributes `templateId`, `vcpu`,
+  `memoryGiB`, `gpus`, `ttlSeconds`, `warm` and `fromSnapshot`. The budget check runs outside any
+  transaction. After an allow it either:
+  - claims the template's oldest settled warm instance of the current `instance_version`
+    (`FOR UPDATE SKIP LOCKED`). The instance changes owner and resumes, with no new placement;
+  - or creates and schedules one with the decision's admission context.
+
+  The TTL starts at admission. `wait` holds the answer until the sandbox leaves `starting`.
+- **Lifetime.** `extend({ until | by })` is decided with the new lifetime as the pending
+  `ttlSeconds`, and is bounded by `maxTtlSeconds`. `delete` and expiry are both an ordinary instance
+  delete. Events: `sandbox.created`, `ready` (stamped when the instance first runs), `extended`,
+  `expired`, `deleted`.
+- **Warm pools.** The `vps.sandboxes` reconciler runs every 15 s. It keeps `warm.min` instances per
+  template:
+  - they are `paused` when `RuntimeTraits.pause` is set, otherwise `stopped`;
+  - it creates at most 4 per template per pass, each in its own transaction, best effort;
+  - it drains instances beyond `warm.max`, of stale versions, and of deleted templates.
+
+  Warm instances count against the tenant's quota and are metered as `vps.sandbox.warm` (warm
+  vCPU-hours, tenant-billed) until claimed (`instances.claimed_at`). From the claim on they bill as
+  the owner's ordinary usage.
+- **Snapshots.** `sandboxes.snapshot({ includeMemory = true, keep = false })` needs
+  `vps({ snapshots: SnapshotStore })` (`presign`, optional `delete`). It sends the host
+  `instance.snapshot` (registered through `commandKinds`), keyed `vps.sandboxes:<snapshotId>:snapshot`.
+  - The snapshot is `pending` until the command settles, then `ready` or `failed`
+    (`sandbox.snapshot.ready` and `.failed`).
+  - Snapshots live in vps's `sandbox_snapshots` table. They are tenant-private, cannot be promoted,
+    and are deleted with their sandbox unless kept. All of them go at tenant teardown.
+  - `create({ fromSnapshot })` restores the tenant's own ready snapshot, taken on the same runtime.
+    A memory snapshot places only on nodes labelled with the same `cpu.model`. Another tenant's
+    snapshot is `NOT_FOUND`.
+- **Exec without an in-guest agent.** `vps({ sandboxExec: { caPublicKey, account = 'sandbox' } })`
+  makes every sandbox instance's user data a multipart whose vps cloud-config part:
+  - creates the account;
+  - trusts the tunnels module's `sandboxSsh` CA for `<account>@<instanceId>` only.
+
+  `sandboxes.exec` is contributed by the tunnels module. It returns an `ssh` tunnel ticket plus a
+  certificate that lives at most 15 minutes. Template `env` values are resolved for the tenant into
+  `/etc/sandbox/env` (0600) inside user data that the broker seals. Without a broker, env is
+  `INVALID_CONFIG`.
+- **Network.** A template's `network` becomes the instance's `InstanceSpec.networkPolicy`, which the
+  host enforces on the instance's taps.
+
+## Tenant teardown (§12.8)
+
+`tenantDeleted` removes the tenant's vps state:
+
+- deletes its sandbox templates;
+- marks its sandboxes deleting and deletes their snapshots;
+- drops drafts;
+- sets every live instance to `desiredState: 'deleted'`, through the ordinary lifecycle.
+
+It answers `SYNC_AGAIN` until all of them are `deleted`. Hosted instances hold inline allocations,
+which capacity's teardown never reaches.
 
 ## Flavors and provider accounts
 
