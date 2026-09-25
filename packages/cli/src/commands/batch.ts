@@ -457,6 +457,18 @@ export interface BatchView {
   createdAt: number;
   approvedAt?: number;
   createdBy?: string;
+  /** An agent that proposed it for `createdBy`, and its delegation: the reason is then the agent's text (review 14 M3). */
+  createdByAgent?: string;
+  delegationId?: string;
+}
+
+/** Who proposed a batch, as approvers should read it: an agent's reason is not the person's. */
+export function proposedBy(view: Pick<BatchView, 'createdBy' | 'createdByAgent' | 'delegationId'>): string | undefined {
+  if (view.createdByAgent)
+    return `agent ${printable(view.createdByAgent)} for ${printable(view.createdBy ?? 'unknown')}${
+      view.delegationId ? ` (delegation ${printable(view.delegationId)})` : ''
+    }: the reason is the agent's own text`;
+  return view.createdBy ? printable(view.createdBy) : undefined;
 }
 
 const badAnswer = (message: string) => new CliError('INVALID_RESPONSE', message);
@@ -831,7 +843,8 @@ export const batchCommands = [
         await writeFile(target, `${JSON.stringify(document, null, 2)}\n`, { flag: 'wx' });
         note(`Wrote ${target}: sign it with batch sign --key … --scope ${flags['scope-out']}.`);
       }
-      return { ...view, scopeVerified: true, ...describeScope(entries) };
+      const proposer = proposedBy(view);
+      return { ...view, ...(proposer ? { proposedBy: proposer } : {}), scopeVerified: true, ...describeScope(entries) };
     },
   }),
   defineCommand({
@@ -881,6 +894,8 @@ export const batchCommands = [
       checkWindow(view.notAfter, Date.now(), flags['max-hours'] ?? 72);
       const entries = await verifiedScope(client, view);
       note(`Batch ${view.batchId} of ${trustDomain}: ${printable(view.reason)}`);
+      const proposer = proposedBy(view);
+      if (proposer) note(`Proposed by ${proposer}.`);
       note(`${scopeLine(view.scopeSize, entries)}:`);
       for (const line of subjectLines(entries)) note(line);
       if (flags.expect !== undefined) {

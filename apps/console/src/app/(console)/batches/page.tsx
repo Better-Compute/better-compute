@@ -115,8 +115,15 @@ export default function BatchesPage() {
                       {batch.reason}
                       <div className="muted">
                         <code>{batch.batchId}</code>
-                        {batch.createdBy ? ` · by ${batch.createdBy}` : ''}
+                        {batch.createdBy && !batch.createdByAgent ? ` · by ${batch.createdBy}` : ''}
                       </div>
+                      {batch.createdByAgent && (
+                        <div className="warning">
+                          Proposed by agent {batch.createdByAgent} for {batch.createdBy ?? 'unknown'}
+                          {batch.delegationId ? ` (delegation ${batch.delegationId})` : ''}: the reason is the
+                          agent&apos;s own text.
+                        </div>
+                      )}
                     </td>
                     <td>{batch.scopeSize}</td>
                     <td>

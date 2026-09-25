@@ -61,6 +61,19 @@ const leaves = (list: { subject: string; kind: string; payloadSha256?: string }[
   }));
 const later = () => String(Date.now() + 3_600_000);
 
+describe('who proposed a batch (review 14 M3)', () => {
+  it("names an agent's proposal as the agent's, for its person, never as the person's own", async () => {
+    const { proposedBy } = await import('../packages/cli/src/commands/batch.js');
+    expect(proposedBy({ createdBy: 'usr_alice' })).toBe('usr_alice');
+    expect(proposedBy({ createdBy: 'usr_alice', createdByAgent: 'agt_ops', delegationId: 'dlg_1' })).toBe(
+      "agent agt_ops for usr_alice (delegation dlg_1): the reason is the agent's own text",
+    );
+    expect(proposedBy({})).toBeUndefined();
+    // Server strings never reach the terminal as escape sequences.
+    expect(proposedBy({ createdBy: 'usr\u001b[2Jx', createdByAgent: 'agt\u009b1' })).not.toMatch(/[\u001b\u009b]/);
+  });
+});
+
 describe('batch keygen', () => {
   it('writes a private key once and its public key beside it', async () => {
     const h = await harness();

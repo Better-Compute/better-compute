@@ -24,6 +24,9 @@ export interface BatchRow {
   createdAt: number;
   approvedAt?: number;
   createdBy?: string;
+  /** An agent that proposed it for `createdBy` (its reason is then the agent's text), and its delegation. */
+  createdByAgent?: string;
+  delegationId?: string;
   trustDomain?: string;
 }
 
