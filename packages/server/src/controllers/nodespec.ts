@@ -228,6 +228,9 @@ function wireInstance(instance: InstanceSpec): Json {
       sha256: bytesField(instance.restoreFrom.sha256),
       format: 'raw',
     };
+  // Egress is the wire default (UNSPECIFIED), so specs without a policy hash as before.
+  if (instance.networkPolicy && instance.networkPolicy !== 'egress')
+    wire.networkPolicy = `INSTANCE_NETWORK_POLICY_${instance.networkPolicy.toUpperCase()}`;
   return wire;
 }
 

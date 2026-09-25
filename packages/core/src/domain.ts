@@ -588,6 +588,12 @@ export interface InstanceSpec {
    * a runtime or CPU model mismatch.
    */
   restoreFrom?: { url: string; sha256: string; imageId: string };
+  /**
+   * (v0.5, sandboxes §3.7) What the instance's NICs may reach, enforced by the host on its taps:
+   * `egress` (the default: anything the pool's network allows), `private` (the pool's IPAM subnet
+   * and the host) or `none` (the host only; tunnels still work).
+   */
+  networkPolicy?: 'egress' | 'private' | 'none';
 }
 /** One instance NIC: the host bridge or network, its MAC and its IPAM addresses. */
 export interface InstanceNicSpec {

@@ -497,6 +497,20 @@ message InstanceSpec {
   // disk and, when captured, memory state. The daemon verifies sha256 before restoring and fails
   // the instance on a runtime or CPU model mismatch.
   ImageRef restore_from = 12;
+  // (v0.5, sandboxes) What the instance's NICs may reach, enforced by bcd as host nftables rules on
+  // its taps, whatever the runtime. bcd's own tunnel dial from the host always works.
+  InstanceNetworkPolicy network_policy = 13;
+}
+
+enum InstanceNetworkPolicy {
+  // EGRESS: existing specs do not change.
+  INSTANCE_NETWORK_POLICY_UNSPECIFIED = 0;
+  // Anything the pool's network allows (as before this field).
+  INSTANCE_NETWORK_POLICY_EGRESS = 1;
+  // Only the pool's IPAM subnet and the host.
+  INSTANCE_NETWORK_POLICY_PRIVATE = 2;
+  // Only the host: bcd's tunnel dial, DHCP and ARP; nothing else in or out.
+  INSTANCE_NETWORK_POLICY_NONE = 3;
 }
 
 enum InstanceDesiredState {
