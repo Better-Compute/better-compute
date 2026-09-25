@@ -105,6 +105,7 @@ import {
   prepareCreateSandbox,
   prepareExtendSandbox,
   reconcileSandboxes,
+  sandboxSelfCheck,
   sandboxSettled,
   sandboxWork,
   templatePool,
@@ -811,7 +812,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         },
       },
     ],
-    selfCheck: (context) => vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!),
+    selfCheck: async (context) => [
+      ...(await vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!)),
+      ...(await sandboxSelfCheck(context.sql)),
+    ],
     // §12.8: hosted instances hold inline allocations, which capacity's teardown never reaches.
     tenantDeleted: (context, tenantId) =>
       vpsTenantDeleted(depsOf(context), context, tenantId, options.snapshots),

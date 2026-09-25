@@ -6,6 +6,7 @@ import {
   type AdmissionContext,
   type AdmissionPlan,
   type AuthzAttributes,
+  type Finding,
   type InstanceState,
   type Json,
   type MethodContext,
@@ -1699,6 +1700,82 @@ export async function reconcileSandboxes(
     }
   }
   return pass;
+}
+
+/**
+ * `selfCheck` (doctor) for sandboxes:
+ * - `vps.sandboxes.expiry`: sandboxes more than two passes (30 s) past `expiresAt` and not yet
+ *   deleting (the `vps.sandboxes` reconciler is not running, or failing);
+ * - `vps.sandboxes.deleting`: sandboxes deleting for more than 10 minutes (their instance is stuck);
+ * - `vps.sandboxes.warm`: templates below `warm.min` settled instances for over 10 minutes with no
+ *   refill in that time (quota, capacity, or a vanished flavor or image), or warm instances that have
+ *   not settled within 10 minutes.
+ */
+export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const present = await sql.query<{ found: string | null }>(
+    `SELECT to_regclass('sandboxes')::text AS found`,
+  );
+  if (!present.rows[0]?.found) return findings;
+  const { rows } = await sql.query<{
+    expired: string | number;
+    deleting: string | number;
+    stuck_templates: string[] | null;
+    unsettled: string | number;
+  }>(
+    `SELECT
+       (SELECT count(*) FROM sandboxes WHERE NOT draft AND deleting_at IS NULL
+          AND expires_at < compute_now() - interval '30 seconds') AS expired,
+       (SELECT count(*) FROM sandboxes WHERE deleting_at < compute_now() - interval '10 minutes'
+          AND deleted_at IS NULL) AS deleting,
+       (SELECT array_agg(t.id ORDER BY t.id) FROM sandbox_templates t
+         WHERE NOT t.deleted AND t.warm_min > 0 AND t.created_at < compute_now() - interval '10 minutes'
+           AND (SELECT count(*) FROM instances i WHERE i.warm_template_id = t.id
+                  AND i.warm_template_version = t.instance_version AND i.desired_state <> 'deleted'
+                  AND i.state IN ('paused', 'stopped')) < t.warm_min
+           AND NOT EXISTS (SELECT 1 FROM instances i WHERE i.warm_template_id = t.id
+                  AND i.created_at >= compute_now() - interval '10 minutes')) AS stuck_templates,
+       (SELECT count(*) FROM instances WHERE warm_template_id IS NOT NULL AND desired_state <> 'deleted'
+          AND state NOT IN ('paused', 'stopped', 'deleting', 'deleted')
+          AND created_at < compute_now() - interval '10 minutes') AS unsettled`,
+  );
+  const row = rows[0]!;
+  const expired = Number(row.expired);
+  if (expired > 0)
+    findings.push({
+      check: 'vps.sandboxes.expiry',
+      severity: 'error',
+      message: `${expired} sandbox(es) are past their expiry and still running`,
+      fix: 'Check that a worker runs the vps.sandboxes reconciler and that it is not failing',
+      count: expired,
+    });
+  const deleting = Number(row.deleting);
+  if (deleting > 0)
+    findings.push({
+      check: 'vps.sandboxes.deleting',
+      severity: 'warning',
+      message: `${deleting} sandbox(es) have been deleting for over 10 minutes`,
+      fix: "Check their instances' hosts (a host must report the instance gone, or be declared lost)",
+      count: deleting,
+    });
+  const stuck = row.stuck_templates ?? [];
+  const unsettled = Number(row.unsettled);
+  if (stuck.length > 0 || unsettled > 0)
+    findings.push({
+      check: 'vps.sandboxes.warm',
+      severity: 'warning',
+      message: [
+        stuck.length > 0
+          ? `${stuck.length} template(s) stay below warm.min with no refill in 10 minutes: ${stuck.slice(0, 5).join(', ')}`
+          : '',
+        unsettled > 0 ? `${unsettled} warm instance(s) have not settled within 10 minutes` : '',
+      ]
+        .filter(Boolean)
+        .join('; '),
+      fix: "Check the tenant's quota on the template's pool, host capacity, and that the template's flavor and image still exist",
+      count: stuck.length + unsettled,
+    });
+  return findings;
 }
 
 /**

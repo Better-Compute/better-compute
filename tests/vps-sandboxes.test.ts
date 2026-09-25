@@ -1136,6 +1136,51 @@ describe('template network and versions', () => {
   });
 });
 
+describe('selfCheck', () => {
+  const check = () => module.selfCheck!(moduleContext(db));
+  const sandboxFindings = async () =>
+    (await check()).filter((finding) => finding.check.startsWith('vps.sandboxes'));
+
+  it('flags missed expiries, stuck deletions and warm pools that stopped refilling', async () => {
+    const template = await createTemplate({ warm: { min: 2 } });
+    const sandbox = await createSandbox(template.id, { ttlSeconds: 60 });
+    expect(await sandboxFindings()).toEqual([]);
+    // Two passes past expiry with no reconciler: the expiry finding.
+    await advance(60_000 + 31_000);
+    // (The template is too young for a warm finding: no pass has run to refill it yet.)
+    expect(await sandboxFindings()).toMatchObject([
+      { check: 'vps.sandboxes.expiry', severity: 'error', count: 1 },
+    ]);
+    // The pass expires it; its host never reports the instance gone.
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    await advance(11 * 60_000);
+    const findings = await sandboxFindings();
+    expect(findings.map((finding) => finding.check)).toEqual(['vps.sandboxes.deleting']);
+    expect(sandbox.id).toMatch(/^sbx_/);
+  });
+
+  it('flags a warm pool below min with no refill for 10 minutes', async () => {
+    // Quota for one small instance only: the second warm instance can never be created.
+    await db.query(
+      `UPDATE quota_usage SET max = 2 WHERE tenant_id = 'acme' AND pool_id = $1 AND resource = 'vcpu'`,
+      [pool],
+    );
+    const template = await createTemplate({ warm: { min: 2 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    await advance(11 * 60_000);
+    await reconcileSandboxes();
+    expect(await sandboxFindings()).toMatchObject([
+      {
+        check: 'vps.sandboxes.warm',
+        count: 1,
+        message: expect.stringContaining(template.id),
+      },
+    ]);
+  });
+});
+
 describe('template env', () => {
   afterEach(() => {
     broker = undefined;
