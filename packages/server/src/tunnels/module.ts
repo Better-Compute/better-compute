@@ -44,6 +44,11 @@ export interface TunnelsOptions {
    * certificates per hour (default 20). Beyond them: `RATE_LIMITED` with `retryAfterMs`.
    */
   limits?: { tunnelsPerMinute?: number; sshCertsPerHour?: number };
+  /**
+   * The IAM resource-type prefix (`ComputeOptions.typePrefix`, default `compute-`), for re-deciding
+   * certificates outside a request; `betterCompute()` passes its own.
+   */
+  typePrefix?: string;
 }
 
 /** A sliding-window counter per key (in memory; each api replica counts its own calls). */
@@ -316,6 +321,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
       'tunnels needs an exec ticket issuer (pki createExecTicketIssuer)',
     );
   const sshAccounts = [...(options.sshAccounts ?? ['root'])];
+  const typePrefix = options.typePrefix ?? 'compute-';
   if (!sshAccounts.length || sshAccounts.some((account) => !accountPattern.test(account)))
     throw new ComputeError('INVALID_CONFIG', 'tunnels.sshAccounts must list Unix account names');
   const limitTunnels = slidingLimit(options.limits?.tunnelsPerMinute ?? 10, 60_000, 'tunnels');
@@ -440,11 +446,12 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             validBefore,
           });
           const serial = issued.serial.toString();
-          // Every issuance is recorded: revocation (the node's KRL) and audit read it.
+          // Every issuance is recorded: revocation (the node's KRL), re-authorization (by the issuing
+          // session) and audit read it.
           await tx.query(
             `INSERT INTO ssh_certificates
-               (serial, node_id, tenant_id, identity_id, principal, key_id, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+               (serial, node_id, tenant_id, identity_id, principal, key_id, expires_at, session_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
             [
               serial,
               input.nodeId,
@@ -453,6 +460,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
               principal,
               keyId,
               new Date(issued.validBefore),
+              caller.sessionId ?? null,
             ],
           );
           await context.events.publish(tx, {
@@ -552,6 +560,77 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
              RETURNING serial`,
           );
           return rows.length === 5000 ? 'SYNC_AGAIN' : 'DONE';
+        },
+      },
+      {
+        // A certificate outlives every request check, and IAM does not announce every way access ends
+        // (a deleted binding, an expired activation, a changed policy). Like a tunnel's 60 s re-check, each
+        // outstanding certificate is re-decided for its issuing session; a denial revokes it (the node's KRL).
+        // IAM unreachable keeps it: break-glass is for outages, and it expires within the hour anyway.
+        name: 'tunnels.ssh-certificates-reauthorize',
+        shardBy: 'none',
+        periodic: [{ key: 'ssh-certificates', every: '1m' }],
+        async run(context) {
+          const authorizeSession = context.iam.authorizeSession?.bind(context.iam);
+          if (!options.ssh || !authorizeSession) return 'DONE';
+          const { rows } = await context.sql.query<{
+            serial: string;
+            node_id: string;
+            tenant_id: string;
+            identity_id: string;
+            session_id: string;
+          }>(
+            `SELECT serial, node_id, tenant_id, identity_id, session_id FROM ssh_certificates
+              WHERE revoked_at IS NULL AND expires_at > compute_now() AND session_id IS NOT NULL
+              ORDER BY reauthorized_at NULLS FIRST, serial LIMIT 500`,
+          );
+          for (const row of rows) {
+            if (context.signal.aborted) break;
+            let allowed: boolean;
+            try {
+              allowed = await authorizeSession(
+                { identityId: row.identity_id, sessionId: row.session_id },
+                {
+                  tenantId: row.tenant_id,
+                  action: 'compute:nodes:ssh-root',
+                  resource: { type: `${typePrefix}node`, id: row.node_id },
+                },
+              );
+            } catch (error) {
+              context.log.warn('Re-authorizing an SSH certificate failed; it stays valid until it expires', {
+                serial: row.serial,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              continue;
+            }
+            if (allowed) {
+              await context.sql.query(
+                'UPDATE ssh_certificates SET reauthorized_at = compute_now() WHERE serial = $1',
+                [row.serial],
+              );
+              continue;
+            }
+            await context.sql.transaction(async (tx) => {
+              const { rows: revoked } = await tx.query<{ serial: string }>(
+                `UPDATE ssh_certificates
+                    SET revoked_at = compute_now(), revoked_by = 'iam', revoke_reason = 'access-withdrawn'
+                  WHERE serial = $1 AND revoked_at IS NULL
+                  RETURNING serial`,
+                [row.serial],
+              );
+              if (!revoked.length) return;
+              await context.desired.invalidate(tx, row.node_id);
+              await context.events.publish(tx, {
+                type: 'node.ssh-cert.revoked',
+                tenantId: row.tenant_id,
+                subject: `node/${row.node_id}`,
+                data: { serial: row.serial, identityId: row.identity_id, reason: 'access-withdrawn' },
+              });
+            });
+          }
+          // The longest-unchecked 500 per minute; the rest wait for the next period (never a tight loop while
+          // IAM is failing).
+          return 'DONE';
         },
       },
     ],

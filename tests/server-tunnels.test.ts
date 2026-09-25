@@ -522,6 +522,66 @@ describe('nodes.issueSshCert', () => {
     expect(rows.map((row) => row.serial)).toEqual(['998']);
   });
 
+  it('re-decides outstanding certificates for their session and revokes the ones IAM no longer allows', async () => {
+    const mfa = { ...alice, mfa: true };
+    const kept = (await issue({}, { ...mfa, sessionId: 'ses_kept' })) as unknown as { serial: string };
+    const gone = (await issue({}, { ...mfa, sessionId: 'ses_gone' })) as unknown as { serial: string };
+    const flaky = (await issue({}, { ...mfa, sessionId: 'ses_flaky' })) as unknown as { serial: string };
+    const { rows: recorded } = await db.query<{ session_id: string }>(
+      'SELECT session_id FROM ssh_certificates WHERE serial = $1',
+      [gone.serial],
+    );
+    expect(recorded[0]?.session_id).toBe('ses_gone');
+    const decisions: unknown[] = [];
+    const warnings: string[] = [];
+    const reauthorize = withSsh.reconcilers!.find((r) => r.name === 'tunnels.ssh-certificates-reauthorize')!;
+    expect(reauthorize.periodic).toEqual([{ key: 'ssh-certificates', every: '1m' }]);
+    invalidated.length = 0;
+    events = [];
+    await reauthorize.run(
+      {
+        sql: db,
+        iam: {
+          async authorizeSession(session: { sessionId: string }, decision: unknown) {
+            decisions.push([session.sessionId, decision]);
+            // The binding was deleted (IAM announced nothing compute reacts to), or IAM is down.
+            if (session.sessionId === 'ses_flaky') throw new Error('IAM unreachable');
+            return session.sessionId !== 'ses_gone';
+          },
+        },
+        desired: { invalidate: async (_tx: SqlTx, nodeId: string) => invalidated.push(nodeId) },
+        events: {
+          async publish(_tx: SqlTx, event: { type: string }) {
+            events.push(event.type);
+          },
+        },
+        log: { warn: (message: string) => warnings.push(message) },
+        signal: new AbortController().signal,
+      } as never,
+      'ssh-certificates',
+    );
+    expect(decisions).toContainEqual([
+      'ses_gone',
+      { tenantId: 'acme', action: 'compute:nodes:ssh-root', resource: { type: 'compute-node', id: NODE } },
+    ]);
+    const { rows } = await db.query<{ serial: string; revoked: boolean; checked: boolean; reason: string | null }>(
+      `SELECT serial, revoked_at IS NOT NULL AS revoked, reauthorized_at IS NOT NULL AS checked,
+              revoke_reason AS reason
+         FROM ssh_certificates WHERE serial = ANY($1) ORDER BY serial`,
+      [[kept.serial, gone.serial, flaky.serial]],
+    );
+    const by = Object.fromEntries(rows.map((row) => [row.serial, row]));
+    expect(by[kept.serial]).toMatchObject({ revoked: false, checked: true });
+    expect(by[gone.serial]).toMatchObject({ revoked: true, reason: 'access-withdrawn' });
+    // IAM unreachable: kept (break-glass is for outages), and reported.
+    expect(by[flaky.serial]).toMatchObject({ revoked: false, checked: false });
+    expect(warnings).toHaveLength(1);
+    expect(invalidated).toEqual([NODE]);
+    expect(events).toEqual(['node.ssh-cert.revoked']);
+    const spec = await withSsh.nodeSpec!(specContext(), { id: NODE } as NodeRecord);
+    expect(spec.access?.sshRevokedSerials).toContain(gone.serial);
+  });
+
   it('allows only the configured accounts', async () => {
     await expect(issue({ principal: 'ubuntu' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     const ubuntu = tunnelsModule({ issuer, ssh: ca, sshAccounts: ['root', 'ubuntu'] });

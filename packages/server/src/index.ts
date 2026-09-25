@@ -234,7 +234,7 @@ export function betterCompute<
     createTenancyModule({ modules: () => hosted, gate: tenantGate }),
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
     ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
-    ...(options.tunnels ? [tunnelsModule(options.tunnels)] : []),
+    ...(options.tunnels ? [tunnelsModule({ typePrefix: resolved.typePrefix, ...options.tunnels })] : []),
     // Audit sinks (`sinks.audit` and modules' AuditSink extensions): committed audit rows, in order.
     ...(resolved.auditSinks.length ? [createAuditSinksModule(resolved.auditSinks)] : []),
     ...(options.modules ?? []),
