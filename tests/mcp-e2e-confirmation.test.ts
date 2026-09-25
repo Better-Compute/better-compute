@@ -1,9 +1,20 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createIamClient } from '@better-iam/client';
 import { createMcpGate } from '@better-iam/mcp';
+import type { BetterIam } from '@better-iam/server';
 import { createComputeClient } from '@better-compute/client';
 import type { Credential, SqlExecutor } from '@better-compute/core';
-import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
-import { createComputeMcp, gateTools, iamConfirmations } from '@better-compute/mcp';
+import {
+  TEST_IAM_ORIGIN,
+  createEmbeddedTestIam,
+  type EmbeddedTestIam,
+} from '@better-compute/iam/testing';
+import {
+  createComputeMcp,
+  gateTools,
+  iamConfirmations,
+  remoteMcpIam,
+} from '@better-compute/mcp';
 import { pglite } from '@better-compute/postgres/pglite';
 import { betterCompute, type BetterCompute } from '@better-compute/server';
 
@@ -116,8 +127,12 @@ afterAll(async () => {
   await t?.close();
 });
 
-/** The MCP endpoint as a host mounts it: better-iam's gate, then the compute tools over HTTP. */
-function mcpEndpoint(options: { poll?: boolean } = {}) {
+/**
+ * The MCP endpoint as a host mounts it: better-iam's gate, then the compute tools over HTTP. With
+ * `remote`, the gate reaches IAM over better-iam's HTTP API (`remoteMcpIam`), as a host whose IAM
+ * runs elsewhere would (v0.4).
+ */
+function mcpEndpoint(options: { poll?: boolean; remote?: boolean } = {}) {
   const mcp = createComputeMcp({
     // Each request's compute client forwards the caller's Authorization to the compute handler.
     client: (request) =>
@@ -130,8 +145,16 @@ function mcpEndpoint(options: { poll?: boolean } = {}) {
       ? { confirmations: iamConfirmations(t.iam.api.delegations, { intervalMs: 20 }) }
       : {}),
   });
+  const iam = options.remote
+    ? remoteMcpIam(
+        createIamClient<BetterIam>({
+          baseURL: TEST_IAM_ORIGIN,
+          fetch: async (input, init) => t.iam.handler(new Request(input, init)),
+        }) as never,
+      )
+    : t.iam;
   const gate = createMcpGate({
-    iam: t.iam as never,
+    iam: iam as never,
     tenantId: t.acme.tenantId,
     tools: gateTools(),
     unlisted: 'deny',
@@ -259,6 +282,32 @@ describe('an agent reserves GPUs over MCP with a person’s confirmation (v0.3 a
       confirmationId,
     });
     expect(await bookings()).toEqual(before);
+  }, 60_000);
+
+  it('gates the same way when IAM is reached over HTTP (remoteMcpIam, v0.4)', async () => {
+    const call = mcpEndpoint({ remote: true, poll: true });
+    const pools = await call('list_pools', {});
+    expect(pools.isError, JSON.stringify(pools.structuredContent)).toBeUndefined();
+    // Held back for alice over the remote gate too; she approves, the retry books.
+    const waiting = call('reserve_gpus', { poolId, gpus: 1, duration: '15m' });
+    let confirmationId: string | undefined;
+    for (let tries = 0; tries < 100 && !confirmationId; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      confirmationId = (await pendingFor(alice.credential))[0]?.id;
+    }
+    await t.iam.api.delegations.decideConfirmation(alice.credential, {
+      tenantId: t.acme.tenantId,
+      confirmationId: confirmationId!,
+      approve: true,
+    });
+    const booked = await waiting;
+    expect(booked.structuredContent.reservation).toMatchObject({ state: 'placed' });
+    await call('release_reservation', { reservationId: booked.structuredContent.reservation.id });
+    // Another organization's owner cannot see acme's pool through the gate.
+    const outsider = await call('reserve_gpus', { poolId, gpus: 1, duration: '15m' }, (
+      t.other.owner as { token: string }
+    ).token);
+    expect(outsider.isError).toBe(true);
   }, 60_000);
 
   it('books at once for a person, and polls only with the caller’s token and tenant', async () => {

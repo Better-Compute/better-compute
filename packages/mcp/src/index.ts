@@ -4,5 +4,6 @@
  * endpoint with no MCP SDK dependency. Put `@better-iam/mcp`'s gate in front with `gateTools()`.
  */
 export * from './confirmations.js';
+export * from './remote-iam.js';
 export * from './server.js';
 export * from './tools.js';

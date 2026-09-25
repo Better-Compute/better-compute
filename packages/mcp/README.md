@@ -50,4 +50,8 @@ export default {
   polls and retries once itself. `confirmations: iamConfirmations(iam.api.delegations)` polls
   better-iam's `getConfirmation` per request with the caller's own bearer token and tenant
   (`rejected` → `confirmation-denied`, a lapsed pending request → `confirmation-expired`).
+- **Remote IAM (v0.4).** When better-iam runs elsewhere, give the gate
+  `iam: remoteMcpIam(createIamClient<BetterIam>({ baseURL }))`: it authenticates with
+  `sts.getCallerIdentity` and decides with `authorize`/`authorizeMany`, each as the caller (only
+  identity headers are forwarded), and asks for confirmations through the caller's delegation.
 - **Tenant.** Tools act in `tenantId` (fixed or per caller); by default, the gate caller's tenant.
