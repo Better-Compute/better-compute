@@ -48,7 +48,7 @@ import {
 } from './spot.js';
 import { lockPool, readPool, readPoolNodes } from './store.js';
 import { placeFromIndex } from './placer.js';
-import { PoolIndex } from './pool-index.js';
+import { PoolIndex, type PoolIndexCache } from './pool-index.js';
 import {
   isTenantRootPool,
   leasableSql,
@@ -884,7 +884,7 @@ export async function placeQueued(
   deps: ReservationDeps,
   tx: SqlTx,
   poolId: string,
-  options: { maxBatch?: number } = {},
+  options: { maxBatch?: number; cache?: PoolIndexCache } = {},
 ): Promise<{ placed: number; pending: number; more: boolean }> {
   const limit = Math.min(Math.max(1, options.maxBatch ?? maxPlacementBatch), maxPlacementBatch);
   const pool = await readPool(tx, poolId);
@@ -898,7 +898,10 @@ export async function placeQueued(
   );
   const batch = rows.slice(0, limit);
   const now = deps.clock.now();
-  const index = await PoolIndex.load(tx, pool, now);
+  if (batch.length === 0) return { placed: 0, pending: 0, more: false };
+  const index = options.cache
+    ? await options.cache.get(tx, pool, now)
+    : await PoolIndex.load(tx, pool, now);
   let placed = 0;
   for (const { id } of batch) {
     const row = await readReservationById(tx, id, false);

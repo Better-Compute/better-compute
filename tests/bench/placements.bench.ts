@@ -9,7 +9,7 @@ import {
   inlinePlacer,
   lockPool,
   placeFromIndex,
-  PoolIndex,
+  PoolIndexCache,
 } from '@better-compute/capacity';
 
 // The v0.1 placements/s measurement (PLAN.md §16, bench/REFERENCE.md "placements"): the inline placer
@@ -226,13 +226,19 @@ describe('placements', () => {
     let sequence = 0;
     let placed = 0;
     const batches: number[] = [];
+    const loads: number[] = [];
+    // One batch per simulated second, so the index is rebuilt every fifth batch.
+    const indexes = new PoolIndexCache();
     const started = performance.now();
     for (let done = 0; done < count; done += 64) {
       const size = Math.min(64, count - done);
       const batchStart = performance.now();
       placed += await db.transaction(async (tx) => {
         const pool = await lockPool(tx, 'pool_bench');
-        const index = await PoolIndex.load(tx, pool, T0);
+        // As the capacity.placer worker does: the index is kept between batches (5 s max age).
+        const loadStart = performance.now();
+        const index = await indexes.get(tx, pool, T0 + Math.floor(done / 64) * 1_000);
+        loads.push(performance.now() - loadStart);
         let ok = 0;
         for (let i = 0; i < size; i++) {
           const outcome = await placeFromIndex(
@@ -266,7 +272,12 @@ describe('placements', () => {
       lockHeldMs: summary(batches),
     };
     steps.push(step);
-    console.log('placements pool-lease batch', JSON.stringify(step));
+    console.log(
+      'placements pool-lease batch',
+      JSON.stringify(step),
+      'index load ms',
+      summary(loads),
+    );
     expect(placed).toBe(count);
   });
 });

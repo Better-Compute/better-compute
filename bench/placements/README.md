@@ -31,6 +31,18 @@ The suite is [`tests/bench/placements.bench.ts`](../../tests/bench/placements.be
 | Baseline: whole pool loaded under the pool lock | 12.4 | 79 ms | 78 ms |
 | SQL shortlist, planned before the lock | 35.7 | 27 ms | 2.3 ms |
 | v0.4 pool-lease batches of 64 (in-memory `PoolIndex`) | 118.1 | queued, then ~540 ms per batch | the whole batch |
+| + in-memory shortlist, index kept between batches (5 s) | 350.2 | queued, then ~170 ms per batch | the whole batch |
+
+At 10k nodes × 8 GPUs (PGlite, 1 GPU per placement):
+
+| | placements/s |
+|---|---|
+| inline | 7.8 |
+| pool-lease, index rebuilt every batch, whole-pool plans | 21.1 |
+| pool-lease, in-memory shortlist, index kept between batches | 93.3 |
+
+PLAN's G5 target is ≥200 placements/s per region on Postgres. Pools batch independently on the
+workers that own their shards.
 
 With the pool-lease placer (`capacityModule({ placer: 'pool-lease' })`), admission only queues the request and never
 takes the pool lock. The worker that owns the pool's shard locks the pool once per batch and plans up to 64 requests

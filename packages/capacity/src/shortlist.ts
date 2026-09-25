@@ -41,7 +41,7 @@ async function candidates(
   pool: Pick<PoolRow, 'id'>,
   request: PlacementRequest,
   excluded: readonly string[],
-): Promise<{ nodeId: string; free: number; total: number }[]> {
+): Promise<CandidateCounts[]> {
   const want = new Map<string, number>();
   for (const device of request.devices)
     want.set(device.class, (want.get(device.class) ?? 0) + device.count);
@@ -131,6 +131,38 @@ export async function planFromShortlist(
   excluded: readonly string[],
   context: Pick<PlacementContext, 'plugins' | 'weights' | 'topN'>,
 ): Promise<{ plan: PlacementPlan; views: NodeView[] } | undefined> {
+  return shortlistPlan(pool, request, excluded, context, {
+    counts: () => candidates(tx, pool, request, excluded),
+    views: (nodeIds) => loadNodeViews(tx, pool, request.during, { onlyNodes: nodeIds }),
+    linked: () => linkedNodes(tx, pool),
+  });
+}
+
+/** Free and bookable atoms of the requested classes on one fitting, schedulable node. */
+export interface CandidateCounts {
+  nodeId: string;
+  free: number;
+  total: number;
+}
+
+/** Where a shortlist's inputs come from: SQL (the inline placer) or a `PoolIndex` (batches). */
+export interface ShortlistSource {
+  /** Every schedulable, not excluded node whose scalars and free atoms fit the request. */
+  counts(): Promise<CandidateCounts[]> | CandidateCounts[];
+  /** Placement views of these nodes for the request's window. */
+  views(nodeIds: readonly string[]): Promise<NodeView[]> | NodeView[];
+  /** Nodes with at least one GPU link row. */
+  linked(): Promise<Set<string>> | Set<string>;
+}
+
+/** The exact shortlist over any source; see `planFromShortlist`. */
+export async function shortlistPlan(
+  pool: PoolRow,
+  request: PlacementRequest,
+  excluded: readonly string[],
+  context: Pick<PlacementContext, 'plugins' | 'weights' | 'topN'>,
+  source: ShortlistSource,
+): Promise<{ plan: PlacementPlan; views: NodeView[] } | undefined> {
   const weights = { ...defaultScorerWeights, ...context.weights };
   const needed = request.devices.reduce((sum, device) => sum + device.count, 0);
   const gpus = request.devices
@@ -138,7 +170,7 @@ export async function planFromShortlist(
     .reduce((sum, device) => sum + device.count, 0);
   const topologyConstant = gpus <= 1;
   const w = (id: string) => weights[id] ?? 0;
-  const rows = await candidates(tx, pool, request, excluded);
+  const rows = await source.counts();
   if (rows.length === 0) return undefined;
   const scored: Candidate[] = rows.map((row) => {
     const freeAfter = Math.max(0, row.free - needed);
@@ -157,9 +189,7 @@ export async function planFromShortlist(
   );
   const size = Math.max(shortlistSize, 8 * Math.max(1, context.topN ?? 5));
   const shortlist = scored.slice(0, size);
-  const views = await loadNodeViews(tx, pool, request.during, {
-    onlyNodes: shortlist.map((candidate) => candidate.nodeId),
-  });
+  const views = await source.views(shortlist.map((candidate) => candidate.nodeId));
   const plan = planPlacement({ ...request, excludeNodes: [...excluded] }, views, pool, {
     plugins: context.plugins,
     weights: context.weights,
@@ -177,7 +207,7 @@ export async function planFromShortlist(
   const wholeGpus = request.devices.every(
     (device) => device.class === 'gpu' || !device.class.startsWith('gpu'),
   );
-  const linked = extra > 0 && wholeGpus ? await linkedNodes(tx, pool) : undefined;
+  const linked = extra > 0 && wholeGpus ? await source.linked() : undefined;
   const epsilon = 1e-9;
   for (const candidate of scored.slice(size)) {
     if (candidate.partial + extra < last.score - epsilon) break; // sorted: the rest score lower

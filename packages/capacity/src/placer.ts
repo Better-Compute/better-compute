@@ -22,7 +22,7 @@ import {
 } from './pipeline.js';
 import type { PoolIndex } from './pool-index.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
-import { planFromShortlist, shortlistable } from './shortlist.js';
+import { planFromShortlist, shortlistable, shortlistPlan } from './shortlist.js';
 import { loadNodeViews, lockPool, readPool, type PoolRow } from './store.js';
 
 export interface InlinePlacerOptions {
@@ -362,7 +362,9 @@ export async function placeFromIndex(
   const ids = options.ids ?? newId;
   const excluded = new Set(request.excludeNodes ?? []);
   const lock = async () => pool;
-  const views = index.views(request.during);
+  let whole: NodeView[] | undefined;
+  const views = () => (whole ??= index.views(request.during));
+  const fast = shortlistable(request, context.plugins);
   const outcome =
     request.gang !== undefined
       ? await placeGang(
@@ -370,7 +372,7 @@ export async function placeFromIndex(
           request,
           request.gang,
           pool,
-          views,
+          views(),
           excluded,
           context,
           maxAttempts,
@@ -380,11 +382,22 @@ export async function placeFromIndex(
       : await placeSingle(
           tx,
           request,
-          async (without) =>
-            planPlacement({ ...request, excludeNodes: without }, views, pool, {
-              plugins: context.plugins,
-              weights: context.weights,
-            }),
+          async (without) => {
+            const short = fast
+              ? await shortlistPlan(pool, request, without, context, {
+                  counts: () => index.counts(request, without),
+                  views: (nodeIds) => index.views(request.during, nodeIds),
+                  linked: () => index.linked(),
+                })
+              : undefined;
+            return (
+              short?.plan ??
+              planPlacement({ ...request, excludeNodes: without }, views(), pool, {
+                plugins: context.plugins,
+                weights: context.weights,
+              })
+            );
+          },
           excluded,
           context,
           maxAttempts,

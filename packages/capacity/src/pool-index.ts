@@ -2,11 +2,13 @@ import type {
   Atom,
   Device,
   NodeView,
+  PlacementRequest,
   ScalarResource,
   SqlTx,
   TimeRange,
 } from '@better-compute/core';
 import { isSchedulable } from './eligibility.js';
+import type { CandidateCounts } from './shortlist.js';
 import {
   readDeviceLinks,
   readDevices,
@@ -24,6 +26,31 @@ import {
 // not seen until the next batch; the guarded commit statements catch a stale view, and the placer
 // replans without that node.
 
+/**
+ * Keeps each pool's index between batches of the worker that owns it (§10.3: "rebuilt when the lease
+ * is acquired"): reused while younger than `maxAgeMs` (default 5 s) and while the pool row is
+ * unchanged. Drop a pool's entry when a batch fails, since its transaction's records never
+ * happened. Changes made by others in the meantime are caught by the guarded commits, and picked up
+ * at the next rebuild.
+ */
+export class PoolIndexCache {
+  private readonly entries = new Map<string, { index: PoolIndex; at: number; version: number }>();
+  constructor(private readonly maxAgeMs = 5_000) {}
+
+  async get(tx: SqlTx, pool: PoolRow, now: number): Promise<PoolIndex> {
+    const hit = this.entries.get(pool.id);
+    if (hit && now - hit.at < this.maxAgeMs && now >= hit.at && hit.version === pool.version)
+      return hit.index;
+    const index = await PoolIndex.load(tx, pool, now);
+    this.entries.set(pool.id, { index, at: now, version: pool.version });
+    return index;
+  }
+
+  drop(poolId: string): void {
+    this.entries.delete(poolId);
+  }
+}
+
 export class PoolIndex {
   private constructor(
     readonly pool: PoolRow,
@@ -34,7 +61,38 @@ export class PoolIndex {
     private readonly links: Map<string, NonNullable<NodeView['links']>>,
     /** Booking intervals per device, `[start, end)` in epoch ms. */
     private readonly bookings: Map<string, [number, number][]>,
-  ) {}
+  ) {
+    for (const [nodeId, list] of devices) {
+      const counts = new Map<string, { bookable: number; healthy: number }>();
+      for (const device of list) {
+        this.deviceById.set(device.id, device);
+        if (!device.bookable) continue;
+        const entry = counts.get(device.class) ?? { bookable: 0, healthy: 0 };
+        entry.bookable++;
+        if (device.healthy) entry.healthy++;
+        counts.set(device.class, entry);
+      }
+      this.classCounts.set(nodeId, counts);
+    }
+    for (const deviceId of bookings.keys()) this.markBooked(deviceId);
+  }
+
+  private readonly deviceById = new Map<string, Device>();
+  /** Bookable devices per node and class: all, and healthy. */
+  private readonly classCounts = new Map<
+    string,
+    Map<string, { bookable: number; healthy: number }>
+  >();
+  /** Devices with at least one booking, per node: the only ones a window can make busy. */
+  private readonly bookedByNode = new Map<string, Set<string>>();
+
+  private markBooked(deviceId: string): void {
+    const device = this.deviceById.get(deviceId);
+    if (!device) return;
+    const set = this.bookedByNode.get(device.nodeId) ?? new Set<string>();
+    set.add(deviceId);
+    this.bookedByNode.set(device.nodeId, set);
+  }
 
   /** Loads a pool: every node, and devices, scalars, links and bookings ending after `from` for schedulable ones. */
   static async load(tx: SqlTx, pool: PoolRow, from: number): Promise<PoolIndex> {
@@ -78,9 +136,63 @@ export class PoolIndex {
     return false;
   }
 
-  /** The placement view of the pool for one window, as `loadNodeViews` would build it. */
-  views(during: TimeRange): NodeView[] {
-    return this.nodes.map((node) => {
+  /** Nodes with at least one GPU link row. */
+  linked(): Set<string> {
+    return new Set(this.links.keys());
+  }
+
+  /**
+   * Shortlist inputs for a request (see `ShortlistSource.counts`): every schedulable node, not
+   * excluded, whose scalars fit and whose free atoms cover each requested class, with its free and
+   * bookable counts over the requested classes.
+   */
+  counts(request: PlacementRequest, excluded: readonly string[]): CandidateCounts[] {
+    const want = new Map<string, number>();
+    for (const device of request.devices)
+      want.set(device.class, (want.get(device.class) ?? 0) + device.count);
+    const skip = new Set(excluded);
+    const out: CandidateCounts[] = [];
+    nodes: for (const node of this.nodes) {
+      if (skip.has(node.id) || !isSchedulable(node, this.pool)) continue;
+      const scalars = this.resources.get(node.id) ?? {};
+      for (const [resource, need] of Object.entries(request.resources ?? {})) {
+        if (!(need > 0)) continue;
+        const scalar = scalars[resource];
+        if (!scalar || scalar.allocated + need > Math.floor(scalar.allocatable * scalar.ratio))
+          continue nodes;
+      }
+      if (want.size === 0) {
+        out.push({ nodeId: node.id, free: 0, total: 0 });
+        continue;
+      }
+      // Healthy bookable atoms per class, minus the booked ones this window makes busy.
+      const classes = this.classCounts.get(node.id);
+      const busy = new Map<string, number>();
+      for (const deviceId of this.bookedByNode.get(node.id) ?? []) {
+        const device = this.deviceById.get(deviceId)!;
+        if (device.bookable && device.healthy && want.has(device.class))
+          if (this.busy(deviceId, request.during))
+            busy.set(device.class, (busy.get(device.class) ?? 0) + 1);
+      }
+      let freeTotal = 0;
+      let total = 0;
+      for (const [deviceClass, count] of want) {
+        const counts = classes?.get(deviceClass);
+        const available = (counts?.healthy ?? 0) - (busy.get(deviceClass) ?? 0);
+        if (available < count) continue nodes;
+        freeTotal += available;
+        total += counts?.bookable ?? 0;
+      }
+      out.push({ nodeId: node.id, free: freeTotal, total });
+    }
+    return out;
+  }
+
+  /** The placement view of the pool (or of `onlyNodes`) for one window, as `loadNodeViews` builds it. */
+  views(during: TimeRange, onlyNodes?: readonly string[]): NodeView[] {
+    const only = onlyNodes ? new Set(onlyNodes) : undefined;
+    const nodes = only ? this.nodes.filter((node) => only.has(node.id)) : this.nodes;
+    return nodes.map((node) => {
       const all = this.devices.get(node.id) ?? [];
       const view: NodeView = {
         ...node,
@@ -105,11 +217,13 @@ export class PoolIndex {
     resources: Readonly<Record<string, number>>;
     during: TimeRange;
   }): void {
-    for (const atom of allocation.atoms)
+    for (const atom of allocation.atoms) {
       this.bookings.set(atom, [
         ...(this.bookings.get(atom) ?? []),
         [allocation.during.start, allocation.during.end],
       ]);
+      this.markBooked(atom);
+    }
     const scalars = this.resources.get(allocation.nodeId);
     if (!scalars) return;
     const next = { ...scalars };

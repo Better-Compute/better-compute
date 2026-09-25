@@ -30,6 +30,7 @@ import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
 import { inlinePlacer, poolLeasePlacer } from './placer.js';
 import { leaseCandidates, leaseGroups } from './node-lease.js';
+import { PoolIndexCache } from './pool-index.js';
 import { defaultSpotNoticeMs, planPreemption, readSpotAllocations } from './spot.js';
 import {
   chargeQuota,
@@ -1263,15 +1264,25 @@ export function capacityModule(
     },
   };
   // v0.4 pool-lease placer: one batch per pool key, by the worker owning the pool's shard.
+  const indexes = new PoolIndexCache();
   const placerReconciler: Reconciler = {
     name: placerWork,
     shardBy: 'pool',
     async run(context, poolId) {
       const deps = depsFrom(context, placers, options);
-      const { more } = await inTx(context, (tx) =>
-        placeQueued(deps, tx, poolId, options.maxBatch ? { maxBatch: options.maxBatch } : {}),
-      );
-      return more ? 'SYNC_AGAIN' : 'DONE';
+      try {
+        const { more } = await inTx(context, (tx) =>
+          placeQueued(deps, tx, poolId, {
+            cache: indexes,
+            ...(options.maxBatch ? { maxBatch: options.maxBatch } : {}),
+          }),
+        );
+        return more ? 'SYNC_AGAIN' : 'DONE';
+      } catch (error) {
+        // The batch's records never committed: rebuild the index next time.
+        indexes.drop(poolId);
+        throw error;
+      }
     },
   };
   // §12.7: hourly usage windows for the IAM usage sink, which flushes hourly before closePeriod.
