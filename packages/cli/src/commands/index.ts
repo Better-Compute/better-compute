@@ -4,6 +4,7 @@ import { authCommands } from './auth.js';
 import { batchCommands } from './batch.js';
 import { auditCommands } from './audit.js';
 import { capacityCommands } from './capacity.js';
+import { catalogCommands } from './catalog.js';
 import { daemonCommands } from './daemon.js';
 import { eventCommands } from './events.js';
 import { fleetCommands } from './fleet.js';
@@ -35,6 +36,7 @@ export const builtinCommands: readonly CommandSpec<any>[] = [
   ...instanceCommands,
   ...eventCommands,
   ...operationCommands,
+  ...catalogCommands,
   ...fleetCommands,
   ...pkiCommands,
   ...batchCommands,

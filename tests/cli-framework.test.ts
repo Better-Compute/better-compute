@@ -137,6 +137,13 @@ describe('help and the manifest', () => {
     expect((await run(['help', 'api'])).stdout).toMatch(/--url URL\s+Call a running compute/);
   });
 
+  it('gives no command a flag twice (its own and the common --config, --url, --format, --query)', () => {
+    for (const command of cliManifest().commands as { name: string; flags?: { flag: string }[] }[]) {
+      const flags = (command.flags ?? []).map((flag) => flag.flag);
+      expect(flags.filter((flag, index) => flags.indexOf(flag) !== index), command.name).toEqual([]);
+    }
+  });
+
   it('prints every command as JSON with help --json', async () => {
     const { status, stdout } = await run(['help', '--json']);
     expect(status).toBe(0);
@@ -215,6 +222,37 @@ describe('help and the manifest', () => {
       'commands list',
       'commands get',
       'commands cancel',
+      'sites list',
+      'sites get',
+      'sites create',
+      'sites update',
+      'sites delete',
+      'projects list',
+      'projects get',
+      'projects create',
+      'projects archive',
+      'images list',
+      'images get',
+      'images register',
+      'images promote',
+      'flavors list',
+      'flavors create',
+      'flavors update',
+      'flavors delete',
+      'quotas get',
+      'quotas set',
+      'usage list',
+      'usage export',
+      'webhooks list',
+      'webhooks get',
+      'webhooks create',
+      'webhooks update',
+      'webhooks delete',
+      'webhooks ping',
+      'webhooks rotate-secret',
+      'webhooks deliveries',
+      'webhooks redeliver',
+      'webhooks event-types',
       'fleet export',
       'fleet plan',
       'fleet status',
