@@ -1542,3 +1542,177 @@ describe('spot reservations (v0.5)', () => {
     expect(((await call('reservations', 'create', four('r2'))) as Rsv).state).toBe('pending');
   });
 });
+
+describe('node leases: binding node (v0.5)', () => {
+  let leasePool: string;
+  const root = { ...caller, tenantId: 'root', identityId: 'usr_root' };
+
+  async function addReadyNode(id: string, gpus: number): Promise<void> {
+    await db.query(
+      `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance,
+                          cordoned, connectivity, trust, generation, observed_generation, next_cmd_seq,
+                          identity_gen, shard, version)
+       VALUES ($1, 'site_01jz00000000000000000000aa', $2, 'root', 'host', 'ready', false, false,
+               'disconnected', 'platform', 1, 0, 1, 1, 0, 1)`,
+      [id, leasePool],
+    );
+    for (let index = 0; index < gpus; index++)
+      await db.query(
+        `INSERT INTO devices (id, node_id, class, bookable, healthy, attributes)
+         VALUES ($1, $2, 'gpu', true, $3, '{"gpuModel":"H100"}')`,
+        [`GPU-${id.slice(-2)}-${index}`, id, index < 4],
+      );
+  }
+
+  beforeEach(async () => {
+    const pool = (await call(
+      'pools',
+      'create',
+      {
+        tenantId: 'root',
+        siteId: 'site_01jz00000000000000000000aa',
+        class: 'metal-host',
+        gpuModel: 'H100',
+        policy: { tenantRoot: true },
+      },
+      { who: root },
+    )) as { id: string };
+    leasePool = pool.id;
+    await call(
+      'pools',
+      'offer',
+      { tenantId: 'root', poolId: leasePool, toTenantId: 'acme', quota: { gpu: 100 } },
+      { who: root },
+    );
+    await addReadyNode('node_01jz00000000000000000000la', 5);
+    await addReadyNode('node_01jz00000000000000000000lb', 5);
+    recorded.work = [];
+  });
+
+  const lease = (extra: Record<string, unknown> = {}) =>
+    create({
+      poolId: leasePool,
+      devices: [{ class: 'gpu', count: 4 }],
+      duration: '8h',
+      binding: 'node',
+      node: { profileId: 'prf_ubuntu-24', profileVersion: 2 },
+      idempotencyKey: 'lease-1',
+      ...extra,
+    });
+  const get = async (id: string) =>
+    (await call('reservations', 'get', { tenantId: 'acme', reservationId: id })) as Rsv & {
+      request: Record<string, unknown>;
+    };
+  const allocationsOf = async (id: string) =>
+    (
+      await db.query<{ id: string; node_id: string; atoms: string[]; released: boolean }>(
+        `SELECT id, node_id, atoms, released_at IS NOT NULL AS released FROM allocations
+          WHERE owner_id = $1 ORDER BY id`,
+        [id],
+      )
+    ).rows;
+
+  it('books the whole node, lets metal deploy it from the start, and hands it back on release', async () => {
+    const leased = (await call('reservations', 'create', lease())) as Rsv;
+    expect(leased.state).toBe('placed');
+    expect((await get(leased.id)).request).toMatchObject({
+      binding: 'node',
+      node: { profileId: 'prf_ubuntu-24', profileVersion: 2 },
+    });
+    const [allocation] = await allocationsOf(leased.id);
+    // Every bookable atom, the unhealthy fifth GPU included.
+    expect(allocation!.atoms).toHaveLength(5);
+    const nodeId = allocation!.node_id;
+    expect(recorded.work.filter((entry) => entry.kind === 'metal')).toEqual([]);
+
+    await reconcile(leased.id);
+    expect((await get(leased.id)).state).toBe('binding');
+    expect(recorded.work).toContainEqual({ kind: 'metal', key: nodeId });
+    // bcd on the node gets no CDI assignments for a lease.
+    expect(await deviceAssignments(db, nodeId)).toEqual([]);
+
+    // Metal finished the deploy: it marks the allocation bound and wakes the reservation.
+    await db.query(
+      `UPDATE allocations SET bound_at = compute_now(), binding = '{"node": true}'::jsonb WHERE id = $1`,
+      [allocation!.id],
+    );
+    await db.query(
+      `UPDATE nodes SET provision_state = 'deployed', trust = 'tenant-controlled' WHERE id = $1`,
+      [nodeId],
+    );
+    await reconcile(leased.id);
+    expect((await get(leased.id)).state).toBe('active');
+
+    // The other node is still leasable; this one is not while the tenant holds it.
+    const second = (await call(
+      'reservations',
+      'create',
+      lease({ idempotencyKey: 'lease-2' }),
+    )) as Rsv;
+    expect(second.state).toBe('placed');
+    expect((await allocationsOf(second.id))[0]!.node_id).not.toBe(nodeId);
+    const third = (await call(
+      'reservations',
+      'create',
+      lease({ idempotencyKey: 'lease-3' }),
+    )) as Rsv;
+    expect(third).toMatchObject({
+      state: 'pending',
+      conditions: [expect.objectContaining({ message: expect.stringContaining('leasable') })],
+    });
+
+    recorded.work = [];
+    await call('reservations', 'release', { tenantId: 'acme', reservationId: leased.id });
+    expect((await allocationsOf(leased.id))[0]!.released).toBe(true);
+    expect(recorded.work).toContainEqual({ kind: 'metal', key: nodeId });
+
+    // After metal's teardown the node is ready and platform-owned again: leasable.
+    await db.query(`UPDATE nodes SET provision_state = 'ready', trust = 'platform' WHERE id = $1`, [
+      nodeId,
+    ]);
+    await reconcile(third.id);
+    expect((await get(third.id)).state).toBe('placed');
+  });
+
+  it('fails a lease metal did not deploy in time, without placing it again', async () => {
+    const leased = (await call('reservations', 'create', lease())) as Rsv;
+    await reconcile(leased.id);
+    const nodeId = (await allocationsOf(leased.id))[0]!.node_id;
+    await advance(5 * 60_000 + 1);
+    await reconcile(leased.id);
+    expect((await get(leased.id)).state).toBe('binding');
+    recorded.work = [];
+    await advance(2 * HOUR);
+    await reconcile(leased.id);
+    expect(await get(leased.id)).toMatchObject({
+      state: 'failed',
+      conditions: [expect.objectContaining({ type: 'BindTimeout' })],
+    });
+    expect(recorded.work).toContainEqual({ kind: 'metal', key: nodeId });
+    expect((await allocationsOf(leased.id)).every((row) => row.released)).toBe(true);
+  });
+
+  it('leases gangs of whole nodes', async () => {
+    const gang = (await call('reservations', 'create', lease({ gang: { size: 2 } }))) as Rsv;
+    expect(gang.state).toBe('placed');
+    expect((await allocationsOf(gang.id)).map((row) => row.node_id)).toEqual(
+      expect.arrayContaining([
+        'node_01jz00000000000000000000la',
+        'node_01jz00000000000000000000lb',
+      ]),
+    );
+  });
+
+  it('refuses node bindings outside tenantRoot pools, without a profile, or as spot', async () => {
+    for (const bad of [
+      lease({ poolId }),
+      lease({ node: undefined }),
+      lease({ spot: true }),
+      create({ node: { profileId: 'prf_x' } }),
+      lease({ node: { profileId: 'prf_x', extra: 1 } }),
+    ])
+      await expect(call('reservations', 'create', bad)).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+  });
+});

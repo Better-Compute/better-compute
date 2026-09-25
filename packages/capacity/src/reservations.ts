@@ -18,6 +18,7 @@ import {
   type Json,
   type MethodContext,
   type ModuleContext,
+  type NodeBindingSpec,
   type PlacementContext,
   type PlacementOutcome,
   type Placer,
@@ -46,6 +47,13 @@ import {
   truncateAllocation,
 } from './spot.js';
 import { readPool, readPoolNodes } from './store.js';
+import {
+  isTenantRootPool,
+  leasableSql,
+  metalWork,
+  nodeBindTimeoutMs,
+  placeNodeLease,
+} from './node-lease.js';
 
 // Reservations (PLAN.md §3.4, §10.5): request-as-resource drafts decided by IAM, placed by the
 // Placer in the second transaction, then driven by the `capacity.reservations` reconciler through
@@ -57,6 +65,7 @@ export const reservationWork = 'capacity.reservations';
 
 const tenantPattern = /^[A-Za-z0-9._:-]{1,128}$/;
 const keyPattern = /^[A-Za-z0-9._:-]{1,128}$/;
+const profilePattern = /^[A-Za-z0-9._:/-]{1,128}$/;
 const deviceClasses: readonly DeviceClass[] = [
   'gpu',
   'gpu.mig',
@@ -78,7 +87,10 @@ export interface CreateReservationInput {
   start?: number;
   /** Milliseconds. */
   duration: number;
-  binding: 'hold';
+  /** `hold` (default) or `node` (v0.5: a whole node in a `tenantRoot` pool, deployed by metal). */
+  binding: 'hold' | 'node';
+  /** `binding: 'node'`: the metal profile to deploy (required there, refused otherwise). */
+  node?: NodeBindingSpec;
   leaseSeconds?: number;
   idempotencyKey: string;
   wait?: { timeoutMs: number };
@@ -128,6 +140,7 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
       'start',
       'duration',
       'binding',
+      'node',
       'leaseSeconds',
       'spot',
       'idempotencyKey',
@@ -182,21 +195,32 @@ export function parseCreateReservation(raw: unknown): CreateReservationInput {
   if (!(duration >= 60_000 && duration <= maxDuration))
     fail('duration must be between 1m and 365d');
 
-  if (input.binding !== undefined && input.binding !== 'hold')
+  if (input.binding !== undefined && input.binding !== 'hold' && input.binding !== 'node')
     throw new ComputeError(
       'UNSUPPORTED',
-      `binding ${String(input.binding)} arrives later (instance: v0.3, node: v0.5)`,
+      `binding ${String(input.binding)} is not a reservation binding (instances: vps.instances.create)`,
     );
+  const binding = input.binding === 'node' ? 'node' : 'hold';
   if (input.spot !== undefined && typeof input.spot !== 'boolean') fail('spot must be a boolean');
+  if (binding === 'node' && input.spot === true) fail('A node binding cannot be spot');
+  if ((binding === 'node') !== (input.node !== undefined))
+    fail(binding === 'node' ? 'binding node needs node.profileId' : 'node needs binding node');
 
   const result: CreateReservationInput = {
     tenantId,
     poolId,
     devices,
     duration,
-    binding: 'hold',
+    binding,
     idempotencyKey: string(input.idempotencyKey, keyPattern, 'idempotencyKey'),
   };
+  if (input.node !== undefined) {
+    const node = record(input.node, 'node');
+    onlyKeys(node, ['profileId', 'profileVersion'], 'node');
+    result.node = { profileId: string(node.profileId, profilePattern, 'node.profileId') };
+    if (node.profileVersion !== undefined)
+      result.node.profileVersion = integer(node.profileVersion, 1, 2 ** 31, 'node.profileVersion');
+  }
   if (input.projectId !== undefined) {
     if (!isId(input.projectId, 'prj')) fail('projectId must be a project id');
     result.projectId = input.projectId;
@@ -237,6 +261,7 @@ export function reservationSpec(input: CreateReservationInput): ReservationSpec 
   if (input.leaseSeconds !== undefined) spec.leaseSeconds = input.leaseSeconds;
   if (input.gang !== undefined) spec.gang = { ...input.gang };
   if (input.spot === true) spec.spot = true;
+  if (input.node !== undefined) spec.node = { ...input.node };
   return spec;
 }
 
@@ -633,6 +658,8 @@ export async function prepareCreate(
   const pool = await visiblePool(tx, input.tenantId, input.poolId);
   if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
   assertSharingFits(input.devices, pool.sharing);
+  if (input.binding === 'node' && !isTenantRootPool(pool))
+    fail(`Pool ${pool.id} does not lease whole nodes (policy.tenantRoot)`);
   const id =
     existing?.id ?? (await draftId('rsv', input.tenantId, caller.identityId, input.idempotencyKey));
   const spec = reservationSpec(input);
@@ -754,12 +781,15 @@ async function attemptPlacement(
   const now = deps.clock.now();
   const start = Math.max(row.request.start ?? now, now);
   let during = { start, end: start + requestedDuration(row) };
-  let outcome = await deps.placer.place(tx, placementRequest(row, during), {
-    ...deps.placement,
-    clock: deps.clock,
-    ...(admission ? { admission } : {}),
-  });
-  if (outcome.status === 'pending' && row.request.spot !== true) {
+  const nodeLease = isNodeBinding(row);
+  let outcome = nodeLease
+    ? await placeNodeLease(tx, placementRequest(row, during), deps.placement)
+    : await deps.placer.place(tx, placementRequest(row, during), {
+        ...deps.placement,
+        clock: deps.clock,
+        ...(admission ? { admission } : {}),
+      });
+  if (outcome.status === 'pending' && row.request.spot !== true && !nodeLease) {
     const preempted = await preemptFor(deps, tx, row, during);
     if (preempted) ({ outcome, during } = preempted);
   }
@@ -932,6 +962,21 @@ async function noticeSpot(
   await publish(deps, tx, noticed, 'reservation.preempting', { ...by, at });
 }
 
+/** Whether a reservation leases whole nodes (`binding: 'node'`, deployed by metal). */
+export function isNodeBinding(row: Pick<ReservationRow, 'request'>): boolean {
+  return row.request.binding === 'node';
+}
+
+/** Wakes metal's node reconciler for every node of a node-binding reservation. */
+async function wakeMetal(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  allocations: readonly { nodeId: string }[],
+): Promise<void> {
+  for (const nodeId of new Set(allocations.map((allocation) => allocation.nodeId)))
+    await deps.work.enqueue(tx, metalWork, nodeId);
+}
+
 /** Whether a reservation was cut short by spot preemption. */
 export function isPreempted(row: Pick<ReservationRow, 'conditions'>): boolean {
   return row.conditions.some((entry) => entry.type === 'Preempted' && entry.status === 'true');
@@ -976,6 +1021,8 @@ async function releaseBookings(
     await releaseAllocation(tx, allocation.id);
     await deps.desired.invalidate(tx, allocation.nodeId);
   }
+  // Metal tears a released lease down (tenant-root release) and returns the node to ready.
+  if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
   return allocations;
 }
 
@@ -1421,8 +1468,10 @@ export async function reconcileReservation(
     const binding = await move(tx, repaired, 'start');
     const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id });
     for (const allocation of allocations) await deps.desired.invalidate(tx, allocation.nodeId);
+    // A node lease is deployed by metal from its start, never earlier.
+    if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
     await publish(deps, tx, binding, 'reservation.binding');
-    return wake(now + bindTimeoutMs);
+    return wake(now + (isNodeBinding(row) ? nodeBindTimeoutMs : bindTimeoutMs));
   }
 
   if (row.state === 'binding') {
@@ -1447,8 +1496,8 @@ export async function reconcileReservation(
       await publish(deps, tx, active, 'reservation.active');
       return wake(row.during.end);
     }
-    if (!rejected && now - row.during.start < bindTimeoutMs)
-      return wake(row.during.start + bindTimeoutMs);
+    const timeout = isNodeBinding(row) ? nodeBindTimeoutMs : bindTimeoutMs;
+    if (!rejected && now - row.during.start < timeout) return wake(row.during.start + timeout);
     const previous = row.conditions.find((entry) => entry.type === 'BindTimeout');
     const attempts = Number(previous?.message ?? 0) + 1;
     const condition = {
@@ -1457,7 +1506,8 @@ export async function reconcileReservation(
       reason: rejected ? 'NodeRejectedBinding' : 'NodeDidNotBind',
       message: String(attempts),
     };
-    if (attempts > maxBindRetries) {
+    // A half-deployed node is not followed by a second deploy elsewhere: node leases fail at once.
+    if (attempts > maxBindRetries || isNodeBinding(row)) {
       await failReservation(deps, tx, row, condition);
       return undefined;
     }
@@ -1505,7 +1555,7 @@ export async function deviceAssignments(
     `SELECT a.id, a.atoms, (extract(epoch FROM upper(a.during)) * 1000)::float8 AS end_ms
        FROM allocations a JOIN reservations r ON r.id = a.owner_id AND a.owner_kind = 'reservation'
       WHERE a.node_id = $1 AND a.released_at IS NULL AND r.state IN ('binding', 'active')
-        AND cardinality(a.atoms) > 0
+        AND cardinality(a.atoms) > 0 AND r.request->>'binding' IS DISTINCT FROM 'node'
       ORDER BY a.id`,
     [nodeId],
   );
@@ -1610,11 +1660,13 @@ export async function repairBooking(
 ): Promise<ReservationRow> {
   if (!row.during) return row;
   await tx.query(`SELECT 1 FROM pools WHERE id = $1 FOR UPDATE`, [row.poolId]);
+  // A node lease is judged by leasability; its atoms are all the node's, healthy or not.
+  const nodeLease = isNodeBinding(row);
   const { rows } = await tx.query<{ node_id: string; node_ok: boolean; atoms_ok: boolean }>(
     `SELECT a.node_id,
             EXISTS (SELECT 1 FROM nodes n JOIN pools p ON p.id = n.pool_id
-                     WHERE n.id = a.node_id AND ${schedulableSql}) AS node_ok,
-            NOT EXISTS (SELECT 1 FROM devices d WHERE d.id = ANY(a.atoms)
+                     WHERE n.id = a.node_id AND ${nodeLease ? leasableSql : schedulableSql}) AS node_ok,
+            ${nodeLease ? 'true OR ' : ''}NOT EXISTS (SELECT 1 FROM devices d WHERE d.id = ANY(a.atoms)
                          AND NOT (d.healthy AND d.bookable)) AS atoms_ok
        FROM allocations a
       WHERE a.owner_kind = 'reservation' AND a.owner_id = $1 AND a.released_at IS NULL`,
@@ -1631,11 +1683,10 @@ export async function repairBooking(
     await releaseAllocation(tx, allocation.id);
     await deps.desired.invalidate(tx, allocation.nodeId);
   }
-  const outcome = await deps.placer.place(
-    tx,
-    { ...placementRequest(row, row.during), excludeNodes: [...new Set(bad)] },
-    { ...deps.placement, clock: deps.clock },
-  );
+  const again = { ...placementRequest(row, row.during), excludeNodes: [...new Set(bad)] };
+  const outcome = nodeLease
+    ? await placeNodeLease(tx, again, deps.placement)
+    : await deps.placer.place(tx, again, { ...deps.placement, clock: deps.clock });
   if (outcome.status === 'placed') {
     const conditions = withoutCondition(row.conditions, 'Unschedulable');
     const { rowCount } = await tx.query(
