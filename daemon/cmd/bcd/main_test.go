@@ -45,9 +45,8 @@ func TestHelpAndUsage(t *testing.T) {
 
 func TestUnimplementedModesExitTwo(t *testing.T) {
 	phases := map[string]string{
-		"site":    "v0.2",
-		"ramdisk": "v0.2",
-		"sim":     "v0.4",
+		"site": "v0.2",
+		"sim":  "v0.4",
 	}
 	for name, phase := range phases {
 		code, _, stderr := runBCD(name)
@@ -151,5 +150,13 @@ func TestStatusWithoutAnAgent(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "bcd.sock")
 	if code, _, stderr := runBCD("status", "--socket", socket); code != exitFailure || !strings.Contains(stderr, "not running") {
 		t.Fatalf("bcd status without an agent = %d, %q", code, stderr)
+	}
+}
+
+func TestRamdiskNeedsBootParameters(t *testing.T) {
+	cmdline := filepath.Join(t.TempDir(), "cmdline")
+	_ = os.WriteFile(cmdline, []byte("BOOT_IMAGE=/vmlinuz console=ttyS0\n"), 0o644)
+	if code, _, stderr := runBCD("ramdisk", "--cmdline", cmdline, "--data-dir", t.TempDir()); code != exitUsage || !strings.Contains(stderr, "bc.gateway") {
+		t.Fatalf("bcd ramdisk without boot parameters = %d, %q", code, stderr)
 	}
 }

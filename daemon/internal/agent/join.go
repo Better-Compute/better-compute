@@ -37,6 +37,10 @@ type JoinOptions struct {
 	// NodeCARoots, when known, must certify the issued certificate.
 	NodeCARoots [][]byte
 	Role        commonv1.AgentRole
+	// Attestor verifies the join ("join-token" by default; "discovery" for a PXE ramdisk, whose
+	// Attestation is the site agent's SignedDiscoveryAssertion).
+	Attestor    string
+	Attestation []byte
 	Claims      *agentv1.HardwareClaims
 	Version     string
 	// DataDir receives the key and the identity.
@@ -80,6 +84,9 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
+	if o.Attestor == "" {
+		o.Attestor = "join-token"
+	}
 	if o.Role == commonv1.AgentRole_AGENT_ROLE_UNSPECIFIED {
 		o.Role = commonv1.AgentRole_AGENT_ROLE_NODE
 	}
@@ -102,7 +109,8 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 			SealedToken:   sealed,
 			Csr:           csr,
 			Claims:        o.Claims,
-			Attestor:      "join-token",
+			Attestor:      o.Attestor,
+			Attestation:   o.Attestation,
 			DaemonVersion: o.Version,
 			Role:          o.Role,
 		})

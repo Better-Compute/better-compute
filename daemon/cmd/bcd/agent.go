@@ -179,13 +179,17 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd node: %v\n", err)
 		return exitFailure
 	}
-	log := newLogger(cfg, stderr)
+	return runAgent("node", cfg, newLogger(cfg, stderr), stderr)
+}
+
+// runAgent runs the agent of a joined identity in cfg.DataDir until a signal (bcd node, bcd ramdisk).
+func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Writer) int {
 	if cfg.DevInsecureH2C {
 		log.Warn("dev_insecure_h2c: cleartext HTTP/2 to a dev gateway; never on a reachable machine")
 	}
 	state, key, err := agent.LoadState(cfg.DataDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "bcd node: %v\n", err)
+		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
 	j, err := journal.OpenBolt(filepath.Join(cfg.DataDir, agent.JournalFile), journal.BoltOptions{
@@ -193,19 +197,19 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		MaxBytes:  int(cfg.Journal.MaxBytes),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "bcd node: journal: %v\n", err)
+		fmt.Fprintf(stderr, "bcd %s: journal: %v\n", mode, err)
 		return exitFailure
 	}
 	defer j.Close()
 	host, err := newHost(cfg.DataDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "bcd node: %v\n", err)
+		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
 	var client atomic.Pointer[transport.Client]
 	first, err := newClient(cfg, state, key)
 	if err != nil {
-		fmt.Fprintf(stderr, "bcd node: %v\n", err)
+		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
 	client.Store(first)
@@ -237,16 +241,16 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		Log:       log,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "bcd node: %v\n", err)
+		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
 	stopStatus := serveStatus(cfg.SocketPath, a, log)
 	defer stopStatus()
 	ctx, cancel := signalContext()
 	defer cancel()
-	log.Info("bcd node starting", "version", version, "node", state.NodeID, "site", state.SiteID, "gateway", cfg.GatewayURL, "hardware", hardwareBackend)
+	log.Info("bcd "+mode+" starting", "version", version, "node", state.NodeID, "site", state.SiteID, "gateway", cfg.GatewayURL, "hardware", hardwareBackend)
 	if err := a.Run(ctx); err != nil {
-		fmt.Fprintf(stderr, "bcd node: %v\n", err)
+		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}
 	return exitOK
