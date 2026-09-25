@@ -3,8 +3,9 @@
 import Link from 'next/link';
 import { use, useEffect, useMemo, useState } from 'react';
 import { createTimelineView, earliestFit } from '@better-compute/console-kit';
-import { useStore } from '@better-compute/console-kit/react';
+import { useList, useStore } from '@better-compute/console-kit/react';
 import { useConsole } from '@/components/console-provider';
+import { PoolJoin } from '@/components/pool-join';
 import { Loading } from '@/components/ui';
 
 const levelColor = { free: '#16a34a', busy: '#d97706', full: '#dc2626' } as const;
@@ -13,12 +14,13 @@ const hour = 3_600_000;
 /** One pool's booking calendar for the next 7 days (`capacity.timeline`), and the earliest slot for a request. */
 export default function PoolPage({ params }: { params: Promise<{ poolId: string }> }) {
   const { poolId } = use(params);
-  const { api, tenantId } = useConsole();
+  const { api, tenantId, resources } = useConsole();
   const view = useMemo(() => {
     const from = Math.floor(Date.now() / hour) * hour;
     return createTimelineView(api, { tenantId, poolId, from, to: from + 7 * 24 * hour });
   }, [api, tenantId, poolId]);
   const state = useStore(view);
+  const pools = useList(resources.pools);
   const [gpus, setGpus] = useState(1);
   const [hours, setHours] = useState(4);
   useEffect(() => {
@@ -99,6 +101,10 @@ export default function PoolPage({ params }: { params: Promise<{ poolId: string 
           </>
         )}
       </Loading>
+      {/* Machines join the pools this organization owns (IAM decides join-tokens:* on the pool). */}
+      {pools.items.find((pool) => pool.id === poolId)?.owned === true && (
+        <PoolJoin poolId={poolId} />
+      )}
     </>
   );
 }
