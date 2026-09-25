@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CliError, usageError } from '../errors.js';
+import { CliError, RemoteExitError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { tenantFlag } from './capacity.js';
 
@@ -60,12 +60,24 @@ export const sshCommands = [
         max: 60,
         description: 'Validity in minutes',
       },
+      connect: {
+        type: 'string',
+        value: 'HOST',
+        description: "Then run ssh to the node's address with the new certificate (the command after --, or a shell)",
+      },
+      ssh: { type: 'string', value: 'PROGRAM', default: 'ssh', description: 'The OpenSSH client for --connect' },
     },
+    args: [{ name: 'command', variadic: true, description: 'With --connect: the command to run, after --' }],
     examples: [
       'better-compute ssh-cert --tenant org_acme --node node_01k5w… && ssh -i ~/.ssh/id_ed25519 root@10.0.0.5',
       'better-compute ssh-cert --tenant org_acme --node node_01k5w… --key ./ops.pub --minutes 5',
+      'better-compute ssh-cert --node node_01k5w… --connect 10.0.0.5 -- journalctl -u bcd -n 50',
     ],
-    async run({ flags, env, path, api, note }) {
+    async run({ flags, args, env, path, api, note, io }) {
+      // A host is never an ssh option (-oProxyCommand=…): a name, IPv4 or IPv6 address only.
+      if (flags.connect !== undefined && !/^[A-Za-z0-9_.:\[\]%]([A-Za-z0-9_.:\[\]%-]{0,252})$/.test(flags.connect))
+        throw usageError('--connect takes a host name or an IP address');
+      if (args.length && flags.connect === undefined) throw usageError('A command needs --connect HOST');
       const keyPath = flags.key ? path(flags.key) : await defaultPublicKey(env);
       if (!keyPath.endsWith('.pub')) throw usageError('--key must be the public key (a .pub file)');
       const publicKey = (await readFile(keyPath, 'utf8')).trim();
@@ -81,6 +93,24 @@ export const sshCommands = [
       const certificatePath = `${keyPath.slice(0, -'.pub'.length)}-cert.pub`;
       await writeFile(certificatePath, `${issued.certificate.trim()}\n`, { mode: 0o644 });
       note(`Wrote ${certificatePath}; it opens ${flags.node} as ${issued.account} until ${new Date(issued.validBefore).toISOString()}.`);
+      if (flags.connect !== undefined) {
+        const run = io.spawn ?? (() => Promise.reject(new CliError('UNSUPPORTED', 'This program cannot run ssh (CliIO.spawn)')));
+        const status = await run(flags.ssh ?? 'ssh', [
+          '-i',
+          keyPath.slice(0, -'.pub'.length),
+          '-o',
+          `CertificateFile=${certificatePath}`,
+          '-o',
+          'IdentitiesOnly=yes',
+          '-l',
+          issued.account,
+          '--',
+          flags.connect,
+          ...args,
+        ]);
+        if (status !== 0) throw new RemoteExitError(status, 'ssh');
+        return undefined;
+      }
       return {
         certificate: certificatePath,
         serial: issued.serial,

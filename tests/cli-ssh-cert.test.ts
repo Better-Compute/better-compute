@@ -88,6 +88,42 @@ describe('ssh-cert', () => {
     expect(Date.parse(result.validBefore) - Date.now()).toBeLessThanOrEqual(5 * 60_000 + 5_000);
     expect(Date.parse(result.validBefore) - Date.now()).toBeGreaterThan(4 * 60_000);
 
+    // --connect runs ssh with the new certificate beside the key, the account and the command.
+    const spawned: { command: string; args: readonly string[] }[] = [];
+    const connectIo: CliIO = {
+      ...io,
+      spawn: async (command, args) => {
+        spawned.push({ command, args });
+        return 0;
+      },
+    };
+    await createCli().run(
+      ['ssh-cert', '--tenant', ACME, '--node', NODE, '--connect', '10.0.0.5', '--', 'uptime'],
+      connectIo,
+    );
+    expect(spawned).toEqual([
+      {
+        command: 'ssh',
+        args: [
+          '-i',
+          join(home, '.ssh', 'id_ed25519'),
+          '-o',
+          `CertificateFile=${join(home, '.ssh', 'id_ed25519-cert.pub')}`,
+          '-o',
+          'IdentitiesOnly=yes',
+          '-l',
+          'root',
+          '--',
+          '10.0.0.5',
+          'uptime',
+        ],
+      },
+    ]);
+    // A "host" that is an ssh option is refused before anything is issued.
+    await expect(
+      createCli().run(['ssh-cert', '--tenant', ACME, '--node', NODE, '--connect', '-oProxyCommand=calc'], connectIo),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
     // A private key is refused before anything is sent.
     await writeFile(join(home, 'wrong.pub'), '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n');
     await expect(
