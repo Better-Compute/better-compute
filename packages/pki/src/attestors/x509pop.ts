@@ -211,7 +211,9 @@ export function x509popAttestor(options: X509popAttestorOptions = {}): AttestorV
       if (row.revoked) return refuse('revoked', ids);
       if (!row.current_gen) return refuse('superseded', ids);
       if (row.provision_state === 'retired') return refuse('retired', ids);
-      const role = row.role as AgentRole;
+      // A lessee's node-tenant certificate re-joins as a node; JoinService re-derives node-tenant
+      // from the node's tenant-controlled trust, so the restriction survives the re-join.
+      const role = (row.role === 'node-tenant' ? 'node' : row.role) as AgentRole;
       if (role !== context.role || (role !== 'node' && role !== 'site')) return refuse('role', ids);
       const now = ms(row.now);
       if (now < ms(row.not_before)) return refuse('not-yet-valid', ids);

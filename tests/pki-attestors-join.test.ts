@@ -14,6 +14,7 @@ import {
   gcpInstanceIdentity,
   generateP256KeyPair,
   issueJoinToken,
+  parseCertificate,
   provisionedAttestor,
   sealJoinToken,
   sha256,
@@ -190,6 +191,61 @@ describe('attestors through JoinService', () => {
     expect(rows[0]).toEqual({ identity_gen: 2, certs: '2', revoked: '1' });
     // The old certificate was revoked by the reclaim: the same proof never works twice.
     await denied(s.service.join(again));
+  });
+
+  it('x509pop: a lessee whose node-tenant cert expired offline re-joins still restricted', async () => {
+    const s = await setup();
+    const key = generateP256KeyPair().privateKey;
+    const firstCsr = createCsr(key);
+    const token = await mintToken(s, 'node');
+    const first = s.verify(
+      await s.service.join(request(s, { csr: firstCsr, token: token.token })),
+      firstCsr,
+    );
+    // Metal started a dedicated-root lease; the lessee's OS got a node-tenant certificate.
+    await s.fixture.database.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [
+      first.nodeId,
+    ]);
+    const leaseKey = generateP256KeyPair().privateKey;
+    const leaseCsr = createCsr(leaseKey);
+    const lease = s.verify(
+      await s.service.join(
+        request(s, {
+          csr: leaseCsr,
+          attestor: 'x509pop',
+          attestation: createX509popEvidence({
+            nodeId: first.nodeId,
+            chain: first.certChain,
+            privateKey: key,
+            csr: leaseCsr,
+            now: s.fixture.clock.now(),
+          }),
+        }),
+      ),
+      leaseCsr,
+    );
+    expect(parseCertificate(lease.certChain[0]!).role).toBe('node-tenant');
+
+    await s.fixture.advance(3 * 86_400_000); // offline past expiry
+    const csr = createCsr(generateP256KeyPair().privateKey);
+    const again = s.verify(
+      await s.service.join(
+        request(s, {
+          csr,
+          attestor: 'x509pop',
+          attestation: createX509popEvidence({
+            nodeId: first.nodeId,
+            chain: lease.certChain,
+            privateKey: leaseKey,
+            csr,
+            now: s.fixture.clock.now(),
+          }),
+        }),
+      ),
+      csr,
+    );
+    expect(again.nodeId).toBe(first.nodeId);
+    expect(parseCertificate(again.certChain[0]!).role).toBe('node-tenant');
   });
 
   it('provisioned: the sealed token reaches the attestor as evidence.token and is spent', async () => {
