@@ -97,8 +97,13 @@ export interface CommandInfo {
   kind: string;
   state: CommandState;
   reason?: string;
-  notBefore: number;
+  /** When it may be sent; absent while it waits for its batch's approvals (`awaitingApproval`). */
+  notBefore?: number;
   notAfter: number;
+  /** (v1.0 §13) The destructive batch it belongs to. */
+  batchId?: string;
+  /** Held until the batch's approvers sign it (then `notBefore` is set). */
+  awaitingApproval?: true;
   minGeneration?: number;
   retrySafe: boolean;
   selfTerminating: boolean;
@@ -230,9 +235,14 @@ interface CommandRow {
   self_terminating: boolean;
   attested: boolean;
   idempotency_key: string;
+  held: boolean;
+  batch_id: string | null;
 }
+// `held`: not_before = 'infinity' (a batched command waiting for its approvals).
 const columns = `c.id, c.node_id, c.seq, c.kind, c.state, c.reason, c.not_before, c.not_after,
-  c.min_generation, c.retry_safe, c.self_terminating, c.attested, c.idempotency_key`;
+  c.min_generation, c.retry_safe, c.self_terminating, c.attested, c.idempotency_key,
+  c.not_before = 'infinity' AS held,
+  (SELECT m.batch_id FROM command_batch_members m WHERE m.command_id = c.id) AS batch_id`;
 
 function toCommand(row: CommandRow, bundles?: SupportBundlesOptions): CommandInfo {
   const command: CommandInfo = {
@@ -241,13 +251,14 @@ function toCommand(row: CommandRow, bundles?: SupportBundlesOptions): CommandInf
     seq: int(row.seq),
     kind: row.kind,
     state: row.state,
-    notBefore: ms(row.not_before)!,
+    ...(row.held ? { awaitingApproval: true as const } : { notBefore: ms(row.not_before)! }),
     notAfter: ms(row.not_after)!,
     retrySafe: row.retry_safe,
     selfTerminating: row.self_terminating,
     attested: row.attested,
   };
   if (row.reason !== null) command.reason = row.reason;
+  if (row.batch_id) command.batchId = row.batch_id;
   if (row.min_generation !== null && row.min_generation !== undefined)
     command.minGeneration = int(row.min_generation);
   if (bundles && row.kind === 'logs.collect')

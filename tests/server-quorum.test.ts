@@ -322,6 +322,9 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
         )
       ).rows[0]!.due;
     expect(await due()).toBe(false);
+    // The API says why it waits.
+    expect(queued).toMatchObject({ awaitingApproval: true, batchId: created.batchId });
+    expect(queued.notBefore).toBeUndefined();
     const approved = await s.api.approve(s.cred, {
       tenantId: ACME,
       batchId: created.batchId,
@@ -329,6 +332,9 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
     });
     expect(approved).toMatchObject({ state: 'approved', commands: { pending: 1 } });
     expect(await due()).toBe(true);
+    const released = await commands.get(s.cred, { tenantId: ACME, nodeId: NODE_Q, commandId: queued.id });
+    expect(released.awaitingApproval).toBeUndefined();
+    expect(released).toMatchObject({ notBefore: expect.any(Number), batchId: created.batchId });
   });
 
   it('stores a leaf payload for approvers and binds the leaf to its digest (review 7 #3)', async () => {
