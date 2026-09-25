@@ -87,7 +87,7 @@ export type { SelfCheckReport } from './self-check.js';
 export { validateNoInput } from './system.js';
 export type { CallerIdentity, NoInput, SystemApi, WhoAmI } from './system.js';
 export { serverVersion, wellKnownJoinKeys } from './version.js';
-export type { ServerInfo, WellKnownJoinKeys } from './version.js';
+export type { ServerInfo, WellKnownGateway, WellKnownJoinKeys } from './version.js';
 export * from './join/index.js';
 export { commandTrustBundle, createCommandSigner } from './runtime/command-signing.js';
 export type { CommandSigner, CommandSignerOptions } from './runtime/command-signing.js';

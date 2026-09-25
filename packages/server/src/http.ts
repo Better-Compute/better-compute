@@ -1,10 +1,17 @@
+import { X509Certificate } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ComputeError, isComputeError, newId, type ComputeErrorBody } from '@better-compute/core';
+import { spkiPin } from '@better-compute/pki';
 import { serveDownload } from './downloads.js';
 import type { Operations } from './operations.js';
 import type { ResolvedOptions } from './options.js';
 import type { RegisteredMethod, Registry } from './registry.js';
-import { serverInfo, wellKnownJoinKeys, type WellKnownJoinKeys } from './version.js';
+import {
+  serverInfo,
+  wellKnownJoinKeys,
+  type WellKnownGateway,
+  type WellKnownJoinKeys,
+} from './version.js';
 
 /** JSON request bodies above this are refused with `PAYLOAD_TOO_LARGE` (PLAN.md §9.1). */
 export const maxBodyBytes = 65_536;
@@ -148,6 +155,35 @@ export function createHttp({ options, registry, operations }: HttpHost) {
     return joinKeys ?? Promise.resolve(undefined);
   }
 
+  // The well-known `gateway` section: the configured URL, plus the serving CA's SPKI pin read once
+  // from its certificate (a failing CA is logged, the pin omitted and retried a minute later).
+  let servingPin: Promise<string | undefined> | undefined;
+  let servingRetryAt = 0;
+  async function wellKnownGateway(): Promise<WellKnownGateway | undefined> {
+    const gateway = options.wellKnownGateway;
+    if (!gateway) return undefined;
+    const ca = gateway.servingCa;
+    if (ca && !servingPin && Date.now() >= servingRetryAt)
+      servingPin = (async () => {
+        const [certificate] = await ca.certificates();
+        if (!certificate) throw new Error('the serving CA has no certificate');
+        return spkiPin(new X509Certificate(certificate).publicKey);
+      })().catch((error: unknown) => {
+        servingPin = undefined;
+        servingRetryAt = Date.now() + joinKeysRetryMs;
+        log.error('Reading the serving CA failed; the well-known document omits its pin', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return undefined;
+      });
+    const pin = await servingPin;
+    return {
+      url: gateway.url,
+      ...(gateway.serverName ? { serverName: gateway.serverName } : {}),
+      ...(pin ? { servingCaPin: pin } : {}),
+    };
+  }
+
   /** A route below the base path; the registry's Map never answers for inherited names. */
   function route(path: string): RegisteredMethod | undefined {
     const parts = path.split('/');
@@ -175,9 +211,9 @@ export function createHttp({ options, registry, operations }: HttpHost) {
       }
     }
     if (path === '.well-known/better-compute') {
-      const join = await wellKnownJoin();
+      const [join, gateway] = await Promise.all([wellKnownJoin(), wellKnownGateway()]);
       return Response.json(
-        { ...serverInfo(basePath), ...(join ? { join } : {}) },
+        { ...serverInfo(basePath), ...(join ? { join } : {}), ...(gateway ? { gateway } : {}) },
         { headers: hardened },
       );
     }

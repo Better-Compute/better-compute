@@ -778,7 +778,7 @@ export interface ComputeOptions<M extends readonly ComputeModule[] = [], P exten
   drivers?: DriverDefinition[]; providers?: ProviderDefinition[]; scheduler?: SchedulerOptions; attestors?: AttestorVerifier[];
   pki?: { nodeCa?: CertificateAuthority; servingCa?: CertificateAuthority; internalCa?: CertificateAuthority };
   secrets?: SecretStore[]; notifier?: Notifier; sinks?: SinkOptions; downloads?: { dir?: string; blob?: BlobStore };
-  gateway?: { publicUrls: Record<string, string>; maxStreams?: number };
+  gateway?: { url?: string; serverName?: string; publicUrls?: Record<string, string>; maxStreams?: number };  // url → well-known gateway (bcd join --server)
   clock?: Clock;                    // default: db-anchored (§8.4); tests pass the sim clock
   acceptIamCookie?: boolean;        // same-origin IAM cookie (console); default false
 }

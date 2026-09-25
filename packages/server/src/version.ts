@@ -18,6 +18,21 @@ export interface ServerInfo {
    * A daemon accepts these only when they match the pins in its config.
    */
   join?: WellKnownJoinKeys;
+  /**
+   * The well-known document only, when `gateway.url` is set: where daemons dial and the serving CA
+   * they pin, so `bcd join --server <control plane>` writes its own config (PLAN.md §6 Install).
+   */
+  gateway?: WellKnownGateway;
+}
+
+/** The gateway section of the well-known document. */
+export interface WellKnownGateway {
+  /** https URL of the gateway daemons dial. */
+  url: string;
+  /** The TLS server name, when it differs from the URL's host. */
+  serverName?: string;
+  /** `sha256/<base64>` SPKI pin of the serving CA (`serving_ca_spki_pin`); absent without one. */
+  servingCaPin?: string;
 }
 
 /** JoinService's public keys as the well-known document carries them; nothing here is secret. */

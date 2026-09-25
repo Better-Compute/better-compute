@@ -194,7 +194,19 @@ export interface ComputeOptions<
    * `computeFixture` defaults it to `throw`.
    */
   iamGuard?: IamGuardMode;
-  gateway?: { publicUrls: Record<string, string>; maxStreams?: number };
+  /**
+   * The gateway daemons dial. `url` (https) and `serverName` (the TLS name when it differs from the
+   * URL's host) are published in `/.well-known/better-compute` as `gateway`, with `servingCaPin`
+   * computed from `pki.servingCa`, so `bcd join --server <control plane>` can configure itself (PLAN
+   * §6 Install). The pins then rest on the control plane's TLS (trust on first use); user data that
+   * carries the pins stays stronger.
+   */
+  gateway?: {
+    url?: string;
+    serverName?: string;
+    publicUrls?: Record<string, string>;
+    maxStreams?: number;
+  };
   /**
    * Business time (P9). Default: the process clock anchored to `compute_now()`, re-sampled at every
    * lease renewal (ClockSkew beyond 1 s). Tests pass the sim clock.
@@ -245,6 +257,8 @@ export interface ResolvedOptions {
   capacity: CapacityModuleOptions;
   /** JoinService's keys and node CA, when configured. */
   join?: JoinCrypto;
+  /** The well-known document's `gateway` section: `gateway.url` plus the serving CA to pin. */
+  wellKnownGateway?: { url: string; serverName?: string; servingCa?: CertificateAuthority };
   /** Signs every command (`pki.commandSigning`); absent: commands go unsigned (v0.1). */
   commandSigner?: CommandSigner;
   /** The command-signing roots and version daemons get (JoinResponse.trust, Welcome.trust). */
@@ -428,6 +442,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
   const guardMode = options.iamGuard ?? envIamGuard();
   if (!['off', 'warn', 'throw'].includes(guardMode))
     throw invalid('iamGuard must be off, warn or throw');
+  const wellKnownGateway = resolveWellKnownGateway(options.gateway, options.pki?.servingCa);
 
   return {
     database: hooks.database,
@@ -450,6 +465,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     ports,
     capacity,
     ...(join ? { join } : {}),
+    ...(wellKnownGateway ? { wellKnownGateway } : {}),
     ...signing,
     secretStores,
     sealedSecrets: configuredStores.length === 0,
@@ -562,6 +578,35 @@ function resolveCapacity(
   if (scheduler?.weights) resolved.weights = scheduler.weights;
   if (scheduler?.topN !== undefined) resolved.topN = scheduler.topN;
   return resolved;
+}
+
+/** `gateway.url` (+ `serverName`) and `pki.servingCa` → the well-known `gateway` section. */
+function resolveWellKnownGateway(
+  gateway: ComputeOptions['gateway'],
+  servingCa: CertificateAuthority | undefined,
+): ResolvedOptions['wellKnownGateway'] {
+  if (gateway === undefined) return undefined;
+  if (!isRecord(gateway)) throw invalid('gateway must be an object');
+  if (gateway.url === undefined) return undefined;
+  let url: URL;
+  try {
+    url = new URL(gateway.url);
+  } catch {
+    throw invalid('gateway.url must be an absolute https URL');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash)
+    throw invalid('gateway.url must be an https URL without credentials, query or fragment');
+  if (
+    gateway.serverName !== undefined &&
+    (typeof gateway.serverName !== 'string' ||
+      !/^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(gateway.serverName))
+  )
+    throw invalid('gateway.serverName must be a DNS name');
+  return {
+    url: url.href.replace(/\/$/, ''),
+    ...(gateway.serverName ? { serverName: gateway.serverName } : {}),
+    ...(servingCa ? { servingCa } : {}),
+  };
 }
 
 /** `BETTER_COMPUTE_IAM_GUARD=warn|throw` turns the guard on for a whole run (tests, `dev`). */

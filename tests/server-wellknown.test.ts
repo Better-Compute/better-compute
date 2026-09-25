@@ -254,3 +254,55 @@ describe('/.well-known/better-compute', () => {
     }
   });
 });
+
+describe('/.well-known/better-compute gateway section (bcd join --server)', () => {
+  const withGateway = (gateway: Record<string, unknown>, servingCa?: PkiBundle['servingCa']) =>
+    betterCompute({
+      ...options(noStore, fakeIam()),
+      log: memoryLogger(),
+      gateway,
+      ...(servingCa ? { pki: { servingCa } } : {}),
+    });
+
+  it('publishes the gateway URL, its TLS name and the serving CA pin bcd writes into its config', async () => {
+    const bundle = createPkiBundle({ trustDomain: TRUST_DOMAIN });
+    const result = await wellKnown(
+      withGateway(
+        { url: 'https://gw.example.com/', serverName: 'gw.internal' },
+        bundle.servingCa,
+      ) as never,
+    );
+    expect(result.json.gateway).toEqual({
+      url: 'https://gw.example.com',
+      serverName: 'gw.internal',
+      servingCaPin: pkiPins(bundle).servingCaSpkiPin,
+    });
+    // Without a serving CA the pin is omitted; without a URL there is no section at all.
+    expect(
+      (await wellKnown(withGateway({ url: 'https://gw.example.com' }) as never)).json.gateway,
+    ).toEqual({
+      url: 'https://gw.example.com',
+    });
+    expect(
+      (await wellKnown(withGateway({ maxStreams: 10 }) as never)).json.gateway,
+    ).toBeUndefined();
+  });
+
+  it('refuses a gateway URL that is not plain https, and a bad server name', () => {
+    for (const gateway of [
+      { url: 'http://gw.example.com' },
+      { url: 'https://user:pw@gw.example.com' },
+      { url: 'https://gw.example.com/?x=1' },
+      { url: 'not a url' },
+      { url: 'https://gw.example.com', serverName: 'bad name' },
+    ]) {
+      let caught: unknown;
+      try {
+        withGateway(gateway);
+      } catch (error) {
+        caught = error;
+      }
+      expect(isComputeError(caught, 'INVALID_CONFIG'), JSON.stringify(gateway)).toBe(true);
+    }
+  });
+});
