@@ -6,7 +6,13 @@ import { create } from '@bufbuild/protobuf';
 import { timestampFromMs } from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
-import { approverKeyOf, batchScope, fromBase64url, verifyBatchApproval } from '@better-compute/pki';
+import {
+  approverKeyOf,
+  batchScope,
+  fromBase64url,
+  verifyApproverSetChange,
+  verifyBatchApproval,
+} from '@better-compute/pki';
 import { BatchApprovalSchema } from '@better-compute/protocol';
 
 // The approver's side of the destructive-batch quorum (PLAN.md §13): keygen writes a P-256 pair whose public half
@@ -78,6 +84,44 @@ describe('batch keygen', () => {
     await expect(
       h.run(['batch', 'sign', '--key', 'alice.pem', '--scope', 'scope.json', '--not-after', later()]),
     ).rejects.toMatchObject({ code: 'INVALID_STATE', message: /readable by others/ });
+  });
+});
+
+describe('batch sign-approvers', () => {
+  it('signs a new approver set that daemons holding the current one accept at its threshold', async () => {
+    const h = await harness();
+    await h.run(['batch', 'keygen', '--out', 'alice.pem']);
+    await h.run(['batch', 'keygen', '--out', 'bob.pem']);
+    await h.run(['batch', 'keygen', '--out', 'carol.pem']);
+    const key = async (name: string) => approverKeyOf(await readFile(join(h.cwd, `${name}.pem.pub`), 'utf8'));
+    const [alice, bob, carol] = [await key('alice'), await key('bob'), await key('carol')];
+    const current = { approverKeys: [alice, bob], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    const argv = (signer: string) => [
+      'batch', 'sign-approvers', '--key', `${signer}.pem`, '--version', '4',
+      '--approvers', 'alice.pem.pub,bob.pem.pub,carol.pem.pub', '--threshold', '2', '--tiers', '5:1,100:2',
+    ];
+    const byAlice = await h.run(argv('alice'));
+    const byBob = await h.run(argv('bob'));
+    expect(byAlice).toMatchObject({ version: 4, set: { approverKids: [alice.kid, bob.kid, carol.kid], threshold: 2 } });
+    expect(byAlice.setSha256).toBe(byBob.setSha256);
+    const next = {
+      approverKeys: [alice, bob, carol],
+      approverThreshold: 2,
+      quorumTiers: [
+        { maxScopeSize: 5, threshold: 1 },
+        { maxScopeSize: 100, threshold: 2 },
+      ],
+      unbatchedDestructivePerHour: 0,
+      version: 4n,
+    };
+    const signatures = [byAlice, byBob].map((out) => ({ kid: out.signature.kid, sig: fromBase64url(out.signature.sig) }));
+    expect(verifyApproverSetChange(current, { ...next, approverSetSignatures: signatures })).toHaveLength(2);
+    expect(() => verifyApproverSetChange(current, { ...next, approverSetSignatures: signatures.slice(0, 1) })).toThrow();
+    // Removing the quorum is said out loud; bad thresholds and tier orders are refused.
+    await h.run(['batch', 'sign-approvers', '--key', 'alice.pem', '--version', '5']);
+    expect(h.err.join('\n')).toMatch(/REMOVAL of the quorum/);
+    await expect(h.run([...argv('alice').slice(0, -4), '--threshold', '4'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(h.run([...argv('alice').slice(0, -2), '--tiers', '100:2,5:1'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 });
 

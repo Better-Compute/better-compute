@@ -146,6 +146,9 @@ better-compute batch cancel --batch batch_…
   72) refuses long approval windows.
 - **`batch sign`** does the same offline from `batch show --scope-out`. Signing a bare `--root` needs
   `--unchecked`.
+- **`batch sign-approvers`** is how the quorum itself changes. Each CURRENT approver signs the new set's keys,
+  threshold, tiers and unbatched cap for one trust-bundle `--version`. Daemons that hold approver keys refuse a
+  changed quorum, including its removal, without their threshold of such signatures.
 - Key files readable by others are refused, as ssh does.
 
 ## Output and exit codes

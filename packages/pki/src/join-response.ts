@@ -46,6 +46,11 @@ export interface TrustBundleInput {
   approverThreshold?: number;
   quorumTiers?: readonly { maxScopeSize: number; threshold: number }[];
   unbatchedDestructivePerHour?: number;
+  /**
+   * Signatures by the CURRENT approvers over these quorum fields and this version (signApproverSet): what lets a
+   * daemon that holds approver keys take a changed quorum.
+   */
+  approverSetSignatures?: readonly { kid: string; sig: Uint8Array }[];
 }
 
 export interface JoinResponseInput {
@@ -70,6 +75,10 @@ function trustBundle(input: TrustBundleInput | undefined): TrustBundle {
     approverThreshold: input?.approverThreshold ?? 0,
     quorumTiers: (input?.quorumTiers ?? []).map((tier) => ({ ...tier })),
     unbatchedDestructivePerHour: input?.unbatchedDestructivePerHour ?? 0,
+    approverSetSignatures: (input?.approverSetSignatures ?? []).map((signature) => ({
+      kid: signature.kid,
+      sig: signature.sig,
+    })),
   });
 }
 

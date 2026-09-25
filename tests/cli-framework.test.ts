@@ -191,6 +191,7 @@ describe('help and the manifest', () => {
       'pki issue-gateway',
       'batch keygen',
       'batch sign',
+      'batch sign-approvers',
       'batch list',
       'batch show',
       'batch approve',

@@ -8,6 +8,7 @@ import {
   createCommandSigningAuthority,
   createSigningKey,
   desiredStateFromStored,
+  signApproverSet,
   signBatchApproval,
   signTrustBundle,
   storedDesiredState,
@@ -364,6 +365,94 @@ describe('FakeDaemon signed intent', () => {
     const plain = send(h, h.commandBody('diag.nvml'));
     await h.advance(5);
     expect(states(h, plain.id).filter((state) => state.startsWith('REJECTED'))).toEqual([]);
+  });
+
+  it('spends a batch leaf or an unbatched slot only on an accepted command (review 6 L1)', async () => {
+    const approvers = [createApproverKey()];
+    const h = await daemon({
+      intent: {
+        roots: [authority.certificate],
+        version: 1n,
+        trustSigner: { publicKey: joinKey.publicKey },
+        quorum: { approverKeys: approvers.map((a) => a.key), threshold: 1, unbatchedPerHour: 1, trustDomain: 'compute.test' },
+      },
+      kinds: {
+        'test.destroy': { lane: Lane.CONTROL, roles: [AgentRole.NODE], destructive: true, run: () => ({ outcome: 'succeeded' }) },
+      },
+    });
+    const rogue = createCommandSigner({ authority: createCommandSigningAuthority({ clock }), workerId: 'gw', clock });
+    // A forged unbatched command is refused and leaves the one slot free.
+    const forged = send(h, h.rawCommandBody('test.destroy'), (bytes) => rogue.sign(bytes));
+    await h.advance(5);
+    expect(states(h, forged.id)).toEqual(['REJECTED:BAD_SIGNATURE']);
+    const real = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+    await h.advance(5);
+    accepted(h, real.id);
+    // A forged command carrying the (public) approval and proof cannot burn the approved leaf.
+    const batchId = 'batch_01k5w00000000000000000000r';
+    const scope = batchScope(batchId, [{ subject: 'node_a', kind: 'test.destroy' }]);
+    const input = { batchId, scopeRoot: scope.root, scopeSize: scope.size, notAfter: T0 + 3_600_000, trustDomain: 'compute.test' };
+    const approval = create(BatchApprovalSchema, {
+      batchId,
+      scopeRoot: scope.root,
+      scopeSize: scope.size,
+      notAfter: timestampFromMs(input.notAfter),
+      signatures: [signBatchApproval(input, approvers[0]!.privateKey)],
+    });
+    const batched = (sign: typeof signer) => {
+      const body = h.rawCommandBody('test.destroy', { batchId });
+      const command = wrapCommand(body, { attempt: 1 });
+      command.signature = fromSignature(sign.sign(toBinary(CommandBodySchema, body)));
+      command.batchApproval = approval;
+      command.batchProof = create(BatchProofSchema, scope.proofOf('node_a', 'test.destroy')!);
+      h.server.send({ case: 'command', value: command });
+      return body;
+    };
+    const burn = batched(rogue);
+    await h.advance(5);
+    expect(states(h, burn.id)).toEqual(['REJECTED:BAD_SIGNATURE']);
+    const legit = batched(signer);
+    await h.advance(5);
+    accepted(h, legit.id);
+  });
+
+  it('takes a changed quorum from Welcome.trust only when the current approvers signed it (review 6 H1)', async () => {
+    const approvers = [createApproverKey(), createApproverKey()];
+    const quorum = { approverKeys: approvers.map((a) => a.key), threshold: 2, unbatchedPerHour: 0, trustDomain: 'compute.test' };
+    const kinds = {
+      'test.destroy': { lane: Lane.CONTROL, roles: [AgentRole.NODE], destructive: true, run: () => ({ outcome: 'succeeded' as const }) },
+    };
+    // The next bundle lifts the quorum (no approver keys): what a compromised api holding the join key would send.
+    const lifted = { approverKeys: [], approverThreshold: 0, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    const bundle = (signers: number[]) =>
+      signTrustBundle(
+        {
+          version: 2,
+          commandSigningRoots: [authority.certificate],
+          ...lifted,
+          approverSetSignatures: signers.map((i) => signApproverSet({ version: 2, set: lifted }, approvers[i]!.privateKey)),
+        },
+        joinKey,
+      );
+    const run = async (signers: number[]) => {
+      const h = await daemon({
+        intent: { roots: [authority.certificate], version: 1n, trustSigner: { publicKey: joinKey.publicKey }, quorum },
+        kinds,
+        autoWelcome: () => ({ trust: bundle(signers) }),
+      });
+      const cmd = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+      await h.advance(5);
+      return { h, cmd };
+    };
+    // Signed by the join key alone, or by one approver of two: the bundle is refused; the quorum stays.
+    for (const signers of [[], [0], [0, 0]]) {
+      const { h, cmd } = await run(signers);
+      expect(states(h, cmd.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
+      expect(h.server.of('hello').at(-1)?.trustVersion).toBe(1n);
+    }
+    // Both current approvers signed the change: it applies, and the quorum is lifted.
+    const { h, cmd } = await run([0, 1]);
+    accepted(h, cmd.id);
   });
 
   it('without signed intent configured, behaves as v0.1 (nothing checked)', async () => {

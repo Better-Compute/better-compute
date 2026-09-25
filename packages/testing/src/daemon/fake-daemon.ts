@@ -9,7 +9,9 @@ import {
   openWorkloadTokenResponse,
   signAttestedReport,
   signCommandUpdate,
+  approverSetOf,
   batchSubject,
+  verifyApproverSetChange,
   verifyBatchCommand,
   verifyCommand,
   verifyDesiredState,
@@ -386,6 +388,11 @@ export class FakeDaemon {
   private readonly unbatched = new Map<string, number>();
   /** Batch leaves used: `<batch_id>#<leaf index>` → the command that used it (each leaf runs once). */
   private readonly batchLeaves = new Map<string, string>();
+  /**
+   * What an admitted command will use of the quorum: its batch leaf, or an unbatched slot. Recorded only when the
+   * command is accepted, so deliveries rejected for a bad signature, another node or a past deadline use nothing.
+   */
+  private readonly quorumClaims = new Map<string, { leaf: string } | { unbatched: true }>();
   /** Desired states refused by signed intent, in arrival order. */
   private readonly specRejectionsValue: { generation: number; reason: string }[] = [];
   private readonly fs = new Map<string, string>();
@@ -1068,6 +1075,20 @@ export class FakeDaemon {
     if (this.options.intent?.trustSigner && welcome.trust) {
       try {
         const bundle = verifyTrustBundle(welcome.trust, this.options.intent.trustSigner, this.intentVersion);
+        // A change of the quorum, removal included, needs the CURRENT approvers' signatures (the join key alone,
+        // which the api holds, cannot lift or replace it): otherwise the whole bundle is refused.
+        const held = this.quorum;
+        verifyApproverSetChange(
+          held
+            ? {
+                approverKeys: held.approverKeys,
+                approverThreshold: held.threshold,
+                quorumTiers: held.tiers ?? [],
+                unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
+              }
+            : undefined,
+          { ...approverSetOf(bundle), version: bundle.version, approverSetSignatures: bundle.approverSetSignatures },
+        );
         this.intentRoots = [...bundle.commandSigningRoots];
         this.intentVersion = bundle.version;
         // The quorum travels in the same signed bundle: a newer one without approver keys lifts it.
@@ -1196,7 +1217,10 @@ export class FakeDaemon {
     const kind = this.kinds.get(body.kind);
     const destructive = kind?.destructive ?? (isCommandKind(body.kind) && commandKinds[body.kind].destructive);
     if (!destructive) return;
+    // Approvals expire in server time; the unbatched hourly window counts on the local clock, which a gateway
+    // cannot move forward (a Welcome can).
     const now = this.serverNow();
+    const local = this.localNow();
     if (body.batchId) {
       try {
         // The subject comes from the signed body: this node for its own kinds, the BMC or proxied node a site
@@ -1224,7 +1248,7 @@ export class FakeDaemon {
         const holder = this.batchLeaves.get(leaf);
         if (holder !== undefined && holder !== body.id)
           throw new ComputeError('ACCESS_DENIED', 'This batch leaf already ran', undefined, { reason: 'leaf-used' });
-        this.batchLeaves.set(leaf, body.id);
+        this.quorumClaims.set(body.id, { leaf });
         this.batchVerdicts.delete(body.id);
       } catch (error) {
         this.batchVerdicts.set(body.id, 'BATCH_UNAPPROVED');
@@ -1238,14 +1262,36 @@ export class FakeDaemon {
     }
     // A redelivery of an admitted command does not count again.
     if (this.unbatched.has(body.id)) return;
-    for (const [id, at] of this.unbatched) if (at <= now - 3_600_000) this.unbatched.delete(id);
+    for (const [id, at] of this.unbatched) if (at <= local - 3_600_000) this.unbatched.delete(id);
     if (this.unbatched.size >= (quorum.unbatchedPerHour ?? 0)) {
       this.batchVerdicts.set(body.id, 'UNBATCHED_LIMIT');
       this.log('command.unbatched-limit', { id: body.id, kind: body.kind });
       return;
     }
-    this.unbatched.set(body.id, now);
+    this.quorumClaims.set(body.id, { unbatched: true });
     this.batchVerdicts.delete(body.id);
+  }
+
+  /**
+   * Records what an accepted command uses of the quorum, checking again first (another command may have taken the
+   * leaf or the last slot since it was delivered). Returns the rejection when it no longer fits.
+   */
+  private claimQuorum(id: string): 'BATCH_UNAPPROVED' | 'UNBATCHED_LIMIT' | undefined {
+    const claim = this.quorumClaims.get(id);
+    if (!claim) return undefined;
+    this.quorumClaims.delete(id);
+    if ('leaf' in claim) {
+      const holder = this.batchLeaves.get(claim.leaf);
+      if (holder !== undefined && holder !== id) return 'BATCH_UNAPPROVED';
+      this.batchLeaves.set(claim.leaf, id);
+      return undefined;
+    }
+    if (this.unbatched.has(id)) return undefined;
+    const local = this.localNow();
+    for (const [other, at] of this.unbatched) if (at <= local - 3_600_000) this.unbatched.delete(other);
+    if (this.unbatched.size >= (this.quorum?.unbatchedPerHour ?? 0)) return 'UNBATCHED_LIMIT';
+    this.unbatched.set(id, local);
+    return undefined;
   }
 
   /** Go: dispatch.Precheck, in its order. */
@@ -1308,6 +1354,13 @@ export class FakeDaemon {
         case: 'update',
         value: { commandId: body.id, state: CommandState.REJECTED, rejectReason: CommandRejectReason.BUSY, bootId: this.bootIdValue },
       } as AgentFrame['msg']);
+      return;
+    }
+    const lost = this.claimQuorum(body.id);
+    if (lost) {
+      const result = recordRejection(this.journalValue, delivery, lost, this.runtime(), this.bootIdValue);
+      this.log('command.reject', { id: body.id, reason: lost });
+      this.sendResult(session, body.id, result);
       return;
     }
     accept(this.journalValue, delivery, this.runtime());

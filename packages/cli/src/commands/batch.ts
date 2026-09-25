@@ -2,10 +2,13 @@ import { createPrivateKey, type KeyObject } from 'node:crypto';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import {
   approverKeyOf,
+  approverSetDigest,
   base64url,
   batchScope,
   createApproverKey,
+  signApproverSet,
   signBatchApproval,
+  type ApproverSet,
   type BatchScopeEntry,
 } from '@better-compute/pki';
 import { CliError, usageError } from '../errors.js';
@@ -486,6 +489,93 @@ export const batchCommands = [
         scopeSize: size,
         notAfter: new Date(notAfter).toISOString(),
         trustDomain,
+        signature: { kid, sig: base64url(signature.sig) },
+      };
+    },
+  }),
+  defineCommand({
+    name: 'batch sign-approvers',
+    group: 'Quorum',
+    summary: 'Sign a change of the approver set with a current approver key',
+    description:
+      "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version. Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
+    output: 'json',
+    flags: {
+      key: { type: 'string', value: 'PATH', required: true, description: 'Your CURRENT approver private key (PEM)' },
+      version: { type: 'integer', value: 'N', required: true, min: 1, description: 'The trust bundle version that publishes the new set' },
+      approvers: {
+        type: 'string',
+        value: 'PATHS',
+        description: 'The new set: approver public keys (.pub files, comma-separated); empty lifts the quorum',
+      },
+      threshold: { type: 'integer', value: 'K', min: 0, description: 'Approvals a batch needs in the new set' },
+      tiers: { type: 'string', value: 'SIZE:K,…', description: 'Per-size thresholds, ascending, e.g. 5:1,100:2' },
+      unbatched: { type: 'integer', value: 'N', min: 0, default: 0, description: 'Unbatched destructive commands per hour' },
+    },
+    examples: [
+      'better-compute batch sign-approvers --key alice.pem --version 4 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2',
+    ],
+    async run({ flags, env, path, note }) {
+      const { privateKey, kid } = await loadApproverKey(path(flags.key!), env);
+      const files = (flags.approvers ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const approverKeys = [];
+      for (const file of files) {
+        let key;
+        try {
+          key = approverKeyOf(await readFile(path(file), 'utf8'));
+        } catch {
+          throw new CliError('INVALID_INPUT', `${file} is not an approver public key (P-256, from batch keygen)`);
+        }
+        approverKeys.push(key);
+      }
+      if (new Set(approverKeys.map((key) => key.kid)).size !== approverKeys.length)
+        throw new CliError('INVALID_INPUT', 'The new set names a key twice');
+      const threshold = flags.threshold ?? (approverKeys.length ? undefined : 0);
+      if (threshold === undefined) throw usageError('Pass --threshold: how many of the new approvers a batch needs');
+      if (approverKeys.length && !(threshold >= 1 && threshold <= approverKeys.length))
+        throw usageError(`--threshold must be from 1 to ${approverKeys.length}`);
+      if (!approverKeys.length && threshold !== 0) throw usageError('A set without approver keys has --threshold 0');
+      const quorumTiers = (flags.tiers ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => {
+          const match = /^(\d+):(\d+)$/.exec(item);
+          if (!match) throw usageError('--tiers takes SIZE:K pairs, e.g. 5:1,100:2');
+          return { maxScopeSize: Number(match[1]), threshold: Number(match[2]) };
+        });
+      for (const [index, tier] of quorumTiers.entries()) {
+        const previous = quorumTiers[index - 1];
+        if (tier.maxScopeSize < 1 || tier.threshold < 1 || tier.threshold > approverKeys.length)
+          throw usageError('Each tier needs a size of at least 1 and a threshold from 1 to the number of approvers');
+        if (previous && (tier.maxScopeSize <= previous.maxScopeSize || tier.threshold < previous.threshold))
+          throw usageError('Tiers go by ascending size, with thresholds that never decrease');
+      }
+      const set: ApproverSet = {
+        approverKeys,
+        approverThreshold: threshold,
+        quorumTiers,
+        unbatchedDestructivePerHour: flags.unbatched ?? 0,
+      };
+      note(
+        approverKeys.length
+          ? `Signing, as ${kid}, a quorum of ${threshold} of ${approverKeys.length}: ${approverKeys.map((key) => key.kid).join(', ')}.`
+          : `Signing, as ${kid}, the REMOVAL of the quorum: destructive batches will no longer need approvals.`,
+      );
+      if (!approverKeys.some((key) => key.kid === kid)) note(`Your own key ${kid} is not in the new set.`);
+      const signature = signApproverSet({ version: flags.version!, set }, privateKey);
+      return {
+        version: flags.version,
+        setSha256: hexOf(approverSetDigest(set)),
+        set: {
+          approverKids: approverKeys.map((key) => key.kid),
+          threshold,
+          tiers: quorumTiers,
+          unbatchedDestructivePerHour: set.unbatchedDestructivePerHour,
+        },
         signature: { kid, sig: base64url(signature.sig) },
       };
     },
