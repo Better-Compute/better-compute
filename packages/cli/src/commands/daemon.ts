@@ -8,7 +8,7 @@ import {
 import { CliError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { renderInstallScript, type BcdArch } from '../install-script.js';
-import { defaultPkiPath, pkiFlag } from './pki.js';
+import { defaultPkiPath, pkiFlag, pkiUnlockOptions } from './pki.js';
 
 /** Parses `amd64=<hex>,arm64=<hex>`. */
 export function parseSha256Flag(value: string): Partial<Record<BcdArch, string>> {
@@ -182,7 +182,7 @@ export const daemonCommands = [
       if ((flags.sha256 === undefined) === (flags['release-manifest'] === undefined))
         throw usageError('Give exactly one of --sha256 or --release-manifest');
     },
-    async run({ flags, path, note, program }) {
+    async run({ flags, path, note, program, env }) {
       const version = flags['bcd-version']!.replace(/^v/, '');
       const sha256 = flags['release-manifest']
         ? await digestsFromManifest(
@@ -197,7 +197,12 @@ export const daemonCommands = [
         throw usageError('--base-path must look like /api/compute');
       let pins;
       try {
-        pins = readPkiPins(await readFile(path(flags.pki ?? defaultPkiPath), 'utf8'));
+        // The pins every new node trusts: checked against the seal when the secret is here.
+        pins = readPkiPins(await readFile(path(flags.pki ?? defaultPkiPath), 'utf8'), pkiUnlockOptions(env));
+        if (!pins.authenticated)
+          note(
+            'Warning: these pins come from a bundle nothing vouches for here (set BETTER_COMPUTE_SECRET to check them against the seal).',
+          );
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT')
           throw new CliError(

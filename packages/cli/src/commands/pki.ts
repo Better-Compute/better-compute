@@ -17,6 +17,7 @@ import {
   type CommandRootRotationStage,
   type PkiBundle,
 } from '@better-compute/pki';
+import type { ImportPkiBundleOptions } from '@better-compute/pki';
 import type { Finding, SqlExecutor } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
@@ -68,10 +69,39 @@ async function readBundleText(path: string): Promise<string> {
   }
 }
 
+/**
+ * How the environment unlocks a bundle: BETTER_COMPUTE_SECRET, and BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1 for the
+ * one run that re-seals a bundle whose public parts nothing authenticates (the former seal format, or unsealed).
+ */
+export function pkiUnlockOptions(
+  env: NodeJS.ProcessEnv,
+): Pick<ImportPkiBundleOptions, 'secret' | 'allowUnauthenticated'> {
+  return {
+    ...(env.BETTER_COMPUTE_SECRET ? { secret: env.BETTER_COMPUTE_SECRET } : {}),
+    ...(env.BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED === '1' ? { allowUnauthenticated: true } : {}),
+  };
+}
+
 /** Loads the bundle, unsealing it with BETTER_COMPUTE_SECRET when it is sealed. */
 export async function loadPkiBundle(path: string, env: NodeJS.ProcessEnv): Promise<PkiBundle> {
-  const secret = env.BETTER_COMPUTE_SECRET;
-  return importPkiBundle(await readBundleText(path), secret ? { secret } : {});
+  return importPkiBundle(await readBundleText(path), pkiUnlockOptions(env));
+}
+
+/**
+ * The pins of the bundle at `path`, checked against its seal when BETTER_COMPUTE_SECRET is set. Without it they come
+ * from a file nothing vouches for, and `warn` says so.
+ */
+export async function readTrustedPins(
+  path: string,
+  env: NodeJS.ProcessEnv,
+  warn: (message: string) => void,
+): Promise<ReturnType<typeof readPkiPins>> {
+  const pins = readPkiPins(await readBundleText(path), pkiUnlockOptions(env));
+  if (!pins.authenticated)
+    warn(
+      `Warning: the pins in ${path} are not authenticated (set BETTER_COMPUTE_SECRET to check them against the seal); whoever can write that file chooses them.`,
+    );
+  return pins;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -201,7 +231,7 @@ export async function pkiFindings(
       fix: 'At least 24 hours after the switch: better-compute pki rotate-command-root --stage drop',
     });
   try {
-    importPkiBundle(text, env.BETTER_COMPUTE_SECRET ? { secret: env.BETTER_COMPUTE_SECRET } : {});
+    importPkiBundle(text, pkiUnlockOptions(env));
   } catch (error) {
     findings.push({
       check: 'pki.unseal',
@@ -288,7 +318,7 @@ export const pkiCommands = [
       note(
         `Wrote the PKI bundle to ${target}${secret ? ' (sealed)' : ' (plaintext PEM, mode 0600)'}.`,
       );
-      return readPkiPins(await readFile(target, 'utf8'));
+      return readPkiPins(await readFile(target, 'utf8'), pkiUnlockOptions(env));
     },
   }),
   defineCommand({
@@ -296,17 +326,42 @@ export const pkiCommands = [
     group: 'PKI',
     summary: 'Print the pins install scripts and bcd need, and the CA expiry dates',
     description:
-      "pki show reads only the public half of the bundle (no secret needed) and prints the trust domain, the gateway serving CA's SPKI pin, the JoinService signing and encryption key pins in bcd's sha256/<base64> form, the encryption key as a JWK, and when each CA expires.",
+      "pki show prints the trust domain, the gateway serving CA's SPKI pin, the JoinService signing and encryption key pins in bcd's sha256/<base64> form, the encryption key as a JWK, and when each CA expires. With BETTER_COMPUTE_SECRET the public half is checked against the seal first (authenticated: true); without it the pins come from a file nothing vouches for, and a warning says so.",
     flags: { pki: pkiFlag },
     examples: ['better-compute pki show', 'better-compute pki show --query servingCaSpkiPin'],
-    async run({ flags, path }) {
-      const pins = readPkiPins(await readBundleText(path(flags.pki ?? defaultPkiPath)));
+    async run({ flags, path, env, note }) {
+      const pins = await readTrustedPins(path(flags.pki ?? defaultPkiPath), env, note);
       return {
         ...pins,
         expires: Object.fromEntries(
           Object.entries(pins.expires).map(([name, ms]) => [name, iso(ms)]),
         ),
       };
+    },
+  }),
+  defineCommand({
+    name: 'pki reseal',
+    group: 'PKI',
+    summary: 'Seal the bundle in the current format, authenticating its public parts',
+    description:
+      "pki reseal rewrites the bundle sealed with BETTER_COMPUTE_SECRET in the current format, where the seal also covers every certificate and pin, so a file changed without the secret no longer loads. Bundles sealed before that format, or left unsealed while a secret is set, are refused everywhere else. First compare the pins it prints (the same as pki show) with the ones your install scripts and join tokens use: it seals whatever the file holds now. Needs BETTER_COMPUTE_SECRET; the current key and certificates are kept, nothing is rotated.",
+    output: 'json',
+    flags: { pki: pkiFlag },
+    examples: ['better-compute pki show && better-compute pki reseal'],
+    async run({ flags, env, path, note }) {
+      const target = path(flags.pki ?? defaultPkiPath);
+      const secret = env.BETTER_COMPUTE_SECRET;
+      if (!secret || secret.length < minSecret)
+        throw new CliError(
+          'MISSING_ENV',
+          `Set BETTER_COMPUTE_SECRET (at least ${minSecret} characters): the bundle is sealed under it`,
+        );
+      const text = await readBundleText(target);
+      const bundle = importPkiBundle(text, { secret, allowUnauthenticated: true });
+      await replace(target, exportPkiBundle(bundle, { secret, omitRootKey: !bundle.root }));
+      const pins = readPkiPins(await readFile(target, 'utf8'), { secret });
+      note(`Sealed ${target} in the current format. These are the pins it now vouches for.`);
+      return { ...pins, expires: Object.fromEntries(Object.entries(pins.expires).map(([name, ms]) => [name, iso(ms)])) };
     },
   }),
   defineCommand({
@@ -424,7 +479,7 @@ export const pkiCommands = [
       const secret = env.BETTER_COMPUTE_SECRET;
       const rootKeyPath = flags['root-key'] ? path(flags['root-key']) : undefined;
       const bundle = importPkiBundle(await readBundleText(target), {
-        ...(secret ? { secret } : {}),
+        ...pkiUnlockOptions(env),
         ...(rootKeyPath ? { rootKey: await readFile(rootKeyPath, 'utf8') } : {}),
       });
       const which = flags.ca as BundleCa;

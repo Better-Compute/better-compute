@@ -8,7 +8,7 @@ import {
 import { readPkiPins } from '@better-compute/pki';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
-import { defaultPkiPath, loadPkiBundle, pkiFlag } from './pki.js';
+import { defaultPkiPath, loadPkiBundle, pkiFlag, pkiUnlockOptions } from './pki.js';
 
 // Audit trail commands (PLAN.md §13 "Supply chain and audit"): seal audit_events into signed
 // checkpoints, verify a tenant's trail, and prove one event to a third party offline.
@@ -20,8 +20,16 @@ const pinFlag: FlagSpec = {
   description: 'The audit signing key pin (sha256/…); default: from the PKI bundle',
 };
 
-/** The pin to verify under: --pin, else the bundle's public half. */
-async function auditPin(pin: string | undefined, bundlePath: string): Promise<string> {
+/**
+ * The pin to verify under: --pin, else the bundle's, checked against its seal with BETTER_COMPUTE_SECRET (without
+ * it, whoever can write the file could make forged checkpoints verify, and `warn` says so).
+ */
+async function auditPin(
+  pin: string | undefined,
+  bundlePath: string,
+  env: NodeJS.ProcessEnv,
+  warn: (message: string) => void,
+): Promise<string> {
   if (pin) {
     if (!/^sha256\/[A-Za-z0-9+/]{43}=$/.test(pin))
       throw usageError('--pin must be sha256/<base64>');
@@ -37,7 +45,12 @@ async function auditPin(pin: string | undefined, bundlePath: string): Promise<st
       'Pass --pin sha256/… or --pki PATH.',
     );
   }
-  const found = readPkiPins(text).auditSigningKeyPin;
+  const pins = readPkiPins(text, pkiUnlockOptions(env));
+  if (!pins.authenticated)
+    warn(
+      `Warning: the audit pin in ${bundlePath} is not authenticated (set BETTER_COMPUTE_SECRET, or pass --pin from your records).`,
+    );
+  const found = pins.auditSigningKeyPin;
   if (!found)
     throw new CliError(
       'AUDIT_KEY_MISSING',
@@ -109,8 +122,8 @@ export const auditCommands = [
       'better-compute audit verify --tenant org_acme',
       'better-compute audit verify --tenant org_acme --query problems',
     ],
-    async run({ flags, path, deployment, print }) {
-      const pin = await auditPin(flags.pin, path(flags.pki ?? defaultPkiPath));
+    async run({ flags, path, deployment, print, env, note }) {
+      const pin = await auditPin(flags.pin, path(flags.pki ?? defaultPkiPath), env, note);
       const { options } = await deployment();
       const report = await verifyAuditCheckpoints(options.database, {
         tenantId: flags.tenant!,
@@ -170,8 +183,8 @@ export const auditCommands = [
     ],
     flags: { pin: pinFlag, pki: pkiFlag },
     examples: ['better-compute audit check-proof proof.json --pin sha256/…'],
-    async run({ flags, args, path, io }) {
-      const pin = await auditPin(flags.pin, path(flags.pki ?? defaultPkiPath));
+    async run({ flags, args, path, io, env, note }) {
+      const pin = await auditPin(flags.pin, path(flags.pki ?? defaultPkiPath), env, note);
       const source = args[0]!;
       let text: string;
       if (source === '-') {

@@ -359,6 +359,9 @@ export function createSshCertificateAuthority(
   } = {},
 ): SshCertificateAuthority {
   const clock = options.clock ?? systemClock;
+  // The public key line goes into every node's sshd TrustedUserCAKeys: a comment with a line break would add a CA.
+  if (options.comment !== undefined && !/^([\x21-\x7e][\x20-\x7e]{0,63})?$/.test(options.comment))
+    throw new ComputeError('INVALID_CONFIG', 'The SSH CA comment must be printable ASCII, one line, at most 64 characters');
   const caKey = options.privateKey
     ? toPrivateKey(options.privateKey)
     : options.algorithm === 'ecdsa-p256'

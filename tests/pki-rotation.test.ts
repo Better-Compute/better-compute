@@ -8,6 +8,7 @@ import { pkiFindings } from '../packages/cli/src/commands/pki.js';
 import {
   commandSigningOptions,
   createPkiBundle,
+  createSshCertificateAuthority,
   exportPkiBundle,
   importPkiBundle,
   pkiPins,
@@ -131,15 +132,68 @@ describe('command-signing root rotation', () => {
       };
       return JSON.stringify(stored);
     };
-    expect(importPkiBundle(legacy({}), { secret: SECRET }).trustDomain).toBe('compute.test');
+    // Refused by default (nothing authenticates its public parts, and an older seal could be swapped in)…
+    expect(() => importPkiBundle(legacy({}), { secret: SECRET })).toThrow(/former format/);
+    // …loaded only when asked, to re-seal it.
+    const unlocked = { secret: SECRET, allowUnauthenticated: true };
+    expect(importPkiBundle(legacy({}), unlocked).trustDomain).toBe('compute.test');
     const stranger = createPkiBundle({ trustDomain: 'compute.test' });
     expect(() =>
       importPkiBundle(
         legacy({ commandSigningPreviousCertificate: new X509Certificate(stranger.rootCertificate).toString() }),
-        { secret: SECRET },
+        unlocked,
       ),
     ).toThrow(/without authenticating/);
-    expect(() => importPkiBundle(legacy({ trustVersion: 7 }), { secret: SECRET })).toThrow(/without authenticating/);
+    expect(() => importPkiBundle(legacy({ trustVersion: 7 }), unlocked)).toThrow(/without authenticating/);
+    // An unsealed bundle where a secret is set: a sealed one may have been replaced wholesale.
+    expect(() => importPkiBundle(exportPkiBundle(bundle), { secret: SECRET })).toThrow(/not sealed/);
+  });
+
+  it('never lets the SSH CA line carry a second key (every node trusts each line)', () => {
+    const sealed = exportPkiBundle(createPkiBundle({ trustDomain: 'compute.test' }), { secret: SECRET });
+    const stored = JSON.parse(sealed) as { sshCaPublicKey: string };
+    const [type, key] = stored.sshCaPublicKey.split(' ');
+    const attacker = createSshCertificateAuthority().publicKey;
+    for (const smuggled of [`${type} ${key} x\n${attacker}`, `${type} ${key} x\r${attacker}`])
+      expect(() =>
+        importPkiBundle(JSON.stringify({ ...stored, sshCaPublicKey: smuggled }), { secret: SECRET, allowUnauthenticated: true }),
+      ).toThrow(/malformed SSH CA/);
+    expect(() => createSshCertificateAuthority({ comment: `ca\n${attacker}` })).toThrow(/comment/);
+  });
+
+  it('authenticates the pins it reads when given the secret', () => {
+    const sealed = exportPkiBundle(createPkiBundle({ trustDomain: 'compute.test' }), { secret: SECRET });
+    expect(readPkiPins(sealed).authenticated).toBe(false);
+    expect(readPkiPins(sealed, { secret: SECRET }).authenticated).toBe(true);
+    const stranger = createPkiBundle({ trustDomain: 'compute.test' });
+    const swapped = JSON.stringify({
+      ...(JSON.parse(sealed) as object),
+      auditSigningCertificate: new X509Certificate(stranger.auditSigning!.certificate).toString(),
+    });
+    // Without the secret nothing can tell; with it, the swapped audit key is refused.
+    expect(readPkiPins(swapped).authenticated).toBe(false);
+    expect(() => readPkiPins(swapped, { secret: SECRET })).toThrow(/changed after it was sealed/);
+  });
+
+  it('re-seals a former-format bundle through the CLI after it is checked', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'bc-reseal-'));
+    const target = join(cwd, '.better-compute', 'pki.json');
+    const out: string[] = [];
+    const io: CliIO = { out: (line) => out.push(line), err() {}, cwd, env: { BETTER_COMPUTE_SECRET: SECRET } };
+    await createCli().run(['pki', 'init', '--trust-domain', 'compute.test', '--plaintext'], { ...io, env: {} });
+    // Unsealed while a secret is set: refused by everything else…
+    await expect(createCli().run(['pki', 'rotate-command-root', '--stage', 'add'], io)).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+      message: /not sealed/,
+    });
+    // …until resealed; the pins stay the same.
+    const before = readPkiPins(await readFile(target, 'utf8'));
+    out.length = 0;
+    await createCli().run(['pki', 'reseal'], io);
+    const after = JSON.parse(out.join('\n'));
+    expect(after).toMatchObject({ authenticated: true, servingCaSpkiPin: before.servingCaSpkiPin });
+    expect(await readFile(target, 'utf8')).toContain('"sealed"');
+    await createCli().run(['pki', 'rotate-command-root', '--stage', 'add'], io);
   });
 
   it('rotates through the CLI, writing the bundle back sealed', async () => {

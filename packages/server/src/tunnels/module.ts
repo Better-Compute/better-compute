@@ -476,6 +476,9 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
       'INVALID_CONFIG',
       'tunnels needs an exec ticket issuer (pki createExecTicketIssuer)',
     );
+  // Every node writes this line into sshd's TrustedUserCAKeys: a line break would smuggle in a second CA.
+  if (options.ssh && !/^[\x20-\x7e]+$/.test(options.ssh.publicKey))
+    throw new ComputeError('INVALID_CONFIG', 'The SSH CA public key must be a single printable line');
   const sshAccounts = [...(options.sshAccounts ?? ['root'])];
   const typePrefix = options.typePrefix ?? 'compute-';
   if (!sshAccounts.length || sshAccounts.some((account) => !accountPattern.test(account)))

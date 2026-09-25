@@ -173,6 +173,7 @@ describe('help and the manifest', () => {
       'fleet apply',
       'pki init',
       'pki show',
+      'pki reseal',
       'pki rotate-command-root',
       'pki renew-ca',
       'pki issue-gateway',

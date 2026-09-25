@@ -316,18 +316,17 @@ export function pkiPins(bundle: PkiBundle): PkiPins {
 }
 
 /**
- * The pins of a stored bundle, read from its public parts only: no secret needed, nothing unsealed.
- * Also reports each CA certificate's expiry. Throws `INVALID_CONFIG`.
+ * The pins of a stored bundle, from its public parts, with each CA certificate's expiry. Without a secret nothing
+ * is unsealed and nothing vouches for the file (`authenticated: false`): whoever can write it chooses these pins.
+ * With the deployment `secret`, a sealed bundle's public parts are checked against the seal first (a changed file
+ * throws), and `authenticated` is true. Throws `INVALID_CONFIG`.
  */
-export function readPkiPins(text: string): PkiPins & { expires: Record<string, number> } {
-  let stored: StoredBundle;
-  try {
-    stored = JSON.parse(text) as StoredBundle;
-  } catch {
-    throw new ComputeError('INVALID_CONFIG', 'The PKI bundle is not JSON');
-  }
-  if (stored?.format !== 'better-compute-pki' || stored.version !== 1)
-    throw new ComputeError('INVALID_CONFIG', 'Not a better-compute PKI bundle (version 1)');
+export function readPkiPins(
+  text: string,
+  options: Pick<ImportPkiBundleOptions, 'secret' | 'allowUnauthenticated'> = {},
+): PkiPins & { expires: Record<string, number>; authenticated: boolean } {
+  const stored = parseStored(text);
+  const authenticated = options.secret !== undefined ? openKeys(stored, options).authenticated : false;
   const first = (pem: string, what: string) => {
     const der = fromPem(pem)[0];
     if (!der)
@@ -384,6 +383,7 @@ export function readPkiPins(text: string): PkiPins & { expires: Record<string, n
       internalCa: internal.notAfter,
       ...(commandSigning ? { commandSigningRoot: commandSigning.notAfter } : {}),
     },
+    authenticated,
   };
 }
 
@@ -556,10 +556,17 @@ export interface ImportPkiBundleOptions {
   clock?: Clock;
   /** The root key (from `exportRootKey`) when the bundle was exported without it. */
   rootKey?: string;
+  /**
+   * Accept a bundle sealed in the former format, whose public parts nothing authenticates (and, with a secret,
+   * an unsealed one). Off by default: whoever can write the file could otherwise swap certificates, add trust
+   * anchors or roll the keys back to an older seal. Use it once to re-seal (`better-compute pki reseal`) after
+   * checking the pins it prints.
+   */
+  allowUnauthenticated?: boolean;
 }
 
-/** Loads a bundle written by `exportPkiBundle`. Throws `INVALID_CONFIG` on a wrong secret or file. */
-export function importPkiBundle(text: string, options: ImportPkiBundleOptions = {}): PkiBundle {
+/** Parses the stored JSON; throws `INVALID_CONFIG`. */
+function parseStored(text: string): StoredBundle {
   let stored: StoredBundle;
   try {
     stored = JSON.parse(text) as StoredBundle;
@@ -568,52 +575,80 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
   }
   if (stored?.format !== 'better-compute-pki' || stored.version !== 1)
     throw new ComputeError('INVALID_CONFIG', 'Not a better-compute PKI bundle (version 1)');
-  let keys: Partial<Record<KeyName, string>>;
-  if (stored.sealed) {
-    if (options.secret === undefined)
+  // One line, a key type the CA signs, a short printable comment: every node writes it into sshd's
+  // TrustedUserCAKeys, where a second line would be a second trusted CA.
+  if (stored.sshCaPublicKey !== undefined && !sshCaLine.test(stored.sshCaPublicKey))
+    throw new ComputeError('INVALID_CONFIG', 'The PKI bundle has a malformed SSH CA public key');
+  return stored;
+}
+
+const sshCaLine = /^(ssh-ed25519|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+={0,2}( [\x21-\x7e][\x20-\x7e]{0,63})?$/;
+
+/**
+ * The private keys of a stored bundle and whether its public parts are authenticated (sealed with a digest that
+ * matches). A secret with an unsealed bundle, or a bundle sealed in the former format, is refused unless
+ * `allowUnauthenticated`.
+ */
+function openKeys(
+  stored: StoredBundle,
+  options: Pick<ImportPkiBundleOptions, 'secret' | 'allowUnauthenticated'>,
+): { keys: Partial<Record<KeyName, string>>; authenticated: boolean } {
+  const reseal =
+    'check its pins (better-compute pki show), then re-seal it: better-compute pki reseal (BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1 for that run)';
+  if (!stored.sealed) {
+    if (options.secret !== undefined && !options.allowUnauthenticated)
       throw new ComputeError(
         'INVALID_CONFIG',
-        'The PKI bundle is sealed; pass the deployment secret',
+        `The PKI bundle is not sealed although a deployment secret is set; a sealed bundle may have been replaced. If this one is yours, ${reseal}`,
       );
-    try {
-      const data = fromBase64url(stored.sealed.data);
-      const decipher = createDecipheriv(
-        'aes-256-gcm',
-        sealKey(options.secret, fromBase64url(stored.sealed.salt)),
-        fromBase64url(stored.sealed.iv),
-      );
-      decipher.setAAD(Buffer.from(`${stored.format}/${stored.version}/${stored.trustDomain}`));
-      decipher.setAuthTag(data.subarray(data.length - 16));
-      const opened = JSON.parse(
-        Buffer.concat([
-          decipher.update(data.subarray(0, data.length - 16)),
-          decipher.final(),
-        ]).toString('utf8'),
-      ) as SealedPayload | Partial<Record<KeyName, string>>;
-      if ('publicSha256' in opened && typeof opened.keys === 'object') {
-        if (opened.publicSha256 !== publicDigest(stored))
-          throw new ComputeError(
-            'INVALID_CONFIG',
-            'The PKI bundle’s public parts were changed after it was sealed (a certificate, trust anchor or trust version); restore it from a backup',
-          );
-        keys = opened.keys;
-      } else {
-        // Sealed before the public parts were authenticated: its rotation fields cannot be trusted.
-        if (stored.commandSigningPreviousCertificate !== undefined || stored.trustVersion !== undefined)
-          throw new ComputeError(
-            'INVALID_CONFIG',
-            'This PKI bundle was sealed without authenticating its command-signing rotation; restore the copy from before the rotation and run better-compute pki rotate-command-root again',
-          );
-        keys = opened as Partial<Record<KeyName, string>>;
-      }
-    } catch (error) {
-      if (error instanceof ComputeError) throw error;
+    return { keys: stored.keys ?? {}, authenticated: false };
+  }
+  if (options.secret === undefined)
+    throw new ComputeError('INVALID_CONFIG', 'The PKI bundle is sealed; pass the deployment secret');
+  let opened: SealedPayload | Partial<Record<KeyName, string>>;
+  try {
+    const data = fromBase64url(stored.sealed.data);
+    const decipher = createDecipheriv(
+      'aes-256-gcm',
+      sealKey(options.secret, fromBase64url(stored.sealed.salt)),
+      fromBase64url(stored.sealed.iv),
+    );
+    decipher.setAAD(Buffer.from(`${stored.format}/${stored.version}/${stored.trustDomain}`));
+    decipher.setAuthTag(data.subarray(data.length - 16));
+    opened = JSON.parse(
+      Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString('utf8'),
+    ) as SealedPayload | Partial<Record<KeyName, string>>;
+  } catch (error) {
+    if (error instanceof ComputeError) throw error;
+    throw new ComputeError('INVALID_CONFIG', 'Cannot unseal the PKI bundle: wrong secret or a damaged file');
+  }
+  if ('publicSha256' in opened && typeof opened.keys === 'object') {
+    if (opened.publicSha256 !== publicDigest(stored))
       throw new ComputeError(
         'INVALID_CONFIG',
-        'Cannot unseal the PKI bundle: wrong secret or a damaged file',
+        'The PKI bundle’s public parts were changed after it was sealed (a certificate, trust anchor or trust version); restore it from a backup',
       );
-    }
-  } else keys = stored.keys ?? {};
+    return { keys: opened.keys, authenticated: true };
+  }
+  // Sealed in the former format: nothing ties its public parts to the seal, and an older seal of the same
+  // deployment could be swapped in (rolling keys back).
+  if (!options.allowUnauthenticated)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `The PKI bundle is sealed in the former format, which does not authenticate its certificates. ${reseal[0]!.toUpperCase()}${reseal.slice(1)}`,
+    );
+  if (stored.commandSigningPreviousCertificate !== undefined || stored.trustVersion !== undefined)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'This PKI bundle was sealed without authenticating its command-signing rotation; restore the copy from before the rotation and run better-compute pki rotate-command-root again',
+    );
+  return { keys: opened as Partial<Record<KeyName, string>>, authenticated: false };
+}
+
+/** Loads a bundle written by `exportPkiBundle`. Throws `INVALID_CONFIG` on a wrong secret or file. */
+export function importPkiBundle(text: string, options: ImportPkiBundleOptions = {}): PkiBundle {
+  const stored = parseStored(text);
+  const { keys } = openKeys(stored, options);
   const need = (name: KeyName): string => {
     const value = keys[name];
     if (!value) throw new ComputeError('INVALID_CONFIG', `The PKI bundle lacks the ${name} key`);

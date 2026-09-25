@@ -194,7 +194,7 @@ describe('pki commands', () => {
     expect(group.stdout).toContain('pki issue-gateway');
     expect((await run(['help', 'pki', 'show'])).stdout).toContain('public half');
     expect(await run(['pki'])).toMatchObject({ ok: false, code: 'INVALID_COMMAND' });
-    expect((await run(['pki'])).message).toContain('init, show, rotate-command-root, renew-ca, issue-gateway');
+    expect((await run(['pki'])).message).toContain('init, show, reseal, rotate-command-root, renew-ca, issue-gateway');
   });
 });
 
