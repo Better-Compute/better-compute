@@ -137,6 +137,7 @@ type fakeHost struct {
 	reboots    []string
 	onBoot     func()
 	sshReloads int
+	kmsg       io.ReadCloser
 }
 
 func (h *fakeHost) BootID() (string, error) { return h.boot, nil }
@@ -154,6 +155,12 @@ func (h *fakeHost) Reboot(reason string) error {
 	return nil
 }
 func (h *fakeHost) Path(abs string) string { return filepath.Join(h.root, filepath.FromSlash(abs)) }
+func (h *fakeHost) Kmsg() (io.ReadCloser, error) {
+	if h.kmsg == nil {
+		return nil, os.ErrNotExist
+	}
+	return h.kmsg, nil
+}
 func (h *fakeHost) ReloadSSH() error {
 	h.mu.Lock()
 	h.sshReloads++
@@ -742,5 +749,37 @@ func TestSecretAndWorkloadTokenRequests(t *testing.T) {
 	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_WorkloadToken{WorkloadToken: &agentv1.WorkloadTokenResponse{RequestId: wreq.GetRequestId(), Error: "disabled"}}})
 	if err := <-tokens; err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("refusal = %v", err)
+	}
+}
+
+func TestXidBecomesADeviceCondition(t *testing.T) {
+	r, w := io.Pipe()
+	gpu := fakehw.Inventory(1).Gpus.Gpus[2]
+	h := newHarness(t, func(o *Options) { o.Host.(*fakeHost).kmsg = r })
+	defer w.Close()
+	s, _ := h.open()
+	s.push(desired(1, &agentv1.NodeSpec{}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil })
+	bus := strings.TrimPrefix(strings.ToLower(gpu.PciBusId), "0000")
+	bus = strings.TrimSuffix(bus, ".0")
+	_, _ = io.WriteString(w, "3,1,1,-;NVRM: Xid (PCI:"+bus+"): 79, pid=1, GPU has fallen off the bus.\n")
+	status := s.next(t, "status with the XID", func(f *agentv1.AgentFrame) bool {
+		for _, c := range f.GetStatus().GetConditions() {
+			if c.GetType() == "Xid79" {
+				return true
+			}
+		}
+		return false
+	}).GetStatus()
+	for _, c := range status.GetConditions() {
+		if c.GetType() == "Xid79" && (c.GetDeviceId() != gpu.Uuid || c.GetStatus() != agentv1.ConditionStatus_CONDITION_STATUS_TRUE) {
+			t.Fatalf("condition = %v", c)
+		}
+	}
+	// The next converger pass keeps it (this boot's faults stay active).
+	s.push(desired(2, &agentv1.NodeSpec{}))
+	again := s.next(t, "next status", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 2 }).GetStatus()
+	if len(again.GetConditions()) != 1 {
+		t.Fatalf("conditions = %v", again.GetConditions())
 	}
 }

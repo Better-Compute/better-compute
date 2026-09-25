@@ -80,6 +80,8 @@ type Options struct {
 	DialTunnel TunnelDialer
 	// TunnelProgram runs a tunnel's program (default DefaultTunnelProgram).
 	TunnelProgram TunnelProgramFactory
+	// HealthInterval is how often host pressure is sampled and reported (default 30 s).
+	HealthInterval time.Duration
 }
 
 // Agent is the node agent.
@@ -116,9 +118,12 @@ type Agent struct {
 	lastStatus *agentv1.StatusReport
 	revoked    bool
 	// execJWKS is the applied access section's exec-ticket JWKS (tunnels).
-	execJWKS      string
-	tunnels       int
-	secrets       map[string]*pendingSecret
+	execJWKS string
+	tunnels  int
+	secrets  map[string]*pendingSecret
+	// faults are this boot's active device conditions (XIDs); pressure the last PSI sample.
+	faults        []*agentv1.Condition
+	pressure      *agentv1.HostPressure
 	workloads     map[string]*pendingWorkload
 	upgradeNeeded bool
 
@@ -144,6 +149,9 @@ func New(o Options) (*Agent, error) {
 	}
 	if o.ConvergeRetry == 0 {
 		o.ConvergeRetry = 30 * time.Second
+	}
+	if o.HealthInterval == 0 {
+		o.HealthInterval = 30 * time.Second
 	}
 	if o.WelcomeTimeout == 0 {
 		o.WelcomeTimeout = 30 * time.Second
@@ -270,6 +278,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	go a.convergeLoop(ctx)
 	go a.sweepLoop(ctx)
+	go a.healthLoop(ctx)
+	go a.watchXids(ctx)
 	if a.o.Renewer != nil {
 		go a.renewLoop(ctx)
 	}

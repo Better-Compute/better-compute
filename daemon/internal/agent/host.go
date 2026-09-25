@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,8 @@ type Host interface {
 	Logs(ctx context.Context, unit string, since time.Duration) ([]byte, error)
 	// ReloadSSH makes sshd re-read its configuration (the access converger's drop-in).
 	ReloadSSH() error
+	// Kmsg opens the kernel log after its last record (NVIDIA XIDs).
+	Kmsg() (io.ReadCloser, error)
 }
 
 // RealHost is the machine bcd runs on.

@@ -257,6 +257,8 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 		a.observed = generation
 	}
 	status.ObservedGeneration = a.observed
+	status.Pressure = a.pressure
+	status.Conditions = append(status.Conditions, cloneConditions(a.faults)...)
 	if stored, ok, err := a.j.Spec(); err == nil && ok {
 		status.AppliedSpecHash = stored.Hash
 	}
