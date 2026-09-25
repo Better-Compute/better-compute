@@ -28,10 +28,11 @@ export type SystemApi = {
 
 const empty = manifest({});
 
-/** Accepts `{}` or no input; anything else is `INVALID_INPUT`. */
-export function validateNoInput(input: unknown): NoInput {
-  return empty.parse(input ?? {}) as NoInput;
-}
+/** Accepts `{}` or no input; anything else is `INVALID_INPUT`. Described as the empty strict object. */
+export const validateNoInput = Object.assign(
+  (input: unknown): NoInput => empty.parse(input ?? {}) as NoInput,
+  { jsonSchema: empty.jsonSchema() },
+);
 
 function identityOf(caller: Caller): CallerIdentity {
   const identity: CallerIdentity = {

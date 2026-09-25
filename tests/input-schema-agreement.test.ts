@@ -27,7 +27,7 @@ const issuesOf = (run: () => unknown): { message: string; path: string[] }[] => 
   }
 };
 
-const fullyDescribed = ['webhooks'];
+const fullyDescribed = ['webhooks', 'inventory', 'system'];
 
 async function everyModule() {
   const { compute } = await computeFixture({
