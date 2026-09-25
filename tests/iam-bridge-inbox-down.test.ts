@@ -73,9 +73,10 @@ describe('the compute inbox down', () => {
     await f.iam.events.dispatch();
     expect(Date.now() - started).toBeLessThan(2_000);
 
-    // Every subscriber else got every event; compute got none, and says so.
-    const suspended = (ids: string[]) => ids.map((id) => `agent:suspend:${id}`);
-    expect(mirrored.filter((line) => line.startsWith('agent:suspend'))).toEqual(
+    // Every subscriber else got every event; compute got none, and says so. (One dispatch delivers in random-id
+    // order, §12.8, so compare as sets.)
+    const suspended = (ids: string[]) => ids.map((id) => `agent:suspend:${id}`).sort();
+    expect(mirrored.filter((line) => line.startsWith('agent:suspend')).sort()).toEqual(
       suspended(agents.slice(0, 4).map((agent) => agent.id)),
     );
     expect(stored.events).toHaveLength(0);
