@@ -147,7 +147,10 @@ show it.
 
   Warm instances count against the tenant's quota and are metered as `vps.sandbox.warm` (warm
   vCPU-hours, tenant-billed) until claimed (`instances.claimed_at`). From the claim on they bill as
-  the owner's ordinary usage.
+  the owner's ordinary usage. Where the pool checks budgets (`budgetCheck: 'meter'`, or an offer's
+  `stop-new`/`drain`), a spent budget stops refills, and a `drain` offer also empties the pool. The
+  check is `IamPort.billingCheck({ tenantId })`, asked once per tenant per pass and only when a
+  refill or a drain depends on it.
 
 - **Snapshots.** `sandboxes.snapshot({ includeMemory = true, keep = false })` needs
   `vps({ snapshots: SnapshotStore })` (`presign`, optional `delete`). It sends the host

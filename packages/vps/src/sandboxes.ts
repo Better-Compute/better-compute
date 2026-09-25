@@ -2165,7 +2165,12 @@ export interface SandboxPass {
 export async function reconcileSandboxes(
   deps: InstanceDeps,
   sql: SqlExecutor,
-  options: { batch?: number; store?: SnapshotStore } = {},
+  options: {
+    batch?: number;
+    store?: SnapshotStore;
+    /** A tenant's budget allows new spend (`IamPort.billingCheck`); absent: never checked. */
+    budget?: (tenantId: string) => Promise<boolean>;
+  } = {},
 ): Promise<SandboxPass> {
   const batch = options.batch ?? 100;
   const now = deps.clock.now();
@@ -2263,9 +2268,17 @@ export async function reconcileSandboxes(
   // Only instances of the template's current version count; older ones are drained, as are those
   // whose host certificate no longer covers the template's TTL (`warmCertificateFloorSeconds`).
   const { rows: pools } = await sql.query<
-    RawTemplate & { live: string | number; stale: string | number }
+    RawTemplate & {
+      live: string | number;
+      stale: string | number;
+      budget_check: string | null;
+      on_budget_exceeded: string | null;
+    }
   >(
     `SELECT ${templateColumnsOf('t.')},
+            (SELECT p.policy->'admission'->>'budgetCheck' FROM pools p WHERE p.id = t.pool_id) AS budget_check,
+            (SELECT o.on_budget_exceeded FROM pool_offers o
+              WHERE o.pool_id = t.pool_id AND o.tenant_id = t.tenant_id) AS on_budget_exceeded,
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
                                   AND NOT ${warmStale('i.', 't.instance_version', '$1', 'least(t.default_ttl_seconds, $2)')}) AS live,
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
@@ -2276,14 +2289,52 @@ export async function reconcileSandboxes(
       GROUP BY t.id`,
     [at, warmCertificateFloorSeconds],
   );
+  // Whether each tenant's budget is spent, asked once per pass and only where a pool checks it.
+  const spent = new Map<string, Promise<boolean>>();
+  const budgetSpent = (tenantId: string): Promise<boolean> => {
+    const check = options.budget;
+    if (!check) return Promise.resolve(false);
+    let answer = spent.get(tenantId);
+    if (!answer) {
+      answer = check(tenantId).then(
+        (allowed) => !allowed,
+        (error: unknown) => {
+          // Best effort, like the refill itself: an unanswered check keeps the pool as it is.
+          deps.log.warn('vps: warm pool budget check failed', {
+            tenantId,
+            error: String((error as Error)?.message ?? error),
+          });
+          return false;
+        },
+      );
+      spent.set(tenantId, answer);
+    }
+    return answer;
+  };
   for (const raw of pools) {
     const template = toTemplate(raw);
     const live = Number(raw.live);
-    const keep = template.deleted ? 0 : template.warm.max;
+    // Warm instances are metered to the tenant: a spent budget stops refills where the pool checks
+    // budgets (as it refuses creates), and an offer that drains on one empties the pool.
+    const budgeted =
+      !template.deleted &&
+      (raw.budget_check === 'meter' ||
+        raw.on_budget_exceeded === 'stop-new' ||
+        raw.on_budget_exceeded === 'drain');
+    const draining = raw.on_budget_exceeded === 'drain' && live > 0;
+    const overBudget =
+      budgeted && (live < template.warm.min || draining)
+        ? await budgetSpent(template.tenantId)
+        : false;
+    const keep =
+      template.deleted || (overBudget && raw.on_budget_exceeded === 'drain')
+        ? 0
+        : template.warm.max;
     if (Number(raw.stale) > 0)
       pass.warmDrained += await drainWarm(deps, sql, template, Number(raw.stale), true);
     if (live > keep) pass.warmDrained += await drainWarm(deps, sql, template, live - keep, false);
-    const want = template.deleted ? 0 : Math.min(template.warm.min - live, warmRefillPerPass);
+    const want =
+      template.deleted || overBudget ? 0 : Math.min(template.warm.min - live, warmRefillPerPass);
     for (let index = 0; index < want; index++) {
       try {
         await sql.transaction((tx) =>

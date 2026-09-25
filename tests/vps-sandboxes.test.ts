@@ -900,6 +900,43 @@ describe('warm pools', () => {
     expect(rows.filter((row) => row.desired_state !== 'deleted')).toHaveLength(1);
   });
 
+  it('stop refilling on a spent budget where the pool checks it, and empty for a drain offer', async () => {
+    const template = await createTemplate({ warm: { min: 2 } });
+    await db.query(
+      `UPDATE pools SET policy = policy || '{"admission": {"budgetCheck": "meter"}}'::jsonb WHERE id = $1`,
+      [pool],
+    );
+    const warm = async () =>
+      (
+        await db.query<{ id: string }>(
+          `SELECT id FROM instances WHERE warm_template_id = $1 AND desired_state <> 'deleted'`,
+          [template.id],
+        )
+      ).rows.length;
+    budgetSpent = true;
+    try {
+      await reconcileSandboxes();
+      expect(await warm()).toBe(0);
+      budgetSpent = false;
+      await reconcileSandboxes();
+      expect(await warm()).toBe(2);
+      // `stop-new` keeps what is there; `drain` empties the pool while the budget is spent.
+      budgetSpent = true;
+      await reconcileSandboxes();
+      expect(await warm()).toBe(2);
+      await db.query(
+        `UPDATE pool_offers SET on_budget_exceeded = 'drain' WHERE pool_id = $1 AND tenant_id = 'acme'`,
+        [pool],
+      );
+      await reconcileSandboxes();
+      expect(await warm()).toBe(0);
+    } finally {
+      budgetSpent = false;
+    }
+    await reconcileSandboxes();
+    expect(await warm()).toBe(2);
+  });
+
   it('keep instances stopped on a runtime that cannot pause', async () => {
     const template = await createTemplate({ warm: { min: 1 } });
     const noPause = vps({

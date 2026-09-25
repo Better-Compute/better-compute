@@ -988,6 +988,9 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           else
             await reconcileSandboxes(depsOf(context), context.sql, {
               ...(options.snapshots ? { store: options.snapshots } : {}),
+              // No caller here: both IAM modes answer for the named tenant (remote as the root
+              // service account, an ancestor of every tenant; [31c64a] c7a5312).
+              budget: async (tenantId) => (await context.iam.billingCheck({ tenantId })).allowed,
             });
           return 'DONE';
         },
