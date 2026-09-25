@@ -7,6 +7,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { metalBatchScope } from './batch.js';
+import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { stateProfile, workflowStates } from './profiles.js';
 import { applyProvisionVerb, readMetalNode, setMetalWorkflow, type MetalNodeRow } from './store.js';
 import { dueNodeLease, leaseEnded, markLeaseBound, newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
@@ -30,7 +31,7 @@ export type MetalReconcileOutcome =
   | { action: 'failed'; from: ProvisionState; error: Json }
   | { action: 'missing' };
 
-type Context = Pick<ModuleContext, 'sql' | 'events' | 'work'> & Partial<Pick<ModuleContext, 'workflows' | 'commands' | 'registry'>>;
+type Context = Pick<ModuleContext, 'sql' | 'events' | 'work'> & Partial<Pick<ModuleContext, 'workflows' | 'commands' | 'registry' | 'desired'>>;
 
 async function publish(context: Context, tx: SqlTx, node: MetalNodeRow, type: string, data: Record<string, Json>) {
   await context.events.publish(tx, { type, tenantId: node.tenant_id, subject: `node/${node.node_id}`, data: { nodeId: node.node_id, ...data } });
@@ -163,6 +164,8 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
         const role = state === 'deploying' ? (workflow.profile_document?.role ?? 'host') : undefined;
         const to = await applyProvisionVerb(tx, node, 'complete', role ? { role } : {});
         await setMetalWorkflow(tx, nodeId, null, null);
+        // A retired machine is no longer a site.httpProxy target.
+        if (to === 'retired' && node.pool_agent === 'none') await invalidateSiteProxyTargets(tx, context.desired, node.site_id);
         // A dedicated-root lease is bound once its deploy is done; capacity takes it from there.
         if (state === 'deploying' && node.lease_allocation_id && (await markLeaseBound(tx, context.work, node.lease_allocation_id)))
           await publish(context, tx, node, 'node.tenant-root.bound', { allocationId: node.lease_allocation_id });

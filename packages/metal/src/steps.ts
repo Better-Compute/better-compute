@@ -37,6 +37,7 @@ import {
   purgeableCredentials,
   rotatedCredentialValue,
 } from './bmc-rotation.js';
+import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
 import type { HardwareProfile } from './module-types.js';
@@ -301,13 +302,17 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
         ? result.ipAddresses.filter((a): a is string => typeof a === 'string' && isIP(a) !== 0)
         : [];
       if (macs.length || uuid || addresses.length)
-        await context.sql.query(
-          `UPDATE metal_nodes SET macs = CASE WHEN cardinality($2::text[]) > 0 THEN $2::text[] ELSE macs END,
-             product_uuid = COALESCE($3, product_uuid),
-             addresses = CASE WHEN cardinality($4::text[]) > 0 THEN $4::text[] ELSE addresses END,
-             updated_at = compute_now() WHERE node_id = $1`,
-          [requireNode(context), macs, uuid, addresses],
-        );
+        await context.sql.transaction(async (tx) => {
+          await tx.query(
+            `UPDATE metal_nodes SET macs = CASE WHEN cardinality($2::text[]) > 0 THEN $2::text[] ELSE macs END,
+               product_uuid = COALESCE($3, product_uuid),
+               addresses = CASE WHEN cardinality($4::text[]) > 0 THEN $4::text[] ELSE addresses END,
+               updated_at = compute_now() WHERE node_id = $1`,
+            [requireNode(context), macs, uuid, addresses],
+          );
+          // The site's agents may now reach (site.httpProxy) the addresses of an agentless machine.
+          if (addresses.length && context.node) await invalidateSiteProxyTargets(tx, context.desired, context.node.siteId);
+        });
       return result;
     },
   });

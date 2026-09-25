@@ -7,6 +7,7 @@ import { teardownTenantMetal } from './tenancy.js';
 import { metalMigrations } from './migrations.js';
 import type { HardwareProfile } from './module-types.js';
 import { metalProfiles } from './profiles.js';
+import { metalNodeSpec } from './proxy-targets.js';
 import { metalWorkKind, reconcileMetalNode } from './reconcile.js';
 import { metalSteps, type AttestationVerifier } from './steps.js';
 
@@ -60,6 +61,8 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
       commandKinds: [...metalCommandKinds],
       reconcilers: [reconciler],
       selfCheck: (context) => metalFindings(context.sql),
+      // Site agents: the agentless machines site.httpProxy may reach, and nothing else.
+      nodeSpec: metalNodeSpec,
       // A deleted tenant's machines are retired, one legal transition per sweep, until none is left.
       async tenantDeleted(context, tenantId) {
         return (await teardownTenantMetal(context, tenantId)).remaining > 0 ? 'SYNC_AGAIN' : 'DONE';
