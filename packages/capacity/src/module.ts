@@ -50,6 +50,8 @@ import {
   cancelReservation,
   completeCreate,
   completeExtend,
+  budgetAdmissionCheck,
+  budgetExtendCheck,
   denyCreate,
   denyPending,
   deviceAssignments,
@@ -1193,6 +1195,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       admission: {
         prepare: (context, input, tx) => prepareCreate(context, input, tx),
         denied: (context, input, tx, error) => denyCreate(context, input, tx, error),
+        check: (context, input) => budgetAdmissionCheck(context, input.tenantId, input.poolId),
       },
       handler: (context, input) => completeCreate(deps(context), context, input),
       // §9.1 async-with-wait: `wait` holds the answer while the pool-lease batch runs.
@@ -1253,6 +1256,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       admission: {
         prepare: (context, input, tx) => prepareExtend(context, input, tx),
         denied: (context, input, tx) => denyPending(context, input, tx),
+        check: (context, input) => budgetExtendCheck(context, input),
       },
       handler: (context, input) => completeExtend(deps(context), context, input),
     }),

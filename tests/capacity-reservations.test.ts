@@ -108,8 +108,25 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
         recorded.invalidated.push(nodeId);
       },
     },
+    iam: {
+      async billingCheck(input: { tenantId: string; identityId?: string }) {
+        billingChecks.push(input);
+        return billing;
+      },
+    },
   } as unknown as ModuleContext;
 }
+
+/** What `iam.billingCheck` answers (the admission's budget check), and who asked. */
+let billing: {
+  allowed: boolean;
+  budgets: unknown[];
+  blockedBy?: { budgetId: string; name: string };
+} = {
+  allowed: true,
+  budgets: [],
+};
+const billingChecks: { tenantId: string; identityId?: string }[] = [];
 
 /** The executor handlers see inside the envelope's transaction. */
 function within(tx: SqlTx): SqlExecutor {
@@ -150,6 +167,7 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
         tx: SqlTx,
       ): Promise<{ status: string; result?: unknown }>;
       denied?(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
+      check?(context: MethodContext, input: unknown, resource: unknown): Promise<void>;
     };
   };
   const input = definition.validate(raw);
@@ -177,6 +195,12 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
       );
       throw refusal;
     }
+    // After an allowed decision, with no transaction open: a throw refuses, `denied` is not called.
+    await definition.admission.check?.(
+      { ...moduleContext(db), caller: who, requestId: 'req_1' } as MethodContext,
+      input,
+      (plan as { resource?: unknown }).resource,
+    );
   }
   return db.transaction((tx) => definition.handler(context(tx), input));
 }
@@ -914,6 +938,66 @@ describe('pools, capacity and quotas', () => {
     await expect(
       call('pools', 'offer', { tenantId: 'acme', poolId, toTenantId: 'acme', quota: { gpu: 8 } }),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('checks the caller’s budget at admission when the pool or the offer asks (SPEND_LIMIT_REACHED, draft kept)', async () => {
+    billingChecks.length = 0;
+    billing = { allowed: true, budgets: [] };
+    await call('reservations', 'create', create({ idempotencyKey: 'b0' }));
+    expect(billingChecks).toEqual([]); // neither the pool nor the offer asks: no IAM call
+
+    // The offer stops new work when a budget is spent (§12.8 stop-new).
+    await db.query(
+      `UPDATE pool_offers SET on_budget_exceeded = 'stop-new' WHERE pool_id = $1 AND tenant_id = 'acme'`,
+      [poolId],
+    );
+    billing = {
+      allowed: false,
+      budgets: [],
+      blockedBy: { budgetId: 'bud_team', name: 'team-a' },
+    };
+    await expect(
+      call('reservations', 'create', create({ idempotencyKey: 'b1' })),
+    ).rejects.toMatchObject({
+      code: 'SPEND_LIMIT_REACHED',
+      details: { budgetId: 'bud_team', name: 'team-a' },
+    });
+    expect(billingChecks.at(-1)).toEqual({ tenantId: 'acme', identityId: caller.identityId });
+    // Not denied: the same key re-decides once the budget's window resets.
+    const { rows } = await db.query<{ state: string }>(
+      `SELECT state FROM reservations WHERE idempotency_key = 'b1'`,
+    );
+    expect(rows[0]!.state).toBe('draft');
+    billing = { allowed: true, budgets: [] };
+    const placed = (await call('reservations', 'create', create({ idempotencyKey: 'b1' }))) as Rsv;
+    expect(placed.state).toBe('placed');
+
+    // Extends too; a refusal clears the pending change it wrote.
+    billing = { allowed: false, budgets: [] };
+    recorded.pending = [];
+    await expect(
+      call('reservations', 'extend', {
+        tenantId: 'acme',
+        reservationId: placed.id,
+        by: '1h',
+        idempotencyKey: 'bx',
+      }),
+    ).rejects.toMatchObject({ code: 'SPEND_LIMIT_REACHED' });
+    expect(recorded.pending.at(-1)).toEqual({ id: placed.id, pending: null });
+
+    // The pool itself can ask for it on every admission (`admission.budgetCheck: 'meter'`).
+    await db.query(`UPDATE pool_offers SET on_budget_exceeded = 'notify' WHERE pool_id = $1`, [
+      poolId,
+    ]);
+    await db.query(
+      `UPDATE pools SET policy = '{"admission": {"budgetCheck": "meter"}}' WHERE id = $1`,
+      [poolId],
+    );
+    await expect(
+      call('reservations', 'create', create({ idempotencyKey: 'b2' })),
+    ).rejects.toMatchObject({ code: 'SPEND_LIMIT_REACHED' });
+    await db.query(`UPDATE pools SET policy = '{}' WHERE id = $1`, [poolId]);
+    billing = { allowed: true, budgets: [] };
   });
 
   it('invalidates the site agents’ specs when a pool’s prewarmImages change', async () => {

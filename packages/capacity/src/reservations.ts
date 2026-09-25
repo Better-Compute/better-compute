@@ -796,6 +796,68 @@ export async function prepareCreate(
   return { status: 'decide', resource: { type: 'reservation', id } };
 }
 
+/**
+ * The admission's budget check (`MethodAdmission.check`: after the IAM decision, no transaction
+ * open). It runs when the pool asks for it (`policy.admission.budgetCheck: 'meter'`) or when the
+ * tenant's offer reacts to a spent budget by stopping new work (`onBudgetExceeded: 'stop-new' |
+ * 'drain'`, §12.8), and calls `iam.billingCheck` for the caller. A spent budget refuses with
+ * `SPEND_LIMIT_REACHED`; the draft stays, so the same key re-decides once the budget's window
+ * resets.
+ */
+export async function budgetAdmissionCheck(
+  context: MethodContext,
+  tenantId: string,
+  poolId: string,
+): Promise<void> {
+  const { rows } = await context.sql.query<{
+    budget_check: string | null;
+    on_budget_exceeded: string | null;
+  }>(
+    `SELECT p.policy->'admission'->>'budgetCheck' AS budget_check,
+            (SELECT o.on_budget_exceeded FROM pool_offers o
+              WHERE o.pool_id = p.id AND o.tenant_id = $2) AS on_budget_exceeded
+       FROM pools p WHERE p.id = $1`,
+    [poolId, tenantId],
+  );
+  const row = rows[0];
+  if (!row) return;
+  const wanted =
+    row.budget_check === 'meter' ||
+    row.on_budget_exceeded === 'stop-new' ||
+    row.on_budget_exceeded === 'drain';
+  if (!wanted) return;
+  const check = await context.iam.billingCheck(
+    { tenantId, ...(context.caller ? { identityId: context.caller.identityId } : {}) },
+    context.credential,
+  );
+  if (check.allowed) return;
+  const budget = check.blockedBy;
+  throw new ComputeError(
+    'SPEND_LIMIT_REACHED',
+    budget ? `Budget ${budget.name} is spent` : 'A budget covering this request is spent',
+    undefined,
+    budget ? { budgetId: budget.budgetId, name: budget.name } : {},
+  );
+}
+
+/** `budgetAdmissionCheck` for `reservations.extend`: a refusal also clears the pending change. */
+export async function budgetExtendCheck(
+  context: MethodContext,
+  input: ExtendReservationInput,
+): Promise<void> {
+  const { rows } = await context.sql.query<{ pool_id: string }>(
+    `SELECT pool_id FROM reservations WHERE id = $1 AND tenant_id = $2`,
+    [input.reservationId, input.tenantId],
+  );
+  if (!rows[0]) return;
+  try {
+    await budgetAdmissionCheck(context, input.tenantId, rows[0].pool_id);
+  } catch (error) {
+    await context.sql.transaction((tx) => denyPending(context, input, tx));
+    throw error;
+  }
+}
+
 /** How long a delegated request may wait for a human (§3.4 step 7: ≤30 min). */
 export const maxConfirmationMs = 30 * 60_000;
 
