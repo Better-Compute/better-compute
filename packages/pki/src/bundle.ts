@@ -3,6 +3,7 @@ import {
   createDecipheriv,
   createHash,
   hkdfSync,
+  X509Certificate,
   type JsonWebKey,
   type KeyObject,
 } from 'node:crypto';
@@ -427,6 +428,20 @@ type KeyName =
   | 'commandSigning'
   | 'commandSigningNext';
 
+/** What a sealed bundle encrypts: the private keys and a digest of every public field. */
+interface SealedPayload {
+  keys: Partial<Record<KeyName, string>>;
+  publicSha256: string;
+}
+
+/** SHA-256 over the public fields (everything but `keys` and `sealed`), in sorted key order. */
+function publicDigest(stored: StoredBundle): string {
+  const fields = Object.entries(stored)
+    .filter(([name, value]) => name !== 'keys' && name !== 'sealed' && value !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
+}
+
 const minSecretLength = 32;
 
 function sealKey(secret: string, salt: Uint8Array): Buffer {
@@ -504,8 +519,11 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
     const cipher = createCipheriv('aes-256-gcm', sealKey(options.secret, salt), iv);
     const header = Buffer.from(`${stored.format}/${stored.version}/${stored.trustDomain}`);
     cipher.setAAD(header);
+    // The public parts are authenticated too: whoever can write the file but lacks the secret cannot add a
+    // trust anchor (a command-signing root daemons would trust) or change the trust version.
+    const sealedPayload: SealedPayload = { keys, publicSha256: publicDigest(stored) };
     const data = Buffer.concat([
-      cipher.update(JSON.stringify(keys)),
+      cipher.update(JSON.stringify(sealedPayload)),
       cipher.final(),
       cipher.getAuthTag(),
     ]);
@@ -566,12 +584,28 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
       );
       decipher.setAAD(Buffer.from(`${stored.format}/${stored.version}/${stored.trustDomain}`));
       decipher.setAuthTag(data.subarray(data.length - 16));
-      keys = JSON.parse(
+      const opened = JSON.parse(
         Buffer.concat([
           decipher.update(data.subarray(0, data.length - 16)),
           decipher.final(),
         ]).toString('utf8'),
-      );
+      ) as SealedPayload | Partial<Record<KeyName, string>>;
+      if ('publicSha256' in opened && typeof opened.keys === 'object') {
+        if (opened.publicSha256 !== publicDigest(stored))
+          throw new ComputeError(
+            'INVALID_CONFIG',
+            'The PKI bundle’s public parts were changed after it was sealed (a certificate, trust anchor or trust version); restore it from a backup',
+          );
+        keys = opened.keys;
+      } else {
+        // Sealed before the public parts were authenticated: its rotation fields cannot be trusted.
+        if (stored.commandSigningPreviousCertificate !== undefined || stored.trustVersion !== undefined)
+          throw new ComputeError(
+            'INVALID_CONFIG',
+            'This PKI bundle was sealed without authenticating its command-signing rotation; restore the copy from before the rotation and run better-compute pki rotate-command-root again',
+          );
+        keys = opened as Partial<Record<KeyName, string>>;
+      }
     } catch (error) {
       if (error instanceof ComputeError) throw error;
       throw new ComputeError(
@@ -668,6 +702,8 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
     const previous = fromPem(stored.commandSigningPreviousCertificate)[0];
     if (!previous)
       throw new ComputeError('INVALID_CONFIG', 'The PKI bundle has an unreadable previous command-signing root');
+    if (!new X509Certificate(previous).ca)
+      throw new ComputeError('INVALID_CONFIG', 'The previous command-signing root is not a CA certificate');
     bundle.commandSigningPrevious = previous;
   }
   if (stored.trustVersion !== undefined) {

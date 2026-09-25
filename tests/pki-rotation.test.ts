@@ -1,3 +1,4 @@
+import { createCipheriv, hkdfSync, randomBytes, X509Certificate } from 'node:crypto';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -84,6 +85,59 @@ describe('command-signing root rotation', () => {
       secret: SECRET,
     });
     expect(pkiPins(switched).commandSigningPreviousRootSha256).toBe(pkiPins(added).commandSigningRootSha256);
+  });
+
+  it('refuses a sealed bundle whose public parts were changed without the secret', () => {
+    const sealed = exportPkiBundle(createPkiBundle({ trustDomain: 'compute.test' }), { secret: SECRET });
+    const stranger = createPkiBundle({ trustDomain: 'compute.test' });
+    const pem = (der: Uint8Array) => new X509Certificate(der).toString();
+    const edit = (change: (stored: Record<string, unknown>) => void) => {
+      const stored = JSON.parse(sealed) as Record<string, unknown>;
+      change(stored);
+      return () => importPkiBundle(JSON.stringify(stored), { secret: SECRET });
+    };
+    // A file writer adds their own command-signing root (daemons would trust it) or pins the trust version.
+    expect(edit((s) => (s.commandSigningPreviousCertificate = pem(stranger.rootCertificate)))).toThrow(
+      /changed after it was sealed/,
+    );
+    expect(edit((s) => (s.trustVersion = 2 ** 52))).toThrow(/changed after it was sealed/);
+    expect(edit((s) => (s.rootCertificate = pem(stranger.rootCertificate)))).toThrow(/changed after it was sealed/);
+    // Reformatting the JSON (key order, indentation) changes nothing that matters.
+    const reordered = Object.fromEntries(Object.entries(JSON.parse(sealed) as object).reverse());
+    expect(importPkiBundle(JSON.stringify(reordered), { secret: SECRET }).trustDomain).toBe('compute.test');
+  });
+
+  it('loads bundles sealed before the public parts were authenticated, unless they carry rotation fields', () => {
+    const bundle = createPkiBundle({ trustDomain: 'compute.test' });
+    // The former format: only the private keys under the seal.
+    const legacy = (extra: Record<string, unknown>) => {
+      const stored = JSON.parse(exportPkiBundle(bundle)) as Record<string, unknown>;
+      const keys = stored.keys;
+      delete stored.keys;
+      Object.assign(stored, extra);
+      const salt = randomBytes(16);
+      const iv = randomBytes(12);
+      const key = Buffer.from(hkdfSync('sha256', SECRET, salt, 'better-compute/pki-bundle/v1', 32));
+      const cipher = createCipheriv('aes-256-gcm', key, iv);
+      cipher.setAAD(Buffer.from(`better-compute-pki/1/${stored.trustDomain}`));
+      const data = Buffer.concat([cipher.update(JSON.stringify(keys)), cipher.final(), cipher.getAuthTag()]);
+      stored.sealed = {
+        alg: 'HKDF-SHA256+A256GCM',
+        salt: salt.toString('base64url'),
+        iv: iv.toString('base64url'),
+        data: data.toString('base64url'),
+      };
+      return JSON.stringify(stored);
+    };
+    expect(importPkiBundle(legacy({}), { secret: SECRET }).trustDomain).toBe('compute.test');
+    const stranger = createPkiBundle({ trustDomain: 'compute.test' });
+    expect(() =>
+      importPkiBundle(
+        legacy({ commandSigningPreviousCertificate: new X509Certificate(stranger.rootCertificate).toString() }),
+        { secret: SECRET },
+      ),
+    ).toThrow(/without authenticating/);
+    expect(() => importPkiBundle(legacy({ trustVersion: 7 }), { secret: SECRET })).toThrow(/without authenticating/);
   });
 
   it('rotates through the CLI, writing the bundle back sealed', async () => {
