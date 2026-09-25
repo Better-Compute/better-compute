@@ -1259,6 +1259,8 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         prepare: (context, input, tx) => prepareExtend(context, input, tx),
         denied: (context, input, tx) => denyPending(context, input, tx),
         check: (context, input) => budgetExtendCheck(context, input),
+        // Transaction 2 threw (the reservation changed in between): its own clearing rolled back.
+        abandoned: (context, input, tx) => denyPending(context, input, tx),
       },
       handler: (context, input) => completeExtend(deps(context), context, input),
     }),

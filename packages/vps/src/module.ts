@@ -841,6 +841,9 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           prepare: (context, input, tx) => prepareExtendSandbox(context, input, tx),
           denied: (context, input, tx) => denyExtendSandbox(context, input, tx),
           check: (context, input) => budgetExtendSandboxCheck(context, input),
+          // Transaction 2 threw (the sandbox or its template changed in between): its own
+          // clearing rolled back.
+          abandoned: (context, input, tx) => denyExtendSandbox(context, input, tx),
         },
         handler: (context, input) => extendSandbox(depsOf(context), context, input),
       }),

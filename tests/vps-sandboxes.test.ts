@@ -213,6 +213,7 @@ type Definition = {
     ): Promise<{ status: string; result?: unknown; resource?: unknown }>;
     denied?(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
     check?(context: MethodContext, input: unknown): Promise<void>;
+    abandoned?(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
   };
 };
 
@@ -744,6 +745,19 @@ describe('sandboxes', () => {
     expect(
       await call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: sandbox.id, by: '10m' }),
     ).toMatchObject({ expiresAt: T0 + 1200_000 });
+    // A handler that throws after the allow (the sandbox changed in between) rolls back its own
+    // clearing; the envelope's abandon hook clears the pending lifetime in its own transaction.
+    const extend = (api.sandboxes as Record<string, Definition>).extend!;
+    recorded.pending = [];
+    await db.transaction((tx) =>
+      extend.admission!.abandoned!(
+        { ...moduleContext(within(tx)), caller: alice, requestId: 'req' } as MethodContext,
+        { tenantId: 'acme', sandboxId: sandbox.id, until: T0 + 1800_000 },
+        tx,
+        new Error('changed'),
+      ),
+    );
+    expect(recorded.pending).toEqual([{ id: sandbox.id, attributes: null }]);
   });
 
   it('list the caller’s own by default', async () => {
