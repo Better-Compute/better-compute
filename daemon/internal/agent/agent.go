@@ -117,8 +117,10 @@ type Agent struct {
 	// spoofGuard: the instances' anti-spoofing rules are loaded (netpolicy.go); IMDS needs it.
 	spoofGuard atomic.Bool
 	// uploads are the snapshot files instance.snapshot is uploading (collectSnapshots keeps them).
-	uploads    sync.Map
-	cache      *imageCache
+	uploads sync.Map
+	cache   *imageCache
+	// bootURL is the boot server's own URL (BootHandler), under which it serves the cache.
+	bootURL    string
 	access     *accessConverger
 	convergeCh chan struct{}
 	rng        *rand.Rand

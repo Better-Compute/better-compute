@@ -238,6 +238,18 @@ func (c *Client) Do(ctx context.Context, operation string, args map[string]any) 
 		return c.firmware(ctx)
 	case "management.rotateCredential":
 		return c.rotate(ctx, str(args["username"]), str(args["newPassword"]))
+	case "bios.getSettings":
+		return c.biosSettings(ctx)
+	case "bios.applySettings":
+		return c.applyBios(ctx, args)
+	case "raid.getLayout":
+		return c.raidLayout(ctx)
+	case "raid.applyLayout":
+		return c.applyRaid(ctx, args)
+	case "raid.clear":
+		return c.raidClear(ctx)
+	case "firmware.update":
+		return c.updateFirmware(ctx, str(args["component"]), str(args["url"]))
 	}
 	return nil, fail("unsupported", "operation %s", operation)
 }

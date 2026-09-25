@@ -83,12 +83,28 @@ func bmcResult(ok bool, result any, code, message string) (journal.Result, error
 	return succeeded(r)
 }
 
+// bmcOperations are the operations each BMC kind may carry (packages/metal/src/commands.ts). The
+// kind decides the command's lane, retry safety and whether it must be signed, so an operation
+// never runs under a kind other than its own: an unsigned bmc.query cannot power a machine off or
+// rebuild its RAID.
+var bmcOperations = map[string]map[string]bool{
+	"bmc.query":    {"power.getPower": true, "inspect.inspect": true, "firmware.components": true, "bios.getSettings": true, "raid.getLayout": true},
+	"bmc.boot":     {"management.setBootDevice": true, "virtual-media.insert": true, "virtual-media.eject": true, "bios.applySettings": true},
+	"bmc.power":    {"power.setPower": true},
+	"bmc.rotate":   {"management.rotateCredential": true},
+	"bmc.firmware": {"firmware.update": true},
+	"bmc.storage":  {"raid.applyLayout": true, "raid.clear": true},
+}
+
 // runBMC runs one BmcOperationRequest. A BMC that refuses or fails answers ok=false with a code
 // (the command itself succeeds: the site agent did its part); bmc.rotate results are node-signed.
 func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Result, error) {
 	req := &sitev1.BmcOperationRequest{}
 	if err := payloadOf(cmd, req); err != nil {
 		return journal.Result{}, err
+	}
+	if !bmcOperations[cmd.Kind][req.GetOperation()] {
+		return journal.Result{}, invalidPayload(fmt.Errorf("%s is not a %s operation", req.GetOperation(), cmd.Kind))
 	}
 	if d := req.GetDriver(); d != "" && d != "redfish" {
 		return bmcResult(false, nil, "unsupported-driver", "the site agent drives redfish BMCs; not "+d)
@@ -115,6 +131,15 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 		args["newPassword"] = parseCredential(next, cred.Username).Password
 		delete(args, "newCredentialRef")
 	}
+	if req.GetOperation() == "firmware.update" {
+		// The BMC fetches the image itself and cannot check its digest: it gets the site cache's
+		// copy, pulled and verified here first.
+		cached, err := a.verifiedFirmware(ctx, str(args["url"]), str(args["sha256"]))
+		if err != nil {
+			return bmcResult(false, nil, "image-unverified", err.Error())
+		}
+		args["url"] = cached
+	}
 	client, err := redfish.New(req.GetAddress(), cred.Username, cred.Password, req.GetTlsSpkiSha256())
 	if err != nil {
 		return bmcResult(false, nil, "invalid-address", err.Error())
@@ -129,6 +154,33 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 	}
 	a.log.Info("bmc operation", "operation", req.GetOperation(), "bmc", req.GetAddress())
 	return bmcResult(true, result, "", "")
+}
+
+func str(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+// verifiedFirmware pulls a firmware image into the site cache (its sha256 verified) and returns the
+// cache URL the boot server serves it at. Without a boot server there is no cache to serve from,
+// and the update is refused rather than handing the BMC an unverified source.
+func (a *Agent) verifiedFirmware(ctx context.Context, url, digest string) (string, error) {
+	a.mu.Lock()
+	base := a.bootURL
+	a.mu.Unlock()
+	if base == "" {
+		return "", errors.New("firmware updates go through the site image cache; this agent serves none ([boot] url)")
+	}
+	if !digestPath.MatchString(digest) {
+		return "", errors.New("firmware.update needs the image's sha256 (hex)")
+	}
+	if !a.cache.has(digest) {
+		if err := a.cache.pull(ctx, a.imageClient(), url, digest); err != nil {
+			return "", err
+		}
+		a.cache.saveMeta(digest, cacheMeta{Ref: "firmware", LastUsed: time.Now()})
+	}
+	return strings.TrimRight(base, "/") + "/cache/" + digest, nil
 }
 
 // ---- site.httpProxy ----------------------------------------------------------------------------

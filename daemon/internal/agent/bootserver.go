@@ -197,6 +197,9 @@ func (a *Agent) ServeBoot(ctx context.Context, cfg BootConfig) error {
 
 // BootHandler serves GET /boot/ipxe?mac=${mac}&uuid=${uuid}&ip=${ip} (what the iPXE first stage chains).
 func (a *Agent) BootHandler(cfg BootConfig) *http.ServeMux {
+	a.mu.Lock()
+	a.bootURL = cfg.URL // where machines (and BMCs fetching firmware) reach the cache
+	a.mu.Unlock()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boot/ipxe", func(w http.ResponseWriter, r *http.Request) { a.serveIPXE(w, r, cfg) })
 	mux.HandleFunc("GET /cache/", a.cache.serve)

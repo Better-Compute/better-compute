@@ -1,9 +1,15 @@
 package agent
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +85,51 @@ func TestSiteBMCAndBootEntries(t *testing.T) {
 	// The site kinds are the site's only.
 	if _, ok := h.agent.reg.Lookup("bmc.power", "node"); ok {
 		t.Fatal("bmc.power allowed on a node")
+	}
+}
+
+// An operation runs only under its own kind (the kind decides signing and retry safety), and a
+// firmware image reaches a BMC only through the verified site cache.
+func TestBMCOperationsKeepToTheirKind(t *testing.T) {
+	h := siteHarness(t)
+	s, _ := h.open()
+	for i, c := range []struct{ kind, op string }{
+		{"bmc.query", "power.setPower"},
+		{"bmc.query", "raid.applyLayout"},
+		{"bmc.boot", "firmware.update"},
+		{"bmc.power", "management.rotateCredential"},
+	} {
+		id := "k" + string(rune('0'+i))
+		s.push(command(body(id, c.kind, &sitev1.BmcOperationRequest{Driver: "redfish", Address: "10.0.0.1", CredentialsRef: "secret://t/bmc", Operation: c.op})))
+		if u := s.update(t, id, commonv1.CommandState_COMMAND_STATE_FAILED); u.GetError().GetCode() != "invalid-payload" {
+			t.Fatalf("%s under %s = %v", c.op, c.kind, u)
+		}
+	}
+
+	// firmware.update without a boot server (no cache to serve from) is refused, never forwarded.
+	fw := &sitev1.BmcOperationRequest{Driver: "redfish", Address: "https://127.0.0.1:1", CredentialsRef: "secret://t/bmc", Operation: "firmware.update",
+		ArgsJson: `{"component":"BIOS","url":"https://images.example/bios.bin","sha256":"` + strings.Repeat("ab", 32) + `"}`}
+	s.push(command(body("f1", "bmc.firmware", fw)))
+	answerSecret(t, s, `{"username":"admin","password":"pw"}`)
+	res := &sitev1.BmcOperationResult{}
+	_ = proto.Unmarshal(s.update(t, "f1", commonv1.CommandState_COMMAND_STATE_SUCCEEDED).GetResult(), res)
+	if res.GetOk() || res.GetErrorCode() != "image-unverified" {
+		t.Fatalf("firmware without a cache = %v", res)
+	}
+
+	// With a boot server: the image is pulled and verified first, and a wrong digest never reaches
+	// the BMC.
+	image := []byte("firmware image")
+	sum := sha256.Sum256(image)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(image) }))
+	defer upstream.Close()
+	h.agent.BootHandler(BootConfig{URL: "http://10.0.0.2:8080"})
+	cached, err := h.agent.verifiedFirmware(context.Background(), upstream.URL+"/bios.bin", hex.EncodeToString(sum[:]))
+	if err != nil || cached != "http://10.0.0.2:8080/cache/"+hex.EncodeToString(sum[:]) || !h.agent.cache.has(hex.EncodeToString(sum[:])) {
+		t.Fatalf("verified firmware = %q, %v", cached, err)
+	}
+	if _, err := h.agent.verifiedFirmware(context.Background(), upstream.URL+"/bios.bin", strings.Repeat("cd", 32)); err == nil {
+		t.Fatal("an image with another digest was cached")
 	}
 }
 
