@@ -322,6 +322,7 @@ export function createRuntime(options: ResolvedOptions): Runtime {
           ...(options.commandSigner ? { signer: options.commandSigner } : {}),
           // v1.0 §13: batches need approvals only when the trust bundle publishes approver keys.
           ...(quorumConfigOf(options.trustBundle) ? { quorum: quorumConfigOf(options.trustBundle)! } : {}),
+          unbatchedDestructivePerHour: options.trustBundle?.unbatchedDestructivePerHour ?? 0,
           now: () => options.clock.now(),
         }),
         events: eventPublisher,

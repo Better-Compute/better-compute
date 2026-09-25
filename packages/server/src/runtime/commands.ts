@@ -301,6 +301,8 @@ export interface CommandQueueInput {
   signer?: Pick<CommandSigner, 'sign'>;
   /** (v1.0) The trust bundle's quorum (`quorumConfigOf`); without it batches need no approvals. */
   quorum?: QuorumConfig;
+  /** The trust bundle's break-glass allowance of unbatched destructive commands per hour (default 0). */
+  unbatchedDestructivePerHour?: number;
   /** Business time, for batch expiry defaults. */
   now?: () => number;
 }
@@ -376,6 +378,22 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       const spec = commandKindSpec(registry, command.kind);
       const found = await existing(tx, command.nodeId, command.idempotencyKey);
       if (found) return replay(found, command.kind);
+      // (v1.0 §13) With a quorum and no break-glass allowance, daemons refuse unbatched destructive
+      // commands (UNBATCHED_LIMIT): say so now instead of failing on the node. An early warning
+      // only; the daemon stays the judge.
+      if (
+        command.batchId === undefined &&
+        spec.destructive &&
+        input.quorum &&
+        (input.unbatchedDestructivePerHour ?? 0) === 0
+      )
+        throw new ComputeError(
+          'INVALID_STATE',
+          `Destructive ${spec.kind} needs a batch: create one with commands.createBatch and pass its batchId ` +
+            '(or allow break-glass commands with pki.approvers.unbatchedDestructivePerHour)',
+          undefined,
+          { reason: 'batch-required', kind: spec.kind },
+        );
       const payload = encodePayload(spec, command.payload);
       await checkAllowedKind(tx, command.nodeId, spec.kind);
 

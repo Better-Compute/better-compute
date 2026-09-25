@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { fromBinary } from '@bufbuild/protobuf';
 import { afterEach, describe, expect, it } from 'vitest';
-import { manualClock, shardOf, type SqlExecutor } from '@better-compute/core';
+import { defineModule, manualClock, shardOf, type SqlExecutor } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
@@ -30,13 +30,30 @@ afterEach(async () => {
   db = undefined;
 });
 
-async function setup(withApprovers: boolean) {
+/** A module kind flagged destructive, as metal's wipe or bmc.* are. */
+const destroyer = defineModule({
+  name: 'destroyer',
+  commandKinds: [
+    {
+      kind: 'acme.wipe',
+      lane: 'provision',
+      retrySafe: false,
+      destructive: true,
+      timeout: '10m',
+      roles: ['node'],
+      payload: { kind: 'message', typeName: 'acme.Wipe' },
+    },
+  ],
+});
+
+async function setup(withApprovers: boolean, unbatchedDestructivePerHour = 0) {
   db = pglite();
   const clock = manualClock(T0);
   const approvers = [createApproverKey(), createApproverKey()];
   const iam = fakeIam({ callers: { [TOKEN]: { tenantId: ACME, identityId: 'usr_ops' } }, allow: [{}] });
   const compute = betterCompute({
     ...options(db, iam),
+    modules: [destroyer],
     clock,
     pki: {
       commandSigning: createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) }),
@@ -48,7 +65,13 @@ async function setup(withApprovers: boolean) {
         encryptionKey: generateP256KeyPair().privateKey,
       }),
       ...(withApprovers
-        ? { approvers: { keys: approvers.map((approver) => approver.key.spkiDer), threshold: 1 } }
+        ? {
+            approvers: {
+              keys: approvers.map((approver) => approver.key.spkiDer),
+              threshold: 1,
+              unbatchedDestructivePerHour,
+            },
+          }
         : {}),
     },
   } as never) as any;
@@ -164,6 +187,26 @@ describe('CommandQueue batches (v1.0 quorum, §13)', () => {
     // A leaf bound to another payload does not admit this one.
     const other = await s.batch(ACME, [{ subject: 'node_a', kind: 'node.reboot', payloadSha256: new Uint8Array(32).fill(1) }]);
     await expect(s.enqueue('node_a', other.batchId, 'bound-b')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('refuses an unbatched destructive command up front when the quorum allows no break-glass', async () => {
+    const s = await setup(true);
+    const error = await s.enqueue('node_a', undefined, 'wipe-a', 'acme.wipe').catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: 'INVALID_STATE', details: { reason: 'batch-required', kind: 'acme.wipe' } });
+    expect(String((error as Error).message)).toMatch(/commands\.createBatch/);
+    // Non-destructive kinds are unaffected (node.reboot is destructive itself); a batched one is admitted.
+    await s.enqueue('node_a', undefined, 'diag-a', 'diag.nvml');
+    await expect(s.enqueue('node_a', undefined, 'reboot-a')).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    const created = await s.batch(ACME, [{ subject: 'node_a', kind: 'acme.wipe' }]);
+    await s.enqueue('node_a', created.batchId, 'wipe-b', 'acme.wipe');
+  });
+
+  it('lets unbatched destructive commands through with a break-glass allowance, or without a quorum', async () => {
+    const allowance = await setup(true, 2);
+    await allowance.enqueue('node_a', undefined, 'wipe-a', 'acme.wipe');
+    await db!.close();
+    const open = await setup(false);
+    await open.enqueue('node_a', undefined, 'wipe-a', 'acme.wipe');
   });
 
   it('records batches for audit only without approver keys: members are sent at once', async () => {
