@@ -214,8 +214,9 @@ describe('worker lease HA', () => {
     );
     // Singletons move as soon as the dead owner's lease expires (TTL 15 s + one renewal period).
     expect(movedAt('singleton:')).toBeLessThan(15_000 + 5_000 + 2_000);
-    // Shards move only once the dead worker's heartbeat is stale (liveWorkerMs 30 s), not at lease expiry: the
-    // bound below is today's; tighten it to the singleton bound when the runtime frees expired shards at once.
-    expect(movedAt('shard:')).toBeLessThan(30_000 + 5_000 + 5_000);
+    // Shards too: a worker silent for a lease TTL loses them as they expire, not at liveWorkerMs (30 s).
+    expect(movedAt('shard:')).toBeLessThan(15_000 + 5_000 + 2_000);
+    // Renewals run on their own timer, every renewMs (5 s), whatever the reconcilers are doing.
+    expect(leases.gapMs.p99).toBeLessThan(5_000 + 1_500);
   }, 90_000);
 });

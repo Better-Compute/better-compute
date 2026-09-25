@@ -16,12 +16,12 @@ import {
 } from '@better-compute/core';
 import {
   claimWork,
-  completeClaim,
-  deferClaim,
   enqueueKeys,
   isWorkKind,
   seedKeys,
+  settleClaims,
   type ClaimedWork,
+  type Settlement,
 } from './work-queue.js';
 import type { Membership, SingletonLease } from './workers.js';
 
@@ -164,6 +164,40 @@ export interface ReconcilerRunner {
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+/**
+ * Group commit for settlements: whatever lanes finish while one settle statement is in flight go
+ * together in the next, so a busy runner pays one statement per wave, not one per key, and an idle
+ * one settles each key at once.
+ */
+function settler(run: (batch: Settlement[]) => Promise<void>): (settlements: Settlement[]) => Promise<void> {
+  let pending: { settlements: Settlement[]; resolve: () => void; reject: (error: unknown) => void }[] = [];
+  let flushing = false;
+  async function flush() {
+    flushing = true;
+    try {
+      while (pending.length) {
+        const wave = pending;
+        pending = [];
+        try {
+          await run(wave.flatMap((entry) => entry.settlements));
+          for (const entry of wave) entry.resolve();
+        } catch (error) {
+          for (const entry of wave) entry.reject(error);
+        }
+      }
+    } finally {
+      flushing = false;
+    }
+  }
+  return (settlements) => {
+    if (!settlements.length) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      pending.push({ settlements, resolve, reject });
+      if (!flushing) void flush();
+    });
+  };
+}
+
 export function createReconcilerRunner(input: ReconcilerRunnerInput): ReconcilerRunner {
   const { reconciler, periodic, database, clock, log, settings } = input;
   const { name } = reconciler;
@@ -173,6 +207,10 @@ export function createReconcilerRunner(input: ReconcilerRunnerInput): Reconciler
   let seeded = false;
   let resyncRound = 0;
   let nextResyncAt: number | undefined;
+  const settle = settler((batch) => settleClaims(database, name, batch));
+  const complete = (item: ClaimedWork) => settle([{ item, delayMs: null, always: false }]);
+  const defer = (item: ClaimedWork, delayMs: number, always: boolean) =>
+    settle([{ item, delayMs, always }]);
 
   async function resync(shards: readonly number[]): Promise<void> {
     if (!shards.length) return;
@@ -220,15 +258,14 @@ export function createReconcilerRunner(input: ReconcilerRunnerInput): Reconciler
         retryInMs: delay,
         error: message(error),
       });
-      await deferClaim(database, name, item, delay, true);
+      await defer(item, delay, true);
       return;
     }
     failures.delete(item.key);
     const every = periodic.get(item.key);
-    if (outcome === 'SYNC_AGAIN')
-      await deferClaim(database, name, item, settings.syncAgainMs, false);
-    else if (every !== undefined) await deferClaim(database, name, item, every, false);
-    else await completeClaim(database, name, item);
+    if (outcome === 'SYNC_AGAIN') await defer(item, settings.syncAgainMs, false);
+    else if (every !== undefined) await defer(item, every, false);
+    else await complete(item);
   }
 
   return {
@@ -272,7 +309,7 @@ export function createReconcilerRunner(input: ReconcilerRunnerInput): Reconciler
           const lease = sharded ? leases!.get(item.shard) : singleton;
           if (!lease) {
             // The shard moved between the claim and now: let its new owner have the key.
-            await deferClaim(database, name, item, 0, false);
+            await defer(item, 0, false);
             continue;
           }
           await runOne(item, lease);
@@ -281,7 +318,7 @@ export function createReconcilerRunner(input: ReconcilerRunnerInput): Reconciler
       const lanes = Math.max(1, Math.min(concurrency, claimed.length));
       await Promise.all(Array.from({ length: lanes }, worker));
       // Stopped mid-batch: hand back what never ran instead of waiting out the claim.
-      for (const item of claimed.slice(next)) await deferClaim(database, name, item, 0, false);
+      await settle(claimed.slice(next).map((item) => ({ item, delayMs: 0, always: false })));
       return Math.min(next, claimed.length);
     },
   };

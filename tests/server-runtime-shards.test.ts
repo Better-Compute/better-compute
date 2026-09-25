@@ -105,6 +105,64 @@ describe('two workers on one store', () => {
   });
 });
 
+describe('a silent worker', () => {
+  it('loses its shards as their leases expire, not at liveWorkerMs, and gets them back when it returns', async () => {
+    const module = defineModule({
+      name: 'split',
+      reconcilers: [{ name: 'split', shardBy: 'node', run: async () => 'DONE' }],
+    });
+    const fixture = await computeFixture({ modules: [module] });
+    const a = fixture.compute;
+    const b = await sibling(fixture, { modules: [module], worker: { id: 'wkr-b' } });
+    const { database, advance } = fixture;
+    await a.jobs.split!.tick();
+    const idA = (
+      await database.query<{ owner: string }>("SELECT owner FROM leases WHERE name = 'shard:0'")
+    ).rows[0]!.owner;
+    await b.jobs.split!.tick();
+    await advance(5_000);
+    await a.jobs.split!.tick();
+    await b.jobs.split!.tick();
+    const mine = assignShards([idA, 'wkr-b'], idA);
+    expect((await owners(database)).get(idA)).toBe(mine.length);
+    const epochs = async () =>
+      new Map(
+        (
+          await database.query<{ name: string; epoch: number }>(
+            "SELECT name, epoch::int AS epoch FROM leases WHERE name LIKE 'shard:%'",
+          )
+        ).rows.map((row) => [row.name, row.epoch]),
+      );
+    const before = await epochs();
+
+    // A stops renewing (paused, partitioned or dead) but stays live: its heartbeat is < 30 s old.
+    // Before its leases expire B leaves them alone; once they have, B takes every one.
+    for (let step = 0; step < 2; step++) {
+      await advance(5_000);
+      await b.jobs.split!.tick();
+    }
+    expect((await owners(database)).get(idA)).toBe(mine.length);
+    await advance(6_000); // 16 s since A last renewed: past the 15 s TTL, A still live until 30 s
+    await b.jobs.split!.tick();
+    expect(await owners(database)).toEqual(new Map([['wkr-b', SHARD_COUNT]]));
+    const after = await epochs();
+    for (const shard of mine) expect(after.get(`shard:${shard}`)).toBe(before.get(`shard:${shard}`)! + 1);
+
+    // A returns: it heartbeats, so its shards are no longer orphans; B lets go on its next pass and
+    // A takes them back.
+    await a.jobs.split!.tick();
+    await advance(5_000);
+    await b.jobs.split!.tick();
+    await a.jobs.split!.tick();
+    expect(await owners(database)).toEqual(
+      new Map([
+        [idA, mine.length],
+        ['wkr-b', SHARD_COUNT - mine.length],
+      ]),
+    );
+  });
+});
+
 async function owners(database: SqlTx) {
   const { rows } = await database.query<{ owner: string; n: number }>(
     `SELECT owner, count(*)::int AS n FROM leases

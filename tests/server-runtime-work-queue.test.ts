@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { defineModule, isComputeError, shardOf, type ReconcileContext } from '@better-compute/core';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
+import {
+  claimWork,
+  completeClaim,
+  deferClaim,
+  settleClaims,
+  type Settlement,
+} from '../packages/server/src/runtime/work-queue.js';
 import { workRows } from './support/runtime.js';
 
 // The coalescing work queue (PLAN.md §8.4): enqueue in the state-change transaction, claims by
@@ -157,5 +164,54 @@ describe('claim and complete', () => {
     await advance(30_001);
     expect(await compute.jobs.slow!.tick()).toBe(1);
     expect(seen).toEqual(['k1']);
+  });
+});
+
+describe('settleClaims', () => {
+  it('leaves exactly the rows completeClaim/deferClaim one by one would', async () => {
+    const { compute, database, advance } = await computeFixture();
+    const { work } = compute.context;
+    // The same scenario on two kinds: `one` settled key by key, `many` in one statement.
+    const keys = ['k1', 'k2', 'k3', 'k4', 'k5', 'k6'];
+    for (const kind of ['one', 'many'])
+      await database.transaction((tx) => work.enqueueMany(tx, kind, keys));
+    const claimed = {
+      one: await claimWork(database, 'one', undefined, 10, 60_000),
+      many: await claimWork(database, 'many', undefined, 10, 60_000),
+    };
+    await advance(1_000);
+    // Re-dirtied while "running": k2 (completed), k5 (deferred at the claimed gen), k6 (always).
+    for (const kind of ['one', 'many'])
+      await database.transaction((tx) => work.enqueueMany(tx, kind, ['k2', 'k5', 'k6']));
+    await advance(1_000);
+    const plan = (items: typeof claimed.one): Settlement[] => {
+      const by = new Map(items.map((item) => [item.key, item]));
+      return [
+        { item: by.get('k1')!, delayMs: null, always: false },
+        { item: by.get('k2')!, delayMs: null, always: false },
+        { item: by.get('k3')!, delayMs: 10_000, always: false },
+        { item: by.get('k4')!, delayMs: 0, always: true },
+        { item: by.get('k5')!, delayMs: 10_000, always: false },
+        { item: by.get('k6')!, delayMs: 30_000, always: true },
+      ];
+    };
+    for (const settlement of plan(claimed.one))
+      if (settlement.delayMs === null) await completeClaim(database, 'one', settlement.item);
+      else await deferClaim(database, 'one', settlement.item, settlement.delayMs, settlement.always);
+    await settleClaims(database, 'many', plan(claimed.many));
+
+    const rows = async (kind: string) =>
+      (await workRows(database, kind)).map((row) => ({
+        key: row.key,
+        gen: Number(row.gen),
+        notBefore: row.not_before.getTime(),
+        claimed: row.claimed_until !== null,
+      }));
+    const many = await rows('many');
+    expect(many).toEqual(await rows('one'));
+    // k1 is gone; k2 and k5 keep their re-dirty time; k4 is due now; k3 in 10 s; k6 in 30 s.
+    expect(many.map((row) => row.key)).toEqual(['k2', 'k5', 'k4', 'k3', 'k6']);
+    expect(many.every((row) => !row.claimed)).toBe(true);
+    expect(await settleClaims(database, 'many', [])).toBeUndefined();
   });
 });

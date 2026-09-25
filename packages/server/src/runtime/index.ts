@@ -41,6 +41,7 @@ import { workQueue } from './work-queue.js';
 import {
   createMembership,
   createSingletonLease,
+  renewLeases,
   type Membership,
   type SingletonLease,
 } from './workers.js';
@@ -131,7 +132,14 @@ export function createRuntime(options: ResolvedOptions): Runtime {
   });
   const singletons: SingletonLease[] = [];
   const singleton = (job: string) => {
-    const lease = createSingletonLease(leases, clock, job, workerId, settings.leaseTtlMs);
+    const lease = createSingletonLease(
+      leases,
+      clock,
+      job,
+      workerId,
+      settings.leaseTtlMs,
+      settings.renewMs,
+    );
     singletons.push(lease);
     return lease;
   };
@@ -336,6 +344,17 @@ export function createRuntime(options: ResolvedOptions): Runtime {
       if (!eventsLoop) {
         eventsLoop = true;
         loop('event-subscribers', () => localEvents.tick(), Math.min(poll, 250));
+        // Renewals on their own timer: a long reconcile batch never delays them. Each pass is free
+        // unless something is due; then shards and every due singleton go in one statement each.
+        loop(
+          'lease-renewal',
+          async () => {
+            const shards = loopRoles.has('controllers') ? membership : undefined;
+            await renewLeases(shards, leases, singletons, workerId, settings.leaseTtlMs);
+            return 0;
+          },
+          Math.max(50, Math.min(1_000, Math.floor(settings.renewMs / 5))),
+        );
       }
     },
 

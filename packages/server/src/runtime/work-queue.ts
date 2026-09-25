@@ -72,6 +72,21 @@ const deferWork = `UPDATE work_queue SET claimed_until = NULL,
       THEN compute_now() + make_interval(secs => $4::float8) ELSE not_before END
   WHERE kind = $1 AND key = $2`;
 
+/**
+ * Settles many claims of one kind in one statement: each row is completeWork (`delay` NULL) or
+ * deferWork (`delay` seconds, `always`), exactly as those would leave it. The UPDATE reads the
+ * snapshot before the DELETE, so it must skip the rows the DELETE removes.
+ */
+const settleWork = `WITH v AS (
+    SELECT * FROM unnest($2::text[], $3::bigint[], $4::float8[], $5::boolean[]) AS v(key, gen, delay, always)),
+  done AS (
+    DELETE FROM work_queue w USING v
+     WHERE w.kind = $1 AND w.key = v.key AND v.delay IS NULL AND w.gen = v.gen RETURNING w.key)
+  UPDATE work_queue w SET claimed_until = NULL,
+    not_before = CASE WHEN v.delay IS NOT NULL AND (w.gen = v.gen OR v.always)
+      THEN compute_now() + make_interval(secs => v.delay) ELSE w.not_before END
+    FROM v WHERE w.kind = $1 AND w.key = v.key AND NOT (v.delay IS NULL AND w.gen = v.gen)`;
+
 /** One claimed row. */
 export interface ClaimedWork {
   key: string;
@@ -212,4 +227,29 @@ export async function deferClaim(
   always: boolean,
 ): Promise<void> {
   await tx.query(deferWork, [kind, item.key, item.gen, Math.max(0, delayMs) / 1000, always]);
+}
+
+/** How a finished claim ends: completed (`delayMs` null) or deferred like `deferClaim`. */
+export interface Settlement {
+  item: ClaimedWork;
+  delayMs: number | null;
+  always: boolean;
+}
+
+/**
+ * `completeClaim`/`deferClaim` for many claims of one kind in one statement. A key named twice
+ * keeps its last settlement (a claim is settled once; this only guards the statement).
+ */
+export async function settleClaims(tx: SqlTx, kind: string, settlements: readonly Settlement[]): Promise<void> {
+  if (!settlements.length) return;
+  const last = new Map<string, Settlement>();
+  for (const settlement of settlements) last.set(settlement.item.key, settlement);
+  const rows = [...last.values()].sort((a, b) => (a.item.key < b.item.key ? -1 : a.item.key > b.item.key ? 1 : 0));
+  await tx.query(settleWork, [
+    kind,
+    rows.map((row) => row.item.key),
+    rows.map((row) => row.item.gen),
+    rows.map((row) => (row.delayMs === null ? null : Math.max(0, row.delayMs) / 1000)),
+    rows.map((row) => row.always),
+  ]);
 }

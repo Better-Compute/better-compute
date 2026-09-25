@@ -6,12 +6,15 @@ import { leaseNames, type TableLeases } from './leases.js';
 // `shard:<n>` leases it is the desired owner of (in v0.1 one worker usually holds all 256). A
 // shard moves only when its holder lets go on its next membership pass and the new owner takes it,
 // or when the holder's lease expires; the epoch fences whatever the old holder still has in flight.
+// A holder silent for a whole lease TTL loses its shards as they expire, not only once it leaves
+// the live set (liveWorkerMs), so a dead worker's shards move as fast as its singletons.
 
 const heartbeat = `INSERT INTO workers (id, started_at, heartbeat_at) VALUES ($1, compute_now(), compute_now())
   ON CONFLICT (id) DO UPDATE SET heartbeat_at = compute_now()`;
 
-const liveWorkers = `SELECT id FROM workers
-  WHERE heartbeat_at > compute_now() - make_interval(secs => $1::float8) ORDER BY id`;
+/** Live workers; `fresh` ones heartbeated within a shard lease TTL (so may still hold leases). */
+const liveWorkers = `SELECT id, heartbeat_at > compute_now() - make_interval(secs => $2::float8) AS fresh
+  FROM workers WHERE heartbeat_at > compute_now() - make_interval(secs => $1::float8) ORDER BY id`;
 
 /** Rows of workers gone for a long time; their shards were taken over long before. */
 const forgetWorkers = `DELETE FROM workers
@@ -93,14 +96,27 @@ export function createMembership(
     joined = true;
     await database.query(heartbeat, [me]);
     await database.query(forgetWorkers, [(settings.liveWorkerMs * 20) / 1000, me]);
-    const live = (
-      await database.query<{ id: string }>(liveWorkers, [settings.liveWorkerMs / 1000])
-    ).rows.map((row) => row.id);
+    const rows = (
+      await database.query<{ id: string; fresh: boolean }>(liveWorkers, [
+        settings.liveWorkerMs / 1000,
+        settings.shardLeaseTtlMs / 1000,
+      ])
+    ).rows;
+    const live = rows.map((row) => row.id);
     const desired = new Set(assignShards(live, me));
-    const letGo = [...owned.keys()].filter((shard) => !desired.has(shard));
+    // A desired owner silent for a whole lease TTL has let its leases lapse (it heartbeats in the
+    // pass that renews them) but stays live until liveWorkerMs. Its shards are orphans: take them as
+    // they expire (the acquire only succeeds on an expired lease; the epoch fences the old holder)
+    // and keep them until it heartbeats again or drops out of the live set.
+    const silent = new Set(rows.filter((row) => !row.fresh && row.id !== me).map((row) => row.id));
+    const orphans = new Set<number>();
+    if (silent.size)
+      for (let shard = 0; shard < SHARD_COUNT; shard++)
+        if (!desired.has(shard) && silent.has(shardOwner(live, shard)!)) orphans.add(shard);
+    const letGo = [...owned.keys()].filter((shard) => !desired.has(shard) && !orphans.has(shard));
     if (letGo.length) await leases.releaseMany(letGo.map(leaseNames.shard), me);
     const held = await leases.acquireMany(
-      [...desired].sort((a, b) => a - b).map(leaseNames.shard),
+      [...desired, ...orphans].sort((a, b) => a - b).map(leaseNames.shard),
       me,
       settings.shardLeaseTtlMs,
     );
@@ -141,11 +157,18 @@ export function createMembership(
   };
 }
 
-/** A `singleton:<job>` lease one process holds at a time, renewed when a third of its TTL is left. */
+/**
+ * A `singleton:<job>` lease one process holds at a time, renewed `renewMs` after it was last taken
+ * (default: when a third of its TTL is left).
+ */
 export interface SingletonLease {
   readonly name: string;
   ensure(): Promise<Lease | undefined>;
   current(): Lease | undefined;
+  /** Held and due for renewal (the renewal loop renews these in one statement). */
+  due(): boolean;
+  /** Records the outcome of a batched renewal: the renewed lease, or undefined when lost. */
+  renewed(lease: Lease | undefined): void;
   release(): Promise<void>;
 }
 
@@ -155,21 +178,51 @@ export function createSingletonLease(
   job: string,
   owner: string,
   ttlMs: number,
+  renewMs = (ttlMs * 2) / 3,
 ): SingletonLease {
   const name = leaseNames.singleton(job);
   let lease: Lease | undefined;
+  const fresh = () => lease !== undefined && lease.expiresAt - clock.now() > ttlMs - renewMs;
   return {
     name,
     async ensure() {
-      if (lease && lease.expiresAt - clock.now() > ttlMs / 3) return lease;
+      if (fresh()) return lease;
       lease = await leases.acquire(name, owner, ttlMs);
       return lease;
     },
     current: () => (lease && lease.expiresAt > clock.now() ? lease : undefined),
+    due: () => lease !== undefined && !fresh(),
+    renewed(next) {
+      lease = next;
+    },
     async release() {
       if (!lease) return;
       lease = undefined;
       await leases.release(name, owner);
     },
   };
+}
+
+/**
+ * The renewal pass the runtime runs on its own timer (every `renewMs`), so renewals never wait for
+ * a long reconcile batch: the membership pass when due, then every held singleton that is due, in
+ * one statement.
+ */
+export async function renewLeases(
+  membership: Membership | undefined,
+  leases: TableLeases,
+  singletons: readonly SingletonLease[],
+  owner: string,
+  ttlMs: number,
+): Promise<number> {
+  await membership?.ensure();
+  const due = singletons.filter((singleton) => singleton.due());
+  if (!due.length) return 0;
+  const held = await leases.acquireMany(
+    due.map((singleton) => singleton.name),
+    owner,
+    ttlMs,
+  );
+  for (const singleton of due) singleton.renewed(held.get(singleton.name));
+  return due.length;
 }
