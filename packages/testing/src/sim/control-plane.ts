@@ -12,6 +12,7 @@ import {
   type ComputeModule,
   type IamPort,
   type SqlExecutor,
+  type SqlTx,
 } from '@better-compute/core';
 import {
   attachFrameConn,
@@ -248,6 +249,8 @@ interface GatewaySlot {
   starting?: Promise<Gateway>;
   down: boolean;
   stalled: boolean;
+  /** Partitioned from the database (its connections stay up to the daemons). */
+  dbCut: boolean;
   generation: number;
 }
 
@@ -275,6 +278,16 @@ export interface ControlPlaneSim {
   stallGateway(index: number, stalled: boolean): void;
   /** Stops (or restarts) the control plane's reconcilers and sweepers: every worker process down. */
   pauseWorkers(paused: boolean): void;
+  /**
+   * Makes the database unreachable from every process (a failover), or brings it back: new statements and those
+   * of transactions in flight fail with a connection error until then. Loops that fail meanwhile are counted in
+   * `outageErrors` instead of failing the run, as a real process's timers would log and retry.
+   */
+  failDatabase(down: boolean): void;
+  /** Partitions slot `index`'s gateway from the database only (its daemon connections stay up), or heals it. */
+  cutGatewayDatabase(index: number, cut: boolean): void;
+  /** Loop runs that failed on a simulated database outage (`failDatabase`, `cutGatewayDatabase`). */
+  readonly outageErrors: number;
   /** The serial of the node certificate it joined with. */
   serialOf(nodeId: string): string | undefined;
   /**
@@ -318,6 +331,59 @@ function pinned(db: SqlExecutor, now: () => number): SqlExecutor {
   } as SqlExecutor;
 }
 
+const outageMessage = 'sim: database unreachable';
+
+/** The error a statement gets during a simulated outage (shaped like a refused Postgres connection). */
+function outageError(): Error {
+  return Object.assign(new Error(outageMessage), { code: 'ECONNREFUSED', simOutage: true });
+}
+
+/** Whether `error` (or a cause it wraps) comes from a simulated outage. */
+function isOutage(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 8; depth++) {
+    if ((current as { simOutage?: unknown }).simOutage === true) return true;
+    if (String((current as { message?: unknown }).message ?? current).includes(outageMessage))
+      return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** `db` as seen from a process that may lose it: every statement first checks `down()`. */
+function faulty(db: SqlExecutor, down: () => boolean): SqlExecutor {
+  const check = () => {
+    if (down()) throw outageError();
+  };
+  const wrapTx = (tx: SqlTx): SqlTx =>
+    new Proxy(tx, {
+      get(target, property, receiver) {
+        if (property === 'query')
+          return async (text: string, params?: readonly unknown[]) => {
+            check();
+            return target.query(text, params);
+          };
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function'
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value;
+      },
+    });
+  return {
+    dialect: db.dialect,
+    kind: db.kind,
+    async query(text, params) {
+      check();
+      return db.query(text, params);
+    },
+    async transaction(fn, options) {
+      check();
+      return db.transaction((tx) => fn(wrapTx(tx)), options);
+    },
+    migrate: (extra) => db.migrate(extra),
+    close: () => db.close(),
+  } as SqlExecutor;
+}
+
 const trustDomain = 'compute.sim.test';
 const tenants = {
   root: { id: 'tenant-root', token: 'biam_ses_sim_root' },
@@ -339,6 +405,19 @@ export async function createControlPlaneSim(
   const clock = { now };
   const raw = pglite();
   const database = pinned(raw, now);
+  let databaseDown = false;
+  let outageErrors = 0;
+  // What the control plane's processes see: the pinned store, which a simulated failover takes away.
+  const reachable = faulty(database, () => databaseDown);
+  /** Runs a loop; a failure caused by a simulated outage is counted (a real timer logs and retries). */
+  const survive = async (run: () => Promise<unknown>) => {
+    try {
+      await run();
+    } catch (error) {
+      if (!isOutage(error)) throw error;
+      outageErrors++;
+    }
+  };
 
   const fake = fakeIam({
     callers: Object.fromEntries(
@@ -385,7 +464,7 @@ export async function createControlPlaneSim(
     },
   });
   const compute = betterCompute({
-    database,
+    database: reachable,
     iam: options.iam ? options.iam(fake) : fake,
     attestors: [restrictedAttestor],
     ...(options.modules ? { modules: [...options.modules] } : {}),
@@ -494,6 +573,7 @@ export async function createControlPlaneSim(
       index,
       down: false,
       stalled: false,
+      dbCut: false,
       generation: 0,
     }));
     const slotGateway = async (slot: GatewaySlot): Promise<Gateway> => {
@@ -502,7 +582,7 @@ export async function createControlPlaneSim(
         const created = createGateway({
           id: `gw_sim_${slot.index + 1}_${++slot.generation}`,
           region: 'sim',
-          database,
+          database: faulty(database, () => databaseDown || slot.dbCut),
           clock,
           manual: true,
           services: compute.gatewayServices,
@@ -523,7 +603,7 @@ export async function createControlPlaneSim(
     let workersDown = false;
     // Revoked certificates reach every gateway through one set, fed from node_certs on each tick (sim time).
     const revocations = createRevocationSet();
-    const revocationFeed = createRevocationFeed({ sql: database, revocations, clock });
+    const revocationFeed = createRevocationFeed({ sql: reachable, revocations, clock });
     const facts = controlPlaneFacts(raw);
     const {
       nodes: _nodes,
@@ -565,13 +645,13 @@ export async function createControlPlaneSim(
               if (slot.down || slot.stalled) continue;
               const current = await slotGateway(slot);
               for (const job of ['lease', 'dispatch', 'status', 'liveness', 'specs'] as const)
-                await current.jobs[job].tick();
+                await survive(() => current.jobs[job].tick());
             }
           });
           // A dead worker runs nothing: its keys wait in the work queue until one runs again.
           if (!workersDown)
             await trace('reconcilers', async () => {
-              for (const job of Object.values(compute.jobs)) await job.tick();
+              for (const job of Object.values(compute.jobs)) await survive(() => job.tick());
             });
         },
         kill() {
@@ -628,6 +708,15 @@ export async function createControlPlaneSim(
       },
       pauseWorkers(paused) {
         workersDown = paused;
+      },
+      failDatabase(down) {
+        databaseDown = down;
+      },
+      cutGatewayDatabase(index, cut) {
+        slots[index]!.dbCut = cut;
+      },
+      get outageErrors() {
+        return outageErrors;
       },
       serialOf: (nodeId) => serials.get(nodeId),
       async revokeNode(nodeId, reason = 'sim revocation') {
