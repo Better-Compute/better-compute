@@ -281,6 +281,9 @@ export interface Gateway {
 
 const noopLog: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
+/** The one command kind a daemon below `proto_min` accepts (§7.6, UPGRADE_REQUIRED). */
+const upgradeKind = 'daemon.upgrade';
+
 const roleNames: Partial<Record<WireRole, AgentRole>> = {
   [WireRole.NODE]: 'node',
   [WireRole.SITE]: 'site',
@@ -621,7 +624,17 @@ export function createGateway(options: GatewayOptions): Gateway {
           },
         }),
       );
-    if (session.upgradeRequired) return session;
+    if (session.upgradeRequired) {
+      // Below proto_min (§7.6): no spec and nothing but the upgrade, which the daemon accepts alone.
+      const upgrades = result.replay.filter(
+        (command) => command.kind === upgradeKind && commandKindAllowed(command.kind, session.allowedKinds),
+      );
+      for (const command of [...result.running, ...upgrades]) reserveUnchecked(session, command);
+      for (const command of upgrades)
+        if (!session.peer.signedOnly || command.signature?.sig.byteLength) sendCommand(session, command);
+      if (result.hasPending) gateway.poke();
+      return session;
+    }
 
     if (
       session.appliedGeneration < result.generation ||
@@ -854,7 +867,7 @@ export function createGateway(options: GatewayOptions): Gateway {
   const jobs = {
     dispatch: job('dispatch', async () => {
       if (!lease || stopping) return 0;
-      const live = [...sessions.values()].filter((session) => !session.closed && !session.upgradeRequired);
+      const live = [...sessions.values()].filter((session) => !session.closed);
       if (!live.length) return 0;
       const blocked = new Set<string>();
       const sent = await store
@@ -863,7 +876,9 @@ export function createGateway(options: GatewayOptions): Gateway {
           const send = candidates.filter((command) => {
             const session = sessions.get(command.nodeId);
             const laneKey = `${command.nodeId}:${command.lane}`;
-            if (!session || session.closed || session.upgradeRequired) return false;
+            if (!session || session.closed) return false;
+            // A daemon below proto_min takes the upgrade only; the rest waits, pending, for it.
+            if (session.upgradeRequired && command.kind !== upgradeKind) return false;
             if (session.epoch !== command.epoch || blocked.has(laneKey)) return false;
             if (!command.valid) {
               refuse.push({ command, reason: 'invalid-body' });

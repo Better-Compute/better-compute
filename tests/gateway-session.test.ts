@@ -125,13 +125,21 @@ describe('Hello', () => {
     expect((await f.session(node)).session_epoch).toBe(0);
   });
 
-  it('restricts a daemon below the protocol minimum to upgrade_required', async () => {
+  it('restricts a daemon below the protocol minimum to upgrade_required: the upgrade only (§7.6)', async () => {
     const node = await f.addNode();
-    await f.enqueue(node);
+    const diag = await f.enqueue(node);
     const { stream } = await f.connect(node, { protoMin: 0, protoMax: 0 });
     expect(stream.of('welcome')[0]!.upgradeRequired).toBe(true);
     expect(await f.gateway.jobs.dispatch.tick()).toBe(0);
     expect(stream.of('command')).toEqual([]);
+    expect(stream.of('desired')).toEqual([]);
+
+    // The Rollout's daemon.upgrade does go out (the daemon accepts nothing else); the rest waits.
+    const upgrade = await f.enqueue(node);
+    await f.db.query(`UPDATE commands SET kind = 'daemon.upgrade' WHERE id = $1`, [upgrade]);
+    expect(await f.gateway.jobs.dispatch.tick()).toBe(1);
+    expect(stream.commandIds()).toEqual([upgrade]);
+    expect((await f.command(diag)).state).toBe('pending');
   });
 
   it('supersedes an older session of the same node on this gateway', async () => {
