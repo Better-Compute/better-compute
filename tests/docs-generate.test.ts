@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error plain ESM script without types
 import { checkDescriptions, firstParagraph, parseSections } from '../apps/docs/scripts/descriptions.mjs';
+// @ts-expect-error plain ESM script without types
+import { readProtocol } from '../apps/docs/scripts/protocol.mjs';
 
 // The docs generator (apps/docs/scripts/generate.mjs) and what it writes. These checks need no build:
 // they read the committed generated/*.json and pages. The full `generate.mjs --check` needs every
@@ -87,7 +89,7 @@ describe('generated reference', () => {
   });
 
   it('every other generated page exists with frontmatter', async () => {
-    for (const name of ['cli', 'command-kinds', 'errors', 'events', 'metrics', 'modules', 'packages']) {
+    for (const name of ['cli', 'command-kinds', 'errors', 'protocol', 'events', 'metrics', 'modules', 'packages']) {
       const page = await readFile(join(docs, `content/docs/reference/${name}.mdx`), 'utf8');
       expect(page.replace(/\r\n/g, '\n'), name).toMatch(/^---\ntitle: .+\ndescription: .+\n---\n/);
     }
@@ -102,6 +104,17 @@ describe('generated reference', () => {
       expect(family.labels, family.name).not.toContain('tenant');
       expect(page, family.name).toContain(`\`${family.name}\``);
     }
+  });
+
+  it('the committed protocol reference matches the .proto sources (regenerate after a proto change)', async () => {
+    const root = join(import.meta.dirname, '..');
+    const current = await readProtocol(join(root, 'proto'), root);
+    const committed = await readJson<unknown[]>('generated/protocol.json');
+    expect(committed).toEqual(JSON.parse(JSON.stringify(current)));
+    const messages = current.flatMap((file: { messages: unknown[] }) => file.messages);
+    expect(messages.length).toBeGreaterThan(100);
+    const page = await readFile(join(docs, 'content/docs/reference/protocol.mdx'), 'utf8');
+    for (const message of messages as { name: string }[]) expect(page, message.name).toContain(`### ${message.name}`);
   });
 
   it('check-content finds no broken pages, links or meta entries', async () => {
