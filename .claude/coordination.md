@@ -144,6 +144,16 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   - vps tenantDeleted hook ([6a20b8]/[097b34]).
   - iamGuard (§8.1): `BETTER_COMPUTE_IAM_GUARD=warn|throw`, or `iamGuard` in options ([f85da7]); a full guarded run
     is in progress.
+  - Security review #2 of d5b3df2..HEAD ([f85da7], 2026-09-25):
+    - instance tcp/ssh tunnels dialled host loopback: fixed in bcd a06899b ([6a20b8]); server refusal asked
+      of [402c97];
+    - Welcome clock rewind re-opening ticket replay: fixed in a06899b;
+    - tenancy handler reads IAM inside the inbox tx and is fail-open: [31c64a];
+    - vps has no tenantDeleted: [097b34]; workload tokens now refused for suspended/deleted tenants
+      (d143ead);
+    - binding:deactivate revokes the actor's certs: [402c97];
+    - metal BMC rotation stores a bare password: [f02367].
+  - Sandboxes step 5 seams (paused, restore_from, instance.snapshot, runtime pause/resume/snapshot): b78045b.
   - DONE this round: tenancy §12.8 (ae9a7bb); vps instances.create wait + budget check (32c25ae); wake edge on
     dedicated nodes (9093323); ramdisk allowed kinds (464788a); capacity jsonSchema (45e9685); PoolIndex lazy load
     (7e52552).
