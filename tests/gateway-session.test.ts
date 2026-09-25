@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import { create, toBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GrpcCode, sqlEventPublisher } from '@better-compute/gateway';
+import { createSigningKey, storedDesiredState } from '@better-compute/pki';
 import {
   AgentRole,
+  SignatureSchema,
   CommandBodySchema,
   CommandRejectReason,
   CommandState,
@@ -475,6 +477,31 @@ describe('status, inventory and specs', () => {
     stream.clear();
     await handle.receive(agentFrame({ case: 'specRequest', value: { haveGeneration: 1n } }));
     expect(stream.of('desired')).toHaveLength(1);
+  });
+
+  it('relays a stored signed spec verbatim for the current generation, and renders unsigned otherwise (v0.4)', async () => {
+    const node = await f.addNode();
+    const spec = { telemetry: { otlpEndpoint: 'https://otel.example:4317' } };
+    const worker = createSigningKey();
+    const stored = storedDesiredState({ nodeId: node, generation: 3, spec }, worker);
+    await f.db.query(
+      'UPDATE nodes SET spec = $2::jsonb, generation = 3, spec_body = $3, spec_signature = $4 WHERE id = $1',
+      [node, JSON.stringify(spec), Buffer.from(stored.body), Buffer.from(stored.signature!)],
+    );
+    const { stream } = await f.connect(node);
+    const [desired] = stream.of('desired');
+    // The exact bytes the worker signed, with its signature: the gateway re-encodes nothing.
+    expect(Buffer.from(desired!.body).equals(Buffer.from(stored.body))).toBe(true);
+    expect(desired!.signature?.sig).toEqual(fromBinary(SignatureSchema, stored.signature!).sig);
+
+    // A generation the stored bytes do not match (a bump without a rewrite) falls back to the
+    // unsigned rendering, byte-identical to the writer's encoder.
+    stream.clear();
+    await f.db.query('UPDATE nodes SET generation = 4 WHERE id = $1', [node]);
+    await f.gateway.jobs.specs.tick();
+    const [fallback] = stream.of('desired');
+    expect(fallback!.signature).toBeUndefined();
+    expect(Buffer.from(fallback!.body).equals(Buffer.from(storedDesiredState({ nodeId: node, generation: 4, spec }).body))).toBe(true);
   });
 
   it('sends no spec to a daemon that already holds the current generation', async () => {

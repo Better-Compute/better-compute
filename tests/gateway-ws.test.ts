@@ -26,9 +26,11 @@ import {
   createReplayCache,
   createRevocationSet,
   createServingCa,
+  createSigningKey,
   generateP256KeyPair,
   nodeSpiffeId,
   privateKeyPem,
+  storedDesiredState,
   toPem,
   type LocalCertificateAuthority,
   type RevocationSet,
@@ -286,6 +288,18 @@ describe('WS sessions end to end', () => {
     expect(sent).toEqual([signed]);
     expect(client.frames.some((frame) => frame.msg.case === 'desired')).toBe(false);
     expect((await f.command(unsigned)).state).toBe('pending');
+
+    // A spec the worker signed (nodes.spec_body + spec_signature, v0.4) does reach it, verbatim.
+    const stored = storedDesiredState({ nodeId: node, generation: 3, spec: {} }, createSigningKey());
+    await f.db.query('UPDATE nodes SET generation = 3, spec_body = $2, spec_signature = $3 WHERE id = $1', [
+      node,
+      Buffer.from(stored.body),
+      Buffer.from(stored.signature!),
+    ]);
+    await f.gateway.jobs.specs.tick();
+    await expect.poll(() => client.frames.filter((frame) => frame.msg.case === 'desired').length).toBe(1);
+    const desired = client.frames.find((frame) => frame.msg.case === 'desired')!.msg.value as { body: Uint8Array };
+    expect(Buffer.from(desired.body).equals(Buffer.from(stored.body))).toBe(true);
   });
 
   it('refuses upgrades without a valid proof, with a replayed proof, or for another subprotocol', async () => {

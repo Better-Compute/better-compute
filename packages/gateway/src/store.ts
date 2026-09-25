@@ -1,5 +1,4 @@
-import { createHash } from 'node:crypto';
-import { fromBinary, fromJson, toBinary, toJson, type JsonValue } from '@bufbuild/protobuf';
+import { fromBinary, toBinary, toJson, type JsonValue } from '@bufbuild/protobuf';
 import {
   canTransition,
   commandStateTable,
@@ -15,6 +14,7 @@ import {
   type WorkQueue,
 } from '@better-compute/core';
 import { ingestInventorySection, recordInventoryHashes } from '@better-compute/inventory';
+import { desiredStateBodyFromJson, desiredStateFromStored } from '@better-compute/pki';
 import {
   AttestedReportBodySchema,
   CommandBodySchema,
@@ -23,13 +23,11 @@ import {
   DesiredStateBodySchema,
   EventSchema,
   Lane,
-  NodeSpecSchema,
   protocolRegistry,
   SignatureSchema,
   StatusReportSchema,
   decodeMessage,
   unwrapAttestedReport,
-  wrapDesiredState,
   type AllocationBound,
   type AllocationFailed,
   type AllocationReleased,
@@ -327,26 +325,37 @@ function storedCommand(row: Record<string, unknown>): StoredCommand {
   };
 }
 
-/** Reads `nodes.spec` (protobuf JSON of NodeSpec) into a full, unsigned DesiredState. */
+/**
+ * A node's full DesiredState (v0.4, signed specs). When the spec writer stored the encoded body
+ * (`nodes.spec_body`, and with a worker key `spec_signature`, core/0021) for the current generation,
+ * those bytes are relayed verbatim: the gateway never re-encodes, so it cannot alter what the worker
+ * signed. Otherwise `nodes.spec` (protobuf JSON) is rendered unsigned with pki's
+ * `desiredStateBodyFromJson`, the writer's own encoder, byte for byte.
+ */
 export const nodeSpecColumn: SpecSource = {
   async load(tx, nodeId) {
-    const { rows } = await tx.query<{ generation: number; spec: JsonValue | null }>(
-      'SELECT generation, spec FROM nodes WHERE id = $1',
-      [nodeId],
-    );
+    const { rows } = await tx.query<{
+      generation: number;
+      spec: JsonValue | null;
+      spec_body: Uint8Array | null;
+      spec_signature: Uint8Array | null;
+    }>('SELECT generation, spec, spec_body, spec_signature FROM nodes WHERE id = $1', [nodeId]);
     const row = rows[0];
     if (!row || row.spec === null || row.spec === undefined) return undefined;
-    const spec = fromJson(NodeSpecSchema, row.spec, { registry: protocolRegistry });
-    const specHash = createHash('sha256').update(toBinary(NodeSpecSchema, spec)).digest();
-    return wrapDesiredState({
-      $typeName: DesiredStateBodySchema.typeName,
-      nodeId,
-      generation: BigInt(row.generation),
-      baseGeneration: 0n,
-      specHash: new Uint8Array(specHash),
-      spec: { case: 'full', value: spec },
-      traceparent: '',
-    });
+    if (row.spec_body?.byteLength) {
+      const body = bytesOf(row.spec_body);
+      // A cheap guard: the writer rewrites or clears both columns with every generation bump.
+      let current = false;
+      try {
+        const decoded = fromBinary(DesiredStateBodySchema, body);
+        current = decoded.nodeId === nodeId && decoded.generation === BigInt(row.generation);
+      } catch {
+        current = false;
+      }
+      if (current) return desiredStateFromStored(body, row.spec_signature ? bytesOf(row.spec_signature) : null);
+    }
+    const body = desiredStateBodyFromJson({ nodeId, generation: row.generation, spec: row.spec });
+    return desiredStateFromStored(toBinary(DesiredStateBodySchema, body));
   },
 };
 
