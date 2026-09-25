@@ -34,6 +34,6 @@ describe('nightly simulation (CI size)', () => {
       chaos: 'light',
     });
     expect(again.workloadDigest).toBe(report.workloadDigest);
-    console.log(`outcome digest reproduced: ${again.outcomeDigest === report.outcomeDigest}`);
+    // Outcomes may differ (random ids break ties); the workload may not.
   }, 900_000);
 });

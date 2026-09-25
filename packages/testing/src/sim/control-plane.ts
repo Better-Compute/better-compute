@@ -6,7 +6,13 @@
 // connectivity transitions (I5).
 
 import { create } from '@bufbuild/protobuf';
-import { ComputeError, defineAttestor, type IamPort, type SqlExecutor } from '@better-compute/core';
+import {
+  ComputeError,
+  defineAttestor,
+  type ComputeModule,
+  type IamPort,
+  type SqlExecutor,
+} from '@better-compute/core';
 import {
   attachFrameConn,
   createGateway,
@@ -106,7 +112,15 @@ export function controlPlaneFacts(database: Pick<SqlExecutor, 'query'>): Control
       for (const row of allocations.rows) {
         const start = ms(row.bound_ms);
         if (start === undefined) continue;
-        const end = row.ended ? (ms(row.released_ms) ?? ms(row.upper_ms)) : undefined;
+        // Billing ends at the release or the booked end, whichever is first (a release processed after the booking
+        // ended, e.g. during a worker outage, does not extend it).
+        const released = ms(row.released_ms);
+        const upper = ms(row.upper_ms);
+        const end = row.ended
+          ? released !== undefined && upper !== undefined
+            ? Math.min(released, upper)
+            : (released ?? upper)
+          : undefined;
         billed.set(row.id, {
           allocationId: row.id,
           start,
@@ -215,6 +229,8 @@ export interface ControlPlaneSimOptions
    * `allowedKinds` (exact kinds or `prefix.*`): their certificates only allow those command kinds.
    */
   restricted?: { count: number; allowedKinds: readonly string[] };
+  /** Modules the control plane runs besides the built-ins (their reconcilers tick with the others). */
+  modules?: readonly ComputeModule[];
   /** Gateway processes behind the simulator (default 1); dials are spread over the live ones. */
   gateways?: number;
   /** Extra gateway options (e.g. lease timings). */
@@ -372,6 +388,7 @@ export async function createControlPlaneSim(
     database,
     iam: options.iam ? options.iam(fake) : fake,
     attestors: [restrictedAttestor],
+    ...(options.modules ? { modules: [...options.modules] } : {}),
     secret: 'better-compute-control-plane-sim-secret-0123456789',
     baseURL: 'https://compute.sim.test',
     rootTenantId: tenants.root.id,
@@ -514,6 +531,8 @@ export async function createControlPlaneSim(
       iam: _iam,
       trace: _trace,
       gateways: _gateways,
+      restricted: _restricted,
+      modules: _modules,
       gateway: _gateway,
       ...fleetOptions
     } = options;

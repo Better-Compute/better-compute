@@ -3,10 +3,12 @@
 // partitions, half-open links, stalls, gateway kills, worker outages) while tenants reserve at scale with every
 // placement feature (whole nodes, gangs, spot with preemption, calendar starts with BookingRepair, releases) and
 // operators run commands. It reports invariant violations (I1, I2, I5, I8), latencies in simulated time, outcome
-// counts and two digests: the workload (a pure function of the seed) and the outcomes without ids (compute mints
-// random ids, so the store itself cannot repeat bit for bit).
+// counts and two digests: the workload (a pure function of the seed) and the outcomes without ids. Compute mints
+// random ids and some choices tie-break on them, so outcomes (and their digest) can differ between runs of one seed:
+// the outcome digest is a hint for spotting behaviour changes, not a reproducibility guarantee.
 
 import { createHash } from 'node:crypto';
+import type { ComputeModule } from '@better-compute/core';
 import { summarize, type LatencySummary } from '../realtime/harness.js';
 import type { Rng } from '../rng.js';
 import { createControlPlaneSim, type ControlPlaneSim } from './control-plane.js';
@@ -28,11 +30,15 @@ export interface NightlyOptions {
   chaos?: NightlyChaos;
   /** Workload step in simulated ms (default 10 s). */
   stepMs?: number;
+  /** Extra control-plane modules (e.g. `auditModule`), ticked with the rest. */
+  modules?: readonly ComputeModule[];
+  /** Runs after the night, before teardown; its answer lands in the report's `extra` (e.g. audit verification). */
+  inspect?: (rig: ControlPlaneSim) => Promise<Record<string, unknown>>;
 }
 
 export interface NightlyReport {
   seed: string;
-  config: Required<NightlyOptions>;
+  config: Required<Omit<NightlyOptions, 'modules' | 'inspect'>>;
   wallMs: number;
   /** SHA-256 of the workload asked for: the same seed asks for the same things. */
   workloadDigest: string;
@@ -49,6 +55,8 @@ export interface NightlyReport {
   violations: InvariantViolation[];
   /** Commands queued for the restricted node outside its certificate's allowed kinds (must be 0). */
   kindLeaks: number;
+  /** What `inspect` answered. */
+  extra: Record<string, unknown>;
   ok: boolean;
 }
 
@@ -72,7 +80,7 @@ type Kind = 'node' | 'half' | 'gang' | 'spot' | 'calendar';
 
 /** One simulated night. */
 export async function runNightly(options: NightlyOptions): Promise<NightlyReport> {
-  const config: Required<NightlyOptions> = {
+  const config: Required<Omit<NightlyOptions, 'modules' | 'inspect'>> = {
     seed: options.seed,
     nodes: options.nodes ?? 8,
     gateways: options.gateways ?? 3,
@@ -89,6 +97,7 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
     ...(config.nodes >= 4
       ? { restricted: { count: 1, allowedKinds: ['diag.*', 'inventory.*'] } }
       : {}),
+    ...(options.modules ? { modules: options.modules } : {}),
   });
   try {
     const { compute, tenants, api, database, sim } = rig;
@@ -340,15 +349,16 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
     const lastEnd = Number(open[0]?.last_ms ?? 0);
     const tail = Math.min(Math.max(0, lastEnd - sim.scheduler.now()) + 6 * MIN, 60 * MIN);
     await rig.run(tail);
-    // Releases can still happen in the tail (lapses, failed binds): make sure a metering pass ran after the last.
+    // Releases can still happen in the tail (lapses, failed binds): make sure a metering pass (every 5 min) ran after the last:
+    // two periods, since a pass may have run just before the close.
     for (let pass = 0; pass < 4; pass++) {
       const { rows: closed } = await database.query<{ last_ms: number | null }>(
         `SELECT max(extract(epoch FROM LEAST(COALESCE(released_at, upper(during)), upper(during))) * 1000) AS last_ms
            FROM allocations WHERE LEAST(COALESCE(released_at, upper(during)), upper(during)) <= compute_now()`,
       );
       const since = sim.scheduler.now() - Number(closed[0]?.last_ms ?? 0);
-      if (since >= 5.5 * MIN) break;
-      await rig.run(5.5 * MIN - since);
+      if (since >= 11 * MIN) break;
+      await rig.run(11 * MIN - since);
     }
     const violations = await rig.invariants();
     const tally = async (table: 'reservations' | 'commands') => {
@@ -369,6 +379,25 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
           )
         : { rows: [{ count: 0 }] };
     const kindLeaks = Number(leakedRows[0]?.count ?? 0);
+    // For triage: what the store says about every allocation an I8 violation names.
+    const details: Record<string, unknown>[] = [];
+    for (const subject of [
+      ...new Set(violations.filter((v) => v.invariant === 'I8').map((v) => v.subject)),
+    ].slice(0, 10)) {
+      const { rows } = await database.query<Record<string, unknown>>(
+        `SELECT a.id, a.node_id, a.bound_at, a.released_at, a.during::text AS during_text, a.atoms,
+                r.state AS reservation_state, r.request AS reservation_request,
+                (SELECT json_agg(json_build_object('key', u.idempotency_key, 'meter', u.meter, 'quantity', u.quantity,
+                        'start', u.window_start, 'end', u.window_end)) FROM usage_windows u WHERE u.allocation_id = a.id) AS windows
+           FROM allocations a LEFT JOIN reservations r ON r.id = a.owner_id WHERE a.id = $1`,
+        [subject],
+      );
+      if (rows[0]) details.push(rows[0]);
+    }
+    const extra = {
+      ...(options.inspect ? await options.inspect(rig) : {}),
+      ...(details.length ? { i8Details: details } : {}),
+    };
     const sha = (value: unknown) =>
       createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const workload = Object.fromEntries([...counts.workload].sort());
@@ -393,6 +422,7 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
       commandMs: summarize(commandAfter),
       violations,
       kindLeaks,
+      extra,
       ok: violations.length === 0 && kindLeaks === 0,
     };
   } finally {

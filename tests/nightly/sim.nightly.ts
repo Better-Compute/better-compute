@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { cpus, totalmem } from 'node:os';
 import { describe, expect, it } from 'vitest';
+import { auditModule, checkpointAudit, verifyAuditCheckpoints } from '@better-compute/audit';
+import { createAuditSigningKey } from '@better-compute/pki';
 import { runNightly, type NightlyChaos, type NightlyReport } from '@better-compute/testing';
 
 // The nightly simulation matrix (PLAN.md §15, v0.4 exit: "all §15 scenarios green on 3 consecutive nights"). Every
@@ -53,7 +55,43 @@ describe('sim:nightly', () => {
   for (const chaos of chaosLevels)
     for (const seed of seeds)
       it(`seed ${seed}, ${chaos} chaos`, async () => {
-        const report = await runNightly({ seed, nodes, gateways, minutes, chaos });
+        // The audit trail is checkpointed every 10 simulated minutes through the night (§13 Merkle checkpoints),
+        // then sealed and verified per tenant: no event lost, reordered or altered under chaos.
+        const signer = createAuditSigningKey();
+        const report = await runNightly({
+          seed,
+          nodes,
+          gateways,
+          minutes,
+          chaos,
+          modules: [auditModule({ signer, every: '10m' })],
+          inspect: async (rig) => {
+            while ((await checkpointAudit(rig.database, { signer })).more);
+            const tenantIds = await rig.database.query<{ tenant_id: string }>(
+              'SELECT DISTINCT tenant_id FROM audit_events ORDER BY tenant_id',
+            );
+            const audit = [];
+            for (const { tenant_id: tenantId } of tenantIds.rows)
+              audit.push(
+                await verifyAuditCheckpoints(rig.database, {
+                  tenantId,
+                  trust: { publicKey: signer.publicKey },
+                }),
+              );
+            return {
+              audit: {
+                ok: audit.every((tenant) => tenant.ok && tenant.unsealed === 0),
+                tenants: audit.map(({ tenantId, checkpoints, events, unsealed, problems }) => ({
+                  tenantId,
+                  checkpoints,
+                  events,
+                  unsealed,
+                  problems: problems.map((problem) => problem.code),
+                })),
+              },
+            };
+          },
+        });
         reports.push(report);
         console.log(
           JSON.stringify({
@@ -64,10 +102,13 @@ describe('sim:nightly', () => {
             reservations: report.reservations,
             chaosEvents: report.chaos,
             placeToActiveP99Ms: report.placeToActiveMs.p99,
+            audit: report.extra.audit,
             wallMs: report.wallMs,
           }),
         );
         expect(report.violations).toEqual([]);
+        expect(report.kindLeaks).toBe(0);
+        expect((report.extra.audit as { ok: boolean }).ok).toBe(true);
       });
 
   it('writes the night’s report', () => {
