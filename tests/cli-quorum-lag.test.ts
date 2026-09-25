@@ -60,14 +60,14 @@ describe('quorum lag', () => {
     const digest = approverSetDigest(set);
     await node('node_ok', 3, digest);
     await node('node_old', 2, digest);
-    await node('node_keyless', 3, new Uint8Array());
+    // Holding no keys: both NULL (as the gateway records it), lagging while the bundle has approver keys.
+    await node('node_keyless', null, null);
     await node('node_away', 1, digest, false);
-    await node('node_unreported', null, null);
     expect(await quorumLag(sql, published)).toEqual({
       connected: 3,
       behind: 2,
       sample: [
-        { nodeId: 'node_keyless', epoch: 3 },
+        { nodeId: 'node_keyless', epoch: 0 },
         { nodeId: 'node_old', epoch: 2 },
       ],
     });
@@ -75,6 +75,9 @@ describe('quorum lag', () => {
     const findings = await quorumFindings(sql, options);
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({ check: 'pki.quorum-lag', severity: 'warning' });
-    expect(findings[0]!.message).toMatch(/2 of 3 connected node\(s\).*node_keyless at epoch 3, node_old at epoch 2/);
+    expect(findings[0]!.message).toMatch(/2 of 3 connected node\(s\).*node_keyless at epoch 0, node_old at epoch 2/);
+    // Without published keys, only daemons still holding a set lag.
+    const none = { ...published, approverSet: { approverKeys: [], approverThreshold: 0, quorumTiers: [], unbatchedDestructivePerHour: 0 } };
+    expect(await quorumLag(sql, none)).toMatchObject({ connected: 3, behind: 2 });
   });
 });

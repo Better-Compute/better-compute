@@ -293,7 +293,8 @@ export interface QuorumLag {
 
 /**
  * Which connected daemons hold another approver set (epoch or digest) than `published`, from what they report
- * beside their trust version (node_sessions.approver_set_epoch / approver_set_sha256; an empty digest = no keys).
+ * beside their trust version (node_sessions.approver_set_epoch / approver_set_sha256, both NULL while a daemon holds
+ * no keys): with published keys, a NULL digest, another digest or another epoch lags; without, any held set does.
  * Undefined before those columns exist. A daemon can take a bundle's version while refusing its quorum part, so the
  * trust version alone says nothing about the set it enforces.
  */
@@ -307,23 +308,26 @@ export async function quorumLag(
         AND attname IN ('approver_set_epoch', 'approver_set_sha256') AND NOT attisdropped`,
   );
   if (!ready[0]?.ok) return undefined;
-  const digest = published.approverSet?.approverKeys.length ? Buffer.from(approverSetDigest(published.approverSet)) : Buffer.alloc(0);
+  const keyed = Boolean(published.approverSet?.approverKeys.length);
+  const digest = keyed ? Buffer.from(approverSetDigest(published.approverSet!)) : Buffer.alloc(0);
   const live = `gateway_id IS NOT NULL AND disconnected_at IS NULL
-                AND last_seen > compute_now() - make_interval(secs => $3::float8)
-                AND approver_set_epoch IS NOT NULL`;
-  const differs = `(approver_set_epoch <> $1::numeric OR coalesce(approver_set_sha256, '\\x'::bytea) <> $2::bytea)`;
+                AND last_seen > compute_now() - make_interval(secs => $3::float8)`;
+  const differs = keyed
+    ? `(approver_set_sha256 IS NULL OR approver_set_sha256 <> $2::bytea OR approver_set_epoch IS DISTINCT FROM $1::numeric)`
+    : // (Still naming $1 and $2, which Postgres must be able to type.)
+      `(approver_set_sha256 IS NOT NULL AND length(approver_set_sha256) > 0 AND $2::bytea IS NOT NULL AND $1::numeric IS NOT NULL)`;
   const { rows } = await sql.query<{ connected: string | number; behind: string | number }>(
     `SELECT count(*) AS connected, count(*) FILTER (WHERE ${differs}) AS behind FROM node_sessions WHERE ${live}`,
     [published.approverSetEpoch, digest, liveWindowMs / 1000],
   );
-  const { rows: sample } = await sql.query<{ node_id: string; epoch: string | number }>(
+  const { rows: sample } = await sql.query<{ node_id: string; epoch: string | number | null }>(
     `SELECT node_id, approver_set_epoch AS epoch FROM node_sessions WHERE ${live} AND ${differs} ORDER BY node_id LIMIT 5`,
     [published.approverSetEpoch, digest, liveWindowMs / 1000],
   );
   return {
     connected: Number(rows[0]?.connected ?? 0),
     behind: Number(rows[0]?.behind ?? 0),
-    sample: sample.map((row) => ({ nodeId: row.node_id, epoch: Number(row.epoch) })),
+    sample: sample.map((row) => ({ nodeId: row.node_id, epoch: row.epoch === null ? 0 : Number(row.epoch) })),
   };
 }
 
