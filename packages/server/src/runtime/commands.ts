@@ -18,8 +18,10 @@ import {
   CommandBodySchema,
   commandKinds as wireKinds,
   encodeMessage,
+  encodeMessageJson,
   Lane as WireLane,
   MAX_COMMAND_BODY_BYTES,
+  ProtocolError,
   type CommandBody,
 } from '@better-compute/protocol';
 import { commandKindAllowed } from '@better-compute/pki';
@@ -94,8 +96,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
- * The encoded payload message: a message of the kind's payload type (`$typeName` must match), its
- * encoded bytes, or nothing (`undefined`, `null`, `{}`) for the type's default message.
+ * The encoded payload message: a message of the kind's payload type (`$typeName` must match), the
+ * proto3 JSON of one (what modules build: metal, provision steps), its encoded bytes, or nothing
+ * (`undefined`, `null`, `{}`) for the type's default message. Module kinds name their type only
+ * (`{ kind: 'message', typeName }`); it resolves in protocol's registry.
  */
 function encodePayload(spec: CommandKindSpec, payload: unknown): Uint8Array {
   const typeName = spec.payload?.typeName;
@@ -105,31 +109,48 @@ function encodePayload(spec: CommandKindSpec, payload: unknown): Uint8Array {
       throw new ComputeError('INVALID_INPUT', `A ${spec.kind} payload is too large`);
     return payload;
   }
-  if (isRecord(payload) && typeof payload.$typeName === 'string') {
+  if (!isRecord(payload))
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${spec.kind} takes a ${typeName} message, its proto3 JSON, its encoded bytes, or nothing`,
+    );
+  const hasDescriptor = Array.isArray((spec.payload as { fields?: unknown }).fields);
+  if (typeof payload.$typeName === 'string') {
     if (payload.$typeName !== typeName)
       throw new ComputeError(
         'INVALID_INPUT',
         `${spec.kind} takes ${typeName}, not ${payload.$typeName}`,
       );
-    if (!Array.isArray((spec.payload as { fields?: unknown }).fields))
+    if (hasDescriptor)
+      try {
+        return encodeMessage(spec.payload as Descriptor, payload as never, MAX_COMMAND_BODY_BYTES);
+      } catch (error) {
+        throw new ComputeError(
+          'INVALID_INPUT',
+          `The ${spec.kind} payload cannot be encoded: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+  }
+  if (Object.keys(payload).length === 0) return new Uint8Array(0);
+  if (typeof payload.$typeName === 'string')
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `Command kind ${spec.kind} has no protobuf descriptor to encode a ${typeName} message with; pass its proto3 JSON`,
+    );
+  // Proto3 JSON: resolved by type name in protocol's registry.
+  try {
+    return encodeMessageJson(String(typeName), payload, MAX_COMMAND_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof ProtocolError && error.code === 'UNKNOWN_KIND')
       throw new ComputeError(
         'INVALID_CONFIG',
-        `Command kind ${spec.kind} has no protobuf descriptor to encode its payload with`,
+        `Command kind ${spec.kind} names payload type ${typeName}, which is not a better-compute message`,
       );
-    try {
-      return encodeMessage(spec.payload as Descriptor, payload as never, MAX_COMMAND_BODY_BYTES);
-    } catch (error) {
-      throw new ComputeError(
-        'INVALID_INPUT',
-        `The ${spec.kind} payload cannot be encoded: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `The ${spec.kind} payload is not a ${typeName}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  if (isRecord(payload) && Object.keys(payload).length === 0) return new Uint8Array(0);
-  throw new ComputeError(
-    'INVALID_INPUT',
-    `${spec.kind} takes a ${typeName} message (create(Schema, init)), its encoded bytes, or nothing`,
-  );
 }
 
 function timestamp(ms: number): Timestamp {

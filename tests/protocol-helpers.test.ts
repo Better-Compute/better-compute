@@ -32,9 +32,11 @@ import {
   decodeAgentFrame,
   decodeCommandResult,
   decodeInventorySection,
+  decodeMessage,
   decodeServerFrame,
   encodeAgentFrame,
   encodeCommandResult,
+  encodeMessageJson,
   encodeServerFrame,
   inventorySectionSchemas,
   isCommandKind,
@@ -317,5 +319,34 @@ describe('protocol contract shape (PLAN.md §7.7)', () => {
     expect(protocolRegistry.getService('bettercompute.driver.v1.DriverPlugin')).toBeDefined();
     expect(site.BootLeaseStateSchema.typeName).toBe('bettercompute.site.v1.BootLeaseState');
     expect(driver.DriverPlugin.typeName).toBe('bettercompute.driver.v1.DriverPlugin');
+  });
+});
+
+describe('encodeMessageJson', () => {
+  it('encodes the proto3 JSON of a registered message, bytes fields as base64', () => {
+    const bytes = encodeMessageJson('bettercompute.site.v1.BmcOperationRequest', {
+      driver: 'redfish',
+      address: 'https://10.0.0.9',
+      operation: 'power.getPower',
+      tlsSpkiSha256: Buffer.from('cd'.repeat(32), 'hex').toString('base64'),
+    });
+    const decoded = decodeMessage(site.BmcOperationRequestSchema, bytes);
+    expect(decoded).toMatchObject({ driver: 'redfish', address: 'https://10.0.0.9', operation: 'power.getPower' });
+    expect(Buffer.from(decoded.tlsSpkiSha256).toString('hex')).toBe('cd'.repeat(32));
+  });
+
+  it('refuses unknown types, JSON that is not the message, and oversize results', () => {
+    const code = (fn: () => unknown) => {
+      try {
+        fn();
+      } catch (error) {
+        return error instanceof ProtocolError ? error.code : 'not a ProtocolError';
+      }
+      return 'no error';
+    };
+    expect(code(() => encodeMessageJson('acme.v1.Ghost', {}))).toBe('UNKNOWN_KIND');
+    expect(code(() => encodeMessageJson('bettercompute.site.v1.BmcOperationRequest', { colour: 'blue' }))).toBe('PAYLOAD_MISMATCH');
+    expect(code(() => encodeMessageJson('bettercompute.site.v1.BmcOperationRequest', { driver: 7 }))).toBe('PAYLOAD_MISMATCH');
+    expect(code(() => encodeMessageJson('bettercompute.site.v1.BmcOperationRequest', { argsJson: 'x'.repeat(64) }, 16))).toBe('FRAME_TOO_LARGE');
   });
 });

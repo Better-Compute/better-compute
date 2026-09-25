@@ -221,6 +221,62 @@ describe('CommandQueue.enqueue', () => {
     expect(decodeMessage(CommandBodySchema, new Uint8Array(row.body)).lane).toBe(Lane.BULK);
   });
 
+  it("takes a module kind's payload as proto3 JSON of its named type, and refuses JSON that is not one", async () => {
+    const fixture = await computeFixture();
+    // Module kinds name their payload type only (metal's `message('…')`); it resolves in protocol's registry.
+    const spec: CommandKindSpec = {
+      kind: 'acme.bmc',
+      lane: 'control',
+      retrySafe: true,
+      timeout: '2m',
+      roles: ['site'],
+      payload: { kind: 'message', typeName: 'bettercompute.site.v1.BmcOperationRequest' } as never,
+    };
+    const compute = await sibling(fixture, { modules: [defineModule({ name: 'bmcs', commandKinds: [spec] })] });
+    const node = await seedNode(fixture.database, { tenantId: fixture.tenants.acme.id });
+    const send = (payload: unknown, key: string) =>
+      fixture.database.transaction((tx) =>
+        compute.context.commands.enqueue(tx, { nodeId: node.id, kind: 'acme.bmc', payload, idempotencyKey: key, notAfter: fixture.clock.now() + HOUR }),
+      );
+    const json = {
+      driver: 'redfish',
+      address: 'https://10.0.0.9',
+      credentialsRef: 'secret://acme/bmc',
+      operation: 'power.getPower',
+      argsJson: '{}',
+      tlsSpkiSha256: Buffer.from('ab'.repeat(32), 'hex').toString('base64'),
+    };
+    const { id } = await send(json, 'json-1');
+    const body = decodeMessage(CommandBodySchema, new Uint8Array((await commandRow(fixture.database, id)).body));
+    const payload = anyUnpack(body.payload!, protocolRegistry) as unknown as Record<string, unknown>;
+    expect(payload).toMatchObject({ driver: 'redfish', address: 'https://10.0.0.9', operation: 'power.getPower', credentialsRef: 'secret://acme/bmc' });
+    expect(Buffer.from(payload.tlsSpkiSha256 as Uint8Array).toString('hex')).toBe('ab'.repeat(32));
+
+    await expect(send({ driver: 'redfish', colour: 'blue' }, 'json-2')).rejects.toSatisfy((error: unknown) =>
+      isComputeError(error, 'INVALID_INPUT'),
+    );
+    await expect(send({ driver: 7 }, 'json-3')).rejects.toSatisfy((error: unknown) => isComputeError(error, 'INVALID_INPUT'));
+  });
+
+  it("refuses a module kind whose payload type is not a better-compute message (config, not input)", async () => {
+    const fixture = await computeFixture();
+    const spec: CommandKindSpec = {
+      kind: 'acme.ghost',
+      lane: 'control',
+      retrySafe: true,
+      timeout: '2m',
+      roles: ['node'],
+      payload: { kind: 'message', typeName: 'acme.v1.Ghost' } as never,
+    };
+    const compute = await sibling(fixture, { modules: [defineModule({ name: 'ghosts', commandKinds: [spec] })] });
+    const node = await seedNode(fixture.database, { tenantId: fixture.tenants.acme.id });
+    await expect(
+      fixture.database.transaction((tx) =>
+        compute.context.commands.enqueue(tx, { nodeId: node.id, kind: 'acme.ghost', payload: { a: 1 }, idempotencyKey: 'g', notAfter: fixture.clock.now() + HOUR }),
+      ),
+    ).rejects.toSatisfy((error: unknown) => isComputeError(error, 'INVALID_CONFIG'));
+  });
+
   it("pokes the node's gateway after commit only (transactions through compute's executor)", async () => {
     const { fixture, compute, notifier, node } = await setup();
     // ctx.sql (and the envelope, reconcilers, jobs) run after-commit hooks; the raw store cannot.

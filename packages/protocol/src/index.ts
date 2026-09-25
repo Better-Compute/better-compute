@@ -6,7 +6,9 @@
  * `agent/v1` and `common/v1` are frozen (additive changes only). `site` and `driver` are drafts,
  * exported as namespaces, and may change until v0.2 and v0.5.
  */
-import { createRegistry } from '@bufbuild/protobuf';
+import { createRegistry, fromJson, type JsonValue } from '@bufbuild/protobuf';
+import { ProtocolError } from './errors.js';
+import { encodeMessage, MAX_FRAME_BYTES } from './frames.js';
 import { file_bettercompute_common_v1_common } from './gen/bettercompute/common/v1/common_pb.js';
 import { file_bettercompute_agent_v1_session } from './gen/bettercompute/agent/v1/session_pb.js';
 import { file_bettercompute_agent_v1_inventory } from './gen/bettercompute/agent/v1/inventory_pb.js';
@@ -42,3 +44,22 @@ export const protocolRegistry = /*@__PURE__*/ createRegistry(
   file_bettercompute_site_v1_site,
   file_bettercompute_driver_v1_driver,
 );
+
+/**
+ * The binary encoding of `json`, the proto3 JSON of a message named `typeName` (resolved in
+ * `protocolRegistry`; `Any` fields resolve there too), with a size bound: how control-plane code that
+ * builds payloads as plain JSON (module command kinds) gets wire bytes without depending on protobuf.
+ * Throws `ProtocolError`: `UNKNOWN_KIND` for a type the registry does not know, `PAYLOAD_MISMATCH`
+ * for JSON that is not that message, `FRAME_TOO_LARGE` over `maxBytes`.
+ */
+export function encodeMessageJson(typeName: string, json: unknown, maxBytes = MAX_FRAME_BYTES): Uint8Array {
+  const schema = protocolRegistry.getMessage(typeName);
+  if (!schema) throw new ProtocolError('UNKNOWN_KIND', `${typeName} is not a better-compute message`);
+  let message;
+  try {
+    message = fromJson(schema, json as JsonValue, { registry: protocolRegistry });
+  } catch (error) {
+    throw new ProtocolError('PAYLOAD_MISMATCH', `not a ${typeName}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return encodeMessage(schema, message, maxBytes);
+}
