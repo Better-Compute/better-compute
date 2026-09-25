@@ -485,7 +485,8 @@ export interface CertificateProfile {
   /** URI SANs, e.g. `spiffe://<td>/site/<site>/node/<nodeId>`. */
   uriSans?: readonly string[];
   dnsSans?: readonly string[];
-  role?: AgentRole | 'gateway' | 'internal';
+  /** `node-tenant`: a node under tenant-controlled trust (dedicated-root leases); never attests platform steps. */
+  role?: AgentRole | 'node-tenant' | 'gateway' | 'internal';
   usage: 'client' | 'server';
   ttlSeconds: number;
 }
