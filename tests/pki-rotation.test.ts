@@ -1,5 +1,5 @@
 import { createCipheriv, hkdfSync, randomBytes, X509Certificate } from 'node:crypto';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -188,13 +188,19 @@ describe('command-signing root rotation', () => {
     });
     // …until resealed; the pins stay the same.
     const before = readPkiPins(await readFile(target, 'utf8'));
+    // A certificate slipped in behind a chain's first one leaves every pin unchanged: the digests list it.
+    const stored = JSON.parse(await readFile(target, 'utf8')) as { servingCa: string; rootCertificate: string };
+    stored.servingCa = `${stored.servingCa.trimEnd()}\n${stored.rootCertificate}`;
+    await writeFile(target, JSON.stringify(stored));
     // First it only shows what it would vouch for, and asks for an explicit acceptance.
     out.length = 0;
     await expect(createCli().run(['pki', 'reseal'], io)).rejects.toMatchObject({
       code: 'INVALID_STATE',
       message: /not authenticated/,
     });
-    expect(JSON.parse(out.join('\n'))).toMatchObject({ authenticated: false, servingCaSpkiPin: before.servingCaSpkiPin });
+    const shown = JSON.parse(out.join('\n')) as { certificates: Record<string, string[]> };
+    expect(shown).toMatchObject({ authenticated: false, servingCaSpkiPin: before.servingCaSpkiPin });
+    expect(shown.certificates.servingCa).toEqual([...before.certificates.servingCa!, ...before.certificates.rootCertificate!]);
     out.length = 0;
     await createCli().run(['pki', 'reseal', '--accept-unauthenticated'], io);
     const after = JSON.parse(out.join('\n'));

@@ -381,7 +381,7 @@ export const pkiCommands = [
     group: 'PKI',
     summary: 'Seal the bundle in the current format, authenticating its public parts',
     description:
-      "pki reseal rewrites the bundle sealed with BETTER_COMPUTE_SECRET in the current format, where the seal also covers every certificate and pin, so a file changed without the secret no longer loads. Bundles sealed before that format, or left unsealed while a secret is set, are refused everywhere else. First compare the pins it prints (the same as pki show) with the ones your install scripts and join tokens use: it seals whatever the file holds now. Needs BETTER_COMPUTE_SECRET; the current key and certificates are kept, nothing is rotated.",
+      "pki reseal rewrites the bundle sealed with BETTER_COMPUTE_SECRET in the current format, where the seal also covers every certificate and pin, so a file changed without the secret no longer loads. Bundles sealed before that format, or left unsealed while a secret is set, are refused everywhere else. First compare the pins it prints (the same as pki show) with the ones your install scripts and join tokens use, and check `certificates` (the SHA-256 of every certificate in every chain) holds nothing you did not put there: it seals whatever the file holds now. Needs BETTER_COMPUTE_SECRET; the current key and certificates are kept, nothing is rotated.",
     output: 'json',
     flags: {
       pki: pkiFlag,

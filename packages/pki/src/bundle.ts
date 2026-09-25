@@ -373,7 +373,15 @@ export function pkiPins(bundle: PkiBundle): PkiPins {
 export function readPkiPins(
   text: string,
   options: Pick<ImportPkiBundleOptions, 'secret' | 'allowUnauthenticated'> = {},
-): PkiPins & { expires: Record<string, number>; authenticated: boolean } {
+): PkiPins & {
+  /**
+   * Hex SHA-256 of EVERY certificate (DER) in each stored chain, in file order. The pins name only a chain's first
+   * certificate; a certificate appended behind it would otherwise go unseen when comparing an unauthenticated file.
+   */
+  certificates: Record<string, string[]>;
+  expires: Record<string, number>;
+  authenticated: boolean;
+} {
   const stored = parseStored(text);
   const authenticated = options.secret !== undefined ? openKeys(stored, options).authenticated : false;
   const first = (pem: string, what: string) => {
@@ -426,6 +434,7 @@ export function readPkiPins(
         }
       : {}),
     ...(commandSigning ? { trustVersion: stored.trustVersion ?? 1 } : {}),
+    certificates: certificateDigests(stored),
     expires: {
       root: root.notAfter,
       nodeCa: node.notAfter,
@@ -435,6 +444,28 @@ export function readPkiPins(
     },
     authenticated,
   };
+}
+
+const chainFields = [
+  'rootCertificate',
+  'nodeCa',
+  'servingCa',
+  'internalCa',
+  'joinSigningCertificate',
+  'auditSigningCertificate',
+  'commandSigningCertificate',
+  'commandSigningNextCertificate',
+  'commandSigningPreviousCertificate',
+] as const;
+
+/** Hex SHA-256 of every certificate of every stored chain, by field. */
+function certificateDigests(stored: StoredBundle): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const field of chainFields) {
+    const pem = stored[field];
+    if (pem) out[field] = fromPem(pem).map((der) => sha256Hex(der));
+  }
+  return out;
 }
 
 // --- Storage ---------------------------------------------------------------------------------------
