@@ -86,6 +86,16 @@ describe('examples', () => {
       );
       await writeFile(join(cwd, `${name}.set.json`), signed);
     }
+    // One current approver's signature of two needed: doctor verifies them as a daemon does, and says so.
+    const halfSigned = JSON.parse(
+      await run(['doctor', '--config', config('dev')], { ...wider, BETTER_COMPUTE_APPROVER_SET_SIGNATURES: 'alice.set.json' }, cwd),
+    ) as { findings: { check: string; message: string }[] };
+    expect(halfSigned.findings.find((item) => item.check === 'pki.quorum-unsigned')?.message).toMatch(/do not verify \(approver-set-unsigned\)/);
+    // The digest operators pin comes from the configured keys, the published one beside it while they differ.
+    const pins = await trust(wider);
+    expect(pins.approverSetSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(pins.publishedApproverSetSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(pins.approverSetSha256).not.toBe(pins.publishedApproverSetSha256);
     const signedEnv = { ...wider, BETTER_COMPUTE_APPROVER_SET_SIGNATURES: 'alice.set.json,bob.set.json' };
     const signedOptions = await exampleOptions({ env: signedEnv, cwd });
     expect(signedOptions.pki?.approvers).toMatchObject({ epoch: epoch + 1 });

@@ -15,6 +15,7 @@ import {
   rotateCommandSigningRoot,
   approverSetDigest,
   sameApproverSet,
+  verifyApproverSetChange,
   toPem,
   type ApproverSet,
   type BundleCa,
@@ -275,7 +276,33 @@ export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: A
   const next = published.approverSetEpoch + 1;
   const pki = approversOf(options);
   const epoch = Number(pki?.approvers?.epoch ?? 1);
-  const signed = (pki?.approvers?.setSignatures?.length ?? 0) > 0 && epoch > published.approverSetEpoch;
+  // Verified as a daemon does (review 10 M5): the current set's threshold of valid signatures over this set, epoch
+  // and the deployment's trust domain; merely having signatures says nothing.
+  const trustDomain = (options as { pki?: { join?: { trustDomain?: string } } }).pki?.join?.trustDomain;
+  const given = (pki?.approvers?.setSignatures ?? []) as readonly { kid?: unknown; sig?: unknown }[];
+  let refusal: string | undefined;
+  if (given.length) {
+    try {
+      verifyApproverSetChange(
+        { ...published.approverSet, epoch: BigInt(published.approverSetEpoch) },
+        {
+          ...configured,
+          epoch: BigInt(epoch),
+          trustDomain,
+          approverSetSignatures: given.map((signature) => ({
+            kid: String(signature.kid),
+            sig:
+              typeof signature.sig === 'string'
+                ? new Uint8Array(Buffer.from(signature.sig, 'base64url'))
+                : new Uint8Array(signature.sig as Uint8Array),
+          })),
+        },
+      );
+    } catch (error) {
+      refusal = String((error as { details?: { reason?: string } }).details?.reason ?? (error as Error).message);
+    }
+  }
+  const signed = given.length > 0 && refusal === undefined;
   if (!published.approverSet.approverKeys.length)
     return [
       {
@@ -298,7 +325,9 @@ export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: A
     {
       check: 'pki.quorum-unsigned',
       severity: 'warning',
-      message: `The configured approver quorum differs from the one published (epoch ${published.approverSetEpoch}, trust version ${published.version}), and its current approvers have not signed it for a higher epoch: daemons that hold approver keys will keep the old quorum`,
+      message: `The configured approver quorum differs from the one published (epoch ${published.approverSetEpoch}, trust version ${published.version}), and ${
+        refusal ? `its signatures do not verify (${refusal})` : 'its current approvers have not signed it for a higher epoch'
+      }: daemons that hold approver keys will keep the old quorum`,
       fix: `Each of ${published.approverSet.approverThreshold} current approver(s): better-compute batch sign-approvers --key <key> --epoch ${next} --approvers <new .pub files> --threshold <k>; then set pki.approvers.epoch to ${next} and pki.approvers.setSignatures to their signatures`,
     },
   ];
@@ -684,9 +713,13 @@ export const pkiCommands = [
         // What this configuration would publish: the same version, or the next one.
         nextVersion: matches === false ? published.version + 1 : published.version,
         approverSetEpoch: published.approverSetEpoch,
-        // What install scripts pin (daemon install-script --approver-set-sha256): a new node's first set.
-        ...(published.approverSet?.approverKeys.length
-          ? { approverSetSha256: Buffer.from(approverSetDigest(published.approverSet)).toString('hex') }
+        // What install scripts pin (daemon install-script --approver-set-sha256): computed from THIS configuration's
+        // approver keys, never from the database the api writes (review 10 M4); the published one when it differs.
+        ...(configuredApproverSet(options).approverKeys.length
+          ? { approverSetSha256: Buffer.from(approverSetDigest(configuredApproverSet(options))).toString('hex') }
+          : {}),
+        ...(published.approverSet?.approverKeys.length && !sameApproverSet(published.approverSet, configuredApproverSet(options))
+          ? { publishedApproverSetSha256: Buffer.from(approverSetDigest(published.approverSet)).toString('hex') }
           : {}),
         quorumChanged,
         ...(quorumChanged ? { signQuorumForEpoch: published.approverSetEpoch + 1 } : {}),

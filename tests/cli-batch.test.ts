@@ -207,8 +207,8 @@ describe('batch sign', () => {
     ];
     await writeFile(join(h.cwd, 'scope.json'), JSON.stringify({ batchId, trustDomain, scope: entries }));
     await h.run(sign('scope.json'));
-    expect(h.err.join('\n')).toMatch(/disk\.wipe ×2: \{\}/);
-    expect(h.err.join('\n')).toMatch(/bmc\.power ×1: \{"driver":"redfish","address":"10\.0\.0\.7","operation":"power\.setPower"\}/);
+    expect(h.err.join('\n')).toMatch(/disk\.wipe ×2 \[[0-9a-f]{12}\]: \{\}/);
+    expect(h.err.join('\n')).toMatch(/bmc\.power ×1 \[[0-9a-f]{12}\]: \{"driver":"redfish","address":"10\.0\.0\.7","operation":"power\.setPower"\}/);
     // Another operation under the leaf's digest (a power cycle shown as a query): refused.
     const other = leaf('bmc:node_site/10.0.0.7', 'bmc.power', 'bettercompute.site.v1.BmcOperationRequest', { ...power, operation: 'power.getPower' });
     const swapped = [entries[0], entries[1], { ...entries[2]!, payload: other.payload }];
@@ -223,6 +223,31 @@ describe('batch sign', () => {
     await writeFile(join(h.cwd, 'opaque.json'), JSON.stringify({ batchId, trustDomain, scope: [entries[0], entries[1], digestOnly] }));
     await expect(h.run(sign('opaque.json'))).rejects.toMatchObject({ code: 'OPAQUE_SCOPE' });
     await expect(h.run(sign('opaque.json', ['--allow-opaque']))).resolves.toMatchObject({ batchId });
+    // Two operations alike for their first 400 characters stay two lines (grouped by digest, never by what shows),
+    // and every field shows: long strings are shortened in the middle.
+    const padding = 'x'.repeat(500);
+    const alike = [
+      leaf('node_a', 'site.httpProxy', 'bettercompute.site.v1.HttpProxyRequest', { targetNodeId: 'node_t', url: `https://t/${padding}`, method: 'GET' }),
+      leaf('node_b', 'site.httpProxy', 'bettercompute.site.v1.HttpProxyRequest', { targetNodeId: 'node_t', url: `https://t/${padding}`, method: 'POST' }),
+    ];
+    await writeFile(join(h.cwd, 'alike.json'), JSON.stringify({ batchId, trustDomain, scope: alike }));
+    await h.run(sign('alike.json', ['--operations-out', 'ops.json']));
+    const shown = h.err.join('\n');
+    expect(shown.match(/site\.httpProxy ×1/g)).toHaveLength(2);
+    expect(shown).toMatch(/"method":"POST"/);
+    expect(shown).toMatch(/\.\.\.\(510 chars\)\.\.\./);
+    const written = JSON.parse(await readFile(join(h.cwd, 'ops.json'), 'utf8')) as { operation: { url: string }; subjects: string[] }[];
+    expect(written).toHaveLength(2);
+    expect(written[0]!.operation.url).toBe(`https://t/${padding}`);
+    // A payload with a field this CLI cannot show (a newer schema's, which a newer agent would act on): refused.
+    const extra = Buffer.concat([Buffer.from(entries[2]!.payload.value, 'base64'), Buffer.from([0xf8, 0x06, 0x01])]);
+    const unknown = { ...entries[2]!, payloadSha256: digest(extra), payload: { ...entries[2]!.payload, value: extra.toString('base64') } };
+    await writeFile(join(h.cwd, 'unknown.json'), JSON.stringify({ batchId, trustDomain, scope: [entries[0], entries[1], unknown] }));
+    await expect(h.run(sign('unknown.json'))).rejects.toMatchObject({ code: 'SCOPE_MISMATCH', message: /cannot show/ });
+    // A kind whose payload type only its module knows: the server's label is not shown as if checked; opaque.
+    const plugin = { subject: 'node_a', kind: 'acme.flash', payloadSha256: entries[0]!.payloadSha256, payload: entries[0]!.payload };
+    await writeFile(join(h.cwd, 'plugin.json'), JSON.stringify({ batchId, trustDomain, scope: [plugin] }));
+    await expect(h.run(sign('plugin.json'))).rejects.toMatchObject({ code: 'OPAQUE_SCOPE' });
     // Subjects are printable ASCII: a right-to-left override or a newline is refused.
     const spoofed = [entries[0], { ...entries[1]!, subject: 'node_\u202eb' }];
     await writeFile(join(h.cwd, 'spoofed.json'), JSON.stringify({ batchId, trustDomain, scope: spoofed }));

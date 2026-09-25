@@ -125,14 +125,33 @@ const jsonOf = ({ subject, kind, payloadSha256, payload }: ScopeLeaf): ScopeEntr
 export const printable = (text: string): string =>
   text.replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
+/** Long strings shortened in the middle, so every field of an operation stays on screen. */
+function shortened(json: unknown): unknown {
+  if (typeof json === 'string') return json.length > 120 ? `${json.slice(0, 56)}...(${json.length} chars)...${json.slice(-56)}` : json;
+  if (Array.isArray(json)) return json.map(shortened);
+  if (json && typeof json === 'object') return Object.fromEntries(Object.entries(json).map(([key, value]) => [key, shortened(value)]));
+  return json;
+}
+
+/** One distinct operation of a batch, in full (what --operations-out writes). */
+export interface BatchOperation {
+  kind: string;
+  payloadSha256: string;
+  typeName: string;
+  operation: unknown;
+  subjects: string[];
+}
+
 /**
  * The operations a batch runs (MEDIUM-3): each bound leaf's stored payload, checked against the digest the leaf binds
- * and decoded as its kind's payload type (pki decodeBatchPayload), shown once per distinct operation with how many
- * leaves run it. `opaque`: bound leaves whose payload the server did not give (the approver sees only a digest).
- * Throws SCOPE_MISMATCH when a payload is not the one its leaf binds.
+ * and decoded as its kind's payload type (pki decodeBatchPayload), one line per distinct payload (grouped by the digest
+ * the leaves bind, never by what is displayed) with how many leaves run it and the digest's first 12 hex digits;
+ * long strings are shortened in the middle so every field shows. `opaque`: bound leaves whose operation cannot be
+ * shown (no stored payload, or a kind whose payload type this CLI does not know). Throws SCOPE_MISMATCH when a
+ * payload is not the one its leaf binds.
  */
-export function operationsOf(entries: readonly ScopeLeaf[]): { lines: string[]; opaque: ScopeLeaf[] } {
-  const counts = new Map<string, number>();
+export function operationsOf(entries: readonly ScopeLeaf[]): { lines: string[]; opaque: ScopeLeaf[]; operations: BatchOperation[] } {
+  const byDigest = new Map<string, BatchOperation>();
   const opaque: ScopeLeaf[] = [];
   for (const entry of entries) {
     if (unbound(entry)) continue;
@@ -146,20 +165,27 @@ export function operationsOf(entries: readonly ScopeLeaf[]): { lines: string[]; 
     } catch (error) {
       throw new CliError(
         'SCOPE_MISMATCH',
-        `The ${entry.kind} payload for ${entry.subject} is not what its leaf binds: ${(error as Error).message}`,
+        printable(`The ${entry.kind} payload for ${entry.subject} is not what its leaf binds: ${(error as Error).message}`),
         'Do not approve it. Report it: the control plane shows another operation than the batch runs.',
       );
     }
-    let json = JSON.stringify(decoded.json);
-    if (json.length > 400) json = `${json.slice(0, 400)}…`;
-    const key = `${entry.kind} ${decoded.typeChecked ? '' : '(type as the server says) '}${printable(json)}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    // Only the server's label says what this kind's payload is: not shown as if it were checked.
+    if (!decoded.typeChecked) {
+      opaque.push(entry);
+      continue;
+    }
+    const digest = Buffer.from(entry.payloadSha256!).toString('hex');
+    const key = `${entry.kind}\u0000${digest}`;
+    const known = byDigest.get(key);
+    if (known) known.subjects.push(entry.subject);
+    else
+      byDigest.set(key, { kind: entry.kind, payloadSha256: digest, typeName: decoded.typeName, operation: decoded.json, subjects: [entry.subject] });
   }
-  const lines = [...counts].map(([key, count]) => {
-    const space = key.indexOf(' ');
-    return `  ${key.slice(0, space)} ×${count}: ${key.slice(space + 1)}`;
-  });
-  return { lines, opaque };
+  const operations = [...byDigest.values()];
+  const lines = operations.map(
+    (op) => `  ${op.kind} ×${op.subjects.length} [${op.payloadSha256.slice(0, 12)}]: ${printable(JSON.stringify(shortened(op.operation)))}`,
+  );
+  return { lines, opaque, operations };
 }
 
 /** Bound leaves whose operation the approver cannot see are refused unless accepted (--allow-opaque). */
@@ -169,7 +195,7 @@ function checkOpaque(opaque: readonly ScopeLeaf[], allow: boolean, note: (line: 
     .slice(0, 5)
     .map((entry) => `${entry.kind} on ${entry.subject}`)
     .join(', ');
-  const message = `${opaque.length} command(s) show only a digest of their payload (${listed}${opaque.length > 5 ? ', …' : ''}): what they do cannot be checked here`;
+  const message = `${opaque.length} command(s) cannot show their operation (no stored payload, or a payload type this CLI does not know: ${listed}${opaque.length > 5 ? ', …' : ''}): what they do cannot be checked here`;
   if (!allow) throw new CliError('OPAQUE_SCOPE', message, 'Ask the batch creator to store the payloads, or pass --allow-opaque.');
   note(`Warning: ${message}.`);
 }
@@ -205,16 +231,28 @@ const allowOpaqueFlag = {
   description: 'Approve commands whose operation the batch shows only as a digest',
 } as const satisfies FlagSpec;
 
+const operationsOutFlag = {
+  type: 'string',
+  value: 'PATH',
+  description: 'Also write every distinct operation in full (JSON), with the subjects that run it',
+} as const satisfies FlagSpec;
+
 /** Shows the operations and refuses what the approver cannot see or did not accept. */
-function reviewOperations(
+async function reviewOperations(
   entries: readonly ScopeLeaf[],
-  flags: { 'allow-unbound'?: boolean; 'allow-opaque'?: boolean },
+  flags: { 'allow-unbound'?: boolean; 'allow-opaque'?: boolean; 'operations-out'?: string | undefined },
   note: (line: string) => void,
-): void {
-  const { lines, opaque } = operationsOf(entries);
+  path: (value: string) => string,
+): Promise<void> {
+  const { lines, opaque, operations } = operationsOf(entries);
   if (lines.length) {
     note('Operations:');
     for (const line of lines) note(line);
+  }
+  if (flags['operations-out'] !== undefined) {
+    const target = path(flags['operations-out']);
+    await writeFile(target, `${JSON.stringify(operations, null, 2)}\n`, { flag: 'wx' });
+    note(`Wrote every operation in full to ${target}.`);
   }
   checkUnbound(entries, flags['allow-unbound'] === true, note);
   checkOpaque(opaque, flags['allow-opaque'] === true, note);
@@ -569,6 +607,7 @@ export const batchCommands = [
       expect: expectFlag,
       'allow-unbound': allowUnboundFlag,
       'allow-opaque': allowOpaqueFlag,
+      'operations-out': operationsOutFlag,
       'max-hours': maxHoursFlag,
       unchecked: { type: 'boolean', description: 'Sign --root and --size without a scope to check them against' },
     },
@@ -616,7 +655,7 @@ export const batchCommands = [
             note(`Warning: ${warning}.`);
           note(`Every subject is one ${flags.expect} expects.`);
         }
-        reviewOperations(scope.entries, flags, note);
+        await reviewOperations(scope.entries, flags, note, path);
       } else {
         if (!batchId) throw usageError('Pass --batch with --root and --size');
         note(`Signing root ${flags.root} of batch ${batchId} unchecked: pass --scope to see what it contains.`);
@@ -811,6 +850,7 @@ export const batchCommands = [
       expect: expectFlag,
       'allow-unbound': allowUnboundFlag,
       'allow-opaque': allowOpaqueFlag,
+      'operations-out': operationsOutFlag,
       'max-hours': maxHoursFlag,
       'trust-domain': trustDomainFlag,
       pki: pkiFlag,
@@ -848,7 +888,7 @@ export const batchCommands = [
           note(`Warning: ${warning}.`);
         note(`Every subject is one ${flags.expect} expects.`);
       }
-      reviewOperations(entries, flags, note);
+      await reviewOperations(entries, flags, note, path);
       note(
         `Approvals: ${view.approvals.length} of ${view.requiredApprovals}; the window closes at ${new Date(view.notAfter).toISOString()}.`,
       );

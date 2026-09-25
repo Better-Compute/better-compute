@@ -1,5 +1,5 @@
 import { createHash, type KeyObject } from 'node:crypto';
-import { create, fromBinary, toJson, type JsonValue } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary, toJson, type JsonValue } from '@bufbuild/protobuf';
 import { anyUnpack, timestampFromMs, timestampMs, type Any } from '@bufbuild/protobuf/wkt';
 import { ComputeError } from '@better-compute/core';
 import {
@@ -398,8 +398,14 @@ export function decodeBatchPayload(
   if (!schema) throw fail('payload-unknown-type', `${typeName} is not a better-compute message`);
   let json: JsonValue;
   try {
-    json = toJson(schema, fromBinary(schema, payload.value), { registry: protocolRegistry });
-  } catch {
+    // Decoded without unknown fields and encoded again: bytes this build cannot show (a newer schema's fields, which
+    // an agent built on it would act on) or a non-canonical encoding do not come back the same.
+    const message = fromBinary(schema, payload.value, { readUnknownFields: false });
+    if (Buffer.compare(toBinary(schema, message), payload.value) !== 0)
+      throw fail('payload-unknown-fields', `The ${leaf.kind} payload has fields this CLI cannot show`);
+    json = toJson(schema, message, { registry: protocolRegistry });
+  } catch (error) {
+    if (error instanceof ComputeError) throw error;
     throw fail('payload-undecodable', `The ${leaf.kind} payload is not a valid ${typeName}`);
   }
   return { typeName, json, typeChecked: expected !== undefined };

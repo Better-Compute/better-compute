@@ -137,8 +137,8 @@ describe('batch commands against commandBatches', () => {
     expect(s.err.join('\n')).toMatch(/gpu\.reset: node_site/);
     // The operations themselves, decoded from the stored payloads the leaves bind (MEDIUM-3).
     expect(s.err.join('\n')).toMatch(/Operations:/);
-    expect(s.err.join('\n')).toMatch(/node\.reboot ×2: \{"reason":"rack 7 reimage"\}/);
-    expect(s.err.join('\n')).toMatch(/gpu\.reset ×1: \{"gpuUuids":\["GPU-0a1b"\]\}/);
+    expect(s.err.join('\n')).toMatch(/node\.reboot ×2 \[[0-9a-f]{12}\]: \{"reason":"rack 7 reimage"\}/);
+    expect(s.err.join('\n')).toMatch(/gpu\.reset ×1 \[[0-9a-f]{12}\]: \{"gpuUuids":\["GPU-0a1b"\]\}/);
 
     // A server of another deployment (or one lying about its own): refused before anything is signed.
     await expect(
@@ -185,7 +185,7 @@ describe('batch commands against commandBatches', () => {
     const shown = await s.run(['batch', 'show', '--batch', batchId]);
     expect(shown).toMatchObject({ scopeVerified: true, scopeSize: 2, reason: 'firmware rollout' });
     await s.run(['batch', 'approve', '--batch', batchId, '--key', 'alice.pem']);
-    expect(s.err.join('\n')).toMatch(/node\.reboot ×2: \{"reason":"firmware 2\.1"\}/);
+    expect(s.err.join('\n')).toMatch(/node\.reboot ×2 \[[0-9a-f]{12}\]: \{"reason":"firmware 2\.1"\}/);
     // A payload given as JSON that is not the kind's message is refused before anything is created.
     await writeFile(join(s.cwd, 'bad.json'), JSON.stringify([{ subject: 'node_a', kind: 'node.reboot', payload: { json: { nope: 1 } } }]));
     await expect(s.run(['batch', 'create', '--reason', 'x', '--scope', 'bad.json'])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
