@@ -3,6 +3,7 @@ import { isComputeError, type Decision } from '@better-compute/core';
 import {
   embeddedIam,
   remoteIam,
+  sessionAuthorization,
   tunnelAuthorizer,
   type RemoteIamClient,
 } from '@better-compute/iam';
@@ -177,6 +178,32 @@ describe('tunnelAuthorizer', () => {
     await expect(
       tunnelAuthorizer(embeddedIam(f.iam))({ claims: claims(f, caller) }),
     ).rejects.toSatisfy((error: unknown) => isComputeError(error, 'INVALID_CONFIG'));
+  });
+});
+
+describe('sessionAuthorization errors', () => {
+  it('answers false only when IAM says the identity is gone; a bare 404 is IAM trouble and throws', async () => {
+    const decision: Decision = {
+      tenantId: 'ten_1',
+      action: 'compute:instances:exec',
+      resource: { type: 'compute-instance', id: 'inst_1' },
+    };
+    const failing = (error: unknown) =>
+      sessionAuthorization({
+        listSessions: () => Promise.reject(error),
+        identityStatus: async () => 'active',
+        simulate: async () => true,
+        now: () => 0,
+      })({ identityId: 'idn_1', sessionId: 'ses_1' }, decision);
+    const iamError = (message: string) =>
+      Object.assign(new Error(message), { code: 'NOT_FOUND', status: 404 });
+    expect(await failing(iamError('Identity not found'))).toBe(false);
+    expect(await failing(iamError('Tenant not found'))).toBe(false);
+    // A proxy's 404 page, or a wrong base path: keep the session, retry.
+    await expect(failing(iamError('Endpoint not found'))).rejects.toThrow('Endpoint not found');
+    await expect(
+      failing(Object.assign(new Error('Not Found'), { code: 'INVALID_RESPONSE', status: 404 })),
+    ).rejects.toThrow('Not Found');
   });
 });
 

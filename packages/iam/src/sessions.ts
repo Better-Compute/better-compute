@@ -35,9 +35,19 @@ export interface SessionReader {
 /** Session kinds whose rights `policies.simulate` reproduces exactly (identity-level). */
 const simulatable: ReadonlySet<string> = new Set(['user', 'api-key', 'session-token']);
 
+/**
+ * better-iam's own "the identity (or its tenant) is gone", and nothing else. A bare 404 is also a proxy's error page
+ * or an endpoint that is not there ("Endpoint not found" on a wrong base path): that is IAM trouble, which throws so
+ * callers keep the session and retry, instead of closing every tunnel and revoking every certificate mid-outage.
+ */
 const notFound = (error: unknown): boolean => {
-  const { code, status } = (error ?? {}) as { code?: unknown; status?: unknown };
-  return code === 'NOT_FOUND' || status === 404;
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  return (
+    code === 'NOT_FOUND' &&
+    typeof message === 'string' &&
+    // Identity or tenant gone; `Resource not found` is better-iam's scoped lookup of a record outside the tenant.
+    /^(Identity|Tenant|Resource) not found/.test(message)
+  );
 };
 
 /** `authorizeSession` over a reader; answers false for anything it cannot confirm is live and allowed. */
