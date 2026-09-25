@@ -290,11 +290,7 @@ export function parseCreatePool(raw: unknown): CreatePoolInput {
     (typeof input.gpuModel !== 'string' || !/^[A-Za-z0-9-]{1,32}$/.test(input.gpuModel))
   )
     fail('gpuModel is invalid');
-  if (
-    input.policy !== undefined &&
-    (typeof input.policy !== 'object' || input.policy === null || Array.isArray(input.policy))
-  )
-    fail('policy must be an object');
+  if (input.policy !== undefined) checkPolicy(input.policy);
   const result: CreatePoolInput = {
     tenantId: tenant(input.tenantId),
     siteId: id(input.siteId, 'site', 'siteId'),
@@ -369,10 +365,17 @@ export function parseOfferPool(raw: unknown): OfferPoolInput {
 }
 
 /**
- * The offering validator (§10.2, §10.6): a pool holding `tenant-owned` nodes, or a single-tenant
- * sharing mode (`timeslice`, `mps`), may be offered only to its owner.
+ * The offering validator (§10.2, §10.6, §13): a pool holding `tenant-owned` nodes, or a
+ * single-tenant sharing mode (`timeslice`, `mps`), may be offered only to its owner. A
+ * `policy.singleTenant` pool (container runtimes share the host kernel) may be offered to one tenant
+ * besides its owner, without descendants. The caller holds the pool row lock.
  */
-export async function assertOfferable(tx: SqlTx, pool: Pool, toTenantId: string): Promise<void> {
+export async function assertOfferable(
+  tx: SqlTx,
+  pool: Pool,
+  toTenantId: string,
+  options: { includeDescendants?: boolean } = {},
+): Promise<void> {
   if (toTenantId === pool.ownerTenantId) return;
   if (pool.sharing === 'timeslice' || pool.sharing === 'mps')
     throw new ComputeError('INVALID_STATE', `${pool.sharing} pools are single-tenant`);
@@ -384,6 +387,46 @@ export async function assertOfferable(tx: SqlTx, pool: Pool, toTenantId: string)
     throw new ComputeError(
       'INVALID_STATE',
       `Pool ${pool.id} holds tenant-owned nodes and can be offered only to its owner`,
+    );
+  if (pool.policy.singleTenant !== true) return;
+  if (options.includeDescendants)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${pool.id} is single-tenant: offer it without includeDescendants`,
+    );
+  const other = (await offeredTenants(tx, pool)).find((tenantId) => tenantId !== toTenantId);
+  if (other !== undefined)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${pool.id} is single-tenant and already offered to ${other}`,
+    );
+}
+
+/** The tenants other than the owner that hold an offer of a pool, sorted. */
+async function offeredTenants(tx: SqlTx, pool: Pool): Promise<string[]> {
+  const { rows } = await tx.query<{ tenant_id: string }>(
+    `SELECT tenant_id FROM pool_offers WHERE pool_id = $1 AND tenant_id <> $2 ORDER BY tenant_id`,
+    [pool.id, pool.ownerTenantId],
+  );
+  return rows.map((row) => row.tenant_id);
+}
+
+/** `pools.update` may turn `singleTenant` on only while at most one tenant, without descendants, holds an offer. */
+async function assertSingleTenantable(tx: SqlTx, pool: Pool): Promise<void> {
+  const tenants = await offeredTenants(tx, pool);
+  if (tenants.length > 1)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${pool.id} is offered to ${tenants.length} tenants (${tenants.join(', ')}); unoffer all but one before setting singleTenant`,
+    );
+  const { rows } = await tx.query(
+    `SELECT 1 FROM pool_offers WHERE pool_id = $1 AND tenant_id <> $2 AND include_descendants LIMIT 1`,
+    [pool.id, pool.ownerTenantId],
+  );
+  if (rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${pool.id} is offered with includeDescendants; offer it without before setting singleTenant`,
     );
 }
 
@@ -488,17 +531,23 @@ export interface SetQuotaInput {
   max: number;
 }
 
+/** A pool policy object; the fields capacity enforces are type-checked. */
+function checkPolicy(policy: unknown): PoolPolicy {
+  if (typeof policy !== 'object' || policy === null || Array.isArray(policy))
+    fail('policy must be an object');
+  const singleTenant = (policy as Record<string, unknown>).singleTenant;
+  if (singleTenant !== undefined && typeof singleTenant !== 'boolean')
+    fail('policy.singleTenant must be true or false');
+  return policy as PoolPolicy;
+}
+
 function parseUpdatePool(raw: unknown): UpdatePoolInput {
   const input = object(raw, ['tenantId', 'poolId', 'policy', 'gpuModel']);
   const result: UpdatePoolInput = {
     tenantId: tenant(input.tenantId),
     poolId: id(input.poolId, 'pool', 'poolId'),
   };
-  if (input.policy !== undefined) {
-    if (typeof input.policy !== 'object' || input.policy === null || Array.isArray(input.policy))
-      fail('policy must be an object');
-    result.policy = input.policy as PoolPolicy;
-  }
+  if (input.policy !== undefined) result.policy = checkPolicy(input.policy);
   if (input.gpuModel !== undefined) {
     if (typeof input.gpuModel !== 'string' || !/^[A-Za-z0-9-]{1,32}$/.test(input.gpuModel))
       fail('gpuModel is invalid');
@@ -771,7 +820,9 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const tx = context.sql;
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
         if (pool.archived) throw new ComputeError('INVALID_STATE', `Pool ${pool.id} is archived`);
-        await assertOfferable(tx, pool, input.toTenantId);
+        await assertOfferable(tx, pool, input.toTenantId, {
+          includeDescendants: input.includeDescendants,
+        });
         await tx.query(
           `INSERT INTO pool_offers (pool_id, tenant_id, include_descendants, priority)
            VALUES ($1, $2, $3, $4)
@@ -837,6 +888,8 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
         const next: Pool = { ...pool, version: pool.version + 1 };
         if (input.policy !== undefined) next.policy = input.policy;
+        if (next.policy.singleTenant === true && pool.policy.singleTenant !== true)
+          await assertSingleTenantable(tx, pool);
         if (input.gpuModel !== undefined) next.gpuModel = input.gpuModel;
         await tx.query(
           `UPDATE pools SET policy = $2::jsonb, gpu_model = $3, version = version + 1 WHERE id = $1`,

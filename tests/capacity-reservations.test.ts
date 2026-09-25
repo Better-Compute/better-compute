@@ -722,6 +722,48 @@ describe('pools, capacity and quotas', () => {
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
+  it('offers a single-tenant pool to one tenant besides its owner, without descendants', async () => {
+    const offer = (toTenantId: string, extra: Record<string, unknown> = {}) =>
+      call(
+        'pools',
+        'offer',
+        { tenantId: 'root', poolId, toTenantId, quota: { gpu: 8 }, ...extra },
+        { who: root },
+      );
+    const update = (policy: Record<string, unknown>) =>
+      call('pools', 'update', { tenantId: 'root', poolId, policy }, { who: root });
+    // acme holds an offer already; with a second tenant the flag cannot be turned on.
+    await offer('beta');
+    await expect(update({ singleTenant: true })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringMatching(/offered to 2 tenants \(acme, beta\)/),
+    });
+    await call('pools', 'unoffer', { tenantId: 'root', poolId, toTenantId: 'beta' }, { who: root });
+    await offer('acme', { includeDescendants: true });
+    await expect(update({ singleTenant: true })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringMatching(/includeDescendants/),
+    });
+    await offer('acme');
+    await update({ singleTenant: true });
+
+    await expect(offer('beta')).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringMatching(/single-tenant and already offered to acme/),
+    });
+    await expect(offer('acme', { includeDescendants: true })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
+    // The one tenant may be re-offered (new quota), and the owner always.
+    await offer('acme', { quota: { gpu: 4 } });
+    await offer('root');
+    expect((await readQuotas(db, 'acme', poolId))[0]).toMatchObject({ max: 4 });
+    // Once acme is unoffered, another tenant may take its place.
+    await call('pools', 'unoffer', { tenantId: 'root', poolId, toTenantId: 'acme' }, { who: root });
+    await offer('beta');
+    await expect(update({ singleTenant: 'yes' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('summarizes capacity by GPU model and previews a request without booking', async () => {
     await call('reservations', 'create', create());
     const summary = (await call('capacity', 'summary', { tenantId: 'acme' })) as {
