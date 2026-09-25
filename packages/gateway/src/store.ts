@@ -85,6 +85,19 @@ export interface HelloInput {
   protoMax?: number;
 }
 
+export interface HelloOptions {
+  /** A prior session whose `last_seen` is younger than this is live (a second Hello is a duplicate). */
+  liveWindowMs: number;
+  /**
+   * Duplicate-identity quarantine (§7.2): more than `max` duplicate Hellos within `windowMs` revoke
+   * the presented certificate. Default 3 in 10 minutes. A reboot loop faster than the liveness
+   * window looks the same and counts too.
+   */
+  duplicateHellos?: { max: number; windowMs: number };
+}
+
+export const duplicateHelloDefaults = { max: 3, windowMs: 10 * 60_000 } as const;
+
 export interface HelloResult {
   epoch: number;
   tenantId: string;
@@ -681,8 +694,8 @@ export function createGatewayStore(options: GatewayStoreOptions) {
      * The Hello transaction (§7.2): bump the epoch and route to this gateway, then apply the
      * self-terminating and journal-lost rules, the replayed results, and choose the replay.
      */
-    async hello(input: HelloInput, options: { liveWindowMs: number }): Promise<HelloResult> {
-      return db.transaction(async (tx) => {
+    async hello(input: HelloInput, options: HelloOptions): Promise<HelloResult> {
+      const outcome = await db.transaction(async (tx): Promise<HelloResult | { quarantined: string[] }> => {
         await fence(tx);
         // The session certificate as compute recorded it, before anything changes: Postgres is the
         // revocation truth (the in-memory feed may lag a poll), and a restricted certificate
@@ -727,6 +740,67 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             nodeId: input.nodeId,
           });
         const tenantId = prior.tenant_id;
+
+        // Duplicate identity (§7.2): a second live Hello from another boot wins, and is reported. The
+        // same certificate alternating between two machines (a cloned key) more than
+        // `duplicateHellos.max` times within `windowMs` quarantines it: its serial is revoked (every
+        // gateway's RevocationFeed drops the other clone too) and this Hello is refused. An operator
+        // re-joins the real machine with a new token.
+        const duplicate = prior.live && prior.boot_id !== null && prior.boot_id !== input.bootId;
+        if (duplicate) {
+          const limits = options.duplicateHellos ?? duplicateHelloDefaults;
+          const counted = await tx.query<{ duplicate_hellos: number }>(
+            `UPDATE node_sessions SET
+               duplicate_hellos = CASE WHEN duplicate_since IS NULL
+                 OR duplicate_since < compute_now() - make_interval(secs => $2::float8) THEN 1
+                 ELSE duplicate_hellos + 1 END,
+               duplicate_since = CASE WHEN duplicate_since IS NULL
+                 OR duplicate_since < compute_now() - make_interval(secs => $2::float8) THEN compute_now()
+                 ELSE duplicate_since END
+             WHERE node_id = $1 RETURNING duplicate_hellos`,
+            [input.nodeId, limits.windowMs / 1000],
+          );
+          const alternations = Number(counted.rows[0]!.duplicate_hellos);
+          const quarantine = alternations > limits.max;
+          await events.publish(tx, {
+            type: 'security.node.duplicate-session',
+            tenantId,
+            subject: `node/${input.nodeId}`,
+            data: {
+              nodeId: input.nodeId,
+              gatewayId: input.gatewayId,
+              previousBootId: prior.boot_id,
+              bootId: input.bootId,
+              alternations,
+              windowSeconds: limits.windowMs / 1000,
+              quarantined: quarantine,
+            },
+          });
+          if (quarantine) {
+            // The presented certificate; without a recorded serial (header-authenticated dev
+            // gateways), every live certificate of the node.
+            const revoked = await tx.query<{ serial: string }>(
+              `UPDATE node_certs SET revoked_at = compute_now(), revocation_reason = 'duplicate-identity'
+                WHERE node_id = $1 AND revoked_at IS NULL AND ($2::text IS NULL OR serial = $2)
+                RETURNING serial`,
+              [input.nodeId, input.certSerial ?? null],
+            );
+            // A re-joined machine starts counting afresh.
+            await tx.query(
+              'UPDATE node_sessions SET duplicate_hellos = 0, duplicate_since = NULL WHERE node_id = $1',
+              [input.nodeId],
+            );
+            const serials = revoked.rows.map((row) => row.serial);
+            await events.publish(tx, {
+              type: 'security.node.quarantined',
+              tenantId,
+              subject: `node/${input.nodeId}`,
+              data: { nodeId: input.nodeId, reason: 'duplicate-identity', alternations, serials },
+            });
+            return { quarantined: serials };
+          }
+        }
+
         const journalChanged = prior.journal_id !== null && prior.journal_id !== input.journalId;
         const bootChanged =
           prior.boot_id !== null &&
@@ -845,6 +919,13 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           allowedKinds,
         };
       });
+      // Refused only after the quarantine committed (a throw inside would roll the revocation back).
+      if ('quarantined' in outcome)
+        throw new ComputeError('UNAUTHENTICATED', 'certificate quarantined: duplicate identity', undefined, {
+          reason: 'duplicate-identity',
+          serials: outcome.quarantined,
+        });
+      return outcome;
     },
 
     /**

@@ -147,6 +147,11 @@ export interface GatewayOptions {
    * to starve the gateway's own lease renewal.
    */
   maxPendingHellos?: number;
+  /**
+   * Duplicate-identity quarantine (§7.2): more than `max` duplicate Hellos (a live session from
+   * another boot) within `windowMs` revoke the presented certificate. Default 3 in 10 minutes.
+   */
+  duplicateHellos?: { max: number; windowMs: number };
   /** `gateway:<id>` lease TTL (default 20 000 ms), renewed every `leaseRenewMs` (5 000 ms). */
   gatewayLeaseTtlMs?: number;
   leaseRenewMs?: number;
@@ -518,11 +523,26 @@ export function createGateway(options: GatewayOptions): Gateway {
           protoMax: hello.protoMax,
           ...(peer.serial ? { certSerial: peer.serial } : {}),
         },
-        { liveWindowMs: sessionLeaseTtlMs },
+        {
+          liveWindowMs: sessionLeaseTtlMs,
+          ...(options.duplicateHellos ? { duplicateHellos: options.duplicateHellos } : {}),
+        },
       )
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         if (isComputeError(error, 'NOT_FOUND'))
           throw new GrpcError(GrpcCode.PERMISSION_DENIED, 'this node has not joined');
+        if (isComputeError(error, 'UNAUTHENTICATED') && error.details?.reason === 'duplicate-identity') {
+          // Quarantined (committed): the clone connected here goes too, without waiting for the
+          // revocation feed; other gateways drop theirs from the feed.
+          const serials = (error.details.serials as string[] | undefined) ?? [];
+          await gateway.revoke(hello.nodeId, {
+            reason: 'duplicate-identity',
+            serials: serials.map(
+              (serial) => new Uint8Array(Buffer.from(serial.length % 2 ? `0${serial}` : serial, 'hex')),
+            ),
+          });
+          throw new GrpcError(GrpcCode.UNAUTHENTICATED, 'certificate quarantined: duplicate identity');
+        }
         if (error instanceof FencedError) {
           void jobs.lease.tick().catch(() => {});
           throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway fenced; reconnect');

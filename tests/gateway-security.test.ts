@@ -472,6 +472,85 @@ describe('database-side revocation at Hello, and call context for the services',
     expect(await f.session(node)).toMatchObject({ session_epoch: 1, boot_id: 'boot-1' });
   });
 
+  /** One Hello with `serial` from the machine whose boot is `bootId`. */
+  const helloFrom = async (node: string, serial: string, bootId: string) => {
+    const stream = new FakeStream();
+    await f.gateway.open({ nodeId: node, serial }, stream).receive(helloFrame(node, { bootId }));
+    return stream;
+  };
+
+  it('quarantines a certificate that alternates between two machines more than 3 times in 10 minutes (§7.2)', async () => {
+    const node = await f.addNode();
+    await record(node, 'dd01');
+    await record(node, 'dd02'); // another certificate of the node: not the cloned one
+    const a = await helloFrom(node, 'dd01', 'boot-a');
+    expect(a.of('welcome')).toHaveLength(1);
+    // Three alternations: each new Hello wins over the live session from the other boot.
+    let last = a;
+    for (const bootId of ['boot-b', 'boot-a', 'boot-b']) {
+      const next = await helloFrom(node, 'dd01', bootId);
+      expect(next.of('welcome')).toHaveLength(1);
+      expect(last.closed?.error?.code).toBe(GrpcCode.ABORTED);
+      last = next;
+    }
+    // The fourth is refused, and the clone connected here is dropped with a revocation notice.
+    const fourth = await helloFrom(node, 'dd01', 'boot-a');
+    expect(fourth.of('welcome')).toEqual([]);
+    expect(fourth.closed?.error).toMatchObject({
+      code: GrpcCode.UNAUTHENTICATED,
+      message: 'certificate quarantined: duplicate identity',
+    });
+    expect(last.of('revoked')[0]).toMatchObject({ reason: 'duplicate-identity' });
+    expect(last.closed?.error?.code).toBe(GrpcCode.UNAUTHENTICATED);
+
+    const { rows: certs } = await f.db.query<{ serial: string; revocation_reason: string | null }>(
+      'SELECT serial, revocation_reason FROM node_certs WHERE node_id = $1 ORDER BY serial',
+      [node],
+    );
+    expect(certs).toEqual([
+      { serial: 'dd01', revocation_reason: 'duplicate-identity' },
+      { serial: 'dd02', revocation_reason: null },
+    ]);
+    const duplicates = (await f.outbox('security.node.duplicate-session')).map((row) => row.payload.data);
+    expect(duplicates.map((data) => [data.alternations, data.quarantined])).toEqual([
+      [1, false],
+      [2, false],
+      [3, false],
+      [4, true],
+    ]);
+    expect((await f.outbox('security.node.quarantined')).map((row) => row.payload.data)).toEqual([
+      { nodeId: node, reason: 'duplicate-identity', alternations: 4, serials: ['dd01'] },
+    ]);
+    // Both machines stay out with that certificate; a re-join (new certificate) starts counting afresh.
+    const again = await helloFrom(node, 'dd01', 'boot-b');
+    expect(again.closed?.error).toMatchObject({ code: GrpcCode.UNAUTHENTICATED, message: 'certificate revoked' });
+    expect(await f.session(node)).toMatchObject({ duplicate_hellos: 0, duplicate_since: null });
+  });
+
+  it('counts alternations within the window only; a reconnect after the session went quiet is no duplicate', async () => {
+    const node = await f.addNode();
+    await record(node, 'ee01');
+    await helloFrom(node, 'ee01', 'boot-a');
+    await helloFrom(node, 'ee01', 'boot-b');
+    await helloFrom(node, 'ee01', 'boot-a');
+    await helloFrom(node, 'ee01', 'boot-b');
+    expect(await f.session(node)).toMatchObject({ duplicate_hellos: 3 });
+    // Ten minutes on, the count starts again.
+    await f.db.query(
+      `UPDATE node_sessions SET duplicate_since = compute_now() - interval '11 minutes' WHERE node_id = $1`,
+      [node],
+    );
+    expect((await helloFrom(node, 'ee01', 'boot-a')).of('welcome')).toHaveLength(1);
+    expect(await f.session(node)).toMatchObject({ duplicate_hellos: 1 });
+    // A session that is no longer live (a crash, then a reboot) is superseded without counting.
+    await f.db.query(`UPDATE node_sessions SET last_seen = compute_now() - interval '5 minutes' WHERE node_id = $1`, [
+      node,
+    ]);
+    expect((await helloFrom(node, 'ee01', 'boot-c')).of('welcome')).toHaveLength(1);
+    expect(await f.session(node)).toMatchObject({ duplicate_hellos: 1 });
+    expect(await f.outbox('security.node.quarantined')).toEqual([]);
+  });
+
   it('passes { peerNodeId, gatewayId } to secret and renew, and { gatewayId } to join', async () => {
     const seen: { method: string; context: unknown }[] = [];
     f.services.services.secret = async (_request, context) => {
