@@ -90,6 +90,10 @@ export interface PoolPolicy {
    * and deployed by metal with the reservation's profile, then wiped on release.
    */
   tenantRoot?: boolean;
+  /** (v0.3) The vps runtime driver this pool's hosted instances run on (default: vps()'s first runtime). */
+  runtime?: string;
+  /** (v0.3) Only one tenant besides the owner may be offered this pool; set for container runtimes (§13). */
+  singleTenant?: boolean;
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
