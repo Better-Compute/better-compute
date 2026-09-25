@@ -1,4 +1,4 @@
-import type { KeyObject } from 'node:crypto';
+import { createPrivateKey, type KeyObject } from 'node:crypto';
 import { createServer as createHttpServer, type IncomingMessage, type Server } from 'node:http';
 import { createServer as createHttpsServer, type ServerOptions } from 'node:https';
 import type { AddressInfo } from 'node:net';
@@ -62,8 +62,16 @@ function refuse(socket: Duplex, status: number, error: GrpcError): void {
  * `maxStreams`, draining) and answers `101` with the gateway proof. Other upgrade paths are left
  * to other listeners.
  */
-export function attachGatewayWs(server: Server, gateway: Gateway, options: GatewayWsOptions): () => void {
+export function attachGatewayWs(
+  server: Server,
+  gateway: Gateway,
+  options: GatewayWsOptions,
+): (() => void) & {
+  /** Signs later gateway proofs with a renewed serving key and chain (certificate rotation). */
+  setServing(serving: GatewayWsOptions['serving']): void;
+} {
   const clock = options.clock ?? systemClock;
+  let serving = options.serving;
   const jtiCache = options.jtiCache ?? createReplayCache({ whenFull: 'refuse' });
   const pingIntervalMs = options.pingIntervalMs ?? 20_000;
 
@@ -130,8 +138,8 @@ export function attachGatewayWs(server: Server, gateway: Gateway, options: Gatew
       'HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n' +
         `sec-websocket-accept: ${wsAcceptKey(key)}\r\nsec-websocket-protocol: ${WS_SUBPROTOCOL}\r\n` +
         `x-bc-gateway-proof: ${signGatewayProof({
-          key: options.serving.key,
-          chain: options.serving.chain,
+          key: serving.key,
+          chain: serving.chain,
           gatewayId: gateway.id,
           nodeId: identity.nodeId,
           nonce,
@@ -158,14 +166,30 @@ export function attachGatewayWs(server: Server, gateway: Gateway, options: Gatew
   };
 
   server.on('upgrade', onUpgrade);
-  return () => void server.off('upgrade', onUpgrade);
+  return Object.assign(() => void server.off('upgrade', onUpgrade), {
+    setServing(next: GatewayWsOptions['serving']) {
+      serving = next;
+    },
+  });
+}
+
+/** The serving key and chain for gateway proofs, from PEM material (a reloaded key pair). */
+export function servingFromPem(material: { key: string | Buffer; cert: string | Buffer }): GatewayWsOptions['serving'] {
+  const chain = [...String(material.cert).matchAll(/-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/g)].map(
+    (match) => new Uint8Array(Buffer.from(match[1]!.replace(/\s+/g, ''), 'base64')),
+  );
+  if (!chain.length) throw new GrpcError(GrpcCode.INVALID_ARGUMENT, 'the certificate PEM holds no certificate');
+  return { key: createPrivateKey(material.key), chain };
 }
 
 export interface ServedGatewayWs {
   server: Server;
   port: number;
   close(): Promise<void>;
-  /** Hot-reloads the serving certificate for new connections; see `ServedGateway.setTls`. */
+  /**
+   * Hot-reloads the serving certificate for new connections (see `ServedGateway.setTls`) and, from
+   * the same key and chain, the key that signs later in-band gateway proofs.
+   */
   setTls(material: TlsMaterial): void;
 }
 
@@ -197,8 +221,13 @@ export async function serveGatewayWs(
   return {
     server,
     port: (server.address() as AddressInfo).port,
-    setTls: (material) =>
-      swapSecureContext(server as { setSecureContext?(options: object): void }, options.tls, material),
+    setTls: (material) => {
+      // The in-band gateway proof is signed with the serving key too: rotate both, the proof key
+      // only once the TLS context took the pair (so a bad pair changes neither).
+      const serving = material.key && material.cert ? servingFromPem({ key: material.key as string, cert: material.cert as string }) : undefined;
+      swapSecureContext(server as { setSecureContext?(options: object): void }, options.tls, material);
+      if (serving) detach.setServing(serving);
+    },
     close: () =>
       new Promise<void>((resolve) => {
         detach();

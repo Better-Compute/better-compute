@@ -412,4 +412,42 @@ describe('connectGatewayWs (the daemon side)', () => {
     await expect.poll(() => frames.length).toBe(1);
     client.close();
   });
+
+  it('rotates the TLS certificate and the proof key together on setTls (a renewed serving pair)', async () => {
+    // Both certificates serve TLS (wall clock) and sign proofs (sim clock): long enough for both.
+    const issue = async (ca: LocalCertificateAuthority) => {
+      const key = generateP256KeyPair();
+      const cert = await ca.issue(key.publicKey, { usage: 'server', dnsSans: ['localhost'], ttlSeconds: 30 * 86_400 });
+      const chain = [cert.certificate, ...cert.chain];
+      return { key, chain, pem: { key: privateKeyPem(key.privateKey), cert: chain.map((der) => toPem(der)).join('') } };
+    };
+    const renewedCa = createServingCa({ clock: f.clock });
+    const [first, renewed] = await Promise.all([issue(p.servingCa), issue(renewedCa)]);
+    const served = await serve({
+      insecure: false,
+      tls: first.pem,
+      serving: { key: first.key.privateKey, chain: first.chain },
+    });
+    const node = await f.addNode();
+    const agent = await p.agent(node);
+    const dialPinned = (ca: LocalCertificateAuthority) =>
+      connectGatewayWs({
+        url: `wss://localhost:${served.port}`,
+        nodeId: node,
+        ...agent,
+        audience: 'gw.eu-1.test',
+        servingRoots: [ca.certificate],
+        tls: { ca: toPem(ca.certificate) },
+        clock: f.clock,
+        onFrame: () => {},
+      });
+    (await dialPinned(p.servingCa)).close();
+
+    served.setTls(renewed.pem);
+    // A daemon trusting only the renewed pair's CA gets through: TLS and the in-band proof both moved.
+    const client = await dialPinned(renewedCa);
+    expect(client.gatewayId).toBe(f.gateway.id);
+    client.close();
+    await expect(dialPinned(p.servingCa)).rejects.toBeDefined();
+  });
 });
