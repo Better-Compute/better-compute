@@ -252,6 +252,35 @@ describe('IMDS workload identity (§16 v0.5)', () => {
     expect((await ask()).jwe).not.toBe('');
   }, 60_000);
 
+  it('mints nothing for a suspended or deleted tenant, before teardown reaches its instances (§12.8)', async () => {
+    const x = await running(enabledPool);
+    const services = dev.compute.gatewayServices;
+    const ask = () =>
+      services.workloadToken!(
+        createWorkloadTokenRequest({ nodeKey: daemon(x.nodeId).nodeKey!, instanceId: x.id }).request,
+        { peerNodeId: x.nodeId },
+      );
+    try {
+      for (const state of ['suspended', 'deleted']) {
+        await dev.database.query(
+          `INSERT INTO compute_tenant_states (tenant_id, state) VALUES ($1, $2)
+           ON CONFLICT (tenant_id) DO UPDATE SET state = EXCLUDED.state`,
+          [tenantId, state],
+        );
+        expect(await ask(), state).toMatchObject({ error: 'disabled', jwe: '' });
+      }
+    } finally {
+      await dev.database.query('DELETE FROM compute_tenant_states WHERE tenant_id = $1', [tenantId]);
+    }
+    expect((await ask()).jwe).not.toBe('');
+    const { rows } = await dev.database.query<{ data: Record<string, unknown> }>(
+      `SELECT payload->'data' AS data FROM outbox WHERE topic = 'security.workload.refused' ORDER BY seq`,
+    );
+    expect(rows.map((row) => row.data.reason)).toEqual(
+      expect.arrayContaining(['tenant-suspended', 'tenant-deleted']),
+    );
+  }, 60_000);
+
   it('mints nothing in a pool that did not turn workload identity on', async () => {
     const off = await running(disabledPool);
     const token = await session(off.nodeId, off.id);

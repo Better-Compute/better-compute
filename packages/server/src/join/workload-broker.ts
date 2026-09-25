@@ -220,11 +220,13 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
           throw new Refused('access-denied', 'restricted-certificate', node.owner_tenant_id);
         // 2. A live instance placed on this node, with its live allocation here (without the vps
         //    module there are no instances to mint for).
-        const hasInstances = (
-          await tx.query<{ present: boolean }>(
-            `SELECT to_regclass('instances') IS NOT NULL AS present`,
+        const tables = (
+          await tx.query<{ present: boolean; tenancy: boolean }>(
+            `SELECT to_regclass('instances') IS NOT NULL AS present,
+                    to_regclass('compute_tenant_states') IS NOT NULL AS tenancy`,
           )
-        ).rows[0]?.present;
+        ).rows[0];
+        const hasInstances = tables?.present;
         const { rows } = hasInstances
           ? await tx.query<{ tenant_id: string; enabled: boolean | null }>(
               `SELECT i.tenant_id,
@@ -243,12 +245,23 @@ export function createWorkloadBroker(options: WorkloadBrokerOptions): WorkloadBr
         // 3. The pool opted in.
         if (instance.enabled !== true)
           throw new Refused('disabled', 'disabled', instance.tenant_id);
+        // 4. The instance's tenant is active: a suspended or deleted tenant's workloads get no new
+        //    credentials, even while teardown has not reached its instances yet (§12.8).
+        if (tables?.tenancy) {
+          const blocked = (
+            await tx.query<{ state: string }>(
+              `SELECT state FROM compute_tenant_states WHERE tenant_id = $1 AND state <> 'active'`,
+              [instance.tenant_id],
+            )
+          ).rows[0];
+          if (blocked) throw new Refused('disabled', `tenant-${blocked.state}`, instance.tenant_id);
+        }
         return { opened, instance };
       });
-      // 4. The audience.
+      // 5. The audience.
       if (opened.audience !== '' && !audiences.has(opened.audience))
         throw new Refused('audience', 'audience', instance.tenant_id);
-      // 5. Replay and rate: a relayed copy of an answered request burns nothing.
+      // 6. Replay and rate: a relayed copy of an answered request burns nothing.
       if (!remember(`${nodeId}\0${opened.requestId}`, now))
         throw new Refused('access-denied', 'replayed', instance.tenant_id);
       if (perInstance.take(opened.instanceId, now) === undefined)
