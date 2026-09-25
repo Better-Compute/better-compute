@@ -331,7 +331,15 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - Decision: release pins and approver-set pins come only from install-time config, never the well-known.
       - ALL CLOSED: bcd 7ac5609, 9b56c7d, da474d0 ([site] bmc_networks, [update] release_sequence); pki/CLI bb91a99,
         588e135, 8fe1fb8, f0cf592; server 8bfe10c, ea0d880. Open: install-script --bmc-networks ([402c97]); bcd SIGTERM
-        exit in e2e ([6a20b8]).
+        exit in e2e ([6a20b8]; fixed fc0ca6a). Ramdisk: ext and FAT/Ignition via debugfs/mtools (d9a900f); only xfs/btrfs
+        still mount.
+    - Security review 10 ([402c97]'s, over its own work): its fixes are in b118616 and the L6/L7 commit. Protocol
+      decisions in 856c00c:
+      - M3: one adoption rule, (N, e') only with e' > e and k-of-held signatures, including for an unchanged set.
+      - M5: Hello 18/19 and StatusReport 10/11 report the held approver set.
+      - L: the epoch and set signatures are in the trust digest.
+      Wiring: pki, FakeDaemon and CLI sign-approvers for the new set ([402c97]); bcd ([6a20b8]); node_sessions
+      columns ([f02367]) written by the gateway ([c321a3]); doctor lists lagging nodes ([402c97]).
     - Ramdisk image mount: REDUCED. ext* is written with debugfs, never mounted (1ae1789). The xfs/btrfs/vfat
       fallbacks and the Ignition boot partition remain ([6a20b8]).
       - proto: 525c199, 4f11548;
