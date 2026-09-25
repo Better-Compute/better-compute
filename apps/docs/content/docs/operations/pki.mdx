@@ -19,8 +19,13 @@ sources:
   - packages/cli/src/commands/audit.ts
   - packages/cli/src/commands/daemon.ts
   - packages/cli/src/host/gateway.ts
+  - packages/cli/src/host/config.ts
+  - packages/gateway/src/tls-reload.ts
   - packages/server/src/options.ts
   - packages/server/src/runtime/command-signing.ts
+  - packages/server/src/controllers/nodespec.ts
+  - packages/server/src/join/allocation-binding.ts
+  - packages/gateway/src/store.ts
   - packages/server/src/tunnels/module.ts
   - packages/postgres/src/migrations/0002_base.ts
   - examples/shared/compose.ts
@@ -118,7 +123,36 @@ earlier files atomically.
 | `--days N` | 30 | Lifetime, from 1 to 30 days |
 | `--pki PATH` | `.better-compute/pki.json` | The bundle |
 
-The `serve` gateway role reads its certificate at start, so after reissuing, restart gateways one at a time.
+A running gateway picks a reissued certificate up without a restart when it reads it from files. Point
+`host.gateway.tlsFiles` at them (and `host.gateway.internal.tlsFiles` at the internal-CA pair of the control API):
+
+```ts title="better-compute.config.ts"
+export const host = defineHost(() => ({
+  gateway: {
+    region: 'eu-1',
+    tls: {}, // other listener options; key, cert and ca come from the files
+    tlsFiles: {
+      key: '/etc/better-compute/tls/gateway.key',
+      cert: '/etc/better-compute/tls/gateway.crt',
+      ca: '/etc/better-compute/tls/node-ca.pem', // node CA roots, for client verification
+      intervalMs: 60_000, // the default
+    },
+  },
+}));
+```
+
+`serve` reads the files at start over `tls` and then checks their modification time and size every `intervalMs`. A
+changed set is loaded into a new secure context first and swapped onto the daemon listener and the WebSocket
+fallback (or the control API): new handshakes get the renewed certificate, and open sessions keep theirs, so no daemon
+is disconnected by a rotation. A half-written or mismatched pair is reported (`Gateway serving certificate not
+reloaded: …`) and the listener keeps its certificate; the next change is tried again. Without `tlsFiles`, the
+certificate in `tls` is read once at start, so after reissuing, restart gateways one at a time.
+
+Outside `serve`, `serveGateway`, `serveGatewayWs` and `serveInternal` from `better-compute/gateway` return
+`setTls({ key, cert, ca? })`, which applies new material over the listener's original TLS options (protocol versions
+and the rest stay) and throws `INVALID_CONFIG`, changing nothing, when the key does not match its certificate.
+`watchTlsFiles({ key, cert, ca? }, apply, { intervalMs?, onError?, onReload? })` polls the files and calls `apply`
+with a changed set, for example `(tls) => served.setTls(tls)`.
 
 ## The bundle in code
 
@@ -223,6 +257,19 @@ Daemons receive the roots in their trust bundle, first in `JoinResponse` and the
 JoinService key so a gateway can relay it but not change it. A daemon requires a signature for the kinds its own
 table marks destructive, and checks any signature that is present.
 
+The same worker key signs desired state (v0.4). When the NodeSpec controller writes a new generation, it encodes the
+`DesiredStateBody` with pki's shared encoder (`storedDesiredState`, spec hash = SHA-256 of the encoded NodeSpec),
+signs it under purpose `desired-state` (`CommandSigner.signDesiredState`) and stores both in `nodes.spec_body` and
+`nodes.spec_signature` (`core/0021_signed_specs`) in the same `UPDATE` that bumps the generation. The gateway holds no
+key: it relays the stored bytes verbatim (`desiredStateFromStored`), and falls back to an unsigned rendering from
+`nodes.spec` (`desiredStateBodyFromJson`, byte-identical to the writer's) only when no current body is stored.
+`verifyDesiredState(desired, { roots, now, nodeId, required })` is the daemon-side check.
+
+Signed intent also changes how GPU bindings count: with `pki.commandSigning`, capacity's `attestedBindings`
+defaults to `pkiAllocationBindingCheck()`, which verifies each `AllocationBound` against the reporting node's own
+certificate in `node_certs` before the reservation goes active. See
+[attested bindings](/docs/guides/capacity/reservations#attested-bindings).
+
 Rotating the root takes three steps, gated on the fleet:
 
 1. add the new root beside the old one (`pki.commandSigningRoots`) and bump `pki.trustVersion`; workers still sign
@@ -259,7 +306,7 @@ the key's pin, taken from `--pin`, `BETTER_COMPUTE_AUDIT_PIN` or the bundle's pu
 | --- | --- |
 | Node certificates | Automatically: daemons renew at about 60% of their 24 h lifetime |
 | Worker signing keys | Automatically, at 60% of their 24 h lifetime |
-| Gateway serving certificates | `pki issue-gateway` before the 30 days run out, then restart each gateway |
+| Gateway serving certificates | `pki issue-gateway` before the 30 days run out; gateways with `host.gateway.tlsFiles` hot-reload it, others need a restart one at a time |
 | Command-signing root | The three steps above |
 | Exec ticket key | `rotate()` on the issuer; the previous key stays in the JWKS |
 | Sealed secrets | `localSealedSecretStore` with several keys, then `reseal()` (see [configuration](/docs/operations/configuration#the-deployment-secret)) |

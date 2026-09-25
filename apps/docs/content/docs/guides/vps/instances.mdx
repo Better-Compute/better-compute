@@ -78,7 +78,7 @@ better-compute api instances.create tenantId=acme poolId=pool_01jz… flavor=g1.
     flavor: { type: 'string', description: 'A flavor name of that pool, such as g1.small.', required: true },
     imageId: { type: 'string', description: 'Up to 200 characters of letters, digits and . _ @ : / -, starting with a letter or digit. Hosted pools resolve it with vps({ images }); provider pools pass it to the provider as is.', required: true },
     sshKeys: { type: 'string[]', description: 'Up to 32 OpenSSH public key lines: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256/384/521 or sk-ssh-ed25519@openssh.com.', default: '[]' },
-    userData: { type: 'string', description: 'Your own cloud-init, at most 32 KiB. When given it is used as is, and sshKeys are not added to it.' },
+    userData: { type: 'string', description: 'Your own cloud-init, at most 32 KiB, or a reference to it. When given it is used as is, and sshKeys are not added to it. A reference must be secret://<tenantId>/<id>, a secret of this tenant; any other secret://, vault:// or env:// value is INVALID_INPUT.' },
     desiredState: { type: "'running' | 'stopped'", description: 'Where the instance should end up.', default: "'running'" },
     projectId: { type: 'string', description: 'A prj_ id, for usage tags and policies.' },
     idempotencyKey: { type: 'string', description: '1 to 128 of letters, digits and . _ : -. Retrying with the same key returns the same instance.', required: true },
@@ -261,9 +261,18 @@ sequenceDiagram
 ```
 
 Each hosted node's `instances` section lists every live instance placed on it (not `pending`, `scheduling` or
-`deleted`) with its runtime, flavor, image (`url`, `sha256`, `format`), rendered cloud-init and the GPU atoms of its
-allocation. An instance being deleted is sent with `desiredState: 'deleted'`. The rendered cloud-init sets the
-hostname from the instance id and installs `sshKeys`, unless you passed `userData`.
+`deleted`) with its runtime, flavor, image (`url`, `sha256`, `format`), its user data as a `secret://` reference,
+the GPU atoms and id of its allocation (`allocationId`), and one NIC (`nics`): the host bridge (`br0`, or
+`vps({ hostNetwork })`), a stable locally administered MAC derived from the instance id, and its IPAM address in CIDR
+form. NIC order is the guest's interface order and is kept. An instance being deleted is sent with
+`desiredState: 'deleted'`.
+
+User data never travels in the spec. At admission in a hosted pool, vps renders the cloud-config (the hostname from
+the instance id and `sshKeys`, unless you passed `userData`), seals it through the secret broker and keeps only its
+`secret://` reference (`instances.user_data_sealed`, migration `vps/0002_sealed_user_data`); a tenant's own reference
+is kept as it is, and only a sealed one is deleted with the instance. The host fetches the value with a node-signed
+`SecretRequest` naming the instance's allocation, and the broker releases it only when the secret belongs to the
+instance's own tenant. The guest gets no join token, no `bcd` and no IAM key.
 
 From the reports, the reconciler moves the instance:
 
@@ -273,9 +282,10 @@ From the reports, the reconciler moves the instance:
 - While the report and `desiredState` disagree, it waits and looks again in 10 seconds.
 
 <Callout type="warn" title="The host side is not built yet">
-bcd is written in `daemon/` but not built or released, and has no VM runtime behind its `instances` section. On the
-wire, the NodeSpec encoder forwards user data only as a `secret://` reference and does not fill `InstanceSpec.nics`,
-so a runtime would not yet receive the rendered cloud-init or the IPAM address.
+bcd is written in `daemon/` but not built or released, and has no VM runtime behind its `instances` section. The
+TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
+user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway
+with it.
 </Callout>
 
 ### Provider pools

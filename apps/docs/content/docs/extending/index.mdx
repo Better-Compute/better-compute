@@ -13,6 +13,7 @@ sources:
   - packages/server/src/index.ts
   - packages/server/src/options.ts
   - packages/server/src/registry.ts
+  - packages/server/src/audit-sinks-module.ts
   - packages/better-compute/src/index.ts
   - packages/better-compute/README.md
   - packages/driver-sdk/README.md
@@ -48,8 +49,9 @@ Better Compute has no plugin loader. Every place you can change its behaviour is
 | Out-of-process driver (bcx) | `serveDriver`, `externalDriver` | `@better-compute/driver-sdk` | `drivers` | its own process |
 | [Attestor](/docs/extending/attestors) | `defineAttestor` | `better-compute` | `attestors` | JoinService, in the control plane |
 | [Provider](/docs/extending/providers) | `defineProvider` | `better-compute/vps` | `providers` | control plane |
-| [Scheduler plugin](/docs/extending/scheduler-plugins) | `defineSchedulerPlugin` | `better-compute` | `scheduler.plugins` | the placer, in api and worker processes |
-| [Event sink](/docs/extending/sinks) | `defineSink({ kind: 'events' })` | `better-compute` | `sinks.events` | the `sinks` worker role |
+| [Scheduler plugin](/docs/extending/scheduler-plugins) | `defineSchedulerPlugin` | `better-compute` | `scheduler.plugins`, or a module's `extensions` | the placer, in api and worker processes |
+| [Event sink](/docs/extending/sinks) | `defineSink({ kind: 'events' })` | `better-compute` | `sinks.events`, or a module's `extensions` | the `sinks` worker role |
+| [Audit sink](/docs/extending/sinks#audit-sinks) | `defineSink({ kind: 'audit' })` | `better-compute` | `sinks.audit`, or a module's `extensions` | the `audit-sinks` reconciler, `controllers` role |
 | [Step and profile](/docs/extending/steps-and-profiles) | `defineStep`, `defineProfile` | `better-compute/provision` | a module's `extensions` and `profiles` | control plane or one agent command |
 
 The root entry `better-compute` exports `defineModule`, `definePlugin`, `defineDriver`, `defineSchedulerPlugin`,
@@ -77,7 +79,7 @@ flowchart LR
   REC["Reconcilers"] --> RT
   SCH["Scheduler plugins"] --> PL
   ATT["Attestors"] --> JS
-  SNK["Event sinks"] --> RT
+  SNK["Event and audit sinks"] --> RT
   DRV["Drivers, steps"] --> WF["Workflow engine (provision)"]
   PRV["Providers"] --> VPS["vps module"]
   WF -->|"commands"| AG["bcd agents"]
@@ -87,8 +89,8 @@ A module is the unit everything else hangs off. It can carry API groups, reconci
 NodeSpec sections, IAM catalog fragments, CLI commands, profiles and `extensions` (drivers, steps, scheduler
 plugins, attestors, sinks). The top-level options (`drivers`, `providers`, `attestors`, `scheduler.plugins`,
 `sinks`) register extensions that do not need a module of their own. Both paths end in the same registry and the
-same `kind:id@version` uniqueness check, but not every consumer reads both: drivers and attestors are found in
-either place, while the placer runs only `scheduler.plugins` and OutboxDispatch delivers only to `sinks.events`.
+same `kind:id@version` uniqueness check, and every consumer reads both: scheduler plugins a module lists join
+`scheduler.plugins` in the placer, and its event and audit sinks join `sinks.events` and `sinks.audit`.
 
 ```ts title="compute.ts"
 import { betterCompute, defineSchedulerPlugin, defineSink } from 'better-compute';
@@ -115,7 +117,7 @@ breaking. PLAN.md §5.1 keeps every `define*` helper **experimental until v1.0**
 | Modules, plugins, methods | Built. Every built-in feature (`capacity`, `events`, `fleet`, `rollout`, `audit`, `iam`, `vps`, `metal`, `provision`) is a module on this contract. |
 | Reconcilers, command kinds, NodeSpec sections, migrations | Built, with the v0.1 worker runtime. |
 | Scheduler plugins | Built: filters, scorers, atom pickers and admission hooks run in both placers. |
-| Event sinks | Built: OutboxDispatch with durable cursors. Usage and audit sinks are declared types that nothing dispatches to yet; see [sinks](/docs/extending/sinks#usage-and-audit-sinks). |
+| Sinks | Built: event sinks on OutboxDispatch with durable cursors and dead letters; audit sinks on the built-in `audit-sinks` module. Usage sinks are refused with `INVALID_CONFIG` (usage goes to IAM billing through the bridge); see [sinks](/docs/extending/sinks#usage). Sinks and scheduler plugins a module lists in `extensions` run like those in the options. |
 | Attestors | Built: `join-token`, `x509pop`, `provisioned`, `discovery`, `cloud-iid` and `tpm` are all `defineAttestor` values. The Go producers in bcd are written but not built. |
 | Drivers, steps, profiles | Built in TypeScript (`metal`, `provision`). The bcd side that runs agent commands is written but not built: Go is not installed on the build machine. |
 | Providers | Built: `hetzner` and `proxmox` provider packages, checked by `providerConformanceCases()`. |
@@ -169,7 +171,7 @@ const report = await runConformance(providerConformanceCases(), () => acmeCloudS
   <Card title="Attestors" href="/docs/extending/attestors" icon={<Fingerprint />}>defineAttestor: how a joining agent proves what it is.</Card>
   <Card title="Providers" href="/docs/extending/providers" icon={<Cloud />}>defineProvider: cloud and hosting APIs behind VPS and metal pools.</Card>
   <Card title="Scheduler plugins" href="/docs/extending/scheduler-plugins" icon={<SlidersHorizontal />}>Filters, scorers, atom pickers and admission hooks for the placer.</Card>
-  <Card title="Sinks" href="/docs/extending/sinks" icon={<Inbox />}>Event sinks on the outbox, their cursors, and the IAM usage sink.</Card>
+  <Card title="Sinks" href="/docs/extending/sinks" icon={<Inbox />}>Event and audit sinks, their cursors and dead letters, and where usage goes.</Card>
   <Card title="Steps and profiles" href="/docs/extending/steps-and-profiles" icon={<Workflow />}>defineStep and defineProfile for provisioning workflows.</Card>
   <Card title="Walkthroughs" href="/docs/extending/walkthroughs" icon={<Signpost />}>End-to-end extensions built without touching Better Compute.</Card>
 </Cards>

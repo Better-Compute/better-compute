@@ -13,6 +13,7 @@ sources:
   - packages/events/src/safe-url.ts
   - packages/events/src/catalog.ts
   - packages/events/src/migrations.ts
+  - packages/events/src/retention.ts
   - packages/events/src/outbox.ts
   - apps/docs/content/docs/reference/api/webhooks.mdx
   - examples/shared/compose.ts
@@ -37,10 +38,11 @@ const compute = betterCompute({
 });
 ```
 
-The module adds the `webhooks` API group, the tables `webhooks`, `webhook_deliveries` and `event_cursors` (migration
-`events/0001_webhooks`), and two reconcilers that a worker process runs: `events.fanout` every second and
-`events.deliver` every two seconds. Without a worker running reconcilers (the `controllers` role of
-`better-compute serve`), webhooks are stored but nothing is sent.
+The module adds the `webhooks` API group, the tables `webhooks`, `webhook_deliveries` and `event_cursors`
+(migrations `events/0001_webhooks` and `events/0002_delivery_retention`), and three reconcilers that a worker process
+runs: `events.fanout` every second, `events.deliver` every two seconds and `events.prune` every hour. Without a
+worker running reconcilers (the `controllers` role of `better-compute serve`), webhooks are stored but nothing is
+sent.
 
 ## How a delivery happens
 
@@ -261,6 +263,20 @@ tenant or its webhook is paused. `deliveries` returns at most 200 items (50 by d
 `better-compute doctor` reports `events.webhook-dead-letters` while any delivery is dead, and
 `events.webhook-backlog` when more than 1,000 deliveries are over five minutes late, which usually means no worker
 runs `events.deliver`.
+
+### How long history is kept
+
+`events.prune` deletes settled delivery history once it is old enough, measured from when the delivery was queued:
+`delivered` and `cancelled` deliveries after 30 days, `dead` ones after 90, so there is time to fix an endpoint and
+redeliver. It deletes 5,000 rows per run and runs again a second later while a batch comes back full. `pending`
+deliveries are never deleted, whatever their age.
+
+```ts
+eventsModule({ secret, retention: { deliveredDays: 14, deadDays: 60 } }); // retention: false keeps everything
+```
+
+A period under one day is `INVALID_CONFIG` when the module is defined. `pruneWebhookDeliveries(sql, retention?,
+limit?)` runs one batch, for hosts that schedule pruning themselves. See [retention](/docs/operations/retention).
 
 ## Test, pause and delete
 

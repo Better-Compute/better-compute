@@ -101,13 +101,19 @@ one lease per placed instance, none leaked and none shared.
 
 ## What reaches the host
 
-The protocol has room for a hosted instance's network: `InstanceSpec.nics` in the `instances` section of the
-<Term id="nodespec">NodeSpec</Term> carries, per interface, the host bridge or network name, the MAC address, and the
-addresses assigned by IPAM in CIDR form.
+A hosted instance's network reaches its host in `InstanceSpec.nics`, in the `instances` section of the
+<Term id="nodespec">NodeSpec</Term>. vps sends one NIC per instance:
 
-In this release the NodeSpec encoder does not fill `nics`, so the lease is a record in the control plane that a host
-does not receive yet, and there is no host runtime to act on it: `libvirt-kvm` and `cloud-hypervisor` are planned for
-bcd, which is written but not built. A VPS profile can already declare `network: { mode: 'bridge', ipam: 'pool' }`
+| Field | Value |
+| --- | --- |
+| `network` | The host bridge: `br0`, or `vps({ hostNetwork })` |
+| `mac` | A stable locally administered MAC: `02` followed by the first 10 hex digits of the SHA-256 of the instance id |
+| `addresses` | The IPAM lease in CIDR form (the address with the range's prefix length), or none without a lease |
+
+The NodeSpec encoder keeps NIC order, since it is the guest's interface order. The spec also carries the instance's
+`allocationId`, which the host names when it fetches the user data. The FakeDaemon's fake hypervisor creates a tap
+per NIC; there is no real host runtime to act on it yet: `libvirt-kvm` and `cloud-hypervisor` are planned for bcd,
+which is written but not built. A VPS profile can already declare `network: { mode: 'bridge', ipam: 'pool' }`
 (see [steps and profiles](/docs/extending/steps-and-profiles)), but `vps()` does not read profiles.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels

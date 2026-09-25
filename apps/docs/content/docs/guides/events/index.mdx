@@ -137,7 +137,7 @@ writes a type outside the catalog.
 | `project.*` | `project/{id}` | server | `project.created` |
 | `pool.*` | `pool/{id}` | capacity | `pool.created`, `pool.updated`, `pool.offered`, `pool.unoffered`, `pool.archived` |
 | `quota.updated` | `pool/{id}` | capacity | `quota.updated` |
-| `reservation.*` | `reservation/{id}` | capacity | `reservation.placed`, `pending`, `queued`, `binding`, `active`, `extended`, `preempting`, `preempted`, `repaired`, `failed`, `cancelled`, `expired`, `awaiting-confirmation`, and one per state change |
+| `reservation.*` | `reservation/{id}` | capacity | `reservation.placed`, `pending`, `queued`, `binding`, `active`, `extended`, `preempting`, `preempted`, `repaired`, `failed`, `cancelled`, `expired`, `awaiting-confirmation`, `binding-rejected`, and one per state change |
 | `node.*` | `node/{id}` | server | `node.joined`, `node.acceptance.started`, `node.acceptance.failed`, `node.adopted`, `node.connected`, `node.disconnected`, `node.unreachable`, `node.lost`, `node.status`, `node.cordoned`, `node.uncordoned`, `node.draining`, `node.drained`, `node.labeled`, `node.tainted`, `node.adopting`, `node.deleted`, `node.command.queued`, `node.report-failed`, `node.ssh-cert.issued`, `node.ssh-cert.revoked` |
 | `node.inventory.changed`, `node.gpu.*`, `node.mig.*`, `node.disk.*`, `node.driver.*` | `node/{id}` | inventory | `node.gpu.added`, `node.gpu.missing`, `node.mig.layout.changed`, `node.disk.replaced`, `node.driver.changed` |
 | `node.enrolled`, `node.provision.*` | `node/{id}` | metal | `node.provision.<state>` for each provisioning transition |
@@ -147,7 +147,7 @@ writes a type outside the catalog.
 | `fleet.*` | `fleet/{id}` | fleet | `fleet.drifted`, `fleet.converged` |
 | `rollout.*` | `rollout/{id}` | rollout | `rollout.started`, `paused`, `resumed`, `aborted`, `completed` |
 | `tunnel.*` | `tunnel/{id}` | server | `tunnel.issued` |
-| `security.*` | varies | server | `security.join-token.created`, `security.join-token.revoked`, `security.site-token.created`, `security.site-token.revoked`, `security.join.refused`, `security.certificate-revoked`, `security.node.identity-revoked`, `security.secret.put`, `security.secret.deleted`, `security.secret.refused` |
+| `security.*` | varies | server | `security.join-token.created`, `security.join-token.revoked`, `security.site-token.created`, `security.site-token.revoked`, `security.join.refused`, `security.certificate-revoked`, `security.node.identity-revoked`, `security.node.duplicate-session` and `security.node.quarantined` (from the gateway), `security.secret.put`, `security.secret.deleted`, `security.secret.refused` |
 | `webhook.ping` | `webhook/{id}` | events | A test delivery from `webhooks.ping` |
 
 The catalog names the subject each family is declared with, but code is the final word: `tunnel.issued`, for
@@ -204,9 +204,12 @@ starts the process's cursor at the head, so it sees events from that moment on, 
 every started process feeds it. A handler that throws is logged and does not stop the others. The position lives in
 memory: a restarted process starts at the head again, so use a sink when you need every event.
 
-Event sinks run in the `sinks` worker role under the singleton `outbox-dispatch` lease. Each sink has its own
-durable cursor, so a failing sink backs off (1 s, doubling up to 5 minutes) without holding the others back, and a
-new lease holder resumes where the last one saved.
+Event sinks run in the `sinks` worker role, each under its own lease `singleton:outbox-dispatch:<sink id>` and in
+its own loop, so different workers can deliver different sinks. Each sink has its own durable cursor, so a failing
+sink backs off (1 s, doubling up to 5 minutes) without holding the others back, and a
+new lease holder resumes where the last one saved. A failing batch is bisected down to one event, and an event the
+sink refuses on every attempt while its neighbour goes through is dead-lettered to `outbox_dead_letters`; see
+[poison events](/docs/extending/sinks#poison-events).
 
 Every consumer is at least once: an event can arrive twice after a crash or a retry. Deduplicate on `id`, and order
 by `sequence` (compare txid first, then seq, as numbers).

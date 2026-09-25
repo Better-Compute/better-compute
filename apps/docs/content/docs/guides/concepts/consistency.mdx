@@ -116,9 +116,9 @@ SELECT … FROM outbox o
  ORDER BY o.txid, o.seq
 ```
 
-Nothing can then appear behind the cursor. The worker holding the `outbox-dispatch` lease delivers to the event
-sinks, saving each sink's position in `outbox_cursors` after every batch, so a new lease holder resumes where the
-last one stopped. Delivery is at least once: consumers deduplicate by event `id`. The same cursor shape
+Nothing can then appear behind the cursor. Each event sink is delivered by the worker holding that sink's
+`singleton:outbox-dispatch:<sink id>` lease, which saves the sink's position in `outbox_cursors` after every batch,
+so a new lease holder resumes where the last one stopped. Delivery is at least once: consumers deduplicate by event `id`. The same cursor shape
 serves the SSE stream's `Last-Event-ID` and the `authz_changes` feed. See [events](/docs/guides/events).
 
 ## The work queue never loses a wake-up

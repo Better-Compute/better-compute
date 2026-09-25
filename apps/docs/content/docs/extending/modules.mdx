@@ -15,6 +15,7 @@ sources:
   - packages/server/src/ports.ts
   - packages/server/src/self-check.ts
   - packages/server/src/options.ts
+  - packages/server/src/audit-sinks-module.ts
   - packages/server/src/runtime/index.ts
   - packages/server/src/runtime/reconcilers.ts
   - packages/server/src/runtime/work-queue.ts
@@ -24,6 +25,7 @@ sources:
   - packages/iam/src/catalog.ts
   - packages/iam/src/bridge.ts
   - packages/events/src/module.ts
+  - packages/events/src/retention.ts
   - packages/fleet/src/module.ts
   - packages/rollout/src/module.ts
   - packages/rollout/src/migrations.ts
@@ -179,8 +181,14 @@ await compute.initialize();
 
 `betterCompute()` registers, in this order: the server's own groups, the built-in `node-controllers` and
 `site-boot` modules, `inventory`, `capacity`, a `pki` entry carrying the sealed-secrets migration when the default
-secret store is in use, the `tunnels` module when `tunnels` is configured, then your `modules`, then your
-`plugins`. The order is the order of migrations, of `start()` calls and of NodeSpec merging.
+secret store is in use, the `tunnels` module when `tunnels` is configured, the `audit-sinks` module when any audit
+sink is listed (see [sinks](/docs/extending/sinks#audit-sinks)), then your `modules`, then your `plugins`. The order
+is the order of migrations, of `start()` calls and of NodeSpec merging.
+
+The `extensions` a module or plugin lists are read like the top-level options: drivers and attestors are found in
+either place, scheduler plugins join `scheduler.plugins` in the placer, and event and audit sinks join `sinks.events`
+and `sinks.audit`. A usage sink, in `sinks.usage` or in `extensions`, is `INVALID_CONFIG`: usage goes to IAM billing
+through the IAM bridge.
 
 Registration checks everything it can without the database and throws `INVALID_CONFIG`:
 
@@ -271,9 +279,11 @@ again while its reconciler runs survives, so no wake-up is lost.
 - **`none`**: one worker at a time runs the reconciler, under a `singleton:<name>` lease.
 
 `role` picks the worker role that runs it (v0.4). The default, `controllers`, suits almost everything. Placers
-declare `scheduler`: they then run only in processes started with the `scheduler` role (`serve --roles scheduler`),
-under that role's own rendezvous membership (worker rows `scheduler/<id>`, leases `scheduler/shard:<n>`), so
-placement scales apart from the controllers. `serve` with the default `--roles all` runs both roles.
+declare `scheduler`, as the pool-lease placer `capacity.placer` does: they then run only in processes started with
+the `scheduler` role (`serve --roles scheduler`), under that role's own rendezvous membership (worker rows
+`scheduler/<id>`, leases `scheduler/shard:<n>`), so placement scales apart from the controllers. A role joins a
+shard membership only when it runs a sharded reconciler of its own, so a scheduler process with no placer registered
+holds no shard leases. `serve` with the default `--roles all` runs both roles.
 
 `periodic` keys are seeded once and then come back `every` after each run (at least `1s`), besides any edge
 enqueue. Every transaction a reconciler opens through `ctx.sql.transaction` begins by fencing its lease, so a worker
@@ -285,15 +295,16 @@ Reconcilers from the built-in modules, for reference:
 | Reconciler | Module | `shardBy` | Periodic |
 | --- | --- | --- | --- |
 | `capacity.reservations` | capacity | `none` | edge-triggered, with `notBefore` wake-ups |
-| `capacity.placer` | capacity (`placer: 'pool-lease'`) | `pool` | |
+| `capacity.placer` (role `scheduler`) | capacity (`placer: 'pool-lease'`) | `pool` | |
 | `capacity.rollup`, `capacity.usage` | capacity | `none` | `all` every `5m` |
-| `events.fanout`, `events.deliver` | events | `none` | every `1s`, `2s` |
+| `events.fanout`, `events.deliver`, `events.prune` | events | `none` | every `1s`, `2s`, `1h` (`events.prune` only unless `retention: false`) |
+| `audit-sinks` | audit-sinks (built in, with audit sinks) | `none` | `tick` every `5s` |
 | `fleet.drift` | fleet | `none` | every `15m` by default |
 | `rollout` | rollout | `none` | `all` every `30s` |
 | `audit.checkpoint` | audit | `none` | `checkpoint` every `1h` |
 | `iam.inbox`, `iam.reconcile`, `iam.usage` | iam | `none` | `2s`, `5m`, `1h` |
 
-Workers run reconcilers in the `controllers` role. Tests and the simulator step them without timers:
+All but `capacity.placer` run in the `controllers` role. Tests and the simulator step them without timers:
 `await compute.jobs['acme.widgets'].tick()` runs one batch.
 
 ## Command kinds
@@ -359,7 +370,7 @@ capacity module does this on every binding change; rollout returns a `daemon` se
 | `commands` | `enqueue(tx, command)` and `cancel(tx, commandId)`: the durable command queue |
 | `desired` | `invalidate(tx, nodeId)`: recompute a node's NodeSpec |
 | `authz` | `upsert`, `remove`, `setPending`: maintain your rows of the <Term id="authz-projection">authz projection</Term> |
-| `capacity` | `reserve(tx, request)` and `release(tx, allocationId)`: quota plus the inline placer |
+| `capacity` | `reserve(tx, request, { admission }?)` and `release(tx, allocationId)`: quota plus the inline placer; pass the caller's admission so scheduler plugins' `admit` hooks run |
 | `inventory` | `get(nodeId)`: the latest stored inventory snapshot |
 | `leases` | `acquire`, `release`, `fence`: named leases with a fencing epoch |
 | `iam` | The <Term id="iam-port">IamPort</Term>; never call it inside a transaction |

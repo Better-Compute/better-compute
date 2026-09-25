@@ -226,9 +226,13 @@ operation, the step's `with`, and the driver and config bound in the profile's o
 }
 ```
 
-`targetNodeId` appears when the command goes to the site agent rather than the machine itself. The default timeout of
-a driver operation is 10 minutes. The server's command queue refuses kinds no module registers (`INVALID_CONFIG`), and
-no module registers `driver.invoke` yet, so such a step cannot be sent on a real server today. Metal's own steps
+`targetNodeId` appears when the command goes to the site agent rather than the machine itself. `provisionModule()`
+registers the `driver.invoke` kind: lane `provision`, destructive (so always signed, since driver operations include
+power and deploy), not retry-safe, roles `node`, `site` and `ramdisk`, payload `DriverInvokeRequest`, and a 10-minute
+default timeout (each step's own timeout sets `notAfter`). `tests/e2e/bcx.test.ts` runs such steps end to end: a
+module profile binds `power.getPower` and `power.setPower` to a bcx plugin's driver, and both go out as
+`driver.invoke` through the real engine, queue and gateway to a FakeDaemon that runs them in the plugin process
+(`fakeDriverInvoke` from `@better-compute/testing`). bcd's side needs Go. Metal's own steps
 (`power.setPower`, `media.insert`, ...) are registered control-plane steps that relay typed commands instead; see
 [workflows](/docs/guides/bare-metal/workflows).
 

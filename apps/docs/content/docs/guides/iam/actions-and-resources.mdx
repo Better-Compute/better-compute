@@ -81,8 +81,14 @@ before `iam.require`. The embedded port from `bridge.embedded()` implements it w
 id, tenantId)`, which re-reads that one row; on a miss or a failed read it drops the row, so the decision takes the
 bounded miss path above and fails closed. Before this, `reservations.extend` decided on the row cached at creation,
 so a `BoundedExtend`-style policy capped at 72 hours could be passed by one extra hour within the tail interval.
-`tests/server-example-policies.test.ts` runs the example policies against real drafts to hold this. In remote mode
-the replica on the IAM host has the same staleness and does not refresh yet.
+`tests/server-example-policies.test.ts` runs the example policies against real drafts to hold this.
+
+In remote mode the IAM host decides on its replica's copy, so pass `remoteIam({ refresh: { url, secret, sql? } })`:
+the port then posts a signed `{ tenantId, type, id, lsn }` to the IAM host's refresh handler
+(`computeIamHost().refreshHandler`), which waits at most 2 seconds until its replica has replayed compute's WAL
+position from after transaction 1 and re-reads the row. Any failure fails the admission with `UNAVAILABLE` (fail
+closed). Without `refresh` the remote port has no `refreshResource`, remote admissions can decide on a row up to the
+replica lag plus 1 second old, and `better-compute doctor` warns `iam.refresh`.
 
 ## Actions
 

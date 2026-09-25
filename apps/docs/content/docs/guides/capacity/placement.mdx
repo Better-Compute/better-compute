@@ -135,8 +135,10 @@ checked in this order:
 
 `NoSchedule` reasons come from `nodes.no_schedule_reasons`, which conditions, taints and liveness
 maintain in the same transaction as their cause (see [inventory and health](/docs/guides/nodes/inventory-and-health)).
-The schedulability check exists twice, as `ineligibility()` in TypeScript and as the SQL predicate the
-commit locks with, and a test keeps the two in agreement.
+The one reason a request can tolerate is a dedication to its own tenant: a node tainted `dedicated=acme` places
+`acme`'s work and no one else's (see [operating nodes](/docs/guides/nodes/operating-nodes)). The schedulability
+check exists twice, as `ineligibility(node, pool, tenantId?)` in TypeScript and as the SQL predicate the commit locks
+with (`schedulableSqlTolerating`), and a test keeps the two in agreement.
 
 Scalar room is `floor(allocatable × ratio) − allocated` from the node's `node_resources` row.
 

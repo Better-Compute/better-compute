@@ -10,6 +10,9 @@ sources:
   - packages/observability/src/instrument.ts
   - packages/observability/src/spans.ts
   - packages/observability/src/traceparent.ts
+  - packages/observability/src/database.ts
+  - packages/cli/src/host/metrics.ts
+  - packages/server/src/operations.ts
   - packages/cli/src/commands/serve.ts
   - packages/cli/src/commands/setup.ts
   - packages/cli/src/host/config.ts
@@ -42,12 +45,12 @@ package can depend on it. The CLI host mounts it for you when the configuration'
 
 <Callout type="warn" title="Defined is not the same as recorded">
 `standardMetrics(registry)` fixes the names, labels and buckets of every section 14 series, so all packages record
-the same thing. Today the built-in packages record only some of them: the gateway series sampled by
-`gatewayCollector`, the gateway service calls, outbox events by family, and whatever you wrap
-(`meteredIamPort`, `meteredAttestor`, `meteredProvider`, spans). The work-queue, placement, pool, connectivity,
-backlog, certificate, clock and command-latency series are defined but no package sets them yet; they expose their
-`HELP` and `TYPE` lines with no samples until your host records them. The matching `doctor` checks cover most of
-those conditions today.
+the same thing. The built-in pieces record: the gateway series sampled by `gatewayCollector`, the gateway service
+calls, outbox events by family, the deployment-wide series `databaseCollector` samples from the database (below),
+and whatever you wrap (`meteredIamPort`, `meteredAttestor`, `meteredProvider`, spans). `gateway_sessions`,
+`gateway_handshakes_total`, `commands_swept_total`, `reconcile_duration_seconds`, `placements_total`,
+`booking_conflicts_total`, `usage_dead_letters_total` and `security_events_total` are defined but no package sets them
+yet; they expose their `HELP` and `TYPE` lines with no samples until your host records them.
 </Callout>
 
 ## Wire metrics into a deployment
@@ -80,7 +83,11 @@ export const host = defineHost(async ({ env }) => ({
 - mounts `GET /metrics` (or `host.metrics.path`) on the API listener when `bearerToken` is set; without a token there
   is no route;
 - when it runs the gateway role, meters `compute.gatewayServices` with `meteredGatewayServices` and samples the
-  gateway at every scrape with `gatewayCollector`.
+  gateway at every scrape with `gatewayCollector`;
+- when it runs any worker role, starts `databaseCollector` into the same registry: a first reading at start, then
+  every 15 s, stopped with the server. It takes each command kind's lane from the registry and watches the host's
+  own certificates as `cert_expiry_seconds{kind}`: `node-ca`, `command-signing` and `serving` (the gateway's TLS
+  certificate).
 
 `better-compute dev` mounts the configuration's `host.metrics` too. The examples read the token from
 `BETTER_COMPUTE_METRICS_TOKEN`.
@@ -160,6 +167,45 @@ const resolveResource = bridge.resolveResource(undefined, {
 });
 ```
 
+### The database collector
+
+Some section 14 series describe the whole deployment, not one process. `databaseCollector` samples them from
+compute's own tables with read-only, bounded statements:
+
+```ts
+import { databaseCollector, standardMetrics } from 'better-compute/observability';
+
+const collector = databaseCollector(standardMetrics(registry), {
+  sql: compute.context.sql,
+  laneOf: (kind) => compute.context.registry.commandKind(kind)?.lane, // default label (unknown)
+  certificates: () => [{ kind: 'serving', notAfter }], // host certificates besides node certificates
+});
+collector.start(); // every intervalMs (default 15 s); refresh() polls once; stop() ends it
+```
+
+| Series | Sampled from |
+| --- | --- |
+| `work_queue_depth{kind}` | Due, unclaimed `work_queue` rows by kind |
+| `backlog{queue}` | Pending `commands`, unprocessed `iam_inbox` rows, unrecorded `usage_windows`, pending `webhook_deliveries`, and each `outbox_cursors` reader's lag as `outbox:<name>`; each capped at 100,000 |
+| `node_connectivity{state}` | Nodes by connectivity |
+| `generation_lag_nodes` | Nodes whose observed generation is behind |
+| `pool_gpus{state}` | `pool_capacity_rollup` GPUs: total, allocatable, allocated, reserved, provisioning, unhealthy, maintenance, unreachable |
+| `cert_expiry_seconds{kind}` | Each node's newest live certificate, soonest per role as `node:<role>`, plus the `certificates` you pass |
+| `clock_offset_seconds` | This process's clock minus `compute_now()` |
+| `command_latency_seconds{kind,lane}` | Commands settled since the last poll, `updated_at - created_at` (needs `commands.created_at`, `core/0020`) |
+
+A table an optional module did not create is skipped, and a label set that disappears reads 0 instead of going
+stale. Latency starts at the first poll, so a restart does not observe history twice, and at most 5,000 settled
+commands are observed per poll. **Run it in one process per deployment**, the worker, so the histogram counts each
+command once. Poll failures go to `onError` and never throw.
+
+<Callout type="info" title="Several worker processes">
+`serve` starts the collector in every process that runs a worker role. With more than one worker process, each
+reports the same deployment-wide gauges, and each observes every settled command in its own
+`command_latency_seconds`. Query one worker instance's series (or `max` the gauges) rather than summing across
+instances.
+</Callout>
+
 ### Series the instrumentation adds
 
 | Series | From | Labels |
@@ -206,8 +252,10 @@ spans to their tracing system.
 **Trace context.** `parseTraceparent`, `formatTraceparent` and `childTraceparent` handle W3C Trace Context version
 `00` (`00-<32 hex trace id>-<16 hex parent id>-<2 hex flags>`), refusing all-zero ids and version `ff`. The protocol
 carries `traceparent` on every `CommandBody` and `DesiredStateBody`, and the driver SDK passes it to drivers, so a
-daemon's work can join the request's trace. The server does not fill it from API requests yet: commands and specs
-go out with it empty.
+daemon's work can join the request's trace. A valid `traceparent` header on an API request (version `00`, non-zero
+trace and parent ids) reaches the method as `MethodContext.traceparent`, and `ctx.commands.enqueue` in that method
+defaults `CommandBody.traceparent` to it, so the commands a call enqueues carry the caller's trace. An invalid header
+is dropped, not refused. Commands enqueued by reconcilers, and NodeSpecs, go out with it empty.
 
 **Request ids.** The API takes the caller's `X-Request-Id` when it is 1 to 128 characters of letters, digits and
 `._:-`, else it mints a `req_` id, and returns it in the response's `X-Request-Id`. IAM receives the same id in

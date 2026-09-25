@@ -191,7 +191,12 @@ never forge intent or results:
   given `pki.commandSigning` (the root from `createCommandSigningAuthority`, or the PKI bundle's `commandSigning`),
   every command is signed by a 24-hour worker key that root certifies, and JoinResponse and Welcome carry the
   trust bundle (the roots, plus `pki.commandSigningRoots` during a rotation, and `pki.trustVersion`). Without it,
-  commands go unsigned as in v0.1. Desired-state (NodeSpec) bodies are not signed yet.
+  commands go unsigned as in v0.1. The same key signs each NodeSpec generation (purpose `desired-state`, v0.4); the
+  gateway relays the stored signed bytes, and the daemon verifies them before applying a spec. See
+  [delivery](/docs/daemon/delivery#signed-commands-and-attested-results).
+
+With `pki.commandSigning`, GPU bindings are attested too: a reservation goes active only once the node's own signed
+`AllocationBound` verifies; see [attested bindings](/docs/guides/capacity/reservations#attested-bindings).
 
 Commands never carry secret values: they carry `secretRef`s, which the agent exchanges for a value sealed to a
 one-time key. See [security](/docs/operations/security).

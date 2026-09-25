@@ -60,8 +60,8 @@ Run as many of each as you need:
 
 - **api** processes are stateless. Put them behind any HTTP load balancer.
 - **Worker** processes register in the `workers` table and split the 256 `shard:<n>` leases by rendezvous hashing;
-  singleton jobs (the CommandSweeper, outbox dispatch, each IAM job) run under their own `singleton:<name>` lease on
-  whichever worker holds it. Shard and singleton leases live 15 s and renew every 5 s.
+  singleton jobs (the CommandSweeper, outbox dispatch to each event sink, each IAM job) run under their own
+  `singleton:<name>` lease on whichever worker holds it. Shard and singleton leases live 15 s and renew every 5 s.
 - **Gateway** processes each hold a `gateway:<id>` lease (20 s, renewed every 5 s) and a row in `gateways`. A node's
   session row names the gateway that holds it, and dispatch joins on it, so any number of gateways can share a
   region.
@@ -94,8 +94,10 @@ A region is a set of gateways with the same `host.gateway.region` (the value in 
 gateways of their own region; sites need only outbound 443. Every region's gateways write to the same database as
 the api and workers.
 
-An air-gapped installation (local object store, image mirror, `bcd` downloads from `downloads.dir`) is designed in
-PLAN.md but not built: the `downloads` option is accepted and not used yet.
+An air-gapped installation (local object store, image mirror, `bcd` downloads) is designed in PLAN.md. Of it, the
+api's `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` route is built: set `downloads: { dir }` or
+`downloads: { blob }` and the install script fetches `bcd` from the control plane itself. See
+[installing bcd](/docs/daemon/install#serving-the-binaries).
 
 ## Load balancers
 
@@ -165,15 +167,17 @@ process takes them over, with a new epoch that fences out anything the old one s
 
 - `host.gateway.region`;
 - `host.gateway.tls` with `key` and `cert` from the gateway serving CA (`pki issue-gateway`) and `ca`, the node CA
-  roots;
+  roots, or `host.gateway.tlsFiles { key, cert, ca?, intervalMs? }` naming those files;
 - a way to authenticate daemons: `pki.nodeCa` and `pki.join` in the options (from the PKI bundle), or
   `host.gateway.identity { roots, trustDomain, revocations }`. The role refuses to start without roots and a trust
   domain.
 
 The host fills in the gateway's store, services, work queue, events, report handlers and the tunnel JWKS. Anything
 else `createGateway()` takes goes in `host.gateway.options`, for example `maxStreams` (default 5,000) or vps's
-`instanceStatusHandler` in `options.reports.status`. The certificate is read once at start: after
-`pki issue-gateway` writes a new one, restart gateways one at a time.
+`instanceStatusHandler` in `options.reports.status`. With `tlsFiles` (and `internal.tlsFiles` for the control API),
+the gateway re-reads the files every 60 seconds and hot-reloads a renewed certificate for new handshakes while open
+sessions keep theirs; a certificate given inline in `tls` is read once at start, so after `pki issue-gateway` writes a
+new one, restart gateways one at a time. See [PKI](/docs/operations/pki#pki-issue-gateway).
 
 In this release the gateway process builds `compute.gatewayServices` from the shared configuration, so it loads the
 PKI bundle like every other process. See [security](/docs/operations/security#gateway-processes).

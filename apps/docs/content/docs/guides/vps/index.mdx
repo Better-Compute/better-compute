@@ -73,6 +73,11 @@ import them by their own names.
       type: 'SecretResolver',
       description: "Resolves the SecretRefs in provider account configs. Defaults to the server's secret broker.",
     },
+    hostNetwork: {
+      type: 'string',
+      description: "The host bridge a hosted instance's NIC attaches to (InstanceSpec.nics). An interface name of 1 to 15 letters, digits, _ . -; anything else is INVALID_CONFIG.",
+      default: "'br0'",
+    },
   }}
 />
 
@@ -109,8 +114,9 @@ Registering the module adds:
 - the `instances`, `flavors` and `providerAccounts` API groups
   ([instances](/docs/reference/api/instances), [flavors](/docs/reference/api/flavors),
   [providerAccounts](/docs/reference/api/provider-accounts));
-- the migration `vps/0001_instances`, with the tables `flavors`, `provider_accounts`, `instances`, `ip_pools` and
-  `ip_leases`;
+- the migrations `vps/0001_instances`, with the tables `flavors`, `provider_accounts`, `instances`, `ip_pools` and
+  `ip_leases`, `vps/0002_sealed_user_data` (`instances.user_data_sealed`) and `vps/0003_provider_bootstraps`
+  (`provider_bootstraps`, for [bootstrapping provider machines](/docs/extending/providers#bootstrapping-machines));
 - the `vps.instances` reconciler, woken through the <Term id="work-queue">work queue</Term> by every change, and
   the `vps.usage` job, which meters hosted instances every 5 minutes;
 - an `instances` section in the <Term id="nodespec">NodeSpec</Term> of each hosted node;

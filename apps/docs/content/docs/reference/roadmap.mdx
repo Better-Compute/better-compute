@@ -22,6 +22,12 @@ sources:
   - tests/metal-chaos.test.ts
   - tests/vps-churn.test.ts
   - tests/e2e/access.test.ts
+  - tests/e2e/spine.test.ts
+  - tests/e2e/attested-bindings.test.ts
+  - tests/e2e/vps.test.ts
+  - tests/e2e/bcx.test.ts
+  - tests/metal-site-failover.test.ts
+  - tests/bench/placements.bench.ts
   - tests/mcp-e2e-confirmation.test.ts
   - tests/pki-workload.test.ts
 ---
@@ -58,7 +64,7 @@ do not. So no phase after P0 is formally closed yet. This page tracks each item 
 | [v0.1](#v01-adopt-and-reserve) | Adopt and reserve | Control plane done; blocked on bcd, PostgreSQL and the reference gate runs |
 | [v0.2](#v02-metal) | Bare metal | Control plane done and tested in simulation; site agent and ramdisk need bcd |
 | [v0.3](#v03-vps-and-access) | VPS and access | Control plane done; host runtimes and walkthrough runs need bcd |
-| [v0.4](#v04-scale-and-ha) | Scale and HA | Mostly done in simulation; NodeSpec signing, partitioned history and `bcd helper` missing |
+| [v0.4](#v04-scale-and-ha) | Scale and HA | Mostly done in simulation; `bcd helper` missing, and the numbers need the reference PostgreSQL |
 | [v0.5](#v05-gpu-depth-and-ecosystem) | GPU depth and ecosystem | Control plane done ahead of schedule; hardware exits not run |
 | [v1.0](#v10-freeze) | Freeze | Not started |
 
@@ -107,7 +113,7 @@ workstreams.
 | Acceptance | State | Notes |
 | --- | --- | --- |
 | A real `bcd` installed by the install script, plus 3 FakeDaemons, join and match the golden inventory | In progress | The FakeDaemon half is done; no real `bcd` exists yet |
-| An org user reserves 4 GPUs from an offered pool; the CDI spec lists exactly the booked UUIDs, which `reservations.get` returns | In progress | `tests/server-spine-v01.test.ts` runs join, adopt, reserve, bind and liveness end to end against the FakeDaemon; a CDI spec on a real host needs bcd |
+| An org user reserves 4 GPUs from an offered pool; the CDI spec lists exactly the booked UUIDs, which `reservations.get` returns | In progress | `tests/e2e/spine.test.ts` runs it with embedded Better IAM, the example policies, a real gateway and three FakeDaemons: the node's CDI spec, held devices and env file list exactly the booked UUIDs. A CDI spec on a real host needs bcd |
 | `ReserveBoundedH100` allows 8 GPUs and denies 9; `BoundedExtend` denies 72 h + 1 h | Done | IAM bridge and contract tests |
 | `gpu.h100.hours` reaches Better IAM billing without duplicates across worker restarts, even with a deleted identity in a batch | Done | Idempotency keys on every usage window; the sink re-attributes deleted identities |
 | Place-to-active p99 under 2 s with 1k FakeDaemons in the real-time harness | Done, indicative | 1.02 s at 5 placements/s on PGlite; the inline placer saturates one pool between 5 and 10/s |
@@ -115,7 +121,7 @@ workstreams.
 
 | Exit test | State |
 | --- | --- |
-| The spine end to end (planned as `tests/e2e/spine.test.ts`) | Done as `tests/server-spine-v01.test.ts` |
+| The spine end to end (`tests/e2e/spine.test.ts`) | Done with FakeDaemons: join with sealed tokens, `diag.nvml`, adopt, reserve 4 GPUs as a policy-bound org user, bind, release; 9 GPUs, 73 h, non-pool-users and other organizations denied. `tests/server-spine-v01.test.ts` covers the same path in-process |
 | `tests/capacity-concurrency.test.ts`: 1,000 concurrent operations never double-book, and the torture test | Done on PGlite (interleaved); the truly concurrent PostgreSQL half skips without a server |
 | Faults: gateway kill mid-command runs nothing twice, journal loss fails instead of replaying, a reboot completes on rejoin, invariants I1, I2, I5, I8 | Done in `tests/sim/fleet-gateway.test.ts` and `fleet-stub.test.ts` |
 | Security negatives: an IamPort spy records zero IAM calls on fleet paths over 10 simulated minutes | Done (`tests/sim/iam-negative.test.ts`) |
@@ -151,6 +157,8 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | --- | --- |
 | 20 unattended enroll, ready, deployed, released, ready loops on UEFI and BIOS VMs | Done in simulation; not run on VMs |
 | Killing the site agent or the worker mid-deploy resumes cleanly (`metal-chaos`) | Done (`tests/metal-chaos.test.ts`) |
+| Killing the active site agent mid-PXE: the standby takes over boot within 30 s | Done in simulation (`tests/metal-site-failover.test.ts`): the standby is promoted when the dead agent's lease runs out, the machine boots from it, and the boot step's BMC commands ran once |
+| A gateway-forged `AllocationBound` is rejected | Done (`tests/e2e/attested-bindings.test.ts`, through a real gateway with signing FakeDaemons); see [attested bindings](/docs/guides/capacity/reservations#attested-bindings) |
 | Every `ready` follows a verified wipe; `metal-lifecycle` | Done |
 | Site agents refuse other sites' steps | Done |
 | A `SecretResponse` cannot be opened with another key or after its TTL | Done |
@@ -179,7 +187,7 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | A replayed exec ticket is rejected by the gateway and the daemon | Done, with the FakeDaemon as the daemon |
 | `delegation:revoke` closes the agent's stream within 5 s | Done (`tests/e2e/access.test.ts`) |
 | Multi-tenant container offers are rejected; no tenant VM runs bcd | Done |
-| `tests/e2e/vps.test.ts` on real hosts | Not started: needs bcd and a KVM host |
+| `tests/e2e/vps.test.ts` | Done with FakeDaemon hosts on the dev stack (real server runtime and gateway, fake hypervisors): cloud-config through the secret broker, 200-instance churn with no leaks, host loss and recreation, container offers refused, and a tenant VM cannot join as a node with anything it holds. Real KVM hosts need bcd |
 
 ## v0.4: Scale and HA
 
@@ -191,11 +199,11 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | WebSocket fallback, signed frames only | Done | Gateway and FakeDaemon sides; bcd's side needs Go |
 | A/B self-update and Rollout | In progress | Signed releases and wave rollouts are done; the A/B swap on the node is bcd's |
 | `bcd helper` | Not started | Go |
-| Signing of all commands and specs | In progress | Every command is signed; `signDesiredState` exists in pki but the server does not sign NodeSpecs yet |
-| Remote IAM (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) | Done | U0 is an upstream Better IAM item outside this repository; the IAM host's replica does not yet refresh a row before an admission decides, as the embedded port does |
+| Signing of all commands and specs | Done | With `pki.commandSigning`, every command and every NodeSpec generation is signed by a worker key; the gateway relays stored signed specs verbatim, and the FakeDaemon verifies them (`intent.signedSpecs`). bcd's verification needs Go |
+| Remote IAM (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) | Done | U0 is an upstream Better IAM item outside this repository. With `remoteIam({ refresh })`, an admission waits (at most 2 s) until the IAM host's replica has replayed compute's commit and re-reads the row, failing closed with `UNAVAILABLE`; `doctor` warns `iam.refresh` when it is missing |
 | Remote-IAM MCP | Done | `remoteMcpIam()` gives `@better-iam/mcp`'s gate an IAM reached over HTTP; see [MCP](/docs/guides/clients/mcp#remote-iam) |
-| Scheduler worker role | In progress | `Reconciler.role` in core and the runtime's scheduler role with its own shard membership are done; moving the pool-lease placer onto it is pending |
-| Partitioned history | Not started | History tables are pruned by `retentionModule()` instead |
+| Scheduler worker role | Done | `Reconciler.role` in core, the runtime's scheduler role with its own shard membership, and the pool-lease placer `capacity.placer` running in it |
+| Partitioned history | Done | `audit_events`, `inventory_snapshots` and `usage_windows` by UTC month (`core/0018_partitioned_history`); `retentionModule()` keeps months created ahead, prunes and drops emptied months; audit months are archived by hand. See [retention](/docs/operations/retention#history-partitions) |
 | Merkle audit checkpoints | Done | `@better-compute/audit`, with `better-compute audit verify` |
 | `bcd sim` | In progress | `better-compute sim` runs the FakeDaemon fleet simulator; the Go mode is not built |
 | R1, if the IAM-lane benchmark demands it | Not started | Waits for the v0.1 IAM-lane gate |
@@ -206,7 +214,7 @@ The v0.4 acceptance is set at 10,000 nodes and 100,000 GPUs on the reference Pos
 | --- | --- |
 | Gateway-kill recovery under 60 s | Met in simulation: at 10k nodes, the 3,334 re-homed nodes are back at a p99 of 13.25 s simulated time, with no invariant violated |
 | 0 false unreachable marks | Met in simulation (`tests/sim/v04-scenarios.test.ts`) |
-| At least 200 placements/s | Indicative: 1,092/s end to end at 1k nodes and 161/s at 10k with the pool-lease placer, on PGlite |
+| At least 200 placements/s | Indicative: 1,092/s end to end at 1k nodes and 161/s at 10k with the pool-lease placer, on PGlite. The benchmark's sustained mode (`BENCH_PLACE_SUSTAIN_SECONDS=1800` for the acceptance, gate `BENCH_PLACE_GATE`, default 200, judged on the slowest 10 s window, I1 checked) measured 699/s, slowest window 639/s, over 30 s at 1k nodes on PGlite |
 | Cold start under 3 minutes, command p99 under 1.5 s with polling only, PostgreSQL CPU under 50% | Not measured: needs the reference PostgreSQL |
 | Suites green in both IAM modes | In progress: embedded and remote modes are both tested |
 | Every §15 v0.4 scenario green on 3 consecutive nights | In progress: the scenarios run in the simulator and `sim:nightly` exists; no nightly history is recorded |
@@ -231,9 +239,9 @@ Most of v0.5 landed early, on the control plane.
 
 | Exit | State |
 | --- | --- |
-| The MIG torture test and the real-hardware nightly | Not started on hardware (D15) |
+| The MIG torture test and the real-hardware nightly | The torture test runs on a simulated MIG pool; nothing has run on hardware (D15) |
 | A `dedicated-root` lease and release yield a new identity generation | Done |
-| A third-party TypeScript driver runs on a node via bcx | In progress: runs out of process in tests; not on a node |
+| A third-party TypeScript driver runs on a node via bcx | Done with a FakeDaemon as the node (`tests/e2e/bcx.test.ts`): a module profile's `power.*` steps go out as `driver.invoke` commands through the real engine, queue and gateway, and run in a pinned bcx plugin process. On a real node it needs bcd |
 | IMDS cross-instance access fails | Done (`tests/pki-workload.test.ts`) |
 
 ## v1.0: Freeze

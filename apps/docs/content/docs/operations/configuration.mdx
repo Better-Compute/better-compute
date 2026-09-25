@@ -106,14 +106,15 @@ Anything wrong throws `INVALID_CONFIG` before a connection is opened.
 | `secrets` | the local sealed store | `SecretStore`s by URI scheme. Without any, secrets are sealed in `sealed_secrets` under `secret`. |
 | `tunnels` | none | Exec tickets and break-glass SSH (v0.3). Without it neither `tunnels.open` nor `nodes.issueSshCert` exists. See [tunnels](#tunnels). |
 | `notifier` | none | Best-effort wake-ups after commit, such as `gatewayNotifier({ sql, tls })` from `better-compute/gateway`. Never a source of truth. |
-| `sinks` | none | `{ usage?, events?, audit? }`. Each event sink needs a unique `id`: its outbox cursor is stored under it. |
+| `sinks` | none | `{ events?, audit? }`. Each sink needs an `id` unique among its kind: its cursor is stored under it. Audit sinks add the built-in `audit-sinks` module. `usage` with any entry is `INVALID_CONFIG`: usage goes to IAM billing through the bridge. Sinks a module lists in `extensions` join these. See [sinks](/docs/extending/sinks). |
 | `clock` | anchored to `compute_now()` | Business time. Tests pass the sim clock. |
 | `acceptIamCookie` | `false` | Accept the IAM session cookie on same-origin requests (a console on one origin). |
 | `log` | JSON warnings and errors on stderr | A `Logger` with `debug`, `info`, `warn` and `error`. |
 | `iamJobs` | `[]` | Better IAM's jobs for the `iam` worker role: `{ name, everyMs, run }`, `everyMs` at least 100. Usually filled by the IAM bridge. |
 | `worker` | see below | Worker runtime tuning. |
 | `ports` | built-in | Replace `ctx.capacity` or `ctx.inventory`. |
-| `downloads`, `gateway` | none | Accepted and typed for later phases (`bcd` downloads, gateway public URLs); nothing reads them yet. |
+| `downloads` | none | `{ dir?, blob? }` (at least one): where `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` finds `bcd` binaries. See [installing bcd](/docs/daemon/install#serving-the-binaries). |
+| `gateway` | none | Accepted and typed for a later phase (gateway public URLs); nothing reads it yet. |
 
 ### capacity
 
@@ -125,6 +126,7 @@ Anything wrong throws `INVALID_CONFIG` before a connection is opened.
 | `rollupEvery` | `5m` | How often the rollup job rebuilds every pool. |
 | `usageEvery` | `5m` | How often closed hourly usage windows are written. |
 | `spotNoticeMs` | 2 minutes | Notice a preempted spot reservation gets. |
+| `attestedBindings` | `pkiAllocationBindingCheck()` with `pki.commandSigning`, otherwise off | An `AllocationBindingCheck`: a reservation's allocation counts as bound only once the node's own signed `AllocationBound` verifies. See [attested bindings](/docs/guides/capacity/reservations#attested-bindings). |
 
 ### worker
 
@@ -148,7 +150,7 @@ CommandSweeper runs every 5 s.
 | `pki.nodeCa` | The node CA. The gateway role takes its trust anchor and revocation set from it. |
 | `pki.servingCa`, `pki.internalCa` | Accepted, but nothing reads them yet: the gateway's TLS comes from `host.gateway`, issued with `pki issue-gateway`. |
 | `pki.join` | JoinService's keys and node CA: `pkiJoinCrypto({ trustDomain, nodeCa, signingKey, encryptionKey })`. Without it, `Join` and `Renew` answer `INVALID_CONFIG`. Its public keys appear in `/.well-known/better-compute` as `join`. |
-| `pki.commandSigning` | The command-signing root (v0.2). Every command is then signed with a 24 h worker key it certifies, and daemons get its root in their trust bundle. |
+| `pki.commandSigning` | The command-signing root (v0.2). Every command is then signed with a 24 h worker key it certifies, every NodeSpec generation is signed as it is written (v0.4), daemons get its root in their trust bundle, and capacity's `attestedBindings` defaults to the pki check. |
 | `pki.commandSigningRoots` | Roots still trusted during a rotation. Needs `commandSigning`. |
 | `pki.trustVersion` | The trust bundle's version (default 1). Bump it whenever the roots change. |
 
@@ -227,11 +229,14 @@ export const host = defineHost(async ({ compute, env }) => ({
 | `tunnels.control` | Client TLS (`tls`, `timeoutMs`) for the gateways' internal control APIs |
 | `tunnels.reauthorizeMs`, `maxDurationMs`, `onClose` | Tunnel re-authorization period, lifetime and close hook |
 | `iam.bridge` | The IAM bridge whose inbox the workers drain: a revoked delegation closes the agent's tunnels on every gateway, and revocations drop IAM caches |
+| `iam.streams`, `iam.handlers`, `iam.gatewayStaleMs` | This process's `createWatchRegistry()` registries, closed on revocation too; your own reactions in place of the defaults; gateways asked (heartbeat within 120 s by default). See [tunnels](/docs/guides/access/tunnels#closing-on-iam-revocation) |
+| `mcp` | `{ path?, handler }`: the gated MCP endpoint (`computeMcpEndpoint(...).handler`), default path `/mcp`. See [MCP](/docs/guides/clients/mcp) |
 | `gateway.region` | Required. The region, as in `sites.region` |
 | `gateway.listen` | Daemon listener, default `0.0.0.0:8443` |
-| `gateway.tls` | Required. `key` and `cert` from the serving CA, `ca` the node CA roots |
+| `gateway.tls` | Required. `key` and `cert` from the serving CA, `ca` the node CA roots; any of them may come from `tlsFiles` instead |
+| `gateway.tlsFiles` | `{ key, cert, ca?, intervalMs? }`: file paths read at start and re-read every `intervalMs` (60 s); a renewed certificate is hot-reloaded for new handshakes. See [PKI](/docs/operations/pki#pki-issue-gateway) |
 | `gateway.identity` | `{ roots, trustDomain, revocations }`; default: `pki.nodeCa`, `pki.join.trustDomain` and the node CA's revocation set |
-| `gateway.internal` | `{ url, listen?, tls }`: the internal control API (default port 8444) over internal-CA mutual TLS; `url` is advertised in the `gateways` row |
+| `gateway.internal` | `{ url, listen?, tls, tlsFiles? }`: the internal control API (default port 8444) over internal-CA mutual TLS; `url` is advertised in the `gateways` row |
 | `gateway.ws` | `{ publicHost, listen? }`: the v0.4 WebSocket fallback (default port 443) |
 | `gateway.options` | Anything else `createGateway()` takes (`maxStreams`, rates, extra `reports`) |
 

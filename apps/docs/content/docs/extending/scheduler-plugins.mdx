@@ -94,11 +94,17 @@ message of a pending reservation (`no node fits (12 nodes): 7 × rack-a: …`). 
 ### Admission hooks
 
 `admit` receives the request and the <Term id="admission-context">admission context</Term> of the decision that let
-it in: the tenant, identity, identity kind, session kind, agent and delegation, action and resource. It runs in
-`reservations.create` (both placers: the pool-lease placer runs it before answering `queued`), and never again
-for the same reservation: pending retries, BookingRepair, instances booked through `ctx.capacity.reserve` and
-spot preemption place without an admission context, so `admit` is skipped. Whole-node leases (`binding: 'node'`)
-do not go through the pipeline at all.
+it in: the tenant, identity, identity kind, session kind, agent and delegation, action and resource. It is an
+admission decision, so it runs once, in the request's own transaction:
+
+- `reservations.create`, with both placers (the pool-lease placer runs it before answering `queued`);
+- whole-node leases (`binding: 'node'`) at create, although they do not go through the placement pipeline;
+- bookings a module makes through `ctx.capacity.reserve(tx, request, { admission })` in its caller's request:
+  `instances.create` passes its decision, so VPS instances are admitted too.
+
+The system's own re-placements of an admitted request carry no caller and are not re-admitted: pending retries,
+BookingRepair, bind-timeout re-places, spot preemption and a module's retries. Filters, pickers and scorers apply to
+every attempt.
 
 Use IAM policies for who may ask for what; they see the request's attributes. Use `admit` for rules that are about
 placement itself, and throw a `ComputeError` to refuse:
@@ -219,7 +225,7 @@ scorer when either would do.
 
 | | `inline` (default) | `pool-lease` (v0.4) |
 | --- | --- | --- |
-| Runs | In the admission transaction, pool row locked only for the commit | In the `capacity.placer` reconciler (`shardBy: 'pool'`), batches of at most 64 |
+| Runs | In the admission transaction, pool row locked only for the commit | In the `capacity.placer` reconciler (`shardBy: 'pool'`, worker role `scheduler`), batches of at most 64 |
 | Plans from | The SQL shortlist or every node of the pool | An in-memory index of the pool (`PoolIndex`), kept across batches |
 | Plugins | `admit`, filters, pickers, scorers | `admit` at create; filters, pickers and scorers in each batch |
 
@@ -228,7 +234,7 @@ plugins, so a plugin behaves the same under either. See [placement](/docs/guides
 [scaling](/docs/operations/scaling).
 
 <Callout type="info" title="Registering">
-Scheduler plugins take effect only through `betterCompute({ scheduler: { plugins } })`, which feeds the built-in
-capacity module. A scheduler plugin listed in a module's `extensions` is registered and checked for a duplicate id,
-but the placer does not run it.
+Scheduler plugins reach the built-in capacity module two ways: `betterCompute({ scheduler: { plugins } })`, and the
+`extensions` of any module or plugin you register. Both lists are joined (the options' plugins first) and checked
+for a duplicate id, and the placer runs them all.
 </Callout>

@@ -85,6 +85,7 @@ The rest of the group:
 | [offers](/docs/reference/api/provider-accounts#offers)        | `compute:providers:read`   | The provider's catalog through this account.                                                             |
 | [update](/docs/reference/api/provider-accounts#update)        | `compute:providers:manage` | Replaces `config` (validated again) and bumps `version`; the next call builds a fresh client.            |
 | [delete](/docs/reference/api/provider-accounts#delete)        | `compute:providers:manage` | Deletes the account, or `INVALID_STATE` while a non-archived pool or a non-deleted instance uses it.     |
+| [bootstrap](/docs/reference/api/provider-accounts#bootstrap)  | `compute:providers:manage` | Turns one of the account's machines into a bcd host of a pool; see [bootstrapping machines](/docs/extending/providers#bootstrapping-machines). |
 
 Clients are built on demand from the validated config and cached per account id and version. A failed build is not
 cached.
@@ -222,7 +223,8 @@ Hetzner specifics against it; the same hook can record or replay real traffic.
 
 The package also exports `hetznerRobot` (`provides: ['metal']`), which claims existing Hetzner Robot dedicated
 servers and bootstraps them into bcd hosts. That is platform hardware, not tenant VMs: see
-[bare metal](/docs/guides/bare-metal).
+[bare metal](/docs/guides/bare-metal). `providerAccounts.bootstrap` drives it for a `vps-host` or `metal-host` pool;
+see [bootstrapping machines](/docs/extending/providers#bootstrapping-machines).
 
 ## Proxmox VE
 

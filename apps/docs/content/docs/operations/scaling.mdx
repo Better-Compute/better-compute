@@ -191,8 +191,9 @@ join at dispatch time, so nothing needs rewriting. See [the gateway](/docs/daemo
 key, `shardOf` in `@better-compute/core`). Workers heartbeat their `workers` row; rendezvous hashing over the live
 rows names one owner per shard, and each worker holds the `shard:<n>` leases it owns (15 s TTL, renewed every 5 s,
 epoch-fenced). Add a worker and shards move to it on the next membership pass; stop one and its shards move once its
-leases expire. Singletons (the CommandSweeper, outbox dispatch, usage, retention, the IAM jobs) each run under one
-`singleton:<name>` lease. The lease, epoch and work-queue schema is final, so scaling out needs no migration.
+leases expire. Singletons (the CommandSweeper, usage, retention, the IAM jobs) each run under one
+`singleton:<name>` lease; outbox dispatch takes one lease per event sink (`singleton:outbox-dispatch:<sink id>`), so
+several `sinks` workers share the sinks between them. The lease, epoch and work-queue schema is final, so scaling out needs no migration.
 
 The <Term id="work-queue">work queue</Term> coalesces: enqueuing a dirty key bumps its generation instead of adding a
 row, claims use `FOR UPDATE SKIP LOCKED` on the worker's shards, and a successful run deletes the key only if its
@@ -209,8 +210,10 @@ trigger. Worker tuning:
 
 `serve --roles` splits the roles over processes: for example two processes with `controllers,sinks,iam`. The
 `scheduler` role runs reconcilers that declare `role: 'scheduler'` under a membership of its own, so placers scale
-apart from the controllers and a scheduler-only process never takes node shards (the pool-lease placer moves onto it
-in a pending change; until then it runs under `controllers`). See [deployment](/docs/operations/deployment).
+apart from the controllers and a scheduler-only process never takes node shards. The pool-lease placer
+(`capacity.placer`) declares that role, so with `placer: 'pool-lease'` run at least one `scheduler` process; with
+no sharded scheduler reconciler registered the role holds no shard leases. See
+[deployment](/docs/operations/deployment).
 
 ## Choosing a placer
 
@@ -257,7 +260,9 @@ mitigation already built in:
 6. **Inventory payloads**: section hashes; only changed sections travel.
 7. **Connections**: PgBouncer in transaction mode. Leases are table rows, not session advisory locks, so pooling is
    safe.
-8. **History**: partitions, planned for v0.4 and not built; see [retention](/docs/operations/retention).
+8. **History**: `audit_events`, `inventory_snapshots` and `usage_windows` are partitioned by month
+   (`core/0018_partitioned_history`), and the retention pass prunes rows and drops emptied months; see
+   [retention](/docs/operations/retention#history-partitions).
 9. **Gateway TLS CPU**: admission control; optional TLS offload is still to be verified.
 10. **The IAM lane**: in embedded mode every IAM call takes a global lock. An admission costs at least 2
     acquisitions (3 on an authentication-cache miss), a list page 1 to 2 plus an audit append per denied item. The

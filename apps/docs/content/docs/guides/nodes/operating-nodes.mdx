@@ -79,7 +79,17 @@ await client.nodes.taint({ tenantId, nodeId, add: ['rma-pending'], remove: ['bur
 stored in `noScheduleReasons` as `taint:<key>`. A key is 1 to 128 letters, digits and `. _ / = : -`, starting
 and ending with a letter or digit, and cannot be added and removed in one call. The method only ever moves
 operator taints: conditions, `unreachable` and `draining` belong to their controllers. It publishes
-`node.tainted`. Any entry in `noScheduleReasons` keeps a node out of placement.
+`node.tainted`. Any entry in `noScheduleReasons` keeps a node out of placement, with one exception.
+
+**Dedicating a node to a tenant.** The taint `dedicated=<tenantId>` (stored as `taint:dedicated=acme`) keeps every
+other tenant off the node but not that tenant: placement for `acme` tolerates a dedication to `acme` and nothing
+else, on every placement path (inline, shortlist, pool-lease index, bulk commits and BookingRepair). A dedication
+together with any other reason, or dedications to two tenants, blocks everyone. Capacity rollups still count a
+dedicated node as NoSchedule (bucket `unhealthy`).
+
+```ts
+await client.nodes.taint({ tenantId, nodeId, add: ['dedicated=acme'] });
+```
 
 ## Labels
 
@@ -163,6 +173,11 @@ A gateway that runs a revocation feed (`createRevocationFeed` from `@better-comp
 `node_certs` every second by default) learns about the revocation from Postgres and closes the node's live
 session at once; without a feed, a revoked certificate keeps its session until it expires. The machine can come
 back only by joining again with fresh evidence, such as a new join token.
+
+The gateway revokes a certificate on its own when it looks cloned: after more than 3 alternations between two
+machines within 10 minutes it quarantines the certificate with reason `duplicate-identity` and publishes
+`security.node.quarantined`. Watch `security.node.duplicate-session` to see it coming, then find the copy and
+re-join the real machine. See [duplicate identity](/docs/daemon/sessions#duplicate-identity).
 
 ## Adopting again
 

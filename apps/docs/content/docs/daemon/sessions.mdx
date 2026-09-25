@@ -12,6 +12,7 @@ sources:
   - packages/gateway/README.md
   - packages/postgres/src/migrations/0002_base.ts
   - packages/postgres/src/migrations/0008_session_versions.ts
+  - packages/postgres/src/migrations/0016_duplicate_identity.ts
   - packages/server/src/controllers/liveness.ts
   - packages/testing/src/daemon/fake-daemon.ts
   - daemon/internal/session/session.go
@@ -138,7 +139,9 @@ session") without a disconnect write: its row already belongs to the new session
 Right after `Welcome`, the gateway sends an `Ack` for the replayed results it stored. Then, unless the session is
 upgrade-only, a full `DesiredState` when the node's generation is above `applied_generation` (or the node has a
 spec and the daemon reported no spec hash), then the replay. Commands the certificate may not run are cancelled
-`kind-not-allowed` instead of replayed, and a WebSocket session skips unsigned ones.
+`kind-not-allowed` instead of replayed. A WebSocket session skips unsigned commands and withholds unsigned specs; with
+`pki.commandSigning` the NodeSpec controller signs every generation, and the gateway relays the stored signed bytes
+(`nodes.spec_body`, `nodes.spec_signature`) verbatim, so WebSocket daemons receive their specs.
 
 The daemon applies `Welcome` (`session.ApplyWelcome`): it records the epoch as `last_epoch`, forgets events up to
 `acked_event_seq`, keeps the clock offset, sets its lane credits, and sends the requested inventory sections, its
@@ -182,9 +185,25 @@ The daemon has its own half of these rules, applied at start and on every duplic
 
 ### Duplicate identity
 
-A second live `Hello` for a node from another `boot_id` wins: the newer session takes the row, and `node.connected`
-carries `duplicateIdentity: true`. `DuplicateIdentity` is an inventory-owned condition. PLAN.md also designs
-quarantining the certificate after more than 3 alternations in 10 minutes.
+A second live `Hello` for a node from another `boot_id` wins: the newer session takes the row, `node.connected`
+carries `duplicateIdentity: true`, and `security.node.duplicate-session` is published with `nodeId`, `gatewayId`,
+`previousBootId`, `bootId`, `alternations`, `windowSeconds` and `quarantined`. `DuplicateIdentity` is an
+inventory-owned condition. A prior session that already went quiet (outside the live window) is superseded without
+counting.
+
+The Hello transaction counts these alternations in `node_sessions.duplicate_hellos` and `duplicate_since`
+(`core/0016`). When the same certificate alternates between machines more than 3 times within 10 minutes, the gateway
+quarantines it:
+
+1. the presented certificate's serial is revoked with `revocation_reason = 'duplicate-identity'` (every live
+   certificate of the node when no serial was recorded, as on header-authenticated development gateways), so every
+   gateway's revocation feed drops the other clone too;
+2. `security.node.quarantined` is published with `nodeId`, `reason`, `alternations` and the revoked `serials`;
+3. the clone connected to this gateway gets a revocation notice, and the `Hello` is refused `UNAUTHENTICATED`
+   ("certificate quarantined: duplicate identity") once the revocation has committed.
+
+The counter resets with the quarantine, so a re-joined machine starts afresh; re-join the real machine with a new
+join token. The limits are `createGateway({ duplicateHellos: { max, windowMs } })` (defaults 3 and 10 minutes).
 
 ## Liveness
 
@@ -282,6 +301,7 @@ One row per node, inserted by JoinService with epoch 0 and owned by the gateways
 | `last_seen` | Flushed from gateway ages every 15 s |
 | `connected_at`, `disconnected_at` | Set by `Hello` and by the disconnect write |
 | `daemon_version`, `proto_max` | From `Hello`; read by rollouts (migration `core/0008_session_versions`) |
+| `duplicate_hellos`, `duplicate_since` | Duplicate-`Hello` count in the current window, for the quarantine (migration `core/0016_duplicate_identity`) |
 
 Routing is always this join at dispatch time, never a column copied onto commands, so a reconnect needs no rewrite
 and a command enqueued during a reconnect cannot be stranded. See [delivery](/docs/daemon/delivery).

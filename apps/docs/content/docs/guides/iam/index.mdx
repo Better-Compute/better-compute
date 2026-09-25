@@ -237,10 +237,21 @@ event id, because Better IAM delivers at least once:
 The `iam.inbox` reconciler drains the inbox per tenant in Better IAM's `sequence` order, without waiting for gaps,
 and every reaction is level-triggered: it re-reads current state instead of trusting event order. Two reactions are
 built in: remembering `successorId` from `identity:offboard`, and invalidating the flag cache. The rest are hooks.
-The server does not install handlers of its own yet, so wire the ones you need:
+
+`better-compute serve` installs default handlers when the configuration's host sets `host.iam: { bridge }`
+(`installIamHandlers`): `agent` closes the agent's or delegation's tunnels on every live gateway within the 2-second
+inbox drain, with `agentStreamCloser(gatewayStreamCloser(...))` from this package, and drops the agent's cached
+authentications; `identity`, `sessions` and `authz` drop this process's caches, close the tunnels and streams of an
+identity that is gone, and re-authorize an identity's tunnels at once when its sessions are revoked. `host.iam.handlers` replace the defaults one by one; `binding`, `tenant` and `budget` have no default.
+See [tunnels](/docs/guides/access/tunnels#closing-on-iam-revocation). If you build the server yourself, wire the ones
+you need:
 
 ```ts title="compute.server.ts"
+import { agentStreamCloser, gatewayStreamCloser } from 'better-compute/iam';
+
 bridge.setHandlers({
+  // gatewayClients: gatewayControlClient(...) for each gateway's internal control API
+  agent: agentStreamCloser(gatewayStreamCloser(() => gatewayClients)),
   async identity(_tx, event) {
     if (event.subjectId) compute.caches.dropIdentity(event.subjectId);
   },

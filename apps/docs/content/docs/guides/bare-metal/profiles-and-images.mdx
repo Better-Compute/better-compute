@@ -290,13 +290,21 @@ await compute.api.images.register(credential, {
   SHA-256 (IEEE P1363 or DER encoding).
 - **Signers.** Allowlists are rows of `image_signers` per tenant, with SPKI PEM keys; the root
   tenant's signers are the platform's. Hosts add and revoke them with `addImageSigner` and
-  `revokeImageSigner`; there is no API method. Images a revoked signer verified keep their flag.
+  `revokeImageSigner`; there is no API method. Images a revoked signer verified keep their flag, but no longer
+  deploy (below).
 - **Verification.** A signature must verify against the named signer of the tenant or the platform,
   else `INVALID_INPUT`. A verified image has `verified: true`. The default check is offline against
   `image_signers`; swap in Sigstore or a KMS with `provisionModule({ imageVerifier })`.
 - **Visibility.** Unsigned images stay private to their tenant forever (a table `CHECK` enforces it).
   [`images.promote`](/docs/reference/api/images#promote) makes a verified image public to every tenant;
   on an unsigned one it is `INVALID_STATE`.
+- **At deploy time.** Before metal relays `deploy.image`, `verifyImageForUse` re-verifies the image's stored
+  signature against the signer allowlist it was verified against at registration. An unsigned image, a revoked
+  signer or a tampered catalog row stops the deploy with `INVALID_STATE` (`details.reason` `unsigned` or
+  `signature`), and the node fails out of `deploying` without any `deploy.image` sent. Pass the verifier you gave
+  `provisionModule({ imageVerifier })` as `metal({ images: { verifier } })` when it is not the default allowlist.
+  `images: { allowUnsigned: true }` lets a tenant-private unsigned OS image through, for development only; never a
+  ramdisk, and never a signed image whose signature fails.
 - **Reading.** `images.get` and `images.list` (filter by `kind`, up to 200 a page) return the tenant's
   own images and public ones. A profile's `image.ref` resolves to the tenant's own image first.
 

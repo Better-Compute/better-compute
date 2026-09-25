@@ -161,6 +161,7 @@ The handler's `MethodContext` is the [module context](/docs/extending/modules#th
 | `credential` | The credential as presented, for calls you make on the caller's behalf |
 | `admission` | The recorded decision of an allowed mutation: tenant, identity, session, action, resource, `decidedAt` |
 | `requestId` | The caller's `X-Request-Id` when it is short and plain, else a generated `req_…` |
+| `traceparent` | The request's W3C `traceparent` header when it is valid (version `00`, non-zero ids); `ctx.commands.enqueue` then defaults each command's `traceparent` to it unless the command sets its own |
 | `signal` | Aborts when the transport does |
 | `check`, `invoke` | Composite methods only; see below |
 

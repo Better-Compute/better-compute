@@ -12,6 +12,8 @@ sources:
   - packages/mcp/src/server.ts
   - packages/mcp/src/tools.ts
   - packages/mcp/src/confirmations.ts
+  - packages/mcp/src/endpoint.ts
+  - packages/cli/src/host/config.ts
   - packages/better-compute/src/mcp.ts
   - tests/mcp-server.test.ts
   - tests/mcp-e2e-confirmation.test.ts
@@ -50,13 +52,45 @@ The server is a small, stateless Streamable HTTP endpoint that speaks JSON-RPC 2
 `tools/list` and `tools/call`, and accepts notifications. It has no MCP SDK dependency; its only runtime dependency
 is `@better-compute/client`. `@better-iam/mcp`, which provides the gate, is an optional peer.
 
-<Callout type="info" title="A library, not a service">
-  No better-compute process mounts an MCP endpoint for you: `serve`, `dev` and the console do not. You host the
-  handler yourself, in any runtime with the Fetch API, as below, with Better IAM embedded in the same process or
-  reached over HTTP ([remote IAM](#remote-iam)).
+<Callout type="info" title="Mounted when you ask for it">
+  `serve` and `dev` mount the endpoint when the configuration's host sets `host.mcp` (below); nothing is mounted
+  otherwise. You can also host the handler yourself in any runtime with the Fetch API, with Better IAM embedded in
+  the same process or reached over HTTP ([remote IAM](#remote-iam)).
 </Callout>
 
-## Mount the endpoint
+## Mount it with serve
+
+`computeMcpEndpoint({ compute, gate, delegations?, ...options })` builds the endpoint for a control plane in the same
+process: the gate first, then the tools, each calling `compute.handler` in-process with the caller's own
+`Authorization` header, so compute decides every call exactly as it would over HTTP. With `delegations` (Better IAM's
+delegations API) the tools wait inside the call for a person to approve a held-back action. Hand its `handler` to the
+host:
+
+```ts title="better-compute.config.ts"
+import { createMcpGate } from '@better-iam/mcp';
+import { defineHost } from 'better-compute/cli';
+import { computeMcpEndpoint, gateTools } from 'better-compute/mcp';
+
+export const host = defineHost(({ compute }) => ({
+  mcp: {
+    path: '/mcp', // the default
+    handler: computeMcpEndpoint({
+      compute,
+      gate: createMcpGate({ iam, tenantId: platformTenantId, tools: gateTools(), unlisted: 'deny' }),
+      delegations: iam.api.delegations,
+    }).handler,
+  },
+}));
+```
+
+`serve` and `dev` then answer `POST`, `GET` and `DELETE` on the path, and `GET
+/.well-known/oauth-protected-resource{path}` for the gate's RFC 9728 metadata. A path that is not absolute, or a
+missing handler, is `INVALID_CONFIG`. The gate is required. Give it a fixed `tenantId` (the organization that runs the
+endpoint), or choose one per caller deliberately: deciding in each caller's own tenant would let any organization
+grant itself access. The compose audit test mounts it through a real `serve`: no token is 401, and an administrator
+lists the tools.
+
+## Mount the endpoint yourself
 
 ```ts title="mcp.ts"
 import { createMcpGate } from '@better-iam/mcp';
@@ -146,6 +180,9 @@ framework.
 | `preview_reservation` | `capacity.preview` | `compute:pools:read` on the pool | read-only |
 | `reserve_gpus` | `reservations.create` (`binding: 'hold'`) | `compute:pools:read` on the pool | idempotent |
 | `release_reservation` | `reservations.release` | any authenticated caller | destructive, idempotent |
+| `list_reservations` | `reservations.list`: the caller's own by default, `scope: 'all'`, filters `state` and `poolId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
+| `get_reservation` | `reservations.get` | any authenticated caller | read-only |
+| `extend_reservation` | `reservations.extend` by a duration, confirmation-aware | any authenticated caller | idempotent |
 | `node_status` | `nodes.get` | `compute:nodes:read` on the node | read-only |
 | `run_diagnostic` | `commands.run` with `diag.nvml` | `compute:nodes:read` on the node | idempotent |
 | `create_instance` | `instances.create` | `compute:pools:read` on the pool | idempotent |
@@ -174,8 +211,10 @@ deliberately light:
 
 - A tool that names a pool is visible to a caller with `compute:pools:read` on `compute-pool/{poolId}`; one that
   names a node needs `compute:nodes:read` on `compute-node/{nodeId}`.
-- `list_pools`, `capacity_summary` and `release_reservation` are open to any authenticated caller, because the
-  compute API filters and decides every call anyway.
+- `list_pools`, `capacity_summary` and the reservation tools (`release_reservation`, `list_reservations`,
+  `get_reservation`, `extend_reservation`) are open to any authenticated caller, because the compute API filters and
+  decides every call anyway, on the reservation itself (`OwnReservations`, `BoundedExtend`, a delegation's confirm
+  list).
 - The fleet tools need `compute:fleet:admin` on `compute-fleet/global`, which only resolves in the root tenant.
 
 The gate never checks the action a tool performs, such as `compute:reservations:create`. That decision happens once,
@@ -204,7 +243,8 @@ and can list actions that the person must approve each time. When the agent call
 compute answers `CONFIRMATION_REQUIRED` and Better IAM opens a confirmation request. See
 [delegated confirmation](/docs/guides/iam/delegated-confirmation) for the whole mechanism.
 
-`reserve_gpus` and `create_instance` turn that error into a normal result the model can act on:
+`reserve_gpus`, `extend_reservation` and `create_instance` turn that error into a normal result the model can act
+on (`extend_reservation` answers `{ idempotencyKey, extension }` once it goes through):
 
 ```json title="reserve_gpus, waiting for a person"
 {

@@ -155,8 +155,14 @@ API admission. See [policies](/docs/guides/iam/policies).
 - **Kinds.** `diag.nvml`, `inventory.refresh`, `logs.collect` and `node.reboot`, plus the opt-in `fakeGpuReset`
   (not retry-safe). `knobs` make them fail: `diag.nvmlInitFails`, `diag.failGpus`, `diag.error`,
   `logs.uploadFails`, `cdiWriteFailures`.
-- **Beyond v0.1.** With `intent`, it verifies signed commands (`BAD_SIGNATURE`); with `tunnels`, it answers
-  `OpenTunnel`; with `nodeKey`, attested results carry `node_sig`. `createWsDialer()` dials the WebSocket fallback.
+- **Beyond v0.1.** With `intent`, it verifies signed commands (`BAD_SIGNATURE`) and signed NodeSpecs:
+  `intent.signedSpecs` is `'access'` (the default: a spec that changes `access` must be signed) or `'always'`, and
+  refused specs are listed in `specRejections`. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
+  results and allocation reports carry `node_sig`. With `instances` (a `FakeHypervisor` or its options) it plays a
+  VPS host, converging domains, overlay disks, NoCloud seeds and taps and fetching user data through the secret
+  broker. With `selfUpdate: { badVersions?, swapMs? }` it converges `NodeSpec.daemon` by swapping and restarting,
+  and a bad build falls back to its previous slot and reports the section failed. `fakeDriverInvoke({ drivers })`
+  adds the `driver.invoke` kind, running in-process or bcx drivers. `createWsDialer()` dials the WebSocket fallback.
 
 | Option | Default | Meaning |
 | --- | --- | --- |

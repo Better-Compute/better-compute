@@ -7,6 +7,9 @@ status: new
 packages: ['@better-compute/server', '@better-compute/pki', '@better-compute/gateway', '@better-compute/client', '@better-compute/console-kit']
 sources:
   - PLAN.md
+  - packages/iam/src/streams.ts
+  - packages/cli/src/host/iam.ts
+  - tests/e2e/access.test.ts
   - packages/server/src/tunnels/module.ts
   - packages/server/src/tunnels/handler.ts
   - packages/server/src/tunnels/websocket.ts
@@ -373,9 +376,47 @@ The gateway keeps its own registry of the tunnels it relays and can close them w
   matching tunnels and answers `{ closed }`. `gatewayControlClient(...).closeTunnels(filter, reason)` calls it;
 - a gateway that stops closes all of its tunnels (`gateway-stopped`).
 
-PLAN.md also closes a person's streams on IAM revocation events such as `delegation:revoke`. The IAM bridge exposes
-handler hooks for those events, but no shipped handler calls `closeTunnels` yet; until you add one, the 60-second
-re-check is what ends such a tunnel.
+### Closing on IAM revocation
+
+IAM revocations close tunnels at once, without waiting for the 60-second re-check. The IAM bridge's inbox routes
+`delegation:revoke`, `agent:suspend` and `agent:suspend-all` to its `agent` handler, and
+`agentStreamCloser(gatewayStreamCloser(() => gatewayClients))` from `better-compute/iam` turns each into one close
+request sent to every gateway's control API:
+
+| Event | Tunnels closed |
+| --- | --- |
+| `delegation:revoke` | Those opened under the delegation (and its agent, when the event names it) |
+| `agent:suspend` | Those the agent opened |
+| `agent:suspend-all` | Every agent's tunnels in the tenant |
+
+The request goes out as soon as the `iam.inbox` job (every 2 seconds) drains the event, without waiting for the inbox
+transaction, and a gateway that is away never fails the drain: close failures go to `onError`. When a revoked
+delegation had live hand-offs, IAM revokes them without naming them, so the tenant's agent tunnels are re-authorized
+at once (`POST /v1/tunnels/reauthorize`) instead of at their next check. The 60-second re-check stays the backstop.
+`tests/e2e/access.test.ts` holds the v0.3 exit: on a real embedded Better IAM, `delegations.revoke` closes the agent's
+tunnel in under 5 seconds with the revocation's reason, and the administrator's own console stays open.
+
+`better-compute serve` wires this for you with `host.iam`:
+
+```ts title="better-compute.config.ts"
+export const host = defineHost(async () => ({
+  iam: { bridge }, // the bridge whose modules and port the configuration uses
+}));
+```
+
+`installIamHandlers` then installs the default reactions before the workers start: `agent` closes the agent's
+tunnels on every gateway that heartbeated in the last 2 minutes (`gatewayStaleMs`), over its `internal_url` with the
+TLS of `host.tunnels.control` (h2c only without TLS), and drops the agent's cached authentications. Better IAM
+names the identity, not the session, in its session events, so:
+
+- an offboarded, expired or deleted identity closes its tunnels on every gateway and its streams in this process's
+  `host.iam.streams` (such as `GET /watch` streams);
+- `auth:session:revoke`, `auth:session:revoke-others` and `identity:revoke-sessions` close the identity's local
+  streams (clients reconnect and are re-authorized) and make every gateway re-authorize the identity's tunnels at
+  once: the revoked sessions' shells close, the others keep running;
+- role- and tenant-wide revocations are left to the periodic re-check. Your own `host.iam.handlers` replace the
+default of the same name. `better-compute doctor` warns `host.iam` when the IAM module is registered without it. See
+[delegated confirmation](/docs/guides/iam/delegated-confirmation).
 
 ## The gateway half
 

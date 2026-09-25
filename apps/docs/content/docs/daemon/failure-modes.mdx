@@ -63,7 +63,8 @@ checker in this module.
 | [Certificate expiry](#certificate-expiry) | Renewal at 60% of the lifetime; the session closes at expiry | The session | |
 | [Certificate revocation](#certificate-revocation) | `RevocationNotice`, then the stream closes; the daemon stops redialing | The session | |
 | [Reconnect storm](#reconnect-storm) | Token bucket, pending-Hello bound, jitter, hash-only `Hello` | Nothing | Bounded load |
-| [Compromised gateway](#compromised-gateway) | Can delay, drop or read frames; cannot mint certificates, read tokens or secrets, or forge results or signed intent | | P14 |
+| [Compromised gateway](#compromised-gateway) | Can delay, drop or read frames; cannot mint certificates, read tokens or secrets, or forge results, bindings or signed intent | | P14 |
+| [Cloned identity](#cloned-identity) | The sessions alternate; more than 3 alternations in 10 minutes revoke the certificate | Both clones' sessions | I5 |
 
 ## Gateway crash
 
@@ -242,10 +243,25 @@ A gateway holds no CA and no signing key. A compromised one can delay, drop or r
 - harvest join tokens: they are sealed to the JoinService encryption key, and `JoinResponse` is signed;
 - read secrets: they travel as JWE to a one-time key of the node;
 - forge attested results: they carry `node_sig`, verified against `node_certs` by workers;
-- forge intent: commands, and from v0.4 specs, are signed by worker keys the daemon verifies.
+- forge a GPU binding: with `attestedBindings`, a reservation goes active only on the node's own signed
+  `AllocationBound`; an unsigned, foreign-signed or replayed report is rejected (`reservation.binding-rejected`),
+  and a forged re-report of an active binding marks it lost instead of replacing it;
+- forge intent: commands and NodeSpecs are signed by worker keys the daemon verifies; the gateway relays the stored
+  signed spec bytes verbatim.
 
-Signed commands require `pki.commandSigning` on the server, and daemons require signatures for destructive kinds
-from v0.2 and for all kinds from v0.4. See [security](/docs/operations/security).
+Signed commands and specs and attested bindings all come with `pki.commandSigning` on the server. Daemons require
+signatures for destructive kinds from v0.2 and for all kinds from v0.4, and for specs that change `access` from v0.2
+and for every spec from v0.4. `tests/e2e/attested-bindings.test.ts` runs a compromised gateway's forged reports
+through a real gateway. See [security](/docs/operations/security).
+
+## Cloned identity
+
+Two machines presenting the same certificate, a copied key, keep taking the node's session from each other: each
+`Hello` from the other boot wins and publishes `security.node.duplicate-session`. More than 3 such alternations within
+10 minutes quarantine the certificate: it is revoked with reason `duplicate-identity`, both clones lose their
+sessions through the revocation feed, and `security.node.quarantined` is published. Workloads on the real machine
+keep running (nothing is released, I5); an operator re-joins it with a new token. See
+[duplicate identity](/docs/daemon/sessions#duplicate-identity).
 
 ## How the failures are exercised
 

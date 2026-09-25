@@ -40,7 +40,7 @@ streams and nothing else.
 [deployment](/docs/operations/deployment). Embedded in your own process:
 
 ```ts title="gateway.ts"
-import { createGateway, serveGateway } from '@better-compute/gateway';
+import { createGateway, serveGateway, watchTlsFiles } from '@better-compute/gateway';
 
 const gateway = createGateway({
   region: 'eu-1',
@@ -52,13 +52,23 @@ const gateway = createGateway({
   reports: gatewayReportHandlers, // allocation transitions from @better-compute/server
 });
 await gateway.start(); // directory row and the gateway:<id> lease
-await serveGateway(gateway, {
+const served = await serveGateway(gateway, {
   port: 443,
   tls: { key, cert, ca: nodeCaPem },
   nodeRoots: [nodeCa.certificate], // certificateAuthenticate; there is no weaker default
   revocations,
 });
+// A renewed serving certificate (pki issue-gateway) reaches new handshakes; open sessions keep theirs.
+watchTlsFiles({ key: '/etc/better-compute/tls/gateway.key', cert: '/etc/better-compute/tls/gateway.crt' }, (tls) =>
+  served.setTls(tls),
+);
 ```
+
+`serveGateway`, `serveGatewayWs` and `serveInternal` each return `setTls({ key, cert, ca? })`, a hot reload of the
+listener's certificate over its original TLS options; a key that does not match its certificate throws and changes
+nothing. `watchTlsFiles` (from `@better-compute/gateway`) polls the files every 60 seconds by default and reports a
+broken set to `onError`. `serve` does this for you with `host.gateway.tlsFiles`; see
+[PKI](/docs/operations/pki#pki-issue-gateway).
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -71,6 +81,7 @@ await serveGateway(gateway, {
 | `credits` | control 8, provision 4, bulk 2 | Commands in flight per node and lane |
 | `handshakesPerSecond` | 200 | Session opens and joins admitted per second |
 | `maxPendingHellos` | 64 | Hello transactions in flight at once |
+| `duplicateHellos` | `{ max: 3, windowMs: 600000 }` | More than `max` duplicate Hellos (a second live session from another boot) within `windowMs` quarantine the certificate; see [duplicate identity](/docs/daemon/sessions#duplicate-identity) |
 | `gatewayLeaseTtlMs`, `leaseRenewMs` | 20,000, 5,000 | The `gateway:<id>` lease |
 | `livenessFlushMs` | 15,000 | How often ages are flushed |
 | `dispatchIntervalMs`, `dispatchBatch` | 1,000, 1,000 | The dispatch loop |
@@ -179,17 +190,25 @@ The gateway imports no domain module. State transitions driven by what nodes rep
 
 | Hook | Called with | Typical wiring |
 | --- | --- | --- |
-| `reports.allocationBound` | an `AllocationBound` | capacity's `markAllocationBound`: the reservation's allocation is bound |
+| `reports.allocationBound` | an `AllocationBound` | capacity's `markAllocationBound`: the binding and the signed report are stored for the reservation worker to verify |
 | `reports.allocationReleased` | an `AllocationReleased` | capacity marks the binding lost or released |
 | `reports.allocationFailed` | an `AllocationFailed` | capacity retries or fails the binding |
 | `reports.status` | the coalesced `StatusReport` | `xidStatusHandler` (XID conditions to inventory's `recordXid`), VPS instance status |
 
 Each report hook runs in the transaction that stores the event and advances the ack, so a report is applied exactly
-once, and receives `{ nodeId, tenantId, journalId, seq, bootId, signed, work }`. `signed` says whether a `node_sig`
-came with it; workers verify signatures, the gateway never treats one as proof. Status handlers may be a list, each
-run under its own savepoint. A failing hook rolls back to its savepoint and is published as `node.report-failed`;
-ingestion goes on. `@better-compute/server` exports `gatewayReportHandlers` with the capacity hooks, and
-`better-compute serve` always adds `xidStatusHandler`.
+once, and receives `{ nodeId, tenantId, journalId, seq, bootId, signed, attested, work }`. `signed` says whether a
+`node_sig` came with it; `attested` is the signed envelope as received (the `AttestedReport` body bytes, `kid` and
+`sig`) for the worker to verify. Workers verify signatures; the gateway never treats one as proof. Status handlers
+may be a list, each run under its own savepoint. A failing hook rolls back to its savepoint and is published as
+`node.report-failed`; ingestion goes on. `@better-compute/server` exports `gatewayReportHandlers` with the capacity
+hooks, and `better-compute serve` always adds `xidStatusHandler`.
+
+`gatewayReportHandlers` accepts a report only about an allocation placed on the reporting node: a report naming
+another node's allocation is ignored like an unknown allocation, so node A's session can neither bind, release nor
+fail node B's. `AllocationBound` passes the session's node id and the signed envelope to `markAllocationBound`,
+which stores the report as received (`allocations.bound_report`, `bound_sig_kid`, `bound_sig`); with
+`attestedBindings` the reservation worker verifies it before the reservation goes active. See
+[attested bindings](/docs/guides/capacity/reservations#attested-bindings).
 
 ## Certificate authentication
 
@@ -211,7 +230,9 @@ polls `node_certs.revoked_at` into the revocation set the gateway enforces, and 
 session whose certificate serial is revoked receives `RevocationNotice{reason, serials}`, its tunnels close, and the
 stream ends `UNAUTHENTICATED`. New opens with that serial are refused at the handshake, and the `Hello` transaction
 re-checks `node_certs` itself, since the database is the revocation truth and the in-memory feed may lag a poll.
-The control API's `revoke` does the same for one node on demand.
+The control API's `revoke` does the same for one node on demand. The gateway also revokes by itself in one case: a
+certificate that keeps alternating between two machines is quarantined with reason `duplicate-identity` (see
+[duplicate identity](/docs/daemon/sessions#duplicate-identity)).
 
 ## Control API
 

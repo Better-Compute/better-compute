@@ -133,8 +133,16 @@ would be a way in. So exactly one agent per site is the boot server: the holder 
 - Every discovery assertion carries the epoch the agent held, and the control plane refuses an epoch
   that is not the lease's current one.
 
-The lease logic is the server's SiteBoot controller (`tickSiteBoot`, tested for promotion and a
-failover inside 30 seconds). The worker does not run it on a schedule yet.
+The lease logic is the server's SiteBoot controller (`tickSiteBoot`). `betterCompute()` registers it as the built-in
+`site-boot` module: a singleton reconciler whose `tick` key runs every 5 seconds in the `controllers` role.
+
+A failover does not restart a machine that was already booting. BMC operations are reroutable between a site's
+agents: a power cycle the dead agent already ran is reused, not sent again, and one it never received is moved to
+the new agent. Boot entries stay per agent, so the new lease holder gets its own entry (and its own single-use
+discovery token) and serves the waiting machine. `tests/metal-site-failover.test.ts` kills the active agent right
+after it power-cycled a machine: the standby is promoted when the dead agent's lease runs out, never earlier, the
+machine boots from it within 30 seconds, the deploy completes, and the boot step's BMC commands ran once. With both
+agents down the boot waits, and the first agent back serves it.
 
 ### Where site steps go
 

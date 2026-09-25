@@ -76,7 +76,8 @@ frames over a WebSocket:
 A WebSocket session is marked signed-only: the gateway sends it only commands and desired states that carry a
 signature, and unsigned ones stay pending. The proxy can still see frame metadata (kinds, sizes, timing) and can
 delay or drop frames, but it cannot forge intent. PLAN.md allows this mode only once all commands and specs are
-signed, and there is no long-poll or unary path before v1. The gateway side (`attachGatewayWs`, `serveGatewayWs`)
+signed: with `pki.commandSigning` both are (the gateway relays each generation's stored signed spec), so a
+WebSocket daemon receives its desired state. There is no long-poll or unary path before v1. The gateway side (`attachGatewayWs`, `serveGatewayWs`)
 and a daemon-side dialer (`connectGatewayWs`, used by the FakeDaemon) exist; bcd does not implement it yet.
 
 ## Proto packages

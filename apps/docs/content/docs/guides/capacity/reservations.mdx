@@ -6,6 +6,9 @@ icon: Ticket
 packages: ['@better-compute/capacity']
 sources:
   - packages/capacity/src/reservations.ts
+  - packages/server/src/join/allocation-binding.ts
+  - packages/server/src/join/gateway-reports.ts
+  - tests/e2e/attested-bindings.test.ts
   - packages/capacity/src/module.ts
   - packages/core/src/domain.ts
   - packages/core/src/states.ts
@@ -321,7 +324,9 @@ Lifecycle changes emit events with subject `reservation/<id>` and `state` and `p
 `reservation.binding`, `reservation.active`, `reservation.extended`, `reservation.released` (with
 `reason`: `release`, `expired`, `lease-lapsed` or `preempted`), `reservation.cancelled`,
 `reservation.failed`, `reservation.awaiting-confirmation`, `reservation.expired`,
-`reservation.repaired`, `reservation.preempting` and `reservation.preempted`. Subscribe with
+`reservation.repaired`, `reservation.preempting`, `reservation.preempted` and
+`reservation.binding-rejected` (with `allocationId`, `nodeId` and `reason`; see
+[attested bindings](#attested-bindings)). Subscribe with
 [webhooks](/docs/guides/events/webhooks) or [watch](/docs/guides/events/watch).
 
 A node that becomes unreachable only raises conditions on the node; the reservation keeps its
@@ -342,6 +347,42 @@ reports `AllocationBound` with the CDI device names; once every allocation is bo
   reservation is placed again, at most twice; the third failure fails it;
 - an `AllocationReleased` report for a bound allocation: `Degraded` with `BindingLost` until the node
   reports it bound again.
+
+The gateway accepts a report only about an allocation placed on the reporting node's own session; a report naming
+another node's allocation is ignored like an unknown one. A report that arrives while the reservation is still
+`placed` is judged as soon as the start is reached, not after the bind timeout.
+
+### Attested bindings
+
+A gateway relays `AllocationBound`, so on its own a compromised gateway could claim a binding the node never made.
+Attested bindings (v0.2, principle P14) close that gap: the node signs the report with its own key, the gateway stores
+the signed bytes as received (`allocations.bound_report`, `bound_sig_kid`, `bound_sig`, `core/0017`), and the
+reservation worker verifies them before the binding counts.
+
+With `pki.commandSigning` configured, `betterCompute()` turns this on by default: capacity's `attestedBindings` is
+`pkiAllocationBindingCheck()` from `@better-compute/server`. You can also pass your own
+`capacity: { attestedBindings }` check. The pki check accepts a report only when:
+
+- it is signed by a certificate of that node (current, or recently expired within the offline grace, never
+  revoked);
+- the certificate's role runs workloads (`node` or `node-tenant` by default; `roles` changes it);
+- the signed body reports exactly this allocation bound.
+
+A good report replaces the binding with the signed CDI devices and env file, marked `attested`, whatever the gateway
+said. With the option on, only attested allocations count as bound. A report that fails the check never counts, and
+each rejection publishes `reservation.binding-rejected` with `allocationId`, `nodeId` and `reason` (`unsigned
+report`, a signature failure, `the signed report is not this allocation bound`, …):
+
+| State when rejected | What happens |
+| --- | --- |
+| `binding` | `bound_at` is cleared, so nothing is billed; the reservation waits for a genuine report or its bind timeout |
+| `active` | The binding is marked lost: `Degraded` with `BindingLost`, and billing keeps the real binding |
+
+Node leases (`binding: 'node'`) are exempt: metal's worker binds them after its deploy workflow verified the machine.
+The end-to-end test `tests/e2e/attested-bindings.test.ts` runs this through a real gateway on the dev stack: an
+unsigned report, one signed by a foreign key, and the node's genuine signature over another allocation never
+activate the reservation, and a forged re-report of an active binding marks it lost. The FakeDaemon signs its
+reports with its node key; the Go daemon has no signing code for them yet.
 
 The TypeScript FakeDaemon implements this node side (CDI spec `/etc/cdi/bcd-<alloc>.json`, env file
 `/run/bcd/allocations/<alloc>.env`, device names `bcd.dev/gpu=<id>`) and drives the simulator and

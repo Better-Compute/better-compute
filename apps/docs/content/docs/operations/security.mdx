@@ -11,6 +11,10 @@ sources:
   - packages/server/src/options.ts
   - packages/server/src/join/gateway-services.ts
   - packages/server/src/join/secret-broker.ts
+  - packages/server/src/join/allocation-binding.ts
+  - packages/server/src/join/gateway-reports.ts
+  - packages/server/src/controllers/nodespec.ts
+  - packages/gateway/src/store.ts
   - packages/server/src/join/rate.ts
   - packages/server/src/runtime/command-signing.ts
   - packages/server/src/tunnels/module.ts
@@ -49,8 +53,9 @@ are built, and ends with a hardening checklist.
 | --- | --- | --- |
 | Cross-tenant access, forged attributes | Tenant pre-check before any database access; SQL tenant scoping; idempotency keys scoped to tenant and identity; attributes only from compute's own projection | Built |
 | Stolen join token | Short TTL, `maxUses` (default 1), `expect` binding; tokens stored hashed, revocable, and sealed to JoinService in transit, bound to the CSR | Built |
-| Compromised node | `nodeId` only from the certificate's SAN; 24 h certificates with pushed revocation; secrets bound to current work; its attested results speak only for itself | Built |
-| Compromised gateway | Holds no key in its code; commands signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results signed by the node. It can delay, drop or read frames, not forge intent, identity, results or secrets | Built, with the [process caveat](#gateway-processes) |
+| Compromised node | `nodeId` only from the certificate's SAN; 24 h certificates with pushed revocation; secrets bound to current work; reports only about its own allocations; its attested results speak only for itself | Built |
+| Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
+| Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
 | Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited | Built; fleet-wide quorum is v1.0 |
 | Replay | Command-id journal, `not_after`, epoch fencing, ticket `jti` sets, a Renew replay cache | Built in the control plane and FakeDaemon; `bcd` not built |
 | Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
@@ -98,13 +103,25 @@ ones after a restricted re-join. A ramdisk admitted through discovery gets a cer
 the commissioning kinds. A `node-tenant` certificate gets no secrets, and destructive kinds sent to it are
 cancelled `tenant-controlled`.
 
+### Duplicate identities
+
+A second live `Hello` for a node from another boot wins the session and publishes `security.node.duplicate-session`
+(with both boot ids and the running count). A certificate that keeps alternating between two machines, the sign of a
+cloned key, is quarantined once it does so more than 3 times within 10 minutes: its serial is revoked with reason
+`duplicate-identity`, so every gateway's revocation feed drops the other clone too, `security.node.quarantined` is
+published, and the `Hello` is refused `UNAUTHENTICATED` after the revocation commits. Re-join the real machine with a
+new token. A session that already went quiet is superseded without counting. See
+[sessions](/docs/daemon/sessions#duplicate-identity).
+
 ### Signed commands
 
-With `pki.commandSigning`, every command is signed by a 24 h worker key that the command-signing root certifies.
-The gateway relays signatures it cannot produce. `better-compute/pki` can sign desired state the same way
-(`signDesiredState`), but the server does not sign NodeSpecs yet. A daemon requires a
-signature for the kinds its own table marks destructive and checks any that is present. PLAN.md extends the
-requirement to access-changing kinds from v0.2 and to all kinds from v0.4. See [PKI](/docs/operations/pki#signed-intent).
+With `pki.commandSigning`, every command is signed by a 24 h worker key that the command-signing root certifies,
+and so is every NodeSpec generation (v0.4): the NodeSpec controller signs the exact `DesiredStateBody` bytes of each
+new generation (purpose `desired-state`) and stores them in `nodes.spec_body` and `nodes.spec_signature`. The gateway
+relays those signatures verbatim; it cannot produce them. A daemon requires a signature for the kinds its own table
+marks destructive and checks any that is present. For desired state, the FakeDaemon requires a signature on any spec
+that changes the `access` section (v0.2) and, with `signedSpecs: 'always'`, on every spec (v0.4), as bcd must. See
+[PKI](/docs/operations/pki#signed-intent).
 
 ### Attested results
 
@@ -112,6 +129,13 @@ A wipe or diagnostics result counts as attested only when the node signed it: th
 `CommandUpdate.node_sig`, and metal verifies it against `node_certs`. A revoked certificate is refused; an expired
 one is accepted for 7 more days, for results journaled offline. Before this fix a kind's `attested` flag was
 trusted, so a gateway could have forged a wipe. A `node-tenant` certificate never attests.
+
+GPU bindings get the same treatment. With `pki.commandSigning`, capacity's `attestedBindings` defaults to
+`pkiAllocationBindingCheck()`: a reservation goes `active` only once the node's own signed `AllocationBound`
+verifies, the signed CDI devices replace whatever the gateway said, and a rejected report publishes
+`reservation.binding-rejected`. A forged re-report of an active binding marks it lost instead of replacing it. The
+gateway's report handlers also ignore reports about allocations placed on another node. See
+[attested bindings](/docs/guides/capacity/reservations#attested-bindings).
 
 ### Sealed secrets
 
@@ -123,6 +147,9 @@ trusted, so a gateway could have forged a wipe. A `node-tenant` certificate neve
   unrevoked, platform certificate, names the session's node, is bound to work that node is doing right now (a live
   command of the step that carries the reference, or a live allocation on it), and uses a fresh request id. The
   answer is a JWE to the request's one-time key, expiring within 5 minutes.
+- A hosted VPS instance's user data is released only when its `secret://` reference belongs to the instance's own
+  tenant, so one tenant's VM cannot boot with another tenant's secret; `instances.create` refuses a foreign
+  reference up front as well.
 - Commands carry references, never values.
 
 ### Tunnels, tickets and break-glass SSH
@@ -158,7 +185,8 @@ See [tenancy](/docs/guides/iam/tenancy).
 - Unexpected errors answer `500` with `INTERNAL_ERROR` and a generic message; the detail goes only to `log.error`.
 - Join, renew and secret refusals are one generic `ACCESS_DENIED` to the agent; the reason goes to audit
   (`security.join.refused`, `security.secret.refused`), rate-limited per reason.
-- A report a node sends about another node becomes `security.node-mismatch` and never reaches a handler.
+- A report a node sends about another node becomes `security.node-mismatch` and never reaches a handler, and a
+  report about another node's allocation is ignored.
 - `/.well-known/better-compute` publishes only public key members; a private JWK member never passes.
 - The PKI bundle is sealed at rest, and `pki show` reads only its public half.
 - `bcd` reads its join token from `BCD_JOIN_TOKEN` or standard input, never from arguments, and never echoes a
@@ -182,18 +210,23 @@ See [tenancy](/docs/guides/iam/tenancy).
 | Gateway handshakes | A token bucket of 200 a second |
 | Gateway sessions | `maxStreams` (default 5,000) |
 | Pending `Hello`s | 64; more are refused `RESOURCE_EXHAUSTED` so a reconnect storm cannot starve the lease |
+| Duplicate `Hello`s | More than 3 from a second machine within 10 minutes quarantine the certificate (`createGateway({ duplicateHellos: { max, windowMs } })`) |
 | Tunnels, break-glass certificates | 10 a minute and 20 an hour per identity, per api replica |
 | Better IAM | A 429 from IAM becomes `RATE_LIMITED`, with `Retry-After` |
 | Security events | Join and secret refusal events: 60 a minute per reason by default; the rest are counted as suppressed |
 
 ### Tamper-evident audit
 
-Every allowed mutation writes an `audit_events` row with its admission context in the same transaction, as do
-commands, steps, tickets and security events. With `auditModule`, an hourly job seals new rows into signed,
+Every allowed mutation writes an `audit_events` row with its admission context in the same transaction (composite
+methods write one per sub-call). So do node joins and reclaims, secret releases by the broker, and workload tokens
+issued to instances (`workload.token.issued`). Commands, workflow steps and exec tickets are not audit rows today;
+they are recorded in their own tables and events. With `auditModule`, an hourly job seals new rows into signed,
 hash-chained Merkle checkpoints per tenant (RFC 6962), in commit order so a long transaction cannot land behind a
 checkpoint. `better-compute audit verify --tenant ID` recomputes the chain and finds an edited, deleted or inserted
 row, a removed checkpoint or a foreign signature; `audit prove` writes an inclusion proof a third party checks
-offline with `audit check-proof`. The module's self-check warns when rows older than 3 hours are still unsealed.
+offline with `audit check-proof`. The module's self-check warns when rows older than 3 hours are still unsealed. An
+audit sink (`sinks.audit`) copies every committed row, in commit order, to a store the database's operators cannot
+change; see [sinks](/docs/extending/sinks#audit-sinks).
 
 ## Hardening checklist
 
@@ -225,7 +258,7 @@ offline with `audit check-proof`. The module's self-check warns when rows older 
 
 - Better IAM wired through the bridge; `doctor` reports `iam.not-configured` otherwise.
 - `acceptIamCookie` only for a console on the same origin.
-- `pki.commandSigning` set, so commands are signed.
+- `pki.commandSigning` set, so commands and NodeSpecs are signed and GPU bindings are attested.
 - `tunnels` only if you need interactive access, with the SSH CA's MFA requirement left on.
 - `auditModule` registered with the bundle's audit key.
 

@@ -42,10 +42,10 @@ This page is for adapter authors. How operators create accounts and provider poo
 <Callout title="Status">
 Provider pools run today: the `vps.instances` reconciler drives an account's client for every instance of a
 `class: 'provider'` pool (`agent: 'none'`). Three adapters ship: `hetzner-cloud` and `hetzner-robot` in
-`@better-compute/provider-hetzner`, and `proxmox` in `@better-compute/provider-proxmox`. The metal side of providers
-is not wired yet: no module calls `ProviderImpl.bootstrap`, so a `provides: ['metal']` adapter such as Hetzner Robot is
-tested on its own but not driven by metal. The provider packages are not on npm and sit outside the `better-compute`
-umbrella.
+`@better-compute/provider-hetzner`, and `proxmox` in `@better-compute/provider-proxmox`. Platform-owned provider
+machines run too: `providerAccounts.bootstrap` and the `vps.bootstraps` reconciler call `ProviderImpl.identify` and
+`bootstrap` to turn a rented server (Hetzner Robot) into a bcd host; see [bootstrapping machines](#bootstrapping-machines).
+The provider packages are not on npm and sit outside the `better-compute` umbrella.
 </Callout>
 
 ## The shape of an adapter
@@ -135,7 +135,8 @@ front, so a rotated secret takes effect and the value never lives longer than a 
 | `delete(id, call)` | on instance deletion | treat an already-gone machine as deleted: throw `NOT_FOUND` or return |
 | `power?(id, action, call)` | on `instances.start` and `stop` (`on`, `graceful-off`) | act on power; without it a start or stop fails the instance `UNSUPPORTED` |
 | `reinstall?`, `rescue?`, `list?` | not yet | optional capabilities |
-| `bootstrap?(machine, { joinToken, bcdUrl, sha256 }, call)` | not yet | metal adapters: deliver a single-use join token without user data |
+| `identify?(machine, call)` | `vps.bootstraps`, in `identifying` | return `{ productUuid }`, the machine's SMBIOS UUID (Hetzner Robot reads it in rescue) |
+| `bootstrap?(machine, { joinToken, bcdUrl, sha256 }, call)` | `vps.bootstraps`, in `installing` | metal adapters: deliver a single-use join token without user data |
 
 `create` receives `{ offerId, image, userData, name }`: the flavor's `offerId`, the instance's image, the rendered user
 data, and the instance id as `name`. `call` is a `CallContext` of `{ idempotencyKey, signal, clock, secrets, log }`, and
@@ -238,6 +239,24 @@ tenant-readable user data. `hetzner-robot` shows how:
 The installed `bcd` joins through the `provisioned` attestor. Without a `resolveTarget` that maps the token to a node,
 the token must carry `expect: { productUuid }`, and the machine joins as a new node. See
 [attestors](/docs/extending/attestors).
+
+### Bootstrapping machines
+
+`providerAccounts.bootstrap({ tenantId, accountId, poolId, machineId | offerId, idempotencyKey })` (decided as
+`compute:providers:manage`) records a request to turn one machine into a node of a `vps-host` or `metal-host` pool
+that runs `bcd` and that the tenant owns. Name exactly one of `machineId` (a machine the account already has) and
+`offerId` (claim or order one). It needs `vps({ bootstrap: { bcdUrl, sha256 } })` and the host PKI, else
+`INVALID_CONFIG`, and an adapter with both `identify` and `bootstrap`, else `UNSUPPORTED`. A retry with the same key
+returns the current status; another request under the key is `CONFLICT`.
+
+The `vps.bootstraps` reconciler then drives it through `claiming` (`create`, keyed by the bootstrap id),
+`identifying` (`identify`), `installing` (a fresh single-use `provisioned` join token bound to that UUID, 2 h by
+default and at most 6 h, handed to `bootstrap`), `joining` (every 30 s it looks for a node of the pool whose applied
+inventory reports that UUID) and `joined` or `failed`. The token's secret is never stored, and a retry revokes the
+last token before it mints another. Provider errors are retried with back-off up to `maxAttempts` (default 3), and a
+machine that does not join within `joinTimeoutMs` (default 1 h) fails with `JOIN_TIMEOUT`. Events
+`provider.bootstrap.started`, `installed`, `joined` and `failed` have the subject `provider-bootstrap/<id>`. The table
+is `provider_bootstraps` (migration `vps/0003_provider_bootstraps`).
 
 ## Registering
 

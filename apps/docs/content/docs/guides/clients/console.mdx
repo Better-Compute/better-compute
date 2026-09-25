@@ -115,20 +115,21 @@ Run it from `apps/console`: the stack file and the data directory are resolved a
 | `CONSOLE_EXEC_TICKET_KEY_FILE` | a generated `exec-ticket.pem` | unset: tunnels are off |
 | `CONSOLE_SSH_CA_KEY_FILE` | a generated `ssh-ca.pem` | unset: no break-glass SSH |
 | `CONSOLE_GATEWAY_TLS_CERT`, `_KEY`, `_CA` | none needed (h2c gateways) | all three or none; tunnels need them |
+| `CONSOLE_AUDIT_KEY_FILE` | a generated `audit-checkpoint.pem` (P-256 PKCS#8) | unset: no audit checkpoints; every replica shares the key |
 | `CONSOLE_RELEASE_PINS`, `CONSOLE_DOWNLOADS_URL`, `CONSOLE_RELEASE_THRESHOLD` | unset: no rollout module | set the first two to mount rollouts |
 | `CONSOLE_CONFIG` | `console.config.mjs` | another stack file |
 | `PORT`, `HOSTNAME` | `3100`, `localhost` | the same |
 
 Every replica and gateway must share the exec ticket key, and nodes pin its public key and the SSH CA's, so
 production supplies the key files rather than generating them. The stack is built once per process from
-`console.config.mjs` (loaded at run time, never bundled): Better IAM, then compute with the `vps` and `fleet`
-modules, and `rollout` when release pins are set.
+`console.config.mjs` (loaded at run time, never bundled): Better IAM, then compute with the `vps`, `fleet` and
+`events` (webhooks) modules and `retentionModule()` (the console builds `betterCompute()` itself, so the CLI's
+automatic retention does not apply), `audit` when an audit key is available, and `rollout` when release pins are set.
 
-<Callout type="warn" title="No webhooks or audit checkpoints in the reference stack">
-  `console.config.mjs` does not add `eventsModule()` or `auditModule()`, so the console's deployment has no
-  `webhooks` group and no signed audit checkpoints. The live event stream works without them. Add the modules to
-  the stack file if you need them.
-</Callout>
+Before the workers start, the stack calls `installIamHandlers(compute, { bridge, streams: [watches] })`, as `serve`
+does for `host.iam`: a revoked delegation or suspended agent closes its tunnels on every gateway (over the console's
+gateway mTLS) and its `/api/compute/watch` streams in this process, and revocations drop the IAM caches. See
+[tunnels](/docs/guides/access/tunnels#closing-on-iam-revocation).
 
 ## Screens
 

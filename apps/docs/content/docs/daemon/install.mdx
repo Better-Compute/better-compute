@@ -16,6 +16,7 @@ sources:
   - daemon/README.md
   - packages/rollout/README.md
   - packages/server/src/options.ts
+  - packages/server/src/downloads.ts
   - PLAN.md
   - .claude/coordination.md
 ---
@@ -27,12 +28,36 @@ joins the fleet and starts the daemon. The script contains no secret, so you can
 repository; the token travels separately.
 
 <Callout type="warn" title="The pieces are not all runnable yet">
-The script generator (`better-compute daemon install-script`) is built and tested. Two things it depends on are
-not. First, bcd is written but not built: Go is not installed on the build machine, so no release binary exists,
-and in the skeleton `bcd join` and `bcd node` exit 2 with `NOT_IMPLEMENTED`. Second, the control plane does not
-serve the `downloads/bcd/...` route the script fetches from yet (`ComputeOptions.downloads` is typed but unused).
-Until both land, `better-compute dev --sim N` is the way to see nodes join: it runs the TypeScript FakeDaemon
-through the same join and session protocol. See [local development](/docs/operations/local-development).
+The script generator (`better-compute daemon install-script`) is built and tested, and so is the
+`GET {basePath}/downloads/bcd/{version}/linux-{arch}` route it fetches from (see [serving the
+binaries](#serving-the-binaries)). What it installs is not: bcd is written but not built, because Go is not installed
+on the build machine, so no release binary exists, and in the skeleton `bcd join` and `bcd node` exit 2 with
+`NOT_IMPLEMENTED`. Until it lands, `better-compute dev --sim N` is the way to see nodes join: it runs the TypeScript
+FakeDaemon through the same join and session protocol. See [local development](/docs/operations/local-development).
+</Callout>
+
+## Serving the binaries
+
+The api serves the daemon binaries itself when you configure `downloads`:
+
+```ts
+betterCompute({
+  // …
+  downloads: { dir: '/srv/bcd' }, // or { blob: blobStore }, or both (the blob store is tried first)
+});
+```
+
+`GET {basePath}/downloads/bcd/{version}/{os}-{arch}` answers goreleaser's bare binary `bcd_{version}_{os}_{arch}`,
+read from `downloads.blob` under the key `bcd/{version}/{file}` or from `{dir}/{file}`. The route is public: the
+install script and self-update check the sha256 from the verified release manifest, not the transport. Responses are
+`application/octet-stream` with `cache-control: public, max-age=31536000, immutable`. The path must match a strict
+pattern (a semantic version with an optional leading `v`, `linux`, `amd64` or `arm64`), so nothing else on disk can
+be reached; anything else, or a binary the deployment does not have, is 404. `downloads` needs `dir` or `blob`, or
+`betterCompute()` throws `INVALID_CONFIG`.
+
+<Callout type="info" title="Where the binaries come from">
+The route only serves files you put there. Copy each release's bare binaries (from goreleaser's output) into the
+directory or blob store before you roll the version out.
 </Callout>
 
 ## Generate the script

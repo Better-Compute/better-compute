@@ -44,9 +44,9 @@ the API, every worker role, and the gateway when the configuration exports `host
 | --- | --- | --- | --- |
 | `api` | The HTTP API (`POST {basePath}/{group}/{method}`), admission transactions, `/healthz`, `/readyz`, `/.well-known/better-compute`, the host's own routes, and the tunnel upgrade `GET {basePath}/tunnels/{ticket}` when tunnels are configured | `--host`:`--port` (default `0.0.0.0:3000`), plain HTTP behind your TLS terminator | Requests, behind an L7 load balancer |
 | `gateway` | Daemon sessions over gRPC on HTTP/2 mTLS, liveness, command dispatch, result and event ingestion, `Join`/`Renew`/`Secret` hand-off, the revocation feed, tunnels | `host.gateway.listen` (default `0.0.0.0:8443`), plus the internal control API (default port 8444) and the WebSocket fallback (default port 443) when configured | Streams, behind an L4 load balancer with TLS passthrough |
-| `controllers` | Every reconciler (node lifecycle, NodeSpec, liveness, inventory, reservations, workflows, …) over 256 shards, and the CommandSweeper | nothing | Shards, spread over worker processes |
-| `scheduler` | Reconcilers that declare `role: 'scheduler'` (placers), under their own shard membership; the pool-lease placer (`capacity.placer`) still runs under `controllers` until its move to this role lands | nothing | — |
-| `sinks` | Outbox dispatch to event sinks (webhooks, usage) | nothing | One lease per sink |
+| `controllers` | Every reconciler not declared for the scheduler (node lifecycle, NodeSpec, liveness, inventory, reservations, workflows, webhooks, audit sinks, …) over 256 shards, and the CommandSweeper | nothing | Shards, spread over worker processes |
+| `scheduler` | Reconcilers that declare `role: 'scheduler'`: the pool-lease placer `capacity.placer`, under its own shard membership | nothing | Pool shards, spread over scheduler processes |
+| `sinks` | OutboxDispatch to event sinks (`sinks.events` and modules' event sinks) | nothing | Sinks, one `singleton:outbox-dispatch:<sink id>` lease each, spread over the `sinks` workers |
 | `iam` | Better IAM's jobs (`iamJobs`), each under its own `singleton:iam:<name>` lease | nothing | One holder per job |
 
 `--roles` takes `all` or a comma list: `api`, `gateway`, and any of `controllers`, `scheduler`, `sinks`, `iam`.

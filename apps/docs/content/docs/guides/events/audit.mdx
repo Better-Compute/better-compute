@@ -16,6 +16,7 @@ sources:
   - packages/server/src/composite.ts
   - packages/server/src/join/service.ts
   - packages/server/src/join/secret-broker.ts
+  - packages/server/src/audit-sinks-module.ts
   - packages/core/src/domain.ts
   - packages/postgres/src/migrations/0002_base.ts
   - packages/postgres/src/migrations/0005_audit_commit_order.ts
@@ -248,10 +249,32 @@ of its own range, and append-only history comes from the hash chain instead, wit
 one before. There is no CLI command for consistency proofs. The primitives are there for tooling that builds a
 single growing tree over a tenant's leaves.
 
+## Copy it out with an audit sink
+
+An audit sink receives every committed `audit_events` row, in commit order, at least once: for a SIEM, or the copy
+outside the database that the callout above asks for. Declare it with `defineSink({ kind: 'audit', id, write })` and
+list it in `betterCompute({ sinks: { audit: [...] } })` or in a module's `extensions`. The built-in `audit-sinks`
+module then runs a singleton reconciler every 5 seconds that hands each sink the rows after its own cursor
+(`audit_sink_cursors`), 500 at a time, with a per-sink back-off on failure. Records carry `id` for deduplication.
+The sink does not depend on the audit module: it copies rows whether or not they are checkpointed. See
+[sinks](/docs/extending/sinks#audit-sinks).
+
 ## Archiving
 
 `audit_events` is partitioned by month, and nothing deletes audit rows on a timer. Checkpoints are verified against
-the rows the table holds, so archiving is a deliberate operator step: `detachHistoryPartition` from
-`@better-compute/postgres` takes a month out of every read at once, including `audit verify`. Archive only months
-whose checkpoints you archive with them, and keep the pin to verify them later. See
-[retention](/docs/operations/retention) and [PKI](/docs/operations/pki).
+the rows the table holds, so archiving is a deliberate operator step in two parts:
+
+1. `markAuditArchived(sql, { month: 'YYYY-MM', partition?, by? })` from `better-compute/audit` records the month in
+   `audit_archives` (migration `audit/0002_archives`). It refuses the current or a future month with
+   `INVALID_STATE`, and a month that still has rows no checkpoint sealed (run a checkpoint pass first). It is
+   idempotent.
+2. `detachHistoryPartition(tx, 'audit_events', 'audit_events_pYYYYMM')` from `@better-compute/postgres` takes the
+   month out of every read at once, leaving it as a standalone table to export and drop.
+
+`verify` then lists a checkpoint wholly inside archived months whose rows are gone in the report's `archived`
+(`{ sequence, months, partial }`), with `archivedMonths` beside it: its body, chain and signature are still checked,
+its root and size are not. While the rows are still attached it is verified as usual, so an edit still shows. A
+checkpoint that straddles an archived month counts as archived (`partial: true`) only once its rows stop matching. A
+month detached without being marked still shows `size` and `root` problems. Archive only months whose checkpoints
+you keep, and keep the pin to verify them later. See [retention](/docs/operations/retention) and
+[PKI](/docs/operations/pki).

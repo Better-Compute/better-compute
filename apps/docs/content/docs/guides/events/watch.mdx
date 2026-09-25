@@ -6,6 +6,8 @@ icon: Activity
 packages: ['@better-compute/events', '@better-compute/console-kit']
 sources:
   - packages/events/src/watch.ts
+  - packages/cli/src/host/watch.ts
+  - packages/cli/src/host/iam.ts
   - packages/events/src/outbox.ts
   - packages/events/README.md
   - packages/console-kit/src/events.ts
@@ -39,39 +41,34 @@ stream out of the JSON API's envelope and lets each host choose how streams are 
 <Tab value="serve (host export)">
 
 ```ts title="better-compute.config.ts"
-import { defineHost } from 'better-compute/cli';
-import { resourceType } from 'better-compute/core';
-import { handleWatch } from 'better-compute/events';
+import { defineHost, watchAuthorizer } from 'better-compute/cli';
+import { createWatchRegistry, handleWatch } from 'better-compute/events';
 
-export const host = defineHost(({ compute }) => ({
-  http: {
-    routes: [
-      {
-        path: '/watch',
-        method: 'GET',
-        handler: (request: Request) =>
-          handleWatch(request, {
-            sql: compute.context.sql,
-            authorize: async (watch) => {
-              const credential = { headers: watch.headers };
-              const caller = await compute.context.iam.authenticate(credential);
-              const tenantId = new URL(watch.url).searchParams.get('tenantId') ?? caller.tenantId;
-              await compute.context.iam.require(credential, {
-                tenantId,
-                action: 'compute:events:read',
-                resource: { type: resourceType('tenant'), id: tenantId },
-              });
-              return { tenantId };
-            },
-          }),
-      },
-    ],
-  },
-}));
+export const host = defineHost(({ compute }) => {
+  const authorize = watchAuthorizer(compute); // decided exactly like events.list
+  const streams = createWatchRegistry(); // so IAM revocations close open streams at once
+  return {
+    iam: { bridge, streams: [streams] }, // bridge: your createComputeIamBridge()
+    http: {
+      routes: [
+        {
+          path: '/watch',
+          method: 'GET',
+          handler: (request: Request) =>
+            handleWatch(request, { sql: compute.context.sql, authorize, registry: streams }),
+        },
+      ],
+    },
+  };
+});
 ```
 
 `better-compute serve` answers the host export's routes beside the API, so this serves `GET /watch` on the API's
-listener.
+listener. `watchAuthorizer(compute, { cookie? })` decides the stream through the server's own envelope: it calls
+`events.list` for one event as the caller (authentication, the tenant pre-check, one `compute:events:read` decision
+on `compute-tenant/{t}`, and the caches), with `?tenantId=` defaulting to the caller's tenant. It returns the caller's
+subject and, when the IAM port has `authorizeSession`, a re-authorizer, so the stream can be closed or re-checked
+later. Without `cookie: true` it accepts only the `Authorization` header.
 
 </Tab>
 <Tab value="Next.js route">
@@ -131,10 +128,13 @@ if (new URL(request.url).pathname === '/watch') return watch(request);
   type={{
     sql: { type: 'SqlExecutor', description: "The control plane's database executor: compute.context.sql.", required: true },
     authorize: {
-      type: '(request: Request) => Promise<{ tenantId: string }>',
-      description: 'Authenticates and authorizes the request and names the one tenant whose events it may read. Throw a ComputeError to refuse.',
+      type: '(request: Request) => Promise<WatchGrant>',
+      description: 'Authenticates and authorizes the request and returns { tenantId, subject?, reauthorize? }: the one tenant whose events it may read, who asked, and how to re-check them. Throw a ComputeError to refuse.',
       required: true,
     },
+    registry: { type: 'WatchRegistry', description: 'createWatchRegistry(): where open streams register, so a revocation can close them at once. Share one per process.' },
+    reauthorizeMs: { type: 'number', description: 'How often the grant\'s reauthorize runs.', default: '60000' },
+    iamOutageMs: { type: 'number', description: 'How long reauthorize may keep failing (IAM unreachable) before the stream closes.', default: '120000' },
     pollMs: { type: 'number', description: 'How often to look for new events when the last read found none.', default: '1000' },
     heartbeatMs: { type: 'number', description: 'How often to send a comment line that keeps proxies from closing an idle stream.', default: '15000' },
     batch: { type: 'number', description: 'Events per outbox read.', default: '200' },
@@ -157,11 +157,28 @@ if (new URL(request.url).pathname === '/watch') return watch(request);
   header by default, and browsers omit `Origin` on same-origin `GET`s, so the console requires
   `X-Better-Compute: 1`, which a cross-origin page cannot send without a preflight nothing approves.
 
-<Callout type="warn" title="The examples only authenticate">
-  The example deployments' host export (`examples/shared/compose.ts`) authenticates the bearer token and returns the
-  caller's tenant, without an IAM decision on `compute:events:read`. Any authenticated identity of a tenant can then
-  follow all of that tenant's events. Add the `require` call above in your own deployment.
+<Callout type="warn" title="Authenticating is not enough">
+  An `authorize` that only authenticates lets any member of a tenant follow all of that tenant's events. Decide
+  `compute:events:read` as above, or use `watchAuthorizer`, as the example deployments (`examples/shared/compose.ts`)
+  do. Without a grant, a member gets 403; a caller without a token, 401.
 </Callout>
+
+### Revocation
+
+A stream is authorized when it opens, so the grant says how to end it early:
+
+- **`reauthorize`** runs every `reauthorizeMs` (60 s). `false` closes the stream; a throw counts as IAM unreachable,
+  and after `iamOutageMs` (2 minutes) of that the stream closes.
+- **`registry`** lets a revocation close matching streams at once: `closeWhere({ agentId | delegationId |
+  sessionId | identityId | tenantId + anyAgent }, reason)`. A tenant alone is refused, since it would close too
+  much. With `host.iam: { bridge, streams: [registry] }`, `serve` installs handlers that close an agent's or
+  delegation's streams on `delegation:revoke` and `agent:suspend`, every agent's in the tenant on
+  `agent:suspend-all`, and an identity's on its offboarding or session revocation (the client reconnects with
+  `Last-Event-ID` and is decided again).
+
+A closed stream ends with `event: error` carrying `{ "code": "ACCESS_DENIED", "message": <reason> }`, and events read during the
+revocation are not sent. `tests/e2e/access.test.ts` checks that a revoked delegation and a member's sign-out close
+`/watch` within 5 seconds.
 
 A refusal, or any error before the stream starts, is a JSON error with the code's status, like the API's:
 `{ "error": { "code": "ACCESS_DENIED", "message": "…" } }` with 403, `INVALID_INPUT` with 400 for a bad cursor or

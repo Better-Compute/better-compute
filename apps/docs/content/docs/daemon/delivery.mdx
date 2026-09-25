@@ -95,7 +95,10 @@ A `DesiredStateBody` carries the node id, the generation, a `spec_hash` and eith
 A patch applies against `base_generation`: every section it sets replaces that section wholesale (an empty section
 clears it), unset sections stay. The daemon ignores a body for another node and any generation not above the one
 it holds. It never recomputes `spec_hash`; it echoes it back as `applied_spec_hash`. The FakeDaemon applies both
-forms. The gateway in this release sends full specs only (`base_generation` 0), rendered from `nodes.spec`.
+forms. The gateway in this release sends full specs only (`base_generation` 0). When the NodeSpec controller stored
+the encoded body of the current generation (`nodes.spec_body`, and with a signing key `nodes.spec_signature`,
+migration `core/0021_signed_specs`), the gateway relays those bytes verbatim and never re-encodes them; otherwise it
+renders `nodes.spec` unsigned with pki's `desiredStateBodyFromJson`, the writer's own encoder, byte for byte.
 
 The daemon stores the last full spec, its hash and its signature in the journal, and enforces it while offline.
 
@@ -243,12 +246,20 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   command-signing roots of the daemon's trust bundle. The server signs every command when `pki.commandSigning` is
   configured, and sends the matching trust bundle in `JoinResponse` and `Welcome`; without it commands go unsigned,
   as v0.1 allows. The daemon's own kind table decides which kinds require a signature, never a flag the body could
-  carry: destructive kinds from v0.2, all kinds from v0.4. Desired state has the same envelope (purpose
-  `desired-state`), but the gateway's default spec source sends specs unsigned today.
+  carry: destructive kinds from v0.2, all kinds from v0.4.
+- **Signed desired state.** Specs have the same envelope under purpose `desired-state`. With
+  `pki.commandSigning`, the NodeSpec controller signs each new generation's `DesiredStateBody` with the worker key
+  (`CommandSigner.signDesiredState`) in the transaction that bumps the generation, and every bump rewrites both
+  columns, so a signature never outlives its generation. The daemon checks the signature with `verifyDesiredState`:
+  one is required for a spec that changes the `access` section (v0.2) and, with the v0.4 policy, for every spec; a
+  present one is always checked. A refused spec is not applied. The FakeDaemon implements this
+  (`intent.signedSpecs: 'access' | 'always'`, refusals in `specRejections`); bcd must implement the same rule.
 - **Attested results.** For attested kinds (`diag.*`, `gpu.reset`, and later `wipe`, `deploy.*`, `firmware.*`) the
   node signs `CommandUpdate.node_sig` over the command id, the state and the SHA-256 of the result, and allocation
   reports travel as node-signed `AttestedReport`s. Workers verify them against `node_certs` before any state
-  transition; the gateway never judges or strips them.
+  transition; the gateway never judges or strips them. With `attestedBindings` (on by default with
+  `pki.commandSigning`), a reservation goes active only on the node's own signed `AllocationBound`; see
+  [attested bindings](/docs/guides/capacity/reservations#attested-bindings).
 
 ## Events
 
@@ -259,7 +270,9 @@ report handlers, advances `node_sessions.acked_event_seq`, and answers `Ack{jour
 another journal id is ignored.
 
 A report whose body names another node is published as `security.node-mismatch` and never reaches a handler; an
-undecodable one is `security.invalid-report`. Handlers (`allocationBound`, `allocationReleased`,
+undecodable one is `security.invalid-report`. The allocation handlers also ignore a report about an allocation that
+is not placed on the reporting node, as they ignore unknown allocations, so one node's session cannot bind, release
+or fail another node's allocation. Handlers (`allocationBound`, `allocationReleased`,
 `allocationFailed`) run in the ingest transaction under a savepoint: a failing one rolls back its own writes, is
 published as `node.report-failed`, and does not stop the stream, since an unacked event would only be replayed into
 the same failure.

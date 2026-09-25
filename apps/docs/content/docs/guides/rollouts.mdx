@@ -139,8 +139,9 @@ export const compute = betterCompute({
 />
 
 The module only builds download URLs; it does not serve files. Put each release's bare binaries at
-`{downloadsUrl}/bcd/{version}/linux-amd64` and `linux-arm64`. PLAN.md's `GET {basePath}/downloads/bcd/...` route on
-the api is not in the shipped server.
+`{downloadsUrl}/bcd/{version}/linux-amd64` and `linux-arm64`. The api can serve them itself: with
+`betterCompute({ downloads: { dir } })` (or `{ blob }`), set `downloadsUrl` to `{baseURL}{basePath}/downloads`; see
+[installing bcd](/docs/daemon/install#serving-the-binaries).
 
 The module adds the migration `rollout/0001_rollouts` (tables `daemon_releases`, `rollouts`, `rollout_nodes`), the
 `rollout` reconciler and the `daemon.upgrade` command kind. Every method decides `compute:fleet:admin` on

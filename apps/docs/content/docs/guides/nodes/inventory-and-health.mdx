@@ -186,6 +186,11 @@ the Inventory controller from inventory, with the same function, so both agree. 
 trusted key (a cloned disk image, a moved board) gets `DuplicateIdentity` and keeps its key untrusted until an
 operator resolves it.
 
+A copied node certificate shows up at the gateway instead: two machines with the same certificate keep taking the
+node's session from each other, each second `Hello` publishing `security.node.duplicate-session`. More than 3 such
+alternations within 10 minutes revoke the certificate (`security.node.quarantined`, reason `duplicate-identity`), and
+the real machine must re-join with a new token. See [duplicate identity](/docs/daemon/sessions#duplicate-identity).
+
 ## Conditions
 
 A condition is `{ type, status, reason?, message?, since }`, where `status` is `true`, `false` or `unknown` and
