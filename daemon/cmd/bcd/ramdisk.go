@@ -32,6 +32,7 @@ func ramdiskConfig(p bootparams.Params, dataDir string) (*config.Config, error) 
 	cfg.JoinEncryptionKeyPin = p.JoinEncryptionPin
 	cfg.DataDir = dataDir
 	cfg.SocketPath = filepath.ToSlash(filepath.Join(dataDir, "bcd.sock"))
+	cfg.ImageCache = p.Cache
 	if strings.HasPrefix(p.Gateway, "http://") {
 		if !devBuild {
 			return nil, errors.New("an http:// gateway is only accepted by fakehw development builds")

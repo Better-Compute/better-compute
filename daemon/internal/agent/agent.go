@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,6 +77,8 @@ type Options struct {
 	Kinds []*Kind
 	// HTTPClient uploads logs.collect bundles (default: a client with a 5 minute timeout).
 	HTTPClient *http.Client
+	// ImageCache is the site image cache's base URL a ramdisk tries before an image's source.
+	ImageCache string
 	// DialTunnel opens Tunnel streams; nil refuses every OpenTunnel.
 	DialTunnel TunnelDialer
 	// TunnelProgram runs a tunnel's program (default DefaultTunnelProgram).
@@ -99,6 +102,7 @@ type Agent struct {
 	laneConfig  map[dispatch.Lane]dispatch.LaneConfig
 	devices     *devicesConverger
 	boot        *BootEntries
+	cache       *imageCache
 	access      *accessConverger
 	convergeCh  chan struct{}
 	rng         *rand.Rand
@@ -222,6 +226,7 @@ func New(o Options) (*Agent, error) {
 	}
 	a.devices = &devicesConverger{a: a}
 	a.boot = newBootEntries(o.DataDir)
+	a.cache = newImageCache(filepath.Join(o.DataDir, "cache"))
 	a.loadFaults()
 	a.access = &accessConverger{a: a}
 	a.key.Store(o.Key)

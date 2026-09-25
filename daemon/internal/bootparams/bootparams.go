@@ -9,6 +9,7 @@
 //	bc.jwk=<base64url of the JoinService encryption key's public JWK>
 //	bc.token=bcjt_…                     the single-use, MAC-bound discovery join token (15 min)
 //	bc.assertion=<base64url of a SignedDiscoveryAssertion>  the site agent vouching for this boot
+//	bc.cache=http://10.20.0.2:8080/cache   optional: the site image cache (tried before an image's source)
 //
 // The token is readable in /proc/cmdline by anything on the ramdisk, which runs nothing but bcd; it
 // is single-use and bound to the machine's MAC, and support bundles redact it.
@@ -35,6 +36,8 @@ type Params struct {
 	JWK       []byte
 	Token     string
 	Assertion []byte
+	// Cache is the site image cache's base URL (optional).
+	Cache string
 }
 
 var b64 = base64.RawURLEncoding
@@ -44,6 +47,9 @@ func Render(p Params) []string {
 	args := []string{"bc.gateway=" + p.Gateway}
 	if p.ServerName != "" {
 		args = append(args, "bc.server_name="+p.ServerName)
+	}
+	if p.Cache != "" {
+		args = append(args, "bc.cache="+p.Cache)
 	}
 	return append(args,
 		"bc.site="+p.Site,
@@ -80,6 +86,8 @@ func Parse(cmdline string) (Params, error) {
 			p.JWK, err = b64.DecodeString(value)
 		case "bc.token":
 			p.Token = value
+		case "bc.cache":
+			p.Cache = value
 		case "bc.assertion":
 			p.Assertion, err = b64.DecodeString(value)
 		}

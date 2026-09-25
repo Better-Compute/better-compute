@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -243,18 +244,11 @@ func (a *Agent) runDeployImage(ctx context.Context, cmd dispatch.Command) (journ
 		return journal.Result{}, err
 	}
 	start := time.Now()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return journal.Result{}, err
-	}
-	resp, err := a.imageClient().Do(httpReq)
+	resp, err := a.fetchImage(ctx, u.String(), req.GetSha256())
 	if err != nil {
 		return journal.Result{}, &KindError{Code: "download-failed", Message: err.Error()}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return journal.Result{}, &KindError{Code: "download-failed", Message: "GET returned " + resp.Status}
-	}
 	hasher := sha256.New()
 	var body io.Reader = io.TeeReader(resp.Body, hasher)
 	switch req.GetCompression() {
@@ -316,6 +310,35 @@ func (a *Agent) runDeployImage(ctx context.Context, cmd dispatch.Command) (journ
 		RootDisk:     diskID(disk),
 		DurationMs:   uint32(min(time.Since(start).Milliseconds(), int64(^uint32(0)))),
 	})
+}
+
+// fetchImage opens the image: from the site cache when it has the digest, else from its source.
+func (a *Agent) fetchImage(ctx context.Context, source string, digest []byte) (*http.Response, error) {
+	if base := a.o.ImageCache; base != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/"+hex.EncodeToString(digest), nil)
+		if err == nil {
+			if resp, err := a.imageClient().Do(req); err == nil {
+				if resp.StatusCode == http.StatusOK {
+					a.log.Info("image from the site cache", "sha256", hex.EncodeToString(digest))
+					return resp, nil
+				}
+				resp.Body.Close()
+			}
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.imageClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("GET returned %s", resp.Status)
+	}
+	return resp, nil
 }
 
 func (a *Agent) imageClient() *http.Client {

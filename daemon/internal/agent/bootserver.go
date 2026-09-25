@@ -67,6 +67,19 @@ func (c siteConverger) Plan(_ context.Context, desired []byte) ([]converge.Actio
 	if changed {
 		c.a.log.Info("boot lease", "active", lease.active, "epoch", lease.epoch, "ttl", lease.ttl.String())
 	}
+	if len(spec.GetCacheImages()) > 0 {
+		ctx := c.a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		missing, failures := c.a.cache.warm(ctx, spec.GetCacheImages(), c.a.imageClient(), func(msg string, kv ...any) { c.a.log.Info(msg, kv...) })
+		if len(failures) > 0 {
+			return nil, converge.Terminal(errors.New(strings.Join(failures, "; ")))
+		}
+		if missing > 0 {
+			return nil, fmt.Errorf("%d cache images warming", missing)
+		}
+	}
 	return nil, nil
 }
 
@@ -114,6 +127,7 @@ func (a *Agent) ServeBoot(ctx context.Context, cfg BootConfig) error {
 func (a *Agent) BootHandler(cfg BootConfig) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boot/ipxe", func(w http.ResponseWriter, r *http.Request) { a.serveIPXE(w, r, cfg) })
+	mux.HandleFunc("GET /cache/", a.cache.serve)
 	return mux
 }
 

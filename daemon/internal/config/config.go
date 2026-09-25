@@ -98,6 +98,10 @@ type Config struct {
 	// gateway_url host (a gateway reached by IP address, e.g. behind an L4 load balancer).
 	GatewayServerName string
 
+	// ImageCache is the site image cache a ramdisk tries first (set by bcd ramdisk from bc.cache; not
+	// a file key).
+	ImageCache string
+
 	// DevInsecureH2C allows an http:// gateway_url: cleartext HTTP/2 to a dev stack's gateway, which
 	// names the node by a header instead of mTLS. Only fakehw builds of bcd accept it (the host build
 	// refuses to start); never set it on a reachable machine.
@@ -113,6 +117,9 @@ type Boot struct {
 	Initrd string
 	// Cmdline is appended to the ramdisk's kernel command line.
 	Cmdline string
+	// URL is how machines reach this boot server (e.g. http://10.20.0.2:8080): its image cache is
+	// passed to the ramdisks it boots.
+	URL string
 }
 
 // Journal bounds the journal. Values may lower the PLAN.md §6 caps but never raise them.
@@ -297,6 +304,7 @@ var fields = []field{
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
 	{section: "boot", key: "initrd", kind: kindString, set: func(c *Config, v value) { c.Boot.Initrd = v.str }},
+	{section: "boot", key: "url", kind: kindString, set: func(c *Config, v value) { c.Boot.URL = v.str }},
 	{section: "boot", key: "cmdline", kind: kindString, set: func(c *Config, v value) { c.Boot.Cmdline = v.str }},
 	{key: "gateway_server_name", kind: kindString, set: func(c *Config, v value) { c.GatewayServerName = v.str }},
 	{key: "dev_insecure_h2c", kind: kindBool, set: func(c *Config, v value) { c.DevInsecureH2C = v.boolean }},

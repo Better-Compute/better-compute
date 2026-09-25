@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/bootparams"
@@ -45,6 +46,9 @@ func runSite(fs *flag.FlagSet, _, stderr io.Writer) int {
 			Initrd:  cfg.Boot.Initrd,
 			Cmdline: cfg.Boot.Cmdline,
 			Join:    joinParams(cfg, jwk),
+		}
+		if cfg.Boot.URL != "" {
+			boot.Join.Cache = strings.TrimRight(cfg.Boot.URL, "/") + "/cache"
 		}
 		serve = func(ctx context.Context, a *agent.Agent) {
 			if err := a.ServeBoot(ctx, boot); err != nil {

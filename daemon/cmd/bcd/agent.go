@@ -247,9 +247,10 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 			old := client.Swap(next)
 			old.Close()
 		},
-		SignerPin: signerPin,
-		Version:   version,
-		Log:       log,
+		SignerPin:  signerPin,
+		ImageCache: cfg.ImageCache,
+		Version:    version,
+		Log:        log,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
