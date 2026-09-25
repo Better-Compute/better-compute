@@ -8,4 +8,5 @@ export * from './standard.js';
 export * from './spans.js';
 export * from './instrument.js';
 export * from './database.js';
+export * from './catalog.js';
 export * from './traceparent.js';

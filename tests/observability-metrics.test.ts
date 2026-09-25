@@ -1,5 +1,40 @@
 import { timingSafeEqual } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { metricCatalog } from '@better-compute/observability';
+
+describe('metricCatalog', () => {
+  it('lists every family the package defines once, prefixed, with its source and no tenant label', () => {
+    const catalog = metricCatalog();
+    const names = catalog.map((family) => family.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names.every((name) => name.startsWith('better_compute_'))).toBe(true);
+    const find = (name: string) =>
+      catalog.find((family) => family.name === `better_compute_${name}`);
+    expect(find('work_queue_depth')).toMatchObject({
+      kind: 'gauge',
+      labels: ['kind'],
+      source: 'standardMetrics',
+    });
+    expect(find('command_latency_seconds')).toMatchObject({
+      kind: 'histogram',
+      labels: ['kind', 'lane'],
+      buckets: [0.05, 0.1, 0.25, 0.5, 1, 1.5, 2.5, 5, 10, 30, 60],
+    });
+    expect(find('spans_total')?.source).toBe('createObserver');
+    expect(find('attestor_verifications_total')?.source).toBe('meteredAttestor');
+    expect(find('gateway_service_calls_total')?.source).toBe('meteredGatewayServices');
+    expect(find('provider_calls_total')?.source).toBe('meteredProvider');
+    expect(find('placement_seconds')?.source).toBe('placementObserver');
+    expect(find('gateway_loop_last_ok_age_seconds')?.source).toBe('gatewayCollector');
+    expect(find('revocation_feed_consecutive_failures')?.source).toBe('revocationFeedCollector');
+    expect(find('events_total')?.source).toBe('eventCounter');
+    for (const family of catalog) {
+      expect(family.help.length).toBeGreaterThan(0);
+      expect(family.labels.some((label) => /tenant|identity|user/.test(label))).toBe(false);
+    }
+    expect(metricCatalog({ prefix: 'x_' })[0]!.name.startsWith('x_')).toBe(true);
+  });
+});
 import { ComputeError, type IamPort } from '@better-compute/core';
 import {
   childTraceparent,
