@@ -14,6 +14,7 @@ import {
   revocationFeedCollector,
   runtimeObserver,
   standardMetrics,
+  usageFlushCounter,
   type ComputeSpan,
 } from '@better-compute/observability';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
@@ -242,6 +243,11 @@ describe('the standard series with a writer of their own', () => {
     count('security.*', 'server');
     expect(registry.value('security_events_total', { type: 'security.join.refused' })).toBe(2);
     expect(registry.value('events_total', { family: 'security.*', module: 'server' })).toBe(3);
+
+    const flushed = usageFlushCounter(metrics);
+    flushed({ deadLettered: 0 });
+    flushed({ deadLettered: 2 });
+    expect(registry.value('usage_dead_letters_total')).toBe(2);
 
     const lookup = resolverLookupCounter(metrics);
     for (const result of ['hit', 'hit', 'miss', 'timeout']) lookup(result);

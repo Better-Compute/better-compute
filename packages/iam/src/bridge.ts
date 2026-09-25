@@ -44,6 +44,7 @@ import {
   reconcileIamIdentities,
   successorLookup,
   successorsMigration,
+  type FlushUsageResult,
   type IamEventHandlers,
   type IdentityState,
 } from './worker.js';
@@ -54,6 +55,11 @@ export interface ComputeIamBridgeOptions extends ComputeCatalogOptions {
   projection?: Omit<AuthzProjectionOptions, 'source'>;
   /** Compute's reactions to IAM events; `setHandlers` replaces them later (the server wires its own). */
   handlers?: IamEventHandlers;
+  /**
+   * Each hourly usage flush's result (metrics: `usage_dead_letters_total` from `deadLettered`; observability's
+   * `usageFlushCounter`). Never allowed to fail the flush.
+   */
+  onUsageFlush?(result: FlushUsageResult): void;
 }
 
 /** An IAM host as the bridge's embedded mode reads it: the port's surface plus its store. */
@@ -215,7 +221,13 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
         }),
         reconciler('iam.usage', [{ key: 'usage', every: '1h' }], async (store) => {
           if (!port) return false;
-          return (await flushUsageWindows(store, port)).more;
+          const result = await flushUsageWindows(store, port);
+          try {
+            options.onUsageFlush?.(result);
+          } catch {
+            // Metrics never fail the flush.
+          }
+          return result.more;
         }),
       ],
       selfCheck,

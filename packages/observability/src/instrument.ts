@@ -396,6 +396,18 @@ export function eventCounter(
 }
 
 /**
+ * The IAM bridge's `onUsageFlush` feeding `usage_dead_letters_total`:
+ * `createComputeIamBridge({ onUsageFlush: usageFlushCounter(metrics) })`.
+ */
+export function usageFlushCounter(
+  metrics: Pick<StandardMetrics, 'usageDeadLetters'>,
+): (result: { deadLettered: number }) => void {
+  return (result) => {
+    if (result.deadLettered > 0) metrics.usageDeadLetters.inc(undefined, result.deadLettered);
+  };
+}
+
+/**
  * The resolver's `onLookup` feeding `resolver_lookups_total{result}` (hit, miss, timeout, unavailable, scope,
  * fallback): `bridge.resolveResource(fallback, { onLookup: resolverLookupCounter(metrics) })`.
  */
