@@ -18,6 +18,7 @@ function fakeTunnel() {
     onData: (handler) => void handlers.push(handler),
     close: () => markExited({ exitCode: 0, reason: 'bye' }),
     terminate: () => markExited({ exitCode: -1, reason: 'terminated' }),
+    bufferedAmount: 0,
   };
   return {
     tunnel,

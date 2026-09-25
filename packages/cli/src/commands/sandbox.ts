@@ -7,7 +7,7 @@ import { parseDuration } from '@better-compute/core';
 import { CliError, RemoteExitError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { newIdempotencyKey, parseTime, tenantFlag } from './capacity.js';
-import { tunnelEndpoint } from './tunnel.js';
+import { bridgeSocket, tunnelEndpoint } from './tunnel.js';
 
 /** What sandboxes.exec returns (the tunnels module's `SandboxExec`, as far as the CLI uses it). */
 interface SandboxExecGrant {
@@ -234,9 +234,12 @@ export const sandboxCommands = [
         server.close();
         const opened = connectTunnel({ url: tunnelUrl(origin, basePath, granted.path) });
         tunnel = opened;
-        opened.onData((data) => void (socket.destroyed || socket.write(data)));
-        void opened.exited.then(() => socket.end());
-        socket.on('data', (chunk: Buffer) => opened.write(new Uint8Array(chunk)));
+        let ended = false;
+        bridgeSocket(socket, opened, () => ended);
+        void opened.exited.then(() => {
+          ended = true;
+          socket.end();
+        });
         socket.on('close', () => opened.close());
         socket.on('error', () => opened.close());
       });

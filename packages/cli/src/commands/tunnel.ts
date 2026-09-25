@@ -99,6 +99,47 @@ async function attach(
 
 const loopback = new Set(['127.0.0.1', '::1', 'localhost']);
 
+/** Upstream: the local socket pauses while the tunnel holds more than this unsent, until it drains below LOW. */
+const BRIDGE_HIGH_WATER = 4 * 1024 * 1024;
+const BRIDGE_LOW_WATER = 1024 * 1024;
+/** Downstream: a WebSocket cannot be paused, so a local client this far behind is disconnected instead. */
+const BRIDGE_MAX_BEHIND = 16 * 1024 * 1024;
+
+/**
+ * Carries a local TCP connection over a tunnel both ways with bounded memory: the socket is paused while the
+ * tunnel's send buffer is high, and a local reader that falls `BRIDGE_MAX_BEHIND` behind is cut off.
+ * `onData` of the tunnel is taken; `closed()` says the connection is over.
+ */
+export function bridgeSocket(
+  socket: Socket,
+  tunnel: ReturnType<typeof connectTunnel>,
+  closed: () => boolean,
+): void {
+  tunnel.onData((data) => {
+    if (socket.destroyed) return;
+    if (socket.writableLength > BRIDGE_MAX_BEHIND) return void socket.destroy();
+    socket.write(data);
+  });
+  let draining: ReturnType<typeof setInterval> | undefined;
+  const stopDraining = () => {
+    if (draining) clearInterval(draining);
+    draining = undefined;
+  };
+  socket.on('data', (chunk: Buffer) => {
+    if (closed()) return;
+    tunnel.write(new Uint8Array(chunk));
+    if (draining || tunnel.bufferedAmount <= BRIDGE_HIGH_WATER) return;
+    socket.pause();
+    draining = setInterval(() => {
+      if (!closed() && tunnel.bufferedAmount > BRIDGE_LOW_WATER) return;
+      stopDraining();
+      if (!socket.destroyed) socket.resume();
+    }, 20);
+    draining.unref?.();
+  });
+  socket.on('close', stopDraining);
+}
+
 /**
  * Listens on `listen` and forwards each accepted connection through its own `tcp` tunnel (a fresh ticket per
  * connection) to the instance's port, until the stop signal. Resolves once the listener is closed.
@@ -157,7 +198,7 @@ async function forward(
         const current = connectTunnel({ url: tunnelUrl(origin, basePath, opened.path) });
         tunnel = current;
         tunnels.add(current);
-        current.onData((data) => void (socket.destroyed || socket.write(data)));
+        bridgeSocket(socket, current, () => closed);
         void current.exited.then(() => {
           tunnels.delete(current);
           closed = true;
@@ -172,7 +213,6 @@ async function forward(
         return;
       }
       // The tunnel has no half-close: the client ending its side ends the connection.
-      socket.on('data', (chunk: Buffer) => void (closed || tunnel!.write(new Uint8Array(chunk))));
       socket.on('end', hangUp);
       socket.resume();
     })();

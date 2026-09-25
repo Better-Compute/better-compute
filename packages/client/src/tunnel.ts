@@ -170,6 +170,8 @@ export interface TunnelConnection {
    * node that went away). `exited` resolves with exit code -1.
    */
   terminate(): void;
+  /** Bytes written but not yet sent (the WebSocket's `bufferedAmount`): pause the source while it grows. */
+  readonly bufferedAmount: number;
 }
 
 /** The tunnel's WebSocket URL from the API base and `tunnels.open`'s `path`. */
@@ -182,6 +184,7 @@ export function tunnelUrl(baseURL: string, basePath: string, path: string): stri
 
 type WebSocketLike = {
   binaryType: string;
+  bufferedAmount?: number;
   send(data: Uint8Array): void;
   close(code?: number, reason?: string): void;
   addEventListener(type: string, listener: (event: any) => void): void;
@@ -256,6 +259,10 @@ export function connectTunnel(options: {
     resize: (rows, cols) => send(encodeTunnelFrame({ case: 'resize', rows, cols })),
     onData: (handler) => void handlers.push(handler),
     close: () => send(encodeTunnelFrame({ case: 'closed', exitCode: 0, reason: '' })),
+    get bufferedAmount() {
+      // Frames queued before the socket opened count too.
+      return (ws.bufferedAmount ?? 0) + pending.reduce((sum, bytes) => sum + bytes.length, 0);
+    },
     terminate() {
       failReady(new Error('Tunnel terminated'));
       markExited(exit ?? { exitCode: -1, reason: 'terminated' });
