@@ -692,6 +692,8 @@ export interface StepContext extends ModuleContext {
   /** `wf:<workflowId>:<stepId>`. */
   idempotencyKey: string;
   node?: NodeRef;
+  /** (v1.0 §13) The workflow's batch: commands the step sends carry it (`awaitCommand` does). */
+  batchId?: string;
   signal: AbortSignal;
   emit(progress: Progress): void;
 }
@@ -761,8 +763,11 @@ export interface EnqueueCommand<P = unknown> {
 /** A destructive-batch scope: the (subject, kind) leaves approvers sign (§13). */
 export interface CommandBatchInput {
   tenantId: string;
-  /** subject: the node id; `bmc:<address>` for bmc.* kinds; `node:<target>` for site.httpProxy. */
-  scope: readonly { subject: string; kind: string }[];
+  /**
+   * subject: the node id; `bmc:<site agent>/<address>` for bmc.* kinds; `node:<target>` for
+   * site.httpProxy. `payloadSha256` binds a leaf to one exact payload (absent: any payload).
+   */
+  scope: readonly { subject: string; kind: string; payloadSha256?: Uint8Array }[];
   reason: string;
   /** When the batch stops admitting commands (default 24 h). */
   notAfterMs?: number;
@@ -800,6 +805,11 @@ export interface WorkflowEngine {
       profileVersion: number;
       nodeId?: string;
       instanceId?: string;
+      /**
+       * (v1.0 §13 quorum) The batch (`commands.createBatch`) the workflow's destructive commands
+       * belong to: every command it sends carries it.
+       */
+      batchId?: string;
     },
   ): Promise<{ id: string }>;
   abort(tx: SqlTx, workflowId: string): Promise<void>;
