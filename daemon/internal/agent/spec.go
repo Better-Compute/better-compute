@@ -131,7 +131,7 @@ func (a *Agent) onDesired(d *agentv1.DesiredState) {
 	a.applied = generation
 	a.triggerConverge()
 	for _, w := range a.deferred {
-		a.admitLocked(w.cmd, true, w.intent)
+		a.admitLocked(w.cmd, true, w.intent, w.command, w.body)
 	}
 }
 

@@ -33,19 +33,41 @@ type intentVerdict struct {
 	unbatched bool
 }
 
-// unbatchedFile holds the unbatched destructive commands of the last hour (command id → server time).
+// unbatchedFile holds the unbatched destructive commands of the last hour (command id → local
+// time: a gateway moving server time forward must not age them out).
 const unbatchedFile = "unbatched-destructive.json"
 
-// trustBundleLocked is the stored trust bundle, or nil.
-func (a *Agent) trustBundleLocked() *commonv1.TrustBundle {
+// trustBundleLocked is the stored trust bundle (nil: none). ok is false when one is stored but
+// cannot be read: the quorum then refuses every destructive command rather than switching off.
+func (a *Agent) trustBundleLocked() (b *commonv1.TrustBundle, ok bool) {
 	if len(a.state.TrustBundle) == 0 {
-		return nil
+		return nil, true
 	}
-	b := &commonv1.TrustBundle{}
+	b = &commonv1.TrustBundle{}
 	if proto.Unmarshal(a.state.TrustBundle, b) != nil {
-		return nil
+		return nil, false
 	}
-	return b
+	return b, true
+}
+
+// quorumChange reports why next may not replace current: once approver keys are held, the quorum
+// (approver keys, thresholds, tiers, the unbatched cap) changes only with the approvers' own
+// signatures, which the trust bundle cannot carry yet, so it does not change at all. A JoinService
+// key alone could otherwise drop the approvers or swap in its own.
+func quorumChange(current, next *commonv1.TrustBundle) string {
+	if len(current.GetApproverKeys()) == 0 {
+		return ""
+	}
+	strip := func(b *commonv1.TrustBundle) *commonv1.TrustBundle {
+		return &commonv1.TrustBundle{
+			ApproverKeys: b.GetApproverKeys(), ApproverThreshold: b.GetApproverThreshold(),
+			UnbatchedDestructivePerHour: b.GetUnbatchedDestructivePerHour(), QuorumTiers: b.GetQuorumTiers(),
+		}
+	}
+	if !proto.Equal(strip(current), strip(next)) {
+		return "it changes the approver quorum without the approvers' signatures"
+	}
+	return ""
 }
 
 // commandSubject is what a command acts on, from its signed body: the BMC a site agent drives
@@ -72,15 +94,25 @@ func commandSubject(cmd dispatch.Command) (string, error) {
 // quorumVerdict checks a destructive command's batch approval, or reports it unbatched.
 func (a *Agent) quorumVerdict(c *agentv1.Command, body *agentv1.CommandBody, cmd dispatch.Command) (dispatch.Rejection, bool) {
 	a.mu.Lock()
-	bundle := a.trustBundleLocked()
-	now := a.serverNowLocked()
-	a.mu.Unlock()
-	if len(bundle.GetApproverKeys()) == 0 {
-		return "", false
-	}
+	defer a.mu.Unlock()
+	return a.quorumVerdictLocked(c, body, cmd)
+}
+
+// quorumVerdictLocked is quorumVerdict with a.mu held (a deferred command is checked again at
+// admission: its approval may have expired meanwhile).
+func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBody, cmd dispatch.Command) (dispatch.Rejection, bool) {
 	if k := a.kinds[body.GetKind()]; k == nil || !k.Destructive {
 		return "", false
 	}
+	bundle, ok := a.trustBundleLocked()
+	if !ok {
+		a.log.Error("the stored trust bundle is unreadable; destructive commands are refused", "id", body.GetId())
+		return dispatch.RejectBatchUnapproved, false
+	}
+	if len(bundle.GetApproverKeys()) == 0 {
+		return "", false
+	}
+	now := a.serverNowLocked()
 	if body.GetBatchId() == "" {
 		return "", true
 	}
@@ -122,19 +154,20 @@ func (a *Agent) unbatchedLocked(now time.Time) map[string]time.Time {
 }
 
 // unbatchedAllowedLocked reports whether one more unbatched destructive command fits the hourly
-// cap (a command already counted, re-executed after a restart, always does).
+// cap (a command already counted, re-executed after a restart, always does). The hour is this
+// host's own: server time, which a gateway can move, never ages the count out.
 func (a *Agent) unbatchedAllowedLocked(id string) bool {
-	now := a.serverNowLocked()
-	seen := a.unbatchedLocked(now)
+	seen := a.unbatchedLocked(time.Now())
 	if _, counted := seen[id]; counted {
 		return true
 	}
-	return len(seen) < int(a.trustBundleLocked().GetUnbatchedDestructivePerHour())
+	bundle, _ := a.trustBundleLocked()
+	return len(seen) < int(bundle.GetUnbatchedDestructivePerHour())
 }
 
 // recordUnbatchedLocked counts an accepted unbatched destructive command.
 func (a *Agent) recordUnbatchedLocked(id string) {
-	now := a.serverNowLocked()
+	now := time.Now()
 	seen := a.unbatchedLocked(now)
 	seen[id] = now
 	raw, _ := json.Marshal(seen)

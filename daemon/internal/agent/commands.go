@@ -72,6 +72,9 @@ type deferred struct {
 	cmd    dispatch.Command
 	intent intentVerdict
 	timer  *time.Timer
+	// command and body are the delivery, for the quorum check at admission.
+	command *agentv1.Command
+	body    *agentv1.CommandBody
 }
 
 func (a *Agent) onCommand(c *agentv1.Command) {
@@ -96,7 +99,7 @@ func (a *Agent) onCommand(c *agentv1.Command) {
 		a.sendLocked(updateFrame(a.updateOf(cmd.ID, *d.Result)))
 	case journal.ActionReattach:
 	case journal.ActionExecute, journal.ActionReexecute:
-		a.admitLocked(cmd, false, intent)
+		a.admitLocked(cmd, false, intent, c, body)
 	}
 }
 
@@ -128,10 +131,14 @@ func (a *Agent) badSignature(c *agentv1.Command, body *agentv1.CommandBody) bool
 // admitLocked runs the acceptance checks (dispatch.Precheck order), then a lane credit (BUSY), then
 // makes `accepted` durable and hands the command to a lane worker. recheck is set when a deferred
 // command is checked again (a new spec arrived, or its not_after passed).
-func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, intent intentVerdict) {
+func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, intent intentVerdict, c *agentv1.Command, body *agentv1.CommandBody) {
 	known := a.deferred[cmd.ID]
 	if known != nil && !recheck {
 		return // a duplicate of a command already waiting for its spec
+	}
+	if recheck && c != nil {
+		// Checked again now: an approval that expired while the command waited admits nothing.
+		intent.quorum, intent.unbatched = a.quorumVerdictLocked(c, body, cmd)
 	}
 	quorum := intent.quorum
 	if intent.unbatched && quorum == "" && !a.unbatchedAllowedLocked(cmd.ID) {
@@ -152,12 +159,12 @@ func (a *Agent) admitLocked(cmd dispatch.Command, recheck bool, intent intentVer
 			return
 		}
 		wait := cmd.NotAfter.Sub(a.serverNowLocked())
-		d := &deferred{cmd: cmd, intent: intent}
+		d := &deferred{cmd: cmd, intent: intent, command: c, body: body}
 		d.timer = time.AfterFunc(max(wait, 0), func() {
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			if a.deferred[cmd.ID] == d {
-				a.admitLocked(cmd, true, intent)
+				a.admitLocked(cmd, true, intent, c, body)
 			}
 		})
 		a.deferred[cmd.ID] = d

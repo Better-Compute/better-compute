@@ -144,6 +144,45 @@ func TestBatchQuorum(t *testing.T) {
 	s.update(t, "l1", commonv1.CommandState_COMMAND_STATE_ACKED)
 }
 
+// Once approvers exist, a trust bundle signed by the JoinService key alone cannot drop them, swap
+// them or weaken their quorum; other fields may change.
+func TestTheQuorumIsFrozenOnceSet(t *testing.T) {
+	current := newApprovers(t, 2, 2, 0).bundle
+	if quorumChange(nil, current) != "" || quorumChange(&commonv1.TrustBundle{}, current) != "" {
+		t.Fatal("a first quorum was refused")
+	}
+	same := proto.Clone(current).(*commonv1.TrustBundle)
+	same.Version, same.CommandSigningRoots = 3, [][]byte{{1}}
+	if why := quorumChange(current, same); why != "" {
+		t.Fatalf("a roots-only change was refused: %s", why)
+	}
+	for name, change := range map[string]func(b *commonv1.TrustBundle){
+		"dropped":   func(b *commonv1.TrustBundle) { b.ApproverKeys = nil },
+		"swapped":   func(b *commonv1.TrustBundle) { b.ApproverKeys = newApprovers(t, 1, 1, 0).bundle.ApproverKeys },
+		"threshold": func(b *commonv1.TrustBundle) { b.ApproverThreshold = 1 },
+		"unbatched": func(b *commonv1.TrustBundle) { b.UnbatchedDestructivePerHour = 100 },
+		"tiers": func(b *commonv1.TrustBundle) {
+			b.QuorumTiers = []*commonv1.QuorumTier{{MaxScopeSize: 1000, Threshold: 1}}
+		},
+	} {
+		next := proto.Clone(current).(*commonv1.TrustBundle)
+		change(next)
+		if quorumChange(current, next) == "" {
+			t.Errorf("a bundle that %s the quorum was accepted", name)
+		}
+	}
+}
+
+// A stored bundle bcd cannot read never switches the quorum off.
+func TestAnUnreadableBundleRefusesDestructiveCommands(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.State.TrustBundle = []byte{0xff, 0xff, 0xff} })
+	s, _ := h.open()
+	s.push(command(body("x1", "gpu.reset", &agentv1.GpuResetRequest{GpuUuids: []string{"GPU-missing"}})))
+	if u := s.update(t, "x1", commonv1.CommandState_COMMAND_STATE_REJECTED); u.GetRejectReason() != commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED {
+		t.Fatalf("x1 = %v", u)
+	}
+}
+
 // A site agent's BMC command is the leaf of the BMC it drives: one approval covers exactly the
 // machines it names.
 func TestBatchQuorumBindsTheBMC(t *testing.T) {

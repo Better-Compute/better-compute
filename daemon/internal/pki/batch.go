@@ -93,7 +93,8 @@ func BatchApprovalInput(a *agentv1.BatchApproval) []byte {
 }
 
 // QuorumThreshold is the number of distinct approver signatures a batch of size leaves needs: the
-// first tier whose max_scope_size covers it, else approver_threshold; never fewer than one.
+// first tier whose max_scope_size covers it, else approver_threshold. Zero means the bundle names
+// no threshold for it, and VerifyBatchApproval then admits nothing (as the TypeScript side does).
 func QuorumThreshold(b *commonv1.TrustBundle, size uint32) int {
 	threshold := b.GetApproverThreshold()
 	for _, tier := range b.GetQuorumTiers() {
@@ -102,7 +103,7 @@ func QuorumThreshold(b *commonv1.TrustBundle, size uint32) int {
 			break
 		}
 	}
-	return max(int(threshold), 1)
+	return int(threshold)
 }
 
 // VerifyBatchApproval checks an approval against the bundle's approver keys at server time now: not
@@ -133,7 +134,11 @@ func VerifyBatchApproval(a *agentv1.BatchApproval, b *commonv1.TrustBundle, now 
 			valid[sig.GetKid()] = true
 		}
 	}
-	if need := QuorumThreshold(b, a.GetScopeSize()); len(valid) < need {
+	need := QuorumThreshold(b, a.GetScopeSize())
+	if need == 0 {
+		return errors.New("pki: the trust bundle sets no approver threshold for this batch size")
+	}
+	if len(valid) < need {
 		return fmt.Errorf("pki: the batch approval has %d of the %d approver signatures it needs", len(valid), need)
 	}
 	return nil

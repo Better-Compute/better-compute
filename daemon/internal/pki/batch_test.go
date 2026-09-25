@@ -11,6 +11,7 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -60,6 +61,8 @@ func TestBatchScopeGolden(t *testing.T) {
 		}
 	}
 }
+
+func pki0Kid(k *commonv1.ApproverKey) string { return ApproverKid(k.GetSpkiDer()) }
 
 func TestBatchApproval(t *testing.T) {
 	// The signing input matches the golden framing (signing.json "batch-approval").
@@ -112,17 +115,23 @@ func TestBatchApproval(t *testing.T) {
 		t.Fatal("an expired approval passed")
 	}
 	// A signature over other bytes, or by a key whose kid is not its SPKI hash, counts for nothing.
-	other := *a
+	other := proto.Clone(a).(*agentv1.BatchApproval)
 	other.ScopeSize = 411
-	if err := VerifyBatchApproval(&other, bundle, now); err == nil {
+	if err := VerifyBatchApproval(other, bundle, now); err == nil {
 		t.Fatal("signatures over another scope size were accepted")
 	}
 	bundle.ApproverKeys[2].Kid = keys[0].Kid
 	if err := VerifyBatchApproval(a, bundle, now); err == nil {
 		t.Fatal("a mislabelled approver key counted")
 	}
-	// Past every tier: approver_threshold; a zero threshold still needs one.
-	if QuorumThreshold(bundle, 5000) != 2 || QuorumThreshold(&commonv1.TrustBundle{}, 1) != 1 || QuorumThreshold(bundle, 3) != 1 {
+	// Past every tier: approver_threshold.
+	if QuorumThreshold(bundle, 5000) != 2 || QuorumThreshold(bundle, 3) != 1 {
 		t.Fatal("quorum thresholds")
+	}
+	// No threshold for the batch's size admits nothing, however many sign.
+	bundle.ApproverKeys[2].Kid = pki0Kid(keys[2])
+	zero := &commonv1.TrustBundle{ApproverKeys: bundle.ApproverKeys}
+	if err := VerifyBatchApproval(a, zero, now); err == nil {
+		t.Fatal("a zero threshold admitted a batch")
 	}
 }

@@ -39,9 +39,9 @@ func siteKinds(a *Agent) []*Kind {
 	}
 	return []*Kind{
 		bmc("bmc.query", false),
-		bmc("bmc.boot", false),
+		bmc("bmc.boot", true), // the boot device and virtual media decide what a machine boots
 		bmc("bmc.power", true),
-		bmc("bmc.rotate", false),
+		bmc("bmc.rotate", true), // replaces the BMC's credentials
 		bmc("bmc.firmware", true),
 		bmc("bmc.storage", true),
 		{Name: "site.httpProxy", Lane: dispatch.LaneControl, Roles: site, Exec: a.runHTTPProxy},

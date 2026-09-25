@@ -289,6 +289,15 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 	a.upgradeNeeded = w.GetUpgradeRequired()
 	if w.GetTrust() != nil && len(a.o.SignerPin) > 0 {
 		bundle, err := pki.OpenTrustBundle(w.GetTrust(), a.o.SignerPin, a.state.TrustVersion)
+		if err == nil {
+			current, ok := a.trustBundleLocked()
+			if !ok {
+				err = errors.New("the stored trust bundle is unreadable")
+			} else if why := quorumChange(current, bundle); why != "" {
+				err = errors.New(why)
+				a.log.Warn("trust bundle refused", "version", bundle.GetVersion(), "reason", why)
+			}
+		}
 		if err != nil {
 			a.log.Info("trust bundle ignored", "reason", err.Error())
 		} else {
