@@ -13,6 +13,7 @@ import {
   type Reconciler,
   type SqlTx,
 } from '@better-compute/core';
+import { eventCatalog, type EventFamily } from './catalog.js';
 import { eventsMigrations } from './migrations.js';
 import type { UrlPolicy } from './safe-url.js';
 import {
@@ -81,12 +82,16 @@ export type EventsApi = {
     ping: MethodDefinition<Input<typeof refInput>, { delivery: WebhookDelivery }>;
     deliveries: MethodDefinition<Input<typeof deliveriesInput>, { items: WebhookDelivery[] }>;
     redeliver: MethodDefinition<Input<typeof redeliverInput>, { delivery: WebhookDelivery }>;
+    /** The event catalog subscriptions are checked against. */
+    eventTypes: MethodDefinition<Input<typeof listInput>, { items: EventFamily[] }>;
   };
 };
 
 export interface EventsModuleOptions extends WebhookSecrets, UrlPolicy {
   fetch?: typeof globalThis.fetch;
   maxPerTenant?: number;
+  /** Plugin event families subscriptions may name, or `false` to accept any pattern (see `eventCatalog`). */
+  extraEvents?: readonly EventFamily[] | false;
   delivery?: Pick<
     DeliverOptions,
     'limit' | 'timeoutMs' | 'maxAttempts' | 'backoffSeconds' | 'resolve'
@@ -145,6 +150,9 @@ export function eventsModule(options: EventsModuleOptions): ComputeModule<'event
       })),
       redeliver: method('mutation', redeliverInput, async (tx, input) => ({
         delivery: await store.redeliver(tx, input.tenantId, input.deliveryId),
+      })),
+      eventTypes: method('read', listInput, async () => ({
+        items: [...eventCatalog, ...(options.extraEvents || [])],
       })),
     },
   });

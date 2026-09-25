@@ -11,6 +11,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
+import { eventCatalog, isKnownEventPattern, type EventFamily } from './catalog.js';
 import { matchesEventType, outboxTail, readOutbox, type OutboxCursor } from './outbox.js';
 import { assertPublicDestination, checkWebhookUrl, type UrlPolicy } from './safe-url.js';
 import { newWebhookSecret, openSecret, sealSecret } from './seal.js';
@@ -58,6 +59,11 @@ export interface WebhookSecrets {
 
 export interface WebhookStoreOptions extends WebhookSecrets, UrlPolicy {
   clock?: Clock;
+  /**
+   * Event families subscriptions are checked against: the built-in `eventCatalog` plus these (a host's plugin
+   * events), or `false` to accept any pattern.
+   */
+  extraEvents?: readonly EventFamily[] | false;
   /** Webhooks per tenant. Default 20. */
   maxPerTenant?: number;
 }
@@ -153,6 +159,20 @@ export function webhookStore(options: WebhookStoreOptions) {
   const maxPerTenant = options.maxPerTenant ?? 20;
   const context = (id: string) => `webhook:${id}`;
   const ids = createIdGenerator({ now: () => clock.now() });
+  const catalog =
+    options.extraEvents === false ? undefined : [...eventCatalog, ...(options.extraEvents ?? [])];
+  const checkEvents = (events: readonly string[]) => {
+    const unknown = catalog
+      ? events.filter((pattern) => !isKnownEventPattern(pattern, catalog))
+      : [];
+    if (unknown.length)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `No event matches ${unknown.join(', ')}: see webhooks.eventTypes for the catalog`,
+        undefined,
+        { unknown },
+      );
+  };
 
   const get = async (tx: SqlTx, tenantId: string, id: string): Promise<Webhook> => {
     const { rows } = await tx.query<WebhookRow>(
@@ -178,6 +198,7 @@ export function webhookStore(options: WebhookStoreOptions) {
       input: { tenantId: string; url: string; events: string[]; description?: string },
     ): Promise<{ webhook: Webhook; secret: string }> {
       const url = checkWebhookUrl(input.url, options);
+      checkEvents(input.events);
       const { rows: count } = await tx.query<{ n: string }>(
         'SELECT count(*)::text AS n FROM webhooks WHERE tenant_id = $1',
         [input.tenantId],
@@ -210,6 +231,7 @@ export function webhookStore(options: WebhookStoreOptions) {
       changes: { url?: string; events?: string[]; description?: string | null; active?: boolean },
     ): Promise<Webhook> {
       const url = changes.url === undefined ? null : checkWebhookUrl(changes.url, options);
+      if (changes.events) checkEvents(changes.events);
       const { rows } = await tx.query<WebhookRow>(
         `UPDATE webhooks SET
            url = coalesce($3, url),

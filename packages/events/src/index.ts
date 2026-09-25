@@ -8,6 +8,7 @@ export * from './seal.js';
 export * from './safe-url.js';
 export * from './outbox.js';
 export * from './migrations.js';
+export * from './catalog.js';
 export * from './webhooks.js';
 export * from './watch.js';
 export * from './module.js';
