@@ -269,22 +269,27 @@ export function installIamHandlers(
         }
       }),
     // A role activation ended (the holder deactivated it, or an administrator revoked it): break-glass access
-    // granted through it ends too (§12.8). better-iam names the binding as the subject and the holder as the actor
-    // (or `metadata.identityId` when revoked). Its SSH certificates in the tenant are revoked, and every gateway
-    // re-checks its tunnels. An activation only grants: certificates issued under it are already clamped to the
-    // session at issuance, so `binding:activate` needs nothing here.
+    // granted through it ends too (§12.8). better-iam names the binding as the subject; the holder is the actor when
+    // they end their own activation, and `metadata.identityId` when an administrator revokes it (`revoked: true`),
+    // never the administrator. Its SSH certificates are revoked in every tenant (a binding inherited down the
+    // subtree grants in child tenants too; the per-minute re-authorization restores nothing, it only revokes), and
+    // every gateway re-checks its tunnels. An activation only grants, so `binding:activate` needs nothing here.
     binding:
       own.binding ??
       (async (tx, event) => {
         if (event.action !== 'binding:deactivate' || event.metadata?.cancelled === true) return;
-        const holder = text(event.metadata?.identityId) ?? text(event.actorId);
-        if (!holder) return;
-        await revokeIdentitySshCertificates(tx, compute.context, {
-          tenantId: event.tenantId,
-          identityId: holder,
-          reason: event.action,
-          by: 'iam',
-        });
+        const holder =
+          text(event.metadata?.identityId) ??
+          (event.metadata?.revoked === true ? undefined : text(event.actorId));
+        if (!holder) {
+          // A revocation that does not name its holder: guessing (the administrator) would revoke the wrong
+          // certificates. The per-minute re-authorization still catches the holder's.
+          report(new Error('binding:deactivate names no holder; its SSH certificates are left to re-authorization'), {
+            event,
+          });
+          return;
+        }
+        await revokeSshFor(tx, holder, event.action);
         closeFor({ ...event, subjectId: holder }, 'sessions');
       }),
     // A budget spent: the offerings' onBudgetExceeded (stop-new, drain) for the alert's tenant.

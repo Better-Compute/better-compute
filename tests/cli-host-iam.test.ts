@@ -93,9 +93,25 @@ describe('host.iam', () => {
     await cert('1', 'idn_holder', '15 minutes');
     await cert('2', 'idn_holder', '-1 minute');
     await cert('3', 'idn_other', '15 minutes');
+    await cert('4', 'idn_admin', '15 minutes');
+    // Issued in a child tenant through the inherited binding.
+    await sql.query(
+      `INSERT INTO ssh_certificates (serial, node_id, tenant_id, identity_id, principal, key_id, expires_at)
+       VALUES ('5', 'node_b', 'ten_child', 'idn_holder', 'root@node_b', 'key-5', compute_now() + interval '15 minutes')`,
+    );
     let installed: IamEventHandlers = {};
-    installIamHandlers(compute, { bridge: { setHandlers: (handlers) => (installed = handlers) } });
+    const errors: unknown[] = [];
+    installIamHandlers(compute, {
+      bridge: { setHandlers: (handlers) => (installed = handlers) },
+      onError: (error) => errors.push(error),
+    });
     const tx = sql as never;
+    // A revocation that does not name its holder never falls back to the administrator.
+    await installed.binding!(tx, {
+      ...event('binding:deactivate', 'bnd_1', { revoked: true }),
+      actorId: 'idn_admin',
+    });
+    expect(errors).toHaveLength(1);
     // A pending activation cancelled by its requester never granted anything.
     await installed.binding!(tx, {
       ...event('binding:deactivate', 'bnd_1', { cancelled: true }),
@@ -113,6 +129,8 @@ describe('host.iam', () => {
       { serial: '1', revoked: true },
       { serial: '2', revoked: false },
       { serial: '3', revoked: false },
+      { serial: '4', revoked: false },
+      { serial: '5', revoked: true },
     ]);
     // The node's spec is recomputed (its KRL) and the revocation is an event.
     const work = await sql.query<{ key: string }>(`SELECT key FROM work_queue WHERE kind = 'nodespec'`);
@@ -120,7 +138,7 @@ describe('host.iam', () => {
     const events = await sql.query<{ topic: string }>(
       `SELECT topic FROM outbox WHERE topic = 'node.ssh-cert.revoked'`,
     );
-    expect(events.rows).toHaveLength(1);
+    expect(events.rows).toHaveLength(2);
   });
 
   it('offboarding an identity or revoking its sessions revokes its SSH certificates in every tenant', async () => {
