@@ -1,69 +1,38 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { createSshAccessView, sshUsage, SshKeyInputError } from '@better-compute/console-kit';
+import { useStore } from '@better-compute/console-kit/react';
 import { useConsole } from './console-provider';
 import { ErrorLine } from './ui';
 
-interface IssuedSshCert {
-  certificate: string;
-  serial: string;
-  keyId: string;
-  /** Node-bound (`root@node_…`): the certificate opens this node only. */
-  principals: string[];
-  account: string;
-  validBefore: number;
-}
-
 /**
- * Break-glass shell on a node (PLAN.md §13, `nodes.issueSshCert`): a short-lived OpenSSH user certificate from the
- * compute SSH CA for the caller's own public key. Needs `compute:nodes:ssh-root` and an MFA session; the private key
- * never leaves the caller's machine.
+ * Break-glass shell on a node (PLAN.md §13, `nodes.issueSshCert` / `listSshCerts` / `revokeSshCert`): a short-lived
+ * OpenSSH user certificate from the compute SSH CA for the caller's own public key, and who holds one. Needs
+ * `compute:nodes:ssh-root` and an MFA session; the private key never leaves the caller's machine (a pasted private
+ * key is refused before anything is sent).
  */
 export function SshCertPanel({ nodeId }: { nodeId: string }) {
   const { api, tenantId } = useConsole();
+  const view = useMemo(() => createSshAccessView(api, { tenantId, nodeId }), [api, tenantId, nodeId]);
+  const state = useStore(view);
+  const issued = useStore(view.issued);
   const [publicKey, setPublicKey] = useState('');
-  const [principal, setPrincipal] = useState('root');
+  const [account, setAccount] = useState('root');
   const [minutes, setMinutes] = useState(15);
-  const [issued, setIssued] = useState<IssuedSshCert>();
+  const [expired, setExpired] = useState(false);
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
-  const [revokedAt, setRevokedAt] = useState<number>();
 
-  const issue = async () => {
-    setBusy(true);
-    setError(undefined);
-    setIssued(undefined);
-    setRevokedAt(undefined);
-    try {
-      setIssued(
-        await api.$request<IssuedSshCert>('nodes/issueSshCert', {
-          tenantId,
-          nodeId,
-          publicKey: publicKey.trim(),
-          principal,
-          ttlSeconds: minutes * 60,
-        }),
-      );
-    } catch (failure) {
-      setError(failure);
-    } finally {
-      setBusy(false);
-    }
-  };
+  useEffect(() => {
+    void view.refresh();
+  }, [view]);
 
-  // Done with it early, or it leaked: the node's KRL lists it from its next spec (nodes.revokeSshCert).
-  const revoke = async () => {
-    if (!issued) return;
+  const act = async (run: () => Promise<unknown>) => {
     setBusy(true);
     setError(undefined);
     try {
-      const revoked = await api.$request<{ revokedAt: number }>('nodes/revokeSshCert', {
-        tenantId,
-        nodeId,
-        serial: issued.serial,
-        reason: 'revoked from the console',
-      });
-      setRevokedAt(revoked.revokedAt);
+      await run();
     } catch (failure) {
       setError(failure);
     } finally {
@@ -72,6 +41,7 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
   };
 
   const failure = error as { details?: { reason?: string } } | undefined;
+  const reason = failure?.details?.reason;
   return (
     <section className="panel">
       <h3>Break-glass SSH</h3>
@@ -79,11 +49,14 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
         className="form"
         onSubmit={(event) => {
           event.preventDefault();
-          void issue();
+          void act(async () => {
+            await view.issue({ publicKey, account, minutes });
+            setPublicKey('');
+          });
         }}
       >
         <label>
-          Your public key (Ed25519 or ECDSA P-256)
+          Your public key (Ed25519 or ECDSA P-256, the .pub file)
           <textarea
             rows={2}
             placeholder="ssh-ed25519 AAAA… you@laptop"
@@ -93,8 +66,7 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
         </label>
         <div className="row">
           <label>
-            Account{' '}
-            <input value={principal} onChange={(event) => setPrincipal(event.target.value)} />
+            Account <input value={account} onChange={(event) => setAccount(event.target.value)} />
           </label>
           <label>
             Valid for{' '}
@@ -111,41 +83,89 @@ export function SshCertPanel({ nodeId }: { nodeId: string }) {
           Issue certificate
         </button>
       </form>
-      {failure?.details?.reason === 'mfa-required' ? (
-        <p className="warning">
-          This needs a session verified with a second factor. Sign in again with MFA.
-        </p>
+      {reason === 'mfa-required' || reason === 'session-required' ? (
+        <p className="warning">This needs a signed-in session verified with a second factor. Sign in again with MFA.</p>
+      ) : error instanceof SshKeyInputError ? (
+        <p className="error">{error.message}</p>
       ) : (
         <ErrorLine error={error} />
       )}
+
       {issued && (
         <>
           <p className="ok">
-            Valid until {new Date(issued.validBefore).toLocaleString()} for{' '}
-            {issued.principals.join(', ')} ({issued.keyId}). Save it next to your key as{' '}
-            <code>&lt;key&gt;-cert.pub</code>, then connect with{' '}
-            <code>ssh {issued.account}@&lt;node&gt;</code>. It opens this node only.
+            Valid until {new Date(issued.validBefore).toLocaleString()} for {issued.principals.join(', ')}. It opens
+            this node only. Save it next to your key as <code>&lt;key&gt;-cert.pub</code>:
           </p>
           <textarea readOnly rows={4} style={{ width: '100%' }} value={issued.certificate} />
+          <pre>{sshUsage(issued).join('\n')}</pre>
           <div className="row">
-            <button
-              type="button"
-              onClick={() => void navigator.clipboard.writeText(issued.certificate)}
-            >
+            <button type="button" onClick={() => void navigator.clipboard.writeText(issued.certificate)}>
               Copy
             </button>
-            {revokedAt === undefined ? (
-              <button type="button" disabled={busy} onClick={() => void revoke()}>
-                Revoke now
-              </button>
-            ) : (
-              <span className="warning">
-                Revoked {new Date(revokedAt).toLocaleTimeString()}; the node refuses it from its
-                next spec.
-              </span>
-            )}
+            <button type="button" onClick={() => view.dismissIssued()}>
+              Done
+            </button>
           </div>
         </>
+      )}
+
+      <h4>Who holds access</h4>
+      <label className="row">
+        <input
+          type="checkbox"
+          checked={expired}
+          onChange={(event) => {
+            setExpired(event.target.checked);
+            void act(() => view.showExpired(event.target.checked));
+          }}
+        />
+        Include expired
+      </label>
+      {state.value && state.value.items.length === 0 && <p className="muted">No certificates.</p>}
+      {state.value && state.value.items.length > 0 && (
+        <table>
+          <thead>
+            <tr>
+              <th>Holder</th>
+              <th>Principal</th>
+              <th>Issued</th>
+              <th>Until</th>
+              <th>State</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {state.value.items.map((cert) => (
+              <tr key={cert.serial}>
+                <td>{cert.identityId}</td>
+                <td>
+                  <code>{cert.principal}</code>
+                </td>
+                <td>{new Date(cert.issuedAt).toLocaleString()}</td>
+                <td>{new Date(cert.expiresAt).toLocaleTimeString()}</td>
+                <td className={cert.state === 'active' ? 'ok' : 'muted'}>
+                  {cert.state}
+                  {cert.revokeReason && <div className="muted">{cert.revokeReason}</div>}
+                </td>
+                <td>
+                  {cert.state === 'active' && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        window.confirm(`Revoke ${cert.identityId}'s certificate ${cert.serial}?`) &&
+                        void act(() => view.revoke(cert.serial, 'revoked from the console'))
+                      }
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </section>
   );
