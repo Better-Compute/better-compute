@@ -774,33 +774,35 @@ describe('sandboxes', () => {
     const input = (by: string) =>
       extend.validate({ tenantId: 'acme', sandboxId: sandbox.id, by }) as Record<string, unknown>;
 
+    // Every call below shares one request id (callers choose it: x-request-id); the hold is the
+    // admission's own nonce, so sharing it gains nothing.
     // B (long) is being decided; A (short) must not overwrite its pending lifetime.
     const long = input('60m');
     const short = input('5m');
     recorded.pending = [];
-    await prepare('req-b', long);
-    await expect(prepare('req-a', short)).rejects.toMatchObject({
+    await prepare('req-same', long);
+    await expect(prepare('req-same', short)).rejects.toMatchObject({
       code: 'CONFLICT',
       details: { reason: 'extend-in-flight' },
     });
     expect(recorded.pending).toEqual([{ id: sandbox.id, attributes: { ttlSeconds: 4200 } }]);
     // A's cleanup (its refusal) leaves B's pending alone.
-    await cleanup('req-a', short);
+    await cleanup('req-same', short);
     expect(recorded.pending).toHaveLength(1);
-    expect(await handle('req-b', long)).toMatchObject({ expiresAt: T0 + 4200_000 });
+    expect(await handle('req-same', long)).toMatchObject({ expiresAt: T0 + 4200_000 });
     expect(recorded.pending.at(-1)).toEqual({ id: sandbox.id, attributes: null });
 
     // A stalled extend is taken over after a minute; its late transaction 2 then applies nothing.
     const stalled = input('10m');
-    await prepare('req-c', stalled);
+    await prepare('req-same', stalled);
     await advance(61_000);
     const next = input('20m');
-    await prepare('req-d', next);
+    await prepare('req-same', next);
     recorded.pending = [];
-    await expect(handle('req-c', stalled)).rejects.toMatchObject({ code: 'CONFLICT' });
-    await cleanup('req-c', stalled);
+    await expect(handle('req-same', stalled)).rejects.toMatchObject({ code: 'CONFLICT' });
+    await cleanup('req-same', stalled);
     expect(recorded.pending).toEqual([]);
-    expect(await handle('req-d', next)).toMatchObject({ expiresAt: T0 + 5400_000 });
+    expect(await handle('req-same', next)).toMatchObject({ expiresAt: T0 + 5400_000 });
     expect(recorded.pending).toEqual([{ id: sandbox.id, attributes: null }]);
   });
 
