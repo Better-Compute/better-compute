@@ -201,6 +201,8 @@ export function encodeCommandBody(input: {
     attested: spec.attested ?? false,
     workflowId: step?.[1] ?? '',
     stepId: step?.[2] ?? '',
+    // (v1.0 quorum) Set when the command belongs to an approved batch.
+    batchId: '',
   };
   try {
     return encodeMessage(CommandBodySchema, body, MAX_COMMAND_BODY_BYTES);

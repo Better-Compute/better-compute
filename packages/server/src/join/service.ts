@@ -720,10 +720,16 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         $typeName: 'bettercompute.agent.v1.JoinResponseBody',
         nodeId,
         certChain: certificate.chain,
+        // Every field of the message, typed in full: a field left out reaches the encoder undefined
+        // (the quorum fields of 525c199 broke every join that way until they were listed here).
         trust: {
           $typeName: 'bettercompute.common.v1.TrustBundle',
           version: bundle?.version ?? 0n,
           commandSigningRoots: [...(bundle?.commandSigningRoots ?? [])],
+          approverKeys: [],
+          approverThreshold: 0,
+          unbatchedDestructivePerHour: 0,
+          quorumTiers: [],
         },
         csrSha256: csr.sha256,
         trustDomain: crypto.trustDomain,
