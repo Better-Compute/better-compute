@@ -27,7 +27,7 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     type: 'project.*',
     subject: 'project/{id}',
     module: 'server',
-    description: 'Projects created and changed',
+    description: 'Projects created, changed and archived (project.archived: { projectId, name })',
   },
   {
     type: 'pool.*',
@@ -54,6 +54,32 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     module: 'server',
     description:
       'Node lifecycle and connectivity: joined, acceptance.*, adopted, connected, disconnected, unreachable, lost, drained, deleted, status, command.queued, ssh-cert.issued, report-failed',
+  },
+  {
+    type: 'node.command.cancel-requested',
+    subject: 'node/{id}',
+    module: 'server',
+    description: 'Cancelling a command was requested ({ nodeId, commandId, kind, state })',
+  },
+  {
+    type: 'node.condition.changed',
+    subject: 'node/{id}',
+    module: 'inventory',
+    description:
+      'A hygiene or pressure condition was raised or cleared (DriverMismatch, CertExpiring, DaemonOutdated, Cpu/Memory/DiskPressure): { condition, status, reason, noSchedule }',
+  },
+  {
+    type: 'node.remediation.*',
+    subject: 'node/{id}',
+    module: 'provision',
+    description: 'Health remediation started, succeeded or escalated to an operator',
+  },
+  {
+    type: 'pool.remediation.paused',
+    subject: 'node/{id}',
+    module: 'provision',
+    description:
+      'The remediation circuit breaker held a pool back (too many nodes turned unhealthy)',
   },
   {
     type: 'node.inventory.changed',
