@@ -148,6 +148,14 @@ describe('Ignition', () => {
     const files = Object.fromEntries(config.storage.files.map((f: { path: string }) => [f.path, f]));
     expect(files['/etc/bcd/join-token']).toMatchObject({ mode: 0o600, contents: { source: 'data:,tok%22en' } });
     expect(files['/usr/local/bin/bcd'].contents.verification.hash).toBe(`sha256-${'ab'.repeat(32)}`);
-    expect(config.systemd.units[0].contents).toContain('--node-id node_1');
+    // Joins once (while the token file exists), then runs the node agent.
+    const units = Object.fromEntries(config.systemd.units.map((u: { name: string; contents: string }) => [u.name, u.contents]));
+    expect(units['bcd-join.service']).toContain(
+      'ExecStart=/usr/local/bin/bcd join --server https://gw --token-file /etc/bcd/join-token --node-id node_1',
+    );
+    expect(units['bcd-join.service']).toContain('ConditionPathExists=/etc/bcd/join-token');
+    expect(units['bcd.service']).toContain('ExecStart=/usr/local/bin/bcd node');
+    expect(units['bcd.service']).toContain('After=network-online.target bcd-join.service');
+    expect(config.systemd.units.every((u: { enabled: boolean }) => u.enabled)).toBe(true);
   });
 });

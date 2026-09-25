@@ -40,31 +40,74 @@ export function renderTemplate(template: UserDataTemplate, variables: Readonly<R
   });
 }
 
-/** The built-in cloud-init that installs bcd and joins with the embedded token. */
+/** Where the built-in user data puts bcd and the embedded join token. */
+export const bcdPaths = Object.freeze({ binary: '/usr/local/bin/bcd', joinToken: '/etc/bcd/join-token' });
+
+/**
+ * The `bcd join` an installed OS runs (the Go contract; scripts/daemon-fixtures.mjs dumps it for
+ * bcd's tests): the control plane URL (its well-known join keys), the token file (bcd removes it once
+ * joined) and the node the OS was installed for (a `provisioned` token; bcd refuses another identity).
+ * bcd writes its config.toml; `bcdNodeArgv` then runs the agent.
+ */
+export function bcdJoinArgv(variables: Pick<UserDataVariables, 'controlPlaneUrl' | 'nodeId'>): string[] {
+  return [bcdPaths.binary, 'join', '--server', variables.controlPlaneUrl, '--token-file', bcdPaths.joinToken, '--node-id', variables.nodeId];
+}
+
+/** The node agent the installed OS runs after joining (default config, written by `bcd join`). */
+export function bcdNodeArgv(): string[] {
+  return [bcdPaths.binary, 'node'];
+}
+
+/** The systemd unit that keeps the node agent running. */
+const bcdServiceUnit = [
+  '[Unit]',
+  'Description=better-compute node agent',
+  'After=network-online.target bcd-join.service',
+  'Wants=network-online.target',
+  '[Service]',
+  `ExecStart=${bcdNodeArgv().join(' ')}`,
+  'Restart=always',
+  'RestartSec=5',
+  '[Install]',
+  'WantedBy=multi-user.target',
+];
+
+const yamlFlow = (argv: readonly string[]) => `[${argv.join(', ')}]`;
+
+/**
+ * The built-in cloud-init: installs bcd (sha256 checked), joins with the embedded token, then enables
+ * the node agent as `bcd.service`.
+ */
 export const bcdHostCloudInit = `#cloud-config
 hostname: {{hostname}}
 write_files:
-  - path: /etc/bcd/join-token
+  - path: ${bcdPaths.joinToken}
     permissions: '0600'
     content: {{joinToken}}
+  - path: /etc/systemd/system/bcd.service
+    permissions: '0644'
+    content: |
+${bcdServiceUnit.map((line) => `      ${line}`).join('\n')}
 runcmd:
-  - [sh, -c, "curl -fsSL {{bcdUrl}} -o /usr/local/bin/bcd && echo '{{bcdSha256}}  /usr/local/bin/bcd' | sha256sum -c - && chmod 0755 /usr/local/bin/bcd"]
-  - [/usr/local/bin/bcd, join, --server, {{controlPlaneUrl}}, --node-id, {{nodeId}}, --token-file, /etc/bcd/join-token]
+  - [sh, -c, "curl -fsSL {{bcdUrl}} -o ${bcdPaths.binary} && echo '{{bcdSha256}}  ${bcdPaths.binary}' | sha256sum -c - && chmod 0755 ${bcdPaths.binary}"]
+  - ${yamlFlow(bcdJoinArgv({ controlPlaneUrl: '{{controlPlaneUrl}}', nodeId: '{{nodeId}}' }))}
+  - [systemctl, enable, --now, bcd.service]
 `;
 
 /**
  * The built-in Ignition (spec 3.4) config: the token as a 0600 file, bcd downloaded with its
- * sha256 verified by Ignition, and a oneshot unit that joins. Built as JSON, so values cannot
- * change its structure.
+ * sha256 verified by Ignition, a oneshot unit that joins while the token file exists (bcd removes it),
+ * and `bcd.service` running the node agent after it. Built as JSON, so values cannot change its
+ * structure.
  */
 export const bcdHostIgnition: UserDataTemplate = (v) =>
   JSON.stringify({
     ignition: { version: '3.4.0' },
     storage: {
       files: [
-        { path: '/etc/bcd/join-token', mode: 0o600, contents: { source: `data:,${encodeURIComponent(v.joinToken!)}` } },
+        { path: bcdPaths.joinToken, mode: 0o600, contents: { source: `data:,${encodeURIComponent(v.joinToken!)}` } },
         {
-          path: '/usr/local/bin/bcd',
+          path: bcdPaths.binary,
           mode: 0o755,
           contents: { source: v.bcdUrl, verification: { hash: `sha256-${v.bcdSha256}` } },
         },
@@ -81,13 +124,17 @@ export const bcdHostIgnition: UserDataTemplate = (v) =>
             'Description=Join better-compute',
             'After=network-online.target',
             'Wants=network-online.target',
+            `ConditionPathExists=${bcdPaths.joinToken}`,
             '[Service]',
             'Type=oneshot',
-            `ExecStart=/usr/local/bin/bcd join --server ${v.controlPlaneUrl} --node-id ${v.nodeId} --token-file /etc/bcd/join-token`,
+            'RemainAfterExit=yes',
+            // One token per argument: userDataStep refuses URLs with spaces, quotes or `%` (a systemd specifier).
+            `ExecStart=${bcdJoinArgv({ controlPlaneUrl: v.controlPlaneUrl!, nodeId: v.nodeId! }).join(' ')}`,
             '[Install]',
             'WantedBy=multi-user.target',
           ].join('\n'),
         },
+        { name: 'bcd.service', enabled: true, contents: bcdServiceUnit.join('\n') },
       ],
     },
   });
@@ -116,6 +163,12 @@ export interface UserDataOptions {
  */
 export function userDataStep(options: UserDataOptions = {}): StepDefinition {
   const templates = { ...builtinUserDataTemplates, ...(options.templates ?? {}) };
+  // They land in argv lists (a YAML flow sequence, a systemd ExecStart): one plain token each.
+  for (const [name, url] of [['controlPlaneUrl', options.controlPlaneUrl], ['bcdUrl', options.bcdUrl]] as const)
+    if (url !== undefined && !/^https?:\/\/[^\s,[\]{}'"`\\%]+$/.test(url))
+      throw new ComputeError('INVALID_CONFIG', `userdata.render: ${name} must be an http(s) URL without spaces, quotes, commas, brackets or %`);
+  if (options.bcdSha256 !== undefined && !/^[0-9a-f]{64}$/.test(options.bcdSha256))
+    throw new ComputeError('INVALID_CONFIG', 'userdata.render: bcdSha256 must be 64 lower-case hex digits');
   return defineStep({
     id: 'userdata.render',
     runsOn: 'control-plane',
