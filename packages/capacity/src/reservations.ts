@@ -844,7 +844,7 @@ async function preemptFor(
       const victim = await readReservationById(tx, id, false);
       if (!victim?.during || !preemptable.includes(victim.state) || victim.request.spot !== true)
         return await undo();
-      await noticeSpot(deps, tx, victim, row.id, at);
+      await noticeSpot(deps, tx, victim, row, at);
     }
     const planned = new Set(plan.nodeIds);
     const others = (await readPoolNodes(tx, pool.id))
@@ -875,16 +875,22 @@ async function noticeSpot(
   deps: ReservationDeps,
   tx: SqlTx,
   victim: ReservationRow,
-  by: string,
+  preemptor: Pick<ReservationRow, 'id' | 'tenantId'>,
   at: number,
 ): Promise<void> {
   const now = deps.clock.now();
   const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: victim.id });
+  // The victim's tenant learns who preempted it only when it is itself the preemptor's tenant.
+  const sameTenant = preemptor.tenantId === victim.tenantId;
+  const by: Record<string, Json> = sameTenant ? { by: preemptor.id } : {};
+  const message = sameTenant
+    ? `preempted by ${preemptor.id}`
+    : 'preempted by a non-spot reservation';
   const condition: Omit<Condition, 'since'> = {
     type: 'Preempted',
     status: 'true',
     reason: 'SpotPreempted',
-    message: by,
+    message,
   };
   if (victim.during!.start >= at) {
     for (const allocation of allocations) {
@@ -899,13 +905,13 @@ async function noticeSpot(
           type: 'Unschedulable',
           status: 'true',
           reason: 'SpotPreempted',
-          message: `preempted by ${by}`,
+          message,
         },
         now,
       ),
     });
     await deps.work.enqueue(tx, reservationWork, victim.id, { notBefore: now + pendingRetryMs });
-    await publish(deps, tx, pending, 'reservation.preempted', { by, requeued: true });
+    await publish(deps, tx, pending, 'reservation.preempted', { ...by, requeued: true });
     return;
   }
   for (const allocation of allocations) {
@@ -923,7 +929,7 @@ async function noticeSpot(
     throw new ComputeError('CONFLICT', `Reservation ${victim.id} changed concurrently`);
   const noticed = { ...victim, conditions, during: { start: victim.during!.start, end: at } };
   await deps.work.enqueue(tx, reservationWork, victim.id, { notBefore: at });
-  await publish(deps, tx, noticed, 'reservation.preempting', { by, at });
+  await publish(deps, tx, noticed, 'reservation.preempting', { ...by, at });
 }
 
 /** Whether a reservation was cut short by spot preemption. */

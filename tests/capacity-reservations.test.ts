@@ -1395,7 +1395,7 @@ describe('spot reservations (v0.5)', () => {
       state: 'active',
       during: { start: T0, end: T0 + NOTICE },
       conditions: expect.arrayContaining([
-        expect.objectContaining({ type: 'Preempted', message: regular.id }),
+        expect.objectContaining({ type: 'Preempted', message: `preempted by ${regular.id}` }),
       ]),
     });
     expect(recorded.work).toContainEqual({
@@ -1483,6 +1483,48 @@ describe('spot reservations (v0.5)', () => {
       .map((event) => event.subject.replace('reservation/', ''))
       .sort();
     expect(noticed).toEqual(spots.map((spot) => spot.id).sort());
+  });
+
+  it('never tells another tenant which reservation preempted it', async () => {
+    const root = { ...caller, tenantId: 'root', identityId: 'usr_root' };
+    await call(
+      'pools',
+      'offer',
+      { tenantId: 'root', poolId, toTenantId: 'globex', quota: { gpu: 100 } },
+      { who: root },
+    );
+    const globex: Caller = { ...caller, tenantId: 'globex', identityId: 'usr_gus' };
+    const theirs = (await call(
+      'reservations',
+      'create',
+      four('g1', { tenantId: 'globex', spot: true }),
+      {
+        who: globex,
+      },
+    )) as Rsv;
+    await call('reservations', 'create', four('g2', { tenantId: 'globex', spot: true }), {
+      who: globex,
+    });
+    recorded.events = [];
+    const ours = (await call('reservations', 'create', four('r1'))) as Rsv;
+    expect(ours.state).toBe('placed');
+    const notice = recorded.events.find((event) => event.type === 'reservation.preempting')!;
+    expect(notice.data).not.toHaveProperty('by');
+    expect(JSON.stringify(recorded.events)).not.toContain(`"by":"${ours.id}"`);
+    const victim = (await call(
+      'reservations',
+      'get',
+      { tenantId: 'globex', reservationId: notice.subject.replace('reservation/', '') },
+      { who: globex },
+    )) as Rsv & { conditions: { type: string; message?: string }[] };
+    expect(JSON.stringify(victim.conditions)).not.toContain(ours.id);
+    expect(victim.conditions).toContainEqual(
+      expect.objectContaining({
+        type: 'Preempted',
+        message: 'preempted by a non-spot reservation',
+      }),
+    );
+    expect(theirs.state).toBe('placed');
   });
 
   it('never preempts for spot requests, and never preempts regular work', async () => {
