@@ -277,6 +277,32 @@ describe('create_instance', () => {
     expect(text).not.toContain('TOKEN');
   });
 
+  it('caps the calls one caller has in flight (review 14 L5)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const api: ComputeApi = {
+      async $request<Output>() {
+        await gate;
+        return { items: [] } as Output;
+      },
+    };
+    const mcp = mcpWith(api, { maxConcurrentCallsPerCaller: 1 });
+    const ALICE = { authorization: 'Bearer alice' };
+    const first = rpc(mcp, 'tools/call', { name: 'list_pools', arguments: {} }, 1, ALICE);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = await rpc(mcp, 'tools/call', { name: 'list_pools', arguments: {} }, 2, ALICE);
+    expect(second.body.result.isError).toBe(true);
+    expect(second.body.result.content[0].text).toContain('RATE_LIMITED');
+    // Another caller is not affected.
+    const bob = rpc(mcp, 'tools/call', { name: 'list_pools', arguments: {} }, 3, { authorization: 'Bearer bob' });
+    release();
+    expect((await first).body.result.isError).toBeUndefined();
+    expect((await bob).body.result.isError).toBeUndefined();
+    // Freed once the first call finished.
+    const third = await rpc(mcp, 'tools/call', { name: 'list_pools', arguments: {} }, 4, ALICE);
+    expect(third.body.result.isError).toBeUndefined();
+  });
+
   it('keeps gate resources to well-formed ids (review 14 M2)', () => {
     const rules = gateTools();
     const pool = rules.reserve_gpus!.resource as (args: Record<string, unknown>) => unknown;

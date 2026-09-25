@@ -45,6 +45,12 @@ export interface ComputeMcpOptions {
   instructions?: string;
   /** Largest request body (default 1 MiB). */
   maxBodyBytes?: number;
+  /**
+   * Tool calls one caller may have in flight at once (default 4): a call can wait up to ~85 s for a
+   * person's approval or an instance to start, so an agent looping on retries would otherwise pile up
+   * held requests (review 14 L5). More answers RATE_LIMITED.
+   */
+  maxConcurrentCallsPerCaller?: number;
   newKey?: () => string;
 }
 
@@ -141,6 +147,14 @@ export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
       ? options.tenantId(caller)
       : (options.tenantId ?? caller?.tenantId);
 
+  const maxInFlight = options.maxConcurrentCallsPerCaller ?? 4;
+  const inFlight = new Map<string, number>();
+  /** Who a call counts against: the caller's identity, else its credential. */
+  const callerKey = (request: Request, caller?: McpCallerLike) =>
+    caller?.identityId
+      ? `${caller.tenantId ?? ''}/${caller.identityId}`
+      : `auth:${request.headers.get('authorization') ?? ''}`;
+
   const callTool: ComputeMcp['callTool'] = async (name, args, request, caller) => {
     const tool = byName.get(name);
     if (!tool) return errorResult('UNKNOWN_TOOL', `No tool named ${name}`);
@@ -149,6 +163,31 @@ export function createComputeMcp(options: ComputeMcpOptions): ComputeMcp {
     if (problem) return errorResult('INVALID_INPUT', problem);
     const tenantId = tenantFor(caller);
     if (!tenantId) return errorResult('ACCESS_DENIED', 'No tenant to act in');
+    const key = callerKey(request, caller);
+    const running = inFlight.get(key) ?? 0;
+    if (running >= maxInFlight)
+      return errorResult(
+        'RATE_LIMITED',
+        `At most ${maxInFlight} tool calls at once; wait for one to finish`,
+        { retryAfterMs: 2000 },
+      );
+    inFlight.set(key, running + 1);
+    try {
+      return await runTool(tool, input, request, caller, tenantId);
+    } finally {
+      const left = (inFlight.get(key) ?? 1) - 1;
+      if (left <= 0) inFlight.delete(key);
+      else inFlight.set(key, left);
+    }
+  };
+
+  const runTool = async (
+    tool: ComputeTool,
+    input: unknown,
+    request: Request,
+    caller: McpCallerLike | undefined,
+    tenantId: string,
+  ): Promise<CallToolResult> => {
     const confirmations =
       typeof options.confirmations === 'function'
         ? options.confirmations(request, caller)
