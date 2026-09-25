@@ -61,6 +61,41 @@ describe('xidStatusHandler', () => {
     expect(health).toEqual([{ device_id: 'GPU-a' }]);
   });
 
+  it('records host pressure from the same status report (§10.1), publishing each change once', async () => {
+    f = await gatewayFixture({ reports: { status: xidStatusHandler } });
+    const node = await f.addNode();
+    const { handle } = await f.connect(node);
+    const pressured = (generation: number, pressure: Record<string, number>) =>
+      agentFrame({
+        case: 'status',
+        value: {
+          observedGeneration: BigInt(generation),
+          appliedGeneration: BigInt(generation),
+          pressure: { cpuSomeAvg10: 1, memorySomeAvg10: 0, ioSomeAvg10: 2, stealPct: 0, ...pressure },
+        },
+      });
+    const conditions = async () =>
+      (
+        await f.db.query<{ type: string; status: string }>(
+          `SELECT type, status FROM node_conditions WHERE node_id = $1 AND type LIKE '%Pressure' ORDER BY type`,
+          [node],
+        )
+      ).rows;
+    await handle.receive(pressured(1, { memorySomeAvg10: 35 }));
+    await f.gateway.jobs.status.tick();
+    expect(await conditions()).toEqual([{ type: 'MemoryPressure', status: 'true' }]);
+    expect(await f.outbox('node.condition.changed')).toHaveLength(1);
+
+    // Unchanged pressure writes and publishes nothing more; settling clears it.
+    await handle.receive(pressured(2, { memorySomeAvg10: 35 }));
+    await f.gateway.jobs.status.tick();
+    expect(await f.outbox('node.condition.changed')).toHaveLength(1);
+    await handle.receive(pressured(3, { memorySomeAvg10: 1 }));
+    await f.gateway.jobs.status.tick();
+    expect(await conditions()).toEqual([{ type: 'MemoryPressure', status: 'false' }]);
+    expect(await f.outbox('node.condition.changed')).toHaveLength(2);
+  });
+
   it('ignores XIDs without a policy and conditions without a device', async () => {
     f = await gatewayFixture({ reports: { status: xidStatusHandler } });
     const node = await f.addNode();

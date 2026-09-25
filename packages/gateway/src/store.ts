@@ -239,7 +239,7 @@ export interface ReportHandlers {
  */
 export type StatusHandler = (
   tx: SqlTx,
-  context: { nodeId: string; tenantId: string; work: WorkQueue },
+  context: { nodeId: string; tenantId: string; work: WorkQueue; events?: EventPublisher },
   report: StatusReport,
 ) => Promise<unknown>;
 
@@ -1214,7 +1214,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         for (const [index, handler] of (handlers as readonly StatusHandler[]).entries()) {
           await tx.query('SAVEPOINT gateway_status');
           try {
-            await handler(tx, { nodeId, tenantId, work }, report);
+            await handler(tx, { nodeId, tenantId, work, events }, report);
             await tx.query('RELEASE SAVEPOINT gateway_status');
           } catch (error) {
             await tx.query('ROLLBACK TO SAVEPOINT gateway_status');
