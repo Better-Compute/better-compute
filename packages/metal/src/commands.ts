@@ -110,8 +110,17 @@ export const metalCommandKinds: readonly CommandKindSpec[] = Object.freeze([
     payload: metalPayloads.deployImage,
   },
   // One HTTP(S) request from the site agent to a machine's own address (§5.6 walkthrough 3): how
-  // control-plane steps reach agentless machines (the Talos API) without breaking P5.
-  { kind: 'site.httpProxy', lane: 'control', retrySafe: false, timeout: '1m', roles: ['site'], payload: metalPayloads.httpProxy },
+  // control-plane steps reach agentless machines (the Talos API) without breaking P5. Destructive:
+  // the request can be a reset or a media insert, so it takes the same approvals as bmc.* (review 7).
+  {
+    kind: 'site.httpProxy',
+    lane: 'control',
+    retrySafe: false,
+    destructive: true,
+    timeout: '1m',
+    roles: ['site'],
+    payload: metalPayloads.httpProxy,
+  },
   {
     kind: 'boot.kexec',
     lane: 'control',

@@ -196,4 +196,15 @@ CREATE TABLE provision_image_pins (
 CREATE INDEX provision_image_pins_site ON provision_image_pins (site_id, image_id);
 `,
   },
+  {
+    name: 'provision/0006_workflow_batch',
+    sql: `
+-- The destructive-command batch (PLAN.md §13 quorum, commands.createBatch) a workflow runs under: every
+-- destructive command its steps send carries it, so a bulk operation is approved once for all its nodes.
+-- command_kinds: every kind the workflow can send (agent steps' command, control-plane steps' sends),
+-- recorded at start, so the module that owns it can scope its batch before anything is sent.
+ALTER TABLE workflows ADD COLUMN batch_id text, ADD COLUMN command_kinds text[] NOT NULL DEFAULT '{}';
+CREATE INDEX workflows_batch ON workflows (batch_id) WHERE batch_id IS NOT NULL;
+`,
+  },
 ]);

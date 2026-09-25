@@ -467,6 +467,8 @@ group('metal', 'metal', [
   ['recover', 'mutation', 'nodes:provision', 'node', 'v0.2'],
   ['retire', 'mutation', 'nodes:provision', 'node', 'v0.2'],
   ['power', 'mutation', 'nodes:power', 'node', 'v0.2'],
+  // One verb on many nodes as one destructive-command batch (§13 quorum); each node is also decided.
+  ['bulk', 'mutation', 'nodes:provision', 'pool', 'v1.0'],
 ]);
 group('profiles', 'provision', [
   ['create', 'mutation', 'profiles:manage', 'tenant', 'v0.2'],

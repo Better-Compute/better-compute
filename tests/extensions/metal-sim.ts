@@ -1,6 +1,8 @@
 import { createHash, type KeyObject } from 'node:crypto';
 import { create, toBinary } from '@bufbuild/protobuf';
 import type {
+  CommandBatchInput,
+  CommandKindSpec,
   CommandQueue,
   ComputeModule,
   EventPublisher,
@@ -16,6 +18,7 @@ import type {
 import { pglite } from '@better-compute/postgres/pglite';
 import {
   CommandState,
+  commandKinds as protocolKinds,
   DiagDcgmResultSchema,
   InventoryRefreshResultSchema,
   WipeResultSchema,
@@ -129,7 +132,15 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     },
   };
   let seq = 0;
+  /** (§13) Batches created (metal.bulk), and the batch each command carries, by command id. */
+  const batches: { batchId: string; input: CommandBatchInput }[] = [];
+  const commandBatches = new Map<string, string>();
   const commands: CommandQueue = {
+    async createBatch(_tx, input) {
+      const batchId = `batch_sim_${batches.length + 1}`;
+      batches.push({ batchId, input });
+      return { batchId, held: false, required: 0, size: input.scope.length };
+    },
     async enqueue(tx, command) {
       const existing = await tx.query<{ id: string }>('SELECT id FROM commands WHERE node_id = $1 AND idempotency_key = $2', [
         command.nodeId,
@@ -142,6 +153,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
          VALUES ($1, $2, $3, $4, $5, 'pending', to_timestamp($6 / 1000.0), false, false, $7, $8)`,
         [id, command.nodeId, seq, command.kind, new TextEncoder().encode(JSON.stringify(command.payload)), command.notAfter, attested.has(command.kind), command.idempotencyKey],
       );
+      if (command.batchId) commandBatches.set(id, command.batchId);
       return { id, seq };
     },
     async cancel(tx, id) {
@@ -181,7 +193,20 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     authz: { async upsert() {}, async remove() {}, async setPending() {} },
     desired: { async invalidate() {} },
   };
-  const base = { sql: db, work, events: eventLog, commands, pki, secrets, requestId: 'req_sim', iam: { rootTenantId: 'root' }, ...ports };
+  // The command kinds the server's registry would serve: the protocol's and metal's.
+  const kindSpecs = new Map<string, CommandKindSpec>([
+    ...Object.values(protocolKinds).map((spec) => [spec.kind, spec as CommandKindSpec] as const),
+    ...metalCommandKinds.map((spec) => [spec.kind, spec] as const),
+  ]);
+  const registry = { hasModule: () => true, commandKind: (kind: string) => kindSpecs.get(kind), driver: () => undefined };
+  // Composite methods (metal.bulk): every call is allowed here, and runs as the method itself would.
+  const composite = {
+    async check() {},
+    async invoke(_tx: unknown, path: string, input: unknown) {
+      return call(path.split('/')[1] as keyof MetalApi['metal'], input);
+    },
+  };
+  const base = { sql: db, work, events: eventLog, commands, pki, secrets, requestId: 'req_sim', iam: { rootTenantId: 'root' }, registry, ...composite, ...ports };
   const context = { ...base, workflows: provision.workflowEngine(base as never) } as unknown as ModuleContext & MethodContext;
   const api: MetalApi = bareMetal.api!(context);
 
@@ -470,6 +495,6 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       )
     ).rows[0]!;
 
-  return { db, context, api, provision, bareMetal, queue, events, seen, trustedWipes, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, pxeTick, settle, call, state, close: () => db.close() };
+  return { db, context, api, provision, bareMetal, queue, events, batches, commandBatches, seen, trustedWipes, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, pxeTick, settle, call, state, close: () => db.close() };
 }
 export type MetalSim = Awaited<ReturnType<typeof createMetalSim>>;

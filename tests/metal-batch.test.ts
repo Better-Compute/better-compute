@@ -11,10 +11,11 @@ import { createMetalSim, type MetalSim } from './extensions/metal-sim.js';
 
 let sim: MetalSim;
 const nodes: string[] = [];
+const AGENT = 'node_s1tea000000000000000000003';
 
 beforeAll(async () => {
   sim = await createMetalSim();
-  await sim.addSiteAgent('node_s1tea000000000000000000003', 'site_a');
+  await sim.addSiteAgent(AGENT, 'site_a');
   for (const n of [1, 2]) {
     const node = await sim.call('enroll', {
       tenantId: 'root',
@@ -45,12 +46,13 @@ describe('batch scope', () => {
     const kinds = await profileCommandKinds(releaseProfile, steps());
     const scope = await sim.db.transaction((tx) => metalBatchScope(tx, registry, nodes, kinds));
     // The boot device counts: attacker boot media plus any power cycle is a reimage (review #6).
+    // BMC leaves name the relaying site agent (addresses are site-local): one per agent of the site.
     expect(scope).toEqual(
       [
-        { subject: 'bmc:https://10.20.0.1', kind: 'bmc.boot' },
-        { subject: 'bmc:https://10.20.0.1', kind: 'bmc.power' },
-        { subject: 'bmc:https://10.20.0.2', kind: 'bmc.boot' },
-        { subject: 'bmc:https://10.20.0.2', kind: 'bmc.power' },
+        { subject: `bmc:${AGENT}/https://10.20.0.1`, kind: 'bmc.boot' },
+        { subject: `bmc:${AGENT}/https://10.20.0.1`, kind: 'bmc.power' },
+        { subject: `bmc:${AGENT}/https://10.20.0.2`, kind: 'bmc.boot' },
+        { subject: `bmc:${AGENT}/https://10.20.0.2`, kind: 'bmc.power' },
         { subject: nodes[0]!, kind: 'disk.wipe' },
         { subject: nodes[1]!, kind: 'disk.wipe' },
       ].sort((a, b) => (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : a.kind < b.kind ? -1 : 1)),
@@ -61,6 +63,54 @@ describe('batch scope', () => {
       code: 'NOT_FOUND',
     });
     expect(batchSubject('site.httpProxy', { nodeId: 'node_x', bmcAddress: 'x' })).toBe('node:node_x');
+    expect(() => batchSubject('bmc.power', { nodeId: 'node_x', bmcAddress: 'x' })).toThrow(/site agent/);
+  });
+
+  it('metal.bulk: one batch over the verb’s chain, carried by its destructive commands only, until the nodes rest', async () => {
+    expect((await Promise.all(nodes.map((id) => sim.state(id)))).map((s) => s.provision_state)).toEqual(['ready', 'ready']);
+    // Enrolling already ran each machine's workflows under a batch of their own (one node each).
+    const before = sim.batches.length;
+    expect(before).toBeGreaterThan(0);
+    expect(sim.batches.every((batch) => new Set(batch.input.scope.map((leaf) => leaf.subject.replace(/^bmc:[^/]+\//, ''))).size <= 2)).toBe(true);
+    const result = await sim.call('bulk', { tenantId: 'root', poolId: 'pool_metal', verb: 'retire', nodeIds: nodes, reason: 'decommission rack 7' });
+    expect(result.batch).toMatchObject({ held: false });
+    const batchId = result.batch.batchId as string;
+    expect(sim.batches).toHaveLength(before + 1);
+    expect(result.nodes.map((node: { provisionState: string }) => node.provisionState)).toEqual(['retiring', 'retiring']);
+    const created = sim.batches.at(-1);
+    expect(created!.batchId).toBe(batchId);
+    expect(created!.input).toMatchObject({ tenantId: 'root', reason: 'decommission rack 7' });
+    // The retire profile's destructive kinds, per machine: boot device and power through its BMC, the wipe on it.
+    expect(created!.input.scope).toHaveLength(6);
+    const { rows: parked } = await sim.db.query<{ batch_id: string | null }>('SELECT batch_id FROM metal_nodes WHERE node_id = ANY($1::text[])', [nodes]);
+    expect(parked.map((row) => row.batch_id)).toEqual([batchId, batchId]);
+
+    await sim.settle();
+    expect((await Promise.all(nodes.map((id) => sim.state(id)))).map((s) => s.provision_state)).toEqual(['retired', 'retired']);
+    // Every destructive command of the workflows carried the batch, nothing else did, and all fit its scope.
+    const { rows: sent } = await sim.db.query<{ id: string; kind: string }>(
+      `SELECT c.id, c.kind FROM commands c JOIN workflows w ON c.idempotency_key LIKE 'wf:' || w.id || ':%'
+        WHERE w.node_id = ANY($1::text[]) AND w.batch_id = $2`,
+      [nodes, batchId],
+    );
+    const { rows: runs } = await sim.db.query<{ profile_id: string }>('SELECT profile_id FROM workflows WHERE batch_id = $1', [batchId]);
+    expect(runs.map((run) => run.profile_id)).toEqual(['metal-retire', 'metal-retire']);
+    const destructive = new Set(['bmc.boot', 'bmc.power', 'disk.wipe']);
+    expect(sent.some((command) => destructive.has(command.kind))).toBe(true);
+    for (const command of sent) expect(sim.commandBatches.get(command.id), command.kind).toBe(destructive.has(command.kind) ? batchId : undefined);
+    // The bulk batch replaced the per-workflow one: no batch of its own was made for these runs.
+    expect(sim.batches).toHaveLength(before + 1);
+    const { rows: rested } = await sim.db.query<{ batch_id: string | null }>('SELECT batch_id FROM metal_nodes WHERE node_id = ANY($1::text[])', [nodes]);
+    expect(rested.map((row) => row.batch_id)).toEqual([null, null]);
+  });
+
+  it('metal.bulk refuses a verb a node’s state does not allow, before anything changes', async () => {
+    const before = sim.batches.length;
+    await expect(sim.call('bulk', { tenantId: 'root', poolId: 'pool_metal', verb: 'rescue', nodeIds: nodes, reason: 'x' })).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect(sim.batches).toHaveLength(before);
+    await expect(sim.call('bulk', { tenantId: 'root', poolId: 'pool_metal', verb: 'retire', nodeIds: [nodes[0], nodes[0]], reason: 'x' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
   });
 
   it('takes sends on control-plane steps only (the engine enforces it: provision-engine.test.ts)', () => {

@@ -24,6 +24,7 @@ import {
   type StepRegistry,
 } from './expand.js';
 import { releaseImagePins } from './site-cache.js';
+import { batchOf, plannedCommandKinds } from './batch.js';
 
 // The workflow engine (PLAN.md §11.2).
 //
@@ -77,6 +78,8 @@ export interface WorkflowRow {
   error: Json | null;
   work_key: string;
   owner: string | null;
+  /** (v1.0 §13) The batch its commands carry. */
+  batch_id: string | null;
   version: number;
 }
 
@@ -257,6 +260,8 @@ export interface StartWorkflowInput {
    * workflow's key (the node id), so the owner's reconciler reacts without polling.
    */
   owner?: string;
+  /** (v1.0 §13) The destructive-command batch every command of the workflow carries. */
+  batchId?: string;
 }
 
 /**
@@ -286,8 +291,8 @@ export async function startWorkflow(
   const workKey = input.nodeId ?? id;
   const inserted = await tx.query(
     `INSERT INTO workflows (id, tenant_id, node_id, instance_id, profile_id, profile_version, state, work_key, owner,
-       profile_document)
-     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9::jsonb) ON CONFLICT DO NOTHING`,
+       profile_document, batch_id, command_kinds)
+     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9::jsonb, $10, $11::text[]) ON CONFLICT DO NOTHING`,
     [
       id,
       input.tenantId,
@@ -298,6 +303,8 @@ export async function startWorkflow(
       workKey,
       input.owner ?? null,
       JSON.stringify(profile),
+      input.batchId ?? null,
+      plannedCommandKinds(steps, options.steps),
     ],
   );
   if (inserted.rowCount === 0)
@@ -612,6 +619,7 @@ async function startAgentStep(
       : step.args) as Json,
     idempotencyKey: commandKey(step),
     notAfter: deadline,
+    ...batchOf({ batchId: workflow.batch_id ?? undefined, registry: context.registry }, step.command_kind ?? step.action),
   });
   await setStep(tx, step, assertStepVerb('running', 'wait'), {
     command_id: command.id,
@@ -811,6 +819,7 @@ async function runControlPlaneStep(
     ...context,
     commands,
     workflowId: workflow.id,
+    ...(workflow.batch_id ? { batchId: workflow.batch_id } : {}),
     stepId: step.id,
     attempt: step.attempt,
     idempotencyKey: step.idempotency_key,

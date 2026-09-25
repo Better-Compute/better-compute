@@ -108,4 +108,15 @@ export const schemas = {
     { tenantId, nodeId, action: { enum: powerActions, description: 'The BMC power action' } },
     ['tenantId', 'nodeId', 'action'],
   ),
+  bulk: strictObject(
+    {
+      tenantId,
+      poolId: text(128, 'The pool every node is in'),
+      verb: { enum: ['manage', 'inspect', 'provide', 'undeploy', 'rescue', 'retire'], description: 'The verb every node gets' },
+      nodeIds: { type: 'array', minItems: 1, maxItems: 10_000, uniqueItems: true, items: nodeId, description: 'The nodes, all in the tenant' },
+      wipe: { enum: wipeModes, default: 'quick', description: 'undeploy: how the disks are wiped on release' },
+      reason: text(512, 'What the batch is for: the approvers see it'),
+    },
+    ['tenantId', 'poolId', 'verb', 'nodeIds', 'reason'],
+  ),
 } satisfies Record<string, InputSchema>;

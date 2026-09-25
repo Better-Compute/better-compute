@@ -2,7 +2,7 @@ import type { ProvisionVerb } from '@better-compute/core';
 
 /**
  * The methods of the `metal` API group (§9.2). All are authorized as `compute:nodes:provision`
- * (`enroll` on the pool, the others on the node), except `power` (`compute:nodes:power`).
+ * (`enroll` and `bulk` on the pool, the others on the node), except `power` (`compute:nodes:power`).
  */
 export const metalVerbs = [
   'enroll',
@@ -17,6 +17,8 @@ export const metalVerbs = [
   'recover',
   'retire',
   'power',
+  // (v1.0 §13) Another verb on many nodes of one pool, as one destructive-command batch.
+  'bulk',
 ] as const;
 export type MetalVerb = (typeof metalVerbs)[number];
 
@@ -40,4 +42,6 @@ export const metalVerbTransitions: Readonly<Record<MetalVerb, ProvisionVerb | nu
     recover: 'recover',
     retire: 'retire',
     power: null,
+    // Applies the verb it names to each node.
+    bulk: null,
   });

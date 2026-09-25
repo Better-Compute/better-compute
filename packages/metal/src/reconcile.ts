@@ -6,6 +6,7 @@ import {
   type ProvisionState,
   type SqlTx,
 } from '@better-compute/core';
+import { metalBatchScope } from './batch.js';
 import { stateProfile, workflowStates } from './profiles.js';
 import { applyProvisionVerb, readMetalNode, setMetalWorkflow, type MetalNodeRow } from './store.js';
 import { dueNodeLease, leaseEnded, markLeaseBound, newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
@@ -29,7 +30,7 @@ export type MetalReconcileOutcome =
   | { action: 'failed'; from: ProvisionState; error: Json }
   | { action: 'missing' };
 
-type Context = Pick<ModuleContext, 'sql' | 'events' | 'work'> & Partial<Pick<ModuleContext, 'workflows'>>;
+type Context = Pick<ModuleContext, 'sql' | 'events' | 'work'> & Partial<Pick<ModuleContext, 'workflows' | 'commands' | 'registry'>>;
 
 async function publish(context: Context, tx: SqlTx, node: MetalNodeRow, type: string, data: Record<string, Json>) {
   await context.events.publish(tx, { type, tenantId: node.tenant_id, subject: `node/${node.node_id}`, data: { nodeId: node.node_id, ...data } });
@@ -86,6 +87,20 @@ async function leaseTransition(context: Context, tx: SqlTx, node: MetalNodeRow):
   return undefined;
 }
 
+/**
+ * Puts a just-started workflow under a batch of its own: the destructive (subject, kind) set of its
+ * recorded command kinds on this node. Nothing when the deployment keeps no batches (no
+ * `createBatch`) or the workflow sends nothing destructive.
+ */
+async function batchWorkflow(context: Context, tx: SqlTx, node: MetalNodeRow, workflowId: string, state: ProvisionState): Promise<void> {
+  if (!context.commands?.createBatch || !context.registry) return;
+  const { rows } = await tx.query<{ command_kinds: string[] }>('SELECT command_kinds FROM workflows WHERE id = $1', [workflowId]);
+  const scope = await metalBatchScope(tx, context.registry, [node.node_id], rows[0]?.command_kinds ?? []);
+  if (scope.length === 0) return;
+  const batch = await context.commands.createBatch(tx, { tenantId: node.tenant_id, scope, reason: `${state} ${node.node_id}` });
+  await tx.query('UPDATE workflows SET batch_id = $2 WHERE id = $1', [workflowId, batch.batchId]);
+}
+
 /** One reconcile transition, in one transaction. */
 async function step(context: Context, nodeId: string): Promise<MetalReconcileOutcome> {
   return context.sql.transaction(async (tx) => {
@@ -95,6 +110,11 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
     } catch (error) {
       if (isComputeError(error, 'NOT_FOUND')) return { action: 'missing' };
       throw error;
+    }
+    // A bulk verb's batch covers its chain of workflows; once the node rests (or failed), it is done.
+    if (node.batch_id && !workflowStates.includes(node.provision_state)) {
+      await tx.query('UPDATE metal_nodes SET batch_id = NULL WHERE node_id = $1', [nodeId]);
+      node.batch_id = null;
     }
     const leased = await leaseTransition(context, tx, node);
     if (leased) return leased;
@@ -185,8 +205,13 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
       profileVersion = profile.version;
     }
     // `owner` is provision's addition to the core input: the engine wakes this reconciler on finish.
-    const input = { tenantId, profileId, profileVersion, nodeId, owner: metalWorkKind };
+    // Under a bulk verb's batch (metal.bulk), its destructive commands carry it (§13 quorum).
+    const input = { tenantId, profileId, profileVersion, nodeId, owner: metalWorkKind, ...(node.batch_id ? { batchId: node.batch_id } : {}) };
     const { id } = await context.workflows.start(tx, input);
+    // Without a bulk verb's batch, the workflow's destructive commands get a batch of their own
+    // (one node), created before any step sends anything (§13: with approvers set, the command queue
+    // refuses unbatched destructive commands).
+    if (!node.batch_id) await batchWorkflow(context, tx, node, id, state);
     await setMetalWorkflow(tx, nodeId, state, id);
     await publish(context, tx, node, 'node.provision.workflow', { state, workflowId: id, profileId, profileVersion });
     return { action: 'started', state, workflowId: id };

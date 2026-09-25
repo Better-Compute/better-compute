@@ -1,4 +1,5 @@
 import { ComputeError, type Json, type ProfileDocument, type SqlTx, type StepContext } from '@better-compute/core';
+import { batchOf } from './batch.js';
 import { stepNotReady } from './engine.js';
 
 // Control-plane steps that drive agents: a step that needs data only the control plane has (a
@@ -98,6 +99,7 @@ export async function awaitCommand(context: StepContext, options: AwaitCommandOp
       payload: options.payload,
       idempotencyKey: key,
       notAfter: now.rows[0]!.now.getTime() + (options.timeoutMs ?? 10 * 60_000),
+      ...batchOf(context, options.kind),
     });
     return undefined;
   });

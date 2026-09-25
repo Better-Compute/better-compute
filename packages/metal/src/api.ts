@@ -17,12 +17,13 @@ import {
   type SecretRef,
   type WipeMode,
 } from '@better-compute/core';
-import { siteAgentFor } from '@better-compute/provision';
+import { builtinSteps, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
+import { verbBatchScope } from './batch.js';
 import type { HardwareProfile } from './module-types.js';
 import { unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
 import { schemas } from './schemas.js';
-import { bmcOperationJson } from './steps.js';
+import { bmcOperationJson, metalSteps } from './steps.js';
 import { applyProvisionVerb, readMetalNode, resolveDriverBindings, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
 // The `metal` group of PLAN.md §9.2 (v0.2 rows). Every verb checks the move against core's
@@ -132,8 +133,41 @@ export type MetalApi = {
     recover: MethodDefinition<MetalNodeInput, MetalNodeView>;
     retire: MethodDefinition<MetalNodeInput, MetalNodeView>;
     power: MethodDefinition<PowerInput, { commandId: string }>;
+    /**
+     * (v1.0 §13) One verb on many nodes as one destructive-command batch: every node is decided as its
+     * own call (`compute:nodes:provision` on it), then the batch is created over the destructive
+     * (subject, kind) set the verb's workflows can send and every node gets the verb in one
+     * transaction. With the deployment's quorum on, those commands wait for the batch's approvals.
+     */
+    bulk: MethodDefinition<BulkInput, BulkOutput>;
   };
 };
+
+export type BulkVerb = 'manage' | 'inspect' | 'provide' | 'undeploy' | 'rescue' | 'retire';
+const bulkVerbs: Readonly<Record<BulkVerb, ProvisionVerb>> = {
+  manage: 'manage',
+  inspect: 'inspect',
+  provide: 'provide',
+  undeploy: 'release',
+  rescue: 'rescue',
+  retire: 'retire',
+};
+
+export interface BulkInput {
+  tenantId: string;
+  /** The pool every node is in; the call is decided on it, and each node on its own as well. */
+  poolId: string;
+  verb: BulkVerb;
+  nodeIds: string[];
+  wipe?: WipeMode;
+  reason: string;
+}
+
+export interface BulkOutput {
+  /** The batch, when the verb sends destructive commands (and the deployment keeps batches). */
+  batch?: { batchId: string; held: boolean; required: number; size: number };
+  nodes: MetalNodeView[];
+}
 
 const powerActions: readonly PowerAction[] = ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'];
 const wipeModes: readonly WipeMode[] = ['none', 'quick', 'secure-erase', 'crypto-erase'];
@@ -287,6 +321,9 @@ async function verb(
 /** The metal group over the module's hardware profiles. */
 export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfile>>): MetalApi {
   const onNode = (input: { nodeId: string }) => ({ type: 'node', id: input.nodeId });
+  // The steps metal's state profiles use, for the kinds a bulk verb's workflows can send.
+  let steps: StepRegistry | undefined;
+  const scopeSteps = () => (steps ??= stepRegistry([...metalSteps({ hardwareProfiles }), ...builtinSteps]));
   const simple = (provisionVerb: ProvisionVerb) =>
     defineMethod<MetalNodeInput, MetalNodeView>({
       action: 'compute:nodes:provision',
@@ -438,6 +475,56 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
             });
             return { commandId: command.id };
           }),
+      }),
+      bulk: defineMethod<BulkInput, BulkOutput>({
+        action: 'compute:nodes:provision',
+        kind: 'mutation',
+        resource: (input) => ({ type: 'pool', id: input.poolId }),
+        transaction: 'manual',
+        validate: describedBy(schemas.bulk, (raw): BulkInput => {
+          const input = object(raw, ['tenantId', 'poolId', 'verb', 'nodeIds', 'wipe', 'reason']);
+          const verb = Object.hasOwn(bulkVerbs, input.verb as string) ? (input.verb as BulkVerb) : fail(`verb must be one of ${Object.keys(bulkVerbs).join(', ')}`);
+          if (!Array.isArray(input.nodeIds) || input.nodeIds.length === 0 || input.nodeIds.length > 10_000)
+            fail('nodeIds must list 1 to 10000 nodes');
+          const nodeIds = input.nodeIds.map(nodeId);
+          if (new Set(nodeIds).size !== nodeIds.length) fail('nodeIds lists a node twice');
+          const out: BulkInput = {
+            tenantId: tenant(input.tenantId),
+            poolId: text(input.poolId, 'poolId', 128),
+            verb,
+            nodeIds,
+            reason: text(input.reason, 'reason', 512),
+          };
+          if (input.wipe !== undefined) {
+            if (verb !== 'undeploy') fail('wipe is only for undeploy');
+            out.wipe = wipeModes.includes(input.wipe as WipeMode) ? (input.wipe as WipeMode) : fail(`wipe must be one of ${wipeModes.join(', ')}`);
+          }
+          return out;
+        }),
+        async handler(context, input) {
+          if (!context.check || !context.invoke) throw new ComputeError('INVALID_STATE', 'metal.bulk runs as a composite method of the envelope');
+          const path = `metal/${input.verb}` as const;
+          const calls = input.nodeIds.map((id) => ({ tenantId: input.tenantId, nodeId: id, ...(input.wipe ? { wipe: input.wipe } : {}) }));
+          // Each node is its own decision, as if called one by one (no transaction open: IAM is never awaited in one).
+          for (const call of calls) await context.check(path, call);
+          return context.sql.transaction(async (tx) => {
+            const rows = [];
+            for (const id of input.nodeIds) {
+              const row = await readMetalNode(tx, id, { tenantId: input.tenantId, lock: true });
+              if (row.pool_id !== input.poolId) throw new ComputeError('INVALID_INPUT', `Node ${id} is not in pool ${input.poolId}`);
+              rows.push(row);
+            }
+            const scope = await verbBatchScope(tx, context.registry, scopeSteps(), rows, bulkVerbs[input.verb]);
+            let batch: BulkOutput['batch'];
+            if (scope.length > 0 && context.commands.createBatch) {
+              batch = await context.commands.createBatch(tx, { tenantId: input.tenantId, scope, reason: input.reason });
+              await tx.query('UPDATE metal_nodes SET batch_id = $2 WHERE node_id = ANY($1::text[])', [input.nodeIds, batch.batchId]);
+            }
+            const nodes: MetalNodeView[] = [];
+            for (const call of calls) nodes.push(await context.invoke!<MetalNodeView>(tx, path, call));
+            return { ...(batch ? { batch } : {}), nodes };
+          });
+        },
       }),
     },
   };

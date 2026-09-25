@@ -36,6 +36,8 @@ const talosReady = defineStep({
   id: 'wait.talosReady',
   runsOn: 'control-plane',
   relays: ['site'],
+  // The kinds it relays (awaitCommand refuses others; a batch's scope includes them).
+  sends: ['site.httpProxy'],
   timeout: '20m',
   retrySafe: true,
   input: manifest({ port: field.int({ min: 1, max: 65535 }).default(50000) }),

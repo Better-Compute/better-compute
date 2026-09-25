@@ -137,7 +137,7 @@ describe('metal verbs', () => {
       expect(row.action).toBe(
         row.method === 'power' ? 'compute:nodes:power' : 'compute:nodes:provision',
       );
-      expect(row.resource).toBe(row.method === 'enroll' ? 'pool' : 'node');
+      expect(row.resource).toBe(row.method === 'enroll' || row.method === 'bulk' ? 'pool' : 'node');
     }
   });
 
@@ -145,7 +145,8 @@ describe('metal verbs', () => {
     expect(Object.keys(metalVerbTransitions)).toEqual([...metalVerbs]);
     for (const [method, verb] of Object.entries(metalVerbTransitions)) {
       if (verb === null) {
-        expect(['enroll', 'power']).toContain(method);
+        // enroll creates the node, power is its own axis, bulk applies the verb it names.
+        expect(['enroll', 'power', 'bulk']).toContain(method);
         continue;
       }
       expect(provisionVerbs).toContain(verb);

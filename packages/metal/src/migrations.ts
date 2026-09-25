@@ -79,4 +79,12 @@ CREATE UNIQUE INDEX bmc_credential_versions_current ON bmc_credential_versions (
 CREATE UNIQUE INDEX bmc_credential_versions_pending ON bmc_credential_versions (node_id) WHERE state = 'pending';
 `,
   },
+  {
+    name: 'metal/0005_batch',
+    sql: `
+-- The destructive-command batch (PLAN.md §13 quorum) a bulk verb (metal.bulk) put the node under: the
+-- reconciler starts every workflow of the verb's chain under it, and clears it once the node rests.
+ALTER TABLE metal_nodes ADD COLUMN batch_id text;
+`,
+  },
 ]);
