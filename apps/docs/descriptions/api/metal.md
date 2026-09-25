@@ -7,6 +7,8 @@ Creates a metal node from a BMC address, driver and credentials in the given poo
 - Decided as `compute:nodes:provision` on the pool, since the node does not exist yet.
 - `bmc.credentials` is a `secret://` reference or an inline username and password. Inline credentials go to the secret broker before anything is written, and only the reference is stored; without a secret broker they are `INVALID_CONFIG`.
 - The node's driver bindings come from the BMC (power, management, virtual media), then the hardware profile (`hardwareProfile`, else the pool's `policy.hardwareProfile`). An unknown hardware profile is `INVALID_INPUT`.
+- `bmc.driverOptions` is a JSON object of at most 1 KiB for the BMC driver (e.g. `{ "cipherSuite": 3 }` for older IPMI BMCs), sent on every BMC request and validated by the driver. Keys that look like credentials are `INVALID_INPUT`: credentials travel only as `bmc.credentials`.
+- `addresses` are the machine's own IP literals (at most 16). In an agentless pool the site's agents can reach the machine through them at once; out-of-band inspection replaces them only when it reports some (IPMI reports none). A driver that cannot report MACs needs `macs` given here.
 - `NOT_FOUND` when the pool does not exist or the tenant does not own it; `INVALID_INPUT` when the pool is not in `siteId`.
 
 Each call creates a new node; there is no idempotency key. Publishes `node.enrolled`.
