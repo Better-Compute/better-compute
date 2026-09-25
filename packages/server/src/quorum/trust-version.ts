@@ -22,7 +22,7 @@ CREATE TABLE trust_bundle_state (
   id text PRIMARY KEY CHECK (id = 'current'),
   version numeric(20, 0) NOT NULL CHECK (version >= 1),
   digest bytea NOT NULL,
-  updated_at timestamptz NOT NULL DEFAULT now()
+  updated_at timestamptz NOT NULL DEFAULT compute_now()
 );
 `,
 };
@@ -44,7 +44,7 @@ export const trustBundleHistoryMigration: Migration = {
 CREATE TABLE trust_bundle_history (
   digest bytea PRIMARY KEY,
   version numeric(20, 0) NOT NULL,
-  published_at timestamptz NOT NULL DEFAULT now()
+  published_at timestamptz NOT NULL DEFAULT compute_now()
 );
 `,
 };
@@ -177,13 +177,13 @@ export function trustVersionSettler(
       if (version !== recorded || !same || !row.approver_set)
         await tx.query(
           `UPDATE trust_bundle_state SET version = $1, digest = $2, approver_set = $3::jsonb,
-                  updated_at = now()
+                  updated_at = compute_now()
             WHERE id = 'current'`,
           [version.toString(), digest, JSON.stringify(storeSet(set, epoch))],
         );
       await tx.query(
         `INSERT INTO trust_bundle_history (digest, version) VALUES ($1, $2::numeric)
-           ON CONFLICT (digest) DO UPDATE SET version = EXCLUDED.version, published_at = now()`,
+           ON CONFLICT (digest) DO UPDATE SET version = EXCLUDED.version, published_at = compute_now()`,
         [digest, version.toString()],
       );
       return { version, stale: undefined, previous, previousEpoch, quorumChanged };
