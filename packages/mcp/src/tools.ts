@@ -540,6 +540,136 @@ export function computeTools(
           }),
       }),
     ),
+    // Sandboxes (v0.5, PLAN §3.7): short-lived VMs from a template, deleted when their TTL ends.
+    {
+      name: 'list_sandbox_templates',
+      title: 'List sandbox templates',
+      description:
+        'Lists the sandbox templates of this tenant: pool, flavor, image, runtime, TTL bounds and warm pool size. Pick one for create_sandbox.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (_args, context) =>
+        context.api.$request('sandboxTemplates/list', { tenantId: context.tenantId }),
+    },
+    {
+      name: 'create_sandbox',
+      title: 'Create a sandbox',
+      description:
+        "Creates a short-lived VM from a sandbox template. It starts at once from the template's warm pool when one is free, and is deleted, with its disk, when its TTL ends. If a person must approve it, retry with the returned idempotencyKey after they do.",
+      inputSchema: {
+        type: 'object',
+        required: ['templateId'],
+        properties: {
+          templateId: id('sbxt', 'The template (list_sandbox_templates)'),
+          ttlSeconds: {
+            type: 'integer',
+            minimum: 60,
+            maximum: 30 * 24 * 3600,
+            description: "Lifetime in seconds (default: the template's; at most its maximum)",
+          },
+          idempotencyKey,
+          waitSeconds: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 30,
+            description: 'How long to wait for the sandbox to be ready (default 20)',
+          },
+        },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      async run(args, context) {
+        const key = (args.idempotencyKey as string | undefined) ?? context.newKey();
+        const sandbox = await withConfirmation(context, key, () =>
+          context.api.$request('sandboxes/create', {
+            tenantId: context.tenantId,
+            templateId: args.templateId,
+            ...(args.ttlSeconds !== undefined ? { ttlSeconds: args.ttlSeconds } : {}),
+            idempotencyKey: key,
+            wait: { timeoutMs: ((args.waitSeconds as number | undefined) ?? 20) * 1000 },
+          }),
+        );
+        return { idempotencyKey: key, sandbox };
+      },
+    },
+    {
+      name: 'list_sandboxes',
+      title: 'List sandboxes',
+      description:
+        'Lists live sandboxes in this tenant: your own by default, or every one you may see with scope "all". Filter by template; pass the returned cursor for the next page.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['mine', 'all'], description: 'Default mine' },
+          templateId: id('sbxt', 'Only this template'),
+          limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Page size' },
+          cursor: id('sbx', 'The cursor a previous page returned'),
+        },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('sandboxes/list', { tenantId: context.tenantId, ...args }),
+    },
+    {
+      name: 'extend_sandbox',
+      title: 'Extend a sandbox',
+      description:
+        "Moves a sandbox's expiry later by a duration, within its template's maximum TTL.",
+      inputSchema: {
+        type: 'object',
+        required: ['sandboxId', 'by'],
+        properties: { sandboxId: id('sbx', 'The sandbox'), by: duration },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      run: (args, context) =>
+        context.api.$request('sandboxes/extend', {
+          tenantId: context.tenantId,
+          sandboxId: args.sandboxId,
+          by: args.by,
+        }),
+    },
+    ...(['get', 'delete'] as const).map(
+      (verb): ComputeTool => ({
+        name: `${verb}_sandbox`,
+        title: { get: 'Show a sandbox', delete: 'Delete a sandbox' }[verb],
+        description: {
+          get: 'Shows one sandbox: state, template, expiry and its instance (addresses, conditions).',
+          delete: 'Deletes a sandbox now, before its TTL ends, with its disk.',
+        }[verb],
+        inputSchema: {
+          type: 'object',
+          required: ['sandboxId'],
+          properties: { sandboxId: id('sbx', 'The sandbox') },
+          additionalProperties: false,
+        },
+        annotations:
+          verb === 'get'
+            ? { readOnlyHint: true, openWorldHint: false }
+            : {
+                readOnlyHint: false,
+                destructiveHint: true,
+                idempotentHint: true,
+                openWorldHint: false,
+              },
+        run: (args, context) =>
+          context.api.$request(`sandboxes/${verb}`, {
+            tenantId: context.tenantId,
+            sandboxId: args.sandboxId,
+          }),
+      }),
+    ),
   ];
   if (options.execCommand)
     tools.push({

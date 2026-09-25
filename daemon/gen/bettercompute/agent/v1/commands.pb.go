@@ -1882,7 +1882,8 @@ type InstanceSnapshotResult struct {
 	Sha256 []byte `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
 	// The runtime that wrote it; a restore needs the same runtime.
 	Runtime string `protobuf:"bytes,3,opt,name=runtime,proto3" json:"runtime,omitempty"`
-	// The host CPU model the memory state depends on (bc.dev/cpu.model), empty for disk only.
+	// The host CPU model the memory state depends on (the inventory label `cpu.model`), empty for
+	// disk only.
 	CpuModel      string `protobuf:"bytes,4,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

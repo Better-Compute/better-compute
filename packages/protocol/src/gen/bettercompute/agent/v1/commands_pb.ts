@@ -895,7 +895,8 @@ export type InstanceSnapshotResult = Message<"bettercompute.agent.v1.InstanceSna
   runtime: string;
 
   /**
-   * The host CPU model the memory state depends on (bc.dev/cpu.model), empty for disk only.
+   * The host CPU model the memory state depends on (the inventory label `cpu.model`), empty for
+   * disk only.
    *
    * @generated from field: string cpu_model = 4;
    */

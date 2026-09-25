@@ -300,6 +300,7 @@ message InstanceSnapshotResult {
   bytes sha256 = 2;
   // The runtime that wrote it; a restore needs the same runtime.
   string runtime = 3;
-  // The host CPU model the memory state depends on (bc.dev/cpu.model), empty for disk only.
+  // The host CPU model the memory state depends on (the inventory label `cpu.model`), empty for
+  // disk only.
   string cpu_model = 4;
 }

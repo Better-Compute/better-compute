@@ -92,6 +92,12 @@ describe('JSON-RPC over Streamable HTTP', () => {
       'start_instance',
       'stop_instance',
       'delete_instance',
+      'list_sandbox_templates',
+      'create_sandbox',
+      'list_sandboxes',
+      'extend_sandbox',
+      'get_sandbox',
+      'delete_sandbox',
     ]);
     expect(
       tools.find((tool: { name: string }) => tool.name === 'release_reservation').annotations,
@@ -109,6 +115,45 @@ describe('JSON-RPC over Streamable HTTP', () => {
     expect(mcpWith(recorder().api, { execCommand: true }).tools.map((tool) => tool.name)).toContain(
       'exec_command',
     );
+  });
+});
+
+describe('sandbox tools (v0.5, §3.7)', () => {
+  it('create waits and carries its key; list, extend, get and delete stay in the caller’s tenant', async () => {
+    const { api, calls } = recorder(() => ({ id: 'sbx_1' }));
+    const mcp = mcpWith(api);
+    const TEMPLATE = 'sbxt_01k5w0000000000000000000dd';
+    const SANDBOX = 'sbx_01k5w0000000000000000000dd';
+    const created = await rpc(mcp, 'tools/call', {
+      name: 'create_sandbox',
+      arguments: { templateId: TEMPLATE, ttlSeconds: 900, waitSeconds: 5 },
+    });
+    expect(created.body.result.isError).toBeUndefined();
+    await rpc(mcp, 'tools/call', { name: 'list_sandbox_templates', arguments: {} });
+    await rpc(mcp, 'tools/call', { name: 'list_sandboxes', arguments: { templateId: TEMPLATE } });
+    await rpc(mcp, 'tools/call', {
+      name: 'extend_sandbox',
+      arguments: { sandboxId: SANDBOX, by: '30m' },
+    });
+    for (const verb of ['get', 'delete'])
+      await rpc(mcp, 'tools/call', { name: `${verb}_sandbox`, arguments: { sandboxId: SANDBOX } });
+    expect(calls).toEqual([
+      {
+        path: 'sandboxes/create',
+        input: {
+          tenantId: 'org_acme',
+          templateId: TEMPLATE,
+          ttlSeconds: 900,
+          idempotencyKey: expect.any(String),
+          wait: { timeoutMs: 5000 },
+        },
+      },
+      { path: 'sandboxTemplates/list', input: { tenantId: 'org_acme' } },
+      { path: 'sandboxes/list', input: { tenantId: 'org_acme', templateId: TEMPLATE } },
+      { path: 'sandboxes/extend', input: { tenantId: 'org_acme', sandboxId: SANDBOX, by: '30m' } },
+      { path: 'sandboxes/get', input: { tenantId: 'org_acme', sandboxId: SANDBOX } },
+      { path: 'sandboxes/delete', input: { tenantId: 'org_acme', sandboxId: SANDBOX } },
+    ]);
   });
 });
 
