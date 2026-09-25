@@ -647,6 +647,11 @@ export async function hostedRuntime(
       'INVALID_CONFIG',
       `Pool ${pool.id} runs ${runtime}, which this deployment's vps({ runtimes }) does not list`,
     );
+  if (!traits.multiTenant && !pool.singleTenant)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `Pool ${pool.id} runs ${runtime}, a single-tenant ${traits.isolation} runtime: set policy.singleTenant`,
+    );
   if (request.imageFormat !== undefined && !traits.imageFormats.includes(request.imageFormat))
     throw new ComputeError(
       'INVALID_INPUT',
@@ -655,11 +660,6 @@ export async function hostedRuntime(
   if (request.gpus > 0 && !traits.gpuPassthrough)
     throw new ComputeError('INVALID_INPUT', `${runtime} cannot pass GPUs through`);
   if (traits.multiTenant) return runtime;
-  if (!pool.singleTenant)
-    throw new ComputeError(
-      'INVALID_CONFIG',
-      `Pool ${pool.id} runs ${runtime}, a single-tenant ${traits.isolation} runtime: set policy.singleTenant`,
-    );
   // The pool row is locked FOR SHARE so an offer (pools.offer locks it) cannot slip in between.
   await tx.query(`SELECT 1 FROM pools WHERE id = $1 FOR SHARE`, [pool.id]);
   const offered = await tx.query<{ tenant_id: string }>(

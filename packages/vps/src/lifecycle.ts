@@ -195,6 +195,8 @@ async function reconcileHosted(
     if (await recreateOnLoss(tx, row.poolId)) {
       if (row.allocationId) await deps.capacity.release(tx, row.allocationId);
       await releaseAddress(tx, row.id);
+      // The lost host's spec drops the instance, so a host that comes back removes its stale domain.
+      if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
       const again = await moveInstance(tx, row, 'recreate', 'scheduling', {
         nodeId: null,
         allocationId: null,

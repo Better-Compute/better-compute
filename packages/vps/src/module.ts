@@ -60,7 +60,13 @@ import {
 import { instanceSpecs, reconcileInstance } from './lifecycle.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
-import { hostReserve, hostResourcesWork, syncHostResources, type HostReserve } from './hosts.js';
+import {
+  hostReserve,
+  hostResourcesWork,
+  syncHostResources,
+  wakeInstancesOnLostHosts,
+  type HostReserve,
+} from './hosts.js';
 import { meterInstances } from './usage.js';
 
 /** Options of `vps()`. */
@@ -490,12 +496,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         },
       },
       {
-        // §10.2: vcpu/memoryGiB/diskGiB of vps-host nodes from their inventory, with pool overcommit.
+        // §10.2: vcpu/memoryGiB/diskGiB of vps-host nodes from their inventory, with pool overcommit;
+        // and instances on hosts declared lost are woken (no report will mention them again).
         name: hostResourcesWork,
         shardBy: 'none',
         periodic: [{ key: 'all', every: options.hostSyncEvery ?? '30s' }],
         async run(context) {
           await syncHostResources(context.sql, { reserve });
+          await wakeInstancesOnLostHosts(context.sql, context.work);
           return 'DONE';
         },
       },

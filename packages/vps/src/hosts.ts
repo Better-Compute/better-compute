@@ -1,4 +1,5 @@
-import { ComputeError, type SqlExecutor } from '@better-compute/core';
+import { ComputeError, type ModuleContext, type SqlExecutor } from '@better-compute/core';
+import { instanceWork } from './instances.js';
 
 // Host capacity (PLAN.md §10.2): a VPS host's scalar resources come from its inventory.
 //   allocatable = capacity − systemReserved, per resource; available = allocatable × ratio − allocated
@@ -120,6 +121,27 @@ export async function staleHostResources(
     allocatable: Number(row.allocatable),
     ratio: Number(row.ratio),
   }));
+}
+
+/**
+ * Wakes the Instance reconciler for instances on hosts Liveness declared `lost`, which no report
+ * will ever mention again: they turn `lost` (and are recreated where the pool's
+ * `recreateOnHostLoss` says so), and deletions there finish. Returns how many were woken.
+ */
+export async function wakeInstancesOnLostHosts(
+  sql: SqlExecutor,
+  work: ModuleContext['work'],
+): Promise<number> {
+  const { rows } = await sql.query<{ id: string }>(
+    `SELECT i.id FROM instances i JOIN nodes n ON n.id = i.node_id
+      WHERE n.connectivity = 'lost' AND NOT i.draft AND i.state NOT IN ('lost', 'deleted', 'error')
+      ORDER BY i.id LIMIT 1000`,
+  );
+  if (rows.length === 0) return 0;
+  await sql.transaction(async (tx) => {
+    for (const row of rows) await work.enqueue(tx, instanceWork, row.id);
+  });
+  return rows.length;
 }
 
 /**
