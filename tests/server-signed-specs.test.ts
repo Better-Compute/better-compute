@@ -91,6 +91,45 @@ describe('signed NodeSpecs', () => {
     expect(fromBinary(DesiredStateBodySchema, rendered!.body).nodeId).toBe('node_s');
   });
 
+  it('signs an unchanged spec once signing is turned on (daemons with roots refuse unsigned specs)', async () => {
+    const before = await server(undefined);
+    await before.reconcile();
+    const unsigned = await before.stored();
+    expect(unsigned.spec_signature).toBeNull();
+    await before.compute.stop?.();
+    // The same store, now with a command-signing root.
+    const authority = createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) });
+    const compute = betterCompute({
+      ...options(db!, fakeIam()),
+      clock: manualClock(T0),
+      pki: { commandSigning: authority },
+    } as never) as any;
+    await compute.initialize();
+    const reconcile = async () => {
+      await db!.transaction((tx) => compute.context.work.enqueue(tx, 'nodespec', 'node_s'));
+      for (let pass = 0; pass < 3; pass++)
+        for (const job of Object.values(compute.jobs) as { tick(): Promise<unknown> }[])
+          await job.tick().catch(() => undefined);
+    };
+    await reconcile();
+    const signed = (
+      await db!.query<{ generation: number; spec_body: Uint8Array | null; spec_signature: Uint8Array | null }>(
+        'SELECT generation, spec_body, spec_signature FROM nodes WHERE id = $1',
+        ['node_s'],
+      )
+    ).rows[0]!;
+    expect(Number(signed.generation)).toBe(Number(unsigned.generation) + 1);
+    const body = verifyDesiredState(
+      desiredStateFromStored(new Uint8Array(signed.spec_body!), new Uint8Array(signed.spec_signature!)),
+      { roots: [authority.certificate], now: T0, nodeId: 'node_s', required: true },
+    );
+    expect(Number(body.generation)).toBe(Number(signed.generation));
+    // Signed and unchanged: the next pass writes nothing.
+    await reconcile();
+    const again = await db!.query<{ generation: number }>('SELECT generation FROM nodes WHERE id = $1', ['node_s']);
+    expect(Number(again.rows[0]!.generation)).toBe(Number(signed.generation));
+  });
+
   it('writes no signature without pki.commandSigning', async () => {
     const s = await server(undefined);
     await s.reconcile();

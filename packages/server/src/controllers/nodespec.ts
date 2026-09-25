@@ -326,8 +326,19 @@ export async function reconcileNodeSpec(
     for (const module of modules)
       if (typeof module.nodeSpec === 'function') parts.push(await module.nodeSpec(context, record));
     const next = await wireNodeSpec(tx, mergeNodeSpecs(parts));
-    if (stored !== null && canonicalJson(stored) === canonicalJson(next))
-      return { generation: record.generation, changed: false, spec: next };
+    if (stored !== null && canonicalJson(stored) === canonicalJson(next)) {
+      // Unchanged, and signed if it must be. A spec written before signing was configured has no signature, and
+      // daemons holding signing roots refuse unsigned specs: sign it as a new generation.
+      const unsigned =
+        hooks.signer !== undefined &&
+        (
+          await tx.query<{ unsigned: boolean }>(
+            'SELECT spec_signature IS NULL AS unsigned FROM nodes WHERE id = $1',
+            [nodeId],
+          )
+        ).rows[0]?.unsigned === true;
+      if (!unsigned) return { generation: record.generation, changed: false, spec: next };
+    }
     // Signed intent: the exact DesiredStateBody of the generation this UPDATE writes (the gateway relays it
     // verbatim). Every bump rewrites both columns, so a stored signature never outlives its generation.
     let body: Uint8Array | null = null;
