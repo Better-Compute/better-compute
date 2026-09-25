@@ -175,8 +175,12 @@ pending or challenge; `verifyJoinResponse` refuses a deferral) and retry with th
   - The broker runs `openSecretRequest(req, { nodeId, lookup, now, isBound })`: the node signature
     against `node_certs`, the `epk` point, then the binding. Refusals carry `details.refusal` for
     `SecretResponse.error`.
-  - `sealSecretResponse` answers with a JWE to `epk`.
-  - Agents use `createSecretRequest` and `openSecretResponse`.
+  - `sealSecretResponse(opened, value, { expiresAt })` answers with a JWE to `epk`. With
+    `expiresAt` it also carries `exp`.
+  - Agents use `createSecretRequest` and `openSecretResponse`, which refuses an expired answer.
+  - The broker itself is `createSecretBroker` in `@better-compute/server` (GatewayServices.secret).
+    It verifies against the node's current certificate, binds the request to live work, and caps
+    `exp` at 5 minutes.
 - **Signed intent.** `createCommandSigningAuthority()` is the root (in production, KMS or Vault
   transit). It issues `issueWorkerKey({ workerId })` keys that last ≤ 24 h and carry the
   command-signing EKU.
@@ -318,8 +322,10 @@ part)*`, SHA-256.
   `KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}` and check `UnknownExtKeyUsage` yourself.
   Nothing we issue is critical except BasicConstraints and KeyUsage, which Go understands.
 - **SecretResponse.** The JWE has `typ` `bcsecret+jwe` and carries `ref` and `rid` (request id) in
-  the protected header. Check both before using the value; the recipient is the request's one-time
-  `epk` (65-byte uncompressed point).
+  the protected header, plus `exp` (unix seconds, at most 5 minutes out). Check `ref`, `rid` and
+  `exp` before using the value, and drop the value from memory once the step is done. The recipient
+  is the request's one-time `epk` (65-byte uncompressed point). The signing input is pinned in
+  `tests/pki-attestors-vectors.test.ts`.
 - **Renew.** `pop_sig` covers `renew-pop` [sha256(new CSR), node_id, int64_be(seconds) ‖
   int32_be(nanos)], signed with the current key. Renew at ~60% of the lifetime.
 - **Release manifests (v0.4 self-update).**
