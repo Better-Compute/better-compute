@@ -160,6 +160,9 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 		h.Drivers = append(h.Drivers, d.Manifest)
 	}
 	for _, r := range a.o.Runtimes {
+		if _, plugin := r.(*PluginRuntime); plugin {
+			continue // its plugin's manifest is listed above
+		}
 		h.Drivers = append(h.Drivers, &commonv1.DriverManifest{
 			Id: r.Name(), Version: a.o.Version, Kinds: []string{"runtime"}, RunsOn: commonv1.RunsOn_RUNS_ON_NODE,
 			ConfigSchemaJson: `{"type":"object"}`,

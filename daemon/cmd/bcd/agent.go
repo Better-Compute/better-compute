@@ -332,6 +332,12 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 			p.Close()
 		}
 	}()
+	drivers := agent.DriversOf(plugins)
+	runtimes := runtimesFor(mode, cfg.DataDir, host)
+	if mode == "node" {
+		// Runtimes the plugins serve (a Kata or Firecracker plugin), beside the built-in ones.
+		runtimes = append(runtimes, agent.PluginRuntimes(drivers, runtimes)...)
+	}
 	var client atomic.Pointer[transport.Client]
 	first, err := newClient(cfg, state, key)
 	if err != nil {
@@ -364,8 +370,8 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		},
 		SignerPin:     signerPin,
 		ImageCache:    cfg.ImageCache,
-		Runtimes:      runtimesFor(mode, cfg.DataDir, host),
-		Drivers:       agent.DriversOf(plugins),
+		Runtimes:      runtimes,
+		Drivers:       drivers,
 		InstallConfig: cfg.InstallFiles,
 		CacheMaxBytes: uint64(max(cfg.Boot.CacheMaxBytes, 0)),
 		Version:       version,
