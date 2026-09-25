@@ -110,9 +110,11 @@ export const eventCommands = [
         throw usageError(
           '--types takes up to 20 event type patterns like node.* or reservation.placed',
         );
-      // The outbox cursor as the stream writes it (<txid>.<seq>; events.list pages use their own <ms>:<seq>).
-      if (flags.since !== undefined && !/^\d{1,20}\.\d{1,20}$/.test(flags.since))
-        throw usageError('--since takes a printed sequence, like 184467.12');
+      // An outbox position: the stream writes it <txid>.<seq> (an event's sequence), events.list's page cursor the
+      // same position as <txid>:<seq>. Either resumes after it; the stream takes the dotted form.
+      const since = flags.since?.trim().replace(/^(\d{1,20}):(\d{1,20})$/, '$1.$2');
+      if (since !== undefined && !/^\d{1,20}\.\d{1,20}$/.test(since))
+        throw usageError('--since takes a printed sequence, like 184467.12 (or an events list cursor, 184467:12)');
       const path = flags.path ?? '/watch';
       if (!/^(?:\/[A-Za-z0-9_.-]+)+$/.test(path))
         throw usageError('--path must be an absolute path like /watch');
@@ -128,7 +130,7 @@ export const eventCommands = [
           path,
           tenantId: flags.tenant,
           ...(types.length ? { types } : {}),
-          ...(flags.since ? { lastEventId: flags.since } : {}),
+          ...(since ? { lastEventId: since } : {}),
           signal: stop.signal,
         })) {
           // JSON escapes C0 controls but not DEL and C1 (a CSI in a label or reason would reach the terminal).

@@ -91,7 +91,8 @@ describe('events', () => {
         '--types',
         'node.*, reservation.placed',
         '--since',
-        '9.4',
+        // An events list cursor (<txid>:<seq>) is the same position: sent in the stream's dotted form.
+        '9:4',
         '--count',
         '2',
       ],
@@ -130,6 +131,7 @@ describe('events', () => {
     expect(await run(['--url', 'https://compute.test', '--since', 'yesterday'])).toBe(
       'INVALID_ARGUMENT',
     );
+    expect(await run(['--url', 'https://compute.test', '--since', '1.2.3'])).toBe('INVALID_ARGUMENT');
     expect(await run(['--url', 'https://compute.test', '--path', 'watch?x'])).toBe(
       'INVALID_ARGUMENT',
     );
