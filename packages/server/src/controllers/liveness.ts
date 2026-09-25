@@ -48,8 +48,12 @@ const defaults = {
   batchSize: 500,
 } satisfies Required<LivenessOptions>;
 
-/** Pool classes whose machines may be declared lost automatically: never metal (P6). */
-const losablePoolClasses: ReadonlySet<string> = new Set(['provider']);
+/**
+ * Pool classes whose machines may be declared lost automatically, only when the pool sets
+ * `policy.lostAfter`: never metal (P6). vps-host: hosted VMs are recreated elsewhere only when the
+ * pool opts in (`recreateOnHostLoss`); its tenants hold VMs, not the machine.
+ */
+const losablePoolClasses: ReadonlySet<string> = new Set(['provider', 'vps-host']);
 
 interface LivenessRow {
   connectivity: Connectivity;

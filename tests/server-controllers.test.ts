@@ -42,6 +42,8 @@ const METAL = 'pool_metal';
 const PROVIDER = 'pool_cloud';
 const BARE = 'pool_bare';
 const DCGM = 'pool_dcgm';
+const VPS = 'pool_vps';
+const VPS_KEPT = 'pool_vps_kept';
 const GATEWAY = 'gw_1';
 
 /** The contribution the test module's `nodeSpec()` hook returns. */
@@ -78,6 +80,8 @@ async function setup() {
   await pool(PROVIDER, 'provider', { acceptance: [], lostAfter: '10m' });
   await pool(BARE, 'metal-host', {});
   await pool(DCGM, 'metal-host', { acceptance: [{ kind: 'diag.dcgm' }] });
+  await pool(VPS, 'vps-host', { acceptance: [], lostAfter: '10m' });
+  await pool(VPS_KEPT, 'vps-host', { acceptance: [] });
   await gatewayLease(fixture, GATEWAY, 20_000);
   return fixture;
 }
@@ -602,23 +606,22 @@ describe('Liveness', () => {
     expect(await at(fixture, id)).toBe('unreachable');
   });
 
-  it("declares a provider pool's node lost after lostAfter, and never a metal node", async () => {
+  it("declares provider and vps-host nodes lost after the pool's lostAfter, never a metal node", async () => {
     const fixture = await setup();
-    const cloud = await seedNode(fixture, {
-      pool: PROVIDER,
-      state: 'adopted',
-      connectivity: 'disconnected',
-    });
-    const metal = await seedNode(fixture, { state: 'adopted', connectivity: 'disconnected' });
+    const down = { state: 'adopted', connectivity: 'disconnected' };
+    const cloud = await seedNode(fixture, { pool: PROVIDER, ...down });
+    const metal = await seedNode(fixture, down);
+    const host = await seedNode(fixture, { pool: VPS, ...down });
+    const kept = await seedNode(fixture, { pool: VPS_KEPT, ...down });
     await fixture.compute.jobs.liveness!.tick();
     await run(fixture, 45_000);
-    expect([await at(fixture, cloud), await at(fixture, metal)]).toEqual([
-      'unreachable',
-      'unreachable',
-    ]);
+    for (const id of [cloud, metal, host, kept]) expect(await at(fixture, id)).toBe('unreachable');
     await run(fixture, 10 * 60_000);
     expect(await at(fixture, cloud)).toBe('lost');
     expect(await at(fixture, metal)).toBe('unreachable');
+    // A VPS host is lost only when its pool opts in with lostAfter.
+    expect(await at(fixture, host)).toBe('lost');
+    expect(await at(fixture, kept)).toBe('unreachable');
     expect(await topics(fixture)).toContain('node.lost');
   });
 
