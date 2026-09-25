@@ -82,6 +82,7 @@ describe('migrate', () => {
       'core/0020_command_created_at',
       'core/0021_signed_specs',
       'core/0022_ssh_certificate_sessions',
+      'core/0023_session_trust_version',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -372,6 +373,13 @@ describe('outbox dead letters and command latency (core/0019, core/0020)', () =>
     );
     expect(rows).toEqual([{ is_nullable: 'NO', column_default: 'compute_now()' }]);
     expect(await indexDefinition('commands_settled')).toMatch(/\(updated_at\) WHERE \(state = ANY/);
+  });
+
+  it('keeps the trust bundle version each session applied (core/0023)', async () => {
+    const { rows } = await db.query<{ column_default: string; is_nullable: string }>(
+      `SELECT column_default, is_nullable FROM information_schema.columns WHERE table_name = 'node_sessions' AND column_name = 'trust_version'`,
+    );
+    expect(rows).toEqual([{ column_default: '0', is_nullable: 'NO' }]);
   });
 
   it('records the issuing session of SSH certificates and indexes the outstanding ones (core/0022)', async () => {
