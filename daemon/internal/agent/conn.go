@@ -150,6 +150,7 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 		InventoryHashes:   a.inventoryHashes(),
 		TrustVersion:      a.state.TrustVersion,
 	}
+	h.ApproverSetEpoch, h.ApproverSetSha256 = a.heldApproverSetLocked()
 	if spec, ok, err := a.j.Spec(); err == nil && ok {
 		h.AppliedSpecHash = spec.Hash
 	}

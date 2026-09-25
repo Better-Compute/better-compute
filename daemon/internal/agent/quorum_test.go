@@ -348,3 +348,16 @@ func TestProxyWritesNeedABoundLeaf(t *testing.T) {
 	s.push(batched(proxy("g2", "batch_p", get), approval, proofs["node:node_1|site.httpProxy"]))
 	s.update(t, "g2", commonv1.CommandState_COMMAND_STATE_ACKED)
 }
+
+// review 10 M5: Hello reports the held approver set's epoch and digest, so a node stuck on an old
+// quorum shows up.
+func TestHelloReportsTheHeldApproverSet(t *testing.T) {
+	quorum := newApprovers(t, 2, 1, 0)
+	quorum.bundle.ApproverSetEpoch = 3
+	raw, _ := proto.Marshal(quorum.bundle)
+	h := newHarness(t, func(o *Options) { o.State.TrustBundle, o.State.TrustDomain = raw, testTrustDomain })
+	_, hello := h.open()
+	if hello.GetApproverSetEpoch() != 3 || !bytes.Equal(hello.GetApproverSetSha256(), pki.ApproverSetSHA256(quorum.bundle)) {
+		t.Fatalf("hello = epoch %d, sha %x", hello.GetApproverSetEpoch(), hello.GetApproverSetSha256())
+	}
+}

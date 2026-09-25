@@ -90,6 +90,20 @@ func (a *Agent) trustBundleLocked() (b *commonv1.TrustBundle, ok bool) {
 	return b, true
 }
 
+// heldApproverSetLocked is the approver set epoch and digest this daemon holds (review 10 M5, in
+// Hello and with trust_version in StatusReport): a node stuck on an old quorum shows. The digest is
+// empty without approver keys.
+func (a *Agent) heldApproverSetLocked() (uint64, []byte) {
+	b, ok := a.trustBundleLocked()
+	if !ok || b == nil {
+		return 0, nil
+	}
+	if len(b.GetApproverKeys()) == 0 {
+		return b.GetApproverSetEpoch(), nil
+	}
+	return b.GetApproverSetEpoch(), pki.ApproverSetSHA256(b)
+}
+
 // commandSubject is what a command acts on, from its signed body: the BMC a site agent drives
 // ("bmc:" + the site agent's own node id + "/" + address: BMC addresses are site-local), the node a
 // site.httpProxy request reaches ("node:" + target), or the node itself.

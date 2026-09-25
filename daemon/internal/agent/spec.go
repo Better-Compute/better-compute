@@ -311,6 +311,7 @@ func (a *Agent) sendStatusLocked() {
 	if a.trustPending {
 		status = proto.Clone(a.lastStatus).(*agentv1.StatusReport)
 		status.TrustVersion = a.state.TrustVersion
+		status.ApproverSetEpoch, status.ApproverSetSha256 = a.heldApproverSetLocked()
 	}
 	if a.sendLocked(&agentv1.AgentFrame{Msg: &agentv1.AgentFrame_Status{Status: status}}) {
 		a.trustPending = false

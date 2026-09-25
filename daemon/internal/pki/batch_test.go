@@ -300,6 +300,24 @@ func TestApproverSetChanges(t *testing.T) {
 	if got, err := AcceptApproverSet(current, next, domain, nil); err != nil || got.GetApproverSetEpoch() != 4 {
 		t.Fatalf("a signed change at a higher epoch: %v, %v", got, err)
 	}
+	// review 10 M3: an unchanged set moves up only with its own k signatures; unsigned, the held
+	// epoch stays (no error). A daemon that missed S→T@4 and T→S@5 jumps to S@5, after which T@4
+	// replays for nothing.
+	bumped := proto.Clone(current).(*commonv1.TrustBundle)
+	bumped.Version, bumped.ApproverSetEpoch = 7, 5
+	if got, err := AcceptApproverSet(current, bumped, domain, nil); err != nil || got.GetApproverSetEpoch() != 3 {
+		t.Fatalf("an unsigned epoch bump was taken: %v, %v", got, err)
+	}
+	outsiderSig, _ := SignP1363(outsider, ApproverSetSigningInput(bumped, domain))
+	sign(bumped, domain, privs[1], privs[2])
+	bumped.ApproverSetSignatures = append(bumped.ApproverSetSignatures, &commonv1.Signature{Kid: approverKeyFor(t, outsider).Kid, Sig: outsiderSig})
+	held, err := AcceptApproverSet(current, bumped, domain, nil)
+	if err != nil || held.GetApproverSetEpoch() != 5 {
+		t.Fatalf("the set's own signatures at a higher epoch: %v, %v", held, err)
+	}
+	if got, err := AcceptApproverSet(held, next, domain, nil); err == nil || got.GetApproverSetEpoch() != 5 {
+		t.Fatalf("T@4 replayed over S@5: %v, %v", got, err)
+	}
 	// Keyless, the epoch still never goes back.
 	keyless := &commonv1.TrustBundle{ApproverSetEpoch: 5}
 	if _, err := AcceptApproverSet(keyless, next, domain, nil); err == nil {
