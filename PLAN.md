@@ -88,7 +88,7 @@ The umbrella **`better-compute`** re-exports all of these (`better-compute/{inve
 - **G7** better-iam as IdP, PDP, ledger, flag store and event source.
 - **G8** Agent-ready: typed SDK, MCP, delegated sessions with human confirmation.
 
-**Non-goals (v1):** a workload orchestrator (capacity goes to Kubernetes or Slurm through config drivers); a sandbox product; our own users, roles, keys or invoices; telemetry storage; active-active multi-region; volumes and SDN beyond bridges, VLANs and IPAM; live migration; Windows or macOS nodes; Equinix Metal (EOL 2026-06-30 [PA §1]).
+**Non-goals (v1):** a workload orchestrator (capacity goes to Kubernetes or Slurm through config drivers); our own users, roles, keys or invoices; telemetry storage; active-active multi-region; volumes and SDN beyond bridges, VLANs and IPAM; live migration; Windows or macOS nodes; Equinix Metal (EOL 2026-06-30 [PA §1]).
 
 **Principles.**
 - **P1** Postgres is the truth. Gateway memory, caches, projections and pokes are rebuildable.
@@ -262,6 +262,31 @@ IAM cost per admission: 2 lock acquisitions with a warm authentication cache, 3 
 - **Platform-owned provider machines** that become `vps-host` or `metal-host` nodes (Hetzner Robot servers, cloud VMs used as hypervisors) use `agent:'bcd'`. Either `ProviderImpl.bootstrap?(machine, {joinToken, bcdUrl, sha256})` delivers a single-use `provisioned` token through rescue/installimage, or bcd joins via `cloud-iid` (v0.3).
 
 Later operations change only `desiredState`; the API never calls a runtime directly.
+
+### 3.7 Flow (e): a sandbox (v0.5; D24)
+
+A sandbox is a VPS instance with a template, a lifetime and a fast start, and it has no placement or tenancy path of its own. `sandboxes.create({ tenantId, templateId, ttl?, fromSnapshot?, idempotencyKey })` writes a `sandboxes` row plus the `instances` row it drives (`instances.sandbox_id`). Admission (§3.4, one decision on `compute-sandbox/{draftId}`), quota, IPAM, tunnels, IMDS, usage and the leak diff are therefore the instance's. Instance item methods on a sandbox's instance are refused (`INVALID_STATE`, "managed by sandbox …"); only `get` and `list` work.
+- **Templates** (`sandbox_templates`, per tenant) hold:
+  - `poolId`, `flavor`, `imageId` and `runtime`. `runtime` defaults to `cloud-hypervisor`; any `microvm` or `vm` runtime is allowed, and containers only on `singleTenant` pools, as for instances;
+  - `userData`;
+  - `env` as `secret://` references, resolved by the secret broker for the sandbox's own tenant only;
+  - `network`: `egress` by default, or `none` or `private`;
+  - `defaultTtl` and `maxTtl`;
+  - `warm: {min, max}`.
+
+  The template's pool must be offered to the tenant, and creating a template checks flavor and runtime against the pool once.
+- **Lifetime.** `expires_at` is set when the row is created. `sandboxes.extend` moves it within `maxTtl` and the pool policy's bound, as reservation `extend` does. The `vps.sandboxes` reconciler deletes expired sandboxes through the instance lifecycle (`desiredState: 'deleted'`), so expiry is an ordinary delete: bookings refunded, overlay removed, IP released. `sandbox.expired` is emitted first.
+- **Warm pools.** For each template with `warm.min > 0`, the reconciler keeps `min` instances created, booted and then `paused` (or `stopped` when the runtime cannot pause), owned by the template's tenant. `sandboxes.create` still takes its own admission decision. Only after an allow does it claim a warm instance in the same transaction: `FOR UPDATE SKIP LOCKED` on the oldest one, which changes owner, starts the TTL and sets `desiredState: 'running'`. On a miss it falls back to a cold create. Warm instances count against the tenant's quota when created, so a claim charges nothing new. They are metered as `vps.sandbox.warm` so operators can price idle capacity. Refills are rate-limited per pool.
+- **Snapshots.** `sandboxes.snapshot` sends the host the `instance.snapshot` command. The runtime writes disk and memory state, and the daemon uploads it to a presigned URL as an image of `kind: 'snapshot'`. That image is private to the sandbox's tenant, can never be promoted, and stores its sha256. `create({ fromSnapshot })` restores on a host with the same runtime and `bc.dev/cpu.model` (a placement `nodeLabels` constraint), because memory state needs matching CPU features. Snapshots are tenant data that include memory: they are deleted with the sandbox unless `keep: true`, and restoring one from another tenant fails the image visibility check.
+- **Exec and files without an in-guest agent.** The §3.6 rule holds: no platform agent runs inside a tenant VM. `sandboxes.exec` returns a tunnel ticket (§7.6) and a short-lived SSH certificate. The certificate is signed by the tenant's sandbox CA, and templates trust that CA via `TrustedUserCAKeys` in the user data they render. The SDK's `sandbox.exec(cmd)`, `files.put` and `files.get` ride that SSH session through the tunnel. The serial console remains as the fallback.
+- **Runtime contract additions** (optional, additive):
+  - `RuntimeDriver.pause?`, `resume?` and `snapshot?(instanceId, {uploadUrl})`;
+  - `InstanceSpec.desiredState` gains `paused`;
+  - `InstanceSpec.restoreFrom` (image reference + sha256);
+  - the command kind `instance.snapshot`.
+
+  A runtime without `pause` warms to `stopped`. A runtime without `snapshot` makes `sandboxes.snapshot` fail with `UNSUPPORTED`.
+- **Events:** `sandbox.created`, `ready`, `expired`, `deleted`, and `sandbox.snapshot.ready`.
 
 ---
 
@@ -953,6 +978,7 @@ What breaks first, with the mitigation already built in:
 | `metal` (metal, v0.2) | `enroll` → `nodes:provision` @ `pool/{poolId}` (inline BMC credentials are stored at once and never echoed) · `manage`, `inspect`, `provide`, `deploy`, `undeploy`, `rescue`, `unrescue`, `abort`, `recover`, `retire` → `nodes:provision` @ `node/{id}` · `power` → `nodes:power` @ `node/{id}` |
 | `profiles`, `images`, `workflows` (provision, v0.2) | `profiles.create` → `profiles:manage` @ `tenant/{t}` · `profiles.get`, `validate`, `render` → `profiles:read` @ `profile/{id}` · `profiles.list` → `profiles:read` @ `tenant/{t}` + items · `profiles.update`, `delete` → `profiles:manage` @ `profile/{id}` · `images.register` → `images:publish` @ `tenant/{t}` (public: @ `fleet/global`) · `images.get` → `images:read` @ `image/{id}` · `images.list` → `images:read` @ `tenant/{t}` + items · `images.promote` → `images:publish` @ `image/{id}` · `workflows.get`, `list` → `workflows:read` @ `node/{id}` · `workflows.abort`, `retry`, `pause`, `resume` → `workflows:manage` @ `node/{id}` |
 | `instances`, `flavors`, `providerAccounts` (vps, v0.3) | `instances.create` → `instances:create` @ `instance/{draftId}` · `instances.list` → `instances:read` @ `tenant/{t}` (+ owner filter or items) · `get` → `instances:read` · `start`, `stop`, `resize` → `instances:update` · `delete` → `instances:delete` (item methods @ `instance/{id}`) · `flavors.list` → `flavors:read` @ `pool/{id}` · `flavors.create`, `update`, `delete` → `flavors:manage` @ `pool/{id}` · `providerAccounts.create` → `providers:manage` @ `fleet/global` or `tenant/{t}` · `providerAccounts.list` → `providers:read` @ `tenant/{t}` + items · `get`, `offers` → `providers:read` · `update`, `delete`, `bootstrap` (platform-owned machines → bcd nodes) → `providers:manage` (item methods @ `provider-account/{id}`) |
+| `sandboxes`, `sandboxTemplates` (vps, v0.5; §3.7) | `sandboxes.create` → `sandboxes:create` @ `sandbox/{draftId}` (attributes `templateId, vcpu, memoryGiB, gpus, ttlSeconds, fromSnapshot, warm`) · `sandboxes.list` → `sandboxes:read` @ `tenant/{t}` (owner-scoped like instances) · `get` → `sandboxes:read` · `extend`, `snapshot` → `sandboxes:update` · `delete` → `sandboxes:delete` · `exec` → `sandboxes:exec` (item methods @ `sandbox/{id}`) · `sandboxTemplates.create` → `sandboxes:manage` @ `tenant/{t}` · `sandboxTemplates.list` → `sandboxes:read` @ `tenant/{t}` + items · `get` → `sandboxes:read` · `update`, `delete` → `sandboxes:manage` (item methods @ `sandbox-template/{id}`) |
 | `tunnels` (server, v0.3) | `open` → `instances:exec` @ `instance/{id}`, or `nodes:console` @ `node/{id}` |
 | `fleet` (server, v0.2) | `export`, `plan`, `apply` (`FleetConfig v1`, mirroring IAM `config.*` [EXT §5]) → `fleet:admin` @ `fleet/global` |
 
@@ -1828,8 +1854,14 @@ A phase closes only when its exit tests are green in CI. `bench/REFERENCE.md` de
 - *Exit:* all §15 v0.4 scenarios green on 3 consecutive nights.
 
 **v0.5: GPU depth & ecosystem.**
-- *Deliverables:* MIG/timeslice/MPS atoms; calendar reservations + BookingRepair; gang scheduling; spot; `dedicated-root` metal and `binding:'node'`; TPM attestor; optional workload identity; bcx + `driver-sdk`; `provider-proxmox`; console-kit + `apps/console`; walkthrough 4.
+- *Deliverables:* MIG/timeslice/MPS atoms; calendar reservations + BookingRepair; gang scheduling; spot; `dedicated-root` metal and `binding:'node'`; TPM attestor; optional workload identity; bcx + `driver-sdk`; `provider-proxmox`; console-kit + `apps/console`; walkthrough 4; **sandboxes** (§3.7: templates, TTL, warm pools, snapshots, exec over SSH certificates).
 - *Exit:*
+  - `tests/e2e/sandboxes.test.ts`:
+    - 500 sandboxes expire on emulated hosts with the same zero-leak diff as v0.3;
+    - a warm claim reaches `ready` without a placement;
+    - a snapshot round trip restores memory state;
+    - another tenant's snapshot is refused;
+    - instance methods on a sandbox's instance are refused;
   - the MIG torture test and the real-hardware nightly;
   - a `dedicated-root` lease and release yield a new identity generation;
   - a third-party TS driver runs on a node via bcx;
@@ -1866,7 +1898,7 @@ A phase closes only when its exit tests are green in CI. `bench/REFERENCE.md` de
 | D21 | Billing of whole-node leases (`binding: 'node'`, v0.5) | **`node.metal.hours` plus `gpu.<model>.hours` for the GPUs healthy at each window's start**; unhealthy atoms are booked only to exclude others and show as the `UnhealthyAtoms` condition. Spot + `binding: 'node'` is refused. One pricing function (`billableLines`) |
 | D22 | Default placer | **Inline** (synchronous admission); the batched `pool-lease` placer is opt-in and recommended for production (`capacityModule({ placer: 'pool-lease' })`), revisited at the v0.4 exit after a real Postgres run |
 | D23 | Next.js major for `apps/console` | **15.x** (better-iam's `@better-iam/next` peers `next ^15`); `apps/docs` follows better-iam's docs on 16.x |
-| D24 | Sandboxes: §1 lists "a sandbox product" as a v1 non-goal, but the product direction relayed from the user (2026-09-24, via the docs session) is "GPU, CPU and sandbox capacity" | **Open, user decision.** Recommended if yes: a `sandboxes` group layered on `vps()` (templates = flavor + image + user data; TTL with auto-delete; snapshots/restore via the runtime driver; warm pools = pre-created stopped instances per template; the microVM runtime (cloud-hypervisor/Kata via bcx, walkthrough 4) for untrusted code), reusing instances' admission, quota, IPAM, tunnels and IMDS, so no new placement or tenancy path. Until decided, sandboxes are documented as VPS instances |
+| D24 | Sandboxes: §1 lists "a sandbox product" as a v1 non-goal, but the product direction relayed from the user (2026-09-24, via the docs session) is "GPU, CPU and sandbox capacity" | **Decided (user, 2026-09-24, relayed by the docs session): yes.** The §1 non-goal is dropped; sandboxes are a `sandboxes` group on `vps()` (§3.7, §9.2, v0.5): templates, TTL auto-delete through the instance lifecycle, warm pools of paused instances claimed after admission, snapshots via the runtime driver, exec over tunnel + short-lived SSH certificates (no in-guest agent), microVM runtime by default; no new placement or tenancy path. Owner: [097b34] |
 
 Implementation notes (2026-09-24), recorded where the code settled a question the plan left open:
 - **Two-round joins.** An attestor may return an `AttestationDeferral` (`approval` for discovery → `joinRequests`, `challenge` for tpm credential activation). JoinService commits the attestor's rows, issues nothing, and answers with a signed, CSR-bound `JoinResponseBody.deferral` (agent/v1 field 9). Attestors consume tokens and single-use evidence only on the final round.
