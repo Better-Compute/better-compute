@@ -73,6 +73,10 @@ const nodeSigner = pki.createSigningKey({ privateKey: nodeKey, certificate: issu
 const byNode = pki.signCommand(create(CommandBodySchema, { id: 'cmd_go_2', nodeId, kind: 'diag.nvml' }), nodeSigner);
 const trust = pki.signTrustBundle({ version: 7n, commandSigningRoots: [authority.certificate] }, signing);
 
+// An exec ticket issued by TS for this node (tunnel ts_tunnel_1), with its JWKS.
+const tickets = pki.createExecTicketIssuer({ issuer: 'https://compute.test', clock });
+const ticket = tickets.issue({ nodeId, sid: 'ts_tunnel_1', op: 'console', subject: 'user_1' });
+
 const out = {
   now,
   nodeId,
@@ -89,6 +93,9 @@ const out = {
   signedDesiredState: hex(toBinary(DesiredStateSchema, desired)),
   nodeSignedCommand: hex(toBinary(CommandSchema, byNode)),
   signedTrustBundle: hex(toBinary(SignedTrustBundleSchema, trust)),
+  execTicket: ticket.token,
+  execTicketJti: ticket.jti,
+  execTicketJwks: tickets.jwksJson(),
 };
 const file = join(root, 'daemon/internal/pki/testdata/interop.json');
 mkdirSync(dirname(file), { recursive: true });

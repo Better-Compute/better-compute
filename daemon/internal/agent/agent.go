@@ -76,6 +76,10 @@ type Options struct {
 	Kinds []*Kind
 	// HTTPClient uploads logs.collect bundles (default: a client with a 5 minute timeout).
 	HTTPClient *http.Client
+	// DialTunnel opens Tunnel streams; nil refuses every OpenTunnel.
+	DialTunnel TunnelDialer
+	// TunnelProgram runs a tunnel's program (default DefaultTunnelProgram).
+	TunnelProgram TunnelProgramFactory
 }
 
 // Agent is the node agent.
@@ -113,6 +117,7 @@ type Agent struct {
 	revoked    bool
 	// execJWKS is the applied access section's exec-ticket JWKS (tunnels).
 	execJWKS      string
+	tunnels       int
 	upgradeNeeded bool
 
 	invMu       sync.Mutex

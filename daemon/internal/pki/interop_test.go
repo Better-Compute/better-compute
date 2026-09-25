@@ -35,6 +35,10 @@ type interop struct {
 	SignedDesiredState string `json:"signedDesiredState"`
 	NodeSignedCommand  string `json:"nodeSignedCommand"`
 	SignedTrustBundle  string `json:"signedTrustBundle"`
+
+	ExecTicket     string `json:"execTicket"`
+	ExecTicketJti  string `json:"execTicketJti"`
+	ExecTicketJwks string `json:"execTicketJwks"`
 }
 
 func loadInterop(t *testing.T) interop {
@@ -246,5 +250,45 @@ func TestKeyWrapRFC3394Vector(t *testing.T) {
 	back, err := keyUnwrap(kek, got)
 	if err != nil || hex.EncodeToString(back) != strings.ToLower(hex.EncodeToString(key)) {
 		t.Fatalf("unwrap = %x, %v", back, err)
+	}
+}
+
+func TestExecTicketFromTypeScript(t *testing.T) {
+	f := loadInterop(t)
+	seen := map[string]bool{}
+	remember := func(jti string, _ time.Time) (bool, error) {
+		if seen[jti] {
+			return false, nil
+		}
+		seen[jti] = true
+		return true, nil
+	}
+	o := VerifyExecTicketOptions{JWKS: f.ExecTicketJwks, NodeID: f.NodeID, Now: time.UnixMilli(f.Now).Add(10 * time.Second), Remember: remember}
+	claims, err := VerifyExecTicket(f.ExecTicket, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Sid != "ts_tunnel_1" || claims.Op != "console" || claims.Jti != f.ExecTicketJti || claims.Sub != "user_1" {
+		t.Fatalf("claims = %+v", claims)
+	}
+	// Single use, this node only, not after expiry, not under another JWKS, not altered.
+	if _, err := VerifyExecTicket(f.ExecTicket, o); err == nil {
+		t.Fatal("a replayed ticket was accepted")
+	}
+	fresh := func(string, time.Time) (bool, error) { return true, nil }
+	for name, opts := range map[string]VerifyExecTicketOptions{
+		"another node": {JWKS: f.ExecTicketJwks, NodeID: "node_other", Now: o.Now, Remember: fresh},
+		"expired":      {JWKS: f.ExecTicketJwks, NodeID: f.NodeID, Now: o.Now.Add(2 * time.Minute), Remember: fresh},
+		"no jwks":      {JWKS: "", NodeID: f.NodeID, Now: o.Now, Remember: fresh},
+		"other jwks":   {JWKS: `{"keys":[]}`, NodeID: f.NodeID, Now: o.Now, Remember: fresh},
+	} {
+		if _, err := VerifyExecTicket(f.ExecTicket, opts); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	parts := strings.Split(f.ExecTicket, ".")
+	parts[1] = parts[1][:len(parts[1])-2] + "AA"
+	if _, err := VerifyExecTicket(strings.Join(parts, "."), VerifyExecTicketOptions{JWKS: f.ExecTicketJwks, NodeID: f.NodeID, Now: o.Now, Remember: fresh}); err == nil {
+		t.Fatal("an altered ticket was accepted")
 	}
 }

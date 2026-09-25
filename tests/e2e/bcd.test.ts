@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { create } from '@bufbuild/protobuf';
 import { parseCertificate, spkiPin } from '@better-compute/pki';
+import { TunnelFrameSchema } from '@better-compute/protocol';
 import { pkiAllocationBindingCheck } from '@better-compute/server';
 import { createDevStack, type DevStack } from '@better-compute/testing';
 
@@ -104,6 +106,7 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
     if (!host) throw new Error('no route from WSL to the host');
     dev = await createDevStack({
       externalTls: { host: '0.0.0.0' },
+      tunnels: {},
       capacity: { attestedBindings: pkiAllocationBindingCheck() },
     });
     api = dev.compute.api;
@@ -213,6 +216,32 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       sh(`test -e '${dataDir}/fakehw-root/etc/cdi/bcd-${allocationId}.json' && echo held || echo gone`) === 'gone',
     );
   }, 120_000);
+
+  it('opens a console tunnel to a real shell on the node', async () => {
+    const opened = await api.tunnels.open(dev.root, { tenantId: dev.rootTenantId, nodeId, op: 'console' });
+    const request = { ticket: opened.ticket, nodeId, tunnelId: opened.tunnelId, gatewayId: dev.gateway.id };
+    const tunnel = await dev.tunnelRelay!.open(request);
+    let text = '';
+    let closed: { exitCode: number } | undefined;
+    const reading = (async () => {
+      for await (const frame of tunnel.frames as AsyncIterable<any>) {
+        if (frame.body.case === 'data') text += new TextDecoder().decode(frame.body.value);
+        if (frame.body.case === 'closed') {
+          closed = frame.body.value;
+          break;
+        }
+      }
+    })().catch(() => {});
+    const type = (line: string) =>
+      tunnel.send(create(TunnelFrameSchema, { tunnelId: opened.tunnelId, body: { case: 'data', value: new TextEncoder().encode(line) } }));
+    type('echo hi-$((6*7))\n');
+    await until('the shell to answer', async () => text.includes('hi-42'), 20_000);
+    type('exit 5\n');
+    await until('the shell to exit', async () => closed !== undefined, 20_000);
+    expect(closed!.exitCode).toBe(5);
+    tunnel.close();
+    await reading;
+  }, 90_000);
 
   it('reboots and reports SUCCEEDED{rebooted} from the next boot', async () => {
     const before = sh(`cat '${dataDir}/fakehw-boot-id'`);

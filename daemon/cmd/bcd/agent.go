@@ -219,6 +219,9 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		Dial: func(ctx context.Context) (agent.Stream, error) {
 			return client.Load().Session(ctx), nil
 		},
+		DialTunnel: func(ctx context.Context) (agent.TunnelStream, error) {
+			return client.Load().Tunnel(ctx), nil
+		},
 		Renewer: clientRenewer{client: &client},
 		OnRenewed: func(s *agent.State, k *ecdsa.PrivateKey) {
 			next, err := newClient(cfg, s, k)
