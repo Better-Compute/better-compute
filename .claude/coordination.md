@@ -88,6 +88,30 @@ owners: each area's new owner finishes (or discards) the orphan files in its are
 All earlier rules apply: private-index commits (the pre-commit hook enforces it), orchestrator-only installs/lockfile/
 umbrella files, the migration writer is the only one adding `core/00NN`, message the owner before touching their files.
 
+Round 4 exit-test gaps ([f85da7]'s audit of PLAN §16 against tests/**; only gaps buildable in TS without Go, real
+hardware or Postgres). Owners pick these up after their orphan WIP:
+- [31c64a]: `tests/sim/faults-1k.test.ts` (fleet-stub fault scenarios at 1k, I1/I2/I5/I8); sim invariants I3
+  (convergence within T), I4 (no false unreachable, gateway clock skew), I7 (nothing pending an offline solver could
+  place); sim scenarios "identity deleted before usage flush" and "compute inbox down, other IAM subscribers still
+  served, spill metrics rise"; resolver timeout → decision denied end to end; usage flush across a worker restart with
+  no duplicates + `iam.billing.spend` read-back; `delegation:revoke` closes tunnels/SSE/MCP within 5 s sim time;
+  v0.4 sim scenarios (XID storm trips the breaker, a bad daemon build halts its canary, 10-min site partitions, DB
+  outage release nothing); server/iam suites in both IAM modes (vitest project over `remoteIam`).
+- [016b7b]: `tests/e2e/spine.test.ts` (org user bound by policy, not root, reserves 4 GPUs; FakeDaemon CDI UUIDs ==
+  `reservations.get` exactly); `tests/e2e/vps.test.ts`; multi-tenant container offer rejected; "no tenant VM runs
+  bcd" (instance user-data carries no join token/bcd; join tokens refused for instance identities); churn diff
+  extended to overlays and taps.
+- [097b34]: the §15 torture shape on PGlite (8 placers, 2 lock-ignoring, MIG repartitions, constraint-free shadow
+  recheck) = also the v0.5 MIG torture test; placements bench checks I1 after the run + a 200/s gate flag.
+- [c321a3]: a ramdisk-role certificate refused for a `node` Hello; a gateway-forged AllocationBound rejected through
+  the gateway report hook into capacity (not only pki-intent).
+- [f02367]: deploy-time refusal of an unsigned/unverified image; site-agent failover mid-PXE (standby continues the
+  boot step within 30 s, sim clock).
+- [402c97]: support-bundle token scan for TS-produced bundles; a packed-smoke vitest wrapper under `tests/`.
+- [f85da7]: cross-tenant replay of another tenant's known idempotency key (no data, no draft) as an authz-matrix
+  step; per-row guardrail denial + delegated extend > 4 GPUs negative. DONE: MCP → IAM confirmation → same-key
+  retry as one flow (39b3eda).
+
 - [c321a3] round 4: orphan store.ts done (d430815); tunnel filters tenantId/anyAgent + reauthorizeTunnels for [31c64a]/
   [402c97] (6aeb5c4); docs generator MDX escaping + check-content MDX compile (bd57184). NOW: v0.4 shard rebalancing
   (§8.5): `packages/server/src/runtime/{workers,leases,reconcilers}.ts`, `tests/server-runtime-*`. No core/migration

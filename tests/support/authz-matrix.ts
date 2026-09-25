@@ -16,7 +16,8 @@ import { ACME, OTHER, ROOT, options, spyExecutor, type SpyExecutor } from './ser
 // The runner behind tests/generated/authz-matrix.test.ts (PLAN.md §9.2, §16 "the authz matrix is at
 // 100%"). For every registered v0.1 method, one test checks, against a real server:
 // 1. the declared action and resource are what IAM is asked (public methods ask nothing);
-// 2. a caller from another tenant is refused before any IAM decision or database access;
+// 2. a caller from another tenant is refused before any IAM decision or database access, and
+//    replaying acme's idempotency key in its own tenant never returns what the key made for acme;
 // 3. list-recipe methods fail closed when the per-item batch fails.
 
 /** One row of the generated matrix: a registered §9.2 method. */
@@ -177,7 +178,9 @@ export function authzMatrix(rows: readonly MatrixRow[]): void {
       }
 
       // 1. The declared action and resource are what IAM is asked, in the expected tenant.
-      await call({ token: sample.as === 'root' ? ADMIN : USER }, input).catch(() => undefined);
+      const answered = await call({ token: sample.as === 'root' ? ADMIN : USER }, input).catch(
+        () => undefined,
+      );
       const first = decisions()[0];
       expect(first, `${path} asked IAM nothing`).toBeDefined();
       expect(first!.method).toBe(row.kind === 'mutation' ? 'require' : 'authorize');
@@ -201,6 +204,22 @@ export function authzMatrix(rows: readonly MatrixRow[]): void {
       expect((refused as ComputeError).code).toBe('ACCESS_DENIED');
       expect(decisions()).toEqual([]);
       expect(spy.log).toEqual([]);
+
+      // 2b. A known-key replay from another tenant (§16 v0.1 security negatives): the same
+      //     idempotency key in the outsider's own tenant never returns what the key made for acme.
+      const madeId = (answered as { id?: unknown } | undefined)?.id;
+      if (row.kind === 'mutation' && typeof input.idempotencyKey === 'string' && madeId) {
+        const replayed = await call({ token: OUTSIDER }, { ...input, tenantId: OTHER }).catch(
+          (error: unknown) => error,
+        );
+        const shown =
+          replayed instanceof ComputeError
+            ? `${replayed.message} ${JSON.stringify(replayed.details ?? {})}`
+            : JSON.stringify(replayed ?? null);
+        expect(shown, `${path} replayed acme's result to another tenant`).not.toContain(
+          String(madeId),
+        );
+      }
 
       // 3. The list recipe fails closed: a failed batch fails the request.
       if (row.list) {
