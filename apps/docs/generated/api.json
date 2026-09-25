@@ -281,8 +281,8 @@
         "module": "quorum",
         "status": "registered",
         "input": null,
-        "summary": "",
-        "description": ""
+        "summary": "Creates a batch from its (subject, kind) leaves, each optionally bound to a payload's SHA-256, a reason and a lifetime; returns it `pending`, with the approvals its size needs.",
+        "description": "Creates a batch from its (subject, kind) leaves, each optionally bound to a payload's SHA-256, a reason and a lifetime; returns it `pending`, with the approvals its size needs.\n\n- The tree is fixed now: its root, size and every leaf's proof are stored, so what approvers review is what the daemons check. Subjects are computed as the executing agent does (see pki `batchSubject`): the node id, `bmc:<site agent>/<address>` for BMC kinds, `node:<target>` for `site.httpProxy`. A leaf without `payloadSha256` admits any payload of its kind, and `scope` flags it to approvers.\n- **Idempotency.** The batch id derives from the tenant, the caller and `idempotencyKey`. The same request again (the same leaves in any order, reason and lifetime) returns the stored batch without a new event; a different request under the key is `CONFLICT`.\n- The lifetime is `notAfterSeconds` (default 24 hours): after it the batch admits no commands and can no longer be approved. At most 50,000 leaves.\n\nPublishes `command.batch.created` with the scope size and the approvals required."
       },
       {
         "method": "get",
