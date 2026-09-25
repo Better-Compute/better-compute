@@ -6,7 +6,7 @@ import {
   type Reconciler,
   type SqlTx,
 } from '@better-compute/core';
-import { schedulableSql, wakePendingForNode, wakeStartedOnNode } from '@better-compute/capacity';
+import { mayBeSchedulableSql, wakePendingForNode, wakeStartedOnNode } from '@better-compute/capacity';
 import { reconcileDrain } from './controllers/drain.js';
 import { lifecycleIn } from './controllers/lifecycle.js';
 import {
@@ -98,13 +98,18 @@ export async function reconcileNode(
   return lifecycle;
 }
 
-/** The node's schedulability (capacity's definition) and connectivity, in the pass's transaction. */
+/**
+ * The node's schedulability and connectivity, in the pass's transaction. Schedulable here is
+ * capacity's `mayBeSchedulableSql`, meaning schedulable for some tenant (a `dedicated=<tenant>`
+ * taint alone still counts), so a node dedicated to one tenant fires the wake edge; other
+ * tenants' woken reservations are refused by their placer.
+ */
 async function nodeEdges(
   tx: SqlTx,
   nodeId: string,
 ): Promise<{ schedulable: boolean; connectivity: string } | undefined> {
   const { rows } = await tx.query<{ ok: boolean | null; connectivity: string }>(
-    `SELECT (p.id IS NOT NULL AND (${schedulableSql})) AS ok, n.connectivity
+    `SELECT (p.id IS NOT NULL AND (${mayBeSchedulableSql})) AS ok, n.connectivity
        FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id WHERE n.id = $1`,
     [nodeId],
   );

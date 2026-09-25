@@ -87,6 +87,26 @@ describe('pending reservations wake on a schedulable edge', () => {
     expect(await wakeGen(fixture)).toBeGreaterThan(first!);
   });
 
+  it('wakes on a node dedicated to one tenant, but not on one blocked by two dedications', async () => {
+    const fixture = await setup();
+    await fixture.database.query(
+      `UPDATE nodes SET no_schedule_reasons = ARRAY['taint:dedicated=acme', 'taint:dedicated=globex'] WHERE id = $1`,
+      [NODE],
+    );
+    await runNode(fixture);
+    await fixture.database.query('UPDATE nodes SET cordoned = false WHERE id = $1', [NODE]);
+    await runNode(fixture);
+    expect(await wakeGen(fixture)).toBeUndefined();
+
+    // One dedication left: schedulable for that tenant, so the edge fires.
+    await fixture.database.query(
+      `UPDATE nodes SET no_schedule_reasons = ARRAY['taint:dedicated=acme'] WHERE id = $1`,
+      [NODE],
+    );
+    await runNode(fixture);
+    expect(await wakeGen(fixture)).toBeGreaterThan(0);
+  });
+
   it('wakes the node’s started reservations when its connectivity or schedulability changes', async () => {
     const fixture = await setup();
     const ACTIVE = 'rsv_wake2';
