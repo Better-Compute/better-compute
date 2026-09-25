@@ -25,6 +25,17 @@
       - the bcd release pipeline: SBOMs, keyless cosign, SLSA3 provenance;
       - the API surface freeze check in `lint:repo`.
     - The §16 gateway gate is met on a workstation: 5k mTLS sessions, 0 drops, dispatch p99 26 ms.
+    - v1.0 destructive-batch quorum, server side: the `quorum` module (`commandBatches` get/list/scope/approve/cancel,
+      batch expiry) and `pki.approvers` in the trust bundle.
+    - Quorum security review #6:
+      - Leaves bind a payload digest, and BMC subjects are site-qualified.
+      - Approvals sign the trust domain.
+      - Tiers must be ordered.
+      - The trust bundle version follows its content; `pki.trustVersion` is now a floor.
+      - `pki.approvers.setSignatures` are published for the version they sign, and an unsigned quorum change is
+        logged.
+    - Envelope: `MethodAdmission.abandoned` cleans up after an allowed handler throws.
+    - `lint:repo` checks the generated docs reference before the API freeze.
   - Tests: the §16 v0.3 MCP confirmation acceptance and §12.6 example policies end to end, §5.6 walkthrough 2 (acme-cloud), the authz matrix known-key replay step; `pnpm check` runs the remote-IAM suites, `proto-gen --check` and `buf breaking`. Tools: `scripts/private-commit.mjs` (compare-and-swap commits), `scripts/head-check.mjs` (tests the committed tree in a worktree).
 
 - Round 4, capacity and sandboxes ([097b34]):

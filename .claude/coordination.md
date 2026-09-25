@@ -263,8 +263,18 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - deleting a kept snapshot: [097b34];
       - the sandbox-templates reference regen: [c321a3];
       - SDK exec/files helpers: deferred (PLAN §3.7).
-    - v1.0 destructive-batch quorum (§13), checked in the daemon. The leaf is (subject, kind): a node id,
-      bmc:<address> or node:<target> (081928a, [f02367]'s finding).
+    - v1.0 destructive-batch quorum (§13), checked in the daemon. Since review #6 (77cdf4f), the leaf is
+      (subject, kind, payload_sha256 or empty). The subject is a node id, bmc:<site agent>/<address>, or
+      node:<target>. Approvals sign the trust domain, and each leaf runs once (FakeDaemon d566cbe, bcd 8b0f50c).
+      - Tiers are ordered (L3, d566cbe).
+      - The trust bundle version follows its content (M5, 9c40cd5).
+      - The server publishes pki.approvers.setSignatures for their version (H1 server side, edbd63f).
+      - Gateway attach: 40be696. Enqueue refuses an unbatched destructive kind with approvers on and a 0
+        allowance ([c321a3], INVALID_STATE batch-required).
+      - Asked of [402c97]: a doctor finding for an unsigned quorum change, examples env
+        BETTER_COMPUTE_TRUST_VERSION/APPROVER_SET_SIGNATURES, and maybe `pki trust-version`.
+      - lint:repo runs the docs generate --check (267f8f4). MethodAdmission.abandoned (d14564e) is for
+        [097b34] to wire into the vps/capacity extends.
       - proto: 525c199, 4f11548;
       - pki: 36387c8, 2d2fe6f;
       - FakeDaemon: 4b48f08;
@@ -272,13 +282,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - server: trust bundle b816600, the quorum module + commandBatches API ce067e0 (see its git note),
         MCP read-only tools c86b30a.
       Open:
-      - CommandQueue createBatch/EnqueueCommand.batchId + gateway attach ([c321a3]);
+      - CommandQueue createBatch/EnqueueCommand.batchId + gateway attach: DONE ([c321a3], 6067791, 40be696);
       - CLI `batch approve`: DONE ([402c97]). CLI batch keygen/sign/list/show/approve/cancel (0210671, b3fd712),
         sign-approvers + pki approver-set + FakeDaemon (6a7f1b7), console Batches page (b24d043), examples'
         BETTER_COMPUTE_APPROVER_KEYS (d5ccb8b). Review #6 was run by [402c97] and relayed; decided in 77cdf4f
         ([f85da7]) and fixed in bcd 3ff8131, metal 9c14146, pki be24b51, and CLI/FakeDaemon (the commits above).
-        Still open: the server publishing approver_set_signatures, i.e. pki.approvers.setSignatures at the
-        signed version ([f85da7]).
+        The server publishing approver_set_signatures: DONE (edbd63f).
       - the metal/provision funnels + metal.bulk ([f02367]).
     - head-check v4 GREEN at 109ffde (the v3 reds were the shared-worktree artifact).
     - Open, no owner:
