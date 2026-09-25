@@ -2125,8 +2125,9 @@ export type InstanceStatus = Message<"bettercompute.agent.v1.InstanceStatus"> & 
 
   /**
    * (review 13 H2) The InstanceSpec.identity_rebind_ref the guest acknowledged (its nonce written
-   * back); empty until then. The control plane treats a restored instance as not ready until it
-   * matches the spec's.
+   * back); empty until then. Until it matches the spec's, the control plane refuses exec into a
+   * restored instance (it would still carry the snapshot's identity); readiness still means "runs",
+   * since guests restored from snapshots taken before the guest half existed never ack.
    *
    * @generated from field: string identity_rebound_ref = 6;
    */

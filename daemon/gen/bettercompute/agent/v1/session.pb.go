@@ -4200,8 +4200,9 @@ type InstanceStatus struct {
 	// Runtime driver id, e.g. "libvirt-kvm".
 	Runtime string `protobuf:"bytes,5,opt,name=runtime,proto3" json:"runtime,omitempty"`
 	// (review 13 H2) The InstanceSpec.identity_rebind_ref the guest acknowledged (its nonce written
-	// back); empty until then. The control plane treats a restored instance as not ready until it
-	// matches the spec's.
+	// back); empty until then. Until it matches the spec's, the control plane refuses exec into a
+	// restored instance (it would still carry the snapshot's identity); readiness still means "runs",
+	// since guests restored from snapshots taken before the guest half existed never ack.
 	IdentityReboundRef string `protobuf:"bytes,6,opt,name=identity_rebound_ref,json=identityReboundRef,proto3" json:"identity_rebound_ref,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
