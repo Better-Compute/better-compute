@@ -159,11 +159,13 @@ function lengthPrefixed(value: Uint8Array): Uint8Array {
 }
 
 /**
- * The bytes a batch scope leaf hashes (SHA-256 by the caller): `0x00 ‖ lp(batch_id) ‖ lp(node_id)
- * ‖ lp(kind)`. Leaves are ordered by their hash; see `BatchApproval` in session.proto.
+ * The bytes a batch scope leaf hashes (SHA-256 by the caller): `0x00 ‖ lp(batch_id) ‖ lp(subject)
+ * ‖ lp(kind)`. Leaves are ordered by their hash; see `BatchApproval` in session.proto. `subject` is
+ * what the command acts on: the node id for kinds a node runs on itself, `bmc:<address>` for
+ * site-relayed BMC kinds, `node:<target_node_id>` for `site.httpProxy`.
  */
-export function batchLeafInput(batchId: string, nodeId: string, kind: string): Uint8Array {
-  const parts = [batchId, nodeId, kind].map((part) => lengthPrefixed(utf8.encode(part)));
+export function batchLeafInput(batchId: string, subject: string, kind: string): Uint8Array {
+  const parts = [batchId, subject, kind].map((part) => lengthPrefixed(utf8.encode(part)));
   const out = new Uint8Array(1 + parts.reduce((sum, part) => sum + part.byteLength, 0));
   let offset = 1; // out[0] = 0x00, the leaf tag
   for (const part of parts) {
