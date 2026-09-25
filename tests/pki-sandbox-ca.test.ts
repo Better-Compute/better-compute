@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
 import {
+  bootstrapPins,
   createPkiBundle,
   exportPkiBundle,
   importPkiBundle,
@@ -29,6 +30,16 @@ describe('sandbox SSH CA', () => {
     expect(options.ssh).toBe(loaded.sshCa);
     expect(options.sandboxSsh).toBe(loaded.sandboxSshCa);
     expect(options.issuer.jwksJson()).toContain('"kty":"EC"');
+  });
+
+  it('gives machines their bootstrap pins from the bundle', () => {
+    const bundle = createPkiBundle({ trustDomain: 'compute.test' });
+    const pins = pkiPins(bundle);
+    expect(bootstrapPins(bundle)).toEqual({
+      servingCaPin: pins.servingCaSpkiPin,
+      joinSigningPin: pins.joinSigningKeyPin,
+    });
+    expect(bootstrapPins(bundle).servingCaPin).toMatch(/^sha256\/[A-Za-z0-9+/]{43}=$/);
   });
 
   it('keeps generated CA comments printable for any organization name', () => {

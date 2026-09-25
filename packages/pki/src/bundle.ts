@@ -192,6 +192,16 @@ export function execTicketIssuer(
 }
 
 /**
+ * What a new machine pins before it trusts anything the control plane says (`bcd join --serving-ca-pin
+ * --join-signing-pin`, rendered into its user data by provision): taken from the bundle, never from the unsigned
+ * `/.well-known/better-compute`, whose pins only the control plane's Web PKI certificate vouches for.
+ */
+export function bootstrapPins(bundle: PkiBundle): { servingCaPin: string; joinSigningPin: string } {
+  const pins = pkiPins(bundle);
+  return { servingCaPin: pins.servingCaSpkiPin, joinSigningPin: pins.joinSigningKeyPin };
+}
+
+/**
  * What the server's `tunnels` options take from a bundle: the exec ticket issuer (named for the public base URL),
  * the break-glass SSH CA and the sandbox SSH CA when the bundle has them. Pair the sandbox CA's public key with
  * `vps({ sandboxExec: { caPublicKey: bundle.sandboxSshCa.publicKey } })` so sandbox guests trust it.
