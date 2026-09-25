@@ -153,7 +153,7 @@ export async function createStack() {
   const { betterIam } = await import('better-iam/server');
   const { betterCompute } = await import('better-compute/server');
   const { createComputeIamBridge } = await import('better-compute/iam');
-  const { vps } = await import('better-compute/vps');
+  const { sandboxHolders, sandboxIamReactions, vps } = await import('better-compute/vps');
   const { fleetModule } = await import('better-compute/fleet');
 
   const { createWatchRegistry, eventsModule } = await import('better-compute/events');
@@ -215,7 +215,8 @@ export async function createStack() {
       }),
     );
   }
-  const bridge = createComputeIamBridge({ modules });
+  // IamReconcile re-reads sandbox owners and agents too (a create racing a withdrawal is caught by the sweep).
+  const bridge = createComputeIamBridge({ modules, identityHolders: [sandboxHolders] });
   const iam = betterIam({
     database: await iamDatabase(dataDir),
     secret,
@@ -263,7 +264,8 @@ export async function createStack() {
   // its tunnels on every gateway, and revocations drop the IAM caches (what `serve` does with host.iam).
   const { installIamHandlers } = await import('better-compute/cli');
   const tls = tunnels ? await gatewayTls() : undefined;
-  installIamHandlers(compute, { bridge, streams: [watches] }, tls ? { tls } : {});
+  // vps's reactions: a revoked agent's sandboxes are withdrawn, a departed owner's go to the successor.
+  installIamHandlers(compute, { bridge, streams: [watches], reactions: [sandboxIamReactions] }, tls ? { tls } : {});
   await compute.start();
 
   // What `server.mjs` needs to serve `GET /api/compute/tunnels/{ticket}` upgrades (Next route handlers cannot).
