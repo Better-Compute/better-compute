@@ -128,7 +128,10 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
     migrations: [...provisionMigrations],
     extensions: steps.list().filter((step) => !borrowed.has(step)),
     profiles: moduleProfiles.filter((profile) => !borrowedProfiles.has(profile)),
-    nodeSpec: provisionNodeSpec([...builtinConfigUnits, ...(options.configUnits ?? [])]),
+    nodeSpec: provisionNodeSpec(
+      [...builtinConfigUnits, ...(options.configUnits ?? [])],
+      options.imageVerifier ? { verifier: options.imageVerifier } : undefined,
+    ),
     commandKinds: [driverInvokeCommandKind],
     reconcilers: remediation
       ? [

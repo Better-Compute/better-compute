@@ -12,6 +12,7 @@ import {
   recordImageLocation,
   resolveImageRef,
   revokeImageSigner,
+  siteCacheImagesFor,
   touchImageLocation,
   verifyImageForUse,
   type ProvisionApi,
@@ -222,5 +223,57 @@ describe('site caches', () => {
     const picked = await evictionCandidates(db, 'site_a', 15);
     expect(picked.map((p) => p.imageId)).toEqual([ids[1], ids[2]]);
     expect((await evictionCandidates(db, 'site_a', 15, new Set([ids[1]!]))).map((p) => p.imageId)).toEqual([ids[2]]);
+  });
+});
+
+describe('site cache pre-warm (§11.5)', () => {
+  const AGENT = 'node_01j0000000000000000000site';
+  const invalidated: string[] = [];
+
+  beforeAll(async () => {
+    await db.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_w', 'ten_a', 'shared', 'eu', 1)`);
+    await db.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity, trust,
+         generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($1, 'site_w', 'ten_a', 'site', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 0, 0, 1)`,
+      [AGENT],
+    );
+    // Two pools: one names a signed, an unsigned, a revoked-signer and an unknown image; an archived one names another.
+    await db.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version, archived_at) VALUES
+         ('pool_w', 'ten_a', 'site_w', 'metal-host', 'exclusive', 'bcd',
+          '{"prewarmImages":["team-os@2026.09","private-only@1","late-os@1","missing@1","team-os@2026.09"]}', 1, NULL),
+         ('pool_old', 'ten_a', 'site_w', 'metal-host', 'exclusive', 'bcd', '{"prewarmImages":["ubuntu@2026.09"]}', 1, compute_now()),
+         ('pool_bad', 'ten_a', 'site_w', 'metal-host', 'exclusive', 'bcd', '{"prewarmImages":"not-a-list"}', 1, NULL)`,
+    );
+  });
+
+  it('gives site agents the verified images their site pools name, never unsigned or revoked ones', async () => {
+    await db.transaction((tx) => addImageSigner(tx, { tenantId: 'ten_a', id: 'soon-gone', algorithm: 'ed25519', publicKey: pem(strangerKey) }));
+    await call('register', { tenantId: 'ten_a', ...signed(image('late-os@1'), strangerKey, 'soon-gone') });
+    await db.transaction((tx) => revokeImageSigner(tx, 'ten_a', 'soon-gone'));
+    const team = await resolveImageRef(db, 'ten_a', 'team-os@2026.09');
+    expect(await siteCacheImagesFor(db, AGENT)).toEqual([{ url: team!.source, sha256: team!.sha256, format: 'raw' }]);
+    // The module's nodeSpec contributes it for site agents only.
+    const spec = await provisionModule().nodeSpec!({ sql: db } as never, { id: AGENT, role: 'site' } as never);
+    expect(spec.site).toEqual({ cacheImages: [{ url: team!.source, sha256: team!.sha256, format: 'raw' }] });
+    expect((await provisionModule().nodeSpec!({ sql: db } as never, { id: AGENT, role: 'host' } as never)).site).toBeUndefined();
+  });
+
+  it('invalidates the site agents whose pools pre-warm an image when it is registered or promoted', async () => {
+    const withDesired = {
+      ...context,
+      desired: {
+        async invalidate(_tx: unknown, nodeId: string) {
+          invalidated.push(nodeId);
+        },
+      },
+    } as unknown as MethodContext;
+    const register = api.images.register as unknown as { validate(i: unknown): unknown; handler(c: MethodContext, i: unknown): Promise<any> };
+    await register.handler(withDesired, register.validate({ tenantId: 'ten_a', ...signed(image('missing@1'), tenantKey, 'team') }));
+    expect(invalidated).toEqual([AGENT]);
+    await register.handler(withDesired, register.validate({ tenantId: 'ten_a', ...image('unrelated@1') }));
+    expect(invalidated).toEqual([AGENT]);
+    expect((await siteCacheImagesFor(db, AGENT)).map((entry) => entry.url)).toHaveLength(2);
   });
 });

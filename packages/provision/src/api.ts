@@ -30,6 +30,7 @@ import {
   type ImageKind,
   type RegisterImageInput,
 } from './images.js';
+import { invalidateSiteCaches } from './site-cache.js';
 import { createProfile, deleteProfile, profileSource, updateProfile } from './profiles.js';
 
 // The `profiles` and `workflows` groups of PLAN.md §9.2 (v0.2 rows). Workflows start from other
@@ -305,7 +306,12 @@ export function provisionApi(
           return out;
         },
         handler: (ctx, input) =>
-          ctx.sql.transaction((tx) => registerImage(tx, ctx.authz, input.tenantId, rootTenant(), input, options.imageVerifier)),
+          ctx.sql.transaction(async (tx) => {
+            const image = await registerImage(tx, ctx.authz, input.tenantId, rootTenant(), input, options.imageVerifier);
+            // Pools that pre-warm this ref now have an image to warm (§11.5).
+            await invalidateSiteCaches(tx, ctx.desired, image.ref);
+            return image;
+          }),
       }),
       get: defineMethod<ImageRefInput, CatalogImage>({
         action: 'compute:images:read',
@@ -340,7 +346,12 @@ export function provisionApi(
         kind: 'mutation',
         resource: imageResource,
         validate: imageRef,
-        handler: (ctx, input) => ctx.sql.transaction((tx) => promoteImage(tx, ctx.authz, input.tenantId, input.imageId)),
+        handler: (ctx, input) =>
+          ctx.sql.transaction(async (tx) => {
+            const image = await promoteImage(tx, ctx.authz, input.tenantId, input.imageId);
+            await invalidateSiteCaches(tx, ctx.desired, image.ref);
+            return image;
+          }),
       }),
     },
     profiles: {

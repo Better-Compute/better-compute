@@ -8,9 +8,12 @@ import {
   type ModuleContext,
   type NodeRecord,
   type NodeSpec,
+  type NodeSpecPart,
   type SqlTx,
 } from '@better-compute/core';
 import { evaluateWhen } from './expand.js';
+import type { ImageUseOptions } from './images.js';
+import { siteCacheImagesFor } from './site-cache.js';
 
 // Config units (PLAN.md §11.2, §11.3): a profile's `hostConfig` becomes the node's desired state
 // after join (NodeSpec `host.config`), so the daemon's converger keeps correcting drift. Each unit
@@ -149,7 +152,14 @@ export async function hostSpecFor(
   return host.config ? { host } : {};
 }
 
-/** `ComputeModule.nodeSpec` for provision. */
-export function provisionNodeSpec(units?: readonly ConfigUnitDefinition[]) {
-  return (context: ModuleContext, node: NodeRecord) => hostSpecFor(context.sql, node.id, units);
+/**
+ * `ComputeModule.nodeSpec` for provision: the `host` section, and for site agents `site.cacheImages`
+ * (the verified images their site's pools pre-warm, §11.5; SiteBoot contributes `site.boot`).
+ */
+export function provisionNodeSpec(units?: readonly ConfigUnitDefinition[], images?: ImageUseOptions) {
+  return async (context: ModuleContext, node: NodeRecord): Promise<NodeSpecPart> => {
+    const part: NodeSpecPart = await hostSpecFor(context.sql, node.id, units);
+    if (node.role === 'site') part.site = { cacheImages: await siteCacheImagesFor(context.sql, node.id, images) };
+    return part;
+  };
 }

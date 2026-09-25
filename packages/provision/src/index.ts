@@ -33,6 +33,7 @@ export { builtinSteps, waitAgentJoined, waitGenerationObserved } from './builtin
 export { builtinProfileTenant, createProfile, deleteProfile, profileSource, updateProfile } from './profiles.js';
 export { provisionMigrations } from './migrations.js';
 export * from './images.js';
+export * from './site-cache.js';
 export * from './command-step.js';
 export * from './remediation.js';
 export * from './renderers.js';
