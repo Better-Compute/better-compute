@@ -42,11 +42,7 @@ describe('quorum lag', () => {
       ],
     );
     const published = (await publishedTrust(sql))!;
-    // Before the columns exist: nothing to compare.
-    expect(await quorumLag(sql, published)).toBeUndefined();
-    await sql.query(
-      `ALTER TABLE node_sessions ADD COLUMN approver_set_epoch numeric(20, 0), ADD COLUMN approver_set_sha256 bytea`,
-    );
+    // (core/0026 adds the columns daemons report into.)
     await sql.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_q', 'root', 'shared', 'eu', 1)`);
     const node = async (id: string, epoch: number | null, sha: Uint8Array | null, connected = true) => {
       await sql.query(
