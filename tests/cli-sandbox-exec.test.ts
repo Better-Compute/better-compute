@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
-import { formatSshPublicKey } from '@better-compute/pki';
+import { createSshCertificateAuthority, formatSshPublicKey } from '@better-compute/pki';
 import { handleTunnel } from '@better-compute/server';
 import { createDevStack, fakeIam, type DevStack, type TunnelProgramFactory } from '@better-compute/testing';
 
@@ -103,6 +103,8 @@ describe('sandbox exec', () => {
       `${formatSshPublicKey(generateKeyPairSync('ed25519').publicKey, 'dev@laptop')}\n`,
     );
     const granted: unknown[] = [];
+    const knownHosts: string[] = [];
+    let certified: ReturnType<typeof createSshCertificateAuthority> | undefined;
     const spawned: { command: string; args: readonly string[]; cert: string; answer: string }[] = [];
     let status = 0;
     const io: CliIO = {
@@ -127,7 +129,24 @@ describe('sandbox exec', () => {
         });
         const { data } = (await opened.json()) as { data: { path: string } };
         return Response.json({
-          data: { sandboxId: body.sandboxId, instanceId: INSTANCE, path: data.path, certificate: CERT, account: 'sandbox' },
+          data: {
+            sandboxId: body.sandboxId,
+            instanceId: INSTANCE,
+            path: data.path,
+            account: 'sandbox',
+            ...(certified
+              ? {
+                  certificate: certified.issueUserCertificate({
+                    publicKey: body.publicKey,
+                    principals: [`sandbox@${INSTANCE}`],
+                    keyId: 'test',
+                    validBefore: Date.now() + 5 * 60_000,
+                  }).certificate,
+                  hostPrincipal: INSTANCE,
+                  hostCertified: true,
+                }
+              : { certificate: CERT }),
+          },
         });
       },
       // Plays ssh: one connection to the forwarded port, a version line out, the "guest's" answer back.
@@ -135,6 +154,8 @@ describe('sandbox exec', () => {
         const port = Number(args[args.indexOf('-p') + 1]);
         const certPath = unquote(String(args.find((arg) => arg.startsWith('CertificateFile='))).slice(16));
         const cert = await readFile(certPath, 'utf8');
+        const knownHostsPath = unquote(String(args.find((arg) => arg.startsWith('UserKnownHostsFile='))).slice(19));
+        knownHosts.push(await readFile(knownHostsPath, 'utf8').catch(() => ''));
         const socket = connect(port, '127.0.0.1');
         let answer = '';
         socket.on('data', (chunk) => (answer += chunk.toString()));
@@ -166,6 +187,20 @@ describe('sandbox exec', () => {
     expect(run!.args).toEqual(
       expect.arrayContaining(['-a', 'ForwardAgent=no', 'ProxyCommand=none', 'ClearAllForwardings=yes']),
     );
+
+    // Without a host certificate: an empty known_hosts, accepted on first use.
+    expect(knownHosts[0]).toBe('');
+    expect(run!.args).toContain('StrictHostKeyChecking=accept-new');
+
+    // A guest with a host certificate: pinned to the sandbox CA (the one that signed our certificate), strictly.
+    certified = createSshCertificateAuthority();
+    await createCli().run(['sandbox', 'exec', SANDBOX, '--', 'true'], io);
+    const pinnedRun = spawned[1]!;
+    expect(knownHosts[1]).toBe(`@cert-authority ${INSTANCE} ${certified.publicKey.split(' ').slice(0, 2).join(' ')}\n`);
+    expect(pinnedRun.args).toEqual(
+      expect.arrayContaining(['StrictHostKeyChecking=yes', `HostKeyAlias=${INSTANCE}`]),
+    );
+    certified = undefined;
 
     // ssh's own status becomes the command's.
     status = 3;

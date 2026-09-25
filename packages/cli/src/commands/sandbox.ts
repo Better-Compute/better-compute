@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connectTunnel, tunnelUrl } from '@better-compute/client';
 import { parseDuration } from '@better-compute/core';
+import { formatSshPublicKey, parseSshCertificate } from '@better-compute/pki';
 import { CliError, RemoteExitError, usageError } from '../errors.js';
 import { defineCommand } from '../framework.js';
 import { newIdempotencyKey, parseTime, tenantFlag } from './capacity.js';
@@ -15,6 +16,10 @@ interface SandboxExecGrant {
   path: string;
   certificate: string;
   account: string;
+  /** The name the guest's host certificate carries (the instance, or the original one after a memory restore). */
+  hostPrincipal?: string;
+  /** The guest presents a host key certified by the sandbox CA. */
+  hostCertified?: boolean;
 }
 
 // Sandboxes (PLAN.md §3.7, the vps module's `sandboxes` and `sandboxTemplates` groups): short-lived instances
@@ -308,10 +313,25 @@ export const sandboxCommands = [
         socket.on('close', () => opened.close());
         socket.on('error', () => opened.close());
       });
+      // The guest's host key: pinned to the sandbox CA when the guest has a host certificate (the CA that signed our
+      // user certificate, over the authenticated API call); else accepted on first use, and said so.
+      const pinned =
+        granted.hostCertified === true &&
+        typeof granted.hostPrincipal === 'string' &&
+        /^[A-Za-z0-9._-]{1,253}$/.test(granted.hostPrincipal);
+      const alias = pinned ? granted.hostPrincipal! : id;
+      if (!pinned)
+        context.note(
+          'This sandbox has no host certificate (created before host keys were certified): its host key is accepted on first use.',
+        );
       let status: number;
       try {
         const certificate = join(dir, 'key-cert.pub');
         await writeFile(certificate, `${granted.certificate.trim()}\n`, { mode: 0o600 });
+        if (pinned) {
+          const ca = formatSshPublicKey(parseSshCertificate(granted.certificate).signatureKey);
+          await writeFile(join(dir, 'known_hosts'), `@cert-authority ${alias} ${ca}\n`, { mode: 0o600 });
+        }
         await new Promise<void>((resolve, reject) => {
           server.once('error', reject);
           server.listen(0, '127.0.0.1', () => resolve());
@@ -346,13 +366,13 @@ export const sandboxCommands = [
           'ControlPath=none',
           '-o',
           'PermitLocalCommand=no',
-          // The tunnel authenticated the node and the instance; the guest's host key is new every boot.
+          // A per-connection known_hosts: the sandbox CA for a certified guest (nothing else is trusted), else empty.
           '-o',
           `UserKnownHostsFile=${quoted(join(dir, 'known_hosts'))}`,
           '-o',
-          'StrictHostKeyChecking=accept-new',
+          `StrictHostKeyChecking=${pinned ? 'yes' : 'accept-new'}`,
           '-o',
-          `HostKeyAlias=${id}`,
+          `HostKeyAlias=${alias}`,
           '-p',
           String(port),
           '-l',
