@@ -175,7 +175,7 @@ export const supportCommands = [
       const { compute, options, source } = await deployment();
       const check = await compute.selfCheck();
       const findings: Finding[] = [...check.findings];
-      findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env)));
+      findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, compute.context.sql)));
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));
       const now = new Date();

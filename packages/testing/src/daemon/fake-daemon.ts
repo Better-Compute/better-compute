@@ -786,6 +786,8 @@ export class FakeDaemon {
       lastEventSeq: BigInt(meta.eventSeq),
       inventoryHashes: Object.fromEntries(proc.collected.sections.map((s) => [s.name, s.sha256])),
       appliedSpecHash: this.journalValue.spec()?.hash ?? new Uint8Array(),
+      // The TrustBundle version held: a command-root switch waits until every node reports the new one (§13).
+      ...(this.intentVersion !== undefined ? { trustVersion: this.intentVersion } : {}),
     };
   }
 
@@ -1657,7 +1659,12 @@ export class FakeDaemon {
   private sendStatus(): void {
     const proc = this.proc;
     if (!proc?.lastStatus) return;
-    const value = this.pressure ? { ...proc.lastStatus, pressure: this.pressure } : proc.lastStatus;
+    const value = {
+      ...proc.lastStatus,
+      ...(this.pressure ? { pressure: this.pressure } : {}),
+      // A bundle applied from Welcome.trust after Hello is acknowledged here, without a reconnect.
+      ...(this.intentVersion !== undefined ? { trustVersion: this.intentVersion } : {}),
+    };
     this.send(proc.session, { case: 'status', value } as AgentFrame['msg']);
   }
 

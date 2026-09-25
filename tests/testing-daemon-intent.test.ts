@@ -155,6 +155,26 @@ describe('FakeDaemon signed intent', () => {
     expect(states(h, cmd.id)).toEqual(['REJECTED:BAD_SIGNATURE']);
   });
 
+  it('reports the trust version it holds in Hello, and a newer one from Welcome.trust in its status', async () => {
+    const next = createCommandSigningAuthority({ clock, commonName: 'root 2' });
+    const h = await daemon({
+      autoWelcome: () => ({
+        trust: signTrustBundle({ version: 2, commandSigningRoots: [authority.certificate, next.certificate] }, joinKey),
+      }),
+    });
+    expect(h.server.of('hello')[0]?.trustVersion).toBe(1n);
+    // After Welcome the control plane sends the desired state; the StatusReport that answers it carries the version.
+    const spec = storedDesiredState({ nodeId: 'node_a', generation: 1, spec: {} });
+    h.server.send({ case: 'desired', value: desiredStateFromStored(spec.body, signer.signDesiredState(spec.body)) });
+    await h.advance(20_000);
+    const statuses = h.server.of('status');
+    expect(statuses.at(-1)?.trustVersion).toBe(2n);
+    // The next session says so from its Hello on.
+    h.server.conn.close('failover');
+    await h.advance(30_000);
+    expect(h.server.of('hello')[0]?.trustVersion).toBe(2n);
+  });
+
   it('refuses unsigned specs that change access, and forged specs (signed NodeSpecs)', async () => {
     // The v0.2 policy: only access changes need a signature.
     const h = await daemon({

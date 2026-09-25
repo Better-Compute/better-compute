@@ -129,7 +129,7 @@ export const setupCommands = [
       const check = await compute.selfCheck();
       const findings = [...check.findings];
       if (isUnconfiguredIam(options.iam)) findings.push(noIamFinding);
-      findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env)));
+      findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, compute.context.sql)));
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));
       print({

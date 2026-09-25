@@ -17,6 +17,8 @@ import {
   verifyCommand,
 } from '@better-compute/pki';
 import { create } from '@bufbuild/protobuf';
+import type { SqlExecutor } from '@better-compute/core';
+import { pglite } from '@better-compute/postgres/pglite';
 import { CommandBodySchema } from '@better-compute/protocol';
 
 // Command-signing root rotation (PLAN.md §13: new key first, switch after every daemon has it, then drop the old),
@@ -155,7 +157,12 @@ describe('command-signing root rotation', () => {
     // doctor reminds that the rotation is half done.
     const reminders = await pkiFindings(join(cwd, '.better-compute', 'pki.json'), { BETTER_COMPUTE_SECRET: SECRET });
     expect(reminders.map((finding) => `${finding.severity} ${finding.check}`)).toEqual(['info pki.rotation']);
-    const switched = await run(['pki', 'rotate-command-root', '--stage', 'switch']);
+    // Nothing says which daemons hold version 2 here: the switch refuses unless forced.
+    await expect(createCli().run(['pki', 'rotate-command-root', '--stage', 'switch'], io)).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: /Cannot check which daemons hold trust version 2/,
+    });
+    const switched = await run(['pki', 'rotate-command-root', '--stage', 'switch', '--force']);
     expect(switched).toMatchObject({
       signingRoot: added.nextRoot,
       previousRoot: initial.commandSigningRootSha256,
@@ -167,5 +174,59 @@ describe('command-signing root rotation', () => {
       code: 'INVALID_STATE',
     });
     expect(await readFile(join(cwd, '.better-compute', 'pki.json'), 'utf8')).toContain('"sealed"');
+  });
+
+  it('switches only once every connected daemon reports the new trust version', { timeout: 60_000 }, async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'bc-rotate-gate-'));
+    const env = { BETTER_COMPUTE_SECRET: SECRET, BETTER_COMPUTE_DATABASE_URL: 'pglite:data' };
+    const notes: string[] = [];
+    const io: CliIO = { out() {}, err: (line) => notes.push(line), cwd, env };
+    await createCli().run(['pki', 'init', '--trust-domain', 'compute.test'], io);
+    await createCli().run(['pki', 'rotate-command-root', '--stage', 'add'], io);
+    await createCli().run(['migrate'], io);
+    const at = async (fn: (db: SqlExecutor) => Promise<unknown>) => {
+      const db = pglite({ dataDir: join(cwd, 'data') });
+      try {
+        await fn(db);
+      } finally {
+        await db.close();
+      }
+    };
+    await at(async (db) => {
+      await db.query(
+        `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_r', 'root', 'shared', 'eu', 1)`,
+      );
+      for (const [id, version, gone, seen] of [
+        ['node_new', 2, false, '0 seconds'],
+        ['node_old', 1, false, '5 seconds'],
+        ['node_away', 0, true, '0 seconds'],
+        // A session its gateway never closed (the gateway died): not live, not counted.
+        ['node_stale', 0, false, '10 minutes'],
+      ] as const) {
+        await db.query(
+          `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+             trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+           VALUES ($1, 'site_r', 'root', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
+          [id],
+        );
+        await db.query(
+          `INSERT INTO node_sessions (node_id, session_epoch, gateway_id, trust_version, disconnected_at, last_seen)
+           VALUES ($1, 1, 'gw', $2, CASE WHEN $3 THEN compute_now() END, compute_now() - $4::interval)`,
+          [id, version, gone, seen],
+        );
+      }
+    });
+    // node_old has not applied version 2; the disconnected node does not count (Welcome hands it the bundle).
+    await expect(createCli().run(['pki', 'rotate-command-root', '--stage', 'switch'], io)).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: /1 of 2 connected node\(s\) have not applied it \(node_old at 1\)/,
+    });
+    await at(async (db) => {
+      const findings = await pkiFindings(join(cwd, '.better-compute', 'pki.json'), env, Date.now(), db);
+      expect(findings.find((finding) => finding.check === 'pki.rotation')?.message).toMatch(/1 of 2 connected/);
+      await db.query(`UPDATE node_sessions SET trust_version = 2 WHERE node_id = 'node_old'`);
+    });
+    await createCli().run(['pki', 'rotate-command-root', '--stage', 'switch'], io);
+    expect(notes).toContain('All 2 connected node(s) hold trust version 2.');
   });
 });

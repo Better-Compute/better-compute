@@ -17,7 +17,7 @@ import {
   type CommandRootRotationStage,
   type PkiBundle,
 } from '@better-compute/pki';
-import type { Finding } from '@better-compute/core';
+import type { Finding, SqlExecutor } from '@better-compute/core';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
 
@@ -85,6 +85,50 @@ function renewalFor(name: string): string {
   return 'replace the root: a new PKI (pki init), and every node rejoins';
 }
 
+/** How far the connected daemons are from a trust bundle version (`node_sessions.trust_version`, §13). */
+export interface TrustLag {
+  /** Nodes with an open session. */
+  connected: number;
+  /** Of those, how many have not reported `version` yet. */
+  behind: number;
+  /** A few of them, for the message. */
+  sample: { nodeId: string; trustVersion: number }[];
+}
+
+/**
+ * Which connected daemons have not applied trust bundle `version` (Hello or StatusReport `trust_version`).
+ * Connected: a session on a gateway, not ended, seen within `liveWindowMs` (default 2 minutes, a few gateway
+ * lease TTLs). Other nodes do not count: Welcome hands them the current bundle before any command.
+ */
+export async function trustLag(
+  sql: Pick<SqlExecutor, 'query'>,
+  version: number,
+  liveWindowMs = 120_000,
+): Promise<TrustLag> {
+  const live = `gateway_id IS NOT NULL AND disconnected_at IS NULL
+                AND last_seen > compute_now() - make_interval(secs => $2::float8)`;
+  const { rows } = await sql.query<{ connected: string | number; behind: string | number }>(
+    `SELECT count(*) AS connected, count(*) FILTER (WHERE trust_version < $1) AS behind
+       FROM node_sessions WHERE ${live}`,
+    [version, liveWindowMs / 1000],
+  );
+  const { rows: sample } = await sql.query<{ node_id: string; trust_version: string | number }>(
+    `SELECT node_id, trust_version FROM node_sessions
+      WHERE ${live} AND trust_version < $1 ORDER BY node_id LIMIT 5`,
+    [version, liveWindowMs / 1000],
+  );
+  return {
+    connected: Number(rows[0]?.connected ?? 0),
+    behind: Number(rows[0]?.behind ?? 0),
+    sample: sample.map((row) => ({ nodeId: row.node_id, trustVersion: Number(row.trust_version) })),
+  };
+}
+
+const lagText = (lag: TrustLag) =>
+  `${lag.behind} of ${lag.connected} connected node(s) have not applied it (${lag.sample
+    .map((node) => `${node.nodeId} at ${node.trustVersion}`)
+    .join(', ')}${lag.behind > lag.sample.length ? ', …' : ''})`;
+
 /** CAs expiring within this window are reported by `doctor`. */
 export const caExpiryWarningMs = 30 * 86_400_000;
 
@@ -97,6 +141,8 @@ export async function pkiFindings(
   path: string,
   env: NodeJS.ProcessEnv,
   now: number = Date.now(),
+  /** The deployment's store: a rotation in progress also says how many daemons have the new version. */
+  sql?: Pick<SqlExecutor, 'query'>,
 ): Promise<Finding[]> {
   let text: string;
   try {
@@ -136,13 +182,17 @@ export async function pkiFindings(
       });
   }
   // A command-signing root rotation left half done (§13): a reminder, not a problem.
-  if (pins.commandSigningNextRootSha256)
+  if (pins.commandSigningNextRootSha256) {
+    const lag = sql && pins.trustVersion !== undefined ? await trustLag(sql, pins.trustVersion) : undefined;
     findings.push({
       check: 'pki.rotation',
       severity: 'info',
-      message: `A new command-signing root is published (trust version ${pins.trustVersion}) but not signing yet`,
+      message: `A new command-signing root is published (trust version ${pins.trustVersion}) but not signing yet${
+        lag ? (lag.behind ? `; ${lagText(lag)}` : `; all ${lag.connected} connected node(s) have it`) : ''
+      }`,
       fix: 'Once every daemon has this trust version: better-compute pki rotate-command-root --stage switch',
     });
+  }
   if (pins.commandSigningPreviousRootSha256)
     findings.push({
       check: 'pki.rotation',
@@ -275,16 +325,39 @@ export const pkiCommands = [
         description: 'add a new root, switch signing to it, or drop the old one',
       },
       pki: pkiFlag,
+      force: {
+        type: 'boolean',
+        description: 'switch without checking that every connected daemon has the new trust version',
+      },
     },
     examples: [
       'better-compute pki rotate-command-root --stage add',
       'better-compute pki rotate-command-root --stage switch',
       'better-compute pki rotate-command-root --stage drop',
     ],
-    async run({ flags, env, path, note }) {
+    async run({ flags, env, path, note, configPath, deployment }) {
       const target = path(flags.pki ?? defaultPkiPath);
       const bundle = await loadPkiBundle(target, env);
       const stage = flags.stage as CommandRootRotationStage;
+      // Switch only after 100% acknowledgment (§13): a daemon still on the old version would reject every
+      // command signed under the new root. Disconnected daemons get the bundle in Welcome before any command.
+      if (stage === 'switch' && bundle.commandSigningNext && !flags.force) {
+        const version = pkiPins(bundle).trustVersion ?? 1;
+        if (!(await configPath()) && !env.BETTER_COMPUTE_DATABASE_URL)
+          throw new CliError(
+            'INVALID_STATE',
+            `Cannot check which daemons hold trust version ${version}: no configuration or database`,
+            "Run it where the deployment's configuration is (or set BETTER_COMPUTE_DATABASE_URL), or pass --force once you have checked.",
+          );
+        const lag = await trustLag((await deployment()).compute.context.sql, version);
+        if (lag.behind > 0)
+          throw new CliError(
+            'INVALID_STATE',
+            `Not switching: trust version ${version} is published, but ${lagText(lag)}; they would reject commands signed under the new root`,
+            'Wait until they report it (better-compute doctor shows the count), or pass --force.',
+          );
+        note(`All ${lag.connected} connected node(s) hold trust version ${version}.`);
+      }
       let rotated: PkiBundle;
       try {
         rotated = rotateCommandSigningRoot(bundle, stage);
