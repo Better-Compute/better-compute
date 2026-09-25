@@ -5,7 +5,8 @@
 //
 //   node scripts/head-check.mjs [--ref <commit>] [--no-build] [vitest filters...]
 //
-// It keeps a git worktree at `<tmp>/bc-head-check`, moves it to the commit (default: HEAD of this
+// It keeps a git worktree at `<tmp>/bc-head-check` (or `-2`, `-3`… while another run holds the
+// first; see claimTree), moves it to the commit (default: HEAD of this
 // checkout), links every node_modules directory of this checkout into it (junctions, so nothing is
 // installed or copied), builds with `tsc -b` unless --no-build, and runs `vitest run` with the
 // given filters. The worktree is never cleaned with `git clean` (it would follow the junctions).
@@ -17,9 +18,12 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -52,7 +56,45 @@ const build = !argv.includes('--no-build');
 const filters = argv.filter((arg) => arg !== '--no-build');
 
 const commit = git(['rev-parse', ref]);
-const tree = join(tmpdir(), 'bc-head-check');
+
+/**
+ * Takes a worktree no other run is using. Several sessions run head-check at once; sharing one tree
+ * let a second run move it to another commit mid-run (the first then tested a mix). Each tree has a
+ * `<tree>.lock` holding the owner's pid, and a stale lock (dead pid) is taken over. Trees are kept
+ * between runs (`bc-head-check`, `bc-head-check-2`, …), so the node_modules mirrors are reused.
+ */
+function claimTree() {
+  for (let slot = 1; slot <= 8; slot++) {
+    const path = join(tmpdir(), slot === 1 ? 'bc-head-check' : `bc-head-check-${slot}`);
+    const lock = `${path}.lock`;
+    try {
+      writeFileSync(lock, String(process.pid), { flag: 'wx' });
+      return { path, lock };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const owner = Number(readFileSync(lock, 'utf8'));
+      let alive = false;
+      try {
+        process.kill(owner, 0);
+        alive = true;
+      } catch (probe) {
+        alive = probe.code === 'EPERM';
+      }
+      if (alive) continue;
+      writeFileSync(lock, String(process.pid));
+      return { path, lock };
+    }
+  }
+  throw new Error('head-check: 8 worktrees are busy; wait for a run to finish');
+}
+const { path: tree, lock } = claimTree();
+process.on('exit', () => {
+  try {
+    if (Number(readFileSync(lock, 'utf8')) === process.pid) rmSync(lock);
+  } catch {
+    // already gone
+  }
+});
 if (existsSync(join(tree, '.git'))) {
   git(['checkout', '--quiet', '--detach', '--force', commit], tree);
   git(['reset', '--quiet', '--hard', commit], tree);
