@@ -1,16 +1,21 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { PlacementRequest, SchedulerPlugin, SqlExecutor } from '@better-compute/core';
+import type { PlacementRequest, SchedulerPlugin, SqlExecutor, SqlTx } from '@better-compute/core';
 import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
+  before,
   capacityMigrations,
   inlinePlacer,
   loadNodeViews,
-  readImageCachedNodes,
+  partialScorer,
   planFromShortlist,
+  planOnIndex,
   planPlacement,
+  PoolIndex,
+  readImageCachedNodes,
   readPool,
   shortlistable,
+  shortlistPlan,
   shortlistSize,
 } from '@better-compute/capacity';
 
@@ -192,6 +197,69 @@ describe('the placement shortlist', () => {
       });
     });
 
+  it('keeps the pool index ranking exact while a batch records and forgets allocations', async () => {
+    await db.transaction(async (tx) => {
+      const pool = (await readPool(tx, 'pool_s'))!;
+      const index = await PoolIndex.load(tx, pool, T0);
+      const random = seeded(3);
+      const shapes = cases.filter(([, extra]) => extra.imageId === undefined);
+      // What the memoized ranking must equal: every fitting node scored and sorted from scratch.
+      const fresh = (req: PlacementRequest, weights: Record<string, number>) => {
+        const score = partialScorer(req, weights);
+        return index
+          .counts(req, [])
+          .map((row) => ({ nodeId: row.nodeId, partial: score(row) }))
+          .sort((a, b) => (before(a, b) ? -1 : before(b, a) ? 1 : 0));
+      };
+      const planned: { atoms: readonly string[]; during: { start: number; end: number } }[] = [];
+      let forgotten = 0;
+      for (let step = 0; step < 72; step++) {
+        const [name, extra, weights] = shapes[step % shapes.length]!;
+        const req = request(extra);
+        const excluded = req.excludeNodes ?? [];
+        // The index's shortlist ranks the same top N as the whole pool, from the index's own views.
+        const short = await shortlistPlan(
+          pool,
+          req,
+          excluded,
+          { plugins: [], weights, topN: 5 },
+          {
+            ranked: () => index.ranked(req, weights),
+            views: (nodeIds) => index.views(req.during, nodeIds),
+            linked: () => index.linked(),
+          },
+        );
+        if (short) {
+          const full = planPlacement(req, index.views(req.during), pool, { weights });
+          const top = (plan: { ranked: { nodeId: string; score: number }[] }) =>
+            plan.ranked.slice(0, 5).map((entry) => [entry.nodeId, entry.score]);
+          expect(top(short.plan), `${name} at step ${step}`).toEqual(top(full));
+        }
+        const plan = await planOnIndex(index, req, {
+          clock: { now: () => T0 },
+          random,
+          plugins: [],
+          weights,
+          topN: 5,
+        });
+        if (plan) planned.push({ atoms: plan.atoms, during: req.during });
+        // Now and then a commit "fails" and the batch forgets its tentative record.
+        if (step % 5 === 4 && planned.length > 0) {
+          index.forget(planned.splice(Math.floor(random() * planned.length), 1)[0]!);
+          forgotten++;
+        }
+        for (const [other, otherExtra, otherWeights] of shapes) {
+          const otherReq = request(otherExtra);
+          expect(index.ranked(otherReq, otherWeights), `${other} after step ${step}`).toEqual(
+            fresh(otherReq, otherWeights),
+          );
+        }
+      }
+      expect(planned.length).toBeGreaterThan(20);
+      expect(forgotten).toBeGreaterThan(10);
+    });
+  });
+
   it('answers without the whole pool when the topology term is constant', () => {
     // One GPU (or none): the SQL counts decide the ranking entirely.
     for (const name of [
@@ -222,25 +290,32 @@ describe('the placement shortlist', () => {
       weights: { 'image-cached': 10 },
       topN: 1,
     };
-    await db
-      .transaction(async (tx) => {
-        expect(await readImageCachedNodes(tx, 'pool_s', 'img_ubuntu')).toEqual(new Set());
-        await tx.query(
-          `CREATE TABLE IF NOT EXISTS node_image_cache (node_id text NOT NULL, image_id text NOT NULL,
-           state text NOT NULL, bytes bigint, last_used_at timestamptz, PRIMARY KEY (node_id, image_id))`,
-        );
-        await tx.query(
-          `INSERT INTO node_image_cache (node_id, image_id, state) VALUES
-           ('n_101', 'img_ubuntu', 'ready'), ('n_102', 'img_ubuntu', 'pulling'), ('n_103', 'img_other', 'ready')`,
-        );
-        expect(await readImageCachedNodes(tx, 'pool_s', 'img_ubuntu')).toEqual(new Set(['n_101']));
-        const outcome = await inlinePlacer().place(tx, request, context);
-        expect(outcome).toMatchObject({ status: 'placed', allocations: [{ nodeId: 'n_101' }] });
-        throw new Error('rollback');
-      })
-      .catch((error: Error) => {
-        if (error.message !== 'rollback') throw error;
-      });
+    const rollback = (body: (tx: SqlTx) => Promise<void>) =>
+      db
+        .transaction(async (tx) => {
+          await body(tx);
+          throw new Error('rollback');
+        })
+        .catch((error: Error) => {
+          if (error.message !== 'rollback') throw error;
+        });
+    // A schema without core/0013 (the table is dropped only inside this transaction).
+    await rollback(async (tx) => {
+      await tx.query(`DROP TABLE node_image_cache`);
+      expect(await readImageCachedNodes(tx, 'pool_s', 'img_ubuntu')).toEqual(new Set());
+    });
+    await rollback(async (tx) => {
+      expect(await readImageCachedNodes(tx, 'pool_s', 'img_ubuntu')).toEqual(new Set());
+      await tx.query(
+        `INSERT INTO node_image_cache (node_id, sha256, image_id, ref, state, size_bytes) VALUES
+         ('n_101', sha256('ubuntu'::bytea), 'img_ubuntu', 'ubuntu', 'ready', 1),
+         ('n_102', sha256('ubuntu'::bytea), 'img_ubuntu', 'ubuntu', 'pulling', 1),
+         ('n_103', sha256('other'::bytea), 'img_other', 'other', 'ready', 1)`,
+      );
+      expect(await readImageCachedNodes(tx, 'pool_s', 'img_ubuntu')).toEqual(new Set(['n_101']));
+      const outcome = await inlinePlacer().place(tx, request, context);
+      expect(outcome).toMatchObject({ status: 'placed', allocations: [{ nodeId: 'n_101' }] });
+    });
   });
 
   it('declines requests it cannot decide exactly, and nothing that fits is lost', async () => {

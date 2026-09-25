@@ -1,0 +1,73 @@
+{
+  "suite": "placements",
+  "time": "2026-09-25T01:34:27.989Z",
+  "database": "pglite",
+  "nodes": 10000,
+  "gpusPerPlacement": 1,
+  "host": {
+    "cpus": 64,
+    "memoryGiB": 255
+  },
+  "steps": [
+    {
+      "concurrency": 1,
+      "placements": 640,
+      "pending": 0,
+      "errors": 0,
+      "seconds": 95.14,
+      "placementsPerSecond": 6.7,
+      "latencyMs": {
+        "p50": 141.2,
+        "p90": 179.8,
+        "p99": 214.3,
+        "max": 253.8
+      },
+      "lockHeldMs": {
+        "p50": 2.5,
+        "p90": 3.9,
+        "p99": 5.9,
+        "max": 8.6
+      }
+    },
+    {
+      "concurrency": 0,
+      "placements": 640,
+      "pending": 0,
+      "errors": 0,
+      "seconds": 3.82,
+      "placementsPerSecond": 167.6,
+      "latencyMs": {
+        "p50": 208.2,
+        "p90": 1220.4,
+        "p99": 1220.4,
+        "max": 1220.4
+      },
+      "lockHeldMs": {
+        "p50": 208.2,
+        "p90": 1220.4,
+        "p99": 1220.4,
+        "max": 1220.4
+      }
+    },
+    {
+      "concurrency": -1,
+      "placements": 640,
+      "pending": 0,
+      "errors": 0,
+      "seconds": 1.38,
+      "placementsPerSecond": 464.4,
+      "latencyMs": {
+        "p50": 63.9,
+        "p90": 888.5,
+        "p99": 888.5,
+        "max": 888.5
+      },
+      "lockHeldMs": {
+        "p50": 63.9,
+        "p90": 888.5,
+        "p99": 888.5,
+        "max": 888.5
+      }
+    }
+  ]
+}

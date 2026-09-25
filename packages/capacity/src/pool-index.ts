@@ -8,7 +8,7 @@ import type {
   TimeRange,
 } from '@better-compute/core';
 import { isSchedulable } from './eligibility.js';
-import type { CandidateCounts } from './shortlist.js';
+import { before, partialScorer, type Candidate, type CandidateCounts } from './shortlist.js';
 import {
   readDeviceLinks,
   readDevices,
@@ -18,6 +18,25 @@ import {
   type NodeRow,
   type PoolRow,
 } from './store.js';
+
+function wantOf(request: PlacementRequest): Map<string, number> {
+  const want = new Map<string, number>();
+  for (const device of request.devices)
+    want.set(device.class, (want.get(device.class) ?? 0) + device.count);
+  return want;
+}
+
+/** The first position in a best-first list where `entry` belongs. */
+function lowerBound(sorted: readonly Candidate[], entry: Candidate): number {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (before(sorted[middle]!, entry)) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
 
 // The in-memory index of the v0.4 pool-lease placer (PLAN.md §10.3): one pool's nodes, devices,
 // scalars and booking intervals, loaded once per batch by the worker holding the pool. Placement views
@@ -82,7 +101,16 @@ export class PoolIndex {
       this.classCounts.set(nodeId, counts);
     }
     for (const deviceId of bookings.keys()) this.markBooked(deviceId);
+    this.schedulable = nodes.filter((node) => isSchedulable(node, pool));
+    this.schedulableIds = new Set(this.schedulable.map((node) => node.id));
+    this.nodeById = new Map(nodes.map((node) => [node.id, node]));
   }
+
+  private readonly nodeById: Map<string, NodeRow>;
+
+  /** The schedulable nodes, as loaded (node columns only change through a rebuild). */
+  private readonly schedulable: NodeRow[];
+  private readonly schedulableIds: Set<string>;
 
   private readonly deviceById = new Map<string, Device>();
   /** Bookable devices per node and class: all, and healthy. */
@@ -154,51 +182,134 @@ export class PoolIndex {
    * bookable counts over the requested classes.
    */
   counts(request: PlacementRequest, excluded: readonly string[]): CandidateCounts[] {
-    const want = new Map<string, number>();
-    for (const device of request.devices)
-      want.set(device.class, (want.get(device.class) ?? 0) + device.count);
+    const want = wantOf(request);
     const skip = new Set(excluded);
     const out: CandidateCounts[] = [];
-    nodes: for (const node of this.nodes) {
-      if (skip.has(node.id) || !isSchedulable(node, this.pool)) continue;
-      const scalars = this.resources.get(node.id) ?? {};
-      for (const [resource, need] of Object.entries(request.resources ?? {})) {
-        if (!(need > 0)) continue;
-        const scalar = scalars[resource];
-        if (!scalar || scalar.allocated + need > Math.floor(scalar.allocatable * scalar.ratio))
-          continue nodes;
-      }
-      if (want.size === 0) {
-        out.push({ nodeId: node.id, free: 0, total: 0 });
-        continue;
-      }
-      // Healthy bookable atoms per class, minus the booked ones this window makes busy.
-      const classes = this.classCounts.get(node.id);
-      const busy = new Map<string, number>();
-      for (const deviceId of this.bookedByNode.get(node.id) ?? []) {
-        const device = this.deviceById.get(deviceId)!;
-        if (device.bookable && device.healthy && want.has(device.class))
-          if (this.busy(deviceId, request.during))
-            busy.set(device.class, (busy.get(device.class) ?? 0) + 1);
-      }
-      let freeTotal = 0;
-      let total = 0;
-      for (const [deviceClass, count] of want) {
-        const counts = classes?.get(deviceClass);
-        const available = (counts?.healthy ?? 0) - (busy.get(deviceClass) ?? 0);
-        if (available < count) continue nodes;
-        freeTotal += available;
-        total += counts?.bookable ?? 0;
-      }
-      out.push({ nodeId: node.id, free: freeTotal, total });
+    for (const node of this.schedulable) {
+      if (skip.has(node.id)) continue;
+      const counts = this.countsFor(node.id, request, want);
+      if (counts) out.push(counts);
     }
     return out;
   }
 
+  /** One schedulable node's counts for a request, or `undefined` when it does not fit. */
+  private countsFor(
+    nodeId: string,
+    request: PlacementRequest,
+    want: ReadonlyMap<string, number>,
+  ): CandidateCounts | undefined {
+    const resources = request.resources;
+    if (resources) {
+      const scalars = this.resources.get(nodeId) ?? {};
+      for (const resource in resources) {
+        const need = resources[resource]!;
+        if (!(need > 0)) continue;
+        const scalar = scalars[resource];
+        if (!scalar || scalar.allocated + need > Math.floor(scalar.allocatable * scalar.ratio))
+          return undefined;
+      }
+    }
+    if (want.size === 0) return { nodeId, free: 0, total: 0 };
+    // Healthy bookable atoms per class, minus the booked ones this window makes busy.
+    const classes = this.classCounts.get(nodeId);
+    const booked = this.bookedByNode.get(nodeId);
+    let busy: Map<string, number> | undefined;
+    if (booked)
+      for (const deviceId of booked) {
+        const device = this.deviceById.get(deviceId)!;
+        if (device.bookable && device.healthy && want.has(device.class))
+          if (this.busy(deviceId, request.during))
+            (busy ??= new Map()).set(device.class, (busy.get(device.class) ?? 0) + 1);
+      }
+    let free = 0;
+    let total = 0;
+    for (const [deviceClass, count] of want) {
+      const counts = classes?.get(deviceClass);
+      const available = (counts?.healthy ?? 0) - (busy?.get(deviceClass) ?? 0);
+      if (available < count) return undefined;
+      free += available;
+      total += counts?.bookable ?? 0;
+    }
+    return { nodeId, free, total };
+  }
+
+  /**
+   * Every fitting schedulable node scored with `partialScorer` and sorted best first, memoized per
+   * request shape (window, classes, scalars, image, weights) and kept current as this worker records
+   * or forgets allocations (`refresh`), so a batch of like requests ranks 10k nodes once.
+   */
+  ranked(
+    request: PlacementRequest,
+    weights: Readonly<Record<string, number>> = {},
+    imageCached?: ReadonlySet<string>,
+  ): readonly Candidate[] {
+    const key = JSON.stringify([
+      request.during.start,
+      request.during.end,
+      request.devices.map((device) => [device.class, device.count]),
+      request.resources ?? {},
+      request.imageId ?? null,
+      weights,
+    ]);
+    let shape = this.shapes.get(key);
+    if (!shape) {
+      if (this.shapes.size >= 32) this.shapes.clear();
+      const score = partialScorer(request, weights, imageCached);
+      const want = wantOf(request);
+      const sorted: Candidate[] = [];
+      const partial = new Map<string, number>();
+      for (const node of this.schedulable) {
+        const counts = this.countsFor(node.id, request, want);
+        if (!counts) continue;
+        const value = score(counts);
+        sorted.push({ nodeId: node.id, partial: value });
+        partial.set(node.id, value);
+      }
+      sorted.sort((a, b) => (before(a, b) ? -1 : before(b, a) ? 1 : 0));
+      shape = { request, want, score, sorted, partial };
+      this.shapes.set(key, shape);
+    }
+    return shape.sorted;
+  }
+
+  private readonly shapes = new Map<
+    string,
+    {
+      request: PlacementRequest;
+      want: ReadonlyMap<string, number>;
+      score: (row: CandidateCounts) => number;
+      sorted: Candidate[];
+      partial: Map<string, number>;
+    }
+  >();
+
+  /** Re-scores one node in every memoized ranking after its bookings or scalars changed. */
+  private refresh(nodeId: string): void {
+    if (this.shapes.size === 0 || !this.schedulableIds.has(nodeId)) return;
+    for (const shape of this.shapes.values()) {
+      const old = shape.partial.get(nodeId);
+      if (old !== undefined) {
+        const at = lowerBound(shape.sorted, { nodeId, partial: old });
+        if (shape.sorted[at]?.nodeId === nodeId) shape.sorted.splice(at, 1);
+        shape.partial.delete(nodeId);
+      }
+      const counts = this.countsFor(nodeId, shape.request, shape.want);
+      if (!counts) continue;
+      const entry = { nodeId, partial: shape.score(counts) };
+      shape.sorted.splice(lowerBound(shape.sorted, entry), 0, entry);
+      shape.partial.set(nodeId, entry.partial);
+    }
+  }
+
   /** The placement view of the pool (or of `onlyNodes`) for one window, as `loadNodeViews` builds it. */
   views(during: TimeRange, onlyNodes?: readonly string[]): NodeView[] {
-    const only = onlyNodes ? new Set(onlyNodes) : undefined;
-    const nodes = only ? this.nodes.filter((node) => only.has(node.id)) : this.nodes;
+    const nodes = onlyNodes
+      ? onlyNodes.flatMap((id) => {
+          const node = this.nodeById.get(id);
+          return node ? [node] : [];
+        })
+      : this.nodes;
     return nodes.map((node) => {
       const all = this.devices.get(node.id) ?? [];
       const view: NodeView = {
@@ -227,6 +338,12 @@ export class PoolIndex {
       );
       if (at >= 0) intervals.splice(at, 1);
     }
+    const nodes = new Set<string>();
+    for (const atom of allocation.atoms) {
+      const device = this.deviceById.get(atom);
+      if (device) nodes.add(device.nodeId);
+    }
+    for (const nodeId of nodes) this.refresh(nodeId);
   }
 
   /** Records an allocation this worker committed: its atoms are busy in `during`, its scalars claimed. */
@@ -244,12 +361,14 @@ export class PoolIndex {
       this.markBooked(atom);
     }
     const scalars = this.resources.get(allocation.nodeId);
-    if (!scalars) return;
-    const next = { ...scalars };
-    for (const [resource, amount] of Object.entries(allocation.resources)) {
-      const current = next[resource];
-      if (current) next[resource] = { ...current, allocated: current.allocated + amount };
+    if (scalars) {
+      const next = { ...scalars };
+      for (const [resource, amount] of Object.entries(allocation.resources)) {
+        const current = next[resource];
+        if (current) next[resource] = { ...current, allocated: current.allocated + amount };
+      }
+      this.resources.set(allocation.nodeId, next);
     }
-    this.resources.set(allocation.nodeId, next);
+    this.refresh(allocation.nodeId);
   }
 }

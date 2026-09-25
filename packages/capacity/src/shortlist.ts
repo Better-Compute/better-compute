@@ -18,10 +18,46 @@ import { loadNodeViews, type PoolRow } from './store.js';
 /** Nodes loaded and planned per shortlist (at least 8 × topN). */
 export const shortlistSize = 48;
 
-interface Candidate {
+/** A node and the count-derived part of its built-in score. */
+export interface Candidate {
   nodeId: string;
   /** The score from binpack, fragmentation and spread (+ topology when it is constant). */
   partial: number;
+}
+
+/**
+ * The count-derived part of the built-in score for one request: binpack, fragmentation, spread,
+ * topology when it is constant (≤1 GPU) and the image-cached bonus, summed in `planPlacement`'s order
+ * so that ties compare exactly.
+ */
+export function partialScorer(
+  request: PlacementRequest,
+  weights: Readonly<Record<string, number>> = {},
+  imageCached?: ReadonlySet<string>,
+): (row: CandidateCounts) => number {
+  const merged = { ...defaultScorerWeights, ...weights };
+  const w = (id: string) => merged[id] ?? 0;
+  const needed = request.devices.reduce((sum, device) => sum + device.count, 0);
+  const topologyConstant = gpusOf(request) <= 1;
+  return (row) => {
+    const freeAfter = Math.max(0, row.free - needed);
+    const binpack = row.total > 0 ? 1 - freeAfter / row.total : 0;
+    const fragmentation = freeAfter === 0 ? 1 : (freeAfter & (freeAfter - 1)) === 0 ? 0.5 : 0;
+    let partial = 0;
+    partial += w('binpack') * binpack;
+    if (topologyConstant) partial += w('topology') * 1;
+    partial += w('fragmentation') * fragmentation;
+    partial += w('spread') * (1 - binpack);
+    if (request.imageId !== undefined)
+      partial += w('image-cached') * (imageCached?.has(row.nodeId) ? 1 : 0);
+    return partial;
+  };
+}
+
+function gpusOf(request: PlacementRequest): number {
+  return request.devices
+    .filter((device) => device.class.startsWith('gpu'))
+    .reduce((sum, device) => sum + device.count, 0);
 }
 
 /** Whether the shortlist can decide this request exactly (no selectors, no plugin scorers). */
@@ -150,13 +186,44 @@ export interface CandidateCounts {
 /** Where a shortlist's inputs come from: SQL (the inline placer) or a `PoolIndex` (batches). */
 export interface ShortlistSource {
   /** Every schedulable, not excluded node whose scalars and free atoms fit the request. */
-  counts(): Promise<CandidateCounts[]> | CandidateCounts[];
+  counts?(): Promise<CandidateCounts[]> | CandidateCounts[];
+  /**
+   * Instead of `counts`: every fitting schedulable node already scored with `partialScorer` and
+   * sorted best first (`before`), excluded nodes included (they are skipped here).
+   */
+  ranked?(): readonly Candidate[];
   /** Placement views of these nodes for the request's window. */
   views(nodeIds: readonly string[]): Promise<NodeView[]> | NodeView[];
   /** Nodes with at least one GPU link row. */
   linked(): Promise<Set<string>> | Set<string>;
   /** Nodes caching `request.imageId` (the `image-cached` score, a known per-node bonus). */
   imageCached?: ReadonlySet<string>;
+}
+
+/** Best first by partial score, ties by node id (the ranking's own tie-break). */
+export function before(a: Candidate, b: Candidate): boolean {
+  return a.partial > b.partial || (a.partial === b.partial && a.nodeId < b.nodeId);
+}
+
+/**
+ * The best `size` candidates, sorted, without sorting them all: a bounded insertion that rejects
+ * most candidates with one comparison against the current last (10k nodes: ~10k comparisons).
+ */
+function topCandidates<T extends Candidate>(candidates: readonly T[], size: number): T[] {
+  const top: T[] = [];
+  for (const candidate of candidates) {
+    if (top.length === size && !before(candidate, top[size - 1]!)) continue;
+    let low = 0;
+    let high = top.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (before(top[middle]!, candidate)) low = middle + 1;
+      else high = middle;
+    }
+    top.splice(low, 0, candidate);
+    if (top.length > size) top.pop();
+  }
+  return top;
 }
 
 /** The exact shortlist over any source; see `planFromShortlist`. */
@@ -168,34 +235,37 @@ export async function shortlistPlan(
   source: ShortlistSource,
 ): Promise<{ plan: PlacementPlan; views: NodeView[] } | undefined> {
   const weights = { ...defaultScorerWeights, ...context.weights };
-  const needed = request.devices.reduce((sum, device) => sum + device.count, 0);
-  const gpus = request.devices
-    .filter((device) => device.class.startsWith('gpu'))
-    .reduce((sum, device) => sum + device.count, 0);
-  const topologyConstant = gpus <= 1;
+  const topologyConstant = gpusOf(request) <= 1;
   const w = (id: string) => weights[id] ?? 0;
-  const rows = await source.counts();
-  if (rows.length === 0) return undefined;
-  const scored: Candidate[] = rows.map((row) => {
-    const freeAfter = Math.max(0, row.free - needed);
-    const binpack = row.total > 0 ? 1 - freeAfter / row.total : 0;
-    const fragmentation = freeAfter === 0 ? 1 : (freeAfter & (freeAfter - 1)) === 0 ? 0.5 : 0;
-    // Summed in `planPlacement`'s order (binpack, topology, fragmentation, spread, image-cached), so
-    // ties are exact.
-    let partial = 0;
-    partial += w('binpack') * binpack;
-    if (topologyConstant) partial += w('topology') * 1;
-    partial += w('fragmentation') * fragmentation;
-    partial += w('spread') * (1 - binpack);
-    if (request.imageId !== undefined)
-      partial += w('image-cached') * (source.imageCached?.has(row.nodeId) ? 1 : 0);
-    return { nodeId: row.nodeId, partial };
-  });
-  scored.sort(
-    (a, b) => b.partial - a.partial || (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0),
-  );
   const size = Math.max(shortlistSize, 8 * Math.max(1, context.topN ?? 5));
-  const shortlist = scored.slice(0, size);
+
+  // The shortlist, and the candidates outside it (sorted when the source ranks, else in any order).
+  let shortlist: Candidate[];
+  let outside: Iterable<Candidate>;
+  let sorted: boolean;
+  if (source.ranked) {
+    const ordered = source.ranked();
+    const skip = new Set(excluded);
+    shortlist = [];
+    let next = 0;
+    for (; next < ordered.length && shortlist.length < size; next++)
+      if (!skip.has(ordered[next]!.nodeId)) shortlist.push(ordered[next]!);
+    const from = next;
+    outside = (function* () {
+      for (let at = from; at < ordered.length; at++)
+        if (!skip.has(ordered[at]!.nodeId)) yield ordered[at]!;
+    })();
+    sorted = true;
+  } else {
+    const rows = await source.counts!();
+    const scoreOf = partialScorer(request, context.weights, source.imageCached);
+    const scored = rows.map((row) => ({ nodeId: row.nodeId, partial: scoreOf(row) }));
+    shortlist = topCandidates(scored, size);
+    const inShortlist = new Set(shortlist.map((candidate) => candidate.nodeId));
+    outside = scored.filter((candidate) => !inShortlist.has(candidate.nodeId));
+    sorted = false;
+  }
+  if (shortlist.length === 0) return undefined;
   const views = await source.views(shortlist.map((candidate) => candidate.nodeId));
   const plan = planPlacement({ ...request, excludeNodes: [...excluded] }, views, pool, {
     plugins: context.plugins,
@@ -203,10 +273,8 @@ export async function shortlistPlan(
     ...(source.imageCached ? { imageCached: source.imageCached } : {}),
   });
   if (plan.ranked.length === 0) return undefined;
-  if (scored.length <= size) return { plan, views };
   const window = Math.max(1, Math.floor(context.topN ?? 5));
   const last = plan.ranked[window - 1];
-  if (!last) return undefined;
   // A node outside scores at most its partial plus the best topology it could have. It displaces
   // `last` if it could beat it, or tie it with a lower id (ranking ties break on node id).
   // Whole GPUs on a node without a single link row are all unknown to each other: topology is
@@ -215,10 +283,20 @@ export async function shortlistPlan(
   const wholeGpus = request.devices.every(
     (device) => device.class === 'gpu' || !device.class.startsWith('gpu'),
   );
-  const linked = extra > 0 && wholeGpus ? await source.linked() : undefined;
   const epsilon = 1e-9;
-  for (const candidate of scored.slice(size)) {
-    if (candidate.partial + extra < last.score - epsilon) break; // sorted: the rest score lower
+  let linked: Set<string> | undefined;
+  let checked = false;
+  for (const candidate of outside) {
+    // Candidates exist outside: the plan must hold the full top N, and beat them all.
+    if (!last) return undefined;
+    if (candidate.partial + extra < last.score - epsilon) {
+      if (sorted) break; // the rest score lower still
+      continue;
+    }
+    if (!checked) {
+      linked = extra > 0 && wholeGpus ? await source.linked() : undefined;
+      checked = true;
+    }
     const best =
       candidate.partial + (linked && !linked.has(candidate.nodeId) ? w('topology') * 0.5 : extra);
     if (best < last.score - epsilon) continue;

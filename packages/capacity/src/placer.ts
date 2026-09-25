@@ -408,7 +408,7 @@ function indexPlanner(
   return async (without) => {
     const short = fast
       ? await shortlistPlan(pool, request, without, context, {
-          counts: () => index.counts(request, without),
+          ranked: () => index.ranked(request, context.weights),
           views: (nodeIds) => index.views(request.during, nodeIds),
           linked: () => index.linked(),
         })
