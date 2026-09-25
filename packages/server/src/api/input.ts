@@ -11,10 +11,18 @@ export interface Issue {
 
 type Path = readonly string[];
 
+/** A JSON Schema (2020-12) fragment describing what a validator accepts. */
+export type JsonSchema = { readonly [keyword: string]: unknown };
+
 /** One field's validator. `parse` returns the value, or `undefined` after pushing issues. */
 export interface Schema<T> {
   readonly optional: boolean;
   readonly fallback?: { value: T };
+  /**
+   * What `parse` accepts, as JSON Schema (for generated docs and tool schemas). Every `v.*` builder
+   * sets it; a hand-written Schema without it documents as "any value".
+   */
+  readonly jsonSchema?: JsonSchema;
   parse(value: unknown, path: Path, issues: Issue[]): T | undefined;
 }
 interface OptionalSchema<T> extends Schema<T> {
@@ -37,8 +45,26 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const reserved = new Set(['__proto__', 'constructor', 'prototype']);
 
-function schema<T>(parse: Schema<T>['parse']): Schema<T> {
-  return { optional: false, parse };
+function schema<T>(jsonSchema: JsonSchema, parse: Schema<T>['parse']): Schema<T> {
+  return { optional: false, jsonSchema, parse };
+}
+
+/** Drops keywords whose value is undefined (options not given). */
+const defined = (fields: Record<string, unknown>): JsonSchema =>
+  Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+
+/** JSON Schema has no regex flags: a flagged pattern is described without one. */
+const patternOf = (pattern: RegExp | undefined) => (pattern && !pattern.flags ? pattern.source : undefined);
+
+function objectSchema(shape: Shape): JsonSchema {
+  return {
+    type: 'object',
+    properties: Object.fromEntries(Object.entries(shape).map(([key, field]) => [key, field.jsonSchema ?? {}])),
+    required: Object.entries(shape)
+      .filter(([, field]) => !field.optional && !field.fallback)
+      .map(([key]) => key),
+    additionalProperties: false,
+  };
 }
 function fail(issues: Issue[], path: Path, message: string): undefined {
   issues.push({ message, path: [...path] });
@@ -54,7 +80,8 @@ export interface StringOptions {
 export const v = {
   string(options: StringOptions = {}): Schema<string> {
     const max = options.max ?? 256;
-    return schema((value, path, issues) => {
+    const json = defined({ type: 'string', minLength: options.min || undefined, maxLength: max, pattern: patternOf(options.pattern) });
+    return schema(json, (value, path, issues) => {
       if (typeof value !== 'string') return fail(issues, path, 'Expected a string');
       if (value.length < (options.min ?? 0))
         return fail(issues, path, `Must be at least ${options.min} characters`);
@@ -65,7 +92,7 @@ export const v = {
     });
   },
   int(options: { min?: number; max?: number } = {}): Schema<number> {
-    return schema((value, path, issues) => {
+    return schema(defined({ type: 'integer', minimum: options.min, maximum: options.max }), (value, path, issues) => {
       if (typeof value !== 'number' || !Number.isSafeInteger(value))
         return fail(issues, path, 'Expected an integer');
       if (options.min !== undefined && value < options.min)
@@ -76,19 +103,26 @@ export const v = {
     });
   },
   boolean(): Schema<boolean> {
-    return schema((value, path, issues) =>
+    return schema({ type: 'boolean' }, (value, path, issues) =>
       typeof value === 'boolean' ? value : fail(issues, path, 'Expected true or false'),
     );
   },
   option<const V extends readonly [string, ...string[]]>(values: V): Schema<V[number]> {
-    return schema((value, path, issues) =>
+    return schema({ type: 'string', enum: [...values] }, (value, path, issues) =>
       typeof value === 'string' && (values as readonly string[]).includes(value)
         ? (value as V[number])
         : fail(issues, path, `Expected one of ${values.join(', ')}`),
     );
   },
   list<T>(item: Schema<T>, options: { min?: number; max: number; unique?: boolean }): Schema<T[]> {
-    return schema((value, path, issues) => {
+    const json = defined({
+      type: 'array',
+      items: item.jsonSchema ?? {},
+      minItems: options.min || undefined,
+      maxItems: options.max,
+      uniqueItems: options.unique || undefined,
+    });
+    return schema(json, (value, path, issues) => {
       if (!Array.isArray(value)) return fail(issues, path, 'Expected a list');
       if (value.length < (options.min ?? 0))
         return fail(issues, path, `Must list at least ${options.min} items`);
@@ -109,7 +143,13 @@ export const v = {
   },
   /** A JSON object used as a map: keys match `key`, values match `value`. */
   record<T>(key: RegExp, value: Schema<T>, options: { max: number }): Schema<Record<string, T>> {
-    return schema((input, path, issues) => {
+    const json = defined({
+      type: 'object',
+      propertyNames: defined({ pattern: patternOf(key) }),
+      additionalProperties: value.jsonSchema ?? {},
+      maxProperties: options.max,
+    });
+    return schema(json, (input, path, issues) => {
       if (!isRecord(input)) return fail(issues, path, 'Expected an object');
       const keys = Object.keys(input);
       if (keys.length > options.max)
@@ -129,19 +169,19 @@ export const v = {
   },
   /** Any JSON object, validated later by whoever knows its shape (a command's payload). */
   anyObject(): Schema<Record<string, unknown>> {
-    return schema((value, path, issues) =>
+    return schema({ type: 'object' }, (value, path, issues) =>
       isRecord(value) ? value : fail(issues, path, 'Expected an object'),
     );
   },
   object<S extends Shape>(shape: S): Schema<Infer<S>> {
-    return schema((input, path, issues) => parseObject(shape, input, path, issues));
+    return schema(objectSchema(shape), (input, path, issues) => parseObject(shape, input, path, issues));
   },
   optional<T>(inner: Schema<T>): OptionalSchema<T> {
-    return { optional: true, parse: inner.parse };
+    return { optional: true, parse: inner.parse, ...(inner.jsonSchema ? { jsonSchema: inner.jsonSchema } : {}) };
   },
   /** Absent means `value`; the output always has the field. */
   withDefault<T>(inner: Schema<T>, value: T): Schema<T> {
-    return { optional: false, fallback: { value }, parse: inner.parse };
+    return { optional: false, fallback: { value }, parse: inner.parse, jsonSchema: { ...inner.jsonSchema, default: value } };
   },
 };
 
@@ -183,14 +223,20 @@ function invalid(issues: Issue[]): ComputeError {
   );
 }
 
-/** A strict object validator. */
-export function parser<S extends Shape>(shape: S): (input: unknown) => Infer<S> {
-  return (input) => {
-    const issues: Issue[] = [];
-    const output = parseObject(shape, input, [], issues);
-    if (output === undefined || issues.length) throw invalid(issues);
-    return output;
-  };
+/**
+ * A strict object validator. It carries `jsonSchema`, what it accepts as JSON Schema, which a
+ * method's `validate` exposes to the generated reference.
+ */
+export function parser<S extends Shape>(shape: S): ((input: unknown) => Infer<S>) & { readonly jsonSchema: JsonSchema } {
+  return Object.assign(
+    (input: unknown) => {
+      const issues: Issue[] = [];
+      const output = parseObject(shape, input, [], issues);
+      if (output === undefined || issues.length) throw invalid(issues);
+      return output;
+    },
+    { jsonSchema: objectSchema(shape) },
+  );
 }
 
 /** Validates one nested value against `schema`, reporting issues under `path`. */
