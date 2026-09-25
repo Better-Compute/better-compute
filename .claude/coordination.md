@@ -134,6 +134,13 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
     06fce0e (guest host keys pinned via @cert-authority; pki issueHostCertificate a9c3662).
   - Well-known gateway in hosts (8127271, 9620863); bootstrap pins into provisioned user data (afdaeb6, abb23dd).
   - CLI sandbox-template, ssh-cert --connect, dev-sim CAs; console templates UI (a969dfc, 9047c42, c34f60b, cbea043).
+  - Security review #5 fixes (392918b); pki readPkiPins certificate digests (51f4087).
+  - Host wiring:
+    - host.streams (/watch closes on revocation, also under dev --sim; c452c86);
+    - host.iamReactions / iam.reactions for modules' §12.8 reactions (fcedd74); vps sandboxIamReactions and
+      sandboxHolders are wired in the examples and the console (2eb20d4, 45b3263).
+  - daemon install-script --plugins/--privileged-plugins: the bcx plugin drop-in whenever the node has [plugins];
+    upgrades keep the operator's config sections (4225772).
 - [f85da7]: DONE: MCP → IAM confirmation → same-key retry as one flow (39b3eda); known-key replay matrix step
   (542885d); §12.6 policies incl. DelegatedSmall extend on real drafts (cc62e03, which also fixed stale-projection
   admissions); node-scoped gateway reports (6725423). Later: remote-IAM MCP remoteMcpIam (3afe9c1) + reservation
@@ -266,7 +273,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         MCP read-only tools c86b30a.
       Open:
       - CommandQueue createBatch/EnqueueCommand.batchId + gateway attach ([c321a3]);
-      - CLI `batch approve` ([402c97]);
+      - CLI `batch approve`: DONE ([402c97]). CLI batch keygen/sign/list/show/approve/cancel (0210671, b3fd712),
+        sign-approvers + pki approver-set + FakeDaemon (6a7f1b7), console Batches page (b24d043), examples'
+        BETTER_COMPUTE_APPROVER_KEYS (d5ccb8b). Review #6 was run by [402c97] and relayed; decided in 77cdf4f
+        ([f85da7]) and fixed in bcd 3ff8131, metal 9c14146, pki be24b51, and CLI/FakeDaemon (the commits above).
+        Still open: the server publishing approver_set_signatures, i.e. pki.approvers.setSignatures at the
+        signed version ([f85da7]).
       - the metal/provision funnels + metal.bulk ([f02367]).
     - head-check v4 GREEN at 109ffde (the v3 reds were the shared-worktree artifact).
     - Open, no owner:
