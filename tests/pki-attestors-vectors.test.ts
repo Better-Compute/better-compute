@@ -11,7 +11,7 @@ import {
   tpmQuoteNonce,
   x509popSigningInput,
 } from '@better-compute/pki';
-import { signingInput, site } from '@better-compute/protocol';
+import { secretRequestSigningInput, signingInput, site } from '@better-compute/protocol';
 
 // Golden vectors for the agent half of the v0.2+ attestors: `bcd` (Go, W1) must produce these
 // exact bytes. Inputs are fixed; if an output changes, the wire format changed.
@@ -80,6 +80,29 @@ describe('attestor golden vectors (Go parity)', () => {
     expect(hex(signingInput('discovery-assertion', [body]))).toBe(
       '626574746572636f6d707574652e76312f646973636f766572792d617373657274696f6e0000000088' +
         vectors.discoveryAssertionBody,
+    );
+  });
+
+  it('pins the SecretRequest signing input (broker, v0.2)', () => {
+    const input = secretRequestSigningInput({
+      requestId: 'req_1',
+      ref: 'secret://org_acme/bmc-1',
+      workflowId: 'wf_9',
+      stepId: 'power',
+      allocationId: '',
+      epk: new Uint8Array(65).fill(4),
+    });
+    // "bettercompute.v1/secret-request" 00 | len request_id | len ref | len workflow_id | len step_id
+    // | len(0) allocation_id | len(65) epk
+    expect(hex(input)).toBe(
+      '626574746572636f6d707574652e76312f7365637265742d7265717565737400' +
+        '000000057265715f31' +
+        '000000177365637265743a2f2f6f72675f61636d652f626d632d31' +
+        '0000000477665f39' +
+        '00000005706f776572' +
+        '00000000' +
+        '00000041' +
+        '04'.repeat(65),
     );
   });
 
