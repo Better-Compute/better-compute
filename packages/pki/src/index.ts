@@ -39,6 +39,7 @@ export * from './keys.js';
 export * from './pop.js';
 export * from './release.js';
 export * from './revocation.js';
+export * from './revocation-feed.js';
 export * from './signing.js';
 export * from './spiffe.js';
 export * from './ssh.js';
