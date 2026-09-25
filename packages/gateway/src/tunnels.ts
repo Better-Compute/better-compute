@@ -35,6 +35,11 @@ export interface TunnelInfo {
   tenantId?: string;
   instanceId?: string;
   /**
+   * The ticket's `sbx`: the sandbox a `sandboxes.exec` tunnel was decided on, so `reauthorize`
+   * re-decides `compute:sandboxes:exec` on that sandbox (without it the re-check cannot decide).
+   */
+  sandboxId?: string;
+  /**
    * The ticket's `ses` and `act`: the caller's IAM session and the action `tunnels.open` decided, so
    * `reauthorize` can check the session is still live and re-decide the same action (§7.6). A
    * re-authorizer should refuse a tunnel without a session id (fail closed).
@@ -58,6 +63,8 @@ export interface TunnelFilter {
   subject?: string;
   agentId?: string;
   delegationId?: string;
+  /** Tunnels into one sandbox (the ticket's `sbx`), e.g. when it is deleted. */
+  sandboxId?: string;
   /** The ticket's tenant. Alone it does not narrow: pair it with `anyAgent` or another key. */
   tenantId?: string;
   /** Only tunnels an agent opened (the ticket has `agt`), e.g. `agent:suspend-all` with `tenantId`. */
@@ -75,6 +82,7 @@ export function narrowsTunnels(filter: TunnelFilter): boolean {
     filter.subject !== undefined ||
     filter.agentId !== undefined ||
     filter.delegationId !== undefined ||
+    filter.sandboxId !== undefined ||
     (filter.tenantId !== undefined && filter.anyAgent === true)
   );
 }
@@ -86,6 +94,7 @@ function matches(info: TunnelInfo, filter: TunnelFilter): boolean {
     (filter.subject === undefined || info.subject === filter.subject) &&
     (filter.agentId === undefined || info.agentId === filter.agentId) &&
     (filter.delegationId === undefined || info.delegationId === filter.delegationId) &&
+    (filter.sandboxId === undefined || info.sandboxId === filter.sandboxId) &&
     (filter.tenantId === undefined || info.tenantId === filter.tenantId) &&
     (filter.anyAgent !== true || info.agentId !== undefined)
   );
@@ -270,6 +279,7 @@ export function createTunnelRegistry(deps: TunnelRegistryDeps) {
         openedAt: now,
         ...(claims.tnt ? { tenantId: claims.tnt } : {}),
         ...(claims.inst ? { instanceId: claims.inst } : {}),
+        ...(claims.sbx ? { sandboxId: claims.sbx } : {}),
         ...(claims.ses ? { sessionId: claims.ses } : {}),
         ...(claims.act ? { action: claims.act } : {}),
         ...(claims.agt ? { agentId: claims.agt } : {}),

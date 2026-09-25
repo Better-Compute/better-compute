@@ -48,13 +48,13 @@ const stringArray = (value: unknown): value is string[] =>
 const routes = ['/v1/health', '/v1/poke', '/v1/revoke', '/v1/drain', '/v1/tunnels/close', '/v1/tunnels/reauthorize'];
 
 const filterUsage =
-  '{ tunnelId? nodeId? subject? agentId? delegationId? tenantId? anyAgent?: true } (an id key, or tenantId with anyAgent)';
+  '{ tunnelId? nodeId? subject? agentId? delegationId? sandboxId? tenantId? anyAgent?: true } (an id key, or tenantId with anyAgent)';
 
 /** The tunnel filter in a control-API body, or undefined when it does not narrow (`narrowsTunnels`). */
 function tunnelFilter(input: Record<string, unknown> | undefined): TunnelFilter | undefined {
   if (!input) return undefined;
   const filter: TunnelFilter = {};
-  for (const key of ['tunnelId', 'nodeId', 'subject', 'agentId', 'delegationId', 'tenantId'] as const) {
+  for (const key of ['tunnelId', 'nodeId', 'subject', 'agentId', 'delegationId', 'sandboxId', 'tenantId'] as const) {
     const value = input[key];
     if (value === undefined) continue;
     if (typeof value !== 'string') return undefined;
@@ -73,7 +73,7 @@ function tunnelFilter(input: Record<string, unknown> | undefined): TunnelFilter 
  * - `POST /v1/poke {nodeIds?}` → 202 (dispatch + spec check now);
  * - `POST /v1/revoke {nodeId, reason, serials?: hex[]}` → `{ revoked }`;
  * - `POST /v1/drain {reason?}` → 202;
- * - `POST /v1/tunnels/close {tunnelId? nodeId? subject? agentId? delegationId? tenantId? anyAgent?, reason}`
+ * - `POST /v1/tunnels/close {tunnelId? nodeId? subject? agentId? delegationId? sandboxId? tenantId? anyAgent?, reason}`
  *   → `{ closed }` (e.g. `delegation:revoke` by `delegationId`, `agent:suspend-all` by `tenantId` +
  *   `anyAgent`); a tenant alone is refused;
  * - `POST /v1/tunnels/reauthorize {same filter}` → `{ checked }`: re-authorizes the matching tunnels

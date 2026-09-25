@@ -91,10 +91,12 @@ describe('tunnel core', () => {
     options: {
       answerAs?: string;
       ticketFor?: string;
-      op?: 'exec' | 'console';
+      op?: 'exec' | 'console' | 'ssh';
       agentId?: string;
       delegationId?: string;
       tenantId?: string;
+      /** A `sandboxes.exec` ticket: the instance and its sandbox. */
+      sandbox?: { instanceId: string; sandboxId: string };
     } = {},
   ) {
     const node = await f.addNode();
@@ -106,6 +108,7 @@ describe('tunnel core', () => {
       subject: 'user_1',
       ...(options.agentId ? { agentId: options.agentId, delegationId: options.delegationId } : {}),
       ...(options.tenantId ? { tenantId: options.tenantId } : {}),
+      ...(options.sandbox ? { ...options.sandbox, action: 'compute:sandboxes:exec', sessionId: 'ses_1' } : {}),
     });
     const caller = new Side();
     const opening = f.gateway.openTunnel({ ticket: ticket.token, nodeId: node, caller });
@@ -311,6 +314,25 @@ describe('tunnel core', () => {
     expect(own.caller.closed).toBeUndefined();
     expect(f.gateway.tunnels()).toHaveLength(2);
   });
+
+  it("keeps a sandbox exec tunnel's sandbox (the ticket's sbx) for re-authorization and filters", async () => {
+    const sandbox = { instanceId: `inst_${'0'.repeat(26)}`, sandboxId: `sbx_${'1'.repeat(26)}` };
+    const exec = await open({ tenantId: 'tnt_a', op: 'ssh', sandbox });
+    const other = await open({ tenantId: 'tnt_a' });
+    const info = (await exec.opening).info;
+    await other.opening;
+    expect(info).toMatchObject({ ...sandbox, action: 'compute:sandboxes:exec', sessionId: 'ses_1' });
+    const seen: (string | undefined)[] = [];
+    reauthorize = async (tunnel) => {
+      seen.push(tunnel.sandboxId);
+      return true;
+    };
+    expect(await f.gateway.reauthorizeTunnels({ sandboxId: sandbox.sandboxId })).toBe(1);
+    expect(seen).toEqual([sandbox.sandboxId]);
+    expect(f.gateway.closeTunnels({ sandboxId: sandbox.sandboxId }, 'sandbox-deleted')).toBe(1);
+    expect(exec.caller.closed).toBeDefined();
+    expect(other.caller.closed).toBeUndefined();
+  });
 });
 
 describe('narrowsTunnels', () => {
@@ -320,6 +342,7 @@ describe('narrowsTunnels', () => {
     expect(narrowsTunnels({ anyAgent: true })).toBe(false);
     expect(narrowsTunnels({ tenantId: 'tnt_a', anyAgent: true })).toBe(true);
     expect(narrowsTunnels({ delegationId: 'dlg_1' })).toBe(true);
+    expect(narrowsTunnels({ sandboxId: 'sbx_1' })).toBe(true);
     expect(narrowsTunnels({ tenantId: 'tnt_a', nodeId: 'node_1' })).toBe(true);
   });
 });
