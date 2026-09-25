@@ -11,6 +11,7 @@ import type { InventoryApi } from '@better-compute/inventory';
 import { serverGroups, type ServerApi, type ServerGroupsOptions } from './api/index.js';
 import { cachesFor } from './caches.js';
 import type { ResolvedOptions } from './options.js';
+import type { CommandBatchesApi } from './quorum/quorum.js';
 import type { SelfCheckReport } from './self-check.js';
 import { systemApi, type SystemApi } from './system.js';
 import type { ServerInfo } from './version.js';
@@ -40,7 +41,7 @@ export type CallableApi<G> = {
  * `joinTokens`, `nodes`, `commands`, `usage`, `events`) and the built-in modules' (`inventory`;
  * `pools`, `capacity`, `reservations`, `quotas`).
  */
-export type CoreGroups = SystemApi & ServerApi & InventoryApi & CapacityApi;
+export type CoreGroups = SystemApi & ServerApi & InventoryApi & CapacityApi & CommandBatchesApi;
 
 /** The core groups as `compute.api` exposes them. */
 export type CoreApi = CallableApi<CoreGroups>;

@@ -30,6 +30,8 @@ export const idPrefixes = {
   operation: 'op',
   request: 'req',
   inventorySnapshot: 'inv',
+  /** v1.0 destructive-batch quorum (§13). */
+  commandBatch: 'batch',
 } as const;
 export type IdKind = keyof typeof idPrefixes;
 export type IdPrefix = (typeof idPrefixes)[IdKind];

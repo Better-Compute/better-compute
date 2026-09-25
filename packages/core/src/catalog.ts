@@ -90,6 +90,8 @@ const definitions = {
       ...a('images', 'read', 'publish'),
       ...a('providers', 'read', 'manage'),
       ...a('sandboxes', 'read', 'manage'),
+      // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
+      ...a('batches', 'read', 'approve'),
     ],
   },
   project: {
@@ -265,7 +267,7 @@ export function computeResourceTypes(prefix = 'compute-'): Record<string, Comput
 // §9.2: groups, methods and their IAM actions (normative)
 // ---------------------------------------------------------------------------------------------
 
-export type ApiPhase = 'v0.1' | 'v0.2' | 'v0.3' | 'v0.4' | 'v0.5';
+export type ApiPhase = 'v0.1' | 'v0.2' | 'v0.3' | 'v0.4' | 'v0.5' | 'v1.0';
 export type ApiModule =
   | 'server'
   | 'capacity'
@@ -280,7 +282,9 @@ export type ApiModule =
   /** `@better-compute/rollout` (daemon releases and staged rollouts, v0.4); an injected module. */
   | 'rollout'
   /** The server's tunnels module (`tunnels.open`, `nodes.issueSshCert`), hosted when `tunnels` is configured. */
-  | 'tunnels';
+  | 'tunnels'
+  /** The server's quorum module (`commandBatches`, v1.0 §13), always hosted. */
+  | 'quorum';
 
 export interface ApiTarget {
   action: ComputeAction;
@@ -546,6 +550,13 @@ group('sandboxSnapshots', 'vps', [
   ['list', 'read', 'sandboxes:read', 'tenant', 'v0.5', list],
   ['get', 'read', 'sandboxes:read', 'sandbox-snapshot', 'v0.5'],
   ['delete', 'mutation', 'sandboxes:delete', 'sandbox-snapshot', 'v0.5'],
+]);
+group('commandBatches', 'quorum', [
+  ['get', 'read', 'batches:read', 'tenant', 'v1.0'],
+  ['list', 'read', 'batches:read', 'tenant', 'v1.0'],
+  ['scope', 'read', 'batches:read', 'tenant', 'v1.0'],
+  ['approve', 'mutation', 'batches:approve', 'tenant', 'v1.0'],
+  ['cancel', 'mutation', 'batches:approve', 'tenant', 'v1.0'],
 ]);
 group('tunnels', 'tunnels', [
   ['open', 'mutation', 'instances:exec', 'instance', 'v0.3', { or: [['nodes:console', 'node']] }],

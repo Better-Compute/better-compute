@@ -45,6 +45,7 @@ const planActions: Record<string, string[]> = {
     ...a('images', 'read', 'publish'),
     ...a('providers', 'read', 'manage'),
     ...a('sandboxes', 'read', 'manage'),
+    ...a('batches', 'read', 'approve'),
   ],
   'compute-project': [...a('projects', 'read', 'manage'), ...a('usage', 'read')],
   'compute-site': a('sites', 'read', 'manage'),

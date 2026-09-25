@@ -41,6 +41,7 @@ import {
   type TenantReaderSlot,
 } from './tenancy/tenancy.js';
 import { createAuditSinksModule } from './audit-sinks-module.js';
+import { createQuorumModule, quorumConfigOf } from './quorum/quorum.js';
 import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
 
@@ -119,6 +120,26 @@ export {
 } from './tenancy/tenancy.js';
 export type { SiteBootState } from './controllers/site-boot.js';
 export * from './tunnels/index.js';
+export {
+  commandBatchesApi,
+  createCommandBatch,
+  createQuorumModule,
+  defaultBatchTtlMs,
+  maxBatchLeaves,
+  quorumConfigOf,
+  quorumMigration,
+  quorumModuleName,
+  quorumWorkKind,
+  type ApproveBatchInput,
+  type BatchRef,
+  type BatchScopeInput,
+  type BatchState,
+  type CommandBatchView,
+  type CommandBatchesApi,
+  type CreateBatchInput,
+  type ListBatchesInput,
+  type QuorumConfig,
+} from './quorum/quorum.js';
 
 /** One `authz_projection` row as the resolver reads it (PLAN.md §12.4). */
 export interface AuthzProjectionRow extends AuthzRow {
@@ -252,6 +273,9 @@ export function betterCompute<
       reader: tenantReader,
       ...(resolved.rootTenantId ? { rootTenantId: resolved.rootTenantId } : {}),
     }),
+    // §13 v1.0 destructive-batch quorum: batches, `commandBatches`, the expiry sweep (always on, so
+    // the command queue can batch; approvals are needed only with `pki.approvers`).
+    createQuorumModule({ quorum: quorumConfigOf(resolved.trustBundle) }),
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
     ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
     ...(options.tunnels
