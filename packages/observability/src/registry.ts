@@ -85,6 +85,8 @@ export interface MetricsRegistry {
     labelNames?: readonly string[],
     buckets?: readonly number[],
   ): Histogram;
+  /** Runs `fn` at the start of every `expose()`: collectors that sample state (gauges) at scrape time. */
+  collect(fn: () => void): void;
   /** Prometheus text exposition format 0.0.4. */
   expose(): string;
   /** The number of live series, and how many were dropped at the cap. */
@@ -104,6 +106,7 @@ export function createMetrics(options: MetricsOptions = {}): MetricsRegistry {
   const families = new Map<string, Family>();
   let series = 0;
   let dropped = 0;
+  const collectors: (() => void)[] = [];
 
   const define = (
     kind: Kind,
@@ -231,7 +234,17 @@ export function createMetrics(options: MetricsOptions = {}): MetricsRegistry {
         },
       };
     },
+    collect(fn) {
+      collectors.push(fn);
+    },
     expose() {
+      // A collector that throws must not take the whole scrape down.
+      for (const collector of collectors)
+        try {
+          collector();
+        } catch {
+          // skipped this scrape
+        }
       const lines: string[] = [];
       for (const family of families.values()) {
         lines.push(

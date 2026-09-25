@@ -6,4 +6,5 @@
 export * from './registry.js';
 export * from './standard.js';
 export * from './spans.js';
+export * from './instrument.js';
 export * from './traceparent.js';

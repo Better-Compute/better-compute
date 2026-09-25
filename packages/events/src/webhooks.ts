@@ -11,7 +11,7 @@ import {
   type SqlExecutor,
   type SqlTx,
 } from '@better-compute/core';
-import { eventCatalog, isKnownEventPattern, type EventFamily } from './catalog.js';
+import { eventCatalog, eventFamilyOf, isKnownEventPattern, type EventFamily } from './catalog.js';
 import { matchesEventType, outboxTail, readOutbox, type OutboxCursor } from './outbox.js';
 import { assertPublicDestination, checkWebhookUrl, type UrlPolicy } from './safe-url.js';
 import { newWebhookSecret, openSecret, sealSecret } from './seal.js';
@@ -399,6 +399,10 @@ async function enqueueDeliveries(
 export interface FanOutOptions {
   /** The cursor row name. Default `webhooks`. */
   name?: string;
+  /** Called once per event read, with its catalog family (`(unknown)` outside it): metrics. */
+  countEvent?: (family: string, module: string) => void;
+  /** The catalog `countEvent` classifies by (default `eventCatalog`). */
+  catalog?: readonly EventFamily[];
   limit?: number;
   clock?: Clock;
 }
@@ -447,6 +451,15 @@ export async function fanOutWebhooks(
     }
     const after: OutboxCursor = { txid: rows[0]!.txid_text, seq: rows[0]!.seq_text };
     const page = await readOutbox(tx, { after, limit: options.limit ?? 500 });
+    if (options.countEvent)
+      for (const event of page.events) {
+        const family = eventFamilyOf(event.type, options.catalog);
+        try {
+          options.countEvent(family?.type ?? '(unknown)', family?.module ?? '(unknown)');
+        } catch {
+          // Metrics never break the fan-out.
+        }
+      }
     let queued = 0;
     if (page.events.length) {
       const tenants = [...new Set(page.events.map((event) => event.tenantId))];

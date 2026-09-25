@@ -90,6 +90,8 @@ export type EventsApi = {
 export interface EventsModuleOptions extends WebhookSecrets, UrlPolicy {
   fetch?: typeof globalThis.fetch;
   maxPerTenant?: number;
+  /** Counts every event the fan-out reads by catalog family (`eventCounter(registry)` from observability). */
+  countEvent?: (family: string, module: string) => void;
   /** Plugin event families subscriptions may name, or `false` to accept any pattern (see `eventCatalog`). */
   extraEvents?: readonly EventFamily[] | false;
   delivery?: Pick<
@@ -163,7 +165,19 @@ export function eventsModule(options: EventsModuleOptions): ComputeModule<'event
       shardBy: 'none',
       periodic: [{ key: 'webhooks', every: '1s' }],
       run: async (context) =>
-        (await fanOutWebhooks(context.sql, { clock: context.clock })).more ? 'SYNC_AGAIN' : 'DONE',
+        (
+          await fanOutWebhooks(context.sql, {
+            clock: context.clock,
+            ...(options.countEvent
+              ? {
+                  countEvent: options.countEvent,
+                  catalog: [...eventCatalog, ...(options.extraEvents || [])],
+                }
+              : {}),
+          })
+        ).more
+          ? 'SYNC_AGAIN'
+          : 'DONE',
     },
     {
       name: 'events.deliver',
