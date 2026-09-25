@@ -249,7 +249,7 @@ describe('tunnels end to end over HTTP/2', () => {
    * against its PINNED JWKS and its own jti set (P14) and only then opens a Tunnel stream on the same
    * connection, echoing data upper-cased.
    */
-  async function daemon(nodeId: string, pinnedJwks = () => issuer.jwksJson()) {
+  async function daemon(nodeId: string, pinnedJwks = () => issuer.jwksJson(), banner?: string) {
     const client = connect(`http://127.0.0.1:${served.port}`);
     client.on('error', () => {});
     clients.push(client);
@@ -278,6 +278,7 @@ describe('tunnels end to end over HTTP/2', () => {
           const tunnelDecoder = new MessageDecoder();
           const write = (out: TunnelFrame) => tunnel.write(frameMessage(toBinary(TunnelFrameSchema, out)));
           write(create(TunnelFrameSchema, { tunnelId, body: { case: 'opened', value: {} } }));
+          if (banner) write(data(banner, tunnelId)); // same tick as opened, like a shell's prompt
           tunnel.on('data', (tchunk: Buffer) => {
             for (const tbytes of tunnelDecoder.push(tchunk)) {
               const incoming = fromBinary(TunnelFrameSchema, tbytes);
@@ -328,6 +329,18 @@ describe('tunnels end to end over HTTP/2', () => {
     const last = (await frames.next()).value as TunnelFrame;
     expect(last.body).toMatchObject({ case: 'closed', value: { exitCode: 0 } });
     await expect.poll(() => f.gateway.tunnels().length).toBe(0);
+  });
+
+  it('delivers what the node sends right after opened (it can beat the 200 to the caller)', async () => {
+    const node = await f.addNode();
+    await daemon(node, undefined, 'welcome> ');
+    const ticket = issuer.issue({ nodeId: node, sid: 'tun_banner', op: 'console', subject: 'user_1' });
+    const tunnel = await control.openTunnel({ ticket: ticket.token, nodeId: node });
+    const frames = tunnel.frames[Symbol.asyncIterator]();
+    expect(text((await frames.next()).value)).toBe('welcome> ');
+    tunnel.send(data('ls'));
+    expect(text((await frames.next()).value)).toBe('LS');
+    tunnel.close();
   });
 
   it('refuses a replayed ticket at the gateway', async () => {

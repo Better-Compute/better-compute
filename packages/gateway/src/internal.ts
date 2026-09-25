@@ -171,17 +171,32 @@ function tunnelStream(stream: ServerHttp2Stream, headers: IncomingHttpHeaders, g
   stream.on('close', () => end('caller-closed'));
   stream.on('error', () => end('caller-error'));
 
+  // The node's first frames can be relayed before the 200 goes out (its `opened` resolves the open,
+  // and whatever came in the same chunk follows at once): hold them until the response is sent.
+  const unsent: TunnelFrame[] = [];
+  let closeAfterRespond = false;
+  const write = (frame: TunnelFrame) => stream.write(frameMessage(toBinary(TunnelFrameSchema, frame)));
+
   gateway
     .openTunnel({
       ticket,
       nodeId,
       caller: {
-        send: (frame) => (stream.destroyed || !stream.headersSent ? true : stream.write(frameMessage(toBinary(TunnelFrameSchema, frame)))),
+        send: (frame) => {
+          if (stream.destroyed) return true;
+          if (!stream.headersSent) {
+            unsent.push(frame);
+            return true;
+          }
+          return write(frame);
+        },
         onDrain: (callback) => void stream.once('drain', callback),
         pause: () => stream.pause(),
         resume: () => stream.resume(),
         close: () => {
-          if (!stream.destroyed && stream.headersSent) stream.end();
+          if (stream.destroyed) return;
+          if (stream.headersSent) stream.end();
+          else closeAfterRespond = true;
         },
       },
     })
@@ -196,6 +211,8 @@ function tunnelStream(stream: ServerHttp2Stream, headers: IncomingHttpHeaders, g
           'content-type': 'application/x-bc-tunnel+proto',
           'x-bc-tunnel': opened.info.id,
         });
+        for (const frame of unsent.splice(0)) write(frame);
+        if (closeAfterRespond) stream.end();
         handle = opened;
         for (const frame of early.splice(0)) opened.receive(frame);
         if (ended) opened.end('caller-closed');
