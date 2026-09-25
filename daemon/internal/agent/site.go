@@ -262,8 +262,11 @@ func siteAddress(ip net.IP) bool {
 //
 // A BMC is never a proxy target: the BMC hosts this agent has driven (bmc.* commands, remembered)
 // and any /redfish path are refused, so a BMC is reached only through the bmc.* kinds and their
-// quorum. (The address is not yet checked against target_node_id's own addresses: the site agent
-// does not learn them yet.)
+// quorum.
+//
+// The URL's host must also be one of target_node_id's own addresses (SiteSpec.proxy_targets): an IP
+// literal compares as an IP; a name matches a listed name, or else every address it resolves to must
+// be listed. Until every site's spec carries the targets, this is enforced once the list is non-empty.
 func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal.Result, error) {
 	req := &sitev1.HttpProxyRequest{}
 	if err := payloadOf(cmd, req); err != nil {
@@ -302,6 +305,12 @@ func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal
 		if a.knownBMC(ip.String()) {
 			return journal.Result{}, forbidden("%s resolves to %s, a BMC", u.Hostname(), ip)
 		}
+	}
+	a.mu.Lock()
+	targets := a.spec.GetSite().GetProxyTargets()
+	a.mu.Unlock()
+	if err := proxyTargetAllowed(targets, req.GetTargetNodeId(), u.Hostname(), ips); err != nil {
+		return journal.Result{}, forbidden("%v", err)
 	}
 	target := ips[0]
 	port := u.Port()
@@ -373,6 +382,50 @@ func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal
 		out.Headers = append(out.Headers, &sitev1.HttpProxyHeader{Name: n, Value: resp.Header.Get(n)})
 	}
 	return succeeded(out)
+}
+
+// proxyTargetAllowed checks host (resolved to ips) against target_node_id's addresses in the site
+// spec. An empty list checks nothing (the spec predates proxy_targets).
+func proxyTargetAllowed(targets []*sitev1.ProxyTarget, nodeID, host string, ips []net.IP) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	var listed *sitev1.ProxyTarget
+	for _, t := range targets {
+		if nodeID != "" && t.GetNodeId() == nodeID {
+			listed = t
+			break
+		}
+	}
+	if listed == nil {
+		return fmt.Errorf("%q is not a proxy target of this site", nodeID)
+	}
+	name := strings.TrimSuffix(strings.ToLower(host), ".")
+	listedIP := func(ip net.IP) bool {
+		for _, addr := range listed.GetAddresses() {
+			if l := net.ParseIP(addr); l != nil && l.Equal(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	if literal := net.ParseIP(host); literal != nil {
+		if listedIP(literal) {
+			return nil
+		}
+		return fmt.Errorf("%s is not an address of %s", host, nodeID)
+	}
+	for _, addr := range listed.GetAddresses() {
+		if net.ParseIP(addr) == nil && strings.TrimSuffix(strings.ToLower(addr), ".") == name {
+			return nil
+		}
+	}
+	for _, ip := range ips {
+		if !listedIP(ip) {
+			return fmt.Errorf("%s resolves to %s, not an address of %s", host, ip, nodeID)
+		}
+	}
+	return nil
 }
 
 // ---- boot entries ------------------------------------------------------------------------------

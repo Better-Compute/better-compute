@@ -133,6 +133,42 @@ func TestBMCOperationsKeepToTheirKind(t *testing.T) {
 	}
 }
 
+// site.httpProxy reaches only target_node_id's own addresses once the site spec lists them.
+func TestProxyTargetAllowed(t *testing.T) {
+	targets := []*sitev1.ProxyTarget{
+		{NodeId: "node_1", Addresses: []string{"10.0.0.5", "fd00::5", "node1.site.internal"}},
+		{NodeId: "node_2", Addresses: []string{"10.0.0.6"}},
+	}
+	ip := func(s ...string) []net.IP {
+		var out []net.IP
+		for _, a := range s {
+			out = append(out, net.ParseIP(a))
+		}
+		return out
+	}
+	for _, c := range []struct {
+		node, host string
+		ips        []net.IP
+		ok         bool
+	}{
+		{"node_1", "10.0.0.5", ip("10.0.0.5"), true},
+		{"node_1", "fd00:0:0::5", ip("fd00::5"), true},
+		{"node_1", "10.0.0.6", ip("10.0.0.6"), false}, // node_2's
+		{"node_1", "NODE1.site.internal.", ip("10.9.9.9"), true},
+		{"node_1", "other.site.internal", ip("10.0.0.5"), true},
+		{"node_1", "other.site.internal", ip("10.0.0.5", "10.0.0.6"), false},
+		{"node_3", "10.0.0.5", ip("10.0.0.5"), false},
+		{"", "10.0.0.5", ip("10.0.0.5"), false},
+	} {
+		if err := proxyTargetAllowed(targets, c.node, c.host, c.ips); (err == nil) != c.ok {
+			t.Errorf("%s %s %v: %v", c.node, c.host, c.ips, err)
+		}
+	}
+	if err := proxyTargetAllowed(nil, "node_9", "10.1.1.1", ip("10.1.1.1")); err != nil {
+		t.Fatalf("an empty list: %v", err)
+	}
+}
+
 func TestHTTPProxyRefusesTargetsOutsideTheSite(t *testing.T) {
 	h := siteHarness(t)
 	s, _ := h.open()
