@@ -1,0 +1,101 @@
+{
+  "suite": "realtime-spine",
+  "commit": "dc965a4",
+  "date": "2026-09-25T00:36:49.855Z",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores     ",
+    "memoryGiB": 255
+  },
+  "node": "v25.6.0",
+  "database": "pglite",
+  "config": {
+    "nodes": 1000,
+    "reservations": 200,
+    "rate": 5,
+    "burst": 100,
+    "joinConcurrency": 32,
+    "placeConcurrency": 8
+  },
+  "join": {
+    "elapsedMs": 62550,
+    "rpc": {
+      "count": 1000,
+      "p50": 1844,
+      "p90": 2316,
+      "p99": 2774,
+      "max": 2912
+    },
+    "connected": {
+      "count": 1000,
+      "p50": 32995,
+      "p90": 55531,
+      "p99": 57915,
+      "max": 57927
+    },
+    "adopted": {
+      "count": 1000,
+      "p50": 32995,
+      "p90": 55531,
+      "p99": 57915,
+      "max": 57927
+    },
+    "missing": 0,
+    "missingSample": []
+  },
+  "place": {
+    "elapsedMs": 39911,
+    "create": {
+      "count": 200,
+      "p50": 36,
+      "p90": 42,
+      "p99": 53,
+      "max": 54
+    },
+    "active": {
+      "count": 200,
+      "p50": 72,
+      "p90": 92,
+      "p99": 101,
+      "max": 105
+    },
+    "missing": 0,
+    "missingSample": []
+  },
+  "burst": {
+    "elapsedMs": 5962,
+    "create": {
+      "count": 100,
+      "p50": 362,
+      "p90": 383,
+      "p99": 389,
+      "max": 391
+    },
+    "active": {
+      "count": 100,
+      "p50": 3255,
+      "p90": 4306,
+      "p99": 4647,
+      "max": 4680
+    },
+    "missing": 0
+  },
+  "leases": {
+    "renewals": 2343,
+    "gapMs": {
+      "count": 2343,
+      "p50": 4981,
+      "p90": 6027,
+      "p99": 6027,
+      "max": 10276
+    },
+    "minHeadroomMs": 4676,
+    "lapses": 0,
+    "takeovers": 0
+  },
+  "gate": {
+    "placeToActiveP99Ms": 2000,
+    "met": true
+  }
+}
