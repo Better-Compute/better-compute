@@ -3,7 +3,7 @@
 // Postgres snapshot (bookings) plus daemon reports (bindings).
 
 /** Invariant ids of PLAN.md §15 that this module checks. */
-export type InvariantId = 'I1' | 'I2' | 'I3' | 'I4' | 'I5' | 'I8';
+export type InvariantId = 'I1' | 'I2' | 'I3' | 'I4' | 'I5' | 'I7' | 'I8';
 
 export interface InvariantViolation {
   invariant: InvariantId;
@@ -410,6 +410,24 @@ export function checkI4(input: {
       });
   }
   return violations;
+}
+
+// ---------------------------------------------------------------------------------------------
+// I7: nothing pending that an offline solver can place.
+
+/**
+ * I7: after a quiet period, no pending reservation would fit if planned alone right now. `placeable` is the
+ * offline solver's answer (`placeablePending(tx, { now })` from `@better-compute/capacity`, structurally typed so
+ * this package needs no capacity dependency).
+ */
+export function checkI7(
+  placeable: readonly { reservationId: string; poolId: string; nodeIds: readonly string[] }[],
+): InvariantViolation[] {
+  return placeable.map((entry) => ({
+    invariant: 'I7' as const,
+    subject: entry.reservationId,
+    message: `${entry.reservationId} is still pending in pool ${entry.poolId} but fits now on ${entry.nodeIds.join(', ')}`,
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------

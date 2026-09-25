@@ -4,7 +4,13 @@ import { cpus, totalmem } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { auditModule, checkpointAudit, verifyAuditCheckpoints } from '@better-compute/audit';
 import { createAuditSigningKey } from '@better-compute/pki';
-import { runNightly, type NightlyChaos, type NightlyReport } from '@better-compute/testing';
+import { placeablePending } from '@better-compute/capacity';
+import {
+  checkI7,
+  runNightly,
+  type NightlyChaos,
+  type NightlyReport,
+} from '@better-compute/testing';
 
 // The nightly simulation matrix (PLAN.md §15, v0.4 exit: "all §15 scenarios green on 3 consecutive nights"). Every
 // seed × chaos level runs the full scenario mix on the real control plane and gateways under the fleet simulator
@@ -65,6 +71,13 @@ describe('sim:nightly', () => {
           minutes,
           chaos,
           modules: [auditModule({ signer, every: '10m' })],
+          // I7 after the quiet period: nothing pending that capacity's offline solver would place now.
+          invariants: async (rig) =>
+            checkI7(
+              await rig.database.transaction((tx) =>
+                placeablePending(tx, { now: rig.sim.scheduler.now() }),
+              ),
+            ),
           inspect: async (rig) => {
             while ((await checkpointAudit(rig.database, { signer })).more);
             const tenantIds = await rig.database.query<{ tenant_id: string }>(

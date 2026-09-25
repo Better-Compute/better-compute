@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { assertInvariants, runNightly } from '@better-compute/testing';
+import { placeablePending } from '@better-compute/capacity';
+import {
+  assertInvariants,
+  checkI7,
+  runNightly,
+  type ControlPlaneSim,
+} from '@better-compute/testing';
+
+/** I7 after the night's quiet period: nothing pending that capacity's offline solver would place now. */
+const i7 = async (rig: ControlPlaneSim) =>
+  checkI7(
+    await rig.database.transaction((tx) => placeablePending(tx, { now: rig.sim.scheduler.now() })),
+  );
 
 // The CI-sized night (PLAN.md §15): the full scenario mix on a small fleet for a few simulated minutes. The nightly
 // matrix (`pnpm sim:nightly`, tests/nightly/) runs the same scenario bigger and longer over many seeds.
@@ -12,6 +24,7 @@ describe('nightly simulation (CI size)', () => {
       gateways: 2,
       minutes: 6,
       chaos: 'light',
+      invariants: i7,
     });
     assertInvariants(report.violations);
     expect(report.ok).toBe(true);

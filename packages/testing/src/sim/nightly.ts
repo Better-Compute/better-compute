@@ -34,11 +34,16 @@ export interface NightlyOptions {
   modules?: readonly ComputeModule[];
   /** Runs after the night, before teardown; its answer lands in the report's `extra` (e.g. audit verification). */
   inspect?: (rig: ControlPlaneSim) => Promise<Record<string, unknown>>;
+  /**
+   * More invariants checked after the quiet period, added to the report's violations: e.g. I7 with capacity's
+   * `placeablePending` (`checkI7(await rig.database.transaction((tx) => placeablePending(tx, { now })))`).
+   */
+  invariants?: (rig: ControlPlaneSim) => Promise<InvariantViolation[]>;
 }
 
 export interface NightlyReport {
   seed: string;
-  config: Required<Omit<NightlyOptions, 'modules' | 'inspect'>>;
+  config: Required<Omit<NightlyOptions, 'modules' | 'inspect' | 'invariants'>>;
   wallMs: number;
   /** SHA-256 of the workload asked for: the same seed asks for the same things. */
   workloadDigest: string;
@@ -80,7 +85,7 @@ type Kind = 'node' | 'half' | 'gang' | 'spot' | 'calendar';
 
 /** One simulated night. */
 export async function runNightly(options: NightlyOptions): Promise<NightlyReport> {
-  const config: Required<Omit<NightlyOptions, 'modules' | 'inspect'>> = {
+  const config: Required<Omit<NightlyOptions, 'modules' | 'inspect' | 'invariants'>> = {
     seed: options.seed,
     nodes: options.nodes ?? 8,
     gateways: options.gateways ?? 3,
@@ -360,7 +365,10 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
       if (since >= 11 * MIN) break;
       await rig.run(11 * MIN - since);
     }
-    const violations = await rig.invariants();
+    const violations = [
+      ...(await rig.invariants()),
+      ...(options.invariants ? await options.invariants(rig) : []),
+    ];
     const tally = async (table: 'reservations' | 'commands') => {
       const { rows } = await database.query<{ state: string; count: number }>(
         `SELECT state, count(*)::int AS count FROM ${table} GROUP BY state ORDER BY state`,

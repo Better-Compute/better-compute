@@ -36,6 +36,7 @@ export {
   checkI3,
   checkI4,
   checkI5,
+  checkI7,
   checkI8,
   CONVERGENCE_MS,
   LIVENESS_WINDOW_MS,
