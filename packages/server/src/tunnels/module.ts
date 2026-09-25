@@ -245,6 +245,8 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             op: input.op,
             subject: caller.identityId,
             sessionId: caller.sessionId,
+            // What the envelope decided; re-authorization decides exactly this again.
+            action: input.instanceId ? 'compute:instances:exec' : 'compute:nodes:console',
             tenantId: input.tenantId,
             ...(input.instanceId ? { instanceId: input.instanceId } : {}),
             ...(input.port !== undefined ? { port: input.port } : {}),

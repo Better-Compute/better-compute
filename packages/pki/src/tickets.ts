@@ -50,6 +50,8 @@ export interface ExecTicketClaims {
   port?: number;
   /** The caller's IAM session: re-authorization checks it is still live (§7.6). */
   ses?: string;
+  /** The IAM action `tunnels.open` decided (`compute:instances:exec`, `compute:nodes:console`): re-decided as is. */
+  act?: string;
 }
 
 export interface IssueExecTicketInput {
@@ -62,6 +64,8 @@ export interface IssueExecTicketInput {
   port?: number;
   /** The caller's IAM session id (`ses`). */
   sessionId?: string;
+  /** The decided IAM action (`act`). */
+  action?: string;
   /** Default and maximum 60. */
   ttlSeconds?: number;
 }
@@ -145,6 +149,7 @@ export function createExecTicketIssuer(options: {
         ...(input.instanceId !== undefined ? { inst: input.instanceId } : {}),
         ...(input.port !== undefined ? { port: input.port } : {}),
         ...(input.sessionId !== undefined ? { ses: input.sessionId } : {}),
+        ...(input.action !== undefined ? { act: input.action } : {}),
       };
       const current = keys[0]!;
       const signingInput = `${encode({ alg: 'ES256', typ: execTicketType, kid: current.kid })}.${encode(claims)}`;

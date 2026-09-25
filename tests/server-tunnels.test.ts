@@ -659,6 +659,7 @@ describe('tunnel endpoint hardening', () => {
       expect(seen[0]!.claims).toMatchObject({
         sub: 'usr_alice',
         ses: 's',
+        act: 'compute:instances:exec',
         tnt: 'acme',
         inst: INSTANCE,
         sid: ticket.tunnelId,
