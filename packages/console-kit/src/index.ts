@@ -14,3 +14,4 @@ export * from './screen.js';
 export * from './store.js';
 export * from './terminal.js';
 export * from './timeline.js';
+export * from './usage.js';

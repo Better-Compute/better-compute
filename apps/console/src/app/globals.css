@@ -199,6 +199,13 @@ button.link {
   color: var(--accent);
   cursor: pointer;
 }
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
 .timeline {
   display: flex;
   gap: 1px;
