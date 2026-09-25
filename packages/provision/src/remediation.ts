@@ -1,5 +1,6 @@
 import { field, manifest, type Json, type ModuleContext, type SqlTx, type StepDefinition } from '@better-compute/core';
 import { clearNodeFaults, healthWorkKind, wakeStartedReservations, type NodeConditionType } from '@better-compute/inventory';
+import { batchNodeWorkflow } from './batch.js';
 import { awaitCommand } from './command-step.js';
 import { defineProfile } from './profile.js';
 import { defineStep } from './step.js';
@@ -114,7 +115,7 @@ export type HealthOutcome =
   | { action: 'cleared'; conditions: NodeConditionType[] }
   | { action: 'escalated'; reason: string };
 
-type Context = Pick<ModuleContext, 'sql' | 'events' | 'work'> & Partial<Pick<ModuleContext, 'workflows'>>;
+type Context = Pick<ModuleContext, 'sql' | 'events' | 'work'> & Partial<Pick<ModuleContext, 'workflows' | 'commands' | 'registry'>>;
 
 async function publish(context: Context, tx: SqlTx, tenantId: string, nodeId: string, type: string, data: Record<string, Json>) {
   await context.events.publish(tx, { type, tenantId, subject: `node/${nodeId}`, data: { nodeId, ...data } });
@@ -216,6 +217,8 @@ export async function reconcileHealth(
     const profile = kind === 'reboot' ? rebootProfile : gpuResetProfile;
     const input = { tenantId: node.owner_tenant_id, profileId: profile.id, profileVersion: profile.version, nodeId, owner: healthWorkKind };
     const { id } = await context.workflows.start(tx, input);
+    // Reboots and GPU resets are destructive: with a quorum, they run under a batch of their own (§13).
+    await batchNodeWorkflow(context, tx, id, { tenantId: node.owner_tenant_id, nodeId, reason: `remediation ${kind} ${nodeId}` });
     await publish(context, tx, node.owner_tenant_id, nodeId, 'node.remediation.started', { workflowId: id, remediation: kind });
     return { action: 'started', workflowId: id, remediation: kind };
   });

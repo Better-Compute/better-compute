@@ -24,6 +24,7 @@ import {
   resumeWorkflow,
   retryWorkflow,
   startWorkflow,
+  batchNodeWorkflow,
   stepNotReady,
   stepRegistry,
   type AdvanceOptions,
@@ -277,6 +278,38 @@ describe('expandProfile', () => {
       expect(row.state, id).toBe(expected);
       if (expected === 'failed') expect(row.error?.message).toMatch(/does not declare in sends/);
     }
+  });
+
+  it('batches a workflow’s self-executed destructive kinds on its node (remediation, §13)', async () => {
+    const reboot = defineStep({ id: 'node.reboot', runsOn: 'node', command: 'node.reboot', timeout: '5m', retrySafe: false, await: 'rejoin', input: manifest({}) });
+    const own: AdvanceOptions = { ...options, steps: stepRegistry([record, kexec, reboot]) };
+    const destructive = new Set(['node.reboot', 'boot.kexec']);
+    const created: { scope: readonly { subject: string; kind: string }[]; reason: string }[] = [];
+    const batchContext = {
+      registry: { commandKind: (kind: string) => ({ kind, destructive: destructive.has(kind) }) as never },
+      commands: {
+        async createBatch(_tx: unknown, input: { scope: readonly { subject: string; kind: string }[]; reason: string }) {
+          created.push(input);
+          return { batchId: `batch_${created.length}`, held: true, required: 2, size: input.scope.length };
+        },
+      } as never,
+    };
+    profile({ id: 'batch-reboot', steps: [{ use: 'test.record' }, { use: 'node.reboot' }] });
+    const target = await addNode();
+    const { id } = await db.transaction((tx) =>
+      startWorkflow(context(), own, tx, { tenantId: 'ten_a', profileId: 'batch-reboot', profileVersion: 1, nodeId: target }),
+    );
+    expect(await db.transaction((tx) => batchNodeWorkflow(batchContext, tx, id, { tenantId: 'ten_a', nodeId: target, reason: 'r' }))).toBe('batch_1');
+    expect(created[0]!.scope).toEqual([{ subject: target, kind: 'node.reboot' }]);
+    // Idempotent: the workflow keeps its batch.
+    expect(await db.transaction((tx) => batchNodeWorkflow(batchContext, tx, id, { tenantId: 'ten_a', nodeId: target, reason: 'r' }))).toBe('batch_1');
+    expect(created).toHaveLength(1);
+    // A relayed destructive kind needs its owner's scope.
+    destructive.add('bmc.power');
+    await db.query(`UPDATE workflows SET batch_id = NULL, command_kinds = '{bmc.power}' WHERE id = $1`, [id]);
+    await expect(db.transaction((tx) => batchNodeWorkflow(batchContext, tx, id, { tenantId: 'ten_a', nodeId: target, reason: 'r' }))).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    });
   });
 
   it('evaluates when: against node labels', () => {
