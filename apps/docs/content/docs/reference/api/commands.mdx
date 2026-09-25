@@ -33,6 +33,17 @@ Queues a command of an allowlisted kind (`diag.nvml`, `inventory.refresh`, `logs
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field             | Type    | Required | Constraints                                                              |
+| ----------------- | ------- | -------- | ------------------------------------------------------------------------ |
+| `tenantId`        | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`               |
+| `nodeId`          | string  | yes      | at most 64 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$`        |
+| `kind`            | string  | yes      | at most 64 characters; matches `^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+$` |
+| `payload`         | object  |          |                                                                          |
+| `idempotencyKey`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$`           |
+| `notAfterSeconds` | integer |          | 10-3600; default `600`                                                   |
+
 ## get
 
 `POST /api/compute/commands/get`

@@ -34,6 +34,16 @@ Stores a provider account for the tenant after validating its `config` with the 
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field            | Type   | Required | Constraints                                                    |
+| ---------------- | ------ | -------- | -------------------------------------------------------------- |
+| `tenantId`       | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`     |
+| `provider`       | string | yes      | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`        |
+| `name`           | string | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`   |
+| `config`         | any    |          | default `{}`                                                   |
+| `idempotencyKey` | string |          | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$` |
+
 ## list
 
 `POST /api/compute/providerAccounts/list`
@@ -46,6 +56,12 @@ Each `config` holds only secret references.
 - **Authorization:** `compute:providers:read` @ `compute-tenant` + items
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
 
 ## get
 
@@ -60,6 +76,13 @@ An account of another tenant, or none, is `NOT_FOUND`.
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## offers
 
 `POST /api/compute/providerAccounts/offers`
@@ -72,6 +95,20 @@ The optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`,
 - **Authorization:** `compute:providers:read` @ `compute-provider-account`
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field                | Type                  | Required | Constraints                                                        |
+| -------------------- | --------------------- | -------- | ------------------------------------------------------------------ |
+| `tenantId`           | string                | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId`          | string                | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `query`              | object                |          |                                                                    |
+| `query.kind`         | one of `metal`, `vps` |          |                                                                    |
+| `query.region`       | string                |          | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`       |
+| `query.gpuModel`     | string                |          | at most 32 characters; matches `^[A-Za-z0-9-]{1,32}$`              |
+| `query.minGpus`      | integer               |          | 0-64                                                               |
+| `query.minVcpu`      | integer               |          | 0-1024                                                             |
+| `query.minMemoryGiB` | integer               |          | 0-16384                                                            |
 
 ## update
 
@@ -86,6 +123,14 @@ The provider and the name cannot change. The next provider call builds a new cli
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `config`    | any    |          |                                                                    |
+
 ## delete
 
 `POST /api/compute/providerAccounts/delete`
@@ -98,6 +143,13 @@ Archived pools and deleted instances do not count: deleted instances keep their 
 - **Authorization:** `compute:providers:manage` @ `compute-provider-account`
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                        |
+| ----------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId` | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## bootstrap
 
@@ -114,3 +166,14 @@ Records a request to turn one of the account's machines into a bcd host of a `vp
 - **Authorization:** `compute:providers:manage` @ `compute-provider-account`
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field            | Type   | Required | Constraints                                                        |
+| ---------------- | ------ | -------- | ------------------------------------------------------------------ |
+| `tenantId`       | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `accountId`      | string | yes      | at most 58 characters; matches `^pacct_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `poolId`         | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`  |
+| `machineId`      | string |          | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `offerId`        | string |          | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `idempotencyKey` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`         |

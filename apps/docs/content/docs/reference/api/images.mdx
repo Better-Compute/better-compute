@@ -34,6 +34,21 @@ The new image is private. Site agents whose pools pre-warm this ref (`policy.pre
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field         | Type                          | Required | Constraints                                                |
+| ------------- | ----------------------------- | -------- | ---------------------------------------------------------- |
+| `tenantId`    | string                        | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `ref`         | string                        | yes      | 1-200 characters                                           |
+| `kind`        | one of `os`, `ramdisk`        |          | default `"os"`                                             |
+| `format`      | one of `raw`, `qcow2`, `iso`  | yes      |                                                            |
+| `compression` | one of `none`, `zstd`, `gzip` |          | default `"none"`                                           |
+| `sha256`      | string                        | yes      | 1-64 characters; matches `^[0-9A-Fa-f]{64}$`               |
+| `sizeBytes`   | integer                       |          | at least 0                                                 |
+| `source`      | string                        | yes      | 1-2048 characters                                          |
+| `signature`   | string                        |          | 1-1024 characters                                          |
+| `signerId`    | string                        |          | 1-128 characters                                           |
+
 ## get
 
 `POST /api/compute/images/get`
@@ -46,6 +61,13 @@ Returns one image the tenant owns, or a public one, by its `img_` id.
 - **Authorization:** `compute:images:read` @ `compute-image`
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                      |
+| ---------- | ------ | -------- | ---------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `imageId`  | string | yes      | at most 56 characters; matches `^img_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## list
 
@@ -60,6 +82,15 @@ Returns a page of the tenant's own images and public ones, ordered by `ref`, opt
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type                   | Required | Constraints                                                |
+| ---------- | ---------------------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string                 | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `kind`     | one of `os`, `ramdisk` |          |                                                            |
+| `limit`    | integer                |          | 1-200; default `50`                                        |
+| `cursor`   | string                 |          | at most 256 characters                                     |
+
 ## promote
 
 `POST /api/compute/images/promote`
@@ -72,3 +103,10 @@ Decided as `compute:images:publish` on the image. An unsigned image is `INVALID_
 - **Authorization:** `compute:images:publish` @ `compute-image`
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                      |
+| ---------- | ------ | -------- | ---------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `imageId`  | string | yes      | at most 56 characters; matches `^img_[0-9a-hjkmnp-tv-z]{26,52}$` |

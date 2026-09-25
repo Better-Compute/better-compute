@@ -34,6 +34,14 @@ Stores a new profile version from a profile document, `private` unless `visibili
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field        | Type                       | Required | Constraints                                                |
+| ------------ | -------------------------- | -------- | ---------------------------------------------------------- |
+| `tenantId`   | string                     | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `document`   | object                     | yes      |                                                            |
+| `visibility` | one of `private`, `public` |          | default `"private"`                                        |
+
 ## get
 
 `POST /api/compute/profiles/get`
@@ -46,6 +54,14 @@ The lookup prefers the tenant's own profile, then a public stored one, then one 
 - **Authorization:** `compute:profiles:read` @ `compute-profile`
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field            | Type    | Required | Constraints                                                                 |
+| ---------------- | ------- | -------- | --------------------------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`                  |
+| `profileId`      | string  | yes      | at most 128 characters; matches `^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$` |
+| `profileVersion` | integer |          | 1-1000000                                                                   |
 
 ## validate
 
@@ -60,6 +76,14 @@ Problems in the profile are returned as `issues` rather than thrown; an unknown 
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field            | Type    | Required | Constraints                                                                 |
+| ---------------- | ------- | -------- | --------------------------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`                  |
+| `profileId`      | string  | yes      | at most 128 characters; matches `^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$` |
+| `profileVersion` | integer |          | 1-1000000                                                                   |
+
 ## render
 
 `POST /api/compute/profiles/render`
@@ -73,6 +97,14 @@ Returns the profile document and the expanded steps a workflow of this version w
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field            | Type    | Required | Constraints                                                                 |
+| ---------------- | ------- | -------- | --------------------------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`                  |
+| `profileId`      | string  | yes      | at most 128 characters; matches `^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$` |
+| `profileVersion` | integer |          | 1-1000000                                                                   |
+
 ## list
 
 `POST /api/compute/profiles/list`
@@ -85,6 +117,14 @@ Returns a page of the tenant's stored profiles, public ones and those modules sh
 - **Authorization:** `compute:profiles:read` @ `compute-tenant` + items
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                |
+| ---------- | ------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `limit`    | integer |          | 1-200; default `50`                                        |
+| `cursor`   | string  |          | at most 256 characters                                     |
 
 ## update
 
@@ -103,6 +143,17 @@ Replaces the document of one of the tenant's profile versions, or changes its vi
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field             | Type                       | Required | Constraints                                                                 |
+| ----------------- | -------------------------- | -------- | --------------------------------------------------------------------------- |
+| `tenantId`        | string                     | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`                  |
+| `profileId`       | string                     | yes      | at most 128 characters; matches `^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$` |
+| `profileVersion`  | integer                    | yes      | 1-1000000                                                                   |
+| `document`        | any                        |          |                                                                             |
+| `visibility`      | one of `private`, `public` |          |                                                                             |
+| `expectedVersion` | integer                    |          | at least 1                                                                  |
+
 ## delete
 
 `POST /api/compute/profiles/delete`
@@ -115,3 +166,11 @@ Workflows already started keep the profile document they snapshotted. Profiles t
 - **Authorization:** `compute:profiles:manage` @ `compute-profile`
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field            | Type    | Required | Constraints                                                                 |
+| ---------------- | ------- | -------- | --------------------------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`                  |
+| `profileId`      | string  | yes      | at most 128 characters; matches `^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$` |
+| `profileVersion` | integer |          | 1-1000000                                                                   |

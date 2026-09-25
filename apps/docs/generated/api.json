@@ -280,7 +280,42 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "kind": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+$"
+            },
+            "payload": {
+              "type": "object"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            },
+            "notAfterSeconds": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 3600,
+              "default": 600
+            }
+          },
+          "required": ["tenantId", "nodeId", "kind", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "Queues a command of an allowlisted kind (`diag.nvml`, `inventory.refresh`, `logs.collect`, `node.reboot`) on a node the tenant can see; returns the command, `pending` when first queued.",
         "description": "Queues a command of an allowlisted kind (`diag.nvml`, `inventory.refresh`, `logs.collect`, `node.reboot`) on a node the tenant can see; returns the command, `pending` when first queued.\n\n- Idempotent per tenant, caller identity and `idempotencyKey`: a retry with the same key returns the command already queued. The same key with a different `kind` is `CONFLICT`.\n- `notAfterSeconds` (10 to 3600, default 600) sets how long the command may wait for the node before it expires.\n- Any other kind is `UNSUPPORTED`; a payload that does not match the kind's schema is `INVALID_INPUT`; a node outside the tenant's view is `NOT_FOUND`.\n- For `logs.collect`, when the server has `supportBundles` with a presigning blob store, the daemon receives a presigned upload URL and the response carries the bundle's `bundleKey`.\n- Emits `node.command.queued` when the command is first queued, not on a replay."
       },
@@ -520,7 +555,25 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            }
+          },
+          "required": ["tenantId", "poolId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the pool's flavors that are not archived, sorted by name.",
         "description": "Returns the pool's flavors that are not archived, sorted by name.\n\nThe pool must be owned by or offered to the tenant; otherwise the call is `NOT_FOUND`."
       },
@@ -535,7 +588,58 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The flavor name, e.g. g1.small"
+            },
+            "vcpu": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "memoryGiB": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "diskGiB": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "gpus": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0
+            },
+            "offerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "Provider pools: the provider offer this flavor creates (required there)"
+            }
+          },
+          "required": ["tenantId", "poolId", "name", "vcpu", "memoryGiB", "diskGiB"],
+          "additionalProperties": false
+        },
         "summary": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.",
         "description": "Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it at version 1.\n\n- `gpus` defaults to 0. A flavor of a provider pool needs `offerId`, the provider offer it creates; without it the call is `INVALID_INPUT`.\n- `NOT_FOUND` when the tenant does not own the pool; `INVALID_STATE` when the pool is of another class.\n- `CONFLICT` when the pool already has a flavor with that name, archived ones included."
       },
@@ -550,7 +654,58 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The flavor name, e.g. g1.small"
+            },
+            "vcpu": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "memoryGiB": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "diskGiB": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "gpus": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0
+            },
+            "offerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "Provider pools: the provider offer this flavor creates (required there)"
+            }
+          },
+          "required": ["tenantId", "poolId", "name", "vcpu", "memoryGiB", "diskGiB"],
+          "additionalProperties": false
+        },
         "summary": "Replaces the shape of the named flavor and increments its version; an archived flavor becomes active again.",
         "description": "Replaces the shape of the named flavor and increments its version; an archived flavor becomes active again.\n\nThe input is the full shape, as for `create`. An omitted `offerId` keeps the stored one. Instances already admitted keep their old shape; only new instances and resizes use the new one. The call is `NOT_FOUND` when the tenant does not own the pool or the flavor does not exist."
       },
@@ -565,7 +720,31 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The flavor name"
+            }
+          },
+          "required": ["tenantId", "poolId", "name"],
+          "additionalProperties": false
+        },
         "summary": "Deletes the named flavor, or archives it when any instance, deleted ones included, still references it; returns `deleted` and `archived` to say which.",
         "description": "Deletes the named flavor, or archives it when any instance, deleted ones included, still references it; returns `deleted` and `archived` to say which.\n\nAn archived flavor disappears from `list` and can no longer be used to create or resize instances. `update` makes it active again. The call is `NOT_FOUND` when the tenant does not own the pool or the flavor does not exist."
       }
@@ -588,7 +767,19 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the tenant's current sites, provider accounts, pools, owner quotas, offers and flavors as a FleetConfig document, with `missing` listing the tables of modules this deployment does not run.",
         "description": "Returns the tenant's current sites, provider accounts, pools, owner quotas, offers and flavors as a FleetConfig document, with `missing` listing the tables of modules this deployment does not run.\n\nObjects that fleet never named appear under their ids. Archived pools and archived flavors are left out."
       },
@@ -603,7 +794,28 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "config": {
+              "type": "object",
+              "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors }, as fleet.export writes it"
+            },
+            "prune": {
+              "type": "boolean",
+              "default": false,
+              "description": "Delete (archive) what the document no longer lists"
+            }
+          },
+          "required": ["tenantId", "config"],
+          "additionalProperties": false
+        },
         "summary": "Diffs a FleetConfig document against the tenant's current state; returns the changes for people, the exact API calls `apply` would make, a summary, `blocked`, and a `planHash`.",
         "description": "Diffs a FleetConfig document against the tenant's current state; returns the changes for people, the exact API calls `apply` would make, a summary, `blocked`, and a `planHash`.\n\n- The call changes nothing. With `prune: true` the plan also deletes what the document no longer lists: flavors and offers are removed, pools archived, and unused provider accounts deleted. Sites are never changed or pruned.\n- A change that cannot be applied (an immutable field such as a pool's class or an account's provider, an unknown reference, an offer to the pool's owner) is marked `blocked` with the reason.\n- The ids of planned creates derive from the caller's identity, so the call needs an authenticated caller (`UNAUTHENTICATED` otherwise)."
       },
@@ -618,7 +830,34 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "config": {
+              "type": "object",
+              "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors }, as fleet.export writes it"
+            },
+            "prune": {
+              "type": "boolean",
+              "default": false,
+              "description": "Delete (archive) what the document no longer lists"
+            },
+            "planHash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64,
+              "description": "The planHash of the plan you reviewed: apply refuses with CONFIG_DRIFT if the plan moved since"
+            }
+          },
+          "required": ["tenantId", "config"],
+          "additionalProperties": false
+        },
         "summary": "Plans the document again and runs every planned call as the caller, all in one transaction; returns the plan and the number of calls applied.",
         "description": "Plans the document again and runs every planned call as the caller, all in one transaction; returns the plan and the number of calls applied.\n\n- **Decisions.** Each call is authorized first, as the caller and with no transaction open, by the method it invokes; a refusal stops the apply before anything changes.\n- **Consistency.** Pass the `planHash` from `plan` to apply exactly that plan: if the plan has changed, the call is `CONFIG_DRIFT`. The plan is made once more inside the transaction, and a change there is also `CONFIG_DRIFT`, with nothing applied.\n- **Idempotency.** Creates carry keys derived from the tenant, the kind and the name, so repeating an apply creates nothing twice. A plan with no calls still records the document.\n- **Errors.** `INVALID_STATE` with `details.blocked` when any change is blocked. `UNSUPPORTED` when the host cannot run composite methods. Errors of the invoked methods pass through.\n- The document becomes the one that `status` and the `fleet.drift` reconciler compare against."
       },
@@ -633,7 +872,19 @@
         "phase": "v0.2",
         "module": "fleet",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the tenant's last applied document's plan hash, who applied it and when, and, while the fleet differs from it, the drift found at the last check.",
         "description": "Returns the tenant's last applied document's plan hash, who applied it and when, and, while the fleet differs from it, the drift found at the last check.\n\n`applied` is absent when the tenant never applied a document. The `fleet.drift` reconciler re-plans each applied document every 15 minutes by default and publishes `fleet.drifted` or `fleet.converged` when the answer changes."
       }
@@ -661,7 +912,67 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "name@version, e.g. ubuntu-24.04@2026.09"
+            },
+            "kind": {
+              "enum": ["os", "ramdisk"],
+              "description": "What the image boots as",
+              "default": "os"
+            },
+            "format": {
+              "enum": ["raw", "qcow2", "iso"],
+              "description": "The disk format"
+            },
+            "compression": {
+              "enum": ["none", "zstd", "gzip"],
+              "default": "none"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9A-Fa-f]{64}$",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "The digest of the image, 64 hex digits"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "description": "Where the image is fetched from: an https:// or oci:// URL"
+            },
+            "signature": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "description": "Base64 signature over the image's identity (kind, ref, format, compression, sha256)"
+            },
+            "signerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The registered signer whose key checks the signature"
+            }
+          },
+          "required": ["tenantId", "ref", "format", "sha256", "source"],
+          "additionalProperties": false
+        },
         "summary": "Records an image by `ref` (`name@version`), format, digest and `https://` or `oci://` source in the tenant's catalog; with a valid signature it is marked verified.",
         "description": "Records an image by `ref` (`name@version`), format, digest and `https://` or `oci://` source in the tenant's catalog; with a valid signature it is marked verified.\n\n- Decided as `compute:images:publish` on the tenant.\n- `signature` and `signerId` go together. The signature must verify against that signer on the tenant's allowlist or the platform's, else `INVALID_INPUT`.\n- A `ramdisk` must be signed by a platform signer (`INVALID_INPUT` otherwise).\n- `CONFLICT` when the tenant already has that `ref`, so a repeated call does not create a second image.\n\nThe new image is private. Site agents whose pools pre-warm this ref (`policy.prewarmImages`) get their desired state refreshed."
       },
@@ -676,7 +987,25 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "imageId": {
+              "type": "string",
+              "pattern": "^img_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The catalog image"
+            }
+          },
+          "required": ["tenantId", "imageId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one image the tenant owns, or a public one, by its `img_` id.",
         "description": "Returns one image the tenant owns, or a public one, by its `img_` id.\n\n`NOT_FOUND` when the image does not exist, is deleted, or belongs to another tenant and is not public."
       },
@@ -691,7 +1020,35 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "kind": {
+              "enum": ["os", "ramdisk"],
+              "description": "What the image boots as"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50,
+              "description": "Page size"
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "The cursor of the previous page"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns a page of the tenant's own images and public ones, ordered by `ref`, optionally filtered by `kind` (`os` or `ramdisk`).",
         "description": "Returns a page of the tenant's own images and public ones, ordered by `ref`, optionally filtered by `kind` (`os` or `ramdisk`).\n\n`limit` defaults to 50 and is at most 200; pass the returned `cursor` to read the next page."
       },
@@ -706,7 +1063,25 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "imageId": {
+              "type": "string",
+              "pattern": "^img_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The catalog image"
+            }
+          },
+          "required": ["tenantId", "imageId"],
+          "additionalProperties": false
+        },
         "summary": "Makes a verified image the tenant owns public, so every tenant can read and deploy it.",
         "description": "Makes a verified image the tenant owns public, so every tenant can read and deploy it.\n\nDecided as `compute:images:publish` on the image. An unsigned image is `INVALID_STATE`; an image the tenant does not own is `NOT_FOUND`. Promoting an image that is already public returns it unchanged. Site agents whose pools pre-warm this ref get their desired state refreshed."
       }
@@ -729,7 +1104,81 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            },
+            "projectId": {
+              "type": "string",
+              "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The project it belongs to"
+            },
+            "flavor": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The flavor name, e.g. g1.small"
+            },
+            "imageId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$",
+              "maxLength": 200,
+              "description": "The image to boot"
+            },
+            "sshKeys": {
+              "type": "array",
+              "maxItems": 32,
+              "default": [],
+              "description": "OpenSSH public keys, one line each",
+              "items": {
+                "type": "string",
+                "maxLength": 8192
+              }
+            },
+            "userData": {
+              "type": "string",
+              "maxLength": 32768,
+              "description": "User data (at most 32 KiB), or secret://<tenantId>/<id> naming a secret of this tenant"
+            },
+            "desiredState": {
+              "enum": ["running", "stopped"],
+              "default": "running"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+            },
+            "wait": {
+              "type": "object",
+              "properties": {
+                "timeoutMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 30000,
+                  "description": "How long to hold the answer until the instance settles"
+                }
+              },
+              "required": ["timeoutMs"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["tenantId", "poolId", "flavor", "imageId", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.",
         "description": "Admits a VM from a pool, flavor and image after one IAM decision on the draft; returns the instance in `scheduling`, or in `provisioning` with a `nodeId` when a hosted pool placed it at once.\n\n- **Idempotency.** `idempotencyKey` is required. The instance id derives from the tenant, the caller and the key: a retry of a finished request returns the same instance without a second decision, and a different request under the same key is `CONFLICT` with `details.instanceId`.\n- **IAM.** `compute:instances:create` is decided on `compute-instance/` plus the draft id, whose attributes (`vcpu`, `memoryGiB`, `gpus`, `imageId`, `imageVerified`, `projectId`) policies can test. A refusal deletes the draft; a delegated session can get `CONFIRMATION_REQUIRED`.\n- **Errors.** `NOT_FOUND` for a pool the tenant neither owns nor is offered, an archived pool, a missing or archived flavor, or an image a hosted pool cannot resolve. `INVALID_INPUT` for a pool that is not `vps-host` or `provider`. `QUOTA_EXCEEDED` when the shape does not fit the tenant's quota; `CAPACITY_UNAVAILABLE` when a hosted pool has no free IP address. `INVALID_STATE` for a provider pool without an account, `INVALID_CONFIG` for a hosted pool when `vps()` has no `images`.\n- **Events.** `instance.created`, and `instance.scheduled` with the `nodeId` when a hosted instance is placed. When no host fits, the instance stays in `scheduling` with an `Unschedulable` condition and is retried every 30 seconds."
       },
@@ -744,7 +1193,56 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "scope": {
+              "enum": ["mine", "all"],
+              "default": "mine"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "scheduling",
+                "provisioning",
+                "starting",
+                "running",
+                "stopped",
+                "rebooting",
+                "resizing",
+                "deleting",
+                "deleted",
+                "error",
+                "lost"
+              ]
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "cursor": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The last instance id of the previous page"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.",
         "description": "Returns a page of the tenant's instances, newest first, with a `cursor` when more remain.\n\n`scope` defaults to `mine`, the caller's own instances; `all` returns every instance of the tenant that the caller may read. `state` and `poolId` filter the list, and `limit` is 1 to 200 (default 50). Drafts are never listed."
       },
@@ -759,7 +1257,25 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The instance"
+            }
+          },
+          "required": ["tenantId", "instanceId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one instance of the tenant, deleted instances included.",
         "description": "Returns one instance of the tenant, deleted instances included.\n\nDrafts and instances of other tenants are `NOT_FOUND`."
       },
@@ -774,7 +1290,25 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The instance"
+            }
+          },
+          "required": ["tenantId", "instanceId"],
+          "additionalProperties": false
+        },
         "summary": "Sets `desiredState` to `running` and wakes the reconciler; returns the instance before anything has changed on the host or provider.",
         "description": "Sets `desiredState` to `running` and wakes the reconciler; returns the instance before anything has changed on the host or provider.\n\nAn instance in `error` that has a host or a provider machine moves to `starting` and is tried again. An instance being deleted is `INVALID_STATE`. Publishes `instance.starting`."
       },
@@ -789,7 +1323,25 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The instance"
+            }
+          },
+          "required": ["tenantId", "instanceId"],
+          "additionalProperties": false
+        },
         "summary": "Sets `desiredState` to `stopped` and wakes the reconciler; returns the instance before anything has changed on the host or provider.",
         "description": "Sets `desiredState` to `stopped` and wakes the reconciler; returns the instance before anything has changed on the host or provider.\n\nAn instance being deleted is `INVALID_STATE`. Publishes `instance.stopping`."
       },
@@ -804,7 +1356,31 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The instance"
+            },
+            "flavor": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The new flavor"
+            }
+          },
+          "required": ["tenantId", "instanceId", "flavor"],
+          "additionalProperties": false
+        },
         "summary": "Moves a stopped hosted instance to another flavor of its pool, in place on the same host; returns the instance `stopped` with the new flavor.",
         "description": "Moves a stopped hosted instance to another flavor of its pool, in place on the same host; returns the instance `stopped` with the new flavor.\n\nGrowth is charged to quota first and shrinkage refunded after; if the host lacks room the charge is undone and the call is `CAPACITY_UNAVAILABLE` with `details.resource`. Other errors: `UNSUPPORTED` for a provider instance or a flavor with a different GPU count, `INVALID_STATE` when the instance is not stopped (both `state` and `desiredState`) or holds no allocation, `NOT_FOUND` for a missing or archived flavor, `QUOTA_EXCEEDED` when the growth does not fit. Publishes `instance.resized`."
       },
@@ -819,7 +1395,25 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The instance"
+            }
+          },
+          "required": ["tenantId", "instanceId"],
+          "additionalProperties": false
+        },
         "summary": "Sets `desiredState` to `deleted` and wakes the reconciler, which releases the allocation, IP lease and quota; returns the instance at once.",
         "description": "Sets `desiredState` to `deleted` and wakes the reconciler, which releases the allocation, IP lease and quota; returns the instance at once.\n\nThe call is idempotent: an instance already `deleted` is returned unchanged, and stays readable through `get`. Publishes `instance.deleting`; `instance.deleted` follows when everything is released."
       }
@@ -842,7 +1436,28 @@
         "phase": "v0.1",
         "module": "inventory",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the node's latest inventory snapshot: its hash, its sections and when it was collected.",
         "description": "Returns the node's latest inventory snapshot: its hash, its sections and when it was collected.\n\n`NOT_FOUND` when the node has no inventory yet or is not owned by the tenant."
       },
@@ -857,7 +1472,43 @@
         "phase": "v0.2",
         "module": "inventory",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "x-bc": {
+                "kind": "int"
+              }
+            },
+            "cursor": {
+              "type": "string",
+              "pattern": "^inv_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Lists the node's inventory snapshots newest first; returns a page with a cursor.",
         "description": "Lists the node's inventory snapshots newest first; returns a page with a cursor.\n\n`limit` is at most 100 (20 by default). The cursor is the id of the last snapshot returned. `NOT_FOUND` when the node is not owned by the tenant."
       },
@@ -872,7 +1523,42 @@
         "phase": "v0.2",
         "module": "inventory",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "from": {
+              "type": "string",
+              "pattern": "^(inv_[0-9a-hjkmnp-tv-z]{26,52}|[0-9a-f]{64})$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "to": {
+              "type": "string",
+              "pattern": "^(inv_[0-9a-hjkmnp-tv-z]{26,52}|[0-9a-f]{64})$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Compares two of the node's snapshots, named by snapshot id or hash, and returns the changes between them with their stable device ids (GPU UUID, disk WWN or MAC).",
         "description": "Compares two of the node's snapshots, named by snapshot id or hash, and returns the changes between them with their stable device ids (GPU UUID, disk WWN or MAC).\n\n- Without `to`, the latest snapshot is used; without `from`, the snapshot before `to`. A node with a single snapshot diffs against nothing: `from` is empty and there are no changes.\n- Change types are `gpu.missing`, `gpu.added`, `disk.replaced`, `driver.changed` and `mig.layout.changed`, each with `before` and `after` values where they apply.\n- `NOT_FOUND` when the node has no inventory, a named snapshot does not exist for the node, or the node is not owned by the tenant."
       }
@@ -1038,7 +1724,70 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "poolId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "maxUses": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 1
+            },
+            "ttlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400
+            },
+            "expect": {
+              "type": "object",
+              "properties": {
+                "productUuid": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[0-9A-Fa-f-]{8,64}$"
+                },
+                "serial": {
+                  "type": "string",
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9._:/+-]{1,128}$"
+                },
+                "mac": {
+                  "type": "string",
+                  "maxLength": 17,
+                  "pattern": "^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$"
+                },
+                "gpuUuid": {
+                  "type": "string",
+                  "maxLength": 68,
+                  "pattern": "^GPU-[0-9A-Fa-f-]{8,64}$"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "allowReclaim": {
+              "type": "boolean",
+              "default": false
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            }
+          },
+          "required": ["tenantId", "poolId", "ttlSeconds", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "Mints a role-`node` join token for one pool and returns its record with the bearer `token`, which is never shown again.",
         "description": "Mints a role-`node` join token for one pool and returns its record with the bearer `token`, which is never shown again.\n\nOnly the pool's owner tenant can mint tokens for it; another tenant gets `NOT_FOUND`. A pool whose machines run no daemon (its `agent` is not `bcd`) answers `INVALID_STATE`. `expect` pins the token to one machine and must name at least one identifier, otherwise the call is `INVALID_INPUT`. `ttlSeconds` runs from 60 to 86,400 and `maxUses` defaults to 1.\n\nThe token id derives from the tenant, the calling identity and `idempotencyKey`. A retry with the same key returns the stored record without `token` and without a new IAM decision. The same key with a different pool, `expect` or `allowReclaim` is `CONFLICT`.\n\nPublishes `security.join-token.created`, whose `pinned` field says whether the token has an `expect` binding."
       },
@@ -1143,7 +1892,102 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "siteId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The site the node is in (the pool must be in it)"
+            },
+            "poolId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The pool the node joins"
+            },
+            "bmc": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "description": "The BMC address (host or URL)"
+                },
+                "driver": {
+                  "pattern": "^[a-z][a-z0-9-]{0,63}$",
+                  "description": "The BMC driver id, such as redfish"
+                },
+                "credentials": {
+                  "type": ["string", "object"],
+                  "pattern": "^(secret|vault|env)://\\S+$",
+                  "maxLength": 2048,
+                  "properties": {
+                    "username": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "password": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    }
+                  },
+                  "required": ["username", "password"],
+                  "additionalProperties": false,
+                  "description": "A secret:// (or vault://, env://) reference, or inline { username, password } stored in the secret broker at once and never echoed"
+                },
+                "tlsSpkiSha256": {
+                  "pattern": "^[0-9A-Fa-f]{64}$",
+                  "description": "SHA-256 of the BMC certificate's SubjectPublicKeyInfo, 64 hex digits, to pin its TLS"
+                }
+              },
+              "required": ["address", "credentials"],
+              "additionalProperties": false,
+              "description": "How to reach the node's BMC"
+            },
+            "macs": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
+              },
+              "description": "The node's MAC addresses (':' or '-' separated), for PXE and matching"
+            },
+            "productUuid": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "The SMBIOS product UUID"
+            },
+            "arch": {
+              "enum": ["x86_64", "arm64"],
+              "default": "x86_64"
+            },
+            "uefi": {
+              "type": "boolean",
+              "default": true,
+              "description": "Boots in UEFI mode (false: legacy BIOS)"
+            },
+            "hardwareProfile": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "Overrides the pool's policy.hardwareProfile"
+            }
+          },
+          "required": ["tenantId", "siteId", "poolId", "bmc"],
+          "additionalProperties": false
+        },
         "summary": "Creates a metal node from a BMC address, driver and credentials in the given pool, in provision state `enrolling`, and queues the reconciler to verify BMC access and inspect the machine out of band.",
         "description": "Creates a metal node from a BMC address, driver and credentials in the given pool, in provision state `enrolling`, and queues the reconciler to verify BMC access and inspect the machine out of band.\n\n- Decided as `compute:nodes:provision` on the pool, since the node does not exist yet.\n- `bmc.credentials` is a `secret://` reference or an inline username and password. Inline credentials go to the secret broker before anything is written, and only the reference is stored; without a secret broker they are `INVALID_CONFIG`.\n- The node's driver bindings come from the BMC (power, management, virtual media), then the hardware profile (`hardwareProfile`, else the pool's `policy.hardwareProfile`). An unknown hardware profile is `INVALID_INPUT`.\n- `NOT_FOUND` when the pool does not exist or the tenant does not own it; `INVALID_INPUT` when the pool is not in `siteId`.\n\nEach call creates a new node; there is no idempotency key. Publishes `node.enrolled`."
       },
@@ -1158,7 +2002,25 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Moves a `ready` node back to `enrolling` to re-verify BMC access; the reconciler then chains re-inspection and re-commissioning back to `ready`.",
         "description": "Moves a `ready` node back to `enrolling` to re-verify BMC access; the reconciler then chains re-inspection and re-commissioning back to `ready`.\n\n`INVALID_STATE` from any state but `ready`, `NOT_FOUND` when the tenant has no such metal node, and `CONFLICT` when the node changed concurrently. Publishes `node.provision.enrolling`."
       },
@@ -1173,7 +2035,25 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Moves a `ready` node to `inspecting`, where the machine boots the ramdisk and reports its inventory; commissioning follows, and the node returns to `ready`.",
         "description": "Moves a `ready` node to `inspecting`, where the machine boots the ramdisk and reports its inventory; commissioning follows, and the node returns to `ready`.\n\n`INVALID_STATE` from any state but `ready`; `CONFLICT` when the node changed concurrently. Publishes `node.provision.inspecting`."
       },
@@ -1188,7 +2068,25 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Moves a `ready` node to `commissioning`, which runs DCGM diagnostics, a quick wipe and a power-off before the node returns to `ready`.",
         "description": "Moves a `ready` node to `commissioning`, which runs DCGM diagnostics, a quick wipe and a power-off before the node returns to `ready`.\n\n`INVALID_STATE` from any state but `ready`; `CONFLICT` when the node changed concurrently. Publishes `node.provision.commissioning`."
       },
@@ -1203,7 +2101,36 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            },
+            "profileId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The provision profile to deploy"
+            },
+            "profileVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The profile version"
+            }
+          },
+          "required": ["tenantId", "nodeId", "profileId", "profileVersion"],
+          "additionalProperties": false
+        },
         "summary": "Moves a `ready` node to `deploying` with the given profile version recorded on it; the metal reconciler then starts a workflow of that profile.",
         "description": "Moves a `ready` node to `deploying` with the given profile version recorded on it; the metal reconciler then starts a workflow of that profile.\n\nThe call records `profileId` and `profileVersion` without running the profile; run `profiles.validate` first to catch problems before the workflow starts. When the workflow succeeds the node becomes `deployed` and takes the profile's `role`. `INVALID_STATE` from any state but `ready`; `CONFLICT` when the node changed concurrently. Publishes `node.provision.deploying`."
       },
@@ -1218,7 +2145,30 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            },
+            "wipe": {
+              "enum": ["none", "quick", "secure-erase", "crypto-erase"],
+              "default": "quick",
+              "description": "How the disks are wiped on release"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Moves a `deployed` or `rescue` node to `releasing`, which wipes its disks with the chosen mode and powers it off before it returns to `ready`.",
         "description": "Moves a `deployed` or `rescue` node to `releasing`, which wipes its disks with the chosen mode and powers it off before it returns to `ready`.\n\n`wipe` is `none`, `quick` (the default), `secure-erase` or `crypto-erase`. Unless the mode is `none`, the node reaches `ready` only when the wipe result is attested; otherwise it fails with `UNVERIFIED_WIPE`. `INVALID_STATE` from other states. Publishes `node.provision.releasing`."
       },
@@ -1233,7 +2183,25 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Moves a `deployed` node to `rescue`, whose workflow boots the rescue ramdisk for repairs from outside the installed OS.",
         "description": "Moves a `deployed` node to `rescue`, whose workflow boots the rescue ramdisk for repairs from outside the installed OS.\n\n`INVALID_STATE` from any state but `deployed`. On a pool with `agent: 'none'` the node fails with `UNSUPPORTED`, since such a machine cannot boot the ramdisk. Publishes `node.provision.rescue`."
       },
@@ -1248,7 +2216,25 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Starts the `metal-unrescue` workflow, which boots a rescued node back into its installed OS; the node stays in `rescue` until that workflow succeeds, then becomes `deployed`.",
         "description": "Starts the `metal-unrescue` workflow, which boots a rescued node back into its installed OS; the node stays in `rescue` until that workflow succeeds, then becomes `deployed`.\n\n- `INVALID_STATE` outside `rescue`.\n- A second call while the unrescue workflow runs returns the node unchanged.\n- `CONFLICT` while the rescue ramdisk is still booting.\n- `INVALID_CONFIG` when the provision module is not registered.\n\nPublishes `node.provision.unrescuing` with the `workflowId`. If the workflow fails, the node goes to `failed`, and `recover` returns it to `deployed`."
       },
@@ -1263,7 +2249,31 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "Recorded as the node's last error"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Stops the node's running workflow and moves the node to `failed`, recording where it failed, an `ABORTED` error with the optional `reason`, and maintenance on.",
         "description": "Stops the node's running workflow and moves the node to `failed`, recording where it failed, an `ABORTED` error with the optional `reason`, and maintenance on.\n\nLegal from `enrolling`, `inspecting`, `commissioning`, `deploying` and `releasing`; `INVALID_STATE` otherwise. The aborted workflow still runs its cleanup steps. Publishes `node.provision.failed`."
       },
@@ -1278,7 +2288,25 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Moves a `failed` node to the last stable point for the state it failed in: `enrolling` after enrolling, inspecting or commissioning, `releasing` after deploying or releasing, `deployed` after rescue, and `retiring` after retiring.",
         "description": "Moves a `failed` node to the last stable point for the state it failed in: `enrolling` after enrolling, inspecting or commissioning, `releasing` after deploying or releasing, `deployed` after rescue, and `retiring` after retiring.\n\nIt clears `failedFrom` and `lastError` but leaves maintenance on. `INVALID_STATE` when the node is not `failed`. Publishes `node.provision.enrolling`, `node.provision.releasing`, `node.provision.deployed` or `node.provision.retiring`."
       },
@@ -1293,7 +2321,25 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Moves a node to `retiring`, whose workflow crypto-erases the disks (on pools whose machines run `bcd`), powers the machine off and revokes its identity before the node becomes `retired`, which is terminal.",
         "description": "Moves a node to `retiring`, whose workflow crypto-erases the disks (on pools whose machines run `bcd`), powers the machine off and revokes its identity before the node becomes `retired`, which is terminal.\n\nLegal from `adopting`, `adopted`, `enrolling`, `ready` and `failed`; `INVALID_STATE` otherwise, so undeploy a deployed machine first. Publishes `node.provision.retiring`."
       },
@@ -1308,7 +2354,29 @@
         "phase": "v0.2",
         "module": "metal",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            },
+            "action": {
+              "enum": ["on", "off", "graceful-off", "reset", "graceful-restart", "cycle", "nmi"],
+              "description": "The BMC power action"
+            }
+          },
+          "required": ["tenantId", "nodeId", "action"],
+          "additionalProperties": false
+        },
         "summary": "Queues a `bmc.power` command to the site agent of the node's site and returns its `commandId`; the provision state does not change.",
         "description": "Queues a `bmc.power` command to the site agent of the node's site and returns its `commandId`; the provision state does not change.\n\n- Decided as `compute:nodes:power` on the node.\n- `action` is `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle` or `nmi`.\n- `INVALID_STATE` when the node has no BMC credentials, while it is `inspecting`, `commissioning`, `deploying` or `releasing` (a workflow controls its power then), or when no site agent serves its site.\n\nThe command expires five minutes after it is queued. Its idempotency key derives from the request id, so a retry with the same `X-Request-Id` header returns the same command."
       }
@@ -1597,7 +2665,49 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "set": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:/@+=-]*$"
+              },
+              "maxProperties": 64
+            },
+            "remove": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?$"
+              },
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Sets and removes operator labels on the node and returns the node with its labels.",
         "description": "Sets and removes operator labels on the node and returns the node with its labels.\n\n`set` takes up to 64 labels and `remove` up to 64 keys. The call is `INVALID_INPUT` when it names nothing, names a key in both `set` and `remove`, or sets a key that inventory or the system owns. `remove` removes only operator labels. The node's version goes up and `node.labeled` is published."
       },
@@ -1612,7 +2722,47 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "nodeId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "add": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/=:-]{0,126}[A-Za-z0-9])?$"
+              },
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "remove": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/=:-]{0,126}[A-Za-z0-9])?$"
+              },
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Adds and removes operator NoSchedule taints, stored in `noScheduleReasons` as `taint:<key>`.",
         "description": "Adds and removes operator NoSchedule taints, stored in `noScheduleReasons` as `taint:<key>`.\n\n`add` and `remove` take up to 32 keys each. The call is `INVALID_INPUT` when it names nothing or names a key in both lists. Only operator taints change; conditions, `unreachable` and `draining` belong to their controllers. When the result equals the current reasons the node is returned unchanged; otherwise `node.tainted` is published."
       },
@@ -2140,7 +3290,28 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "document": {
+              "type": "object",
+              "description": "The profile document (id, version, target, steps…)"
+            },
+            "visibility": {
+              "enum": ["private", "public"],
+              "description": "Who may use the profile",
+              "default": "private"
+            }
+          },
+          "required": ["tenantId", "document"],
+          "additionalProperties": false
+        },
         "summary": "Stores a new profile version from a profile document, `private` unless `visibility` says `public`.",
         "description": "Stores a new profile version from a profile document, `private` unless `visibility` says `public`.\n\n- Decided as `compute:profiles:manage` on the tenant.\n- The document is checked like `defineProfile`; any problem is `INVALID_INPUT`, with `details.path` naming the first offending field.\n- `CONFLICT` when that id and version already exist; create the next version instead."
       },
@@ -2155,7 +3326,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "profileId": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+              "maxLength": 128,
+              "description": "The profile id"
+            },
+            "profileVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "The profile version (default: the latest)"
+            }
+          },
+          "required": ["tenantId", "profileId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one profile version, the latest when `profileVersion` is omitted.",
         "description": "Returns one profile version, the latest when `profileVersion` is omitted.\n\nThe lookup prefers the tenant's own profile, then a public stored one, then one a module ships. `NOT_FOUND` when none matches."
       },
@@ -2170,7 +3365,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "profileId": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+              "maxLength": 128,
+              "description": "The profile id"
+            },
+            "profileVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "The profile version (default: the latest)"
+            }
+          },
+          "required": ["tenantId", "profileId"],
+          "additionalProperties": false
+        },
         "summary": "Expands a profile version against the registered steps and returns `valid` with every issue found, such as a `use` that does not resolve or a `with` its step rejects.",
         "description": "Expands a profile version against the registered steps and returns `valid` with every issue found, such as a `use` that does not resolve or a `with` its step rejects.\n\nProblems in the profile are returned as `issues` rather than thrown; an unknown profile is `NOT_FOUND`."
       },
@@ -2185,7 +3404,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "profileId": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+              "maxLength": 128,
+              "description": "The profile id"
+            },
+            "profileVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "The profile version (default: the latest)"
+            }
+          },
+          "required": ["tenantId", "profileId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the profile document and the expanded steps a workflow of this version would run, with their phases.",
         "description": "Returns the profile document and the expanded steps a workflow of this version would run, with their phases.\n\n`INVALID_INPUT` when the profile does not resolve, with the problems in `details.issues`; `NOT_FOUND` for an unknown profile."
       },
@@ -2200,7 +3443,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50,
+              "description": "Page size"
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "The cursor of the previous page"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns a page of the tenant's stored profiles, public ones and those modules ship, ordered by id and version.",
         "description": "Returns a page of the tenant's stored profiles, public ones and those modules ship, ordered by id and version.\n\n`limit` defaults to 50 and is at most 200; pass the returned `cursor` to read the next page."
       },
@@ -2215,7 +3482,43 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "profileId": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+              "maxLength": 128,
+              "description": "The profile id"
+            },
+            "profileVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "The version to change"
+            },
+            "document": {
+              "description": "A replacement document, with the same id and version"
+            },
+            "visibility": {
+              "enum": ["private", "public"],
+              "description": "Who may use the profile"
+            },
+            "expectedVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The row's version you read; a mismatch is a conflict"
+            }
+          },
+          "required": ["tenantId", "profileId", "profileVersion"],
+          "additionalProperties": false
+        },
         "summary": "Replaces the document of one of the tenant's profile versions, or changes its visibility, and returns the profile.",
         "description": "Replaces the document of one of the tenant's profile versions, or changes its visibility, and returns the profile.\n\n- Pass `document`, `visibility` or both; neither is `INVALID_INPUT`.\n- A version a workflow has used keeps its document: `INVALID_STATE`. Its visibility can still change.\n- A new document must keep the profile's id and version (`INVALID_INPUT`).\n- `expectedVersion` is the profile's row `version`; a mismatch is `CONFLICT`.\n- `NOT_FOUND` when the tenant has no such version."
       },
@@ -2230,7 +3533,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "profileId": {
+              "type": "string",
+              "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+              "maxLength": 128,
+              "description": "The profile id"
+            },
+            "profileVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "The version to delete (default: every version)"
+            }
+          },
+          "required": ["tenantId", "profileId"],
+          "additionalProperties": false
+        },
         "summary": "Hides one version, or every version when `profileVersion` is omitted, from new workflows and returns the number deleted.",
         "description": "Hides one version, or every version when `profileVersion` is omitted, from new workflows and returns the number deleted.\n\nWorkflows already started keep the profile document they snapshotted. Profiles that modules ship are not stored, so deleting one is `NOT_FOUND`, as is a profile the tenant does not have."
       }
@@ -2405,7 +3732,41 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "provider": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,63}$",
+              "maxLength": 64,
+              "description": "The provider id, e.g. provider-hetzner"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The account name, e.g. hetzner-main"
+            },
+            "config": {
+              "description": "The provider's account config; credentials as secret references only",
+              "default": {}
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$",
+              "maxLength": 128,
+              "description": "Makes the account id deterministic; a retry returns the account"
+            }
+          },
+          "required": ["tenantId", "provider", "name"],
+          "additionalProperties": false
+        },
         "summary": "Stores a provider account for the tenant after validating its `config` with the provider's manifest; returns the account.",
         "description": "Stores a provider account for the tenant after validating its `config` with the provider's manifest; returns the account.\n\n- **Idempotency.** `idempotencyKey` is optional. With a key, the account id derives from the tenant, the caller and the key, and a repeat returns the stored account without a second IAM decision; a different `provider` or `name` under the same key is `CONFLICT`. A name the tenant already uses for another account is also `CONFLICT`.\n- **IAM.** Decided as `compute:providers:manage` on the tenant.\n- **Errors.** `INVALID_INPUT` for an unknown provider (`details.known` lists the registered ones), a config the manifest rejects (`details.issues`), or a field ending in `token`, `secret`, `password` or `key` whose value is not a `secret://`, `vault://` or `env://` reference."
       },
@@ -2420,7 +3781,19 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the tenant's provider accounts, sorted by name.",
         "description": "Returns the tenant's provider accounts, sorted by name.\n\nEach `config` holds only secret references."
       },
@@ -2435,7 +3808,25 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "accountId": {
+              "type": "string",
+              "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 58,
+              "description": "The provider account"
+            }
+          },
+          "required": ["tenantId", "accountId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one provider account of the tenant.",
         "description": "Returns one provider account of the tenant.\n\nAn account of another tenant, or none, is `NOT_FOUND`."
       },
@@ -2450,7 +3841,61 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "accountId": {
+              "type": "string",
+              "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 58,
+              "description": "The provider account"
+            },
+            "query": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "enum": ["metal", "vps"]
+                },
+                "region": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                  "maxLength": 63,
+                  "description": "The provider region"
+                },
+                "gpuModel": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9-]{1,32}$",
+                  "maxLength": 32
+                },
+                "minGpus": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                "minVcpu": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1024
+                },
+                "minMemoryGiB": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16384
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": ["tenantId", "accountId"],
+          "additionalProperties": false
+        },
         "summary": "Asks the provider, through the account, for the machine types it offers; returns them as `items`.",
         "description": "Asks the provider, through the account, for the machine types it offers; returns them as `items`.\n\nThe optional `query` filters by `kind` (`metal` or `vps`), `region`, `gpuModel`, `minGpus`, `minVcpu` and `minMemoryGiB`. The call reaches the provider live. A missing account is `NOT_FOUND`."
       },
@@ -2465,7 +3910,28 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "accountId": {
+              "type": "string",
+              "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 58,
+              "description": "The provider account"
+            },
+            "config": {
+              "description": "The new account config (replaces the old one); credentials as secret references only"
+            }
+          },
+          "required": ["tenantId", "accountId"],
+          "additionalProperties": false
+        },
         "summary": "Replaces the account's `config`, validated as in `create`, and increments its version; returns the account.",
         "description": "Replaces the account's `config`, validated as in `create`, and increments its version; returns the account.\n\nThe provider and the name cannot change. The next provider call builds a new client from the new config. A missing account is `NOT_FOUND`; an invalid config is `INVALID_INPUT`."
       },
@@ -2480,7 +3946,25 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "accountId": {
+              "type": "string",
+              "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 58,
+              "description": "The provider account"
+            }
+          },
+          "required": ["tenantId", "accountId"],
+          "additionalProperties": false
+        },
         "summary": "Deletes a provider account that no pool and no instance uses; returns `deleted: true`.",
         "description": "Deletes a provider account that no pool and no instance uses; returns `deleted: true`.\n\nArchived pools and deleted instances do not count: deleted instances keep their history but drop the reference. A pool that is not archived, or an instance that is not deleted, on the account makes the call `INVALID_STATE`. A missing account is `NOT_FOUND`."
       },
@@ -2495,7 +3979,49 @@
         "phase": "v0.3",
         "module": "vps",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "accountId": {
+              "type": "string",
+              "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 58,
+              "description": "The provider account"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The pool the machine joins"
+            },
+            "machineId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "A machine the account already has (or offerId, not both)"
+            },
+            "offerId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "An offer to claim or order a machine from (or machineId, not both)"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+            }
+          },
+          "required": ["tenantId", "accountId", "poolId", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "Records a request to turn one of the account's machines into a bcd host of a `vps-host` or `metal-host` pool; returns the bootstrap, which the `vps.bootstraps` reconciler then drives to `joined` or `failed`.",
         "description": "Records a request to turn one of the account's machines into a bcd host of a `vps-host` or `metal-host` pool; returns the bootstrap, which the `vps.bootstraps` reconciler then drives to `joined` or `failed`.\n\n- **Input.** Name exactly one of `machineId` (a machine the account already has; starts in `identifying`) or `offerId` (a machine to claim or order; starts in `claiming`). The pool must be owned by the tenant, not archived, and run the `bcd` agent.\n- **Idempotency.** `idempotencyKey` is required. A repeat returns the bootstrap's current status; a different request under the same key is `CONFLICT`.\n- **Errors.** `INVALID_CONFIG` when `vps()` has no `bootstrap` options or the host has no PKI. `UNSUPPORTED` when the provider cannot identify and bootstrap machines. `NOT_FOUND` for a missing account or a pool the tenant does not own, `INVALID_STATE` for an archived pool, `INVALID_INPUT` for a pool of another class or agent.\n- **Events.** `provider.bootstrap.started`; the reconciler later publishes `provider.bootstrap.installed`, `provider.bootstrap.joined` or `provider.bootstrap.failed`. The join token it mints is single-use, bound to the machine, and never returned or stored."
       }
@@ -2601,7 +4127,23 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "manifest": {
+              "type": "object",
+              "description": "The signed release manifest as published (manifest.json): { manifest: base64 canonical body, signatures: [{ kid, sig }] }"
+            }
+          },
+          "required": ["tenantId", "manifest"],
+          "additionalProperties": false
+        },
         "summary": "Verifies a signed bcd release manifest under the configured release pins and records the release; returns it with its per-platform binaries.",
         "description": "Verifies a signed bcd release manifest under the configured release pins and records the release; returns it with its per-platform binaries.\n\n- **Replay.** Registering a manifest whose version is already recorded with the same sequence returns the stored release; the same version with another sequence is `CONFLICT`.\n- **Errors.** `INVALID_INPUT` when the manifest does not verify (`details.reason` says why), when its sequence is not above the latest registered one (a rollback of the release channel, `details.reason` is `rollback`), when it lists several binaries for one platform, or when it lists no Linux binary."
       },
@@ -2616,7 +4158,19 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns every registered release, highest sequence first.",
         "description": "Returns every registered release, highest sequence first.\n\nThe list is not filtered by tenant: releases belong to the platform."
       }
@@ -3038,7 +4592,74 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^v?\\d+\\.\\d+\\.\\d+([-+][0-9A-Za-z.-]+)?$",
+              "description": "The registered bcd release to roll out (semver)"
+            },
+            "poolIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1000,
+              "items": {
+                "type": "string",
+                "pattern": "^pool_[0-9a-z]{26,52}$",
+                "maxLength": 57
+              },
+              "description": "The pools to upgrade (default: every pool the tenant owns); duplicates are dropped"
+            },
+            "waves": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "items": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 100
+              },
+              "default": [1, 10, 50, 100],
+              "description": "Cumulative percentages of nodes per wave: whole numbers, increasing, ending at 100"
+            },
+            "maxFailureRatio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.05,
+              "description": "The share of failed nodes that pauses the rollout"
+            },
+            "soakSeconds": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 604800,
+              "default": 600,
+              "description": "Whole seconds each wave soaks before the next starts"
+            },
+            "upgradeTimeoutSeconds": {
+              "type": "number",
+              "minimum": 60,
+              "maximum": 86400,
+              "default": 900,
+              "description": "Whole seconds a node has to come back on the new version"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$",
+              "maxLength": 128,
+              "description": "A retry with the same key returns the same rollout"
+            }
+          },
+          "required": ["tenantId", "version"],
+          "additionalProperties": false
+        },
         "summary": "Plans a rollout of a registered release to every node that runs bcd in the tenant's pools, or in `poolIds`, and starts it; returns the rollout in `running`.",
         "description": "Plans a rollout of a registered release to every node that runs bcd in the tenant's pools, or in `poolIds`, and starts it; returns the rollout in `running`.\n\n- **Plan.** Nodes are shuffled by a hash of the rollout id and assigned to `waves`, cumulative percentages that must increase and end at 100 (default 1, 10, 50, 100). The other gates default to `maxFailureRatio` 0.05, `soakSeconds` 600 and `upgradeTimeoutSeconds` 900. Nodes that already report the version start as `succeeded`.\n- **Idempotency.** `idempotencyKey` is optional. With a key, the rollout id derives from the tenant, the caller and the key: a repeat for the same version returns the existing rollout, and another version under the key is `CONFLICT`.\n- **Errors.** `NOT_FOUND` when the version is not registered or a listed pool is not an unarchived pool of the tenant. `INVALID_STATE` when no node in scope runs bcd yet. `CONFLICT` with `details.rolloutId` when a node in scope is in another running or paused rollout. `INVALID_INPUT` for gates out of range.\n- **Events.** `rollout.started`; the controller later publishes `rollout.wave`, `rollout.paused` and `rollout.completed`."
       },
@@ -3053,7 +4674,19 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the tenant's 100 most recent rollouts, newest first, each with its node counts by state.",
         "description": "Returns the tenant's 100 most recent rollouts, newest first, each with its node counts by state."
       },
@@ -3068,7 +4701,25 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "rolloutId": {
+              "type": "string",
+              "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 60,
+              "description": "The rollout"
+            }
+          },
+          "required": ["tenantId", "rolloutId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one rollout of the tenant with `nodeList`, each node's wave, state, previous version, timings and error, in rollout order.",
         "description": "Returns one rollout of the tenant with `nodeList`, each node's wave, state, previous version, timings and error, in rollout order.\n\nA rollout of another tenant, or none, is `NOT_FOUND`."
       },
@@ -3083,7 +4734,30 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "rolloutId": {
+              "type": "string",
+              "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 60,
+              "description": "The rollout"
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500,
+              "description": "Why, recorded on the rollout"
+            }
+          },
+          "required": ["tenantId", "rolloutId"],
+          "additionalProperties": false
+        },
         "summary": "Stops a running or paused rollout from starting more nodes and records `reason` (default \"paused by an operator\"); returns the rollout in `paused`.",
         "description": "Stops a running or paused rollout from starting more nodes and records `reason` (default \"paused by an operator\"); returns the rollout in `paused`.\n\nNodes already upgrading still settle. A completed or aborted rollout is `INVALID_STATE`. Publishes `rollout.paused`."
       },
@@ -3098,7 +4772,25 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "rolloutId": {
+              "type": "string",
+              "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 60,
+              "description": "The rollout"
+            }
+          },
+          "required": ["tenantId", "rolloutId"],
+          "additionalProperties": false
+        },
         "summary": "Sets a running or paused rollout back to `running`, clears its reason and wakes the controller; returns the rollout.",
         "description": "Sets a running or paused rollout back to `running`, clears its reason and wakes the controller; returns the rollout.\n\nA rollout paused by the failure gate resumes the same way. A completed or aborted rollout is `INVALID_STATE`. Publishes `rollout.resumed`."
       },
@@ -3113,9 +4805,233 @@
         "phase": "v0.4",
         "module": "rollout",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "rolloutId": {
+              "type": "string",
+              "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 60,
+              "description": "The rollout"
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500,
+              "description": "Why, recorded on the rollout"
+            },
+            "rollback": {
+              "type": "boolean",
+              "default": false,
+              "description": "Also roll upgraded nodes back to the version they ran before"
+            }
+          },
+          "required": ["tenantId", "rolloutId"],
+          "additionalProperties": false
+        },
         "summary": "Ends a running or paused rollout: nodes not yet started are skipped, and with `rollback: true` upgraded nodes go back to the version they ran before; returns the rollout in `aborted`.",
         "description": "Ends a running or paused rollout: nodes not yet started are skipped, and with `rollback: true` upgraded nodes go back to the version they ran before; returns the rollout in `aborted`.\n\n- With `rollback`, nodes `upgrading` or `succeeded` whose previous version is a registered release move to `rolling-back`, and the controller settles them. Without it, nodes still upgrading are marked `failed`.\n- `reason` defaults to \"aborted by an operator\". A completed or aborted rollout is `INVALID_STATE`. Publishes `rollout.aborted`."
+      }
+    ]
+  },
+  {
+    "group": "sandboxTemplates",
+    "slug": "sandbox-templates",
+    "module": "vps",
+    "overview": "",
+    "methods": [
+      {
+        "method": "create",
+        "route": "POST /api/compute/sandboxTemplates/create",
+        "kind": "mutation",
+        "action": "compute:sandboxes:manage",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "list",
+        "route": "POST /api/compute/sandboxTemplates/list",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": true,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "get",
+        "route": "POST /api/compute/sandboxTemplates/get",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-sandbox-template",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "update",
+        "route": "POST /api/compute/sandboxTemplates/update",
+        "kind": "mutation",
+        "action": "compute:sandboxes:manage",
+        "resource": "compute-sandbox-template",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "delete",
+        "route": "POST /api/compute/sandboxTemplates/delete",
+        "kind": "mutation",
+        "action": "compute:sandboxes:manage",
+        "resource": "compute-sandbox-template",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      }
+    ]
+  },
+  {
+    "group": "sandboxes",
+    "slug": "sandboxes",
+    "module": "vps",
+    "overview": "",
+    "methods": [
+      {
+        "method": "create",
+        "route": "POST /api/compute/sandboxes/create",
+        "kind": "mutation",
+        "action": "compute:sandboxes:create",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "list",
+        "route": "POST /api/compute/sandboxes/list",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": true,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "get",
+        "route": "POST /api/compute/sandboxes/get",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "extend",
+        "route": "POST /api/compute/sandboxes/extend",
+        "kind": "mutation",
+        "action": "compute:sandboxes:update",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "snapshot",
+        "route": "POST /api/compute/sandboxes/snapshot",
+        "kind": "mutation",
+        "action": "compute:sandboxes:update",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "exec",
+        "route": "POST /api/compute/sandboxes/exec",
+        "kind": "mutation",
+        "action": "compute:sandboxes:exec",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "delete",
+        "route": "POST /api/compute/sandboxes/delete",
+        "kind": "mutation",
+        "action": "compute:sandboxes:delete",
+        "resource": "compute-sandbox",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "planned",
+        "input": null,
+        "summary": "",
+        "description": ""
       }
     ]
   },
@@ -3141,7 +5057,38 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            },
+            "scope": {
+              "type": "string",
+              "enum": ["tenant", "fleet"],
+              "default": "tenant"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+            }
+          },
+          "required": ["tenantId", "name", "value", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "Stores a secret value under a name and returns its reference and version; a second put with the same name writes a new version.",
         "description": "Stores a secret value under a name and returns its reference and version; a second put with the same name writes a new version.\n\nThe value is at most 64 KiB. A retry whose `idempotencyKey` equals the key of the put that wrote the current version returns that version and writes nothing; the key is not scoped to the calling identity. `scope: 'fleet'` outside the root tenant is `INVALID_INPUT`. The call is `UNAVAILABLE` when no secret store is configured, and `INVALID_STATE` when the existing secret lives in another store than the configured one.\n\nPublishes `security.secret.put` with the reference, name and version, never the value."
       },
@@ -3423,7 +5370,41 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "siteId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "region": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            },
+            "iamRegion": {
+              "type": "string",
+              "maxLength": 63,
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            },
+            "clearIamRegion": {
+              "type": "boolean",
+              "default": false
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": ["tenantId", "siteId"],
+          "additionalProperties": false
+        },
         "summary": "Changes a site's `region` or `iamRegion`, or clears `iamRegion` so IAM uses `region`, and returns the site.",
         "description": "Changes a site's `region` or `iamRegion`, or clears `iamRegion` so IAM uses `region`, and returns the site.\n\nOnly the owner tenant can update a site; a deleted site is `NOT_FOUND`. Naming no change, or both `iamRegion` and `clearIamRegion`, is `INVALID_INPUT`, and a stale `version` is `CONFLICT`. An update that changes nothing returns the site unchanged. Otherwise the new attributes reach every tenant that sees the site, and `site.updated` is published."
       },
@@ -3481,7 +5462,13 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
         "summary": "Reports who is calling: `authenticated: false` without a credential, or the authenticated identity.",
         "description": "Reports who is calling: `authenticated: false` without a credential, or the authenticated identity.\n\nPublic; no IAM decision. When the call carries a credential, IAM authenticates it once and the answer holds the identity id and kind, the tenant, the session kind, whether the session used MFA, and the agent and delegation ids when present. The session id is never returned."
       },
@@ -3496,7 +5483,13 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
         "summary": "Returns the server's name, release version, API base path and the agent protocol versions it speaks.",
         "description": "Returns the server's name, release version, API base path and the agent protocol versions it speaks.\n\nPublic; no IAM decision and no input. The JoinService public keys appear only in the `.well-known/better-compute` document, not in this answer."
       },
@@ -3511,7 +5504,13 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
         "summary": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.",
         "description": "Runs the deployment's read-only health checks and returns the findings, with `ok` false when any finding is an `error`.\n\nDecided as `compute:fleet:admin` on `compute-fleet/global`, which resolves only in the root tenant. The report covers the method catalog, applied migrations, the `btree_gist` extension, `compute_now()` against the database clock, the operations checks (overdue work, command sweeper lag, usage dead letters and backlog, gateway headroom, stale heartbeats, daemon protocol skew, expiring node certificates) and every module's own `selfCheck`. A failing check becomes an `error` finding rather than a failed call."
       }
@@ -3567,7 +5566,47 @@
         "phase": "v0.1",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "projectId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "meter": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+            },
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9_-]{1,256}$"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Lists the tenant's usage windows ordered by window start, optionally for one project, one meter and a time range; returns a page with a cursor.",
         "description": "Lists the tenant's usage windows ordered by window start, optionally for one project, one meter and a time range; returns a page with a cursor.\n\n- Each window carries its billing idempotency key (`cmp:<allocationId>:<windowStartMs>`), meter, quantity, bounds and tags, and, once the usage sink has handed it to IAM billing, `recordedAt` and the `outcome` (`recorded`, `duplicate`, `reattributed` or `dead-lettered`).\n- `from` and `to` (epoch milliseconds) select windows that end after `from` and start before `to`; `to` not after `from` is `INVALID_INPUT`.\n- `limit` is at most 500 (100 by default). A cursor this method did not return is `INVALID_INPUT`."
       },
@@ -3587,7 +5626,40 @@
         "phase": "v0.2",
         "module": "server",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "projectId": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+            },
+            "meter": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+            },
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "format": {
+              "type": "string",
+              "enum": ["csv", "jsonl"]
+            }
+          },
+          "required": ["tenantId", "from", "to"],
+          "additionalProperties": false
+        },
         "summary": "Exports every usage window of a time range as CSV (the default) or JSON Lines, with the window count and the summed quantity per meter.",
         "description": "Exports every usage window of a time range as CSV (the default) or JSON Lines, with the window count and the summed quantity per meter.\n\n- `from` and `to` are required, and the range is at most 93 days; `to` not after `from`, or a longer range, is `INVALID_INPUT`.\n- One export returns at most 50,000 windows; when more match, `truncated` is `true` and the range or meter should be narrowed.\n- CSV has a header row and ISO 8601 timestamps; JSON Lines has one window object per line."
       }
@@ -3610,7 +5682,51 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "x-bc": {
+                "kind": "url"
+              }
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^(\\*|[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)*(\\.\\*)?)$",
+                "x-bc": {
+                  "kind": "string"
+                }
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "x-bc": {
+                "kind": "list"
+              }
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 256,
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "url", "events"],
+          "additionalProperties": false
+        },
         "summary": "Creates an active webhook for a URL and 1 to 20 event type patterns; returns the webhook and its signing secret, which is shown this once.",
         "description": "Creates an active webhook for a URL and 1 to 20 event type patterns; returns the webhook and its signing secret, which is shown this once.\n\n- A pattern is an exact event type, a family such as `reservation.*`, or `*`; a pattern that matches nothing in the event catalog is `INVALID_INPUT` (see `eventTypes`), unless the deployment is configured to accept any pattern.\n- The URL must be absolute, use `https`, carry no credentials and not point at a private, loopback or other non-public address; otherwise `INVALID_INPUT`.\n- A tenant has at most 20 webhooks by default; one more is `QUOTA_EXCEEDED`.\n- The webhook receives events committed after it was created; earlier history is not replayed. The method takes no idempotency key, so a retry creates a second webhook."
       },
@@ -3625,7 +5741,21 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Lists the tenant's webhooks, oldest first, without their secrets.",
         "description": "Lists the tenant's webhooks, oldest first, without their secrets."
       },
@@ -3640,7 +5770,28 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "webhookId": {
+              "type": "string",
+              "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "webhookId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one webhook of the tenant by id, without its secret.",
         "description": "Returns one webhook of the tenant by id, without its secret.\n\n`NOT_FOUND` when the webhook is not the tenant's."
       },
@@ -3655,7 +5806,64 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "webhookId": {
+              "type": "string",
+              "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "x-bc": {
+                "kind": "url"
+              }
+            },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^(\\*|[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)*(\\.\\*)?)$",
+                "x-bc": {
+                  "kind": "string"
+                }
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "x-bc": {
+                "kind": "list"
+              }
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 256,
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "active": {
+              "type": "boolean",
+              "x-bc": {
+                "kind": "boolean"
+              }
+            }
+          },
+          "required": ["tenantId", "webhookId"],
+          "additionalProperties": false
+        },
         "summary": "Changes a webhook's URL, event patterns, description or `active` flag and increments its version; returns the webhook.",
         "description": "Changes a webhook's URL, event patterns, description or `active` flag and increments its version; returns the webhook.\n\n- URL and patterns are checked as in `create` (`INVALID_INPUT`).\n- Setting `active` to `false` pauses the webhook and cancels its pending deliveries.\n- `NOT_FOUND` when the webhook is not the tenant's."
       },
@@ -3670,7 +5878,36 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "webhookId": {
+              "type": "string",
+              "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "keepPreviousSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400,
+              "x-bc": {
+                "kind": "int"
+              }
+            }
+          },
+          "required": ["tenantId", "webhookId"],
+          "additionalProperties": false
+        },
         "summary": "Replaces a webhook's signing secret with a new one; returns the webhook and the new secret, shown this once.",
         "description": "Replaces a webhook's signing secret with a new one; returns the webhook and the new secret, shown this once.\n\n- With `keepPreviousSeconds` (0 to 86,400, default 0), the old secret keeps signing deliveries alongside the new one until then, so receivers can switch without rejecting any; with 0 the old secret stops at once.\n- `NOT_FOUND` when the webhook is not the tenant's."
       },
@@ -3685,7 +5922,28 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "webhookId": {
+              "type": "string",
+              "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "webhookId"],
+          "additionalProperties": false
+        },
         "summary": "Deletes a webhook together with its delivery queue and history; returns `deleted: true`.",
         "description": "Deletes a webhook together with its delivery queue and history; returns `deleted: true`.\n\n`NOT_FOUND` when the webhook is not the tenant's."
       },
@@ -3700,7 +5958,28 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "webhookId": {
+              "type": "string",
+              "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "webhookId"],
+          "additionalProperties": false
+        },
         "summary": "Queues a `webhook.ping` delivery to the webhook, due now; returns the delivery.",
         "description": "Queues a `webhook.ping` delivery to the webhook, due now; returns the delivery.\n\nThe ping is a delivery only: it is not written to the outbox, so `events.list` does not show it. A ping to a paused webhook is cancelled when the delivery worker picks it up. `NOT_FOUND` when the webhook is not the tenant's."
       },
@@ -3715,7 +5994,43 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "webhookId": {
+              "type": "string",
+              "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "state": {
+              "type": "string",
+              "enum": ["pending", "delivered", "dead", "cancelled"],
+              "x-bc": {
+                "kind": "option"
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "x-bc": {
+                "kind": "int"
+              }
+            }
+          },
+          "required": ["tenantId", "webhookId"],
+          "additionalProperties": false
+        },
         "summary": "Lists a webhook's deliveries newest first, optionally filtered by `state` (`pending`, `delivered`, `dead` or `cancelled`), with attempts, the next attempt time and the last status or error.",
         "description": "Lists a webhook's deliveries newest first, optionally filtered by `state` (`pending`, `delivered`, `dead` or `cancelled`), with attempts, the next attempt time and the last status or error.\n\n`limit` is at most 200 (50 by default). `NOT_FOUND` when the webhook is not the tenant's."
       },
@@ -3730,7 +6045,28 @@
         "phase": "v0.3",
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "deliveryId": {
+              "type": "string",
+              "pattern": "^dlv_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId", "deliveryId"],
+          "additionalProperties": false
+        },
         "summary": "Puts a delivery back in the queue, due now, with its attempt count reset; returns the delivery.",
         "description": "Puts a delivery back in the queue, due now, with its attempt count reset; returns the delivery.\n\n- Meant for `dead`, `cancelled` or `delivered` deliveries, for example once a failing endpoint is fixed.\n- The delivery keeps its id, so the `X-Better-Compute-Delivery` header carries the same value as before.\n- `NOT_FOUND` when the delivery is not the tenant's or its webhook is paused."
       },
@@ -3745,7 +6081,21 @@
         "phase": null,
         "module": "events",
         "status": "registered",
-        "input": null,
+        "input": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "x-bc": {
+                "kind": "string"
+              }
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the event catalog that webhook patterns are checked against: the built-in event families plus any plugin families the deployment configured, each with its type, subject, publishing module and description.",
         "description": "Returns the event catalog that webhook patterns are checked against: the built-in event families plus any plugin families the deployment configured, each with its type, subject, publishing module and description.\n\nDecided like the rest of the group, with `compute:webhooks:manage` on `compute-tenant/{tenantId}`. The method comes from the events module and is not in core's API catalog, so it has no phase."
       }
@@ -3768,7 +6118,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node the workflow runs on"
+            },
+            "workflowId": {
+              "type": "string",
+              "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 55,
+              "description": "The workflow"
+            }
+          },
+          "required": ["tenantId", "nodeId", "workflowId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one workflow of the node with all its steps, including each step's phase, state, attempt, command, deadline, result and error.",
         "description": "Returns one workflow of the node with all its steps, including each step's phase, state, attempt, command, deadline, result and error.\n\n`NOT_FOUND` unless the workflow belongs to the tenant and the node."
       },
@@ -3783,7 +6157,37 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node the workflow runs on"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "description": "Page size"
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "The cursor of the previous page"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
         "summary": "Returns a page of the node's workflows with their steps, newest first.",
         "description": "Returns a page of the node's workflows with their steps, newest first.\n\n`limit` defaults to 20 and is at most 100; pass the returned `cursor` to read the next page."
       },
@@ -3798,7 +6202,36 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node the workflow runs on"
+            },
+            "workflowId": {
+              "type": "string",
+              "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 55,
+              "description": "The workflow"
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 512,
+              "description": "Recorded on the workflow"
+            }
+          },
+          "required": ["tenantId", "nodeId", "workflowId"],
+          "additionalProperties": false
+        },
         "summary": "Cancels a workflow: pending steps are cancelled, the in-flight step's command is cancelled, and the cleanup phase runs before the workflow ends `cancelled`.",
         "description": "Cancels a workflow: pending steps are cancelled, the in-flight step's command is cancelled, and the cleanup phase runs before the workflow ends `cancelled`.\n\n- A `pending` or `failed` workflow is cancelled at once, with no cleanup, and publishes `workflow.cancelled`.\n- Aborting a workflow that is already cancelled or cancelling does nothing; aborting a succeeded one is `INVALID_STATE`.\n- The optional `reason` (at most 512 characters) is recorded in the workflow's error.\n\nAborting a workflow that metal owns fails the node; steer metal nodes with `metal.abort` and `metal.recover` instead."
       },
@@ -3813,7 +6246,36 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node the workflow runs on"
+            },
+            "workflowId": {
+              "type": "string",
+              "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 55,
+              "description": "The workflow"
+            },
+            "fromStep": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "The step id to start from (default: the first main step that did not succeed)"
+            }
+          },
+          "required": ["tenantId", "nodeId", "workflowId"],
+          "additionalProperties": false
+        },
         "summary": "Runs a failed workflow again from `fromStep`, by default the first main step that did not succeed; that step and every later main step return to `pending` with the next attempt number, and on-failure and cleanup steps are re-armed.",
         "description": "Runs a failed workflow again from `fromStep`, by default the first main step that did not succeed; that step and every later main step return to `pending` with the next attempt number, and on-failure and cleanup steps are re-armed.\n\n- `INVALID_STATE` unless the workflow is `failed`.\n- `INVALID_INPUT` when `fromStep` is not a main step, or when every main step succeeded.\n- `CONFLICT` when the node has another active workflow.\n\nPublishes `workflow.retried` with the `fromStep`."
       },
@@ -3828,7 +6290,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node the workflow runs on"
+            },
+            "workflowId": {
+              "type": "string",
+              "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 55,
+              "description": "The workflow"
+            }
+          },
+          "required": ["tenantId", "nodeId", "workflowId"],
+          "additionalProperties": false
+        },
         "summary": "Pauses a running workflow: the step in flight finishes, but no further step starts until `resume`.",
         "description": "Pauses a running workflow: the step in flight finishes, but no further step starts until `resume`.\n\n`INVALID_STATE` when the workflow is not `running`, or when it is in its cleanup phase after a failure or abort. Publishes `workflow.paused`."
       },
@@ -3843,7 +6329,31 @@
         "phase": "v0.2",
         "module": "provision",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node the workflow runs on"
+            },
+            "workflowId": {
+              "type": "string",
+              "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 55,
+              "description": "The workflow"
+            }
+          },
+          "required": ["tenantId", "nodeId", "workflowId"],
+          "additionalProperties": false
+        },
         "summary": "Puts a paused workflow back to `running` and queues it to continue with its next step.",
         "description": "Puts a paused workflow back to `running` and queues it to continue with its next step.\n\n`INVALID_STATE` when the workflow is not `paused`. Publishes `workflow.resumed`."
       }

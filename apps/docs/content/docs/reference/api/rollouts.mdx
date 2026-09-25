@@ -34,6 +34,19 @@ Plans a rollout of a registered release to every node that runs bcd in the tenan
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
 
+**Input**
+
+| Field                   | Type           | Required | Constraints                                                    |
+| ----------------------- | -------------- | -------- | -------------------------------------------------------------- |
+| `tenantId`              | string         | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`     |
+| `version`               | string         | yes      | matches `^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$`               |
+| `poolIds`               | list of string |          | 1-1000 items                                                   |
+| `waves`                 | list of number |          | 1-10 items; default `[1,10,50,100]`                            |
+| `maxFailureRatio`       | number         |          | 0-1; default `0.05`                                            |
+| `soakSeconds`           | number         |          | 0-604800; default `600`                                        |
+| `upgradeTimeoutSeconds` | number         |          | 60-86400; default `900`                                        |
+| `idempotencyKey`        | string         |          | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$` |
+
 ## list
 
 `POST /api/compute/rollouts/list`
@@ -44,6 +57,12 @@ Returns the tenant's 100 most recent rollouts, newest first, each with its node 
 - **Authorization:** `compute:fleet:admin` @ `compute-fleet`
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
 
 ## get
 
@@ -58,6 +77,13 @@ A rollout of another tenant, or none, is `NOT_FOUND`.
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
 
+**Input**
+
+| Field       | Type   | Required | Constraints                                                          |
+| ----------- | ------ | -------- | -------------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`           |
+| `rolloutId` | string | yes      | at most 60 characters; matches `^rollout_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## pause
 
 `POST /api/compute/rollouts/pause`
@@ -70,6 +96,14 @@ Nodes already upgrading still settle. A completed or aborted rollout is `INVALID
 - **Authorization:** `compute:fleet:admin` @ `compute-fleet`
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                                                          |
+| ----------- | ------ | -------- | -------------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`           |
+| `rolloutId` | string | yes      | at most 60 characters; matches `^rollout_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `reason`    | string |          | at most 500 characters                                               |
 
 ## resume
 
@@ -84,6 +118,13 @@ A rollout paused by the failure gate resumes the same way. A completed or aborte
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
 
+**Input**
+
+| Field       | Type   | Required | Constraints                                                          |
+| ----------- | ------ | -------- | -------------------------------------------------------------------- |
+| `tenantId`  | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`           |
+| `rolloutId` | string | yes      | at most 60 characters; matches `^rollout_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## abort
 
 `POST /api/compute/rollouts/abort`
@@ -97,3 +138,12 @@ Ends a running or paused rollout: nodes not yet started are skipped, and with `r
 - **Authorization:** `compute:fleet:admin` @ `compute-fleet`
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
+
+**Input**
+
+| Field       | Type    | Required | Constraints                                                          |
+| ----------- | ------- | -------- | -------------------------------------------------------------------- |
+| `tenantId`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`           |
+| `rolloutId` | string  | yes      | at most 60 characters; matches `^rollout_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `reason`    | string  |          | at most 500 characters                                               |
+| `rollback`  | boolean |          | default `false`                                                      |

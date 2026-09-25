@@ -38,6 +38,15 @@ Creates an active webhook for a URL and 1 to 20 event type patterns; returns the
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field         | Type           | Required | Constraints                        |
+| ------------- | -------------- | -------- | ---------------------------------- |
+| `tenantId`    | string         | yes      | matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `url`         | string         | yes      |                                    |
+| `events`      | list of string | yes      | 1-20 items                         |
+| `description` | string         |          | at most 256 characters             |
+
 ## list
 
 `POST /api/compute/webhooks/list`
@@ -48,6 +57,12 @@ Lists the tenant's webhooks, oldest first, without their secrets.
 - **Authorization:** `compute:webhooks:manage` @ `compute-tenant`
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                        |
+| ---------- | ------ | -------- | ---------------------------------- |
+| `tenantId` | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$` |
 
 ## get
 
@@ -61,6 +76,13 @@ Returns one webhook of the tenant by id, without its secret.
 - **Authorization:** `compute:webhooks:manage` @ `compute-tenant`
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                               |
+| ----------- | ------ | -------- | ----------------------------------------- |
+| `tenantId`  | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `webhookId` | string | yes      | matches `^whk_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## update
 
@@ -77,6 +99,17 @@ Changes a webhook's URL, event patterns, description or `active` flag and increm
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field         | Type           | Required | Constraints                               |
+| ------------- | -------------- | -------- | ----------------------------------------- |
+| `tenantId`    | string         | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `webhookId`   | string         | yes      | matches `^whk_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `url`         | string         |          |                                           |
+| `events`      | list of string |          | 1-20 items                                |
+| `description` | string         |          | at most 256 characters                    |
+| `active`      | boolean        |          |                                           |
+
 ## rotateSecret
 
 `POST /api/compute/webhooks/rotateSecret`
@@ -91,6 +124,14 @@ Replaces a webhook's signing secret with a new one; returns the webhook and the 
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field                 | Type    | Required | Constraints                               |
+| --------------------- | ------- | -------- | ----------------------------------------- |
+| `tenantId`            | string  | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `webhookId`           | string  | yes      | matches `^whk_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `keepPreviousSeconds` | integer |          | 0-86400                                   |
+
 ## delete
 
 `POST /api/compute/webhooks/delete`
@@ -103,6 +144,13 @@ Deletes a webhook together with its delivery queue and history; returns `deleted
 - **Authorization:** `compute:webhooks:manage` @ `compute-tenant`
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field       | Type   | Required | Constraints                               |
+| ----------- | ------ | -------- | ----------------------------------------- |
+| `tenantId`  | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `webhookId` | string | yes      | matches `^whk_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## ping
 
@@ -117,6 +165,13 @@ The ping is a delivery only: it is not written to the outbox, so `events.list` d
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field       | Type   | Required | Constraints                               |
+| ----------- | ------ | -------- | ----------------------------------------- |
+| `tenantId`  | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `webhookId` | string | yes      | matches `^whk_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## deliveries
 
 `POST /api/compute/webhooks/deliveries`
@@ -129,6 +184,15 @@ Lists a webhook's deliveries newest first, optionally filtered by `state` (`pend
 - **Authorization:** `compute:webhooks:manage` @ `compute-tenant`
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field       | Type                                               | Required | Constraints                               |
+| ----------- | -------------------------------------------------- | -------- | ----------------------------------------- |
+| `tenantId`  | string                                             | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `webhookId` | string                                             | yes      | matches `^whk_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `state`     | one of `pending`, `delivered`, `dead`, `cancelled` |          |                                           |
+| `limit`     | integer                                            |          | 1-200                                     |
 
 ## redeliver
 
@@ -145,6 +209,13 @@ Puts a delivery back in the queue, due now, with its attempt count reset; return
 - **Module:** `events`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                               |
+| ------------ | ------ | -------- | ----------------------------------------- |
+| `tenantId`   | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `deliveryId` | string | yes      | matches `^dlv_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## eventTypes
 
 `POST /api/compute/webhooks/eventTypes`
@@ -157,3 +228,9 @@ Decided like the rest of the group, with `compute:webhooks:manage` on `compute-t
 - **Authorization:** `compute:webhooks:manage`
 - **Module:** `events`
 - **Phase:** not in PLAN.md §9.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                        |
+| ---------- | ------ | -------- | ---------------------------------- |
+| `tenantId` | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$` |

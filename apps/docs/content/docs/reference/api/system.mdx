@@ -28,6 +28,10 @@ Public; no IAM decision. When the call carries a credential, IAM authenticates i
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+Takes an empty object: `{}`.
+
 ## version
 
 `POST /api/compute/system/version`
@@ -41,6 +45,10 @@ Public; no IAM decision and no input. The JoinService public keys appear only in
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+Takes an empty object: `{}`.
+
 ## selfCheck
 
 `POST /api/compute/system/selfCheck`
@@ -53,3 +61,7 @@ Decided as `compute:fleet:admin` on `compute-fleet/global`, which resolves only 
 - **Authorization:** `compute:fleet:admin` @ `compute-fleet`
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
+
+**Input**
+
+Takes an empty object: `{}`.

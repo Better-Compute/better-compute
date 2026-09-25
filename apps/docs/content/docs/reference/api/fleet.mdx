@@ -29,6 +29,12 @@ Objects that fleet never named appear under their ids. Archived pools and archiv
 - **Module:** `fleet`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+
 ## plan
 
 `POST /api/compute/fleet/plan`
@@ -43,6 +49,14 @@ Diffs a FleetConfig document against the tenant's current state; returns the cha
 - **Authorization:** `compute:fleet:admin` @ `compute-fleet`
 - **Module:** `fleet`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                |
+| ---------- | ------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `config`   | object  | yes      |                                                            |
+| `prune`    | boolean |          | default `false`                                            |
 
 ## apply
 
@@ -61,6 +75,15 @@ Plans the document again and runs every planned call as the caller, all in one t
 - **Module:** `fleet`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type    | Required | Constraints                                                |
+| ---------- | ------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `config`   | object  | yes      |                                                            |
+| `prune`    | boolean |          | default `false`                                            |
+| `planHash` | string  |          | at most 64 characters; matches `^[0-9a-f]{64}$`            |
+
 ## status
 
 `POST /api/compute/fleet/status`
@@ -73,3 +96,9 @@ Returns the tenant's last applied document's plan hash, who applied it and when,
 - **Authorization:** `compute:fleet:admin` @ `compute-fleet`
 - **Module:** `fleet`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |

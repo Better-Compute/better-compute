@@ -29,6 +29,13 @@ The pool must be owned by or offered to the tenant; otherwise the call is `NOT_F
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## create
 
 `POST /api/compute/flavors/create`
@@ -44,6 +51,19 @@ Adds a flavor to a `vps-host` or `provider` pool the tenant owns and returns it 
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field       | Type    | Required | Constraints                                                       |
+| ----------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`    | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `name`      | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |
+| `vcpu`      | integer | yes      | 1-1024                                                            |
+| `memoryGiB` | integer | yes      | 1-16384                                                           |
+| `diskGiB`   | integer | yes      | 1-65536                                                           |
+| `gpus`      | integer |          | 0-16; default `0`                                                 |
+| `offerId`   | string  |          | 1-128 characters                                                  |
+
 ## update
 
 `POST /api/compute/flavors/update`
@@ -57,6 +77,19 @@ The input is the full shape, as for `create`. An omitted `offerId` keeps the sto
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field       | Type    | Required | Constraints                                                       |
+| ----------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`    | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `name`      | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |
+| `vcpu`      | integer | yes      | 1-1024                                                            |
+| `memoryGiB` | integer | yes      | 1-16384                                                           |
+| `diskGiB`   | integer | yes      | 1-65536                                                           |
+| `gpus`      | integer |          | 0-16; default `0`                                                 |
+| `offerId`   | string  |          | 1-128 characters                                                  |
+
 ## delete
 
 `POST /api/compute/flavors/delete`
@@ -69,3 +102,11 @@ An archived flavor disappears from `list` and can no longer be used to create or
 - **Authorization:** `compute:flavors:manage` @ `compute-pool`
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `poolId`   | string | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `name`     | string | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |

@@ -32,6 +32,22 @@ Publishes `security.join-token.created`, whose `pinned` field says whether the t
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field                | Type    | Required | Constraints                                                             |
+| -------------------- | ------- | -------- | ----------------------------------------------------------------------- |
+| `tenantId`           | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `poolId`             | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`   |
+| `maxUses`            | integer |          | 1-10000; default `1`                                                    |
+| `ttlSeconds`         | integer | yes      | 60-86400                                                                |
+| `expect`             | object  |          |                                                                         |
+| `expect.productUuid` | string  |          | at most 64 characters; matches `^[0-9A-Fa-f-]{8,64}$`                   |
+| `expect.serial`      | string  |          | at most 128 characters; matches `^[A-Za-z0-9._:/+-]{1,128}$`            |
+| `expect.mac`         | string  |          | at most 17 characters; matches `^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$` |
+| `expect.gpuUuid`     | string  |          | at most 68 characters; matches `^GPU-[0-9A-Fa-f-]{8,64}$`               |
+| `allowReclaim`       | boolean |          | default `false`                                                         |
+| `idempotencyKey`     | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._~:/+=-]{1,128}$`          |
+
 ## list
 
 `POST /api/compute/joinTokens/list`

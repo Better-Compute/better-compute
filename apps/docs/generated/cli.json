@@ -645,6 +645,68 @@
       ]
     },
     {
+      "name": "forward",
+      "aliases": [],
+      "group": "Access",
+      "summary": "Forward a local port to a port of a running instance",
+      "description": "forward listens on --bind (default 127.0.0.1) at --local-port (default: the same as --port; 0 picks a free one) and forwards each connection to --port on the instance through its own tcp tunnel (tunnels.open, compute:instances:exec on the instance), like ssh -L. It runs until Ctrl-C. The tunnels run over the server’s WebSocket, so it needs --url (or BETTER_COMPUTE_URL). A connection is re-authorized like any tunnel: revoking your session or the delegation closes it. Binding anything but loopback lets whoever reaches that address use your access.",
+      "usage": "better-compute forward --tenant ID --instance ID --port PORT [--local-port PORT] [--bind HOST] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--instance",
+          "value": "ID",
+          "optional": false,
+          "description": "The instance"
+        },
+        {
+          "flag": "--port",
+          "value": "PORT",
+          "optional": false,
+          "description": "The port on the instance"
+        },
+        {
+          "flag": "--local-port",
+          "value": "PORT",
+          "optional": true,
+          "description": "The local port (default: --port; 0 picks a free one)"
+        },
+        {
+          "flag": "--bind",
+          "value": "HOST",
+          "optional": true,
+          "description": "The local address to listen on",
+          "default": "127.0.0.1"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        }
+      ],
+      "examples": [
+        "better-compute forward --url https://compute.example.com --tenant org_acme --instance inst_01k5w… --port 5432",
+        "better-compute forward --instance inst_01k5w… --port 8888 --local-port 0"
+      ]
+    },
+    {
       "name": "reserve",
       "aliases": [],
       "group": "Capacity",

@@ -42,6 +42,24 @@ Each call creates a new node; there is no idempotency key. Publishes `node.enrol
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field               | Type                     | Required | Constraints                                                     |
+| ------------------- | ------------------------ | -------- | --------------------------------------------------------------- |
+| `tenantId`          | string                   | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`      |
+| `siteId`            | string                   | yes      | 1-128 characters                                                |
+| `poolId`            | string                   | yes      | 1-128 characters                                                |
+| `bmc`               | object                   | yes      |                                                                 |
+| `bmc.address`       | string                   | yes      | 1-512 characters                                                |
+| `bmc.driver`        | any                      |          | matches `^[a-z][a-z0-9-]{0,63}$`                                |
+| `bmc.credentials`   | string,object            | yes      | at most 2048 characters; matches `^(secret\|vault\|env)://\S+$` |
+| `bmc.tlsSpkiSha256` | any                      |          | matches `^[0-9A-Fa-f]{64}$`                                     |
+| `macs`              | list of any              |          | 0-16 items                                                      |
+| `productUuid`       | string                   |          | 1-64 characters                                                 |
+| `arch`              | one of `x86_64`, `arm64` |          | default `"x86_64"`                                              |
+| `uefi`              | boolean                  |          | default `true`                                                  |
+| `hardwareProfile`   | string                   |          | 1-64 characters                                                 |
+
 ## manage
 
 `POST /api/compute/metal/manage`
@@ -54,6 +72,13 @@ Moves a `ready` node back to `enrolling` to re-verify BMC access; the reconciler
 - **Authorization:** `compute:nodes:provision` @ `compute-node`
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## inspect
 
@@ -68,6 +93,13 @@ Moves a `ready` node to `inspecting`, where the machine boots the ramdisk and re
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## provide
 
 `POST /api/compute/metal/provide`
@@ -80,6 +112,13 @@ Moves a `ready` node to `commissioning`, which runs DCGM diagnostics, a quick wi
 - **Authorization:** `compute:nodes:provision` @ `compute-node`
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## deploy
 
@@ -94,6 +133,15 @@ The call records `profileId` and `profileVersion` without running the profile; r
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field            | Type    | Required | Constraints                                                       |
+| ---------------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`         | string  | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `profileId`      | string  | yes      | 1-128 characters                                                  |
+| `profileVersion` | integer | yes      | at least 1                                                        |
+
 ## undeploy
 
 `POST /api/compute/metal/undeploy`
@@ -107,6 +155,14 @@ Moves a `deployed` or `rescue` node to `releasing`, which wipes its disks with t
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type                                                   | Required | Constraints                                                       |
+| ---------- | ------------------------------------------------------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string                                                 | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string                                                 | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `wipe`     | one of `none`, `quick`, `secure-erase`, `crypto-erase` |          | default `"quick"`                                                 |
+
 ## rescue
 
 `POST /api/compute/metal/rescue`
@@ -119,6 +175,13 @@ Moves a `deployed` node to `rescue`, whose workflow boots the rescue ramdisk for
 - **Authorization:** `compute:nodes:provision` @ `compute-node`
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## unrescue
 
@@ -138,6 +201,13 @@ Publishes `node.provision.unrescuing` with the `workflowId`. If the workflow fai
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## abort
 
 `POST /api/compute/metal/abort`
@@ -150,6 +220,14 @@ Legal from `enrolling`, `inspecting`, `commissioning`, `deploying` and `releasin
 - **Authorization:** `compute:nodes:provision` @ `compute-node`
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `reason`   | string |          | 1-512 characters                                                  |
 
 ## recover
 
@@ -164,6 +242,13 @@ It clears `failedFrom` and `lastError` but leaves maintenance on. `INVALID_STATE
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## retire
 
 `POST /api/compute/metal/retire`
@@ -176,6 +261,13 @@ Legal from `adopting`, `adopted`, `enrolling`, `ready` and `failed`; `INVALID_ST
 - **Authorization:** `compute:nodes:provision` @ `compute-node`
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                       |
+| ---------- | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## power
 
@@ -193,3 +285,11 @@ The command expires five minutes after it is queued. Its idempotency key derives
 - **Authorization:** `compute:nodes:power` @ `compute-node`
 - **Module:** `metal`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type                                                                            | Required | Constraints                                                       |
+| ---------- | ------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string                                                                          | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string                                                                          | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `action`   | one of `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi` | yes      |                                                                   |

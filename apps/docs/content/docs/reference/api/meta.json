@@ -23,6 +23,8 @@
     "releases",
     "reservations",
     "rollouts",
+    "sandbox-templates",
+    "sandboxes",
     "secrets",
     "site-tokens",
     "sites",

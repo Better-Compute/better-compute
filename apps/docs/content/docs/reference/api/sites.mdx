@@ -98,6 +98,17 @@ Only the owner tenant can update a site; a deleted site is `NOT_FOUND`. Naming n
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field            | Type    | Required | Constraints                                                       |
+| ---------------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `siteId`         | string  | yes      | at most 64 characters; matches `^site_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `region`         | string  |          | at most 63 characters; matches `^[a-z][a-z0-9-]{0,62}$`           |
+| `iamRegion`      | string  |          | at most 63 characters; matches `^[a-z][a-z0-9-]{0,62}$`           |
+| `clearIamRegion` | boolean |          | default `false`                                                   |
+| `version`        | integer |          | at least 1                                                        |
+
 ## delete
 
 `POST /api/compute/sites/delete`

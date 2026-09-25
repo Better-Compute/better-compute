@@ -31,6 +31,14 @@ Returns one workflow of the node with all its steps, including each step's phase
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`     | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `workflowId` | string | yes      | at most 55 characters; matches `^wf_[0-9a-hjkmnp-tv-z]{26,52}$`   |
+
 ## list
 
 `POST /api/compute/workflows/list`
@@ -43,6 +51,15 @@ Returns a page of the node's workflows with their steps, newest first.
 - **Authorization:** `compute:workflows:read` @ `compute-node`
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                                       |
+| ---------- | ------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`   | string  | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `limit`    | integer |          | 1-100; default `20`                                               |
+| `cursor`   | string  |          | at most 256 characters                                            |
 
 ## abort
 
@@ -61,6 +78,15 @@ Aborting a workflow that metal owns fails the node; steer metal nodes with `meta
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`     | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `workflowId` | string | yes      | at most 55 characters; matches `^wf_[0-9a-hjkmnp-tv-z]{26,52}$`   |
+| `reason`     | string |          | at most 512 characters                                            |
+
 ## retry
 
 `POST /api/compute/workflows/retry`
@@ -78,6 +104,15 @@ Publishes `workflow.retried` with the `fromStep`.
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`     | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `workflowId` | string | yes      | at most 55 characters; matches `^wf_[0-9a-hjkmnp-tv-z]{26,52}$`   |
+| `fromStep`   | string |          | at most 256 characters                                            |
+
 ## pause
 
 `POST /api/compute/workflows/pause`
@@ -91,6 +126,14 @@ Pauses a running workflow: the step in flight finishes, but no further step star
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`     | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `workflowId` | string | yes      | at most 55 characters; matches `^wf_[0-9a-hjkmnp-tv-z]{26,52}$`   |
+
 ## resume
 
 `POST /api/compute/workflows/resume`
@@ -103,3 +146,11 @@ Puts a paused workflow back to `running` and queues it to continue with its next
 - **Authorization:** `compute:workflows:manage` @ `compute-node`
 - **Module:** `provision`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `nodeId`     | string | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `workflowId` | string | yes      | at most 55 characters; matches `^wf_[0-9a-hjkmnp-tv-z]{26,52}$`   |

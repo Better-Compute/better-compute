@@ -28,6 +28,13 @@ Verifies a signed bcd release manifest under the configured release pins and rec
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `manifest` | object | yes      |                                                            |
+
 ## list
 
 `POST /api/compute/releases/list`
@@ -40,3 +47,9 @@ The list is not filtered by tenant: releases belong to the platform.
 - **Authorization:** `compute:fleet:admin` @ `compute-fleet`
 - **Module:** `rollout`
 - **Phase:** v0.4 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |

@@ -35,6 +35,22 @@ Admits a VM from a pool, flavor and image after one IAM decision on the draft; r
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field            | Type                        | Required | Constraints                                                             |
+| ---------------- | --------------------------- | -------- | ----------------------------------------------------------------------- |
+| `tenantId`       | string                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `poolId`         | string                      | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+| `projectId`      | string                      |          | at most 56 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$`        |
+| `flavor`         | string                      | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `imageId`        | string                      | yes      | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
+| `sshKeys`        | list of string              |          | 0-32 items; default `[]`                                                |
+| `userData`       | string                      |          | at most 32768 characters                                                |
+| `desiredState`   | one of `running`, `stopped` |          | default `"running"`                                                     |
+| `idempotencyKey` | string                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `wait`           | object                      |          |                                                                         |
+| `wait.timeoutMs` | integer                     | yes      | 0-30000                                                                 |
+
 ## list
 
 `POST /api/compute/instances/list`
@@ -47,6 +63,17 @@ Returns a page of the tenant's instances, newest first, with a `cursor` when mor
 - **Authorization:** `compute:instances:read` @ `compute-tenant` + items
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field      | Type                                                                                                                                              | Required | Constraints                                                       |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string                                                                                                                                            | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `scope`    | one of `mine`, `all`                                                                                                                              |          | default `"mine"`                                                  |
+| `state`    | one of `pending`, `scheduling`, `provisioning`, `starting`, `running`, `stopped`, `rebooting`, `resizing`, `deleting`, `deleted`, `error`, `lost` |          |                                                                   |
+| `poolId`   | string                                                                                                                                            |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `limit`    | integer                                                                                                                                           |          | 1-200                                                             |
+| `cursor`   | string                                                                                                                                            |          | at most 57 characters; matches `^inst_[0-9a-z]{26,52}$`           |
 
 ## get
 
@@ -61,6 +88,13 @@ Drafts and instances of other tenants are `NOT_FOUND`.
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `instanceId` | string | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## start
 
 `POST /api/compute/instances/start`
@@ -73,6 +107,13 @@ An instance in `error` that has a host or a provider machine moves to `starting`
 - **Authorization:** `compute:instances:update` @ `compute-instance`
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `instanceId` | string | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## stop
 
@@ -87,6 +128,13 @@ An instance being deleted is `INVALID_STATE`. Publishes `instance.stopping`.
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `instanceId` | string | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## resize
 
 `POST /api/compute/instances/resize`
@@ -100,6 +148,14 @@ Growth is charged to quota first and shrinkage refunded after; if the host lacks
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `instanceId` | string | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `flavor`     | string | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`      |
+
 ## delete
 
 `POST /api/compute/instances/delete`
@@ -112,3 +168,10 @@ The call is idempotent: an instance already `deleted` is returned unchanged, and
 - **Authorization:** `compute:instances:delete` @ `compute-instance`
 - **Module:** `vps`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `instanceId` | string | yes      | at most 57 characters; matches `^inst_[0-9a-hjkmnp-tv-z]{26,52}$` |

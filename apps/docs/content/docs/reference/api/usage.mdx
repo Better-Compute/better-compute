@@ -29,6 +29,18 @@ Lists the tenant's usage windows ordered by window start, optionally for one pro
 - **Module:** `server`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field       | Type    | Required | Constraints                                                      |
+| ----------- | ------- | -------- | ---------------------------------------------------------------- |
+| `tenantId`  | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `projectId` | string  |          | at most 64 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `meter`     | string  |          | at most 128 characters; matches `^[a-z][a-z0-9_.-]{0,127}$`      |
+| `from`      | integer |          | at least 0                                                       |
+| `to`        | integer |          | at least 0                                                       |
+| `limit`     | integer |          | 1-500; default `100`                                             |
+| `cursor`    | string  |          | at most 256 characters; matches `^[A-Za-z0-9_-]{1,256}$`         |
+
 ## export
 
 `POST /api/compute/usage/export`
@@ -43,3 +55,14 @@ Exports every usage window of a time range as CSV (the default) or JSON Lines, w
 - **Authorization:** `compute:usage:read` @ `compute-tenant` or `compute:usage:read` @ `compute-project`
 - **Module:** `server`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field       | Type                  | Required | Constraints                                                      |
+| ----------- | --------------------- | -------- | ---------------------------------------------------------------- |
+| `tenantId`  | string                | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`       |
+| `projectId` | string                |          | at most 64 characters; matches `^prj_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `meter`     | string                |          | at most 128 characters; matches `^[a-z][a-z0-9_.-]{0,127}$`      |
+| `from`      | integer               | yes      | at least 0                                                       |
+| `to`        | integer               | yes      | at least 0                                                       |
+| `format`    | one of `csv`, `jsonl` |          |                                                                  |

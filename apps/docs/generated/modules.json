@@ -62,7 +62,7 @@
     },
     {
       "name": "vps",
-      "groups": ["flavors", "instances", "providerAccounts"],
+      "groups": ["flavors", "instances", "providerAccounts", "sandboxTemplates", "sandboxes"],
       "migrations": [
         "vps/0001_instances",
         "vps/0002_sealed_user_data",
@@ -111,6 +111,7 @@
     "node",
     "nodespec",
     "outbox-dispatch",
+    "provision.site-cache",
     "rollout",
     "site-boot",
     "tenancy",

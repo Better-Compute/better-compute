@@ -28,6 +28,13 @@ Returns the node's latest inventory snapshot: its hash, its sections and when it
 - **Module:** `inventory`
 - **Phase:** v0.1 (registered)
 
+**Input**
+
+| Field      | Type   | Required | Constraints                                |
+| ---------- | ------ | -------- | ------------------------------------------ |
+| `tenantId` | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `nodeId`   | string | yes      | matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+
 ## history
 
 `POST /api/compute/inventory/history`
@@ -40,6 +47,15 @@ Lists the node's inventory snapshots newest first; returns a page with a cursor.
 - **Authorization:** `compute:nodes:read` @ `compute-node`
 - **Module:** `inventory`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints                                |
+| ---------- | ------- | -------- | ------------------------------------------ |
+| `tenantId` | string  | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`         |
+| `nodeId`   | string  | yes      | matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `limit`    | integer |          | 1-100                                      |
+| `cursor`   | string  |          | matches `^inv_[0-9a-hjkmnp-tv-z]{26,52}$`  |
 
 ## diff
 
@@ -55,3 +71,12 @@ Compares two of the node's snapshots, named by snapshot id or hash, and returns 
 - **Authorization:** `compute:nodes:read` @ `compute-node`
 - **Module:** `inventory`
 - **Phase:** v0.2 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                               |
+| ---------- | ------ | -------- | --------------------------------------------------------- |
+| `tenantId` | string | yes      | matches `^[A-Za-z0-9._:-]{1,128}$`                        |
+| `nodeId`   | string | yes      | matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$`                |
+| `from`     | string |          | matches `^(inv_[0-9a-hjkmnp-tv-z]{26,52}\|[0-9a-f]{64})$` |
+| `to`       | string |          | matches `^(inv_[0-9a-hjkmnp-tv-z]{26,52}\|[0-9a-f]{64})$` |
