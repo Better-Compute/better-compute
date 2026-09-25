@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ComputeModule } from '@better-compute/core';
 import { auditModule } from '@better-compute/audit';
 import { defineHost, watchAuthorizer } from '@better-compute/cli';
@@ -56,6 +59,25 @@ export interface ComposeState {
   /** Set once serve built the deployment and called the host factory. */
   compute?: BetterCompute<any, any>;
   database?: SqlExecutor;
+  /** The gateway's serving key/cert files (host.gateway.tlsFiles, re-read every 50 ms): rewrite to rotate. */
+  tlsFiles: { key: string; cert: string; ca: string };
+}
+
+/** Issues a serving certificate for the compose gateway: a fresh key and a cert for `localhost`. */
+export async function issueServingCertificate(bundle: PkiBundle) {
+  const key = generateP256KeyPair();
+  const issued = await bundle.servingCa.issue(key.publicKey, {
+    usage: 'server',
+    dnsSans: ['localhost'],
+    role: 'gateway',
+    ttlSeconds: 86_400,
+  });
+  return {
+    key: privateKeyPem(key.privateKey),
+    cert: [issued.certificate, ...issued.chain.slice(0, -1)].map((der) => toPem(der)).join(''),
+    /** The leaf (DER). */
+    certificate: issued.certificate,
+  };
 }
 
 const stateKey = Symbol.for('better-compute.tests.compose');
@@ -66,14 +88,14 @@ export const composeState = (): ComposeState | undefined =>
 export async function composedConfig() {
   const iam = await createEmbeddedTestIam({ now: () => Date.now() });
   const bundle = createPkiBundle({ trustDomain: TRUST_DOMAIN });
-  const gatewayKey = generateP256KeyPair();
-  const issued = await bundle.servingCa.issue(gatewayKey.publicKey, {
-    usage: 'server',
-    dnsSans: ['localhost'],
-    role: 'gateway',
-    ttlSeconds: 86_400,
-  });
-  const state: ComposeState = { iam, bundle };
+  // The gateway's serving certificate as files, as `pki issue-gateway` writes them.
+  const serving = await issueServingCertificate(bundle);
+  const dir = mkdtempSync(join(tmpdir(), 'bc-compose-tls-'));
+  const tlsFiles = { key: join(dir, 'gateway.key'), cert: join(dir, 'gateway.crt'), ca: join(dir, 'node-ca.pem') };
+  writeFileSync(tlsFiles.key, serving.key);
+  writeFileSync(tlsFiles.cert, serving.cert);
+  writeFileSync(tlsFiles.ca, bundle.nodeCa.export().certificatesPem);
+  const state: ComposeState = { iam, bundle, tlsFiles };
   (globalThis as Record<symbol, ComposeState>)[stateKey] = state;
   const metrics = createMetrics();
   standardMetrics(metrics);
@@ -142,11 +164,9 @@ export async function composedConfig() {
     gateway: {
       region: 'eu-1',
       listen: { host: '127.0.0.1', port: 0 },
-      tls: {
-        key: privateKeyPem(gatewayKey.privateKey),
-        cert: [issued.certificate, ...issued.chain.slice(0, -1)].map((der) => toPem(der)).join(''),
-        ca: bundle.nodeCa.export().certificatesPem,
-      },
+      // Key, cert and node-CA roots from files, re-read when renewed (checked every 50 ms here).
+      tls: {},
+      tlsFiles: { ...tlsFiles, intervalMs: 50 },
       // vps() is registered: its orphan detection joins the default XID status handler.
       options: { reports: { status: instanceStatusHandler({ events: compute.context.events }) } },
     },

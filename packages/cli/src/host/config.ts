@@ -19,6 +19,16 @@ import type { HostTunnelsConfig } from './tunnels.js';
 // }));
 // ```
 
+/** PEM files of a TLS listener, watched for renewals. */
+export interface HostTlsFiles {
+  key: string;
+  cert: string;
+  /** Client CA roots, when the listener verifies clients. */
+  ca?: string;
+  /** How often the files are checked (default 60 000 ms). */
+  intervalMs?: number;
+}
+
 /** The gateway role (§7): an mTLS listener for daemons, and optionally the internal control API. */
 export interface HostGatewayConfig {
   /** The gateway's region, as in `sites.region`. */
@@ -31,10 +41,22 @@ export interface HostGatewayConfig {
    */
   tls: SecureServerOptions;
   /**
+   * The serving key/cert (and CA roots) as files instead of in `tls`: read at start and re-read when they change
+   * (every `intervalMs`, default 60 s), so a renewed certificate (`pki issue-gateway`, 30 days) takes effect for
+   * new handshakes without a restart; open sessions keep theirs. The WS fallback reloads with it.
+   */
+  tlsFiles?: HostTlsFiles;
+  /**
    * The internal control API the api role dials (pokes, tunnels, revocations), over mTLS from the internal CA.
    * `url` is what this gateway advertises in its directory row.
    */
-  internal?: { url: string; listen?: { host?: string; port?: number }; tls: SecureServerOptions };
+  internal?: {
+    url: string;
+    listen?: { host?: string; port?: number };
+    tls: SecureServerOptions;
+    /** Internal-CA files, re-read when they change (see `tlsFiles`). */
+    tlsFiles?: HostTlsFiles;
+  };
   /**
    * How daemons authenticate (default: the deployment's `pki.nodeCa`, its revocation set, and
    * `pki.join.trustDomain`). The role refuses to start without roots and a trust domain.
@@ -192,10 +214,16 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       throw new ComputeError('INVALID_CONFIG', 'host.gateway must be an object');
     if (typeof gateway.region !== 'string' || !gateway.region)
       throw new ComputeError('INVALID_CONFIG', 'host.gateway.region is required');
-    if (!isRecord(gateway.tls) || !gateway.tls.key || !gateway.tls.cert || !gateway.tls.ca)
+    const files = gateway.tlsFiles;
+    if (
+      !isRecord(gateway.tls) ||
+      !(gateway.tls.key || files?.key) ||
+      !(gateway.tls.cert || files?.cert) ||
+      !(gateway.tls.ca || files?.ca)
+    )
       throw new ComputeError(
         'INVALID_CONFIG',
-        'host.gateway.tls needs key and cert (gateway serving CA) and ca (node CA roots): daemons connect over mTLS',
+        'host.gateway.tls (or tlsFiles) needs key and cert (gateway serving CA) and ca (node CA roots): daemons connect over mTLS',
       );
     if (
       gateway.ws !== undefined &&
@@ -211,7 +239,7 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       if (!isRecord(gateway.internal.tls))
         throw new ComputeError(
           'INVALID_CONFIG',
-          'host.gateway.internal.tls is required (internal CA, mutual TLS)',
+          'host.gateway.internal.tls (or tlsFiles) is required (internal CA, mutual TLS)',
         );
     }
   }

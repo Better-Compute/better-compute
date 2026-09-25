@@ -1,4 +1,6 @@
 import { createPrivateKey, type KeyObject } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import type { SecureServerOptions } from 'node:http2';
 import { ComputeError } from '@better-compute/core';
 import {
   gatewayCollector,
@@ -15,7 +17,7 @@ import {
   type RevocationSet,
 } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
-import type { HostGatewayConfig } from './config.js';
+import type { HostGatewayConfig, HostTlsFiles } from './config.js';
 
 // The gateway role of `serve` (PLAN.md §7, §8.1, §13): `createGateway` on the deployment's store and runtime
 // ports, the report hooks every module needs (capacity's allocation transitions, inventory's XID health),
@@ -37,6 +39,8 @@ interface GatewayLike {
 interface Served {
   port: number;
   close(graceMs?: number): Promise<void>;
+  /** Swaps the listener's key/cert (and ca) for new handshakes. */
+  setTls(material: { key?: unknown; cert?: unknown; ca?: unknown }): void;
 }
 /** The revocation set the gateway enforces and the revocation feed fills (pki's `RevocationSet`). */
 export type RevocationSetLike = RevocationSet;
@@ -57,6 +61,11 @@ interface GatewayPackage {
     trustDomain?: string;
   }): unknown;
   xidStatusHandler: unknown;
+  watchTlsFiles(
+    files: { key: string; cert: string; ca?: string },
+    apply: (material: { key: Buffer; cert: Buffer; ca?: Buffer }) => void,
+    options?: { intervalMs?: number; onError?: (error: unknown) => void; onReload?: () => void },
+  ): { close(): void };
 }
 
 export interface RunningGateway {
@@ -169,14 +178,33 @@ function pemCertificates(pem: unknown): Uint8Array[] {
   );
 }
 
+/** `tls` with the key/cert/ca that `files` names read over it (the files win). */
+export function tlsWithFiles<T extends SecureServerOptions>(tls: T, files: HostTlsFiles | undefined): T {
+  if (!files) return tls;
+  return {
+    ...tls,
+    key: readFileSync(files.key),
+    cert: readFileSync(files.cert),
+    ...(files.ca ? { ca: readFileSync(files.ca) } : {}),
+  };
+}
+
 /** Starts the gateway role; `stop()` drains it and closes its listeners. */
 export async function startGateway(
   compute: AnyCompute,
   options: AnyComputeOptions,
-  config: HostGatewayConfig,
+  given: HostGatewayConfig,
   note: (message: string) => void,
   metrics?: MetricsRegistry,
 ): Promise<RunningGateway> {
+  // Certificates from files: read now, and re-read when renewed (below).
+  const config: HostGatewayConfig = {
+    ...given,
+    tls: tlsWithFiles(given.tls, given.tlsFiles),
+    ...(given.internal
+      ? { internal: { ...given.internal, tls: tlsWithFiles(given.internal.tls, given.internal.tlsFiles) } }
+      : {}),
+  };
   const identity = gatewayIdentity(options, config);
   const pkg = gatewayPackage as unknown as GatewayPackage;
   const gateway = pkg.createGateway(
@@ -199,7 +227,9 @@ export async function startGateway(
   // Sessions by role, stream headroom, draining, lease held, in-flight commands: sampled at scrape.
   if (metrics) gatewayCollector(metrics, () => [gateway as unknown as SampledGateway]);
   const listeners: Served[] = [];
+  const watches: { close(): void }[] = [];
   const stop = async () => {
+    for (const watch of watches.splice(0)) watch.close();
     feed.stop();
     await gateway.drain({ reason: 'shutdown' }).catch(() => undefined);
     for (const listener of listeners.splice(0).reverse())
@@ -245,6 +275,33 @@ export async function startGateway(
       listeners.push(internal);
       running.internalPort = internal.port;
       note(`Gateway control API on port ${internal.port} (${config.internal.url})`);
+      const files = given.internal?.tlsFiles;
+      if (files)
+        watches.push(
+          pkg.watchTlsFiles(files, (material) => internal.setTls(material), {
+            intervalMs: files.intervalMs ?? 60_000,
+            onError: (error) => note(`Gateway control API certificate not reloaded: ${String(error)}`),
+            onReload: () => note('Gateway control API certificate reloaded'),
+          }),
+        );
+    }
+    // A renewed serving certificate reaches new handshakes on the daemon listener and the WS fallback.
+    const files = given.tlsFiles;
+    if (files) {
+      const served = listeners.slice(0, config.ws ? 2 : 1);
+      watches.push(
+        pkg.watchTlsFiles(
+          files,
+          (material) => {
+            for (const listener of served) listener.setTls(material);
+          },
+          {
+            intervalMs: files.intervalMs ?? 60_000,
+            onError: (error) => note(`Gateway serving certificate not reloaded: ${String(error)}`),
+            onReload: () => note('Gateway serving certificate reloaded'),
+          },
+        ),
+      );
     }
   } catch (error) {
     await stop().catch(() => undefined);

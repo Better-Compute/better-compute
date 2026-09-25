@@ -1,6 +1,7 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { connect, type ClientHttp2Session } from 'node:http2';
+import { connect as tlsConnect } from 'node:tls';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -43,7 +44,13 @@ import {
 } from '@better-compute/protocol';
 import { betterCompute, type BetterCompute } from '@better-compute/server';
 import { createDevJoinKeys } from '@better-compute/testing';
-import { composeState, COMPOSE_SECRET, everyModule, METRICS_TOKEN } from './support/compose.js';
+import {
+  composeState,
+  COMPOSE_SECRET,
+  everyModule,
+  issueServingCertificate,
+  METRICS_TOKEN,
+} from './support/compose.js';
 
 // The serve composition audit (PLAN.md §8.1-8.2, §14 topologies): every module of the repository in one
 // control plane, as a production better-compute.config.ts registers them, first in process (registry,
@@ -698,6 +705,36 @@ export const host = composed.host;
         expect(again.frames.some((frame) => frame.msg.case === 'welcome')).toBe(false);
         live.close();
         again.close();
+
+        // host.gateway.tlsFiles: a renewed serving certificate (pki issue-gateway rewrites the files) reaches new
+        // handshakes without a restart.
+        const servedLeaf = () =>
+          new Promise<Buffer>((resolve, reject) => {
+            const socket = tlsConnect({
+              host: '127.0.0.1',
+              port: gatewayPort,
+              servername: 'localhost',
+              ca: toPem(bundle.rootCertificate),
+              ALPNProtocols: ['h2'],
+            });
+            socket.once('secureConnect', () => {
+              resolve(socket.getPeerCertificate().raw);
+              socket.destroy();
+            });
+            socket.once('error', reject);
+          });
+        const { tlsFiles } = composeState()!;
+        const renewed = await issueServingCertificate(bundle);
+        expect(Buffer.from(renewed.certificate).equals(await servedLeaf())).toBe(false);
+        await writeFile(tlsFiles.key, renewed.key);
+        await writeFile(tlsFiles.cert, renewed.cert);
+        let rotated = false;
+        for (let tries = 0; tries < 100 && !rotated; tries++) {
+          rotated = Buffer.from(renewed.certificate).equals(await servedLeaf());
+          if (!rotated) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(rotated).toBe(true);
+        expect(notes.join('\n')).toContain('Gateway serving certificate reloaded');
 
         // node.joined reaches the SSE watch through the outbox.
         const reader = watch.body!.getReader();
