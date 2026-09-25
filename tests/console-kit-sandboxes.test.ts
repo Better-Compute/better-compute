@@ -66,6 +66,37 @@ describe('sandboxes view', () => {
     expect(sandboxExecCommand(SBX)).toBe(`better-compute sandbox exec ${SBX}`);
   });
 
+  it('manages templates for administrators', async () => {
+    const { api, calls } = requester();
+    const view = createSandboxesView(api, { tenantId: 'org_acme' });
+    await view.createTemplate({
+      name: 'python',
+      poolId: 'pool_1',
+      flavor: 'small',
+      imageId: 'img_1',
+      maxTtlSeconds: 14_400,
+      warm: { min: 2 },
+    });
+    await view.updateTemplate('sbxt_1', { warm: { min: 3, max: 4 } });
+    await view.deleteTemplate('sbxt_1');
+    expect(calls).toEqual([
+      {
+        path: 'sandboxTemplates/create',
+        input: {
+          tenantId: 'org_acme',
+          name: 'python',
+          poolId: 'pool_1',
+          flavor: 'small',
+          imageId: 'img_1',
+          maxTtlSeconds: 14_400,
+          warm: { min: 2 },
+        },
+      },
+      { path: 'sandboxTemplates/update', input: { tenantId: 'org_acme', templateId: 'sbxt_1', warm: { min: 3, max: 4 } } },
+      { path: 'sandboxTemplates/delete', input: { tenantId: 'org_acme', templateId: 'sbxt_1' } },
+    ]);
+  });
+
   it('counts down to the expiry', () => {
     const now = Date.UTC(2026, 8, 25, 12);
     expect(timeLeft(now + 12 * 60_000 + 3_000, now)).toEqual({ ms: 723_000, text: '12m 03s', urgent: false });

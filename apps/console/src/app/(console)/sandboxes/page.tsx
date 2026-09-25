@@ -58,6 +58,8 @@ export default function SandboxesPage() {
     }
   };
   const template = templates.find((item) => item.id === templateId);
+  const reloadTemplates = async () => setTemplates(await view.templates());
+  const [draft, setDraft] = useState({ name: '', poolId: '', flavor: '', imageId: '', warmMin: 0, maxHours: 4 });
 
   return (
     <>
@@ -100,6 +102,147 @@ export default function SandboxesPage() {
           </form>
         )}
         <ErrorLine error={error} />
+      </section>
+
+      <section className="panel">
+        <h3>Templates</h3>
+        <p className="muted">
+          What sandboxes start from, and how many stay warm (billed as warm vCPU-hours). Managing them needs
+          compute:sandboxes:manage.
+        </p>
+        {templates.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Pool / flavor / image</th>
+                <th>Lifetime</th>
+                <th>Warm</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {templates.map((item) => (
+                <tr key={item.id}>
+                  <td>
+                    {item.name}
+                    <div className="muted">
+                      <code>{item.id}</code>
+                    </div>
+                  </td>
+                  <td>
+                    {item.poolId} / {item.flavor} / {item.imageId}
+                  </td>
+                  <td>
+                    {Math.round(item.defaultTtlSeconds / 60)} min (max {Math.round(item.maxTtlSeconds / 3600)} h)
+                  </td>
+                  <td>
+                    {item.warm.min}–{item.warm.max}
+                  </td>
+                  <td>
+                    <div className="row">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          void act(async () => {
+                            await view.updateTemplate(item.id, {
+                              warm: { min: item.warm.min + 1, max: Math.max(item.warm.max, item.warm.min + 1) },
+                            });
+                            await reloadTemplates();
+                          })
+                        }
+                      >
+                        Warm +1
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || item.warm.min === 0}
+                        onClick={() =>
+                          void act(async () => {
+                            await view.updateTemplate(item.id, { warm: { min: item.warm.min - 1, max: item.warm.max } });
+                            await reloadTemplates();
+                          })
+                        }
+                      >
+                        Warm −1
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          window.confirm(`Delete the template ${item.name}?`) &&
+                          void act(async () => {
+                            await view.deleteTemplate(item.id);
+                            await reloadTemplates();
+                          })
+                        }
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <form
+          className="form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void act(async () => {
+              await view.createTemplate({
+                name: draft.name.trim(),
+                poolId: draft.poolId.trim(),
+                flavor: draft.flavor.trim(),
+                imageId: draft.imageId.trim(),
+                maxTtlSeconds: draft.maxHours * 3600,
+                ...(draft.warmMin > 0 ? { warm: { min: draft.warmMin } } : {}),
+              });
+              setDraft({ name: '', poolId: '', flavor: '', imageId: '', warmMin: 0, maxHours: 4 });
+              await reloadTemplates();
+            });
+          }}
+        >
+          <div className="row">
+            {(['name', 'poolId', 'flavor', 'imageId'] as const).map((field) => (
+              <label key={field}>
+                {field === 'poolId' ? 'Pool' : field === 'imageId' ? 'Image' : field[0]!.toUpperCase() + field.slice(1)}
+                <input
+                  value={draft[field]}
+                  onChange={(event) => setDraft({ ...draft, [field]: event.target.value })}
+                />
+              </label>
+            ))}
+            <label>
+              Warm
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={draft.warmMin}
+                onChange={(event) => setDraft({ ...draft, warmMin: Number(event.target.value) })}
+              />
+            </label>
+            <label>
+              Max lifetime (h)
+              <input
+                type="number"
+                min={1}
+                max={720}
+                value={draft.maxHours}
+                onChange={(event) => setDraft({ ...draft, maxHours: Number(event.target.value) })}
+              />
+            </label>
+          </div>
+          <button
+            type="submit"
+            disabled={busy || !draft.name.trim() || !draft.poolId.trim() || !draft.flavor.trim() || !draft.imageId.trim()}
+          >
+            Create template
+          </button>
+        </form>
       </section>
 
       <label className="row">

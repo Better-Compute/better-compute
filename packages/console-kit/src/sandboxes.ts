@@ -64,6 +64,21 @@ export interface SandboxesView extends ValueResource<{ items: SandboxRow[]; curs
   extend(sandboxId: string, byMs: number): Promise<SandboxRow>;
   snapshot(sandboxId: string, options?: { includeMemory?: boolean; keep?: boolean }): Promise<unknown>;
   remove(sandboxId: string): Promise<void>;
+  /** Tenant administrators (compute:sandboxes:manage): templates and their warm pools. */
+  createTemplate(input: TemplateFields & { name: string; poolId: string; flavor: string; imageId: string }): Promise<SandboxTemplateRow>;
+  updateTemplate(templateId: string, fields: TemplateFields): Promise<SandboxTemplateRow>;
+  deleteTemplate(templateId: string): Promise<void>;
+}
+
+/** Template fields an administrator sets (sandboxTemplates.create / update). */
+export interface TemplateFields {
+  flavor?: string;
+  imageId?: string;
+  runtime?: string;
+  defaultTtlSeconds?: number;
+  maxTtlSeconds?: number;
+  warm?: { min: number; max?: number };
+  network?: 'egress' | 'private' | 'none';
 }
 
 const newKey = () =>
@@ -124,5 +139,11 @@ export function createSandboxesView(
       change(async () => {
         await api.$request('sandboxes/delete', { tenantId, sandboxId });
       }),
+    createTemplate: (input) => api.$request<SandboxTemplateRow>('sandboxTemplates/create', { tenantId, ...input }),
+    updateTemplate: (templateId, fields) =>
+      api.$request<SandboxTemplateRow>('sandboxTemplates/update', { tenantId, templateId, ...fields }),
+    deleteTemplate: async (templateId) => {
+      await api.$request('sandboxTemplates/delete', { tenantId, templateId });
+    },
   };
 }
