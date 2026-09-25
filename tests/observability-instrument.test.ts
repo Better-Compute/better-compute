@@ -8,6 +8,7 @@ import {
   meteredAttestor,
   meteredGatewayServices,
   meteredProvider,
+  revocationFeedCollector,
 } from '@better-compute/observability';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
 import { defineProvider } from '@better-compute/vps';
@@ -129,26 +130,58 @@ describe('gatewayCollector', () => {
       { role: 1, inFlight: 1, upgradeRequired: true },
       { role: 2, inFlight: 0, upgradeRequired: false },
     ];
-    gatewayCollector(registry, () => [
-      {
-        status: () => ({
-          id: 'gw_1',
-          sessions: sessions.length,
-          maxStreams: 10,
-          draining: false,
-          leaseEpoch: 3,
-        }),
-        sessions: () => sessions,
-      },
-    ]);
+    gatewayCollector(
+      registry,
+      () => [
+        {
+          status: () => ({
+            id: 'gw_1',
+            sessions: sessions.length,
+            maxStreams: 10,
+            draining: false,
+            leaseEpoch: 3,
+            loops: {
+              dispatch: { consecutiveFailures: 0, failures: 2, lastOkMs: 99_000 },
+              specs: { consecutiveFailures: 4, failures: 4, lastOkMs: null },
+            },
+          }),
+          sessions: () => sessions,
+        },
+      ],
+      { now: () => 100_000 },
+    );
     let text = registry.expose();
     expect(text).toContain('better_compute_gateway_open_sessions{gateway="gw_1",role="1"} 2');
     expect(text).toContain('better_compute_gateway_stream_headroom{gateway="gw_1"} 7');
     expect(text).toContain('better_compute_gateway_commands_in_flight{gateway="gw_1"} 3');
     expect(text).toContain('better_compute_gateway_lease_held{gateway="gw_1"} 1');
+    expect(text).toContain(
+      'better_compute_gateway_loop_consecutive_failures{gateway="gw_1",loop="specs"} 4',
+    );
+    expect(text).toContain(
+      'better_compute_gateway_loop_last_ok_age_seconds{gateway="gw_1",loop="dispatch"} 1',
+    );
+    expect(text).toContain(
+      'better_compute_gateway_loop_last_ok_age_seconds{gateway="gw_1",loop="specs"} -1',
+    );
     sessions = sessions.slice(0, 1);
     text = registry.expose();
     expect(text).toContain('better_compute_gateway_stream_headroom{gateway="gw_1"} 9');
+  });
+});
+
+describe('revocationFeedCollector', () => {
+  it('reports each feed’s failed polls in a row', () => {
+    const registry = createMetrics();
+    const feed = { consecutiveFailures: 0 };
+    revocationFeedCollector(registry, () => ({ gateway: feed }));
+    expect(registry.expose()).toContain(
+      'better_compute_revocation_feed_consecutive_failures{feed="gateway"} 0',
+    );
+    feed.consecutiveFailures = 3;
+    expect(registry.expose()).toContain(
+      'better_compute_revocation_feed_consecutive_failures{feed="gateway"} 3',
+    );
   });
 });
 

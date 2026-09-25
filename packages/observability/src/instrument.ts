@@ -167,6 +167,11 @@ export interface SampledGateway {
     maxStreams: number;
     draining: boolean;
     leaseEpoch: number | null;
+    /** Per background loop (dispatch, lease, liveness, specs, status). */
+    loops?: Record<
+      string,
+      { consecutiveFailures: number; failures: number; lastOkMs: number | null }
+    >;
   };
   sessions(): readonly { role: unknown; inFlight: number; upgradeRequired: boolean }[];
 }
@@ -175,7 +180,9 @@ export interface SampledGateway {
 export function gatewayCollector(
   registry: MetricsRegistry,
   gateways: () => readonly SampledGateway[],
+  options: { now?: () => number } = {},
 ): void {
+  const now = options.now ?? Date.now;
   const sessions = registry.gauge('gateway_open_sessions', 'Open agent sessions by role', [
     'gateway',
     'role',
@@ -203,6 +210,21 @@ export function gatewayCollector(
   const upgrade = registry.gauge('gateway_sessions_upgrade_required', 'Sessions told to upgrade', [
     'gateway',
   ]);
+  const loopFailing = registry.gauge(
+    'gateway_loop_consecutive_failures',
+    'Failed runs of a gateway loop since its last clean one (alert on a stuck loop)',
+    ['gateway', 'loop'],
+  );
+  const loopFailures = registry.gauge(
+    'gateway_loop_failures',
+    'Failed runs of a gateway loop since start',
+    ['gateway', 'loop'],
+  );
+  const loopAge = registry.gauge(
+    'gateway_loop_last_ok_age_seconds',
+    'Seconds since a gateway loop last ran cleanly (-1 before its first clean run)',
+    ['gateway', 'loop'],
+  );
   registry.collect(() => {
     for (const gateway of gateways()) {
       const status = gateway.status();
@@ -222,7 +244,32 @@ export function gatewayCollector(
       lease.set({ gateway: id }, status.leaseEpoch === null ? 0 : 1);
       inFlight.set({ gateway: id }, flying);
       upgrade.set({ gateway: id }, upgrading);
+      for (const [name, loop] of Object.entries(status.loops ?? {})) {
+        const labels = { gateway: id, loop: labelValue(name) };
+        loopFailing.set(labels, loop.consecutiveFailures);
+        loopFailures.set(labels, loop.failures);
+        loopAge.set(
+          labels,
+          loop.lastOkMs === null ? -1 : Math.max(0, (now() - loop.lastOkMs) / 1000),
+        );
+      }
     }
+  });
+}
+
+/** Samples revocation feeds (pki `createRevocationFeed`) at every scrape: polls failed in a row, per feed name. */
+export function revocationFeedCollector(
+  registry: MetricsRegistry,
+  feeds: () => Readonly<Record<string, { readonly consecutiveFailures: number }>>,
+): void {
+  const failing = registry.gauge(
+    'revocation_feed_consecutive_failures',
+    'Revocation feed polls failed in a row: revoked certificates keep their sessions while it fails',
+    ['feed'],
+  );
+  registry.collect(() => {
+    for (const [name, feed] of Object.entries(feeds()))
+      failing.set({ feed: labelValue(name) }, feed.consecutiveFailures);
   });
 }
 
