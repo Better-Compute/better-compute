@@ -38,7 +38,7 @@ import {
   type SignerTrust,
 } from '@better-compute/pki';
 import { pglite } from '@better-compute/postgres/pglite';
-import type { JoinRequest } from '@better-compute/protocol';
+import { AgentRole, type JoinRequest } from '@better-compute/protocol';
 import {
   betterCompute,
   gatewayReportHandlers,
@@ -48,6 +48,7 @@ import {
   type WorkerOptions,
 } from '@better-compute/server';
 import { FakeDaemon, type FakeDaemonOptions } from '../daemon/fake-daemon.js';
+import type { FakeKind } from '../daemon/kinds.js';
 import { runAgentJoin } from '../daemon/join.js';
 import { fakeHardware, type FakeHardwareVariant } from '../fake-hw.js';
 import { fakeIam } from '../fake-iam.js';
@@ -152,6 +153,16 @@ export interface DevJoinOptions {
   seed?: string;
 }
 
+export interface DevSiteJoinOptions {
+  siteId: string;
+  /** Site agents to join (default 1; a site token admits at most 16). */
+  count?: number;
+  /** Kinds these agents run besides the defaults (BMC and boot work). */
+  kinds?: Record<string, FakeKind | null>;
+  /** Seeds their machines' identifiers (default: random per call). */
+  seed?: string;
+}
+
 export interface DevFleetOptions {
   /** A control plane built with `keys.pki` and `notifier`, initialized and started by the host. */
   compute: BetterCompute<any, any>;
@@ -199,6 +210,12 @@ export interface DevFleet {
    * token and a fresh key, verifies the signed response, then starts its FakeDaemon. Resolves to the node ids.
    */
   join(options: DevJoinOptions): Promise<string[]>;
+  /**
+   * Enrolls site agents (`bcd site`, PLAN.md §3.3 step 0): mints a role-`site` token with
+   * `siteTokens.create`, joins each agent through the Join RPC, then starts its FakeDaemon (role site)
+   * with `kinds` added (a site's BMC and boot work, e.g. metal's). Resolves to the node ids.
+   */
+  joinSite(options: DevSiteJoinOptions): Promise<string[]>;
   /**
    * Resolves once every node is in `provisionState` (default `adopted`) and has applied a spec of generation
    * ≥ 1: the point where the placer considers it (a node adopted at generation 0 is not yet schedulable).
@@ -309,9 +326,10 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   };
 
   // The agent's Join loop (deferrals included), with a sealed-token join.
-  const joinOne = async (token: string, hardware: ReturnType<typeof fakeHardware>) => {
+  const joinOne = async (token: string, hardware: ReturnType<typeof fakeHardware>, role: AgentRole = AgentRole.NODE) => {
     const { body, privateKey } = await runAgentJoin({
       send,
+      role,
       signer: keys.agent.signer,
       nodeCaRoots: keys.agent.nodeCaRoots,
       wait: async (ms) => {
@@ -386,6 +404,40 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
           nodeId,
           hardware,
           // The key its certificate certifies: attested results (wipes, diagnostics) are node-signed.
+          nodeKey: privateKey,
+          scheduler,
+          dial: () => h2c.session(nodeId),
+        });
+        daemons.set(nodeId, daemon);
+        daemon.start();
+        ids.push(nodeId);
+      }
+      return ids;
+    },
+    async joinSite(siteOptions) {
+      const count = siteOptions.count ?? 1;
+      if (!Number.isSafeInteger(count) || count < 1 || count > 16)
+        throw new ComputeError('INVALID_INPUT', 'count must be a whole number from 1 to 16');
+      const seed = siteOptions.seed ?? Math.random().toString(36).slice(2, 10);
+      const minted = await api.siteTokens.create(root, {
+        tenantId,
+        siteId: siteOptions.siteId,
+        ttlSeconds: 3600,
+        maxUses: count,
+        idempotencyKey: `dev-site-agents-${seed}-${count}`,
+      });
+      const ids: string[] = [];
+      for (let index = 0; index < count; index++) {
+        const hardware = fakeHardware({ seed: `site-${seed}-${index}` });
+        const { nodeId, siteId, serial, privateKey } = await joinOne(minted.token, hardware, AgentRole.SITE);
+        joined.set(nodeId, { siteId, serial });
+        const daemon = new FakeDaemon({
+          backoff: { minMs: 100, maxMs: 5_000 },
+          ...options.daemon,
+          nodeId,
+          role: AgentRole.SITE,
+          hardware,
+          ...(siteOptions.kinds ? { kinds: { ...options.daemon?.kinds, ...siteOptions.kinds } } : {}),
           nodeKey: privateKey,
           scheduler,
           dial: () => h2c.session(nodeId),

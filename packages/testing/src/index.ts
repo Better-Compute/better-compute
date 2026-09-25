@@ -160,6 +160,7 @@ export type {
   DevJoinKeys,
   DevJoinOptions,
   DevPool,
+  DevSiteJoinOptions,
   DevStack,
   DevStackIam,
   DevStackOptions,
