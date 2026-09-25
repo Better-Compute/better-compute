@@ -1,3 +1,4 @@
+import { generateKeyPairSync, type KeyObject } from 'node:crypto';
 import {
   ComputeError,
   draftId,
@@ -1199,7 +1200,16 @@ async function createManagedInstance(
   // The range may have gone since the template was written; never start an instance bcd must stop.
   await assertNetworkDeliverable(tx, template.poolId, template.network);
   // Rendered, then sealed, before the row exists: resolved secrets never touch the table (§6).
-  const rendered = await instanceUserData(deps, template, spec.instanceId);
+  const { userData: rendered, hostCertified: generated } = await instanceUserData(
+    deps,
+    template,
+    spec.instanceId,
+  );
+  // A memory restore resumes the source guest (its host key, certified or not); anything else
+  // boots with the key just rendered.
+  const hostCertified = spec.restoreFrom?.includeMemory
+    ? spec.restoreFrom.hostCertified === true
+    : generated;
   const sealed = rendered !== null && deps.broker !== undefined && !isSecretRef(rendered);
   const userData = sealed ? await deps.broker!.put(template.tenantId, rendered!) : rendered;
   const desiredState =
@@ -1217,9 +1227,9 @@ async function createManagedInstance(
     `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, image, ssh_keys, user_data,
                             runtime, draft, state, desired_state, owner_identity_id, agent_id, delegation_id,
                             idempotency_key, request_hash, sandbox_id, warm_template_id, restore_from, network_policy,
-                            warm_template_version, user_data_sealed, version)
+                            warm_template_version, user_data_sealed, host_certified, version)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, '{}', $8, $9, false, 'pending', $10, $11, $12, $13,
-             $14, decode($15, 'hex'), $16, $17, $18::jsonb, $19, $20, $21, 1)`,
+             $14, decode($15, 'hex'), $16, $17, $18::jsonb, $19, $20, $21, $22, 1)`,
     [
       spec.instanceId,
       template.tenantId,
@@ -1242,6 +1252,7 @@ async function createManagedInstance(
       template.network === 'egress' ? null : template.network,
       spec.warmTemplateId ? template.instanceVersion : null,
       sealed,
+      hostCertified,
     ],
   );
   let row = (await readInstance(tx, spec.instanceId, { lock: true }))!;
@@ -1289,6 +1300,8 @@ export function sandboxUserData(
   parts: {
     exec?: { caPublicKey: string; account: string };
     env?: Readonly<Record<string, string>>;
+    /** A host key certified by the sandbox CA: sshd presents it, so exec clients pin the guest. */
+    hostKey?: { privateKeyPem: string; certificate: string };
   },
 ): string {
   const text = (value: string) => JSON.stringify(value);
@@ -1314,7 +1327,23 @@ export function sandboxUserData(
       `    content: ${text(`${sandboxPrincipal(exec.account, instanceId)}\n`)}`,
       '  - path: "/etc/ssh/sshd_config.d/10-bc-sandbox.conf"',
       '    permissions: "0644"',
-      `    content: ${text('TrustedUserCAKeys /etc/ssh/bc_sandbox_ca.pub\nAuthorizedPrincipalsFile /etc/ssh/bc_sandbox_principals/%u\n')}`,
+      `    content: ${text(
+        `TrustedUserCAKeys /etc/ssh/bc_sandbox_ca.pub\nAuthorizedPrincipalsFile /etc/ssh/bc_sandbox_principals/%u\n${
+          parts.hostKey
+            ? 'HostKey /etc/ssh/bc_sandbox_host_key\nHostCertificate /etc/ssh/bc_sandbox_host_key-cert.pub\n'
+            : ''
+        }`,
+      )}`,
+    );
+  if (exec && parts.hostKey)
+    lines.push(
+      '  - path: "/etc/ssh/bc_sandbox_host_key"',
+      '    permissions: "0600"',
+      '    owner: "root:root"',
+      `    content: ${text(parts.hostKey.privateKeyPem)}`,
+      '  - path: "/etc/ssh/bc_sandbox_host_key-cert.pub"',
+      '    permissions: "0644"',
+      `    content: ${text(`${parts.hostKey.certificate}\n`)}`,
     );
   if (env.length > 0)
     lines.push(
@@ -1349,9 +1378,10 @@ async function instanceUserData(
   deps: InstanceDeps,
   template: TemplateRow,
   instanceId: string,
-): Promise<string | null> {
+): Promise<{ userData: string | null; hostCertified: boolean }> {
   const names = Object.keys(template.env);
-  if (!deps.sandboxExec && names.length === 0) return template.userData ?? null;
+  if (!deps.sandboxExec && names.length === 0)
+    return { userData: template.userData ?? null, hostCertified: false };
   assertEnvDeliverable(deps, template.env, template.userData);
   const env: Record<string, string> = {};
   for (const name of names.sort()) {
@@ -1364,10 +1394,76 @@ async function instanceUserData(
   const own = isSecretRef(template.userData)
     ? await deps.secrets.resolve(template.userData)
     : template.userData;
-  return sandboxUserData(own, instanceId, {
-    ...(deps.sandboxExec ? { exec: deps.sandboxExec } : {}),
-    env,
+  const hostKey = await certifiedHostKey(deps, instanceId);
+  return {
+    userData: sandboxUserData(own, instanceId, {
+      ...(deps.sandboxExec ? { exec: deps.sandboxExec } : {}),
+      env,
+      ...(hostKey ? { hostKey } : {}),
+    }),
+    hostCertified: hostKey !== undefined,
+  };
+}
+
+/** Host certificates live as long as the sandbox CA allows (30 days), a minute short of it. */
+const hostCertificateMs = 30 * 24 * 3600_000 - 60_000;
+
+/** An OpenSSH `ecdsa-sha2-nistp256` public key line. */
+function opensshEcdsaP256(publicKey: KeyObject): string {
+  const jwk = publicKey.export({ format: 'jwk' });
+  const field = (bytes: Buffer) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    return Buffer.concat([length, bytes]);
+  };
+  const point = Buffer.concat([
+    Buffer.from([4]),
+    Buffer.from(jwk.x!, 'base64url'),
+    Buffer.from(jwk.y!, 'base64url'),
+  ]);
+  const blob = Buffer.concat([
+    field(Buffer.from('ecdsa-sha2-nistp256')),
+    field(Buffer.from('nistp256')),
+    field(point),
+  ]);
+  return `ecdsa-sha2-nistp256 ${blob.toString('base64')}`;
+}
+
+/**
+ * A fresh P-256 host key for the guest, certified for its instance id by the sandbox CA
+ * (`vps({ sandboxExec: { certifyHostKey } })`); none without the hook. The private key reaches the
+ * guest only inside broker-sealed user data, so the hook needs the broker.
+ */
+async function certifiedHostKey(
+  deps: InstanceDeps,
+  instanceId: string,
+): Promise<{ privateKeyPem: string; certificate: string } | undefined> {
+  const certify = deps.sandboxExec?.certifyHostKey;
+  if (!certify) return undefined;
+  if (!deps.broker)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'Certified sandbox host keys travel in sealed user data: they need the secret broker',
+    );
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const certificate = await certify({
+    instanceId,
+    principals: [instanceId],
+    publicKey: opensshEcdsaP256(publicKey),
+    validBefore: deps.clock.now() + hostCertificateMs,
   });
+  if (
+    typeof certificate !== 'string' ||
+    !/^ecdsa-sha2-nistp256-cert-v01@openssh\.com [A-Za-z0-9+/=]+( .*)?$/.test(certificate)
+  )
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'certifyHostKey must return an OpenSSH host certificate line',
+    );
+  return {
+    privateKeyPem: privateKey.export({ type: 'sec1', format: 'pem' }) as string,
+    certificate,
+  };
 }
 
 /** Where a sandbox's template env lands in the guest (root-only). */
@@ -1472,6 +1568,9 @@ export async function completeCreateSandbox(
               ...(source.cpuModel ? { cpuModel: source.cpuModel } : {}),
               ...(source.principalInstanceId
                 ? { principalInstanceId: source.principalInstanceId }
+                : {}),
+              ...(source.hostCertified !== undefined
+                ? { hostCertified: source.hostCertified }
                 : {}),
             },
           }

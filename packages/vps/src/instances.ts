@@ -95,8 +95,23 @@ export interface InstanceDeps {
    * (v0.5, §3.7) Sandbox instances trust this SSH user CA for `sandboxes.exec`: their user data gains
    * a cloud-config part that creates `account` and accepts certificates for `<account>@<instanceId>`.
    */
-  sandboxExec?: { caPublicKey: string; account: string };
+  sandboxExec?: { caPublicKey: string; account: string; certifyHostKey?: CertifyHostKey };
 }
+
+/**
+ * Certifies a sandbox instance's SSH host key with the sandbox CA (the tunnels module's
+ * `sandboxSsh.issueHostCertificate`), so exec clients pin the guest instead of trusting on first use.
+ * Returns the OpenSSH host certificate line.
+ */
+export type CertifyHostKey = (input: {
+  instanceId: string;
+  /** Host names the certificate is valid for (the instance id). */
+  principals: string[];
+  /** The host key's OpenSSH public key line (ecdsa-sha2-nistp256). */
+  publicKey: string;
+  /** Epoch ms. */
+  validBefore: number;
+}) => string | Promise<string>;
 
 // --- Input --------------------------------------------------------------------------------------
 
@@ -295,6 +310,7 @@ interface RawInstance {
   sandbox_id: string | null;
   warm_template_id: string | null;
   restore_from: InstanceRestore | string | null;
+  host_certified: boolean | null;
 }
 
 /** The sandbox snapshot an instance boots from (§3.7), verified by the host against `sha256`. */
@@ -311,6 +327,8 @@ export interface InstanceRestore {
    * SSH principal of this (original) instance: `sandboxes.exec` signs for it.
    */
   principalInstanceId?: string;
+  /** A memory restore keeps the source guest's host key: certified or not, as the source was. */
+  hostCertified?: boolean;
 }
 
 /**
@@ -374,6 +392,8 @@ export interface InstanceRow {
   warmTemplateId?: string;
   /** The snapshot it boots from (a restored sandbox, §3.7). */
   restoreFrom?: InstanceRestore;
+  /** Its guest's SSH host key is certified by the sandbox CA (exec clients pin it). */
+  hostCertified: boolean;
 }
 
 const json = <T>(value: T | string): T =>
@@ -390,6 +410,7 @@ function toRow(raw: RawInstance): InstanceRow {
     imageId: raw.image_id,
     sshKeys: raw.ssh_keys ?? [],
     userDataSealed: raw.user_data_sealed === true,
+    hostCertified: raw.host_certified === true,
     runtime: raw.runtime,
     draft: raw.draft,
     state: raw.state,
@@ -423,7 +444,7 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   i.provider_account_id, i.external_id, i.addresses, i.reported_state, i.quota_charged,
   i.owner_identity_id, i.agent_id, i.delegation_id, i.idempotency_key,
   encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class,
-  i.sandbox_id, i.warm_template_id, i.restore_from`;
+  i.sandbox_id, i.warm_template_id, i.restore_from, i.host_certified`;
 
 export async function readInstance(
   tx: SqlTx,

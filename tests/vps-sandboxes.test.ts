@@ -13,6 +13,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { postgres, useSimClock, setSimClock } from '@better-compute/postgres';
+import { createSshCertificateAuthority, parseSshCertificate } from '@better-compute/pki';
 import { pglite } from '@better-compute/postgres/pglite';
 import {
   capacityMigrations,
@@ -1468,6 +1469,62 @@ describe('exec trust', () => {
     expect(userData).toContain('Content-Type: text/x-shellscript; charset="utf-8"');
     expect(userData).toContain('echo hello');
     expect(userData.trimEnd().endsWith(`--bc-sandbox-${sandbox.instanceId}--`)).toBe(true);
+  });
+
+  it('gives each guest a host key certified by the sandbox CA, sealed with its user data', async () => {
+    const ca = createSshCertificateAuthority();
+    const certifying = vps({
+      runtimes: ['cloud-hypervisor'],
+      images,
+      sandboxExec: {
+        caPublicKey,
+        certifyHostKey: ({ instanceId, principals, publicKey, validBefore }) =>
+          ca.issueHostCertificate({
+            publicKey,
+            principals,
+            keyId: `host/${instanceId}`,
+            validBefore,
+          }).certificate,
+      },
+    });
+    const certifyingApi = certifying.api!(moduleContext(db)) as VpsApi;
+    const template = await createTemplate();
+    const create = (key: string) =>
+      run(
+        (certifyingApi.sandboxes as Record<string, Definition>).create!,
+        { tenantId: 'acme', templateId: template.id, idempotencyKey: key },
+        alice,
+      ) as Promise<SandboxView>;
+    // The private key travels only in sealed user data.
+    await expect(create('no-broker')).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+
+    const sealed: string[] = [];
+    broker = {
+      resolve: async (ref) => `value:${ref}`,
+      put: async (tenantId, value) => {
+        sealed.push(value);
+        return `secret://${tenantId}/sealed-${sealed.length}`;
+      },
+      delete: async () => {},
+    };
+    try {
+      const sandbox = await create('with-broker');
+      const { rows } = await db.query<{ host_certified: boolean; user_data: string }>(
+        `SELECT host_certified, user_data FROM instances WHERE id = $1`,
+        [sandbox.instanceId],
+      );
+      expect(rows[0]).toEqual({ host_certified: true, user_data: 'secret://acme/sealed-1' });
+      const content = sealed[0]!;
+      expect(content).toContain('HostKey /etc/ssh/bc_sandbox_host_key');
+      expect(content).toContain('HostCertificate /etc/ssh/bc_sandbox_host_key-cert.pub');
+      expect(content).toContain('BEGIN EC PRIVATE KEY');
+      const line = /ecdsa-sha2-nistp256-cert-v01@openssh\.com [A-Za-z0-9+/=]+/.exec(content)![0];
+      const certificate = parseSshCertificate(line);
+      expect(certificate.principals).toEqual([sandbox.instanceId]);
+      expect(certificate.certType).toBe('host');
+    } finally {
+      broker = undefined;
+    }
   });
 
   it('refuses a secret:// user data it would have to render without a broker', async () => {

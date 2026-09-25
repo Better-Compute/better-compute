@@ -119,6 +119,18 @@ CREATE INDEX instances_warm_created ON instances (created_at)
 `,
 };
 
+/**
+ * Certified guest host keys (§3.7 exec pinning): whether an instance's guest holds a host key
+ * certified by the sandbox CA, and whether a memory snapshot carries such a guest.
+ */
+export const vpsHostCertificatesMigration: Migration = {
+  name: 'vps/0011_host_certificates',
+  sql: `
+ALTER TABLE instances ADD COLUMN host_certified bool NOT NULL DEFAULT false;
+ALTER TABLE sandbox_snapshots ADD COLUMN host_certified bool NOT NULL DEFAULT false;
+`,
+};
+
 export type SnapshotState = 'pending' | 'ready' | 'failed' | 'deleted';
 
 export interface SandboxSnapshot {
@@ -185,6 +197,7 @@ interface RawSnapshot {
   reason: string | null;
   owner_identity_id: string;
   principal_instance_id: string | null;
+  host_certified: boolean;
   created_ms: number;
   ready_ms: number | null;
 }
@@ -192,7 +205,7 @@ interface RawSnapshot {
 const snapshotColumnsOf = (a: string) => `${a}id, ${a}tenant_id, ${a}sandbox_id, ${a}template_id,
   ${a}instance_id, ${a}node_id, ${a}runtime, ${a}include_memory, ${a}keep, ${a}state, ${a}command_id,
   ${a}url, ${a}sha256, ${a}size_bytes, ${a}cpu_model, ${a}reason, ${a}owner_identity_id,
-  ${a}principal_instance_id,
+  ${a}principal_instance_id, ${a}host_certified,
   (extract(epoch FROM ${a}created_at) * 1000)::float8 AS created_ms,
   (extract(epoch FROM ${a}ready_at) * 1000)::float8 AS ready_ms`;
 const snapshotColumns = snapshotColumnsOf('');
@@ -238,6 +251,8 @@ export interface RestoreSource {
   cpuModel?: string;
   /** A memory snapshot's guest still accepts this instance's SSH principal. */
   principalInstanceId?: string;
+  /** A memory snapshot's guest keeps its host key: certified or not. */
+  hostCertified?: boolean;
 }
 
 /**
@@ -270,7 +285,10 @@ export async function restoreSource(
     includeMemory: raw.include_memory,
   };
   if (raw.cpu_model !== null) source.cpuModel = raw.cpu_model;
-  if (raw.include_memory) source.principalInstanceId = raw.principal_instance_id ?? raw.instance_id;
+  if (raw.include_memory) {
+    source.principalInstanceId = raw.principal_instance_id ?? raw.instance_id;
+    source.hostCertified = raw.host_certified;
+  }
   return source;
 }
 
@@ -359,8 +377,8 @@ export async function snapshotSandbox(
   const { rows } = await tx.query<RawSnapshot>(
     `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
                                     include_memory, keep, state, command_id, url, owner_identity_id,
-                                    idempotency_key, principal_instance_id, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, 1)
+                                    idempotency_key, principal_instance_id, host_certified, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, $15, 1)
      RETURNING ${snapshotColumns}`,
     [
       snapshotId,
@@ -378,6 +396,7 @@ export async function snapshotSandbox(
       input.idempotencyKey ?? null,
       // A restored guest keeps the principal its memory was captured with.
       instance.restoreFrom?.principalInstanceId ?? instance.id,
+      instance.hostCertified,
     ],
   );
   // Its own resource: a kept snapshot outlives its sandbox (and the sandbox's authz row).

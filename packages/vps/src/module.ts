@@ -56,6 +56,7 @@ import {
   setPower,
   type CreateInstanceInput,
   type ImageResolver,
+  type CertifyHostKey,
   type InstanceDeps,
   type InstanceRef,
   type ListInstancesInput,
@@ -176,7 +177,16 @@ export interface VpsOptions {
    * `sandboxes.exec` without an in-guest agent (§3.7): sandbox instances trust this SSH user CA (the
    * tunnels module's `sandboxSsh` CA) for `<account>@<instanceId>`, `account` default `sandbox`.
    */
-  sandboxExec?: { caPublicKey: string; account?: string };
+  sandboxExec?: {
+    caPublicKey: string;
+    account?: string;
+    /**
+     * Certifies each sandbox guest's SSH host key with the same CA (tunnels' `sandboxSsh`
+     * `issueHostCertificate`), so exec clients pin guests (`@cert-authority`) instead of trusting
+     * on first use. Needs the secret broker (the private key travels in sealed user data).
+     */
+    certifyHostKey?: CertifyHostKey;
+  };
   /** The IAM resource-type prefix (`ComputeOptions.typePrefix`, default `compute-`), for decisions vps adds. */
   typePrefix?: string;
 }
@@ -412,9 +422,9 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       resource: { type: `${typePrefix}tenant`, id: tenantId },
     });
   };
-  let sandboxExec: { caPublicKey: string; account: string } | undefined;
+  let sandboxExec: InstanceDeps['sandboxExec'];
   if (options.sandboxExec) {
-    const { caPublicKey, account = 'sandbox' } = options.sandboxExec;
+    const { caPublicKey, account = 'sandbox', certifyHostKey } = options.sandboxExec;
     // Written into every sandbox's sshd config: one printable OpenSSH key line, nothing else.
     if (
       typeof caPublicKey !== 'string' ||
@@ -432,7 +442,12 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         'INVALID_CONFIG',
         'vps({ sandboxExec }).account must be a Unix account name',
       );
-    sandboxExec = { caPublicKey, account };
+    if (certifyHostKey !== undefined && typeof certifyHostKey !== 'function')
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'vps({ sandboxExec }).certifyHostKey must be a function',
+      );
+    sandboxExec = { caPublicKey, account, ...(certifyHostKey ? { certifyHostKey } : {}) };
   }
 
   const depsOf = (context: ModuleContext): InstanceDeps => {

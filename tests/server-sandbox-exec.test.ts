@@ -94,7 +94,8 @@ beforeAll(async () => {
   await db.migrate([]);
   // The vps tables, reduced to what sandboxes.exec reads.
   await db.query(`CREATE TABLE instances (id text PRIMARY KEY, tenant_id text NOT NULL, node_id text,
-                    state text NOT NULL, draft bool NOT NULL DEFAULT false, restore_from jsonb)`);
+                    state text NOT NULL, draft bool NOT NULL DEFAULT false, restore_from jsonb,
+                    host_certified bool NOT NULL DEFAULT false)`);
   await db.query(`CREATE TABLE sandboxes (id text PRIMARY KEY, tenant_id text NOT NULL, instance_id text NOT NULL,
                     draft bool NOT NULL DEFAULT false, deleting_at timestamptz, expires_at timestamptz)`);
   await useSimClock(db, T0);
@@ -213,6 +214,18 @@ describe('sandboxes.exec', () => {
     expect(events).toEqual([]);
   });
 
+  it('tells the client which host name to pin, and whether the guest can be pinned', async () => {
+    expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({
+      hostPrincipal: INSTANCE,
+      hostCertified: false,
+    });
+    await db.query(`UPDATE instances SET host_certified = true`);
+    expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({
+      hostPrincipal: INSTANCE,
+      hostCertified: true,
+    });
+  });
+
   it('never outlives the sandbox, and refuses one about to expire', async () => {
     await db.query(`UPDATE sandboxes SET expires_at = $1::timestamptz`, [
       new Date(T0 + 3 * 60_000).toISOString(),
@@ -235,6 +248,8 @@ describe('sandboxes.exec', () => {
     ]);
     const issued = await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey });
     expect(issued.principal).toBe(`sandbox@${ORIGINAL}`);
+    // The resumed guest also keeps the original's host certificate.
+    expect(issued).toMatchObject({ hostPrincipal: ORIGINAL, hostCertified: false });
     expect(parseSshCertificate(issued.certificate).principals).toEqual([`sandbox@${ORIGINAL}`]);
     // The ticket still names the instance it dials.
     expect(issued.instanceId).toBe(INSTANCE);
