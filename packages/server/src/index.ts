@@ -82,6 +82,7 @@ export * from './controllers/index.js';
 export * from './nodes-module.js';
 export * from './site-boot-module.js';
 export * from './audit-sinks-module.js';
+export { bcdArtifact, type DownloadsOptions } from './downloads.js';
 export { siteBootLeaseName, siteBootTtlSeconds, tickSiteBoot } from './controllers/site-boot.js';
 export type { SiteBootState } from './controllers/site-boot.js';
 export * from './tunnels/index.js';
@@ -186,6 +187,8 @@ export function betterCompute<
       modules: () => hosted,
       // A new spec generation wakes the node's gateway to push DesiredState (best effort).
       specChanged: (tx, nodeId) => runtime.pokes.pokeNodes(tx, [nodeId]),
+      // Signed intent: every new spec generation is signed like commands (the gateway relays it).
+      ...(resolved.commandSigner ? { signer: resolved.commandSigner } : {}),
     }),
     createSiteBootModule(),
     inventoryModule,

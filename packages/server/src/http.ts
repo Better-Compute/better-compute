@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ComputeError, isComputeError, newId, type ComputeErrorBody } from '@better-compute/core';
+import { serveDownload } from './downloads.js';
 import type { Operations } from './operations.js';
 import type { ResolvedOptions } from './options.js';
 import type { RegisteredMethod, Registry } from './registry.js';
@@ -121,7 +122,7 @@ const joinKeysRetryMs = 60_000;
 /**
  * The fetch and Node transports (PLAN.md §9.1). `POST {basePath}/{group}/{method}` and
  * `POST {basePath}/plugins/{id}/{group}/{method}` take JSON objects with `X-Better-Compute: 1`;
- * `GET` serves only `/health` and `/.well-known/better-compute`.
+ * `GET` serves only `/health`, `/.well-known/better-compute` and `/downloads/bcd/{version}/{os}-{arch}`.
  */
 export function createHttp({ options, registry, operations }: HttpHost) {
   const { basePath, database, log } = options;
@@ -179,6 +180,10 @@ export function createHttp({ options, registry, operations }: HttpHost) {
         { ...serverInfo(basePath), ...(join ? { join } : {}) },
         { headers: hardened },
       );
+    }
+    if (path.startsWith('downloads/')) {
+      const download = await serveDownload(options.downloads, path, hardened);
+      if (download) return download;
     }
     throw notFound();
   }

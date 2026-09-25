@@ -25,6 +25,7 @@ import {
 } from '@better-compute/core';
 import type { CapacityModuleOptions } from '@better-compute/capacity';
 import { localSealedSecretStore, type CommandSigningAuthority } from '@better-compute/pki';
+import type { DownloadsOptions } from './downloads.js';
 import { pkiAllocationBindingCheck } from './join/allocation-binding.js';
 import type { JoinCrypto, JoinTrustBundle } from './join/crypto.js';
 import { createCommandSigner, type CommandSigner } from './runtime/command-signing.js';
@@ -86,8 +87,8 @@ export interface WorkerSettings {
 }
 
 /**
- * Options of `betterCompute()` (PLAN.md §8.2). Fields for later phases (`secrets`, `downloads`,
- * `gateway`, the other CAs) are accepted and typed now; nothing runs with them until their phase.
+ * Options of `betterCompute()` (PLAN.md §8.2). `gateway` and the serving/internal CAs are accepted
+ * and typed for hosts; the server itself does not read them.
  */
 export interface ComputeOptions<
   M extends readonly ComputeModule[] = [],
@@ -197,6 +198,8 @@ export interface ResolvedOptions {
   log: Logger;
   notifier?: Notifier;
   eventSinks: readonly EventSink[];
+  /** Where `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` finds the daemon binaries. */
+  downloads?: DownloadsOptions;
   /** `sinks.audit` plus the audit sinks modules list: the built-in audit-sinks module delivers to them. */
   auditSinks: readonly AuditSink[];
   iamJobs: readonly IamJob[];
@@ -341,6 +344,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     if (sinkIds.has(sink.id)) throw invalid(`Event sink ${sink.id} is listed twice`);
     sinkIds.add(sink.id);
   }
+  const downloads = resolveDownloads(options.downloads);
   const ports = resolvePorts(options.ports);
   const capacity = resolveCapacity(options.capacity, options.scheduler, schedulerPlugins);
   const join = options.pki?.join;
@@ -389,6 +393,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     ...(options.notifier ? { notifier: options.notifier } : {}),
     eventSinks,
     auditSinks,
+    ...(downloads ? { downloads } : {}),
     iamJobs: resolveIamJobs(options.iamJobs ?? []),
     worker,
     ports,
@@ -498,6 +503,20 @@ function resolveCapacity(
   if (scheduler?.weights) resolved.weights = scheduler.weights;
   if (scheduler?.topN !== undefined) resolved.topN = scheduler.topN;
   return resolved;
+}
+
+function resolveDownloads(downloads: ComputeOptions['downloads']): DownloadsOptions | undefined {
+  if (downloads === undefined) return undefined;
+  if (!isRecord(downloads)) throw invalid('downloads must be an object');
+  if (downloads.dir !== undefined && (typeof downloads.dir !== 'string' || !downloads.dir))
+    throw invalid('downloads.dir must be a directory path');
+  if (downloads.blob !== undefined) requireMethods(downloads.blob, 'downloads.blob', ['get']);
+  if (downloads.dir === undefined && downloads.blob === undefined)
+    throw invalid('downloads needs dir or blob');
+  return {
+    ...(downloads.dir !== undefined ? { dir: downloads.dir } : {}),
+    ...(downloads.blob !== undefined ? { blob: downloads.blob } : {}),
+  };
 }
 
 function resolvePorts(ports: ComputeOptions['ports']): ResolvedOptions['ports'] {
