@@ -35,6 +35,7 @@ import {
   type SecretRequest,
   type ServerFrame,
   type SpecRequest,
+  type SignedTrustBundle,
   type StatusReport,
 } from '@better-compute/protocol';
 import { commandKindAllowed } from '@better-compute/pki';
@@ -56,6 +57,7 @@ import { TokenBucket } from './token-bucket.js';
 import {
   createTunnelRegistry,
   type TunnelEndpoint,
+  type TunnelFilter,
   type TunnelHandle,
   type TunnelInfo,
   type TunnelOptions,
@@ -161,6 +163,12 @@ export interface GatewayOptions {
   manual?: boolean;
   capabilities?: string[];
   /**
+   * The trust bundle sent in every Welcome, pre-signed by JoinService's key (purpose `trust-bundle`,
+   * server's `commandTrustBundle(...).signed`): the gateway only relays it and holds no key (P14).
+   * Read per Welcome, so a root rotation reaches new sessions without a restart.
+   */
+  trustBundle?: () => SignedTrustBundle | undefined;
+  /**
    * Revoked certificate serials: refused at open, and a live session whose certificate is revoked
    * gets a RevocationNotice and is closed at once (§16: within 5 s of the revocation).
    */
@@ -247,8 +255,8 @@ export interface Gateway {
   openTunnel(request: { ticket: string; nodeId: string; caller: TunnelEndpoint }): Promise<TunnelHandle>;
   /** A daemon's `Tunnel` stream (its certificate identity is `peer`). */
   acceptTunnel(peer: PeerIdentity, node: TunnelEndpoint): TunnelStreamHandle;
-  /** Closes matching tunnels (e.g. `delegation:revoke` by subject); returns how many. */
-  closeTunnels(filter: { tunnelId?: string; nodeId?: string; subject?: string }, reason: string): number;
+  /** Closes matching tunnels (e.g. `delegation:revoke` by delegationId); returns how many. */
+  closeTunnels(filter: TunnelFilter, reason: string): number;
   tunnels(): (TunnelInfo & { state: string })[];
   readonly jobs: Readonly<{
     dispatch: GatewayJob;
@@ -550,6 +558,13 @@ export function createGateway(options: GatewayOptions): Gateway {
     };
     sessions.set(session.nodeId, session);
 
+    let trust: SignedTrustBundle | undefined;
+    try {
+      trust = options.trustBundle?.();
+    } catch (error) {
+      // The daemon keeps the bundle it has; a later Welcome carries the new one.
+      log.warn('gateway: trust bundle unavailable; Welcome sent without it', { cause: String(error) });
+    }
     sink.send(
       frame({
         case: 'welcome',
@@ -566,6 +581,7 @@ export function createGateway(options: GatewayOptions): Gateway {
           serverTime: timestampFromMs(clock.now()),
           upgradeRequired: version === undefined,
           capabilities: options.capabilities ?? [],
+          ...(trust ? { trust } : {}),
         }),
       }),
     );

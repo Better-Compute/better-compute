@@ -1,5 +1,6 @@
-import { ComputeError } from '@better-compute/core';
 import { connect, type ClientHttp2Session } from 'node:http2';
+import { create } from '@bufbuild/protobuf';
+import { ComputeError } from '@better-compute/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   frameMessage,
@@ -24,6 +25,7 @@ import {
 import {
   decodeServerFrame,
   encodeAgentFrame,
+  SignedTrustBundleSchema,
   wrapAttestedReport,
   type ServerFrame,
 } from '@better-compute/protocol';
@@ -445,5 +447,29 @@ describe('database-side revocation at Hello, and call context for the services',
       { method: 'renew', context: { peerNodeId: node, gatewayId: f.gateway.id } },
       { method: 'join', context: { gatewayId: f.gateway.id } },
     ]);
+  });
+});
+describe('trust bundle in Welcome', () => {
+  it('relays the host-signed bundle current at each Hello, and survives a failing source', async () => {
+    let version = 1;
+    let fail = false;
+    const f = await gatewayFixture({
+      trustBundle: () => {
+        if (fail) throw new Error('bundle store down');
+        return create(SignedTrustBundleSchema, { body: new Uint8Array([version]) });
+      },
+    });
+    try {
+      const first = await f.connect(await f.addNode());
+      expect(first.stream.of('welcome')[0]!.trust?.body).toEqual(new Uint8Array([1]));
+      version = 2; // a root rotation: new sessions get it without a restart
+      const second = await f.connect(await f.addNode());
+      expect(second.stream.of('welcome')[0]!.trust?.body).toEqual(new Uint8Array([2]));
+      fail = true;
+      const third = await f.connect(await f.addNode());
+      expect(third.stream.of('welcome')[0]!.trust).toBeUndefined();
+    } finally {
+      await f.close();
+    }
   });
 });

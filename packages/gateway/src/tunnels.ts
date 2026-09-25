@@ -34,7 +34,20 @@ export interface TunnelInfo {
   op: ExecTicketClaims['op'];
   tenantId?: string;
   instanceId?: string;
+  /** The ticket's `agt`: the agent acting for `subject` in a delegated session. */
+  agentId?: string;
+  /** The ticket's `dlg`: that delegation, so revoking it closes exactly its tunnels. */
+  delegationId?: string;
   openedAt: number;
+}
+
+/** Which tunnels `closeWhere` closes: every given field must match (at least one is given by callers). */
+export interface TunnelFilter {
+  tunnelId?: string;
+  nodeId?: string;
+  subject?: string;
+  agentId?: string;
+  delegationId?: string;
 }
 
 export interface TunnelOptions {
@@ -42,7 +55,7 @@ export interface TunnelOptions {
   jwks: () => string | { keys: JsonWebKey[] };
   /** When set, the ticket's `iss` must equal it. */
   issuer?: string;
-  /** Default: an in-memory cache. A ticket opens one tunnel, ever. */
+  /** Default: an in-memory cache that fails closed when full. A ticket opens one tunnel, ever. */
   jtiCache?: ReplayCache;
   /**
    * Re-checks the caller's authorization every `reauthorizeMs` (default 60 s): false closes the
@@ -99,7 +112,7 @@ const closedFrame = (tunnelId: string, reason: string, exitCode = -1): TunnelFra
 export function createTunnelRegistry(deps: TunnelRegistryDeps) {
   const { clock, log } = deps;
   const options = deps.options;
-  const jti = options?.jtiCache ?? createReplayCache();
+  const jti = options?.jtiCache ?? createReplayCache({ whenFull: 'refuse' });
   const reauthorizeMs = options?.reauthorizeMs ?? 60_000;
   const iamOutageMs = options?.iamOutageMs ?? 120_000;
   const maxDurationMs = options?.maxDurationMs ?? 12 * 3_600_000;
@@ -190,6 +203,8 @@ export function createTunnelRegistry(deps: TunnelRegistryDeps) {
         openedAt: now,
         ...(claims.tnt ? { tenantId: claims.tnt } : {}),
         ...(claims.inst ? { instanceId: claims.inst } : {}),
+        ...(claims.agt ? { agentId: claims.agt } : {}),
+        ...(claims.dlg ? { delegationId: claims.dlg } : {}),
       };
       const tunnel: Tunnel = {
         info,
@@ -260,13 +275,15 @@ export function createTunnelRegistry(deps: TunnelRegistryDeps) {
     },
 
     /** Closes matching tunnels (delegation revoked, node revoked, operator); returns how many. */
-    closeWhere(filter: { tunnelId?: string; nodeId?: string; subject?: string }, reason: string): number {
+    closeWhere(filter: TunnelFilter, reason: string): number {
       let closed = 0;
       for (const tunnel of [...tunnels.values()])
         if (
           (filter.tunnelId === undefined || tunnel.info.id === filter.tunnelId) &&
           (filter.nodeId === undefined || tunnel.info.nodeId === filter.nodeId) &&
-          (filter.subject === undefined || tunnel.info.subject === filter.subject)
+          (filter.subject === undefined || tunnel.info.subject === filter.subject) &&
+          (filter.agentId === undefined || tunnel.info.agentId === filter.agentId) &&
+          (filter.delegationId === undefined || tunnel.info.delegationId === filter.delegationId)
         ) {
           close(tunnel, reason, new GrpcError(GrpcCode.PERMISSION_DENIED, reason));
           closed++;

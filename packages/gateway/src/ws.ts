@@ -63,7 +63,7 @@ function refuse(socket: Duplex, status: number, error: GrpcError): void {
  */
 export function attachGatewayWs(server: Server, gateway: Gateway, options: GatewayWsOptions): () => void {
   const clock = options.clock ?? systemClock;
-  const jtiCache = options.jtiCache ?? createReplayCache();
+  const jtiCache = options.jtiCache ?? createReplayCache({ whenFull: 'refuse' });
   const pingIntervalMs = options.pingIntervalMs ?? 20_000;
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex) => {

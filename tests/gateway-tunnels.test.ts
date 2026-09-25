@@ -86,10 +86,12 @@ describe('tunnel core', () => {
   afterEach(() => f.close());
 
   /** Opens a tunnel with a node session that answers OpenTunnel from `answer` (default: itself). */
-  async function open(options: { answerAs?: string; ticketFor?: string; op?: 'exec' | 'console' } = {}) {
+  async function open(
+    options: { answerAs?: string; ticketFor?: string; op?: 'exec' | 'console'; agentId?: string; delegationId?: string } = {},
+  ) {
     const node = await f.addNode();
     const { stream } = await f.connect(node);
-    const ticket = issuer.issue({ nodeId: options.ticketFor ?? node, sid: `tun_${node.slice(-6)}`, op: options.op ?? 'console', subject: 'user_1' });
+    const ticket = issuer.issue({ nodeId: options.ticketFor ?? node, sid: `tun_${node.slice(-6)}`, op: options.op ?? 'console', subject: 'user_1', ...(options.agentId ? { agentId: options.agentId, delegationId: options.delegationId } : {}) });
     const caller = new Side();
     const opening = f.gateway.openTunnel({ ticket: ticket.token, nodeId: node, caller });
     const nodeSide = new Side();
@@ -209,6 +211,21 @@ describe('tunnel core', () => {
     await b.opening;
     await f.gateway.revoke(b.node, { reason: 'key compromise' });
     expect(f.gateway.tunnels()).toEqual([]);
+  });
+
+  it("closes exactly a revoked delegation's tunnels, not the person's own", async () => {
+    const own = await open();
+    const delegated = await open({ agentId: 'agent_7', delegationId: 'dlg_1' });
+    const other = await open({ agentId: 'agent_7', delegationId: 'dlg_2' });
+    expect((await delegated.opening).info).toMatchObject({ subject: 'user_1', agentId: 'agent_7', delegationId: 'dlg_1' });
+    expect((await own.opening).info.agentId).toBeUndefined();
+    await other.opening;
+    expect(f.gateway.closeTunnels({ delegationId: 'dlg_1' }, 'delegation-revoked')).toBe(1);
+    expect(delegated.caller.closed).toBeDefined();
+    expect(own.caller.closed).toBeUndefined();
+    expect(f.gateway.closeTunnels({ agentId: 'agent_7' }, 'agent-disabled')).toBe(1);
+    expect(other.caller.closed).toBeDefined();
+    expect(f.gateway.tunnels()).toHaveLength(1);
   });
 });
 
@@ -400,6 +417,15 @@ describe('tunnels end to end over HTTP/2', () => {
   });
 
   describe('gatewayTunnelRelay', () => {
+    it('refuses a plaintext internal_url when TLS is configured', async () => {
+      await register(); // http:// (h2c)
+      const relay = gatewayTunnelRelay({ sql: f.db, tls: { ca: 'internal-ca' } });
+      await expect(
+        relay.open({ ticket: 't', nodeId: 'node_x', tunnelId: 'tun_x', gatewayId: f.gateway.id }),
+      ).rejects.toMatchObject({ code: 'UNAVAILABLE', message: `gateway ${f.gateway.id} has no TLS endpoint` });
+      relay.close();
+    });
+
     /** f.db, counting the internal_url lookups. */
     const counted = () => {
       const lookups = { n: 0 };

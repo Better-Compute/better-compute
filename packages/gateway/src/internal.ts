@@ -18,7 +18,7 @@ import { ComputeError, isComputeError, type Notifier, type SqlTx } from '@better
 import { MAX_FRAME_BYTES, TunnelFrameSchema, type TunnelFrame } from '@better-compute/protocol';
 import type { Gateway, GatewayStatus } from './gateway.js';
 import { frameMessage, MessageDecoder } from './grpc.js';
-import type { TunnelHandle, TunnelInfo } from './tunnels.js';
+import type { TunnelFilter, TunnelHandle, TunnelInfo } from './tunnels.js';
 
 // The gateway's internal control API on `gateways.internal_url` (PLAN.md §8.1), HTTP/2 only, called
 // by api and worker processes over the internal CA's mTLS. Every call but tunnels is an
@@ -52,7 +52,8 @@ const routes = ['/v1/health', '/v1/poke', '/v1/revoke', '/v1/drain', '/v1/tunnel
  * - `POST /v1/poke {nodeIds?}` → 202 (dispatch + spec check now);
  * - `POST /v1/revoke {nodeId, reason, serials?: hex[]}` → `{ revoked }`;
  * - `POST /v1/drain {reason?}` → 202;
- * - `POST /v1/tunnels/close {tunnelId? nodeId? subject?, reason}` → `{ closed }` (e.g. `delegation:revoke`).
+ * - `POST /v1/tunnels/close {tunnelId? nodeId? subject? agentId? delegationId?, reason}` → `{ closed }`
+ *   (e.g. `delegation:revoke` by `delegationId`).
  */
 export function internalHandler(gateway: Gateway): (request: Request) => Promise<Response> {
   return async (request) => {
@@ -91,11 +92,13 @@ export function internalHandler(gateway: Gateway): (request: Request) => Promise
       }
       case 'POST /v1/tunnels/close': {
         const input = await body(request);
-        const filter: { tunnelId?: string; nodeId?: string; subject?: string } = {};
-        for (const key of ['tunnelId', 'nodeId', 'subject'] as const)
+        const filter: TunnelFilter = {};
+        for (const key of ['tunnelId', 'nodeId', 'subject', 'agentId', 'delegationId'] as const)
           if (typeof input?.[key] === 'string') filter[key] = input[key] as string;
         if (!input || typeof input.reason !== 'string' || !Object.keys(filter).length)
-          return invalid('tunnels/close takes { tunnelId? nodeId? subject? (at least one), reason }');
+          return invalid(
+            'tunnels/close takes { tunnelId? nodeId? subject? agentId? delegationId? (at least one), reason }',
+          );
         return json(200, { closed: gateway.closeTunnels(filter, input.reason) });
       }
       default:
@@ -318,7 +321,7 @@ export interface GatewayControlClient {
   drain(reason?: string): Promise<void>;
   /** Opens a tunnel through this gateway (§7.6); rejects with the refusal the gateway sent. */
   openTunnel(request: { ticket: string; nodeId: string }): Promise<ClientTunnel>;
-  closeTunnels(filter: { tunnelId?: string; nodeId?: string; subject?: string }, reason: string): Promise<number>;
+  closeTunnels(filter: TunnelFilter, reason: string): Promise<number>;
   close(): void;
 }
 
@@ -560,6 +563,11 @@ function controlClients(options: {
       if (!url) {
         clients.delete(gatewayId);
         return undefined;
+      }
+      // With internal-CA TLS configured, a gateway registered as http:// never gets a byte in the clear.
+      if (options.tls && !url.startsWith('https://')) {
+        clients.delete(gatewayId);
+        throw new ComputeError('UNAVAILABLE', `gateway ${gatewayId} has no TLS endpoint`);
       }
       const client = gatewayControlClient({ baseUrl: url, tls: options.tls, timeoutMs: options.timeoutMs });
       clients.set(gatewayId, { client, until: now() + cacheMs });

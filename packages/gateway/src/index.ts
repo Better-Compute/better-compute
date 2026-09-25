@@ -106,6 +106,7 @@ export { TokenBucket } from './token-bucket.js';
 export { createTunnelRegistry } from './tunnels.js';
 export type {
   TunnelEndpoint,
+  TunnelFilter,
   TunnelHandle,
   TunnelInfo,
   TunnelOptions,
