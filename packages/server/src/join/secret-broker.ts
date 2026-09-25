@@ -276,6 +276,26 @@ export function createSecretBroker(options: SecretBrokerOptions): SecretBrokerPo
             signed ? node.owner_tenant_id : undefined,
           );
         }
+        // The ref's tenant is active: a suspended or deleted tenant's secrets are not released, even
+        // while teardown has not reached its instances yet (§12.8; the workload broker does the same).
+        const refTenant = parseSecretRef(opened.ref)?.tenantId;
+        const tenancy =
+          refTenant !== undefined &&
+          (
+            await tx.query<{ present: boolean }>(
+              `SELECT to_regclass('compute_tenant_states') IS NOT NULL AS present`,
+            )
+          ).rows[0]?.present;
+        if (tenancy) {
+          const blocked = (
+            await tx.query<{ state: string }>(
+              `SELECT state FROM compute_tenant_states WHERE tenant_id = $1 AND state <> 'active'`,
+              [refTenant],
+            )
+          ).rows[0];
+          if (blocked)
+            throw new Refused('access-denied', `tenant-${blocked.state}`, node.owner_tenant_id);
+        }
         return { opened, owner: node.owner_tenant_id };
       });
       // After the signature: a relayed copy of an answered request is refused, and burns nothing.

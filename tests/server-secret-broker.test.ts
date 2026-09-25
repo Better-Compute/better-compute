@@ -372,6 +372,25 @@ describe('secret broker', () => {
     expect(await get(own, await instance(own))).toBe('');
     // An acme instance naming another tenant's secret as its user data gets nothing.
     expect(await get(foreign, await instance(foreign))).toBe('not-bound');
+
+    // A suspended or deleted tenant's secrets stay sealed, before teardown reaches its instances.
+    await db.query(
+      `CREATE TABLE IF NOT EXISTS compute_tenant_states (tenant_id text PRIMARY KEY, state text NOT NULL)`,
+    );
+    const bound = await instance(own);
+    try {
+      for (const state of ['suspended', 'deleted']) {
+        await db.query(
+          `INSERT INTO compute_tenant_states (tenant_id, state) VALUES ($1, $2)
+           ON CONFLICT (tenant_id) DO UPDATE SET state = EXCLUDED.state`,
+          [TENANT, state],
+        );
+        expect(await get(own, bound), state).toBe('access-denied');
+      }
+    } finally {
+      await db.query('DELETE FROM compute_tenant_states WHERE tenant_id = $1', [TENANT]);
+    }
+    expect(await get(own, bound)).toBe('');
   });
 
   it('answers not-found / unavailable without detail, and bounds refusal events', async () => {
