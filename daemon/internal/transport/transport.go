@@ -43,6 +43,8 @@ type Options struct {
 	URL string
 	// ServingCAPin is the SHA-256 of the gateway serving CA's SPKI (https only; required there).
 	ServingCAPin []byte
+	// ServerName is the name the gateway certificate must carry (default: the URL host).
+	ServerName string
 	// ClientCertificate is the node certificate (mTLS); nil for Join.
 	ClientCertificate *tls.Certificate
 	// TestNode names the node in x-bc-test-node (http:// only).
@@ -103,7 +105,11 @@ func New(opts Options) (*Client, error) {
 			return nil, errors.New("transport: the test node header is for dev h2c gateways only")
 		}
 		transport.Protocols.SetHTTP2(true)
-		transport.TLSClientConfig = tlsConfig(u.Hostname(), opts)
+		name := opts.ServerName
+		if name == "" {
+			name = u.Hostname()
+		}
+		transport.TLSClientConfig = tlsConfig(name, opts)
 	case "http":
 		transport.Protocols.SetUnencryptedHTTP2(true)
 	default:

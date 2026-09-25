@@ -68,6 +68,9 @@ func (m *Memory) SaveMeta(meta Meta) error {
 	m.meta.NodeID = meta.NodeID
 	m.meta.LastEpoch = meta.LastEpoch
 	m.meta.AppliedGeneration = meta.AppliedGeneration
+	if meta.ServerTime.After(m.meta.ServerTime) {
+		m.meta.ServerTime = meta.ServerTime
+	}
 	return nil
 }
 

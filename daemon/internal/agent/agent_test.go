@@ -605,3 +605,29 @@ func TestJoinPersistsIdentity(t *testing.T) {
 		t.Fatalf("empty dir: %v", err)
 	}
 }
+
+// A gateway cannot move the daemon's server time back (into an old worker certificate's window, to
+// replay old signed intent): a Welcome before the persisted high-water mark is refused.
+func TestWelcomeCannotMoveServerTimeBack(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.Backoff.Min, o.Backoff.Max = time.Millisecond, 10*time.Millisecond })
+	s, _ := h.open()
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_Drain{Drain: &agentv1.Drain{ReconnectAfterMs: 1}}})
+	s2 := h.gw.accept()
+	s2.next(t, "Hello", func(f *agentv1.AgentFrame) bool { return f.GetHello() != nil })
+	old := welcome()
+	old.GetWelcome().ServerTime = timestamppb.New(time.Now().Add(-time.Hour))
+	s2.push(old)
+	select {
+	case <-s2.ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a Welcome an hour in the past was accepted")
+	}
+	meta, _ := h.j.Meta()
+	if time.Since(meta.ServerTime) > time.Minute {
+		t.Fatalf("high-water mark = %v", meta.ServerTime)
+	}
+	// A current Welcome on the redial is fine.
+	s3, _ := h.open()
+	s3.push(command(body("ok", "inventory.refresh", nil)))
+	s3.update(t, "ok", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+}

@@ -141,6 +141,9 @@ func (b *Bolt) SaveMeta(meta Meta) error {
 	next.NodeID = meta.NodeID
 	next.LastEpoch = meta.LastEpoch
 	next.AppliedGeneration = meta.AppliedGeneration
+	if meta.ServerTime.After(next.ServerTime) {
+		next.ServerTime = meta.ServerTime
+	}
 	if err := b.db.Update(func(tx *bolt.Tx) error {
 		return putJSON(tx.Bucket(bucketMeta), keyMeta, next)
 	}); err != nil {

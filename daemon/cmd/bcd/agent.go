@@ -61,7 +61,7 @@ func newClient(cfg *config.Config, state *agent.State, key *ecdsa.PrivateKey) (*
 	if err != nil {
 		return nil, err
 	}
-	o := transport.Options{URL: cfg.GatewayURL, ServingCAPin: pin, UserAgent: "bcd/" + version}
+	o := transport.Options{URL: cfg.GatewayURL, ServingCAPin: pin, ServerName: cfg.GatewayServerName, UserAgent: "bcd/" + version}
 	if state != nil {
 		if strings.HasPrefix(cfg.GatewayURL, "http://") {
 			o.TestNode = state.NodeID
@@ -87,7 +87,8 @@ func readToken() (string, error) {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	if t := strings.TrimSpace(line); t != "" {
+	// A Windows shell piping into WSL may prefix a byte-order mark.
+	if t := strings.TrimSpace(strings.TrimPrefix(line, "\uFEFF")); t != "" {
 		return t, nil
 	}
 	return "", errors.New("no join token: set BCD_JOIN_TOKEN or pass the token on standard input")

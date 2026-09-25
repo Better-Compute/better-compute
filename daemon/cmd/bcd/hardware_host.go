@@ -15,11 +15,9 @@ const hardwareBackend = "host"
 // devBuild refuses dev-only configuration in production builds.
 const devBuild = false
 
-// collectInventory reads the host's inventory from sysfs, netlink and NVML.
-//
-// TODO(v0.1): implement the collectors of docs/research/prior-art.md §4 in internal/inventory.
+// collectInventory reads the host's inventory from procfs and sysfs (inventory.Collector).
 func collectInventory() (*inventory.NodeInventory, error) {
-	return nil, errNotImplemented("host inventory collection (sysfs, netlink, NVML)", "v0.1")
+	return inventory.Collector{}.Collect()
 }
 
 // newHost is the machine bcd runs on; a reboot goes through systemd so units stop cleanly.

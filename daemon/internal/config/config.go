@@ -91,6 +91,10 @@ type Config struct {
 	// Log configures the daemon's logs.
 	Log Log
 
+	// GatewayServerName, when set, is the name the gateway's certificate must carry instead of the
+	// gateway_url host (a gateway reached by IP address, e.g. behind an L4 load balancer).
+	GatewayServerName string
+
 	// DevInsecureH2C allows an http:// gateway_url: cleartext HTTP/2 to a dev stack's gateway, which
 	// names the node by a header instead of mTLS. Only fakehw builds of bcd accept it (the host build
 	// refuses to start); never set it on a reachable machine.
@@ -276,6 +280,7 @@ var fields = []field{
 	{section: "journal", key: "max_events", kind: kindInt, set: func(c *Config, v value) { c.Journal.MaxEvents = v.num }},
 	{section: "log", key: "level", kind: kindString, set: func(c *Config, v value) { c.Log.Level = v.str }},
 	{section: "log", key: "json", kind: kindBool, set: func(c *Config, v value) { c.Log.JSON = v.boolean }},
+	{key: "gateway_server_name", kind: kindString, set: func(c *Config, v value) { c.GatewayServerName = v.str }},
 	{key: "dev_insecure_h2c", kind: kindBool, set: func(c *Config, v value) { c.DevInsecureH2C = v.boolean }},
 }
 

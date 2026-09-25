@@ -167,8 +167,7 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 // handle processes one server frame; false ends the session.
 func (a *Agent) handle(ctx context.Context, s *sess, f *agentv1.ServerFrame) bool {
 	if w := f.GetWelcome(); w != nil {
-		a.onWelcome(ctx, s, w)
-		return true
+		return a.onWelcome(ctx, s, w)
 	}
 	a.mu.Lock()
 	welcomed := s.welcomed
@@ -214,18 +213,36 @@ func frameName(f *agentv1.ServerFrame) string {
 
 func typeName(v any) string { return strings.TrimPrefix(fmtType(v), "*") }
 
-func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) {
+// MaxServerTimeRegression is how far a Welcome's server_time may lie before the daemon's server
+// time high-water mark (clock skew between gateways); anything earlier is refused.
+const MaxServerTimeRegression = 5 * time.Minute
+
+func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool {
 	a.mu.Lock()
 	if s.welcomed {
 		a.mu.Unlock()
 		a.log.Debug("duplicate Welcome ignored")
-		return
+		return true
+	}
+	if st := w.GetServerTime(); st != nil {
+		meta, err := a.j.Meta()
+		if err != nil {
+			a.mu.Unlock()
+			a.log.Error("journal: meta", "error", err.Error())
+			return false
+		}
+		serverTime := st.AsTime()
+		if !meta.ServerTime.IsZero() && serverTime.Before(meta.ServerTime.Add(-MaxServerTimeRegression)) {
+			a.mu.Unlock()
+			a.log.Error("protocol: server time went backwards; refusing the session",
+				"serverTime", serverTime.Format(time.RFC3339), "highWater", meta.ServerTime.Format(time.RFC3339))
+			return false
+		}
+		a.offset = serverTime.Sub(time.Now())
+		a.advanceServerTimeLocked()
 	}
 	if err := session.ApplyWelcome(a.j, session.Welcome{Epoch: w.GetEpoch(), AckedEventSeq: w.GetAckedEventSeq()}); err != nil {
 		a.log.Error("journal: apply Welcome", "error", err.Error())
-	}
-	if w.GetServerTime() != nil {
-		a.offset = w.GetServerTime().AsTime().Sub(time.Now())
 	}
 	a.upgradeNeeded = w.GetUpgradeRequired()
 	if w.GetTrust() != nil && len(a.o.SignerPin) > 0 {
@@ -274,6 +291,19 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) {
 	a.sendStatusLocked()
 	a.mu.Unlock()
 	go a.heartbeats(ctx, s, interval)
+	return true
+}
+
+// advanceServerTimeLocked moves the persisted server time high-water mark to serverNow.
+func (a *Agent) advanceServerTimeLocked() {
+	meta, err := a.j.Meta()
+	if err != nil {
+		return
+	}
+	meta.ServerTime = a.serverNowLocked()
+	if err := a.j.SaveMeta(meta); err != nil {
+		a.log.Error("journal: server time", "error", err.Error())
+	}
 }
 
 func (a *Agent) heartbeats(ctx context.Context, s *sess, interval time.Duration) {
@@ -296,6 +326,7 @@ func (a *Agent) heartbeat(s *sess) {
 		return
 	}
 	s.heartbeats++
+	a.advanceServerTimeLocked()
 	hb := &agentv1.Heartbeat{AppliedGeneration: a.applied}
 	running := 0
 	for _, x := range a.execs {

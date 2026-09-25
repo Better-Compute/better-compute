@@ -53,8 +53,8 @@ var (
 type Journal interface {
 	// Meta returns the journal's metadata.
 	Meta() (Meta, error)
-	// SaveMeta stores NodeID, LastEpoch and AppliedGeneration. JournalID and EventSeq belong to the
-	// journal and are ignored.
+	// SaveMeta stores NodeID, LastEpoch, AppliedGeneration and ServerTime (which never moves back: an
+	// earlier value is ignored). JournalID and EventSeq belong to the journal and are ignored.
 	SaveMeta(Meta) error
 
 	// Command returns the entry for id, and false when there is none.
@@ -101,6 +101,11 @@ type Meta struct {
 	EventSeq          uint64
 	LastEpoch         uint64
 	AppliedGeneration uint64
+	// ServerTime is the highest server time the daemon has seen (Welcome, then its own clock on top
+	// of the Welcome offset): a high-water mark that only moves forward. A Welcome whose server_time
+	// lies before it (beyond a small skew) is refused, so a gateway cannot move the daemon's clock
+	// back into the validity window of old signed intent and replay it.
+	ServerTime time.Time
 }
 
 // State is a command entry's state.

@@ -1,0 +1,547 @@
+package inventory
+
+import (
+	"bufio"
+	"os"
+	"path"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Collector reads the host inventory from procfs and sysfs (PLAN.md §10.1) without cgo: DMI for the
+// system section, /proc/cpuinfo and the NUMA topology, meminfo, hugepages and EDAC counters, block
+// devices, physical NICs, and NVIDIA GPUs through the kernel driver's /proc/driver/nvidia files
+// (uuid, model, VBIOS, bus id; NVML adds the rest when built in). Anything unreadable is left out
+// rather than failing the collection: a section is absent when its source is.
+type Collector struct {
+	// Root prefixes every path ("" is the real filesystem); tests point it at a fake tree.
+	Root string
+	// Hostname defaults to os.Hostname.
+	Hostname func() string
+	// Now stamps CollectedAt (default time.Now).
+	Now func() time.Time
+}
+
+// Collect gathers every section and canonicalizes the result.
+func (c Collector) Collect() (*NodeInventory, error) {
+	now := time.Now
+	if c.Now != nil {
+		now = c.Now
+	}
+	inv := &NodeInventory{
+		SchemaVersion: 1,
+		CollectedAt:   now(),
+		System:        c.system(),
+		Cpu:           c.cpu(),
+		Memory:        c.memory(),
+		Disks:         c.disks(),
+		Nics:          c.nics(),
+		Gpus:          c.gpus(),
+		Os:            c.os(),
+	}
+	Canonicalize(inv)
+	return inv, nil
+}
+
+func (c Collector) p(abs string) string {
+	if c.Root == "" {
+		return abs
+	}
+	return filepath.Join(c.Root, filepath.FromSlash(abs))
+}
+
+func (c Collector) read(abs string) string {
+	b, err := os.ReadFile(c.p(abs))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func (c Collector) exists(abs string) bool {
+	_, err := os.Stat(c.p(abs))
+	return err == nil
+}
+
+func (c Collector) uint(abs string) (uint64, bool) {
+	v, err := strconv.ParseUint(c.read(abs), 10, 64)
+	return v, err == nil
+}
+
+// link returns the base name of a symlink's target ("" when it is not a link).
+func (c Collector) link(abs string) string {
+	target, err := os.Readlink(c.p(abs))
+	if err != nil {
+		return ""
+	}
+	return path.Base(filepath.ToSlash(target))
+}
+
+// linkPath returns a symlink's target as a slash path ("" when it is not a link).
+func (c Collector) linkPath(abs string) string {
+	target, err := os.Readlink(c.p(abs))
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(target)
+}
+
+func (c Collector) list(abs string) []string {
+	entries, err := os.ReadDir(c.p(abs))
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ---- system ------------------------------------------------------------------------------------
+
+const efiGlobal = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+
+func (c Collector) system() *SystemSection {
+	dmi := func(name string) string { return c.read("/sys/class/dmi/id/" + name) }
+	s := &SystemSection{
+		Vendor:        dmi("sys_vendor"),
+		Product:       dmi("product_name"),
+		Serial:        dmi("product_serial"),
+		ProductUuid:   strings.ToLower(dmi("product_uuid")),
+		BoardVendor:   dmi("board_vendor"),
+		BoardProduct:  dmi("board_name"),
+		BoardSerial:   dmi("board_serial"),
+		ChassisSerial: dmi("chassis_serial"),
+		BiosVendor:    dmi("bios_vendor"),
+		BiosVersion:   dmi("bios_version"),
+		BootMode:      BootMode_BOOT_MODE_BIOS,
+	}
+	if c.exists("/sys/firmware/efi") {
+		s.BootMode = BootMode_BOOT_MODE_UEFI
+		// efivarfs: 4 attribute bytes, then the variable (1 = enabled).
+		if b, err := os.ReadFile(c.p("/sys/firmware/efi/efivars/SecureBoot-" + efiGlobal)); err == nil && len(b) >= 5 {
+			on := b[4] == 1
+			s.SecureBoot = &on
+		}
+	}
+	if c.exists("/sys/class/tpm/tpm0") {
+		version := "1.2"
+		if major := c.read("/sys/class/tpm/tpm0/tpm_version_major"); major == "2" {
+			version = "2.0"
+		}
+		s.Tpm = &Tpm{Version: version}
+	}
+	if *s == (SystemSection{BootMode: s.BootMode}) {
+		return nil
+	}
+	return s
+}
+
+// ---- cpu ---------------------------------------------------------------------------------------
+
+func (c Collector) cpu() *CpuSection {
+	f, err := os.Open(c.p("/proc/cpuinfo"))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	s := &CpuSection{Architecture: machine(runtime.GOARCH)}
+	flags := map[string]bool{}
+	sockets := map[string]bool{}
+	cores := map[string]bool{}
+	var threads uint32
+	physical, core := "0", ""
+	flush := func() {
+		if core != "" {
+			cores[physical+"/"+core] = true
+		}
+		core = ""
+		physical = "0"
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		key, value, ok := strings.Cut(sc.Text(), ":")
+		if !ok {
+			if strings.TrimSpace(sc.Text()) == "" {
+				flush()
+			}
+			continue
+		}
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		switch key {
+		case "processor":
+			threads++
+		case "vendor_id":
+			s.Vendor = value
+		case "CPU implementer":
+			if s.Vendor == "" {
+				s.Vendor = armImplementer(value)
+			}
+		case "model name":
+			s.Model = value
+		case "physical id":
+			physical = value
+			sockets[value] = true
+		case "core id":
+			core = value
+		case "flags", "Features":
+			for _, fl := range strings.Fields(value) {
+				flags[fl] = true
+			}
+		}
+	}
+	flush()
+	s.Threads = threads
+	s.Sockets = uint32(max(len(sockets), 1))
+	s.Cores = uint32(len(cores))
+	if s.Cores == 0 {
+		s.Cores = threads
+	}
+	for fl := range flags {
+		s.Flags = append(s.Flags, fl)
+	}
+	sort.Strings(s.Flags)
+	for _, name := range c.list("/sys/devices/system/node") {
+		id, ok := strings.CutPrefix(name, "node")
+		n, err := strconv.ParseUint(id, 10, 32)
+		if !ok || err != nil {
+			continue
+		}
+		node := &NumaNode{Id: uint32(n), Cpus: c.read("/sys/devices/system/node/" + name + "/cpulist")}
+		for _, line := range strings.Split(c.read("/sys/devices/system/node/"+name+"/meminfo"), "\n") {
+			// "Node 0 MemTotal:       263842420 kB"
+			if i := strings.Index(line, "MemTotal:"); i >= 0 {
+				node.MemoryBytes = kib(line[i+len("MemTotal:"):])
+			}
+		}
+		s.NumaNodes = append(s.NumaNodes, node)
+	}
+	return s
+}
+
+func machine(goarch string) string {
+	switch goarch {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	}
+	return goarch
+}
+
+func armImplementer(code string) string {
+	switch strings.ToLower(code) {
+	case "0x41":
+		return "ARM"
+	case "0x4e":
+		return "NVIDIA"
+	case "0xc0":
+		return "Ampere"
+	}
+	return code
+}
+
+// kib parses "<n> kB" into bytes.
+func kib(s string) uint64 {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return 0
+	}
+	n, _ := strconv.ParseUint(fields[0], 10, 64)
+	return n * 1024
+}
+
+// ---- memory ------------------------------------------------------------------------------------
+
+func (c Collector) memory() *MemorySection {
+	s := &MemorySection{}
+	for _, line := range strings.Split(c.read("/proc/meminfo"), "\n") {
+		if rest, ok := strings.CutPrefix(line, "MemTotal:"); ok {
+			s.TotalBytes = kib(rest)
+		}
+	}
+	if s.TotalBytes == 0 {
+		return nil
+	}
+	for _, name := range c.list("/sys/kernel/mm/hugepages") {
+		// hugepages-2048kB
+		size, ok := strings.CutPrefix(name, "hugepages-")
+		size, ok2 := strings.CutSuffix(size, "kB")
+		n, err := strconv.ParseUint(size, 10, 64)
+		if !ok || !ok2 || err != nil {
+			continue
+		}
+		total, _ := c.uint("/sys/kernel/mm/hugepages/" + name + "/nr_hugepages")
+		s.Hugepages = append(s.Hugepages, &HugepagePool{PageSizeBytes: n * 1024, Total: total})
+	}
+	if mcs := c.list("/sys/devices/system/edac/mc"); len(mcs) > 0 {
+		edac := &EdacCounters{}
+		found := false
+		for _, mc := range mcs {
+			if !strings.HasPrefix(mc, "mc") {
+				continue
+			}
+			if ce, ok := c.uint("/sys/devices/system/edac/mc/" + mc + "/ce_count"); ok {
+				edac.Correctable += ce
+				found = true
+			}
+			if ue, ok := c.uint("/sys/devices/system/edac/mc/" + mc + "/ue_count"); ok {
+				edac.Uncorrectable += ue
+				found = true
+			}
+		}
+		if found {
+			s.Edac = edac
+		}
+	}
+	return s
+}
+
+// ---- disks -------------------------------------------------------------------------------------
+
+func (c Collector) disks() *DisksSection {
+	s := &DisksSection{}
+	for _, name := range c.list("/sys/block") {
+		base := "/sys/block/" + name
+		// Physical disks only: a device link, and not a loop, RAM, zram or device-mapper node.
+		if !c.exists(base+"/device") || strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") ||
+			strings.HasPrefix(name, "zram") || strings.HasPrefix(name, "dm-") || strings.HasPrefix(name, "sr") {
+			continue
+		}
+		sectors, _ := c.uint(base + "/size")
+		d := &Disk{
+			Name:       name,
+			Model:      c.read(base + "/device/model"),
+			Serial:     c.read(base + "/device/serial"),
+			Wwn:        c.wwn(base),
+			SizeBytes:  sectors * 512,
+			Rotational: c.read(base+"/queue/rotational") == "1",
+			Removable:  c.read(base+"/removable") == "1",
+			Transport:  c.transport(name, base),
+		}
+		s.Disks = append(s.Disks, d)
+	}
+	if len(s.Disks) == 0 {
+		return nil
+	}
+	return s
+}
+
+func (c Collector) wwn(base string) string {
+	for _, f := range []string{"/wwid", "/device/wwid", "/device/wwn"} {
+		if v := c.read(base + f); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (c Collector) transport(name, base string) DiskTransport {
+	switch {
+	case strings.HasPrefix(name, "nvme"):
+		return DiskTransport_DISK_TRANSPORT_NVME
+	case strings.HasPrefix(name, "vd"):
+		return DiskTransport_DISK_TRANSPORT_VIRTIO
+	}
+	target := c.linkPath(base)
+	switch {
+	case strings.Contains(target, "/usb"):
+		return DiskTransport_DISK_TRANSPORT_USB
+	case strings.Contains(target, "/ata"):
+		return DiskTransport_DISK_TRANSPORT_SATA
+	case strings.Contains(target, "/virtio"):
+		return DiskTransport_DISK_TRANSPORT_VIRTIO
+	case strings.Contains(target, "/host") || strings.Contains(target, "/end_device"):
+		return DiskTransport_DISK_TRANSPORT_SAS
+	}
+	return DiskTransport_DISK_TRANSPORT_UNSPECIFIED
+}
+
+// ---- nics --------------------------------------------------------------------------------------
+
+func (c Collector) nics() *NicsSection {
+	s := &NicsSection{}
+	for _, name := range c.list("/sys/class/net") {
+		base := "/sys/class/net/" + name
+		// Physical NICs only: backed by a device, not a virtual interface.
+		if !c.exists(base+"/device") || strings.Contains(c.linkPath(base), "/virtual/") {
+			continue
+		}
+		n := &Nic{
+			Name:       name,
+			Mac:        strings.ToLower(c.read(base + "/address")),
+			Driver:     c.link(base + "/device/driver"),
+			PciAddress: c.link(base + "/device"),
+			Rdma:       RdmaType_RDMA_TYPE_NONE,
+			Link:       LinkState_LINK_STATE_DOWN,
+		}
+		// A MAC assigned at runtime is not the permanent one; the bonding slave file keeps it.
+		if perm := c.read(base + "/bonding_slave/perm_hwaddr"); perm != "" {
+			n.Mac = strings.ToLower(perm)
+		}
+		if speed, err := strconv.Atoi(c.read(base + "/speed")); err == nil && speed > 0 {
+			n.SpeedMbps = uint32(speed)
+		}
+		if numa, err := strconv.Atoi(c.read(base + "/device/numa_node")); err == nil && numa >= 0 {
+			v := uint32(numa)
+			n.NumaNode = &v
+		}
+		if vfs, ok := c.uint(base + "/device/sriov_totalvfs"); ok {
+			n.SriovTotalVfs = uint32(vfs)
+		}
+		if c.exists(base + "/device/infiniband") {
+			n.Rdma = RdmaType_RDMA_TYPE_ROCE
+			if c.read(base+"/type") == "32" {
+				n.Rdma = RdmaType_RDMA_TYPE_INFINIBAND
+			}
+		}
+		if c.read(base+"/operstate") == "up" {
+			n.Link = LinkState_LINK_STATE_UP
+		}
+		if mtu, ok := c.uint(base + "/mtu"); ok {
+			n.Mtu = uint32(mtu)
+		}
+		s.Nics = append(s.Nics, n)
+	}
+	if len(s.Nics) == 0 {
+		return nil
+	}
+	return s
+}
+
+// ---- gpus --------------------------------------------------------------------------------------
+
+func (c Collector) gpus() *GpusSection {
+	buses := c.list("/proc/driver/nvidia/gpus")
+	if len(buses) == 0 {
+		return nil
+	}
+	s := &GpusSection{DriverVersion: nvidiaDriverVersion(c.read("/proc/driver/nvidia/version"))}
+	for _, bus := range buses {
+		info := map[string]string{}
+		for _, line := range strings.Split(c.read("/proc/driver/nvidia/gpus/"+bus+"/information"), "\n") {
+			if k, v, ok := strings.Cut(line, ":"); ok {
+				info[strings.TrimSpace(k)] = strings.TrimSpace(v)
+			}
+		}
+		uuid := info["GPU UUID"]
+		if uuid == "" {
+			continue
+		}
+		g := &Gpu{
+			Uuid:         uuid,
+			Name:         info["Model"],
+			VbiosVersion: info["Video BIOS"],
+			PciBusId:     pciBusID(bus),
+			Architecture: architecture(info["Model"]),
+		}
+		if numa, err := strconv.Atoi(c.read("/sys/bus/pci/devices/" + strings.ToLower(bus) + "/numa_node")); err == nil && numa >= 0 {
+			v := uint32(numa)
+			g.NumaNode = &v
+		}
+		s.Gpus = append(s.Gpus, g)
+	}
+	// Index in bus order, as nvidia-smi enumerates them by default (CUDA_DEVICE_ORDER=PCI_BUS_ID).
+	sort.Slice(s.Gpus, func(i, j int) bool { return s.Gpus[i].PciBusId < s.Gpus[j].PciBusId })
+	for i, g := range s.Gpus {
+		g.Index = uint32(i)
+	}
+	if len(s.Gpus) == 0 {
+		return nil
+	}
+	return s
+}
+
+// nvidiaDriverVersion reads "NVRM version: NVIDIA UNIX x86_64 Kernel Module  580.65.06  ...".
+func nvidiaDriverVersion(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if i := strings.Index(line, "Kernel Module"); i >= 0 {
+			if fields := strings.Fields(line[i+len("Kernel Module"):]); len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+	return ""
+}
+
+// pciBusID widens "0000:18:00.0" to NVML's "00000000:18:00.0".
+func pciBusID(bus string) string {
+	domain, rest, ok := strings.Cut(strings.ToUpper(bus), ":")
+	if !ok {
+		return strings.ToUpper(bus)
+	}
+	for len(domain) < 8 {
+		domain = "0" + domain
+	}
+	return domain + ":" + rest
+}
+
+// architecture guesses the generation from the marketing name (NVML reports it exactly).
+func architecture(model string) string {
+	m := strings.ToUpper(model)
+	switch {
+	case strings.Contains(m, "B200"), strings.Contains(m, "B100"), strings.Contains(m, "GB200"), strings.Contains(m, "RTX PRO 6000"):
+		return "blackwell"
+	case strings.Contains(m, "H100"), strings.Contains(m, "H200"), strings.Contains(m, "H800"), strings.Contains(m, "GH200"):
+		return "hopper"
+	case strings.Contains(m, "L40"), strings.Contains(m, "L4"), strings.Contains(m, "RTX 40"), strings.Contains(m, "RTX 6000 ADA"):
+		return "ada"
+	case strings.Contains(m, "A100"), strings.Contains(m, "A800"), strings.Contains(m, "A10"), strings.Contains(m, "A30"), strings.Contains(m, "A40"):
+		return "ampere"
+	}
+	return ""
+}
+
+// ---- os ----------------------------------------------------------------------------------------
+
+func (c Collector) os() *OsSection {
+	s := &OsSection{Kernel: c.read("/proc/sys/kernel/osrelease"), Cgroup: CgroupVersion_CGROUP_VERSION_V1}
+	for _, line := range strings.Split(c.read("/etc/os-release"), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		v = strings.Trim(v, `"'`)
+		switch k {
+		case "ID":
+			s.Distro = v
+		case "VERSION_ID":
+			s.DistroVersion = v
+		}
+	}
+	if c.exists("/sys/fs/cgroup/cgroup.controllers") {
+		s.Cgroup = CgroupVersion_CGROUP_VERSION_V2
+	}
+	s.Kvm = c.exists("/dev/kvm")
+	s.Iommu = len(c.list("/sys/class/iommu")) > 0
+	runtimes := map[string][]string{
+		"containerd": {"/run/containerd/containerd.sock", "/usr/bin/containerd"},
+		"docker":     {"/run/docker.sock", "/usr/bin/dockerd"},
+		"libvirt":    {"/run/libvirt/libvirt-sock", "/usr/sbin/libvirtd"},
+		"podman":     {"/usr/bin/podman"},
+	}
+	for name, paths := range runtimes {
+		for _, p := range paths {
+			if c.exists(p) {
+				s.Runtimes = append(s.Runtimes, name)
+				break
+			}
+		}
+	}
+	sort.Strings(s.Runtimes)
+	if c.Hostname != nil {
+		s.Hostname = c.Hostname()
+	} else if c.Root == "" {
+		s.Hostname, _ = os.Hostname()
+	} else {
+		s.Hostname = c.read("/proc/sys/kernel/hostname")
+	}
+	return s
+}
