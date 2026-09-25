@@ -170,12 +170,24 @@ show it.
   `/etc/sandbox/env` (0600) inside user data that the broker seals. Without a broker, env is
   `INVALID_CONFIG`.
 
+  With `sandboxExec.certifyHostKey`, which the host wires to the sandbox CA's
+  `issueHostCertificate`, every guest also gets a P-256 host key certified for its instance id:
+  - sshd presents it through `HostKey` and `HostCertificate`;
+  - `sandboxes.exec` answers `hostPrincipal` and `hostCertified`, so clients pin guests with
+    `@cert-authority` and `StrictHostKeyChecking=yes`;
+  - a memory restore keeps its source guest's key and principal.
+
 - **Network.** A template's `network` becomes the instance's `InstanceSpec.networkPolicy`. bcd
   enforces it on the instance's taps with nftables and fails closed without NIC addresses, so
   `private` and `none` need the pool's IP range.
-- **Secrets.** Sandbox user data is rendered and then sealed through the broker before the instance
-  row is written. Without a broker, env and a `secret://` user data that vps would have to render
-  are `INVALID_CONFIG`.
+- **Secrets.** Secrets are write-only, but a sandbox reads whatever its template names. A template's
+  env and `secret://` user data must therefore be secrets the tenant wrote with `secrets.put` (a
+  `secret_refs` row), so platform-minted ones are refused. Writing such a template also decides
+  `compute:secrets:manage` on the tenant, outside any transaction.
+
+  Sandbox user data is rendered and then sealed through the broker before the instance row is
+  written. Without a broker, env and a `secret://` user data that vps would have to render are
+  `INVALID_CONFIG`.
 
 ## Tenant teardown (§12.8)
 
