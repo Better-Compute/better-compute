@@ -39,6 +39,11 @@ export interface ComputeFixtureOptions<
   plugins?: P;
   /** Where compute logs (default: warnings and errors as JSON on stderr). */
   log?: Logger;
+  /**
+   * The §8.1 guard over the IamPort (`iamGuard`): default `throw`, so a test that awaits IAM
+   * inside a compute transaction fails.
+   */
+  iamGuard?: 'off' | 'warn' | 'throw';
 }
 
 /** One tenant of the fixture and the one signed-in person the fake IAM knows in it. */
@@ -274,6 +279,7 @@ export async function computeFixture<
       baseURL,
       rootTenantId: tenants.root.id,
       clock,
+      iamGuard: options.iamGuard ?? 'throw',
       ...(options.modules ? { modules: options.modules } : {}),
       ...(options.plugins ? { plugins: options.plugins } : {}),
       ...(options.log ? { log: options.log } : {}),

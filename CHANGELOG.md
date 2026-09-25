@@ -8,6 +8,16 @@
   - Server: audit sinks (`sinks.audit`, module extensions), module-listed event sinks and scheduler plugins; `sinks.usage` refused. `GET {basePath}/downloads/bcd/{version}/linux-{arch}`; `supportBundles` presigned `logs.collect` uploads; `projects.archive`, `commands.cancel`, `usage.export`; selfCheck §14 operations findings; fewer statements per join; the node pass wakes started reservations on connectivity/schedulability changes; `site` NodeSpec sections merge per field (`NodeSpecPart`); `vps-host` nodes may be declared lost.
   - Core/proto (additive): PoolPolicy runtime/singleTenant/workloadIdentity, InstanceSpec allocationId/nics, CapacityPort.reserve admission, ProviderImpl.identify, Reconciler.role, PlacementRequest.nodeLabels, SiteSpec.cacheImages; `driver.invoke` payloads, WorkloadToken frames (sealed JWE, purpose `workload-token`), StatusReport.pressure; catalog rows providerAccounts.bootstrap, workflows.pause/resume, metal.unrescue.
   - MCP: `iamConfirmations` (per-request polling), `remoteMcpIam` (the gate over HTTP IAM), reservation and instance tools. Client: `$watch`.
+  - Later:
+    - Sandboxes are a product feature (D24, user decision); the design is PLAN §3.7.
+    - vps `instances.create` waits (`wait: { timeoutMs }`) and applies the pool's budget policy (`SPEND_LIMIT_REACHED`).
+    - A node dedicated to one tenant wakes pending work (`mayBeSchedulableSql`).
+    - Ramdisk certificates allow the commissioning kinds under their real names (`inventory.refresh`, `disk.wipe`, `logs.collect`); before this, commissioning could not inspect or wipe.
+    - Proto `Hello.trust_version` / `StatusReport.trust_version` for the command-root switch gate.
+    - `iamGuard` / `BETTER_COMPUTE_IAM_GUARD=warn|throw` reports or refuses an IamPort call made inside a compute transaction (§8.1); `computeFixture` defaults to `throw`.
+    - Sandboxes seams: paused instances, `restore_from`, `instance.snapshot` messages, runtime `pause`/`resume`/`snapshot`.
+    - Workload tokens are refused for suspended or deleted tenants.
+    - MCP `create_instance` waits for the instance to start.
   - Tests: the §16 v0.3 MCP confirmation acceptance and §12.6 example policies end to end, §5.6 walkthrough 2 (acme-cloud), the authz matrix known-key replay step; `pnpm check` runs the remote-IAM suites, `proto-gen --check` and `buf breaking`. Tools: `scripts/private-commit.mjs` (compare-and-swap commits), `scripts/head-check.mjs` (tests the committed tree in a worktree).
 
 - Metal attestation and dedicated-root leases:

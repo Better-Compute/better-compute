@@ -26,6 +26,7 @@ import {
 import type { CapacityModuleOptions } from '@better-compute/capacity';
 import { localSealedSecretStore, type CommandSigningAuthority } from '@better-compute/pki';
 import type { DownloadsOptions } from './downloads.js';
+import { guardIamPort, type IamGuardMode } from './iam-guard.js';
 import { pkiAllocationBindingCheck } from './join/allocation-binding.js';
 import type { JoinCrypto, JoinTrustBundle } from './join/crypto.js';
 import { createCommandSigner, type CommandSigner } from './runtime/command-signing.js';
@@ -187,6 +188,12 @@ export interface ComputeOptions<
    * that `bundleKey`. Without it `logs.collect` has no upload destination.
    */
   supportBundles?: { blob: BlobStore; maxBytes?: number };
+  /**
+   * Reports (`warn`) or refuses (`throw`) an IamPort call made while a compute transaction is open
+   * (§8.1: never allowed). Default `BETTER_COMPUTE_IAM_GUARD` (`warn` or `throw`), else `off`;
+   * `computeFixture` defaults it to `throw`.
+   */
+  iamGuard?: IamGuardMode;
   gateway?: { publicUrls: Record<string, string>; maxStreams?: number };
   /**
    * Business time (P9). Default: the process clock anchored to `compute_now()`, re-sampled at every
@@ -418,9 +425,13 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
   if (capacity.attestedBindings === undefined && signing.commandSigner)
     capacity.attestedBindings = pkiAllocationBindingCheck({ now: () => clock.now() });
 
+  const guardMode = options.iamGuard ?? envIamGuard();
+  if (!['off', 'warn', 'throw'].includes(guardMode))
+    throw invalid('iamGuard must be off, warn or throw');
+
   return {
     database: hooks.database,
-    iam: options.iam,
+    iam: guardIamPort(options.iam, hooks.inTransaction, guardMode, log),
     rootTenantId,
     typePrefix,
     baseURL,
@@ -551,6 +562,12 @@ function resolveCapacity(
   if (scheduler?.weights) resolved.weights = scheduler.weights;
   if (scheduler?.topN !== undefined) resolved.topN = scheduler.topN;
   return resolved;
+}
+
+/** `BETTER_COMPUTE_IAM_GUARD=warn|throw` turns the guard on for a whole run (tests, `dev`). */
+function envIamGuard(): IamGuardMode {
+  const value = typeof process === 'object' ? process.env?.BETTER_COMPUTE_IAM_GUARD : undefined;
+  return value === 'warn' || value === 'throw' ? value : 'off';
 }
 
 function resolveDownloads(downloads: ComputeOptions['downloads']): DownloadsOptions | undefined {
