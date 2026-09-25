@@ -287,6 +287,8 @@ interface RawInstance {
   conditions: Condition[] | string;
   version: string | number;
   pool_class: string;
+  sandbox_id: string | null;
+  warm_template_id: string | null;
 }
 
 /** A stored instance with everything the lifecycle needs. */
@@ -323,6 +325,10 @@ export interface InstanceRow {
   requestHash: string;
   conditions: Condition[];
   version: number;
+  /** The sandbox this instance runs (§3.7): instance item methods refuse it. */
+  sandboxId?: string;
+  /** A warm-pool instance of this sandbox template, not claimed yet (§3.7). */
+  warmTemplateId?: string;
 }
 
 const json = <T>(value: T | string): T =>
@@ -361,6 +367,8 @@ function toRow(raw: RawInstance): InstanceRow {
   if (raw.quota_charged !== null) row.quotaCharged = json(raw.quota_charged);
   if (raw.agent_id !== null) row.agentId = raw.agent_id;
   if (raw.delegation_id !== null) row.delegationId = raw.delegation_id;
+  if (raw.sandbox_id !== null) row.sandboxId = raw.sandbox_id;
+  if (raw.warm_template_id !== null) row.warmTemplateId = raw.warm_template_id;
   return row;
 }
 
@@ -368,7 +376,8 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   i.ssh_keys, i.user_data, i.user_data_sealed, i.runtime, i.draft, i.state, i.desired_state, i.node_id, i.allocation_id,
   i.provider_account_id, i.external_id, i.addresses, i.reported_state, i.quota_charged,
   i.owner_identity_id, i.agent_id, i.delegation_id, i.idempotency_key,
-  encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class`;
+  encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class,
+  i.sandbox_id, i.warm_template_id`;
 
 export async function readInstance(
   tx: SqlTx,
@@ -530,7 +539,7 @@ export function instanceDemand(shape: InstanceShape): Record<string, number> {
   return demand;
 }
 
-function shapeOf(flavor: FlavorRecord): InstanceShape {
+export function shapeOf(flavor: FlavorRecord): InstanceShape {
   const shape: InstanceShape = {
     name: flavor.name,
     vcpu: flavor.vcpu,
@@ -556,7 +565,11 @@ export function renderUserData(row: Pick<InstanceRow, 'id' | 'sshKeys' | 'userDa
  * fetches through the broker for this instance's allocation (the spec never carries user data).
  * A tenant's own ref is kept as it is.
  */
-async function sealUserData(deps: InstanceDeps, tx: SqlTx, row: InstanceRow): Promise<InstanceRow> {
+export async function sealUserData(
+  deps: InstanceDeps,
+  tx: SqlTx,
+  row: InstanceRow,
+): Promise<InstanceRow> {
   if (!deps.broker || isSecretRef(row.userData)) return row;
   const ref = await deps.broker.put(row.tenantId, renderUserData(row));
   await tx.query(`UPDATE instances SET user_data = $2, user_data_sealed = true WHERE id = $1`, [
@@ -581,7 +594,7 @@ export async function dropSealedUserData(deps: InstanceDeps, row: InstanceRow): 
 
 // --- Admission -----------------------------------------------------------------------------------
 
-interface PoolForInstance {
+export interface PoolForInstance {
   id: string;
   ownerTenantId: string;
   class: string;
@@ -592,7 +605,7 @@ interface PoolForInstance {
   singleTenant: boolean;
 }
 
-async function visibleVpsPool(
+export async function visibleVpsPool(
   tx: SqlTx,
   tenantId: string,
   poolId: string,
@@ -938,10 +951,21 @@ async function lockOwned(tx: SqlTx, ref: InstanceRef): Promise<InstanceRow> {
   const row = await readInstance(tx, ref.instanceId, { tenantId: ref.tenantId, lock: true });
   if (!row || row.draft)
     throw new ComputeError('NOT_FOUND', `Instance ${ref.instanceId} not found`);
+  // §3.7: a sandbox's instance, and a warm one waiting for a sandbox, follow their sandbox only.
+  if (row.sandboxId !== undefined)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Instance ${row.id} is managed by sandbox ${row.sandboxId}`,
+    );
+  if (row.warmTemplateId !== undefined)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Instance ${row.id} is a warm instance of sandbox template ${row.warmTemplateId}`,
+    );
   return row;
 }
 
-async function wake(deps: InstanceDeps, tx: SqlTx, row: InstanceRow): Promise<void> {
+export async function wake(deps: InstanceDeps, tx: SqlTx, row: InstanceRow): Promise<void> {
   if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
   await deps.work.enqueue(tx, instanceWork, row.id);
 }
@@ -1073,7 +1097,7 @@ export async function listInstances(
   const owner = input.scope === 'mine' ? (callerIdentityId ?? '') : null;
   const { rows } = await tx.query<RawInstance>(
     `SELECT ${columns} FROM instances i JOIN pools p ON p.id = i.pool_id
-      WHERE i.tenant_id = $1 AND NOT i.draft
+      WHERE i.tenant_id = $1 AND NOT i.draft AND i.warm_template_id IS NULL
         AND ($2::text IS NULL OR i.owner_identity_id = $2)
         AND ($3::text IS NULL OR i.state = $3) AND ($4::text IS NULL OR i.pool_id = $4)
         AND ($5::text IS NULL OR (i.created_at, i.id) <

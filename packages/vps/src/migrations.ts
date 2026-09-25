@@ -1,5 +1,6 @@
 import type { Migration } from '@better-compute/core';
 import { vpsProviderBootstrapsMigration } from './bootstraps.js';
+import { vpsSandboxesMigration } from './sandboxes.js';
 
 /**
  * The VPS tables (PLAN.md §3.6, §8.3 "v0.3 tables"): flavors per pool, provider accounts, instances
@@ -111,4 +112,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsBaseMigration,
   vpsSealedUserDataMigration,
   vpsProviderBootstrapsMigration,
+  vpsSandboxesMigration,
 ]);

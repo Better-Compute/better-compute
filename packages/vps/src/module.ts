@@ -83,6 +83,43 @@ import {
 } from './hosts.js';
 import { meterInstances } from './usage.js';
 import { schemas } from './schemas.js';
+import {
+  completeCreateSandbox,
+  createTemplate,
+  deleteSandbox,
+  deleteTemplate,
+  denyCreateSandbox,
+  denyExtendSandbox,
+  extendSandbox,
+  getSandbox,
+  getTemplate,
+  listSandboxes,
+  listTemplates,
+  parseCreateSandbox,
+  parseExtendSandbox,
+  parseListSandboxes,
+  parseSandboxRef,
+  parseTemplateInput,
+  parseTemplateRef,
+  parseTemplateUpdate,
+  prepareCreateSandbox,
+  prepareExtendSandbox,
+  reconcileSandboxes,
+  sandboxSettled,
+  sandboxWork,
+  templatePool,
+  updateTemplate,
+  type CreateSandboxInput,
+  type ExtendSandboxInput,
+  type ListSandboxesInput,
+  type Sandbox,
+  type SandboxRef,
+  type SandboxTemplate,
+  type TemplateInput,
+  type TemplateRef,
+  type TemplateUpdate,
+} from './sandboxes.js';
+import { vpsTenantDeleted } from './tenancy.js';
 
 /** Options of `vps()`. */
 export interface VpsOptions {
@@ -145,6 +182,20 @@ export type VpsApi = {
     delete: MethodDefinition<AccountRef, { deleted: true }>;
     bootstrap: MethodDefinition<BootstrapInput, ProviderBootstrap>;
   };
+  sandboxes: {
+    create: MethodDefinition<CreateSandboxInput, Sandbox>;
+    list: MethodDefinition<ListSandboxesInput, { items: Sandbox[]; cursor?: string }>;
+    get: MethodDefinition<SandboxRef, Sandbox>;
+    extend: MethodDefinition<ExtendSandboxInput, Sandbox>;
+    delete: MethodDefinition<SandboxRef, Sandbox>;
+  };
+  sandboxTemplates: {
+    create: MethodDefinition<TemplateInput, SandboxTemplate>;
+    list: MethodDefinition<{ tenantId: string }, { items: SandboxTemplate[] }>;
+    get: MethodDefinition<TemplateRef, SandboxTemplate>;
+    update: MethodDefinition<TemplateUpdate, SandboxTemplate>;
+    delete: MethodDefinition<TemplateRef, { deleted: true }>;
+  };
 };
 
 function tenantResource<I extends { tenantId: string }>(input: I) {
@@ -158,6 +209,12 @@ function instanceResource<I extends { instanceId: string }>(input: I) {
 }
 function accountResource<I extends { accountId: string }>(input: I) {
   return { type: 'provider-account', id: input.accountId };
+}
+function sandboxResource<I extends { sandboxId: string }>(input: I) {
+  return { type: 'sandbox', id: input.sandboxId };
+}
+function templateResource<I extends { templateId: string }>(input: I) {
+  return { type: 'sandbox-template', id: input.templateId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -532,6 +589,102 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         handler: (context, input) => startBootstrap(bootstrapDeps(context), context, input),
       }),
     },
+    // §3.7 (D24): a sandbox drives one hosted instance; templates are per tenant.
+    sandboxes: {
+      create: defineMethod<CreateSandboxInput, Sandbox>({
+        action: 'compute:sandboxes:create',
+        kind: 'mutation',
+        // The envelope decides on the draft `prepare` returns.
+        resource: (input) => ({ type: 'sandbox', id: `draft:${input.idempotencyKey}` }),
+        validate: describedBy(schemas.createSandbox, parseCreateSandbox),
+        admission: {
+          prepare: (context, input, tx) =>
+            prepareCreateSandbox(depsOf(context), context, input, tx),
+          denied: (context, input, tx) => denyCreateSandbox(depsOf(context), context, input, tx),
+          check: async (context, input) => {
+            const poolId = await templatePool(context.sql, input);
+            if (poolId !== undefined) await budgetAdmissionCheck(context, input.tenantId, poolId);
+          },
+        },
+        handler: (context, input) => completeCreateSandbox(depsOf(context), context, input),
+        poll: {
+          done: sandboxSettled,
+          refresh: (context, input, output) =>
+            getSandbox(context.sql, { tenantId: input.tenantId, sandboxId: output.id }),
+        },
+      }),
+      list: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(schemas.listSandboxes, parseListSandboxes),
+        handler: (context, input) => listSandboxes(context.sql, input, context.caller?.identityId),
+      }),
+      get: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: sandboxResource,
+        validate: describedBy(schemas.sandbox, parseSandboxRef),
+        handler: (context, input) => getSandbox(context.sql, input),
+      }),
+      extend: defineMethod<ExtendSandboxInput, Sandbox>({
+        action: 'compute:sandboxes:update',
+        kind: 'mutation',
+        resource: sandboxResource,
+        validate: describedBy(schemas.extendSandbox, parseExtendSandbox),
+        admission: {
+          prepare: (context, input, tx) => prepareExtendSandbox(context, input, tx),
+          denied: (context, input, tx) => denyExtendSandbox(context, input, tx),
+        },
+        handler: (context, input) => extendSandbox(depsOf(context), context, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:sandboxes:delete',
+        kind: 'mutation',
+        resource: sandboxResource,
+        validate: describedBy(schemas.sandbox, parseSandboxRef),
+        handler: (context, input) => deleteSandbox(depsOf(context), context.sql, input),
+      }),
+    },
+    sandboxTemplates: {
+      create: defineMethod({
+        action: 'compute:sandboxes:manage',
+        kind: 'mutation',
+        resource: tenantResource,
+        validate: describedBy(schemas.createTemplate, parseTemplateInput),
+        handler: (context, input) => createTemplate(depsOf(context), context, input),
+      }),
+      list: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(schemas.tenant, (raw) => ({
+          tenantId: tenant(object(raw, ['tenantId']).tenantId),
+        })),
+        handler: (context, input) => listTemplates(context.sql, input.tenantId),
+      }),
+      get: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: templateResource,
+        validate: describedBy(schemas.template, parseTemplateRef),
+        handler: (context, input) => getTemplate(context.sql, input),
+      }),
+      update: defineMethod({
+        action: 'compute:sandboxes:manage',
+        kind: 'mutation',
+        resource: templateResource,
+        validate: describedBy(schemas.updateTemplate, parseTemplateUpdate),
+        handler: (context, input) => updateTemplate(depsOf(context), context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:sandboxes:manage',
+        kind: 'mutation',
+        resource: templateResource,
+        validate: describedBy(schemas.template, parseTemplateRef),
+        handler: (context, input) => deleteTemplate(depsOf(context), context.sql, input),
+      }),
+    },
   });
 
   return defineModule({
@@ -584,6 +737,16 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         },
       },
       {
+        // §3.7: sandbox expiry, sandbox.ready/deleted events, and warm pools per template.
+        name: sandboxWork,
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: '15s' }],
+        async run(context) {
+          await reconcileSandboxes(depsOf(context), context.sql);
+          return 'DONE';
+        },
+      },
+      {
         // §12.7: vps.vcpu.hours, vps.memory.gib.hours (and GPU hours) for hosted instances.
         name: 'vps.usage',
         shardBy: 'none',
@@ -595,6 +758,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       },
     ],
     selfCheck: (context) => vpsSelfCheck(context.sql, runtimeTable, runtimes[0]!),
+    // §12.8: hosted instances hold inline allocations, which capacity's teardown never reaches.
+    tenantDeleted: (context, tenantId) => vpsTenantDeleted(depsOf(context), context, tenantId),
     async nodeSpec(context, node) {
       const instances = await instanceSpecs(
         context.sql,

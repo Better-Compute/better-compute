@@ -50,6 +50,29 @@ const machineRef = (description: string): InputSchema => ({
   maxLength: 128,
   description,
 });
+const templateId = idOf('sbxt', 'The sandbox template');
+const sandboxId = idOf('sbx', 'The sandbox');
+const ttlSeconds = (description: string): InputSchema =>
+  integer(60, 30 * 24 * 3600, `${description}, in seconds (1 minute to 30 days)`);
+const templateImage: InputSchema = {
+  type: 'string',
+  pattern: '^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$',
+  maxLength: 200,
+  description: 'The image sandboxes boot',
+};
+const templateUserData: InputSchema = {
+  type: 'string',
+  maxLength: 32_768,
+  description:
+    'User data for every sandbox (at most 32 KiB), or secret://<tenantId>/<id> naming a secret of this tenant',
+};
+const warmPool = strictObject(
+  {
+    min: integer(0, 64, 'Warm instances kept ready (stopped) for fast creates'),
+    max: integer(0, 64, 'Warm instances kept at most (default: min)'),
+  },
+  ['min'],
+);
 // Not typed: any JSON value reaches the provider's config manifest, which validates it.
 const config = (description: string): InputSchema => ({ description });
 
@@ -202,5 +225,89 @@ export const schemas = {
       idempotencyKey,
     },
     ['tenantId', 'accountId', 'poolId', 'idempotencyKey'],
+  ),
+
+  template: strictObject({ tenantId, templateId }, ['tenantId', 'templateId']),
+  createTemplate: strictObject(
+    {
+      tenantId,
+      name: nameOf('The template name, unique in the tenant, e.g. py-small'),
+      poolId: { ...poolId, description: 'A hosted (vps-host) pool offered to the tenant' },
+      flavor,
+      imageId: templateImage,
+      runtime: {
+        type: 'string',
+        pattern: '^[a-z][a-z0-9-]{0,63}$',
+        maxLength: 64,
+        description: "Must be the pool's runtime (checked once, when the template is written)",
+      },
+      userData: templateUserData,
+      defaultTtlSeconds: {
+        ...ttlSeconds('A sandbox’s lifetime unless it asks for one'),
+        default: 3600,
+      },
+      maxTtlSeconds: {
+        ...ttlSeconds('The longest lifetime a sandbox may have, extensions included'),
+        default: 86_400,
+      },
+      warm: warmPool,
+    },
+    ['tenantId', 'name', 'poolId', 'flavor', 'imageId'],
+  ),
+  updateTemplate: strictObject(
+    {
+      tenantId,
+      templateId,
+      flavor,
+      imageId: templateImage,
+      userData: {
+        ...templateUserData,
+        type: ['string', 'null'],
+        description: 'New user data, or null to remove it',
+      },
+      defaultTtlSeconds: ttlSeconds('A sandbox’s lifetime unless it asks for one'),
+      maxTtlSeconds: ttlSeconds('The longest lifetime a sandbox may have, extensions included'),
+      warm: warmPool,
+    },
+    ['tenantId', 'templateId'],
+  ),
+  sandbox: strictObject({ tenantId, sandboxId }, ['tenantId', 'sandboxId']),
+  createSandbox: strictObject(
+    {
+      tenantId,
+      templateId,
+      ttlSeconds: ttlSeconds("The sandbox's lifetime (default: the template's defaultTtlSeconds)"),
+      idempotencyKey,
+      wait: strictObject(
+        {
+          timeoutMs: integer(0, 30_000, 'How long to hold the answer until the sandbox is ready'),
+        },
+        ['timeoutMs'],
+      ),
+    },
+    ['tenantId', 'templateId', 'idempotencyKey'],
+  ),
+  listSandboxes: strictObject(
+    {
+      tenantId,
+      scope: { enum: ['mine', 'all'], default: 'mine' },
+      deleted: { type: 'boolean', default: false, description: 'Include deleted sandboxes' },
+      templateId,
+      limit: integer(1, 200),
+      cursor: { ...sandboxId, description: 'The last sandbox id of the previous page' },
+    },
+    ['tenantId'],
+  ),
+  extendSandbox: strictObject(
+    {
+      tenantId,
+      sandboxId,
+      until: integer(0, 2 ** 47, 'The new expiry, epoch milliseconds (or by, not both)'),
+      by: {
+        type: ['string', 'integer'],
+        description: 'Added to the current expiry: 30m, 8h, or milliseconds (or until, not both)',
+      },
+    },
+    ['tenantId', 'sandboxId'],
   ),
 } satisfies Record<string, InputSchema>;
