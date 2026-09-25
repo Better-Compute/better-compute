@@ -349,4 +349,59 @@ describe('lifecycle', () => {
       await database.close();
     }
   });
+
+  it('runs scheduler reconcilers only under the scheduler role, on their own shard leases', async () => {
+    const seen: string[] = [];
+    const module = defineModule({
+      name: 'live',
+      reconcilers: [
+        { name: 'live', shardBy: 'node', run: async (_c, key) => (seen.push(`live:${key}`), 'DONE') },
+        { name: 'place', shardBy: 'pool', role: 'scheduler', run: async (_c, key) => (seen.push(`place:${key}`), 'DONE') },
+      ],
+    });
+    const database = pglite();
+    const compute = betterCompute({
+      database,
+      iam: fakeIam(),
+      secret: SECRET,
+      baseURL: BASE_URL,
+      rootTenantId: 'tenant-root',
+      modules: [module],
+      worker: { id: 'wkr-sched', pollMs: 20 },
+    });
+    const waitFor = async (entry: string) => {
+      const deadline = Date.now() + 10_000;
+      while (!seen.includes(entry) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    };
+    const shardLeases = async () =>
+      (
+        await database.query<{ controllers: number; scheduler: number }>(
+          `SELECT count(*) FILTER (WHERE name LIKE 'shard:%')::int AS controllers,
+                  count(*) FILTER (WHERE name LIKE 'scheduler/shard:%')::int AS scheduler
+             FROM leases WHERE expires_at > compute_now() AND owner IS NOT NULL`,
+        )
+      ).rows[0];
+    try {
+      await compute.initialize();
+      await compute.start({ roles: ['controllers'] });
+      await database.transaction(async (tx) => {
+        await compute.context.work.enqueue(tx, 'live', 'node_1');
+        await compute.context.work.enqueue(tx, 'place', 'pool_1');
+      });
+      await waitFor('live:node_1');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(seen).toEqual(['live:node_1']);
+      expect(await shardLeases()).toEqual({ controllers: 256, scheduler: 0 });
+
+      await compute.start({ roles: ['scheduler'] });
+      await waitFor('place:pool_1');
+      expect(seen).toEqual(['live:node_1', 'place:pool_1']);
+      expect(await shardLeases()).toEqual({ controllers: 256, scheduler: 256 });
+      await compute.stop();
+      expect(await shardLeases()).toEqual({ controllers: 0, scheduler: 0 });
+    } finally {
+      await compute.stop();
+      await database.close();
+    }
+  });
 });

@@ -7,6 +7,7 @@ import {
   type InventoryPort,
   type Lease,
   type ModuleContext,
+  type Reconciler,
   type RegistryView,
   type SqlTx,
   type WorkQueue,
@@ -119,17 +120,37 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** The worker roles that run reconcilers, each with its own shard membership. */
+const shardedRoles = ['controllers', 'scheduler'] as const;
+type ShardedRole = (typeof shardedRoles)[number];
+
+/** `scheduler` for placers (`Reconciler.role`), which scale apart from the controllers; else `controllers`. */
+function reconcilerRole(reconciler: Reconciler): ShardedRole {
+  return reconciler.role === 'scheduler' ? 'scheduler' : 'controllers';
+}
+
 export function createRuntime(options: ResolvedOptions): Runtime {
   const { database, clock, log, worker: settings } = options;
   const workerId = settings.id;
   const monitor = createClockMonitor(clock, log);
   const leases = createLeases(database, monitor);
-  const membership: Membership = createMembership(database, leases, clock, {
+  const membershipSettings = {
     workerId,
     shardLeaseTtlMs: settings.leaseTtlMs,
     renewMs: settings.renewMs,
     liveWorkerMs: settings.liveWorkerMs,
+  };
+  // One rendezvous membership per role that runs sharded reconcilers (§8.1): the controllers', and
+  // the scheduler's (placers), so each role spreads the 256 shards over its own processes.
+  const membership: Membership = createMembership(database, leases, clock, membershipSettings);
+  const schedulerMembership: Membership = createMembership(database, leases, clock, {
+    ...membershipSettings,
+    group: 'scheduler',
   });
+  const memberships: Record<ShardedRole, Membership> = {
+    controllers: membership,
+    scheduler: schedulerMembership,
+  };
   const singletons: SingletonLease[] = [];
   const singleton = (job: string) => {
     const lease = createSingletonLease(
@@ -177,6 +198,8 @@ export function createRuntime(options: ResolvedOptions): Runtime {
   let stopController = new AbortController();
   const running = new Map<string, Promise<void>>();
   const loopRoles = new Set<WorkerRole>();
+  /** Which worker role runs each reconciler (§8.1). */
+  const runnerRoles = new Map<string, ShardedRole>();
   let eventsLoop = false;
 
   const requireBound = () => {
@@ -285,6 +308,8 @@ export function createRuntime(options: ResolvedOptions): Runtime {
       const collected = collectReconcilers(input.modules, reserved);
       const runners = new Map<string, ReconcilerRunner>();
       for (const { reconciler, periodic } of collected) {
+        const role = reconcilerRole(reconciler);
+        runnerRoles.set(reconciler.name, role);
         const runner = createReconcilerRunner({
           reconciler,
           periodic,
@@ -294,7 +319,7 @@ export function createRuntime(options: ResolvedOptions): Runtime {
           clock,
           log,
           context: () => input.context,
-          membership,
+          membership: memberships[role],
           singleton: singleton(reconciler.name),
           settings: {
             batchSize: settings.batchSize,
@@ -329,10 +354,10 @@ export function createRuntime(options: ResolvedOptions): Runtime {
       for (const role of roles) {
         if (loopRoles.has(role)) continue;
         loopRoles.add(role);
-        if (role === 'controllers') {
+        if (role === 'controllers' || role === 'scheduler') {
           for (const [name, runner] of runners)
-            loop(name, () => runner.tick(settings.concurrency), poll);
-          loop('command-sweeper', sweep, settings.sweepMs);
+            if (runnerRoles.get(name) === role) loop(name, () => runner.tick(settings.concurrency), poll);
+          if (role === 'controllers') loop('command-sweeper', sweep, settings.sweepMs);
         } else if (role === 'sinks') {
           loop('outbox-dispatch', dispatchOutbox, poll);
         } else if (role === 'iam') {
@@ -341,7 +366,6 @@ export function createRuntime(options: ResolvedOptions): Runtime {
             loop(`iam:${job.name}`, async () => (await tick(), 0), job.everyMs);
           }
         }
-        // `scheduler` (the pool-lease placer) arrives in v0.4.
       }
       if (!eventsLoop) {
         eventsLoop = true;
@@ -351,7 +375,7 @@ export function createRuntime(options: ResolvedOptions): Runtime {
         loop(
           'lease-renewal',
           async () => {
-            const shards = loopRoles.has('controllers') ? membership : undefined;
+            const shards = shardedRoles.filter((role) => loopRoles.has(role)).map((role) => memberships[role]);
             await renewLeases(shards, leases, singletons, workerId, settings.leaseTtlMs);
             return 0;
           },
@@ -368,7 +392,7 @@ export function createRuntime(options: ResolvedOptions): Runtime {
       eventsLoop = false;
       await Promise.allSettled(loops);
       const releases: Promise<void>[] = singletons.map((lease) => lease.release());
-      releases.push(membership.leave());
+      releases.push(membership.leave(), schedulerMembership.leave());
       for (const result of await Promise.allSettled(releases))
         if (result.status === 'rejected')
           log.warn('Releasing a lease on stop failed', { error: message(result.reason) });

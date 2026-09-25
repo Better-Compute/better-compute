@@ -1,4 +1,4 @@
-import { SHARD_COUNT, type Clock, type Lease, type SqlExecutor } from '@better-compute/core';
+import { ComputeError, SHARD_COUNT, type Clock, type Lease, type SqlExecutor } from '@better-compute/core';
 import { leaseNames, type TableLeases } from './leases.js';
 
 // Shard ownership (PLAN.md §8.1, §8.5). Every worker heartbeats its `workers` row; rendezvous
@@ -12,9 +12,16 @@ import { leaseNames, type TableLeases } from './leases.js';
 const heartbeat = `INSERT INTO workers (id, started_at, heartbeat_at) VALUES ($1, compute_now(), compute_now())
   ON CONFLICT (id) DO UPDATE SET heartbeat_at = compute_now()`;
 
-/** Live workers; `fresh` ones heartbeated within a shard lease TTL (so may still hold leases). */
+// Membership groups (§8.1): each worker role that runs sharded reconcilers splits the 256 shards
+// among its own members only. The `controllers` group is the unprefixed one (rows `<id>`, leases
+// `shard:<n>`); another group `g` uses rows `g/<id>` and leases `g/shard:<n>`, so a scheduler-only
+// process never takes node shards from the controllers, and the other way round.
+const inGroup = `CASE WHEN $3::text = '' THEN position('/' in id) = 0 ELSE starts_with(id, $3::text || '/') END`;
+
+/** Live workers of a group; `fresh` ones heartbeated within a shard lease TTL (so may still hold leases). */
 const liveWorkers = `SELECT id, heartbeat_at > compute_now() - make_interval(secs => $2::float8) AS fresh
-  FROM workers WHERE heartbeat_at > compute_now() - make_interval(secs => $1::float8) ORDER BY id`;
+  FROM workers WHERE heartbeat_at > compute_now() - make_interval(secs => $1::float8) AND ${inGroup}
+  ORDER BY id`;
 
 /** Rows of workers gone for a long time; their shards were taken over long before. */
 const forgetWorkers = `DELETE FROM workers
@@ -62,6 +69,8 @@ export function assignShards(workers: readonly string[], me: string): number[] {
 
 export interface MembershipSettings {
   workerId: string;
+  /** The membership group (a worker role, e.g. `scheduler`); default: the controllers' group. */
+  group?: string;
   shardLeaseTtlMs: number;
   renewMs: number;
   /** A worker is live while its heartbeat is younger than this. */
@@ -85,7 +94,12 @@ export function createMembership(
   clock: Clock,
   settings: MembershipSettings,
 ): Membership {
-  const { workerId: me } = settings;
+  const group = settings.group ?? '';
+  if (group && !/^[a-z][a-z0-9-]*$/.test(group))
+    throw new ComputeError('INVALID_CONFIG', `Membership group ${JSON.stringify(group)} must be a lower-case name`);
+  /** This worker's row in the group (rendezvous hashes the row ids, so members stay comparable). */
+  const me = group ? `${group}/${settings.workerId}` : settings.workerId;
+  const shardLease = (shard: number) => (group ? `${group}/${leaseNames.shard(shard)}` : leaseNames.shard(shard));
   let owned = new Map<number, Lease>();
   let nextSyncAt = -Infinity;
   let syncing: Promise<ReadonlyMap<number, Lease>> | undefined;
@@ -100,6 +114,7 @@ export function createMembership(
       await database.query<{ id: string; fresh: boolean }>(liveWorkers, [
         settings.liveWorkerMs / 1000,
         settings.shardLeaseTtlMs / 1000,
+        group,
       ])
     ).rows;
     const live = rows.map((row) => row.id);
@@ -114,14 +129,14 @@ export function createMembership(
       for (let shard = 0; shard < SHARD_COUNT; shard++)
         if (!desired.has(shard) && silent.has(shardOwner(live, shard)!)) orphans.add(shard);
     const letGo = [...owned.keys()].filter((shard) => !desired.has(shard) && !orphans.has(shard));
-    if (letGo.length) await leases.releaseMany(letGo.map(leaseNames.shard), me);
+    if (letGo.length) await leases.releaseMany(letGo.map(shardLease), me);
     const held = await leases.acquireMany(
-      [...desired, ...orphans].sort((a, b) => a - b).map(leaseNames.shard),
+      [...desired, ...orphans].sort((a, b) => a - b).map(shardLease),
       me,
       settings.shardLeaseTtlMs,
     );
     const next = new Map<number, Lease>();
-    for (const lease of held.values()) next.set(Number(lease.name.slice('shard:'.length)), lease);
+    for (const lease of held.values()) next.set(Number(lease.name.slice(lease.name.lastIndexOf(':') + 1)), lease);
     owned = next;
     nextSyncAt = clock.now() + settings.renewMs;
     return owned;
@@ -151,7 +166,7 @@ export function createMembership(
       nextSyncAt = -Infinity;
       if (!joined) return;
       joined = false;
-      if (shards.length) await leases.releaseMany(shards.map(leaseNames.shard), me);
+      if (shards.length) await leases.releaseMany(shards.map(shardLease), me);
       await database.query(leaveWorkers, [me]);
     },
   };
@@ -209,13 +224,13 @@ export function createSingletonLease(
  * one statement.
  */
 export async function renewLeases(
-  membership: Membership | undefined,
+  memberships: readonly Membership[],
   leases: TableLeases,
   singletons: readonly SingletonLease[],
   owner: string,
   ttlMs: number,
 ): Promise<number> {
-  await membership?.ensure();
+  for (const membership of memberships) await membership.ensure();
   const due = singletons.filter((singleton) => singleton.due());
   if (!due.length) return 0;
   const held = await leases.acquireMany(

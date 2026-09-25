@@ -163,10 +163,77 @@ describe('a silent worker', () => {
   });
 });
 
-async function owners(database: SqlTx) {
+describe('the scheduler role (§8.1, v0.4)', () => {
+  it('splits its shards over its own members, never touching the controllers', async () => {
+    const runs: { reconciler: string; worker: string; key: string }[] = [];
+    const module = (worker: string) =>
+      defineModule({
+        name: 'split',
+        reconcilers: [
+          { name: 'nodes', shardBy: 'node', run: async (_c, key) => (runs.push({ reconciler: 'nodes', worker, key }), 'DONE') },
+          {
+            name: 'placer',
+            shardBy: 'pool',
+            role: 'scheduler',
+            run: async (_c, key) => (runs.push({ reconciler: 'placer', worker, key }), 'DONE'),
+          },
+        ],
+      });
+    const fixture = await computeFixture({ modules: [module('a')] });
+    const a = fixture.compute;
+    // B is a scheduler-only process: it only ever runs the placer.
+    const b = await sibling(fixture, { modules: [module('b')], worker: { id: 'wkr-b', batchSize: 1000 } });
+    const { database, advance } = fixture;
+
+    await a.jobs.nodes!.tick();
+    await a.jobs.placer!.tick();
+    const idA = (await database.query<{ owner: string }>("SELECT owner FROM leases WHERE name = 'shard:0'")).rows[0]!
+      .owner;
+    expect(await owners(database)).toEqual(new Map([[idA, SHARD_COUNT]]));
+    expect(await owners(database, 'scheduler/')).toEqual(new Map([[`scheduler/${idA}`, SHARD_COUNT]]));
+
+    // B joins the scheduler group only; after a membership pass the scheduler shards are split.
+    await b.jobs.placer!.tick();
+    await advance(5_000);
+    await a.jobs.nodes!.tick();
+    await a.jobs.placer!.tick();
+    await b.jobs.placer!.tick();
+    const group = [`scheduler/${idA}`, 'scheduler/wkr-b'];
+    const expectB = assignShards(group, 'scheduler/wkr-b');
+    expect(await owners(database, 'scheduler/')).toEqual(
+      new Map([
+        [`scheduler/${idA}`, SHARD_COUNT - expectB.length],
+        ['scheduler/wkr-b', expectB.length],
+      ]),
+    );
+    // The controllers' shards never moved: B is no controller.
+    expect(await owners(database)).toEqual(new Map([[idA, SHARD_COUNT]]));
+    const { rows: members } = await database.query<{ id: string }>('SELECT id FROM workers ORDER BY id');
+    expect(members.map((row) => row.id)).toEqual([idA, `scheduler/${idA}`, 'scheduler/wkr-b'].sort());
+
+    // Placer keys run where the scheduler shard is held; node keys on the controller.
+    const pools = Array.from({ length: 24 }, (_, index) => `pool_${String(index).padStart(3, '0')}`);
+    await database.transaction(async (tx) => {
+      for (const key of pools) await a.context.work.enqueue(tx, 'placer', key);
+      await a.context.work.enqueue(tx, 'nodes', 'node_1');
+    });
+    runs.length = 0;
+    await a.jobs.nodes!.tick();
+    await a.jobs.placer!.tick();
+    await b.jobs.placer!.tick();
+    const placed = runs.filter((run) => run.reconciler === 'placer');
+    expect(placed.map((run) => run.key).sort()).toEqual(pools);
+    for (const run of placed) expect(run.worker === 'b').toBe(expectB.includes(shardOf(run.key)));
+    expect(runs.filter((run) => run.reconciler === 'nodes')).toEqual([{ reconciler: 'nodes', worker: 'a', key: 'node_1' }]);
+  });
+});
+
+/** Live shard-lease holders of a membership group (`''` = the controllers). */
+async function owners(database: SqlTx, group = '') {
   const { rows } = await database.query<{ owner: string; n: number }>(
     `SELECT owner, count(*)::int AS n FROM leases
-      WHERE name LIKE 'shard:%' AND expires_at > compute_now() GROUP BY owner`,
+      WHERE name LIKE $1 AND expires_at > compute_now() GROUP BY owner`,
+    [`${group}shard:%`],
   );
   return new Map(rows.map((row) => [row.owner, row.n]));
 }
