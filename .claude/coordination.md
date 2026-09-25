@@ -214,6 +214,15 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         - bcd flags (797915d, c98dd68) and renderers (e6b3b14): done;
         - the well-known `gateway` section (670d586, [f85da7]): done;
         - hosts passing gateway.url + pki.servingCa: [402c97].
+    - [31c64a] security review #5 (routed by them):
+      - HIGH: tenancy read a bare IAM 404 as "tenant missing" and could tear down root: [31c64a] fixing;
+      - MED-HIGH: the well-known join trusts web PKI only; the fix is user-data pins
+        ([f02367] renderers + [6a20b8] bcd + [402c97] host pins);
+      - MED: IMDS matches by source IP only; bcx plugins run as root without seccomp; >5 min snapshot
+        uploads fail ([6a20b8]);
+      - MED: template env can read any tenant secret via sandboxes:manage ([097b34]);
+      - the secret broker lacked a tenant-state check: fixed (6a3248a, [f85da7]).
+    - Sandbox snapshots can be deleted (46d0a29); owner-scoped lists, PLAN rows and MCP tools (935e150).
     - Docs-session sandbox gaps:
       - MCP gate rules: fixed (e2ead0e);
       - iam setup meter vps.sandbox.warm, console snapshot store, CLI list limit, pki reseal auth: [402c97];
