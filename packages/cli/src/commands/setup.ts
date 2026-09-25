@@ -129,10 +129,16 @@ export const setupCommands = [
       const { compute, options, source } = await deployment();
       const check = await compute.selfCheck();
       const findings = [...check.findings];
+      // An unreachable database is selfCheck's finding; the checks that read it would only throw.
+      const reachable = !check.findings.some((finding) => finding.check === 'database' && finding.severity === 'error');
       if (isUnconfiguredIam(options.iam)) findings.push(noIamFinding);
-      findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, compute.context.sql)));
-      findings.push(...(await quorumFindings(compute.context.sql, options)));
-      findings.push(...(await daemonFindings(compute.context.sql)));
+      findings.push(
+        ...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, reachable ? compute.context.sql : undefined)),
+      );
+      if (reachable) {
+        findings.push(...(await quorumFindings(compute.context.sql, options)));
+        findings.push(...(await daemonFindings(compute.context.sql)));
+      }
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));
       print({
