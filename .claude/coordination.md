@@ -84,6 +84,7 @@ owners: each area's new owner finishes (or discards) the orphan files in its are
 | CLI, examples, testing dev stack ([7fe4f7]) + pki, tunnels, console-kit, apps/console, security reviews ([df4a91], [0b2be8]) | [402c97] | `packages/cli/src/{config,index}.ts`, `examples/shared/compose.ts`, `tests/cli-serve-compose.test.ts`, `packages/testing/src/dev/stack.ts` |
 | mcp, fleet, rollout ([9ec62d]; unlisted until now) | [f85da7] | — |
 | apps/docs shell + hand-written pages ([ebe83b]) | "Docs app with better-iam styling" [731f14] | `apps/docs/**` untracked files |
+| W1 Go daemon `daemon/**`, `scripts/daemon-*.mjs` (user asked 2026-09-24 night; Go not installed, so stdlib-only, compiled once Go lands) | [016b7b] | — |
 
 COMMIT WITH `node scripts/private-commit.mjs -F <msgfile> -- <paths>` (fe7f27e). The old private-index recipe
 (read-tree HEAD; add; commit) silently REVERTS a commit that lands between its read-tree and its commit (f069c84
