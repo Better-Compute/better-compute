@@ -345,8 +345,22 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
     rig.pauseWorkers(false);
     sim.quiesce();
     await rig.run(5 * MIN);
-    // Let every booking end (calendar ones start later) and one more metering pass (every 5 min) cover it, so
-    // I8 compares whole bookings with their usage.
+    // The workload is over: what has not started yet never will. Otherwise queued reservations keep binding as
+    // capacity frees, each closing ~10 min later, and the wait below can run out before a metering pass has seen the
+    // last close (an I8 "billed 0" for a booking whose window was simply not due yet).
+    const { rows: unstarted } = await database.query<{ id: string }>(
+      `SELECT id FROM reservations WHERE tenant_id = $1 AND state IN ('pending', 'placed') ORDER BY id`,
+      [tenants.acme.id],
+    );
+    for (const { id } of unstarted)
+      await api(() =>
+        compute.api.reservations.release(acme, {
+          tenantId: tenants.acme.id,
+          reservationId: id,
+        } as never),
+      ).catch(() => undefined);
+    // Let every started booking end and one more metering pass (every 5 min) cover it, so I8 compares whole
+    // bookings with their usage.
     const { rows: open } = await database.query<{ last_ms: number | null }>(
       `SELECT max(extract(epoch FROM upper(during)) * 1000) AS last_ms FROM allocations
         WHERE released_at IS NULL AND NOT upper_inf(during)`,
