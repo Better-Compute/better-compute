@@ -78,6 +78,66 @@ export async function recordInventoryHashes(
   return request;
 }
 
+/** One node's reported hashes, for `recordInventoryHashesMany`. */
+export interface InventoryHashesEntry {
+  nodeId: string;
+  hashes: Readonly<Record<string, Uint8Array | string>>;
+  bootId?: string;
+}
+
+/**
+ * Many nodes' reported hashes (Hellos and every 10th heartbeat, batched by the gateway) in one
+ * statement plus one enqueue: the set-based `recordInventoryHashes`. One slot per entry: the sections
+ * to pull, or the entry's error (`INVALID_INPUT` for a malformed hash, `NOT_FOUND` for an unknown
+ * node). A node reported twice in one batch keeps its last report (the earlier slot gets the same
+ * answer as the last).
+ */
+export async function recordInventoryHashesMany(
+  tx: SqlTx,
+  work: WorkQueue,
+  entries: readonly InventoryHashesEntry[],
+): Promise<(InventorySectionName[] | Error)[]> {
+  const results: (InventorySectionName[] | Error | undefined)[] = new Array(entries.length).fill(undefined);
+  const latest = new Map<string, { hashes: SectionHashes; bootId: string | null }>();
+  for (const [index, entry] of entries.entries()) {
+    try {
+      latest.set(entry.nodeId, { hashes: normalizeSectionHashes(entry.hashes), bootId: entry.bootId ?? null });
+    } catch (error) {
+      results[index] = error instanceof Error ? error : new ComputeError('INVALID_INPUT', String(error));
+    }
+  }
+  const nodes = [...latest.keys()];
+  const answers = new Map<string, InventorySectionName[]>();
+  if (nodes.length > 0) {
+    const { rows } = await tx.query<{ node_id: string; applied_digest: string | null; stored: Record<string, string> | null }>(
+      `WITH e AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]) AS e(node_id, hashes, boot_id)),
+       up AS (
+         INSERT INTO node_inventory (node_id, reported_hashes, reported_at, boot_id)
+         SELECT n.id, e.hashes::jsonb, compute_now(), e.boot_id FROM e JOIN nodes n ON n.id = e.node_id
+         ON CONFLICT (node_id) DO UPDATE SET reported_hashes = EXCLUDED.reported_hashes,
+           reported_at = EXCLUDED.reported_at, boot_id = COALESCE(EXCLUDED.boot_id, node_inventory.boot_id)
+         RETURNING node_id, applied_digest)
+       SELECT up.node_id, up.applied_digest,
+              (SELECT jsonb_object_agg(s.section, s.sha256) FROM node_inventory_sections s WHERE s.node_id = up.node_id) AS stored
+         FROM up`,
+      [nodes, nodes.map((id) => JSON.stringify(latest.get(id)!.hashes)), nodes.map((id) => latest.get(id)!.bootId)],
+    );
+    const apply: string[] = [];
+    for (const row of rows) {
+      const hashes = latest.get(row.node_id)!.hashes;
+      const request = sectionsToRequest((row.stored ?? {}) as SectionHashes, hashes);
+      if (request.length === 0 && row.applied_digest !== inventoryDigest(hashes)) apply.push(row.node_id);
+      answers.set(row.node_id, request);
+    }
+    apply.sort();
+    if (apply.length > 0) {
+      if (work.enqueueMany) await work.enqueueMany(tx, inventoryWorkKind, apply);
+      else for (const nodeId of apply) await work.enqueue(tx, inventoryWorkKind, nodeId);
+    }
+  }
+  return entries.map((entry, index) => results[index] ?? answers.get(entry.nodeId) ?? nodeNotFound(entry.nodeId));
+}
+
 async function storedSectionHashes(tx: SqlTx, nodeId: string): Promise<SectionHashes> {
   const { rows } = await tx.query<{ section: InventorySectionName; sha256: string }>(
     'SELECT section, sha256 FROM node_inventory_sections WHERE node_id = $1',

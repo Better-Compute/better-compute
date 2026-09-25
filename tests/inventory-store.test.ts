@@ -21,6 +21,7 @@ import {
   inventoryReconciler,
   latestInventory,
   recordInventoryHashes,
+  recordInventoryHashesMany,
   sha256Hex,
 } from '@better-compute/inventory';
 
@@ -342,6 +343,50 @@ describe('inventory.history and inventory.diff', () => {
     await expect(call('diff', { tenantId: 'ten_root', nodeId: node, from: 'f'.repeat(64) })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(call('history', { tenantId: 'ten_other', nodeId: node })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(() => api.inventory.history.validate({ tenantId: 'ten_root', nodeId: node, limit: 500 })).toThrow();
+  });
+});
+
+describe('recordInventoryHashesMany (batched Hellos and heartbeats)', () => {
+  it('answers each node as recordInventoryHashes would, in one statement for the batch', async () => {
+    const fresh = `node_${++seq}`;
+    const applied = `node_${++seq}`;
+    await db.transaction(async (tx) => {
+      await addNode(tx, fresh);
+      await addNode(tx, applied);
+    });
+    const sections = { gpus: encoded.gpus(8), system: encoded.system('S-many'), os: encoded.os() };
+    const hashes = Object.fromEntries(Object.entries(sections).map(([name, bytes]) => [name, sha256Hex(bytes)]));
+    // `applied` already has every section stored and applied.
+    await report(applied, sections);
+    await applyInventory(db, applied, { events, work });
+    enqueued.length = 0;
+    const statements: string[] = [];
+    const counting = {
+      ...db,
+      query: (text: string, params?: readonly unknown[]) => {
+        statements.push(text);
+        return db.query(text, params as unknown[]);
+      },
+    } as unknown as SqlTx;
+    const results = await recordInventoryHashesMany(counting, work, [
+      { nodeId: fresh, hashes: { system: 'zz' } }, // malformed: its own slot fails
+      { nodeId: fresh, hashes, bootId: 'boot-a' },
+      { nodeId: applied, hashes, bootId: 'boot-b' },
+      { nodeId: 'node_missing', hashes },
+    ]);
+    expect((results[0] as { code?: string }).code).toBe('INVALID_INPUT');
+    expect(results[1]).toEqual(['system', 'gpus', 'os']);
+    expect(results[2]).toEqual([]);
+    expect((results[3] as { code?: string }).code).toBe('NOT_FOUND');
+    expect(statements).toHaveLength(1);
+    expect(enqueued).toEqual([]); // `applied` reported what it already has
+    // The same answers as the per-node function.
+    expect(await db.transaction((tx) => recordInventoryHashes(tx, work, fresh, hashes))).toEqual(results[1]);
+    // A section vanished: nothing to pull, but the set changed, so the node is queued for apply.
+    const { os: _os, ...withoutOs } = hashes;
+    expect(await db.transaction((tx) => recordInventoryHashesMany(tx, work, [{ nodeId: applied, hashes: withoutOs }]))).toEqual([[]]);
+    expect(enqueued).toEqual([`inventory:${applied}`]);
+    expect(await db.transaction((tx) => recordInventoryHashesMany(tx, work, []))).toEqual([]);
   });
 });
 
