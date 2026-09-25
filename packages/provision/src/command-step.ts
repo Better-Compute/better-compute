@@ -1,4 +1,5 @@
 import { ComputeError, type Json, type ProfileDocument, type SqlTx, type StepContext } from '@better-compute/core';
+import { encodeMessageJson } from '@better-compute/protocol';
 import { batchOf } from './batch.js';
 import { stepNotReady } from './engine.js';
 
@@ -26,6 +27,13 @@ export interface AwaitCommandOptions {
    * delivered, so a site agent failover never runs a step's command twice.
    */
   reroutable?: boolean;
+  /**
+   * (v1.0 §13) A batch of this command's own, for a destructive command whose leaf must be bound to its
+   * exact payload (e.g. a non-GET site.httpProxy): called once, when the command is first enqueued, with
+   * the payload encoded as the agent will see it; returns the batch id (undefined: none). The command
+   * waits for that batch's approval like any held member. It replaces the workflow's batch for it.
+   */
+  batch?: (tx: SqlTx, payload: { typeUrl: string; value: Uint8Array }) => Promise<string | undefined>;
 }
 
 interface KeyedCommand {
@@ -93,13 +101,24 @@ export async function awaitCommand(context: StepContext, options: AwaitCommandOp
     }
     if (existing) return existing;
     const now = await tx.query<{ now: Date }>('SELECT compute_now() AS now');
+    let payload: Json | Uint8Array = options.payload;
+    let batch = batchOf(context, options.kind);
+    if (options.batch) {
+      // One encoding for the batch leaf and the command, so the bound digest is the command's own.
+      const typeName = context.registry?.commandKind(options.kind)?.payload?.typeName;
+      if (!typeName) throw new ComputeError('INVALID_CONFIG', `${options.kind} has no registered payload type to bind a batch leaf to`);
+      const value = encodeMessageJson(typeName, options.payload);
+      payload = value;
+      const own = await options.batch(tx, { typeUrl: `type.googleapis.com/${typeName}`, value });
+      if (own) batch = { batchId: own };
+    }
     await context.commands.enqueue(tx, {
       nodeId: options.nodeId,
       kind: options.kind,
-      payload: options.payload,
+      payload,
       idempotencyKey: key,
       notAfter: now.rows[0]!.now.getTime() + (options.timeoutMs ?? 10 * 60_000),
-      ...batchOf(context, options.kind),
+      ...batch,
     });
     return undefined;
   });

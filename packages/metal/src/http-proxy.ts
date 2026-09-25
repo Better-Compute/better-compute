@@ -1,5 +1,5 @@
 import { isIP } from 'node:net';
-import { ComputeError, isSecretRef, type SecretRef, type StepContext } from '@better-compute/core';
+import { ComputeError, isSecretRef, type SecretRef, type SqlTx, type StepContext } from '@better-compute/core';
 import { StepNotReady, awaitCommand, siteAgentFor, stepNotReady } from '@better-compute/provision';
 import { httpProxyResult } from './results.js';
 import { readMetalNode } from './store.js';
@@ -152,8 +152,30 @@ export async function httpViaSite(context: StepContext, request: HttpViaSiteRequ
     timeoutMs,
     secretHeaders: Object.entries(request.secretHeaders ?? {}).map(([name, value]) => ({ name, value })),
   };
+  // (review 9 HIGH-3) With a quorum, a request that changes something (not GET) must join a leaf bound to
+  // its exact bytes: it gets a one-leaf batch of its own, so approvers see this very request, and the
+  // step waits for their approval. GET polls ride the workflow's (unbound) batch.
+  const method = payload.method;
+  const bound =
+    method !== 'GET' && context.commands.createBatch
+      ? async (tx: SqlTx, encoded: { typeUrl: string; value: Uint8Array }) =>
+          (
+            await context.commands.createBatch!(tx, {
+              tenantId: node.tenant_id,
+              scope: [{ subject: `node:${nodeId}`, kind: 'site.httpProxy', payload: encoded }],
+              reason: `${method} ${url.host}${url.pathname} for ${nodeId}`,
+            })
+          ).batchId
+      : undefined;
   const send = (key: string | undefined) =>
-    awaitCommand(context, { nodeId: agent, kind: 'site.httpProxy', ...(key ? { key } : {}), timeoutMs: timeoutMs + 30_000, payload });
+    awaitCommand(context, {
+      nodeId: agent,
+      kind: 'site.httpProxy',
+      ...(key ? { key } : {}),
+      timeoutMs: timeoutMs + 30_000,
+      payload,
+      ...(bound ? { batch: bound } : {}),
+    });
   const key = request.poll ? await pollKey(context, agent, request.key ?? 'poll', send) : request.key;
   const outcome = await send(key);
   const response = httpProxyResult(outcome);
