@@ -1,8 +1,10 @@
-import { mkdtemp } from 'node:fs/promises';
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createCli, main, type CliIO, type CliTerminal } from '@better-compute/cli';
+import { formatSshPublicKey } from '@better-compute/pki';
 
 // `better-compute console` / `exec` (PLAN.md §7.6): tunnels.open as the token, then the tunnel's
 // WebSocket, with the terminal attached until the remote program exits. Against `dev --sim 1`, whose
@@ -107,6 +109,21 @@ describe('console', () => {
       third.type('\x1d');
       await detached;
       expect(third.modes).toEqual(['raw', 'restored']);
+
+      // dev --sim has a (throwaway) break-glass CA: ssh-cert gets as far as the MFA check, never UNSUPPORTED.
+      const home = await mkdtemp(join(tmpdir(), 'bc-console-home-'));
+      await mkdir(join(home, '.ssh'));
+      await writeFile(
+        join(home, '.ssh', 'id_ed25519.pub'),
+        `${formatSshPublicKey(generateKeyPairSync('ed25519').publicKey, 'dev@laptop')}\n`,
+      );
+      const refused = await createCli()
+        .run(['ssh-cert', '--node', nodeId], { out() {}, env: { ...env, HOME: home }, cwd })
+        .then(
+          () => undefined,
+          (error: { code?: string; details?: { reason?: string } }) => error,
+        );
+      expect(refused?.code).not.toBe('UNSUPPORTED');
     } finally {
       controller.abort();
       await dev;

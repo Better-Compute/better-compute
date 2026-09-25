@@ -6,7 +6,12 @@ import type {
   SqlExecutor,
 } from '@better-compute/core';
 import { iamTenantReader, type TenantReaderHost } from '@better-compute/iam';
-import { createExecTicketIssuer, type ExecTicketIssuer } from '@better-compute/pki';
+import {
+  createExecTicketIssuer,
+  createSshCertificateAuthority,
+  type ExecTicketIssuer,
+  type SshCertificateAuthority,
+} from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from './config.js';
 import type { HostIamConfig } from './host/iam.js';
 import type { HostTunnelsConfig } from './host/tunnels.js';
@@ -138,8 +143,14 @@ export async function prepareDevSim(
     sim.note('--sim: JoinService uses throwaway dev keys instead of the configured pki.join');
   // Tunnels to the simulated machines: the deployment's issuer, else a throwaway one.
   const issuerName = new URL(options.baseURL).origin;
-  const configured = (options as { tunnels?: { issuer?: ExecTicketIssuer } }).tunnels;
+  const configured = (options as {
+    tunnels?: { issuer?: ExecTicketIssuer; ssh?: SshCertificateAuthority; sandboxSsh?: SshCertificateAuthority };
+  }).tunnels;
   const issuer = configured?.issuer ?? createExecTicketIssuer({ issuer: issuerName });
+  // Break-glass (ssh-cert) and sandbox exec work in dev too: throwaway CAs unless the deployment has its own.
+  const ssh = configured?.ssh ?? createSshCertificateAuthority({ comment: 'better-compute dev ssh ca' });
+  const sandboxSsh =
+    configured?.sandboxSsh ?? createSshCertificateAuthority({ comment: 'better-compute dev sandbox ssh ca' });
   const simOptions: AnyComputeOptions = {
     ...options,
     iam,
@@ -147,7 +158,7 @@ export async function prepareDevSim(
     modules,
     pki: { ...options.pki, nodeCa: keys.pki.nodeCa as never, join: keys.pki.join as never },
     notifier: options.notifier ?? notifier,
-    ...({ tunnels: { ...configured, issuer } } as object),
+    ...({ tunnels: { ...configured, issuer, ssh, sandboxSsh } } as object),
   };
   // The embedded test IAM has no session reviewer, so it cannot re-authorize an open tunnel: dev skips
   // the 60 s re-check (tickets are still decided by tunnels.open). A configured IAM keeps the default.
