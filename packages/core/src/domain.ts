@@ -278,12 +278,23 @@ export interface ReservationRequest {
   start?: number;
   duration: Duration;
   binding?: ReservationBinding;
+  /**
+   * `binding: 'node'` (v0.5, tenantRoot pools): the metal profile deployed on the whole node for
+   * the reservation's lifetime; `profileVersion` pins it (latest when absent).
+   */
+  node?: NodeBindingSpec;
   /** Makes the reservation renewable: `renew` must be called within every lease period. */
   leaseSeconds?: number;
   spot?: boolean;
   /** Scoped to `(tenant, caller identity)`. */
   idempotencyKey: string;
   wait?: WaitOptions;
+}
+
+/** What a `binding: 'node'` reservation deploys (metal `dedicated-root`). */
+export interface NodeBindingSpec {
+  profileId: string;
+  profileVersion?: number;
 }
 /** What a reservation stores of its request (the admission-only fields removed). */
 export type ReservationSpec = Omit<ReservationRequest, 'tenantId' | 'idempotencyKey' | 'wait'>;
