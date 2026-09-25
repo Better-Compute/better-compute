@@ -41,6 +41,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -83,6 +84,11 @@ type Config struct {
 
 	// JoinEncryptionKeyPin pins the JoinService key the join token is sealed to (JWE).
 	JoinEncryptionKeyPin string
+
+	// ApproverSetSHA256 pins the approver set a daemon without approver keys may take (lowercase hex
+	// of sha256(approver set input); review 7 M2, written by the install script). Empty: the first
+	// set is taken as it comes.
+	ApproverSetSHA256 string
 
 	// DataDir holds the journal, and the node key when there is no TPM (default /var/lib/bcd).
 	DataDir string
@@ -327,6 +333,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s: %w", p.key, err)
 		}
 	}
+	if _, err := c.ApproverSetPin(); err != nil {
+		return err
+	}
 	if !path.IsAbs(c.DataDir) {
 		return fmt.Errorf("data_dir must be an absolute path, got %q", c.DataDir)
 	}
@@ -366,6 +375,18 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ApproverSetPin decodes approver_set_sha256 (nil when unset).
+func (c *Config) ApproverSetPin() ([]byte, error) {
+	if c.ApproverSetSHA256 == "" {
+		return nil, nil
+	}
+	pin, err := hex.DecodeString(c.ApproverSetSHA256)
+	if err != nil || len(pin) != sha256.Size || strings.ToLower(c.ApproverSetSHA256) != c.ApproverSetSHA256 {
+		return nil, errors.New("approver_set_sha256 must be 64 lowercase hex digits")
+	}
+	return pin, nil
+}
+
 // DecodePin returns the SHA-256 digest a pin carries.
 func DecodePin(pin string) ([]byte, error) {
 	encoded, ok := strings.CutPrefix(pin, PinPrefix)
@@ -394,6 +415,7 @@ var fields = []field{
 	{key: "serving_ca_spki_pin", kind: kindString, required: true, set: func(c *Config, v value) { c.ServingCASPKIPin = v.str }},
 	{key: "join_signing_key_pin", kind: kindString, required: true, set: func(c *Config, v value) { c.JoinSigningKeyPin = v.str }},
 	{key: "join_encryption_key_pin", kind: kindString, required: true, set: func(c *Config, v value) { c.JoinEncryptionKeyPin = v.str }},
+	{key: "approver_set_sha256", kind: kindString, set: func(c *Config, v value) { c.ApproverSetSHA256 = v.str }},
 	{key: "data_dir", kind: kindString, set: func(c *Config, v value) { c.DataDir = v.str }},
 	{key: "socket_path", kind: kindString, set: func(c *Config, v value) { c.SocketPath = v.str }},
 	{section: "journal", key: "max_bytes", kind: kindInt, set: func(c *Config, v value) { c.Journal.MaxBytes = v.num }},
@@ -468,6 +490,9 @@ func Render(c *Config) string {
 		"join_signing_key_pin = "+q(c.JoinSigningKeyPin),
 		"join_encryption_key_pin = "+q(c.JoinEncryptionKeyPin),
 	)
+	if c.ApproverSetSHA256 != "" {
+		lines = append(lines, "approver_set_sha256 = "+q(c.ApproverSetSHA256))
+	}
 	if c.DataDir != "" && c.DataDir != DefaultDataDir {
 		lines = append(lines, "data_dir = "+q(c.DataDir))
 	}

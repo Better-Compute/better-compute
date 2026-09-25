@@ -212,6 +212,22 @@ func TestUpdateSection(t *testing.T) {
 	}
 }
 
+func TestApproverSetSHA256(t *testing.T) {
+	digest := strings.Repeat("ab", 32)
+	cfg, err := Parse([]byte(required() + "approver_set_sha256 = \"" + digest + "\"\n"))
+	if pin, perr := cfg.ApproverSetPin(); err != nil || perr != nil || len(pin) != 32 {
+		t.Fatalf("approver_set_sha256 = %v %v", err, perr)
+	}
+	if back, err := Parse([]byte(Render(cfg))); err != nil || back.ApproverSetSHA256 != digest {
+		t.Fatalf("Render lost approver_set_sha256: %v", err)
+	}
+	for _, bad := range []string{strings.Repeat("AB", 32), "abcd", strings.Repeat("zz", 32)} {
+		if _, err := Parse([]byte(required() + "approver_set_sha256 = \"" + bad + "\"\n")); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
 func TestDecodePin(t *testing.T) {
 	digest, err := DecodePin(testPin)
 	if err != nil {

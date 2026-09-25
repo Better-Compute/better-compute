@@ -213,3 +213,101 @@ func TestBatchQuorumBindsTheBMC(t *testing.T) {
 		t.Fatalf("p3 = %v", u)
 	}
 }
+
+// welcomeWithTrust accepts the agent's next session and welcomes it with a trust bundle signed by
+// join (the JoinService key the agent pins).
+func welcomeWithTrust(t *testing.T, h *harness, join *signer, bundle *commonv1.TrustBundle) *fakeStream {
+	t.Helper()
+	s := h.gw.accept()
+	s.next(t, "Hello", func(f *agentv1.AgentFrame) bool { return f.GetHello() != nil })
+	body, _ := proto.Marshal(bundle)
+	w := welcome()
+	w.GetWelcome().Trust = &commonv1.SignedTrustBundle{Body: body, Signature: join.sign(t, pki.PurposeTrustBundle, body)}
+	s.push(w)
+	return s
+}
+
+// heldBundle waits until the agent holds trust bundle version, and returns it.
+func heldBundle(t *testing.T, h *harness, version uint64) *commonv1.TrustBundle {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.agent.mu.Lock()
+		b, _ := h.agent.trustBundleLocked()
+		held := h.agent.state.TrustVersion
+		h.agent.mu.Unlock()
+		if held == version {
+			return b
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("trust version %d, want %d", held, version)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A bundle whose approver set is refused still brings its roots and version; the quorum stays.
+func TestRefusedApproverSetKeepsTheQuorum(t *testing.T) {
+	quorum := newApprovers(t, 3, 2, 1)
+	quorum.bundle.ApproverSetEpoch = 1
+	raw, _ := proto.Marshal(quorum.bundle)
+	join := newSigner(t, "join")
+	pin, _ := pki.SPKISHA256(&join.key.PublicKey)
+	h := newHarness(t, func(o *Options) {
+		o.State.TrustBundle, o.State.TrustDomain, o.State.TrustVersion = raw, testTrustDomain, 2
+		o.SignerPin = pin
+		o.Backoff.Min, o.Backoff.Max = time.Millisecond, 10*time.Millisecond
+	})
+	outsider := newApprovers(t, 1, 1, 5)
+	next := proto.Clone(outsider.bundle).(*commonv1.TrustBundle)
+	next.Version, next.ApproverSetEpoch, next.CommandSigningRoots = 3, 2, [][]byte{join.chain[0]}
+	s := welcomeWithTrust(t, h, join, next)
+	held := heldBundle(t, h, 3)
+	if len(held.GetCommandSigningRoots()) != 1 || held.GetApproverSetEpoch() != 1 || len(held.GetApproverKeys()) != 3 || held.GetApproverThreshold() != 2 {
+		t.Fatalf("held bundle = %v", held)
+	}
+
+	// Signed by two current approvers for this trust domain at a higher epoch: taken.
+	next.Version = 4
+	next.ApproverSetSignatures = nil
+	for _, k := range quorum.keys[:2] {
+		der, _ := x509.MarshalPKIXPublicKey(&k.PublicKey)
+		sig, _ := pki.SignP1363(k, pki.ApproverSetSigningInput(next, testTrustDomain))
+		next.ApproverSetSignatures = append(next.ApproverSetSignatures, &commonv1.Signature{Kid: pki.ApproverKid(der), Sig: sig})
+	}
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_Drain{Drain: &agentv1.Drain{ReconnectAfterMs: 1}}})
+	welcomeWithTrust(t, h, join, next)
+	if held := heldBundle(t, h, 4); held.GetApproverSetEpoch() != 2 || len(held.GetApproverKeys()) != 1 {
+		t.Fatalf("held bundle = %v", held)
+	}
+}
+
+// review 7 M2: installed with approver_set_sha256, a keyless daemon takes only that set, and runs no
+// destructive command until it holds it.
+func TestPinnedApproverSet(t *testing.T) {
+	quorum := newApprovers(t, 2, 1, 0)
+	join := newSigner(t, "join")
+	pin, _ := pki.SPKISHA256(&join.key.PublicKey)
+	h := newHarness(t, func(o *Options) {
+		o.State.TrustDomain = testTrustDomain
+		o.SignerPin = pin
+		o.ApproverSetPin = pki.ApproverSetSHA256(quorum.bundle)
+		o.Backoff.Min, o.Backoff.Max = time.Millisecond, 10*time.Millisecond
+	})
+	other := newApprovers(t, 1, 1, 9)
+	other.bundle.Version = 1
+	s := welcomeWithTrust(t, h, join, other.bundle)
+	if held := heldBundle(t, h, 1); len(held.GetApproverKeys()) != 0 {
+		t.Fatalf("an unpinned set was taken: %v", held)
+	}
+	s.push(command(body("x1", "gpu.reset", &agentv1.GpuResetRequest{GpuUuids: []string{"GPU-missing"}})))
+	if u := s.update(t, "x1", commonv1.CommandState_COMMAND_STATE_REJECTED); u.GetRejectReason() != commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED {
+		t.Fatalf("x1 = %v", u)
+	}
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_Drain{Drain: &agentv1.Drain{ReconnectAfterMs: 1}}})
+	quorum.bundle.Version = 2
+	welcomeWithTrust(t, h, join, quorum.bundle)
+	if held := heldBundle(t, h, 2); len(held.GetApproverKeys()) != 2 {
+		t.Fatalf("the pinned set was refused: %v", held)
+	}
+}

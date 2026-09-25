@@ -169,8 +169,9 @@ func approverSetVector(t *testing.T, file string) {
 		t.Skipf("not available: %v", err)
 	}
 	var f struct {
-		Version string `json:"version"`
-		Keys    []struct {
+		Epoch       string `json:"epoch"`
+		TrustDomain string `json:"trustDomain"`
+		Keys        []struct {
 			Kid     string `json:"kid"`
 			SpkiDer string `json:"spkiDer"`
 		} `json:"approverKeys"`
@@ -186,8 +187,8 @@ func approverSetVector(t *testing.T, file string) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		t.Fatal(err)
 	}
-	version, _ := strconv.ParseUint(f.Version, 10, 64)
-	b := &commonv1.TrustBundle{Version: version, ApproverThreshold: f.ApproverThreshold, UnbatchedDestructivePerHour: f.UnbatchedDestructivePerHour}
+	epoch, _ := strconv.ParseUint(f.Epoch, 10, 64)
+	b := &commonv1.TrustBundle{ApproverSetEpoch: epoch, ApproverThreshold: f.ApproverThreshold, UnbatchedDestructivePerHour: f.UnbatchedDestructivePerHour}
 	for _, k := range f.Keys {
 		b.ApproverKeys = append(b.ApproverKeys, &commonv1.ApproverKey{Kid: k.Kid, SpkiDer: unhex(t, k.SpkiDer)})
 	}
@@ -197,14 +198,16 @@ func approverSetVector(t *testing.T, file string) {
 	if got := hex.EncodeToString(ApproverSetInput(b)); got != f.ApproverSetInput {
 		t.Fatalf("approver set input = %s\nprotocol             %s", got, f.ApproverSetInput)
 	}
-	if got := hex.EncodeToString(ApproverSetSigningInput(b)); got != f.SigningInput {
+	if got := hex.EncodeToString(ApproverSetSigningInput(b, f.TrustDomain)); got != f.SigningInput {
 		t.Fatalf("approver set signing input = %s\nprotocol                     %s", got, f.SigningInput)
 	}
 }
 
-// Once approvers exist, the quorum changes only with k of the CURRENT approvers' signatures over the
-// new set; a daemon without approvers takes the first set as it comes.
+// Once approvers exist, the quorum changes only at a higher epoch with k of the CURRENT approvers'
+// signatures over the new set for this trust domain; a daemon without approvers takes the first set
+// as it comes, or only the pinned one.
 func TestApproverSetChanges(t *testing.T) {
+	const domain = "compute.test"
 	var privs []*ecdsa.PrivateKey
 	var keys []*commonv1.ApproverKey
 	for i := 0; i < 3; i++ {
@@ -212,49 +215,76 @@ func TestApproverSetChanges(t *testing.T) {
 		privs = append(privs, k)
 		keys = append(keys, approverKeyFor(t, k))
 	}
-	current := &commonv1.TrustBundle{Version: 4, ApproverKeys: keys, ApproverThreshold: 2}
-	if VerifyApproverSet(nil, current) != nil || VerifyApproverSet(&commonv1.TrustBundle{}, current) != nil {
+	current := &commonv1.TrustBundle{Version: 4, ApproverKeys: keys, ApproverThreshold: 2, ApproverSetEpoch: 3}
+	if VerifyApproverSet(nil, current, domain, nil) != nil || VerifyApproverSet(&commonv1.TrustBundle{}, current, domain, nil) != nil {
 		t.Fatal("a first approver set was refused")
+	}
+	pin := ApproverSetSHA256(current)
+	if VerifyApproverSet(nil, current, domain, pin) != nil {
+		t.Fatal("the pinned first set was refused")
+	}
+	other := proto.Clone(current).(*commonv1.TrustBundle)
+	other.ApproverThreshold = 1
+	if VerifyApproverSet(nil, other, domain, pin) == nil {
+		t.Fatal("a keyless daemon with a pin took another set")
 	}
 	same := proto.Clone(current).(*commonv1.TrustBundle)
 	same.Version, same.CommandSigningRoots = 5, [][]byte{{1}}
-	if err := VerifyApproverSet(current, same); err != nil {
+	if err := VerifyApproverSet(current, same, domain, nil); err != nil {
 		t.Fatalf("a roots-only change was refused: %v", err)
 	}
 	outsider, _ := GenerateKey()
-	next := &commonv1.TrustBundle{Version: 5, ApproverKeys: []*commonv1.ApproverKey{approverKeyFor(t, outsider)}, ApproverThreshold: 1}
-	sign := func(b *commonv1.TrustBundle, by ...*ecdsa.PrivateKey) {
+	next := &commonv1.TrustBundle{Version: 5, ApproverKeys: []*commonv1.ApproverKey{approverKeyFor(t, outsider)}, ApproverThreshold: 1, ApproverSetEpoch: 4}
+	sign := func(b *commonv1.TrustBundle, forDomain string, by ...*ecdsa.PrivateKey) {
 		b.ApproverSetSignatures = nil
 		for _, k := range by {
-			sig, _ := SignP1363(k, ApproverSetSigningInput(b))
+			sig, _ := SignP1363(k, ApproverSetSigningInput(b, forDomain))
 			b.ApproverSetSignatures = append(b.ApproverSetSignatures, &commonv1.Signature{Kid: approverKeyFor(t, k).Kid, Sig: sig})
 		}
 	}
-	sign(next, outsider)
-	if VerifyApproverSet(current, next) == nil {
+	sign(next, domain, outsider)
+	if VerifyApproverSet(current, next, domain, nil) == nil {
 		t.Fatal("the new set's own key changed the set")
 	}
-	sign(next, privs[0], privs[0])
-	if VerifyApproverSet(current, next) == nil {
+	sign(next, domain, privs[0], privs[0])
+	if VerifyApproverSet(current, next, domain, nil) == nil {
 		t.Fatal("one approver, twice, changed the set")
 	}
-	sign(next, privs[0], privs[2])
-	if err := VerifyApproverSet(current, next); err != nil {
+	// Signed for another deployment that shares the approver keys: nothing.
+	sign(next, "compute.staging.test", privs[0], privs[2])
+	if VerifyApproverSet(current, next, domain, nil) == nil {
+		t.Fatal("another trust domain's approver-set signatures were taken")
+	}
+	sign(next, domain, privs[0], privs[2])
+	if err := VerifyApproverSet(current, next, domain, nil); err != nil {
 		t.Fatalf("two current approvers could not change the set: %v", err)
 	}
-	// The signatures bind the version: replayed onto another version they count for nothing.
+	if VerifyApproverSet(current, next, "", nil) == nil {
+		t.Fatal("a change was verified without a trust domain")
+	}
+	// The signatures bind the epoch, and the epoch only moves up.
 	replay := proto.Clone(next).(*commonv1.TrustBundle)
-	replay.Version = 6
-	if VerifyApproverSet(current, replay) == nil {
-		t.Fatal("approver-set signatures were replayed onto another version")
+	replay.ApproverSetEpoch = 5
+	if VerifyApproverSet(current, replay, domain, nil) == nil {
+		t.Fatal("approver-set signatures were replayed onto another epoch")
+	}
+	stale := proto.Clone(next).(*commonv1.TrustBundle)
+	stale.ApproverSetEpoch = 3
+	sign(stale, domain, privs[0], privs[2])
+	if VerifyApproverSet(current, stale, domain, nil) == nil {
+		t.Fatal("a change at the current epoch was taken")
 	}
 	// Removing every approver is a change like any other.
-	drop := &commonv1.TrustBundle{Version: 5}
-	if VerifyApproverSet(current, drop) == nil {
+	drop := &commonv1.TrustBundle{Version: 5, ApproverSetEpoch: 4}
+	if VerifyApproverSet(current, drop, domain, nil) == nil {
 		t.Fatal("the approvers were dropped without their signatures")
 	}
-	sign(drop, privs[1], privs[2])
-	if err := VerifyApproverSet(current, drop); err != nil {
+	sign(drop, domain, privs[1], privs[2])
+	if err := VerifyApproverSet(current, drop, domain, nil); err != nil {
 		t.Fatalf("the approvers could not stand down: %v", err)
+	}
+	kept := KeepQuorum(current, next)
+	if kept.GetVersion() != 5 || kept.GetApproverSetEpoch() != 3 || !proto.Equal(kept.GetApproverKeys()[0], keys[0]) {
+		t.Fatalf("KeepQuorum = %v", kept)
 	}
 }

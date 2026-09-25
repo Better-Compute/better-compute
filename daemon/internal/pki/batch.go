@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // Destructive-batch quorum (PLAN.md §13, v1.0): operators approve a batch of destructive commands
@@ -187,29 +188,61 @@ func ApproverSetInput(b *commonv1.TrustBundle) []byte {
 }
 
 // ApproverSetSigningInput is what an approver_set_signatures entry signs: purpose "approver-set",
-// parts [uint64_be(version), sha256(ApproverSetInput)].
-func ApproverSetSigningInput(b *commonv1.TrustBundle) []byte {
+// parts [uint64_be(approver_set_epoch), sha256(ApproverSetInput), trust_domain]. The trust domain is
+// the verifier's own: a set signed for another deployment sharing approver keys counts for nothing.
+func ApproverSetSigningInput(b *commonv1.TrustBundle, trustDomain string) []byte {
 	digest := sha256.Sum256(ApproverSetInput(b))
-	return SigningInput(PurposeApproverSet, binary.BigEndian.AppendUint64(nil, b.GetVersion()), digest[:])
+	return SigningInput(PurposeApproverSet, binary.BigEndian.AppendUint64(nil, b.GetApproverSetEpoch()), digest[:], []byte(trustDomain))
 }
 
-// VerifyApproverSet decides whether next may replace current. A daemon without approver keys takes
-// the first set as it comes (it only adds restrictions); one that holds keys accepts a change to
-// any quorum field, removal included, only with approver_set_signatures by its CURRENT keys at its
-// current threshold (a zero threshold accepts no change).
-func VerifyApproverSet(current, next *commonv1.TrustBundle) error {
-	if len(current.GetApproverKeys()) == 0 {
-		return nil
-	}
+// ApproverSetSHA256 is the digest a daemon's approver_set_sha256 pin names.
+func ApproverSetSHA256(b *commonv1.TrustBundle) []byte {
+	digest := sha256.Sum256(ApproverSetInput(b))
+	return digest[:]
+}
+
+// VerifyApproverSet decides whether next's quorum fields (3-8) may replace current's; a refusal
+// keeps the current quorum while the rest of the bundle still applies. The same set needs nothing.
+// A daemon without approver keys takes the first set as it comes (it only adds restrictions), or,
+// with a pin (config approver_set_sha256), only the set whose digest it names. One that holds keys
+// at epoch e takes a different set, removal included, only at an epoch above e and with
+// approver_set_signatures for its own trust domain by its CURRENT keys at its current threshold (a
+// zero threshold accepts no change).
+func VerifyApproverSet(current, next *commonv1.TrustBundle, trustDomain string, pin []byte) error {
 	if bytes.Equal(ApproverSetInput(current), ApproverSetInput(next)) {
 		return nil
+	}
+	if len(current.GetApproverKeys()) == 0 {
+		if len(pin) > 0 && !bytes.Equal(ApproverSetSHA256(next), pin) {
+			return errors.New("pki: the approver set is not the one this daemon was installed with (approver_set_sha256)")
+		}
+		return nil
+	}
+	if next.GetApproverSetEpoch() <= current.GetApproverSetEpoch() {
+		return fmt.Errorf("pki: the approver set changes at epoch %d, not above the current %d", next.GetApproverSetEpoch(), current.GetApproverSetEpoch())
+	}
+	if trustDomain == "" {
+		return errors.New("pki: the approver set cannot change without this daemon's trust domain")
 	}
 	need := int(current.GetApproverThreshold())
 	if need == 0 {
 		return errors.New("pki: the approver set cannot change: the current set has no threshold")
 	}
-	if got := countSignatures(approverKeys(current), next.GetApproverSetSignatures(), ApproverSetSigningInput(next)); got < need {
+	if got := countSignatures(approverKeys(current), next.GetApproverSetSignatures(), ApproverSetSigningInput(next, trustDomain)); got < need {
 		return fmt.Errorf("pki: the approver set changes with %d of the %d current approver signatures it needs", got, need)
 	}
 	return nil
+}
+
+// KeepQuorum returns next with current's quorum fields (3-8): the bundle a daemon stores when it
+// refused next's approver set (roots and version still apply).
+func KeepQuorum(current, next *commonv1.TrustBundle) *commonv1.TrustBundle {
+	out := proto.Clone(next).(*commonv1.TrustBundle)
+	out.ApproverKeys = current.GetApproverKeys()
+	out.ApproverThreshold = current.GetApproverThreshold()
+	out.UnbatchedDestructivePerHour = current.GetUnbatchedDestructivePerHour()
+	out.QuorumTiers = current.GetQuorumTiers()
+	out.ApproverSetSignatures = current.GetApproverSetSignatures()
+	out.ApproverSetEpoch = current.GetApproverSetEpoch()
+	return out
 }

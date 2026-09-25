@@ -362,6 +362,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	}
 	client.Store(first)
 	signerPin, _ := config.DecodePin(cfg.JoinSigningKeyPin)
+	approverSetPin, _ := cfg.ApproverSetPin() // validated when the file was loaded
 	var update *agent.UpdateOptions
 	if mode == "node" || mode == "site" {
 		if update, err = updateOptions(cfg); err != nil {
@@ -391,15 +392,16 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 			old := client.Swap(next)
 			old.Close()
 		},
-		SignerPin:     signerPin,
-		ImageCache:    cfg.ImageCache,
-		Runtimes:      runtimes,
-		Drivers:       drivers,
-		InstallConfig: cfg.InstallFiles,
-		CacheMaxBytes: uint64(max(cfg.Boot.CacheMaxBytes, 0)),
-		Version:       version,
-		Log:           log,
-		Update:        update,
+		SignerPin:      signerPin,
+		ApproverSetPin: approverSetPin,
+		ImageCache:     cfg.ImageCache,
+		Runtimes:       runtimes,
+		Drivers:        drivers,
+		InstallConfig:  cfg.InstallFiles,
+		CacheMaxBytes:  uint64(max(cfg.Boot.CacheMaxBytes, 0)),
+		Version:        version,
+		Log:            log,
+		Update:         update,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)

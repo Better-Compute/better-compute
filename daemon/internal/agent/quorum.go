@@ -137,6 +137,12 @@ func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBod
 		return dispatch.RejectBatchUnapproved, false
 	}
 	if len(bundle.GetApproverKeys()) == 0 {
+		if len(a.o.ApproverSetPin) > 0 {
+			// Installed with a pinned approver set it has not received yet: no destructive command
+			// runs without the quorum the install named.
+			a.log.Warn("the pinned approver set has not arrived; destructive commands are refused", "id", body.GetId())
+			return dispatch.RejectBatchUnapproved, false
+		}
 		return "", false
 	}
 	now := a.serverNowLocked()

@@ -65,8 +65,11 @@ type Options struct {
 	OnRenewed func(*State, *ecdsa.PrivateKey)
 	// SignerPin is join_signing_key_pin: Welcome trust bundles must be signed by that key.
 	SignerPin []byte
-	Version   string
-	Log       *slog.Logger
+	// ApproverSetPin is approver_set_sha256 (review 7 M2): without approver keys the daemon takes only
+	// the approver set with this digest, and refuses destructive commands until it holds it.
+	ApproverSetPin []byte
+	Version        string
+	Log            *slog.Logger
 	// Backoff is the redial schedule (default 1 s → 60 s).
 	Backoff session.Backoff
 	// Lanes sizes credits and workers (default dispatch.DefaultLanes).

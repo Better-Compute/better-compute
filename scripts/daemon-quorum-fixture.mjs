@@ -26,15 +26,17 @@ const set = {
   unbatchedDestructivePerHour: 3,
 };
 const input = protocol.approverSetInput(set);
-const version = 9n;
+const epoch = 9n;
+const trustDomain = 'compute.fixture.test';
 const out = {
-  version: String(version),
+  epoch: String(epoch),
+  trustDomain,
   approverKeys: keys.map((key) => ({ kid: key.kid, spkiDer: hex(key.spkiDer) })),
   approverThreshold: set.approverThreshold,
   quorumTiers: set.quorumTiers,
   unbatchedDestructivePerHour: set.unbatchedDestructivePerHour,
   approverSetInput: hex(input),
-  signingInput: hex(protocol.approverSetSigningInput({ version, setSha256: createHash('sha256').update(input).digest() })),
+  signingInput: hex(protocol.approverSetSigningInput({ epoch, setSha256: createHash('sha256').update(input).digest(), trustDomain })),
 };
 const file = join(root, 'daemon/internal/pki/testdata/quorum.json');
 mkdirSync(dirname(file), { recursive: true });
