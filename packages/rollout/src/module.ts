@@ -1,6 +1,7 @@
 import {
   ComputeError,
   defineMethod,
+  describedBy,
   fleetResourceId,
   type CommandKindSpec,
   type ComputeModule,
@@ -27,6 +28,7 @@ import {
   type Rollout,
   type RolloutNode,
 } from './rollout.js';
+import { schemas } from './schemas.js';
 
 export interface RolloutModuleOptions {
   /** `sha256/…` pins of the offline release keys, and how many must sign (default 1). */
@@ -144,7 +146,7 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
       register: defineMethod({
         ...common,
         kind: 'mutation',
-        validate(value) {
+        validate: describedBy(schemas.registerRelease, (value) => {
           const input = object(value, ['tenantId', 'manifest']);
           const manifest = input.manifest as SignedReleaseManifest | undefined;
           if (
@@ -154,7 +156,7 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
           )
             throw new ComputeError('INVALID_INPUT', 'manifest must be a signed release manifest');
           return { tenantId: input.tenantId as string, manifest };
-        },
+        }),
         handler: (context, input) =>
           inTx(context, async (tx) => {
             const { rows } = await tx.query<{ now: Date }>('SELECT compute_now() AS now');
@@ -168,7 +170,9 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
       list: defineMethod({
         ...common,
         kind: 'read',
-        validate: (value) => ({ tenantId: object(value, ['tenantId']).tenantId as string }),
+        validate: describedBy(schemas.tenant, (value) => ({
+          tenantId: object(value, ['tenantId']).tenantId as string,
+        })),
         handler: (context) => inTx(context, async (tx) => ({ items: await listReleases(tx) })),
       }),
     },
@@ -176,7 +180,7 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
       create: defineMethod({
         ...common,
         kind: 'mutation',
-        validate(value) {
+        validate: describedBy(schemas.createRollout, (value) => {
           const input = object(value, [
             'tenantId',
             'version',
@@ -221,24 +225,26 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
             ...optionalNumber(input, 'upgradeTimeoutSeconds'),
             ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey as string } : {}),
           };
-        },
+        }),
         handler: (context, input) =>
           inTx(context, (tx) => createRollout(context, tx, input, identityOf(context))),
       }),
       list: defineMethod({
         ...common,
         kind: 'read',
-        validate: (value) => ({ tenantId: object(value, ['tenantId']).tenantId as string }),
+        validate: describedBy(schemas.tenant, (value) => ({
+          tenantId: object(value, ['tenantId']).tenantId as string,
+        })),
         handler: (context, input) =>
           inTx(context, async (tx) => ({ items: await listRollouts(tx, input.tenantId) })),
       }),
       get: defineMethod({
         ...common,
         kind: 'read',
-        validate: (value) => {
+        validate: describedBy(schemas.rollout, (value) => {
           const input = ref(value);
           return { tenantId: input.tenantId, rolloutId: input.rolloutId };
-        },
+        }),
         handler: (context, input) =>
           inTx(context, async (tx) => {
             const rollout = await readRollout(tx, input.tenantId, input.rolloutId);
@@ -250,24 +256,24 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
       pause: defineMethod({
         ...common,
         kind: 'mutation',
-        validate: (value) => {
+        validate: describedBy(schemas.pause, (value) => {
           const input = ref(value, ['reason']);
           return {
             tenantId: input.tenantId,
             rolloutId: input.rolloutId,
             ...(input.reason ? { reason: input.reason as string } : {}),
           };
-        },
+        }),
         handler: (context, input) =>
           inTx(context, (tx) => changeRollout(context, tx, { ...input, action: 'pause' })),
       }),
       resume: defineMethod({
         ...common,
         kind: 'mutation',
-        validate: (value) => {
+        validate: describedBy(schemas.rollout, (value) => {
           const input = ref(value);
           return { tenantId: input.tenantId, rolloutId: input.rolloutId };
-        },
+        }),
         handler: (context, input) =>
           inTx(context, async (tx) => {
             const rollout = await changeRollout(context, tx, { ...input, action: 'resume' });
@@ -278,7 +284,7 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
       abort: defineMethod({
         ...common,
         kind: 'mutation',
-        validate: (value) => {
+        validate: describedBy(schemas.abort, (value) => {
           const input = ref(value, ['reason', 'rollback']);
           if (input.rollback !== undefined && typeof input.rollback !== 'boolean')
             throw new ComputeError('INVALID_INPUT', 'rollback must be true or false');
@@ -288,7 +294,7 @@ export function rolloutModule(options: RolloutModuleOptions): ComputeModule<'rol
             ...(input.reason ? { reason: input.reason as string } : {}),
             ...(input.rollback !== undefined ? { rollback: input.rollback as boolean } : {}),
           };
-        },
+        }),
         handler: (context, input) =>
           inTx(context, async (tx) => {
             const rollout = await changeRollout(context, tx, { ...input, action: 'abort' });
