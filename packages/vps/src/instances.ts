@@ -38,6 +38,7 @@ import {
   tenant,
 } from './input.js';
 import { leaseAddress } from './ipam.js';
+import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 
 // Instances (PLAN.md §3.6, §11.1): request-as-resource drafts decided on `compute-instance/{draftId}`,
 // admitted in the second transaction, then converged by the `vps.instances` reconciler toward
@@ -79,7 +80,10 @@ export interface InstanceDeps {
   secrets: SecretResolver;
   clients: ProviderClients;
   images?: ImageResolver;
+  /** The default runtime of hosted pools (`vps({ runtimes })[0]`); a pool picks another with `policy.runtime`. */
   runtime: string;
+  /** Runtimes hosted pools may run, with their traits (default: `runtime` with its built-in traits). */
+  runtimes?: ReadonlyMap<string, RuntimeTraits>;
 }
 
 // --- Input --------------------------------------------------------------------------------------
@@ -491,9 +495,13 @@ function shapeOf(flavor: FlavorRecord): InstanceShape {
 
 interface PoolForInstance {
   id: string;
+  ownerTenantId: string;
   class: string;
   agent: string;
   providerAccountId?: string;
+  /** `policy.runtime`, when the pool names one. */
+  runtime?: string;
+  singleTenant: boolean;
 }
 
 async function visibleVpsPool(
@@ -503,11 +511,18 @@ async function visibleVpsPool(
 ): Promise<PoolForInstance> {
   const { rows } = await tx.query<{
     id: string;
+    owner_tenant_id: string;
     class: string;
     agent: string;
     provider_account_id: string | null;
+    runtime: string | null;
+    single_tenant: boolean | null;
   }>(
-    `SELECT p.id, p.class, p.agent, p.provider_account_id FROM pools p
+    `SELECT p.id, p.owner_tenant_id, p.class, p.agent, p.provider_account_id,
+            p.policy->>'runtime' AS runtime,
+            CASE WHEN jsonb_typeof(p.policy->'singleTenant') = 'boolean'
+                 THEN (p.policy->>'singleTenant')::boolean END AS single_tenant
+       FROM pools p
       WHERE p.id = $1 AND (p.owner_tenant_id = $2
             OR EXISTS (SELECT 1 FROM pool_offers o WHERE o.pool_id = p.id AND o.tenant_id = $2))
         AND p.archived_at IS NULL`,
@@ -517,9 +532,97 @@ async function visibleVpsPool(
   if (!row) throw new ComputeError('NOT_FOUND', `Pool ${poolId} not found`);
   if (row.class !== 'vps-host' && row.class !== 'provider')
     throw new ComputeError('INVALID_INPUT', `Pool ${poolId} is ${row.class}, not a VPS pool`);
-  const pool: PoolForInstance = { id: row.id, class: row.class, agent: row.agent };
+  const pool: PoolForInstance = {
+    id: row.id,
+    ownerTenantId: row.owner_tenant_id,
+    class: row.class,
+    agent: row.agent,
+    singleTenant: row.single_tenant === true,
+  };
   if (row.provider_account_id !== null) pool.providerAccountId = row.provider_account_id;
+  if (row.runtime !== null) pool.runtime = row.runtime;
   return pool;
+}
+
+/** The runtimes hosted pools may run: `deps.runtimes`, or the default runtime alone. */
+export function runtimeTable(
+  deps: Pick<InstanceDeps, 'runtime' | 'runtimes'>,
+): ReadonlyMap<string, RuntimeTraits> {
+  if (deps.runtimes) return deps.runtimes;
+  const traits = builtinRuntimeTraits[deps.runtime];
+  return new Map([
+    [
+      deps.runtime,
+      traits ?? {
+        isolation: 'vm',
+        multiTenant: true,
+        gpuPassthrough: false,
+        imageFormats: ['qcow2', 'raw'],
+      },
+    ],
+  ]);
+}
+
+/**
+ * The runtime a hosted pool runs (`policy.runtime`, else the default) and the checks its traits
+ * impose on one request (§13): the image format, GPU passthrough, and for single-tenant runtimes
+ * (containers) that the pool is marked `singleTenant` and serves this tenant alone — the one tenant
+ * it is offered to, else its owner — with no other tenant's instance in it.
+ */
+export async function hostedRuntime(
+  deps: Pick<InstanceDeps, 'runtime' | 'runtimes'>,
+  tx: SqlTx,
+  pool: PoolForInstance,
+  request: { tenantId: string; imageFormat?: ImageFormat; gpus: number },
+): Promise<string> {
+  const table = runtimeTable(deps);
+  const runtime = pool.runtime ?? deps.runtime;
+  const traits = table.get(runtime);
+  if (!traits)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `Pool ${pool.id} runs ${runtime}, which this deployment's vps({ runtimes }) does not list`,
+    );
+  if (request.imageFormat !== undefined && !traits.imageFormats.includes(request.imageFormat))
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${runtime} boots ${traits.imageFormats.join(', ')} images, not ${request.imageFormat}`,
+    );
+  if (request.gpus > 0 && !traits.gpuPassthrough)
+    throw new ComputeError('INVALID_INPUT', `${runtime} cannot pass GPUs through`);
+  if (traits.multiTenant) return runtime;
+  if (!pool.singleTenant)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      `Pool ${pool.id} runs ${runtime}, a single-tenant ${traits.isolation} runtime: set policy.singleTenant`,
+    );
+  // The pool row is locked FOR SHARE so an offer (pools.offer locks it) cannot slip in between.
+  await tx.query(`SELECT 1 FROM pools WHERE id = $1 FOR SHARE`, [pool.id]);
+  const offered = await tx.query<{ tenant_id: string }>(
+    `SELECT DISTINCT tenant_id FROM pool_offers WHERE pool_id = $1 AND tenant_id <> $2 ORDER BY tenant_id`,
+    [pool.id, pool.ownerTenantId],
+  );
+  if (offered.rows.length > 1)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${pool.id} is single-tenant but offered to ${offered.rows.length} tenants`,
+    );
+  const tenant = offered.rows[0]?.tenant_id ?? pool.ownerTenantId;
+  if (request.tenantId !== tenant)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${pool.id} is single-tenant and serves tenant ${tenant} only`,
+    );
+  const others = await tx.query(
+    `SELECT 1 FROM instances WHERE pool_id = $1 AND tenant_id <> $2 AND state <> 'deleted' AND NOT draft LIMIT 1`,
+    [pool.id, request.tenantId],
+  );
+  if (others.rows.length > 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `Pool ${pool.id} is single-tenant and still runs another tenant's instances`,
+    );
+  return runtime;
 }
 
 /** The attributes IAM policies read on an instance (§3.6). */
@@ -545,7 +648,7 @@ export function instanceAttributes(
  * and its authz row. A finished request under the same key replays; a different one is CONFLICT.
  */
 export async function prepareCreateInstance(
-  deps: Pick<InstanceDeps, 'images' | 'runtime'>,
+  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes'>,
   context: MethodContext,
   input: CreateInstanceInput,
   tx: SqlTx,
@@ -585,6 +688,14 @@ export async function prepareCreateInstance(
   else image = await deps.images?.resolve(tx, input.tenantId, input.imageId);
 
   const shape = shapeOf(flavor);
+  const runtime =
+    pool.class === 'vps-host'
+      ? await hostedRuntime(deps, tx, pool, {
+          tenantId: input.tenantId,
+          gpus: shape.gpus,
+          ...(image ? { imageFormat: image.format } : {}),
+        })
+      : deps.runtime;
   if (!existing)
     await tx.query(
       `INSERT INTO instances (id, tenant_id, pool_id, project_id, flavor_id, flavor, image_id, image,
@@ -604,7 +715,7 @@ export async function prepareCreateInstance(
         image ? JSON.stringify(image) : null,
         input.sshKeys,
         input.userData ?? null,
-        deps.runtime,
+        runtime,
         input.desiredState,
         pool.class === 'provider' ? pool.providerAccountId! : null,
         caller.identityId,

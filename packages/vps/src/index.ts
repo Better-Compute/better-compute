@@ -14,6 +14,8 @@ export * from './status.js';
 export * from './flavors.js';
 export * from './accounts.js';
 export * from './ipam.js';
+export * from './hosts.js';
+export { builtinRuntimeTraits } from './runtime.js';
 export type {
   RuntimeDriver,
   RuntimeInstanceStatus,

@@ -5,6 +5,7 @@ import {
   draftId,
   newId,
   type ComputeModule,
+  type Duration,
   type Instance,
   type MethodDefinition,
   type ModuleContext,
@@ -58,18 +59,30 @@ import {
 } from './instances.js';
 import { instanceSpecs, reconcileInstance } from './lifecycle.js';
 import { vpsMigrations } from './migrations.js';
+import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
+import { hostReserve, hostResourcesWork, syncHostResources, type HostReserve } from './hosts.js';
 import { meterInstances } from './usage.js';
 
 /** Options of `vps()`. */
 export interface VpsOptions {
-  /** Runtime driver ids hosted pools run, e.g. `['libvirt-kvm', 'cloud-hypervisor']`; the first is the default. */
+  /**
+   * Runtime driver ids hosted pools run, e.g. `['libvirt-kvm', 'cloud-hypervisor']`; the first is the
+   * default and a pool picks another with `policy.runtime`. A container runtime (`containerd`) is
+   * single-tenant: pools that run it need `policy.singleTenant` (§13).
+   */
   runtimes?: readonly string[];
+  /** Traits of runtimes bcd does not build in (bcx plugins, §5.5), by id; built-ins may be overridden. */
+  runtimeTraits?: Readonly<Record<string, RuntimeTraits>>;
   /** Provider definitions accounts may use (`provider-hetzner`, …). */
   providers?: readonly ProviderDefinition[];
   /** Resolves images for tenants; required for hosted pools (§3.6: compute checks visibility itself). */
   images?: ImageResolver;
   /** Resolves provider credentials; defaults to the host's secret broker. */
   secrets?: SecretResolver;
+  /** What each VPS host keeps for itself (default 2 vCPU, 8 GiB, 100 GiB disk). */
+  hostReserve?: Partial<HostReserve>;
+  /** How often host capacity is re-derived from inventory (default `30s`). */
+  hostSyncEvery?: Duration;
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -190,6 +203,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
   const runtimes = options.runtimes ?? ['libvirt-kvm'];
   if (runtimes.length === 0 || !runtimes.every((runtime) => /^[a-z][a-z0-9-]{0,63}$/.test(runtime)))
     throw new ComputeError('INVALID_CONFIG', 'vps({ runtimes }) must list runtime driver ids');
+  const runtimeTable = new Map<string, RuntimeTraits>();
+  for (const runtime of runtimes) {
+    const traits = options.runtimeTraits?.[runtime] ?? builtinRuntimeTraits[runtime];
+    if (!traits)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `vps({ runtimes }) lists ${runtime}; give its traits in vps({ runtimeTraits })`,
+      );
+    runtimeTable.set(runtime, traits);
+  }
+  const reserve = hostReserve(options.hostReserve);
   const providers = new Map<string, ProviderDefinition>();
   for (const provider of options.providers ?? []) {
     if (provider?.extension !== 'provider')
@@ -215,6 +239,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       secrets: options.secrets ?? context.secrets ?? noSecrets,
       clients,
       runtime: runtimes[0]!,
+      runtimes: runtimeTable,
     };
     if (options.images) deps.images = options.images;
     return deps;
@@ -456,6 +481,16 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             await context.sql.transaction((tx) =>
               context.work.enqueue(tx, instanceWork, key, { notBefore: next }),
             );
+          return 'DONE';
+        },
+      },
+      {
+        // §10.2: vcpu/memoryGiB/diskGiB of vps-host nodes from their inventory, with pool overcommit.
+        name: hostResourcesWork,
+        shardBy: 'none',
+        periodic: [{ key: 'all', every: options.hostSyncEvery ?? '30s' }],
+        async run(context) {
+          await syncHostResources(context.sql, { reserve });
           return 'DONE';
         },
       },

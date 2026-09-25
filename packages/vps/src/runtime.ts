@@ -21,6 +21,37 @@ export interface RuntimeTraits {
   imageFormats: readonly ImageFormat[];
 }
 
+/**
+ * Traits of the runtimes bcd builds in or ships as known bcx plugins (§11.3). Containers share the
+ * host kernel, so they are single-tenant (§13): a pool running them must set `policy.singleTenant`.
+ */
+export const builtinRuntimeTraits: Readonly<Record<string, RuntimeTraits>> = Object.freeze({
+  'libvirt-kvm': {
+    isolation: 'vm',
+    multiTenant: true,
+    gpuPassthrough: true,
+    imageFormats: ['qcow2', 'raw', 'iso'],
+  },
+  'cloud-hypervisor': {
+    isolation: 'microvm',
+    multiTenant: true,
+    gpuPassthrough: true,
+    imageFormats: ['raw', 'qcow2'],
+  },
+  firecracker: {
+    isolation: 'microvm',
+    multiTenant: true,
+    gpuPassthrough: false,
+    imageFormats: ['raw'],
+  },
+  containerd: {
+    isolation: 'container',
+    multiTenant: false,
+    gpuPassthrough: true,
+    imageFormats: ['raw'],
+  },
+});
+
 /** An instance as the runtime reports it on its host. */
 export interface RuntimeInstanceStatus {
   id: string;
