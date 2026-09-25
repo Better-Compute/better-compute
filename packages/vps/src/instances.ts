@@ -3,6 +3,7 @@ import {
   draftId,
   instanceStateTable,
   transition,
+  type AdmissionContext,
   type AdmissionPlan,
   type AuthzAttributes,
   type CapacityPort,
@@ -825,19 +826,29 @@ export async function scheduleHosted(
   deps: InstanceDeps,
   tx: SqlTx,
   row: InstanceRow,
+  /** `instances.create`'s decision: scheduler plugins' `admit` hooks see it (never on retries). */
+  admission?: AdmissionContext,
 ): Promise<InstanceRow> {
   const now = deps.clock.now();
-  const outcome = await deps.capacity.reserve(tx, {
-    tenantId: row.tenantId,
-    poolId: row.poolId,
-    ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
-    instanceId: row.id,
-    // Lets the image-cached scorer prefer hosts whose runtime already holds the image.
-    imageId: row.imageId,
-    devices: row.shape.gpus > 0 ? [{ class: 'gpu', count: row.shape.gpus }] : [],
-    resources: { vcpu: row.shape.vcpu, memoryGiB: row.shape.memoryGiB, diskGiB: row.shape.diskGiB },
-    during: { start: now, end: openEnded },
-  });
+  const outcome = await deps.capacity.reserve(
+    tx,
+    {
+      tenantId: row.tenantId,
+      poolId: row.poolId,
+      ...(row.projectId !== undefined ? { projectId: row.projectId } : {}),
+      instanceId: row.id,
+      // Lets the image-cached scorer prefer hosts whose runtime already holds the image.
+      imageId: row.imageId,
+      devices: row.shape.gpus > 0 ? [{ class: 'gpu', count: row.shape.gpus }] : [],
+      resources: {
+        vcpu: row.shape.vcpu,
+        memoryGiB: row.shape.memoryGiB,
+        diskGiB: row.shape.diskGiB,
+      },
+      during: { start: now, end: openEnded },
+    },
+    admission ? { admission } : undefined,
+  );
   if (outcome.status !== 'placed') {
     const reason = outcome.status === 'pending' ? outcome.reason : 'queued';
     const conditions = withCondition(
@@ -891,7 +902,7 @@ export async function completeCreateInstance(
     await chargeQuota(tx, next.tenantId, next.poolId, demand);
     next = await updateInstance(tx, next, { quotaCharged: demand });
     await deps.work.enqueue(tx, instanceWork, next.id);
-  } else next = await scheduleHosted(deps, tx, next);
+  } else next = await scheduleHosted(deps, tx, next, context.admission);
   await publishInstance(deps, tx, next, 'instance.created');
   return instanceView(next);
 }

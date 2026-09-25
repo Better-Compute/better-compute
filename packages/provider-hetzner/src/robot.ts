@@ -128,6 +128,9 @@ function toMachine(server: RobotServer): ExternalMachine {
   return machine;
 }
 
+/** Answers 0 only in Hetzner's rescue system (installimage is there, and nowhere else). */
+const rescueProbe = 'test -e /root/.oldroot/nfs/install/installimage';
+
 const resetTypes: Partial<Record<PowerAction, string>> = {
   reset: 'hw',
   cycle: 'hw',
@@ -403,26 +406,42 @@ class HetznerRobotClient implements ProviderImpl {
       if (server.server_name.startsWith(robotClaimPrefix)) yield toMachine(server);
   }
 
-  /**
-   * Installs the OS from rescue and starts bcd with a single-use `provisioned` join token (§3.6).
-   * The token travels only over SSH stdin into a root-only file; it never enters user data, argv or
-   * logs. bcd's download is pinned by sha256.
-   */
-  async bootstrap(
-    machine: ExternalMachine,
-    bootstrap: { joinToken: string; bcdUrl: string; sha256: string },
-    context: CallContext,
-  ): Promise<void> {
+  #ssh(): SshExecutor {
     const ssh = this.#options.ssh;
     if (!ssh)
       throw new ComputeError(
         'INVALID_CONFIG',
-        'hetznerRobotProvider({ ssh }) is required for bootstrap',
+        'hetznerRobotProvider({ ssh }) is required for identify and bootstrap',
       );
-    if (!/^[0-9a-f]{64}$/.test(bootstrap.sha256))
-      throw new ComputeError('INVALID_INPUT', 'bootstrap.sha256 must be a hex sha256');
-    if (!/^https:\/\//.test(bootstrap.bcdUrl))
-      throw new ComputeError('INVALID_INPUT', 'bcdUrl must be https');
+    return ssh;
+  }
+
+  /** Rescue's SSH target for a server, answering right now; undefined when it does not. */
+  async #inRescue(
+    machine: ExternalMachine,
+  ): Promise<{ host: string; username: string; privateKey: string } | undefined> {
+    const host = machine.addresses.find((address) => !address.includes(':'));
+    if (!host) return undefined;
+    const target = {
+      host,
+      username: 'root',
+      privateKey: await this.#context.secrets.resolve(this.#config.rescueKey),
+    };
+    const probe = await this.#ssh()(target, rescueProbe).catch(() => undefined);
+    return probe?.code === 0 ? target : undefined;
+  }
+
+  /**
+   * Boots the server into rescue unless it is already there (identify left it so), and waits until
+   * rescue answers over SSH with the account's key.
+   */
+  async #rescueTarget(
+    machine: ExternalMachine,
+    context: CallContext,
+  ): Promise<{ host: string; username: string; privateKey: string }> {
+    const ssh = this.#ssh();
+    const already = await this.#inRescue(machine);
+    if (already) return already;
     const access = await this.rescue(machine.id, context);
     const target = {
       host: access.address,
@@ -436,10 +455,8 @@ class HetznerRobotClient implements ProviderImpl {
     const deadline = clock.now() + (this.#options.rescueTimeoutMs ?? 10 * 60_000);
     // Rescue is up when it answers; the hardware reset takes a minute or two.
     for (;;) {
-      const probe = await ssh(target, 'test -e /root/.oldroot/nfs/install/installimage').catch(
-        () => undefined,
-      );
-      if (probe?.code === 0) break;
+      const probe = await ssh(target, rescueProbe).catch(() => undefined);
+      if (probe?.code === 0) return target;
       if (clock.now() >= deadline || context.signal.aborted)
         throw new ComputeError(
           'PROVIDER_ERROR',
@@ -451,6 +468,45 @@ class HetznerRobotClient implements ProviderImpl {
         );
       await sleep(this.#options.rescuePollMs ?? 15_000);
     }
+  }
+
+  /**
+   * The server's SMBIOS UUID, read in rescue, so its bootstrap token can be bound to it (the
+   * `provisioned` attestor refuses unbound tokens). Leaves the server in rescue for `bootstrap`.
+   */
+  async identify(machine: ExternalMachine, context: CallContext): Promise<{ productUuid: string }> {
+    const target = await this.#rescueTarget(machine, context);
+    const read = await this.#ssh()(target, 'cat /sys/class/dmi/id/product_uuid');
+    const productUuid = read.stdout.trim().toLowerCase();
+    if (
+      read.code !== 0 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(productUuid)
+    )
+      throw new ComputeError(
+        'PROVIDER_ERROR',
+        `Could not read the SMBIOS UUID of Robot server ${machine.id}`,
+        undefined,
+        { provider: 'hetzner-robot' },
+      );
+    return { productUuid };
+  }
+
+  /**
+   * Installs the OS from rescue and starts bcd with a single-use `provisioned` join token (§3.6).
+   * The token travels only over SSH stdin into a root-only file; it never enters user data, argv or
+   * logs. bcd's download is pinned by sha256.
+   */
+  async bootstrap(
+    machine: ExternalMachine,
+    bootstrap: { joinToken: string; bcdUrl: string; sha256: string },
+    context: CallContext,
+  ): Promise<void> {
+    const ssh = this.#ssh();
+    if (!/^[0-9a-f]{64}$/.test(bootstrap.sha256))
+      throw new ComputeError('INVALID_INPUT', 'bootstrap.sha256 must be a hex sha256');
+    if (!/^https:\/\//.test(bootstrap.bcdUrl))
+      throw new ComputeError('INVALID_INPUT', 'bcdUrl must be https');
+    const target = await this.#rescueTarget(machine, context);
     const written = await ssh(
       target,
       'umask 077 && cat > /root/bc-join-token',
@@ -497,7 +553,7 @@ export function hetznerRobotProvider(
     version: '0.1.0',
     provides: ['metal'],
     config: hetznerRobotConfig as unknown as ProviderDefinition<HetznerRobotConfig>['config'],
-    capabilities: ['power', 'rescue', 'bootstrap', 'list'],
+    capabilities: ['power', 'rescue', 'identify', 'bootstrap', 'list'],
     create: (config, context) => new HetznerRobotClient(config, context, options),
   });
 }

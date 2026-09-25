@@ -58,6 +58,16 @@ import {
   type ListInstancesInput,
 } from './instances.js';
 import { instanceSpecs, reconcileInstance } from './lifecycle.js';
+import {
+  bootstrapWork,
+  parseBootstrap,
+  reconcileBootstrap,
+  startBootstrap,
+  type BootstrapDeps,
+  type BootstrapInput,
+  type BootstrapOptions,
+  type ProviderBootstrap,
+} from './bootstraps.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
 import {
@@ -91,6 +101,11 @@ export interface VpsOptions {
   hostSyncEvery?: Duration;
   /** The host bridge hosted instances' NIC attaches to (default `br0`). */
   hostNetwork?: string;
+  /**
+   * Platform-owned provider machines (§3.6): where the bcd a bootstrapped machine installs comes
+   * from. Without it `providerAccounts.bootstrap` is INVALID_CONFIG.
+   */
+  bootstrap?: BootstrapOptions;
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -123,6 +138,7 @@ export type VpsApi = {
     offers: MethodDefinition<AccountRef & { query: OfferQuery }, { items: Offer[] }>;
     update: MethodDefinition<AccountRef & { config: unknown }, ProviderAccountView>;
     delete: MethodDefinition<AccountRef, { deleted: true }>;
+    bootstrap: MethodDefinition<BootstrapInput, ProviderBootstrap>;
   };
 };
 
@@ -222,6 +238,22 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     runtimeTable.set(runtime, traits);
   }
   const reserve = hostReserve(options.hostReserve);
+  if (options.bootstrap) {
+    if (!/^https:\/\/[^\s]+$/.test(options.bootstrap.bcdUrl))
+      throw new ComputeError('INVALID_CONFIG', 'vps({ bootstrap }).bcdUrl must be an https URL');
+    if (!/^[0-9a-f]{64}$/.test(options.bootstrap.sha256))
+      throw new ComputeError('INVALID_CONFIG', 'vps({ bootstrap }).sha256 must be a hex sha256');
+  }
+  const bootstrapDeps = (context: ModuleContext): BootstrapDeps => ({
+    clock: context.clock,
+    events: context.events,
+    work: context.work,
+    log: context.log,
+    secrets: options.secrets ?? context.secrets ?? noSecrets,
+    clients,
+    ...(context.pki ? { pki: context.pki } : {}),
+    ...(options.bootstrap ? { options: options.bootstrap } : {}),
+  });
   if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
     throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
   const providers = new Map<string, ProviderDefinition>();
@@ -473,6 +505,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           return { deleted: true as const };
         },
       }),
+      bootstrap: defineMethod({
+        action: 'compute:providers:manage',
+        kind: 'mutation',
+        resource: accountResource,
+        validate: parseBootstrap,
+        handler: (context, input) => startBootstrap(bootstrapDeps(context), context, input),
+      }),
     },
   });
 
@@ -504,6 +543,24 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         async run(context) {
           await syncHostResources(context.sql, { reserve });
           await wakeInstancesOnLostHosts(context.sql, context.work);
+          return 'DONE';
+        },
+      },
+      {
+        // §3.6: platform-owned provider machines, claimed → identified → installed → joined.
+        name: bootstrapWork,
+        shardBy: 'none',
+        async run(context, key) {
+          const next = await reconcileBootstrap(
+            bootstrapDeps(context),
+            context.sql,
+            key,
+            context.signal,
+          );
+          if (next !== undefined)
+            await context.sql.transaction((tx) =>
+              context.work.enqueue(tx, bootstrapWork, key, { notBefore: next }),
+            );
           return 'DONE';
         },
       },

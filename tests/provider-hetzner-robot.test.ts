@@ -328,6 +328,48 @@ describe('hetznerRobot specifics', () => {
     expect(install.stdin).toContain('shred -u /root/bc-join-token');
   });
 
+  it('identifies a server in rescue, and bootstrap reuses that rescue (one reset)', async () => {
+    const api = new RobotEmulator();
+    let inRescue = false;
+    const commands: string[] = [];
+    const ssh: SshExecutor = async (_target, command) => {
+      commands.push(command);
+      // Rescue answers once the reset into it happened.
+      inRescue ||= api.resets.length > 0;
+      if (command.startsWith('test -e'))
+        return { code: inRescue ? 0 : 255, stdout: '', stderr: '' };
+      if (command === 'cat /sys/class/dmi/id/product_uuid')
+        return { code: 0, stdout: '4C4C4544-0051-3010-8052-B4C04F4A4E32\n', stderr: '' };
+      if (command === 'sh -s') return { code: 255, stdout: '', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const impl = await client(api, ssh);
+    const machine = await impl.create(
+      { offerId: '1001', image: '', userData: '', name: '' },
+      call('node_02'),
+    );
+    expect(await impl.identify!(machine, call('id'))).toEqual({
+      productUuid: '4c4c4544-0051-3010-8052-b4c04f4a4e32',
+    });
+    expect(api.rescue.has(1001)).toBe(true); // left in rescue for bootstrap
+    await impl.bootstrap!(
+      machine,
+      { joinToken: 'bcjt_x', bcdUrl: 'https://d.example/bcd', sha256: 'ab'.repeat(32) },
+      call('boot'),
+    );
+    expect(api.resets).toEqual([{ server: 1001, type: 'hw' }]);
+    expect(api.rescue.has(1001)).toBe(false);
+    // A machine that answers garbage is not identified.
+    const liar = await client(api, async (_target, command) =>
+      command.startsWith('test -e')
+        ? { code: 0, stdout: '', stderr: '' }
+        : { code: 0, stdout: 'To Be Filled By O.E.M.', stderr: '' },
+    );
+    await expect(liar.identify!(machine, call('id2'))).rejects.toMatchObject({
+      code: 'PROVIDER_ERROR',
+    });
+  });
+
   it('refuses bootstrap without an executor, with a bad digest or plain http, and when rescue never answers', async () => {
     const api = new RobotEmulator();
     const noSsh = await client(api);

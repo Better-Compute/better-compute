@@ -392,6 +392,7 @@ describe('vps() API surface', () => {
     expect(module.migrations!.map((migration) => migration.name)).toEqual([
       'vps/0001_instances',
       'vps/0002_sealed_user_data',
+      'vps/0003_provider_bootstraps',
     ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);

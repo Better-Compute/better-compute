@@ -15,6 +15,7 @@ export * from './flavors.js';
 export * from './accounts.js';
 export * from './ipam.js';
 export * from './hosts.js';
+export * from './bootstraps.js';
 export { builtinRuntimeTraits } from './runtime.js';
 export type {
   RuntimeDriver,
