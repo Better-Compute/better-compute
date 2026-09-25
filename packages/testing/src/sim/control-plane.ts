@@ -6,7 +6,7 @@
 // connectivity transitions (I5).
 
 import { create } from '@bufbuild/protobuf';
-import type { IamPort, SqlExecutor } from '@better-compute/core';
+import { ComputeError, defineAttestor, type IamPort, type SqlExecutor } from '@better-compute/core';
 import {
   attachFrameConn,
   createGateway,
@@ -210,6 +210,11 @@ export interface ControlPlaneSimOptions
    * pass an IAM spy's `path` to attribute calls. Default: runs `fn` as is.
    */
   trace?: <T>(path: string, fn: () => T) => T;
+  /**
+   * The last `count` nodes join through a test attestor (`sim-restricted`) that admits them with these
+   * `allowedKinds` (exact kinds or `prefix.*`): their certificates only allow those command kinds.
+   */
+  restricted?: { count: number; allowedKinds: readonly string[] };
   /** Gateway processes behind the simulator (default 1); dials are spread over the live ones. */
   gateways?: number;
   /** Extra gateway options (e.g. lease timings). */
@@ -346,9 +351,27 @@ export async function createControlPlaneSim(
   const nodeCa = createNodeCa({ clock, trustDomain });
   const signingKey = createSigningKey({ clock });
   const encryption = generateP256KeyPair();
+  let restrictedPool: string | undefined;
+  const restrictedAttestor = defineAttestor({
+    id: 'sim-restricted',
+    version: '1.0.0',
+    roles: ['node'],
+    async verify() {
+      if (!restrictedPool || !options.restricted)
+        throw new ComputeError('ACCESS_DENIED', 'Join refused');
+      return {
+        tenantId: tenants.root.id,
+        role: 'node',
+        poolId: restrictedPool,
+        trust: 'platform',
+        allowedKinds: [...options.restricted.allowedKinds],
+      };
+    },
+  });
   const compute = betterCompute({
     database,
     iam: options.iam ? options.iam(fake) : fake,
+    attestors: [restrictedAttestor],
     secret: 'better-compute-control-plane-sim-secret-0123456789',
     baseURL: 'https://compute.sim.test',
     rootTenantId: tenants.root.id,
@@ -400,7 +423,9 @@ export async function createControlPlaneSim(
         quota: { gpu: 1_000_000 },
       } as never),
     );
+    restrictedPool = pool.id;
     const count = options.nodes ?? 4;
+    const restrictedFrom = count - Math.min(count, options.restricted?.count ?? 0);
     const minted = await api(() =>
       compute.api.joinTokens.create(root, {
         tenantId: tenants.root.id,
@@ -428,6 +453,7 @@ export async function createControlPlaneSim(
           create(JoinRequestSchema, {
             sealedToken: new TextEncoder().encode(sealed),
             csr,
+            ...(index >= restrictedFrom ? { attestor: 'sim-restricted' } : {}),
             claims: create(HardwareClaimsSchema, hardware.claims),
             daemonVersion: '0.1.0',
             role: AgentRole.NODE,

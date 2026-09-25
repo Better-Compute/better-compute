@@ -47,6 +47,8 @@ export interface NightlyReport {
   /** Command enqueue → terminal, simulated ms. */
   commandMs: LatencySummary;
   violations: InvariantViolation[];
+  /** Commands queued for the restricted node outside its certificate's allowed kinds (must be 0). */
+  kindLeaks: number;
   ok: boolean;
 }
 
@@ -83,6 +85,10 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
     seed: `nightly-${config.seed}`,
     nodes: config.nodes,
     gateways: config.gateways,
+    // One node's certificate only allows diagnostics and inventory (an attestor's allowedKinds).
+    ...(config.nodes >= 4
+      ? { restricted: { count: 1, allowedKinds: ['diag.*', 'inventory.*'] } }
+      : {}),
   });
   try {
     const { compute, tenants, api, database, sim } = rig;
@@ -182,6 +188,22 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
             bump(counts.workload, 'command-refused');
           }
         }
+      }
+      // Operators also try a kind the restricted node's certificate does not allow: refused before it is queued.
+      if (config.nodes >= 4 && rng.chance(0.1)) {
+        workloadLog.push(`${Math.round((now - chaosStart) / 1000)}:restricted`);
+        const refused = await api(() =>
+          compute.api.commands.run(root, {
+            tenantId: tenants.root.id,
+            nodeId: rig.nodes.at(-1)!.nodeId,
+            kind: 'logs.collect',
+            idempotencyKey: `nightly-restricted-${key++}`,
+          } as never),
+        ).then(
+          () => false,
+          () => true,
+        );
+        bump(counts.workload, refused ? 'restricted-refused' : 'restricted-accepted');
       }
       // Chaos beyond the simulator's own: gateway processes die and come back, workers go down.
       if (profile) {
@@ -337,6 +359,16 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
     };
     const reservations = await tally('reservations');
     const commands = await tally('commands');
+    // A command of a kind the restricted certificate does not allow must never have been queued for it.
+    const { rows: leakedRows } =
+      config.nodes >= 4
+        ? await database.query<{ count: number }>(
+            `SELECT count(*)::int AS count FROM commands WHERE node_id = $1
+               AND kind NOT LIKE 'diag.%' AND kind NOT LIKE 'inventory.%'`,
+            [rig.nodes.at(-1)!.nodeId],
+          )
+        : { rows: [{ count: 0 }] };
+    const kindLeaks = Number(leakedRows[0]?.count ?? 0);
     const sha = (value: unknown) =>
       createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const workload = Object.fromEntries([...counts.workload].sort());
@@ -360,7 +392,8 @@ export async function runNightly(options: NightlyOptions): Promise<NightlyReport
       placeToActiveMs: summarize(activeAfter),
       commandMs: summarize(commandAfter),
       violations,
-      ok: violations.length === 0,
+      kindLeaks,
+      ok: violations.length === 0 && kindLeaks === 0,
     };
   } finally {
     await rig.close();
