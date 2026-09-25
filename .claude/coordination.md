@@ -133,7 +133,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   inventory.Collector; server-time high-water mark per [402c97]), e3dd05b (logs.collect + redaction), a4c305b (bcd
   status socket), 20e6a84 (access converger: sshd CA/principals/native KRL), bd9eaf4 (tunnels: ticket re-verify,
   PTY console, ssh/tcp; e2e through the real gateway), 1a7f0b7 (SecretRequest/WorkloadTokenRequest), 86c582d (XIDs
-  from kmsg → Xid<n> conditions; PSI/steal pressure), ab3e493 (gpu.reset). README → [097b34]. Next: ramdisk mode.
+  from kmsg → Xid<n> conditions; PSI/steal pressure), ab3e493 (gpu.reset). README → [097b34]. Then 21a4647 ramdisk
+  kinds, a302223 bcd ramdisk (bootparams cmdline), a06899b security, 48cb975 site kinds (Redfish, httpProxy, boot
+  entries), 0c35daf bcd site boot server. Next: site image cache, proxyDHCP/TFTP, instances runtime.
 - OPEN cross-owner items ([f85da7], keep current):
   - nightly sim I8 ("billed 0 atom-ms but booked") red at clean HEAD: [31c64a], with [f02367] helping.
   - Sandboxes (D24, user said yes): PLAN §3.7 (e645a4d); the `sandboxes` group on vps() is [097b34]'s. They ping
@@ -152,7 +154,11 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
     - vps has no tenantDeleted: [097b34]; workload tokens now refused for suspended/deleted tenants
       (d143ead);
     - binding:deactivate revokes the actor's certs: [402c97];
-    - metal BMC rotation stores a bare password: [f02367].
+    - metal BMC rotation stores a bare password: fixed in 6abfa79 ([f02367]).
+    - Also found by [f02367]: inventory from tenant-controlled nodes was applied as trusted (a lessee could
+      hide GPUs from node-lease billing and rewrite labels): now advisory, a5af436. The docs "Trust" line in
+      guides/nodes/inventory-and-health.mdx is still to be written (docs session).
+  - FleetConfig sandboxTemplates (5f2067e); MCP sandbox tools (54da7a8); iamGuard (54facfc).
   - Sandboxes step 5 seams (paused, restore_from, instance.snapshot, runtime pause/resume/snapshot): b78045b.
   - DONE this round: tenancy §12.8 (ae9a7bb); vps instances.create wait + budget check (32c25ae); wake edge on
     dedicated nodes (9093323); ramdisk allowed kinds (464788a); capacity jsonSchema (45e9685); PoolIndex lazy load
