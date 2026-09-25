@@ -31,7 +31,9 @@ export function createTerminalSession(
   api: ComputeRequester,
   options: {
     tenantId: string;
-    instanceId: string;
+    /** Exactly one target: an instance (exec / ssh) or a node (its console, `compute:nodes:console`). */
+    instanceId?: string;
+    nodeId?: string;
     op?: 'exec' | 'ssh';
     /** Where the API lives, for the WebSocket URL. */
     baseURL: string;
@@ -42,6 +44,8 @@ export function createTerminalSession(
     connect?: (url: string) => TunnelConnection;
   },
 ): TerminalSession {
+  if ((options.instanceId === undefined) === (options.nodeId === undefined))
+    throw new Error('createTerminalSession needs exactly one of instanceId or nodeId');
   const max = options.maxBufferedBytes ?? 256 * 1024;
   const store = createStore<TerminalState>({ status: 'idle', output: [], bufferedBytes: 0 });
   const listeners = new Set<(data: Uint8Array, channel: number) => void>();
@@ -66,11 +70,16 @@ export function createTerminalSession(
       if (status === 'opening' || status === 'open') return;
       store.set({ status: 'opening', output: [], bufferedBytes: 0 });
       try {
-        const opened = await api.$request<{ tunnelId: string; path: string }>('tunnels/open', {
-          tenantId: options.tenantId,
-          instanceId: options.instanceId,
-          op: options.op ?? 'exec',
-        });
+        const opened = await api.$request<{ tunnelId: string; path: string }>(
+          'tunnels/open',
+          options.nodeId !== undefined
+            ? { tenantId: options.tenantId, nodeId: options.nodeId, op: 'console' }
+            : {
+                tenantId: options.tenantId,
+                instanceId: options.instanceId,
+                op: options.op ?? 'exec',
+              },
+        );
         tunnel = connect(
           tunnelUrl(options.baseURL, options.basePath ?? '/api/compute', opened.path),
         );

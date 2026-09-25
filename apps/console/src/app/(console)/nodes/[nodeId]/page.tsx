@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { use, useMemo } from 'react';
 import { createDetail } from '@better-compute/console-kit';
 import { useDetail } from '@better-compute/console-kit/react';
@@ -75,6 +76,13 @@ export default function NodePage({ params }: { params: Promise<{ nodeId: string 
                 detail={detail}
                 only={['nodes/cordon', 'nodes/uncordon', 'nodes/drain']}
               />
+              {node.connectivity === 'connected' && (
+                <p>
+                  <Link href={`/nodes/${encodeURIComponent(nodeId)}/console`}>
+                    Open the console
+                  </Link>
+                </p>
+              )}
             </section>
             {/* Break-glass shells are a platform operation (compute:nodes:ssh-root; IAM still decides). */}
             {root && <SshCertPanel nodeId={nodeId} />}

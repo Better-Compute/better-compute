@@ -80,6 +80,41 @@ describe('terminal session', () => {
     expect(session.get()).toMatchObject({ status: 'closed', exit: { exitCode: 0, reason: 'bye' } });
   });
 
+  it('opens a node console, and needs exactly one target', async () => {
+    const calls: unknown[] = [];
+    const api: ComputeRequester = {
+      async $request<O>(path: string, input?: unknown) {
+        calls.push([path, input]);
+        return { tunnelId: 'tun_2', path: 'tunnels/T2' } as O;
+      },
+    };
+    const fake = fakeTunnel();
+    const session = createTerminalSession(api, {
+      tenantId: 'root',
+      nodeId: 'node_1',
+      baseURL: 'https://compute.test',
+      connect: () => fake.tunnel,
+    });
+    const opening = session.open();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fake.ready();
+    await opening;
+    expect(calls).toEqual([
+      ['tunnels/open', { tenantId: 'root', nodeId: 'node_1', op: 'console' }],
+    ]);
+    expect(() => createTerminalSession(api, { tenantId: 'root', baseURL: 'https://x' })).toThrow(
+      /exactly one/,
+    );
+    expect(() =>
+      createTerminalSession(api, {
+        tenantId: 'root',
+        nodeId: 'node_1',
+        instanceId: 'inst_1',
+        baseURL: 'https://x',
+      }),
+    ).toThrow(/exactly one/);
+  });
+
   it('reports a refused open', async () => {
     const api: ComputeRequester = {
       async $request() {
