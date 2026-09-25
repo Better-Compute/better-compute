@@ -16,8 +16,12 @@ import { sshCertificatesMigration, sshCertificatesTables } from './0014_ssh_cert
 import { inventoryImagesMigration } from './0015_inventory_images.js';
 import { duplicateIdentityMigration } from './0016_duplicate_identity.js';
 import { allocationEvidenceMigration } from './0017_allocation_evidence.js';
+import { partitionedHistoryMigration } from './0018_partitioned_history.js';
 
-/** Every table the base schema creates, in creation order. */
+/**
+ * Every table the base schema creates, in creation order. Partitions of the history tables
+ * (core/0018: `<table>_default`, `<table>_pYYYYMM`) are not listed; `historyPartitions` reads them.
+ */
 export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables, ...v02ServerTables, ...v02SecurityTables, ...v02EvidenceTables, ...imageCacheTables, ...sshCertificatesTables]);
 
 /**
@@ -42,6 +46,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   inventoryImagesMigration,
   duplicateIdentityMigration,
   allocationEvidenceMigration,
+  partitionedHistoryMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

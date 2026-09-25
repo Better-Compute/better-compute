@@ -151,6 +151,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0015_inventory_images',
       'core/0016_duplicate_identity',
       'core/0017_allocation_evidence',
+      'core/0018_partitioned_history',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });

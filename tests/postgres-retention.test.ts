@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SqlExecutor } from '@better-compute/core';
-import { loadCursor, pruneAttestationUses, pruneBehindCursors, retentionModule, runRetention, saveCursor, setSimClock, useSimClock } from '@better-compute/postgres';
+import {
+  loadCursor,
+  pruneAttestationUses,
+  pruneBehindCursors,
+  retentionModule,
+  runRetention,
+  saveCursor,
+  setSimClock,
+  useSimClock,
+} from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 
 // core/0009_runtime: durable cursors and retention behind every cursor of a stream (PLAN.md §8.4).
@@ -9,10 +18,15 @@ let db: SqlExecutor;
 const START = Date.UTC(2026, 8, 1);
 
 async function write(topic: string, n: number) {
-  for (let i = 0; i < n; i++) await db.query(`INSERT INTO outbox (topic, payload) VALUES ($1, '{"tenantId":"t1"}')`, [topic]);
+  for (let i = 0; i < n; i++)
+    await db.query(`INSERT INTO outbox (topic, payload) VALUES ($1, '{"tenantId":"t1"}')`, [topic]);
 }
 const rows = async () =>
-  (await db.query<{ seq: number; txid_text: string }>('SELECT seq, txid::text AS txid_text FROM outbox ORDER BY outbox.txid, outbox.seq')).rows;
+  (
+    await db.query<{ seq: number; txid_text: string }>(
+      'SELECT seq, txid::text AS txid_text FROM outbox ORDER BY outbox.txid, outbox.seq',
+    )
+  ).rows;
 
 beforeAll(async () => {
   db = pglite();
@@ -58,9 +72,13 @@ describe('pruneBehindCursors', () => {
     expect(await pruneBehindCursors(db, 'outbox', { batch: 2 })).toBe(2);
     expect(await pruneBehindCursors(db, 'outbox', { batch: 2 })).toBe(2);
     expect(await rows()).toEqual([]);
-    await db.query(`INSERT INTO authz_changes (type, id, tenant_id, op) VALUES ('pool', 'p1', 't1', 'upsert')`);
+    await db.query(
+      `INSERT INTO authz_changes (type, id, tenant_id, op) VALUES ('pool', 'p1', 't1', 'upsert')`,
+    );
     expect(await pruneBehindCursors(db, 'authz_changes', { minAgeSeconds: 0 })).toBe(0); // no authz cursor
-    await expect(pruneBehindCursors(db, 'webhooks' as never)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(pruneBehindCursors(db, 'webhooks' as never)).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
   });
 
   it('adds work_queue.attempts, commands.owner and the tenant indexes', async () => {
@@ -69,25 +87,49 @@ describe('pruneBehindCursors', () => {
         WHERE (table_name, column_name) IN (('work_queue', 'attempts'), ('commands', 'owner'), ('outbox', 'created_at'))
         ORDER BY table_name`,
     );
-    expect(columns.map((c) => `${c.table_name}.${c.column_name}`)).toEqual(['commands.owner', 'outbox.created_at', 'work_queue.attempts']);
+    expect(columns.map((c) => `${c.table_name}.${c.column_name}`)).toEqual([
+      'commands.owner',
+      'outbox.created_at',
+      'work_queue.attempts',
+    ]);
     const { rows: indexes } = await db.query<{ indexname: string }>(
       `SELECT indexname FROM pg_indexes WHERE indexname IN ('outbox_tenant_cursor', 'usage_windows_tenant', 'join_tokens_tenant_pool') ORDER BY 1`,
     );
-    expect(indexes.map((i) => i.indexname)).toEqual(['join_tokens_tenant_pool', 'outbox_tenant_cursor', 'usage_windows_tenant']);
+    expect(indexes.map((i) => i.indexname)).toEqual([
+      'join_tokens_tenant_pool',
+      'outbox_tenant_cursor',
+      'usage_windows_tenant',
+    ]);
   });
 });
 
 describe('retentionModule', () => {
   it('is a periodic singleton, and one pass drains every job', async () => {
     const module = retentionModule({ every: '10m' });
-    expect(module.reconcilers).toEqual([expect.objectContaining({ name: 'core.retention', shardBy: 'none', periodic: [{ key: 'pass', every: '10m' }] })]);
-    await db.query(`INSERT INTO attestation_uses (attestor, subject, expires_at) VALUES ('discovery', $1, compute_now() - interval '1 minute')`, [
-      new Uint8Array(32).fill(9),
+    expect(module.reconcilers).toEqual([
+      expect.objectContaining({
+        name: 'core.retention',
+        shardBy: 'none',
+        periodic: [{ key: 'pass', every: '10m' }],
+      }),
     ]);
+    await db.query(
+      `INSERT INTO attestation_uses (attestor, subject, expires_at) VALUES ('discovery', $1, compute_now() - interval '1 minute')`,
+      [new Uint8Array(32).fill(9)],
+    );
     const pass = await runRetention(db, { minAgeSeconds: 0 });
     expect(pass.attestationUses).toBe(1);
     expect(pass).toMatchObject({ joinRequestsExpired: 0 });
-    expect(await runRetention(db)).toEqual({ outbox: 0, authzChanges: 0, attestationUses: 0, joinRequestsExpired: 0 });
+    expect(await runRetention(db)).toEqual({
+      outbox: 0,
+      authzChanges: 0,
+      attestationUses: 0,
+      joinRequestsExpired: 0,
+      partitionsCreated: 0,
+      inventorySnapshots: 0,
+      usageWindows: 0,
+      partitionsDropped: 0,
+    });
   });
 });
 
@@ -107,8 +149,12 @@ describe('pruneAttestationUses (core/0011)', () => {
     await use('discovery', 2, 3600);
     await setSimClock(db, START + 5 * 3600_000 + 120_000); // two minutes after the uses above
     expect(await pruneAttestationUses(db)).toBe(1);
-    const { rows: left } = await db.query<{ attestor: string }>('SELECT attestor FROM attestation_uses ORDER BY attestor');
+    const { rows: left } = await db.query<{ attestor: string }>(
+      'SELECT attestor FROM attestation_uses ORDER BY attestor',
+    );
     expect(left.map((row) => row.attestor)).toEqual(['cloud-iid', 'discovery']);
-    await expect(db.query(`INSERT INTO attestation_uses (attestor, subject) VALUES ('x', '\\x00')`)).rejects.toThrow();
+    await expect(
+      db.query(`INSERT INTO attestation_uses (attestor, subject) VALUES ('x', '\\x00')`),
+    ).rejects.toThrow();
   });
 });

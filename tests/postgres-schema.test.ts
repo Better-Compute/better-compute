@@ -77,6 +77,7 @@ describe('migrate', () => {
       'core/0015_inventory_images',
       'core/0016_duplicate_identity',
       'core/0017_allocation_evidence',
+      'core/0018_partitioned_history',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -121,9 +122,11 @@ describe('migrate', () => {
 
 describe('base schema', () => {
   it('creates every v0.1 table and none of the later ones', async () => {
+    // Partitions of the history tables (core/0018) are not tables of their own.
     const { rows } = await db.query<{ name: string }>(
-      `SELECT table_name::text AS name FROM information_schema.tables
-       WHERE table_schema = 'public' ORDER BY table_name`,
+      `SELECT t.table_name::text AS name FROM information_schema.tables t
+         JOIN pg_class c ON c.relname = t.table_name AND c.relnamespace = 'public'::regnamespace
+       WHERE t.table_schema = 'public' AND NOT c.relispartition ORDER BY t.table_name`,
     );
     const names = rows.map((row) => row.name);
     expect(names.sort()).toEqual(

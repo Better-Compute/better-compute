@@ -18,6 +18,19 @@ export {
   type PruneOptions,
 } from './retention.js';
 export {
+  defaultPartitionRows,
+  detachHistoryPartition,
+  dropEmptyHistoryPartitions,
+  ensureHistoryPartitions,
+  historyPartitions,
+  pruneInventorySnapshots,
+  pruneUsageWindows,
+  type HistoryPartition,
+  type HistoryPruneOptions,
+  type HistoryTable,
+} from './history.js';
+export { historyTables } from './migrations/0018_partitioned_history.js';
+export {
   retentionModule,
   retentionWorkKind,
   runRetention,
