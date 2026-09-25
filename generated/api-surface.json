@@ -1,0 +1,6715 @@
+{
+  "$comment": "The frozen compute API surface (PLAN.md §16 v1.0). Written by `node scripts/api-surface.mjs --update`; do not edit.",
+  "methods": {
+    "capacity.byPool": {
+      "route": "POST /api/compute/capacity/byPool",
+      "kind": "read",
+      "action": "compute:capacity:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "capacity.preview": {
+      "route": "POST /api/compute/capacity/preview",
+      "kind": "read",
+      "action": "compute:capacity:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project it belongs to"
+          },
+          "devices": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "properties": {
+                "class": {
+                  "enum": [
+                    "gpu",
+                    "gpu.mig",
+                    "gpu.slot",
+                    "nic.vf",
+                    "disk",
+                    "node"
+                  ],
+                  "description": "The device class to book"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 64
+                },
+                "selector": {
+                  "type": "object",
+                  "description": "matchExpressions over device attributes, then node labels"
+                },
+                "topology": {
+                  "enum": [
+                    "any",
+                    "nvlink-all"
+                  ]
+                },
+                "sharing": {
+                  "enum": [
+                    "exclusive",
+                    "mig",
+                    "timeslice",
+                    "mps"
+                  ]
+                }
+              },
+              "required": [
+                "class",
+                "count"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "topology": {
+            "enum": [
+              "any",
+              "nvlink-all"
+            ]
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 140737488355328,
+            "description": "Epoch ms (default now)"
+          },
+          "duration": {
+            "type": [
+              "string",
+              "integer"
+            ],
+            "description": "How long: \"30m\", \"8h\", \"7d\", or milliseconds"
+          },
+          "binding": {
+            "type": "string",
+            "default": "hold",
+            "description": "hold (CDI devices) or node (a whole-node lease in a tenantRoot pool)"
+          },
+          "node": {
+            "type": "object",
+            "properties": {
+              "profileId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:/-]{1,128}$",
+                "maxLength": 128
+              },
+              "profileVersion": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "profileId"
+            ],
+            "additionalProperties": false
+          },
+          "leaseSeconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 86400
+          },
+          "spot": {
+            "type": "boolean"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          },
+          "wait": {
+            "type": "object",
+            "properties": {
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 30000
+              }
+            },
+            "required": [
+              "timeoutMs"
+            ],
+            "additionalProperties": false
+          },
+          "gang": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 64
+              },
+              "topologyKey": {
+                "type": "string",
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "size"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "devices",
+          "duration",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "capacity.summary": {
+      "route": "POST /api/compute/capacity/summary",
+      "kind": "read",
+      "action": "compute:capacity:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "capacity.timeline": {
+      "route": "POST /api/compute/capacity/timeline",
+      "kind": "read",
+      "action": "compute:capacity:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "from": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 140737488355328,
+            "description": "Epoch ms"
+          },
+          "to": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 140737488355328,
+            "description": "Epoch ms"
+          },
+          "stepMinutes": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 1440
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "commands.cancel": {
+      "route": "POST /api/compute/commands/cancel",
+      "kind": "mutation",
+      "action": "compute:nodes:exec",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "commandId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^cmd_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "commandId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "commands.get": {
+      "route": "POST /api/compute/commands/get",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "commandId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^cmd_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "commandId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "commands.list": {
+      "route": "POST /api/compute/commands/list",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "dispatched",
+              "acked",
+              "running",
+              "succeeded",
+              "failed",
+              "rejected",
+              "expired",
+              "cancelled"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 19,
+            "pattern": "^\\d{1,19}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "commands.run": {
+      "route": "POST /api/compute/commands/run",
+      "kind": "mutation",
+      "action": "compute:nodes:exec",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+$"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+          },
+          "notAfterSeconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 3600,
+            "default": 600
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "kind",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "drivers.list": {
+      "route": "POST /api/compute/drivers/list",
+      "kind": "read",
+      "action": "compute:drivers:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9-]{0,63}$"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "events.list": {
+      "route": "POST /api/compute/events/list",
+      "kind": "read",
+      "action": "compute:events:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 41,
+            "pattern": "^\\d{1,20}:\\d{1,20}$"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "flavors.create": {
+      "route": "POST /api/compute/flavors/create",
+      "kind": "mutation",
+      "action": "compute:flavors:manage",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The flavor name, e.g. g1.small"
+          },
+          "vcpu": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1024
+          },
+          "memoryGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384
+          },
+          "diskGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          },
+          "gpus": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16,
+            "default": 0
+          },
+          "offerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Provider pools: the provider offer this flavor creates (required there)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "vcpu",
+          "memoryGiB",
+          "diskGiB"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "flavors.delete": {
+      "route": "POST /api/compute/flavors/delete",
+      "kind": "mutation",
+      "action": "compute:flavors:manage",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The flavor name"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "flavors.list": {
+      "route": "POST /api/compute/flavors/list",
+      "kind": "read",
+      "action": "compute:flavors:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "flavors.update": {
+      "route": "POST /api/compute/flavors/update",
+      "kind": "mutation",
+      "action": "compute:flavors:manage",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The flavor name, e.g. g1.small"
+          },
+          "vcpu": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1024
+          },
+          "memoryGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16384
+          },
+          "diskGiB": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          },
+          "gpus": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16,
+            "default": 0
+          },
+          "offerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Provider pools: the provider offer this flavor creates (required there)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "name",
+          "vcpu",
+          "memoryGiB",
+          "diskGiB"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "fleet.apply": {
+      "route": "POST /api/compute/fleet/apply",
+      "kind": "mutation",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "config": {
+            "type": "object",
+            "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors, sandboxTemplates }, as fleet.export writes it"
+          },
+          "prune": {
+            "type": "boolean",
+            "default": false,
+            "description": "Delete (archive) what the document no longer lists"
+          },
+          "planHash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "maxLength": 64,
+            "description": "The planHash of the plan you reviewed: apply refuses with CONFIG_DRIFT if the plan moved since"
+          }
+        },
+        "required": [
+          "tenantId",
+          "config"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "fleet.export": {
+      "route": "POST /api/compute/fleet/export",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "fleet.plan": {
+      "route": "POST /api/compute/fleet/plan",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "config": {
+            "type": "object",
+            "description": "The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors, sandboxTemplates }, as fleet.export writes it"
+          },
+          "prune": {
+            "type": "boolean",
+            "default": false,
+            "description": "Delete (archive) what the document no longer lists"
+          }
+        },
+        "required": [
+          "tenantId",
+          "config"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "fleet.status": {
+      "route": "POST /api/compute/fleet/status",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "images.get": {
+      "route": "POST /api/compute/images/get",
+      "kind": "read",
+      "action": "compute:images:read",
+      "resource": "compute-image",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "imageId": {
+            "type": "string",
+            "pattern": "^img_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The catalog image"
+          }
+        },
+        "required": [
+          "tenantId",
+          "imageId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "images.list": {
+      "route": "POST /api/compute/images/list",
+      "kind": "read",
+      "action": "compute:images:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "kind": {
+            "enum": [
+              "os",
+              "ramdisk"
+            ],
+            "description": "What the image boots as"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50,
+            "description": "Page size"
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The cursor of the previous page"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "images.promote": {
+      "route": "POST /api/compute/images/promote",
+      "kind": "mutation",
+      "action": "compute:images:publish",
+      "resource": "compute-image",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "imageId": {
+            "type": "string",
+            "pattern": "^img_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The catalog image"
+          }
+        },
+        "required": [
+          "tenantId",
+          "imageId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "images.register": {
+      "route": "POST /api/compute/images/register",
+      "kind": "mutation",
+      "action": "compute:images:publish",
+      "resource": "compute-tenant",
+      "alternatives": [
+        "compute:images:publish @ compute-fleet"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "name@version, e.g. ubuntu-24.04@2026.09"
+          },
+          "kind": {
+            "enum": [
+              "os",
+              "ramdisk"
+            ],
+            "description": "What the image boots as",
+            "default": "os"
+          },
+          "format": {
+            "enum": [
+              "raw",
+              "qcow2",
+              "iso"
+            ],
+            "description": "The disk format"
+          },
+          "compression": {
+            "enum": [
+              "none",
+              "zstd",
+              "gzip"
+            ],
+            "default": "none"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{64}$",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "The digest of the image, 64 hex digits"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Where the image is fetched from: an https:// or oci:// URL"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "Base64 signature over the image's identity (kind, ref, format, compression, sha256)"
+          },
+          "signerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The registered signer whose key checks the signature"
+          }
+        },
+        "required": [
+          "tenantId",
+          "ref",
+          "format",
+          "sha256",
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.create": {
+      "route": "POST /api/compute/instances/create",
+      "kind": "mutation",
+      "action": "compute:instances:create",
+      "resource": "compute-instance",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project it belongs to"
+          },
+          "flavor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The flavor name, e.g. g1.small"
+          },
+          "imageId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$",
+            "maxLength": 200,
+            "description": "The image to boot"
+          },
+          "sshKeys": {
+            "type": "array",
+            "maxItems": 32,
+            "default": [],
+            "description": "OpenSSH public keys, one line each",
+            "items": {
+              "type": "string",
+              "maxLength": 8192
+            }
+          },
+          "userData": {
+            "type": "string",
+            "maxLength": 32768,
+            "description": "User data (at most 32 KiB), or secret://<tenantId>/<id> naming a secret of this tenant"
+          },
+          "desiredState": {
+            "enum": [
+              "running",
+              "stopped"
+            ],
+            "default": "running"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          },
+          "wait": {
+            "type": "object",
+            "properties": {
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 30000,
+                "description": "How long to hold the answer until the instance settles"
+              }
+            },
+            "required": [
+              "timeoutMs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "flavor",
+          "imageId",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.delete": {
+      "route": "POST /api/compute/instances/delete",
+      "kind": "mutation",
+      "action": "compute:instances:delete",
+      "resource": "compute-instance",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The instance"
+          }
+        },
+        "required": [
+          "tenantId",
+          "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.get": {
+      "route": "POST /api/compute/instances/get",
+      "kind": "read",
+      "action": "compute:instances:read",
+      "resource": "compute-instance",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The instance"
+          }
+        },
+        "required": [
+          "tenantId",
+          "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.list": {
+      "route": "POST /api/compute/instances/list",
+      "kind": "read",
+      "action": "compute:instances:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "scope": {
+            "enum": [
+              "mine",
+              "all"
+            ],
+            "default": "mine"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "scheduling",
+              "provisioning",
+              "starting",
+              "running",
+              "stopped",
+              "rebooting",
+              "resizing",
+              "deleting",
+              "deleted",
+              "error",
+              "lost",
+              "paused"
+            ]
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The last instance id of the previous page"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.resize": {
+      "route": "POST /api/compute/instances/resize",
+      "kind": "mutation",
+      "action": "compute:instances:update",
+      "resource": "compute-instance",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The instance"
+          },
+          "flavor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The new flavor"
+          }
+        },
+        "required": [
+          "tenantId",
+          "instanceId",
+          "flavor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.start": {
+      "route": "POST /api/compute/instances/start",
+      "kind": "mutation",
+      "action": "compute:instances:update",
+      "resource": "compute-instance",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The instance"
+          }
+        },
+        "required": [
+          "tenantId",
+          "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "instances.stop": {
+      "route": "POST /api/compute/instances/stop",
+      "kind": "mutation",
+      "action": "compute:instances:update",
+      "resource": "compute-instance",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The instance"
+          }
+        },
+        "required": [
+          "tenantId",
+          "instanceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "inventory.diff": {
+      "route": "POST /api/compute/inventory/diff",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "from": {
+            "type": "string",
+            "pattern": "^(inv_[0-9a-hjkmnp-tv-z]{26,52}|[0-9a-f]{64})$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "to": {
+            "type": "string",
+            "pattern": "^(inv_[0-9a-hjkmnp-tv-z]{26,52}|[0-9a-f]{64})$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "inventory.get": {
+      "route": "POST /api/compute/inventory/get",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "inventory.history": {
+      "route": "POST /api/compute/inventory/history",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "x-bc": {
+              "kind": "int"
+            }
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^inv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "joinRequests.approve": {
+      "route": "POST /api/compute/joinRequests/approve",
+      "kind": "mutation",
+      "action": "compute:join-tokens:create",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "poolId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "requestId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^jreq_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 86400,
+            "default": 3600
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "requestId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "joinRequests.list": {
+      "route": "POST /api/compute/joinRequests/list",
+      "kind": "read",
+      "action": "compute:join-tokens:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "poolId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "expired",
+              "consumed",
+              "all"
+            ],
+            "default": "pending"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^jreq_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "joinRequests.reject": {
+      "route": "POST /api/compute/joinRequests/reject",
+      "kind": "mutation",
+      "action": "compute:join-tokens:create",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "poolId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "requestId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^jreq_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "requestId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "joinTokens.create": {
+      "route": "POST /api/compute/joinTokens/create",
+      "kind": "mutation",
+      "action": "compute:join-tokens:create",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "poolId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "maxUses": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "default": 1
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 86400
+          },
+          "expect": {
+            "type": "object",
+            "properties": {
+              "productUuid": {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[0-9A-Fa-f-]{8,64}$"
+              },
+              "serial": {
+                "type": "string",
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:/+-]{1,128}$"
+              },
+              "mac": {
+                "type": "string",
+                "maxLength": 17,
+                "pattern": "^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$"
+              },
+              "gpuUuid": {
+                "type": "string",
+                "maxLength": 68,
+                "pattern": "^GPU-[0-9A-Fa-f-]{8,64}$"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "allowReclaim": {
+            "type": "boolean",
+            "default": false
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "ttlSeconds",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "joinTokens.list": {
+      "route": "POST /api/compute/joinTokens/list",
+      "kind": "read",
+      "action": "compute:join-tokens:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "poolId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "includeInactive": {
+            "type": "boolean",
+            "default": false
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^jt_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "joinTokens.revoke": {
+      "route": "POST /api/compute/joinTokens/revoke",
+      "kind": "mutation",
+      "action": "compute:join-tokens:revoke",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "poolId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "tokenId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^jt_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "tokenId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.abort": {
+      "route": "POST /api/compute/metal/abort",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Recorded as the node's last error"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.deploy": {
+      "route": "POST /api/compute/metal/deploy",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The provision profile to deploy"
+          },
+          "profileVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The profile version"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "profileId",
+          "profileVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.enroll": {
+      "route": "POST /api/compute/metal/enroll",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "siteId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The site the node is in (the pool must be in it)"
+          },
+          "poolId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The pool the node joins"
+          },
+          "bmc": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "The BMC address (host or URL)"
+              },
+              "driver": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$",
+                "description": "The BMC driver id, such as redfish"
+              },
+              "credentials": {
+                "type": [
+                  "string",
+                  "object"
+                ],
+                "pattern": "^(secret|vault|env)://\\S+$",
+                "maxLength": 2048,
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  }
+                },
+                "required": [
+                  "username",
+                  "password"
+                ],
+                "additionalProperties": false,
+                "description": "A secret:// (or vault://, env://) reference, or inline { username, password } stored in the secret broker at once and never echoed"
+              },
+              "tlsSpkiSha256": {
+                "type": "string",
+                "pattern": "^[0-9A-Fa-f]{64}$",
+                "description": "SHA-256 of the BMC certificate's SubjectPublicKeyInfo, 64 hex digits, to pin its TLS"
+              }
+            },
+            "required": [
+              "address",
+              "driver",
+              "credentials"
+            ],
+            "additionalProperties": false,
+            "description": "How to reach the node's BMC"
+          },
+          "macs": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "pattern": "^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$"
+            },
+            "description": "The node's MAC addresses (':' or '-' separated), for PXE and matching"
+          },
+          "productUuid": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "The SMBIOS product UUID"
+          },
+          "arch": {
+            "enum": [
+              "x86_64",
+              "arm64"
+            ],
+            "default": "x86_64"
+          },
+          "uefi": {
+            "type": "boolean",
+            "default": true,
+            "description": "Boots in UEFI mode (false: legacy BIOS)"
+          },
+          "hardwareProfile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Overrides the pool's policy.hardwareProfile"
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId",
+          "poolId",
+          "bmc"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.inspect": {
+      "route": "POST /api/compute/metal/inspect",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.manage": {
+      "route": "POST /api/compute/metal/manage",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.power": {
+      "route": "POST /api/compute/metal/power",
+      "kind": "mutation",
+      "action": "compute:nodes:power",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          },
+          "action": {
+            "enum": [
+              "on",
+              "off",
+              "graceful-off",
+              "reset",
+              "graceful-restart",
+              "cycle",
+              "nmi"
+            ],
+            "description": "The BMC power action"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.provide": {
+      "route": "POST /api/compute/metal/provide",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.recover": {
+      "route": "POST /api/compute/metal/recover",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.rescue": {
+      "route": "POST /api/compute/metal/rescue",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.retire": {
+      "route": "POST /api/compute/metal/retire",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.undeploy": {
+      "route": "POST /api/compute/metal/undeploy",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          },
+          "wipe": {
+            "enum": [
+              "none",
+              "quick",
+              "secure-erase",
+              "crypto-erase"
+            ],
+            "default": "quick",
+            "description": "How the disks are wiped on release"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.unrescue": {
+      "route": "POST /api/compute/metal/unrescue",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.adopt": {
+      "route": "POST /api/compute/nodes/adopt",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.cordon": {
+      "route": "POST /api/compute/nodes/cordon",
+      "kind": "mutation",
+      "action": "compute:nodes:cordon",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.delete": {
+      "route": "POST /api/compute/nodes/delete",
+      "kind": "mutation",
+      "action": "compute:nodes:delete",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.drain": {
+      "route": "POST /api/compute/nodes/drain",
+      "kind": "mutation",
+      "action": "compute:nodes:drain",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.events": {
+      "route": "POST /api/compute/nodes/events",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 41,
+            "pattern": "^\\d{1,20}:\\d{1,20}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.get": {
+      "route": "POST /api/compute/nodes/get",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.issueSshCert": {
+      "route": "POST /api/compute/nodes/issueSshCert",
+      "kind": "mutation",
+      "action": "compute:nodes:ssh-root",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-z]{26,52}$",
+            "maxLength": 57
+          },
+          "publicKey": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Your OpenSSH public key line (Ed25519 or ECDSA P-256)"
+          },
+          "principal": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+            "default": "root",
+            "description": "The Unix account to log in as, one of the deployment's sshAccounts"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 3600,
+            "default": 900
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "publicKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.label": {
+      "route": "POST /api/compute/nodes/label",
+      "kind": "mutation",
+      "action": "compute:nodes:update",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "set": {
+            "type": "object",
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/@+=-]*$"
+            },
+            "maxProperties": 64
+          },
+          "remove": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,126}[A-Za-z0-9])?$"
+            },
+            "maxItems": 64,
+            "uniqueItems": true
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.list": {
+      "route": "POST /api/compute/nodes/list",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "poolId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "siteId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "cordoned": {
+            "type": "boolean"
+          },
+          "provisionState": {
+            "type": "string",
+            "enum": [
+              "adopting",
+              "adopted",
+              "enrolling",
+              "inspecting",
+              "commissioning",
+              "ready",
+              "deploying",
+              "deployed",
+              "releasing",
+              "rescue",
+              "failed",
+              "retiring",
+              "retired"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.listSshCerts": {
+      "route": "POST /api/compute/nodes/listSshCerts",
+      "kind": "read",
+      "action": "compute:nodes:read",
+      "resource": null,
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": null,
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-z]{26,52}$",
+            "maxLength": 57
+          },
+          "includeExpired": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also certificates past their expiry (kept one day)"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "nextCursor of the previous page"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.revokeIdentity": {
+      "route": "POST /api/compute/nodes/revokeIdentity",
+      "kind": "mutation",
+      "action": "compute:nodes:revoke-identity",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.revokeSshCert": {
+      "route": "POST /api/compute/nodes/revokeSshCert",
+      "kind": "mutation",
+      "action": "compute:nodes:ssh-root",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-z]{26,52}$",
+            "maxLength": 57
+          },
+          "serial": {
+            "type": "string",
+            "pattern": "^[0-9]{1,20}$",
+            "description": "The certificate serial in decimal, as nodes.issueSshCert returned it"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "serial"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.taint": {
+      "route": "POST /api/compute/nodes/taint",
+      "kind": "mutation",
+      "action": "compute:nodes:update",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "add": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/=:-]{0,126}[A-Za-z0-9])?$"
+            },
+            "maxItems": 32,
+            "uniqueItems": true
+          },
+          "remove": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._/=:-]{0,126}[A-Za-z0-9])?$"
+            },
+            "maxItems": 32,
+            "uniqueItems": true
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "nodes.uncordon": {
+      "route": "POST /api/compute/nodes/uncordon",
+      "kind": "mutation",
+      "action": "compute:nodes:cordon",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "nodeId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.archive": {
+      "route": "POST /api/compute/pools/archive",
+      "kind": "mutation",
+      "action": "compute:pools:manage",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.capacity": {
+      "route": "POST /api/compute/pools/capacity",
+      "kind": "read",
+      "action": "compute:capacity:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.create": {
+      "route": "POST /api/compute/pools/create",
+      "kind": "mutation",
+      "action": "compute:pools:create",
+      "resource": "compute-fleet",
+      "alternatives": [
+        "compute:pools:create @ compute-tenant"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "siteId": {
+            "type": "string",
+            "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The site the pool lives in"
+          },
+          "class": {
+            "enum": [
+              "metal-host",
+              "metal-dedicated",
+              "vps-host",
+              "provider"
+            ]
+          },
+          "gpuModel": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9-]{1,32}$",
+            "maxLength": 32
+          },
+          "sharing": {
+            "enum": [
+              "exclusive",
+              "mig",
+              "timeslice",
+              "mps"
+            ],
+            "default": "exclusive"
+          },
+          "agent": {
+            "enum": [
+              "bcd",
+              "none"
+            ],
+            "description": "bcd (default), or none for provider pools"
+          },
+          "policy": {
+            "type": "object",
+            "description": "PoolPolicy"
+          },
+          "ownerQuota": {
+            "type": "object",
+            "description": "The owner's limits per resource (default: unlimited GPUs)",
+            "propertyNames": {
+              "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+            },
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "providerAccountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "Provider pools: the provider account behind them"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$",
+            "maxLength": 128,
+            "description": "Makes the pool id deterministic; a retry returns the pool"
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId",
+          "class"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.get": {
+      "route": "POST /api/compute/pools/get",
+      "kind": "read",
+      "action": "compute:pools:read",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.list": {
+      "route": "POST /api/compute/pools/list",
+      "kind": "read",
+      "action": "compute:pools:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.offer": {
+      "route": "POST /api/compute/pools/offer",
+      "kind": "mutation",
+      "action": "compute:pools:share",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "toTenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the pool is offered to"
+          },
+          "quota": {
+            "type": "object",
+            "description": "That tenant's limits per resource",
+            "propertyNames": {
+              "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+            },
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "includeDescendants": {
+            "type": "boolean",
+            "default": false
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": -1000,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "toTenantId",
+          "quota"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.unoffer": {
+      "route": "POST /api/compute/pools/unoffer",
+      "kind": "mutation",
+      "action": "compute:pools:share",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "toTenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant to withdraw from"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "toTenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "pools.update": {
+      "route": "POST /api/compute/pools/update",
+      "kind": "mutation",
+      "action": "compute:pools:manage",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "policy": {
+            "type": "object",
+            "description": "The new PoolPolicy (replaces the old one)"
+          },
+          "gpuModel": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9-]{1,32}$",
+            "maxLength": 32
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "profiles.create": {
+      "route": "POST /api/compute/profiles/create",
+      "kind": "mutation",
+      "action": "compute:profiles:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "document": {
+            "type": "object",
+            "description": "The profile document (id, version, target, steps…)"
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "public"
+            ],
+            "description": "Who may use the profile",
+            "default": "private"
+          }
+        },
+        "required": [
+          "tenantId",
+          "document"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "profiles.delete": {
+      "route": "POST /api/compute/profiles/delete",
+      "kind": "mutation",
+      "action": "compute:profiles:manage",
+      "resource": "compute-profile",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "profileId": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+            "maxLength": 128,
+            "description": "The profile id"
+          },
+          "profileVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "The version to delete (default: every version)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "profileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "profiles.get": {
+      "route": "POST /api/compute/profiles/get",
+      "kind": "read",
+      "action": "compute:profiles:read",
+      "resource": "compute-profile",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "profileId": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+            "maxLength": 128,
+            "description": "The profile id"
+          },
+          "profileVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "The profile version (default: the latest)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "profileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "profiles.list": {
+      "route": "POST /api/compute/profiles/list",
+      "kind": "read",
+      "action": "compute:profiles:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50,
+            "description": "Page size"
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The cursor of the previous page"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "profiles.render": {
+      "route": "POST /api/compute/profiles/render",
+      "kind": "read",
+      "action": "compute:profiles:read",
+      "resource": "compute-profile",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "profileId": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+            "maxLength": 128,
+            "description": "The profile id"
+          },
+          "profileVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "The profile version (default: the latest)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "profileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "profiles.update": {
+      "route": "POST /api/compute/profiles/update",
+      "kind": "mutation",
+      "action": "compute:profiles:manage",
+      "resource": "compute-profile",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "profileId": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+            "maxLength": 128,
+            "description": "The profile id"
+          },
+          "profileVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "The version to change"
+          },
+          "document": {
+            "description": "A replacement document, with the same id and version"
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "public"
+            ],
+            "description": "Who may use the profile"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The row's version you read; a mismatch is a conflict"
+          }
+        },
+        "required": [
+          "tenantId",
+          "profileId",
+          "profileVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "profiles.validate": {
+      "route": "POST /api/compute/profiles/validate",
+      "kind": "read",
+      "action": "compute:profiles:read",
+      "resource": "compute-profile",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "profileId": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+            "maxLength": 128,
+            "description": "The profile id"
+          },
+          "profileVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "description": "The profile version (default: the latest)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "profileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "projects.archive": {
+      "route": "POST /api/compute/projects/archive",
+      "kind": "mutation",
+      "action": "compute:projects:manage",
+      "resource": "compute-project",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "projectId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "projectId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "projects.create": {
+      "route": "POST /api/compute/projects/create",
+      "kind": "mutation",
+      "action": "compute:projects:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "name",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "projects.get": {
+      "route": "POST /api/compute/projects/get",
+      "kind": "read",
+      "action": "compute:projects:read",
+      "resource": "compute-project",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "projectId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "projectId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "projects.list": {
+      "route": "POST /api/compute/projects/list",
+      "kind": "read",
+      "action": "compute:projects:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.bootstrap": {
+      "route": "POST /api/compute/providerAccounts/bootstrap",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool the machine joins"
+          },
+          "machineId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "A machine the account already has (or offerId, not both)"
+          },
+          "offerId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "An offer to claim or order a machine from (or machineId, not both)"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId",
+          "poolId",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.create": {
+      "route": "POST /api/compute/providerAccounts/create",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-fleet",
+      "alternatives": [
+        "compute:providers:manage @ compute-tenant"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "provider": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "maxLength": 64,
+            "description": "The provider id, e.g. provider-hetzner"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The account name, e.g. hetzner-main"
+          },
+          "config": {
+            "description": "The provider's account config; credentials as secret references only",
+            "default": {}
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$",
+            "maxLength": 128,
+            "description": "Makes the account id deterministic; a retry returns the account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "provider",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.delete": {
+      "route": "POST /api/compute/providerAccounts/delete",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.get": {
+      "route": "POST /api/compute/providerAccounts/get",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.list": {
+      "route": "POST /api/compute/providerAccounts/list",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.offers": {
+      "route": "POST /api/compute/providerAccounts/offers",
+      "kind": "read",
+      "action": "compute:providers:read",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          },
+          "query": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "metal",
+                  "vps"
+                ]
+              },
+              "region": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+                "maxLength": 63,
+                "description": "The provider region"
+              },
+              "gpuModel": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9-]{1,32}$",
+                "maxLength": 32
+              },
+              "minGpus": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64
+              },
+              "minVcpu": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1024
+              },
+              "minMemoryGiB": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16384
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providerAccounts.update": {
+      "route": "POST /api/compute/providerAccounts/update",
+      "kind": "mutation",
+      "action": "compute:providers:manage",
+      "resource": "compute-provider-account",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "accountId": {
+            "type": "string",
+            "pattern": "^pacct_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 58,
+            "description": "The provider account"
+          },
+          "config": {
+            "description": "The new account config (replaces the old one); credentials as secret references only"
+          }
+        },
+        "required": [
+          "tenantId",
+          "accountId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "quotas.get": {
+      "route": "POST /api/compute/quotas/get",
+      "kind": "read",
+      "action": "compute:quotas:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "quotas.set": {
+      "route": "POST /api/compute/quotas/set",
+      "kind": "mutation",
+      "action": "compute:quotas:manage",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "resource": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$",
+            "maxLength": 64
+          },
+          "max": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "resource",
+          "max"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "releases.list": {
+      "route": "POST /api/compute/releases/list",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "releases.register": {
+      "route": "POST /api/compute/releases/register",
+      "kind": "mutation",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "manifest": {
+            "type": "object",
+            "description": "The signed release manifest as published (manifest.json): { manifest: base64 canonical body, signatures: [{ kid, sig }] }"
+          }
+        },
+        "required": [
+          "tenantId",
+          "manifest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservations.cancel": {
+      "route": "POST /api/compute/reservations/cancel",
+      "kind": "mutation",
+      "action": "compute:reservations:release",
+      "resource": "compute-reservation",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "reservationId": {
+            "type": "string",
+            "pattern": "^rsv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The reservation"
+          }
+        },
+        "required": [
+          "tenantId",
+          "reservationId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservations.create": {
+      "route": "POST /api/compute/reservations/create",
+      "kind": "mutation",
+      "action": "compute:reservations:create",
+      "resource": "compute-reservation",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "projectId": {
+            "type": "string",
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The project it belongs to"
+          },
+          "devices": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "properties": {
+                "class": {
+                  "enum": [
+                    "gpu",
+                    "gpu.mig",
+                    "gpu.slot",
+                    "nic.vf",
+                    "disk",
+                    "node"
+                  ],
+                  "description": "The device class to book"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 64
+                },
+                "selector": {
+                  "type": "object",
+                  "description": "matchExpressions over device attributes, then node labels"
+                },
+                "topology": {
+                  "enum": [
+                    "any",
+                    "nvlink-all"
+                  ]
+                },
+                "sharing": {
+                  "enum": [
+                    "exclusive",
+                    "mig",
+                    "timeslice",
+                    "mps"
+                  ]
+                }
+              },
+              "required": [
+                "class",
+                "count"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "topology": {
+            "enum": [
+              "any",
+              "nvlink-all"
+            ]
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 140737488355328,
+            "description": "Epoch ms (default now)"
+          },
+          "duration": {
+            "type": [
+              "string",
+              "integer"
+            ],
+            "description": "How long: \"30m\", \"8h\", \"7d\", or milliseconds"
+          },
+          "binding": {
+            "type": "string",
+            "default": "hold",
+            "description": "hold (CDI devices) or node (a whole-node lease in a tenantRoot pool)"
+          },
+          "node": {
+            "type": "object",
+            "properties": {
+              "profileId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._:/-]{1,128}$",
+                "maxLength": 128
+              },
+              "profileVersion": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "profileId"
+            ],
+            "additionalProperties": false
+          },
+          "leaseSeconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 86400
+          },
+          "spot": {
+            "type": "boolean"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          },
+          "wait": {
+            "type": "object",
+            "properties": {
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 30000
+              }
+            },
+            "required": [
+              "timeoutMs"
+            ],
+            "additionalProperties": false
+          },
+          "gang": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 64
+              },
+              "topologyKey": {
+                "type": "string",
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "size"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "devices",
+          "duration",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservations.extend": {
+      "route": "POST /api/compute/reservations/extend",
+      "kind": "mutation",
+      "action": "compute:reservations:extend",
+      "resource": "compute-reservation",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "reservationId": {
+            "type": "string",
+            "pattern": "^rsv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The reservation"
+          },
+          "until": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 140737488355328,
+            "description": "The new end, epoch ms"
+          },
+          "by": {
+            "type": [
+              "string",
+              "integer"
+            ],
+            "description": "How much longer: \"30m\", \"8h\", \"7d\", or milliseconds"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          }
+        },
+        "required": [
+          "tenantId",
+          "reservationId",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservations.get": {
+      "route": "POST /api/compute/reservations/get",
+      "kind": "read",
+      "action": "compute:reservations:read",
+      "resource": "compute-reservation",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "reservationId": {
+            "type": "string",
+            "pattern": "^rsv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The reservation"
+          }
+        },
+        "required": [
+          "tenantId",
+          "reservationId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservations.list": {
+      "route": "POST /api/compute/reservations/list",
+      "kind": "read",
+      "action": "compute:reservations:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "scope": {
+            "enum": [
+              "mine",
+              "all"
+            ],
+            "default": "mine"
+          },
+          "state": {
+            "enum": [
+              "draft",
+              "denied",
+              "awaiting-confirmation",
+              "pending",
+              "placed",
+              "binding",
+              "active",
+              "releasing",
+              "released",
+              "failed",
+              "cancelled",
+              "expired"
+            ]
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The pool"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^rsv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The reservation"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservations.release": {
+      "route": "POST /api/compute/reservations/release",
+      "kind": "mutation",
+      "action": "compute:reservations:release",
+      "resource": "compute-reservation",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "reservationId": {
+            "type": "string",
+            "pattern": "^rsv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The reservation"
+          }
+        },
+        "required": [
+          "tenantId",
+          "reservationId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reservations.renew": {
+      "route": "POST /api/compute/reservations/renew",
+      "kind": "mutation",
+      "action": "compute:reservations:extend",
+      "resource": "compute-reservation",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "reservationId": {
+            "type": "string",
+            "pattern": "^rsv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The reservation"
+          }
+        },
+        "required": [
+          "tenantId",
+          "reservationId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rollouts.abort": {
+      "route": "POST /api/compute/rollouts/abort",
+      "kind": "mutation",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "rolloutId": {
+            "type": "string",
+            "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 60,
+            "description": "The rollout"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Why, recorded on the rollout"
+          },
+          "rollback": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also roll upgraded nodes back to the version they ran before"
+          }
+        },
+        "required": [
+          "tenantId",
+          "rolloutId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rollouts.create": {
+      "route": "POST /api/compute/rollouts/create",
+      "kind": "mutation",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^v?\\d+\\.\\d+\\.\\d+([-+][0-9A-Za-z.-]+)?$",
+            "description": "The registered bcd release to roll out (semver)"
+          },
+          "poolIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-z]{26,52}$",
+              "maxLength": 57
+            },
+            "description": "The pools to upgrade (default: every pool the tenant owns); duplicates are dropped"
+          },
+          "waves": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "default": [
+              1,
+              10,
+              50,
+              100
+            ],
+            "description": "Cumulative percentages of nodes per wave: whole numbers, increasing, ending at 100"
+          },
+          "maxFailureRatio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.05,
+            "description": "The share of failed nodes that pauses the rollout"
+          },
+          "soakSeconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 604800,
+            "default": 600,
+            "description": "Whole seconds each wave soaks before the next starts"
+          },
+          "upgradeTimeoutSeconds": {
+            "type": "number",
+            "minimum": 60,
+            "maximum": 86400,
+            "default": 900,
+            "description": "Whole seconds a node has to come back on the new version"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$",
+            "maxLength": 128,
+            "description": "A retry with the same key returns the same rollout"
+          }
+        },
+        "required": [
+          "tenantId",
+          "version"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rollouts.get": {
+      "route": "POST /api/compute/rollouts/get",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "rolloutId": {
+            "type": "string",
+            "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 60,
+            "description": "The rollout"
+          }
+        },
+        "required": [
+          "tenantId",
+          "rolloutId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rollouts.list": {
+      "route": "POST /api/compute/rollouts/list",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rollouts.pause": {
+      "route": "POST /api/compute/rollouts/pause",
+      "kind": "mutation",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "rolloutId": {
+            "type": "string",
+            "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 60,
+            "description": "The rollout"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Why, recorded on the rollout"
+          }
+        },
+        "required": [
+          "tenantId",
+          "rolloutId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rollouts.resume": {
+      "route": "POST /api/compute/rollouts/resume",
+      "kind": "mutation",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.4",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "rolloutId": {
+            "type": "string",
+            "pattern": "^rollout_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 60,
+            "description": "The rollout"
+          }
+        },
+        "required": [
+          "tenantId",
+          "rolloutId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxTemplates.create": {
+      "route": "POST /api/compute/sandboxTemplates/create",
+      "kind": "mutation",
+      "action": "compute:sandboxes:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The template name, unique in the tenant, e.g. py-small"
+          },
+          "poolId": {
+            "type": "string",
+            "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "A hosted (vps-host) pool offered to the tenant"
+          },
+          "flavor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The flavor name, e.g. g1.small"
+          },
+          "imageId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$",
+            "maxLength": 200,
+            "description": "The image sandboxes boot"
+          },
+          "runtime": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$",
+            "maxLength": 64,
+            "description": "Must be the pool's runtime (checked once, when the template is written)"
+          },
+          "userData": {
+            "type": "string",
+            "maxLength": 32768,
+            "description": "User data for every sandbox (at most 32 KiB), or secret://<tenantId>/<id> naming a secret of this tenant"
+          },
+          "defaultTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000,
+            "description": "A sandbox’s lifetime unless it asks for one, in seconds (1 minute to 30 days)",
+            "default": 3600
+          },
+          "maxTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000,
+            "description": "The longest lifetime a sandbox may have, extensions included, in seconds (1 minute to 30 days)",
+            "default": 86400
+          },
+          "warm": {
+            "type": "object",
+            "properties": {
+              "min": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64,
+                "description": "Warm instances kept ready (stopped) for fast creates"
+              },
+              "max": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64,
+                "description": "Warm instances kept at most (default: min)"
+              }
+            },
+            "required": [
+              "min"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "name",
+          "poolId",
+          "flavor",
+          "imageId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxTemplates.delete": {
+      "route": "POST /api/compute/sandboxTemplates/delete",
+      "kind": "mutation",
+      "action": "compute:sandboxes:manage",
+      "resource": "compute-sandbox-template",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "templateId": {
+            "type": "string",
+            "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The sandbox template"
+          }
+        },
+        "required": [
+          "tenantId",
+          "templateId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxTemplates.get": {
+      "route": "POST /api/compute/sandboxTemplates/get",
+      "kind": "read",
+      "action": "compute:sandboxes:read",
+      "resource": "compute-sandbox-template",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "templateId": {
+            "type": "string",
+            "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The sandbox template"
+          }
+        },
+        "required": [
+          "tenantId",
+          "templateId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxTemplates.list": {
+      "route": "POST /api/compute/sandboxTemplates/list",
+      "kind": "read",
+      "action": "compute:sandboxes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxTemplates.update": {
+      "route": "POST /api/compute/sandboxTemplates/update",
+      "kind": "mutation",
+      "action": "compute:sandboxes:manage",
+      "resource": "compute-sandbox-template",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "templateId": {
+            "type": "string",
+            "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The sandbox template"
+          },
+          "flavor": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+            "maxLength": 63,
+            "description": "The flavor name, e.g. g1.small"
+          },
+          "imageId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$",
+            "maxLength": 200,
+            "description": "The image sandboxes boot"
+          },
+          "userData": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 32768,
+            "description": "New user data, or null to remove it"
+          },
+          "defaultTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000,
+            "description": "A sandbox’s lifetime unless it asks for one, in seconds (1 minute to 30 days)"
+          },
+          "maxTtlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000,
+            "description": "The longest lifetime a sandbox may have, extensions included, in seconds (1 minute to 30 days)"
+          },
+          "warm": {
+            "type": "object",
+            "properties": {
+              "min": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64,
+                "description": "Warm instances kept ready (stopped) for fast creates"
+              },
+              "max": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64,
+                "description": "Warm instances kept at most (default: min)"
+              }
+            },
+            "required": [
+              "min"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "templateId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxes.create": {
+      "route": "POST /api/compute/sandboxes/create",
+      "kind": "mutation",
+      "action": "compute:sandboxes:create",
+      "resource": "compute-sandbox",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "templateId": {
+            "type": "string",
+            "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The sandbox template"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000,
+            "description": "The sandbox's lifetime (default: the template's defaultTtlSeconds), in seconds (1 minute to 30 days)"
+          },
+          "fromSnapshot": {
+            "type": "string",
+            "pattern": "^snap_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Restore this snapshot of the tenant (taken on the same runtime)"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+          },
+          "wait": {
+            "type": "object",
+            "properties": {
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 30000,
+                "description": "How long to hold the answer until the sandbox is ready"
+              }
+            },
+            "required": [
+              "timeoutMs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "templateId",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxes.delete": {
+      "route": "POST /api/compute/sandboxes/delete",
+      "kind": "mutation",
+      "action": "compute:sandboxes:delete",
+      "resource": "compute-sandbox",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "sandboxId": {
+            "type": "string",
+            "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox"
+          }
+        },
+        "required": [
+          "tenantId",
+          "sandboxId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxes.exec": {
+      "route": "POST /api/compute/sandboxes/exec",
+      "kind": "mutation",
+      "action": "compute:sandboxes:exec",
+      "resource": "compute-sandbox",
+      "alternatives": [],
+      "list": false,
+      "status": "planned",
+      "phase": "v0.5",
+      "input": null
+    },
+    "sandboxes.extend": {
+      "route": "POST /api/compute/sandboxes/extend",
+      "kind": "mutation",
+      "action": "compute:sandboxes:update",
+      "resource": "compute-sandbox",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "sandboxId": {
+            "type": "string",
+            "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox"
+          },
+          "until": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 140737488355328,
+            "description": "The new expiry, epoch milliseconds (or by, not both)"
+          },
+          "by": {
+            "type": [
+              "string",
+              "integer"
+            ],
+            "description": "Added to the current expiry: 30m, 8h, or milliseconds (or until, not both)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "sandboxId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxes.get": {
+      "route": "POST /api/compute/sandboxes/get",
+      "kind": "read",
+      "action": "compute:sandboxes:read",
+      "resource": "compute-sandbox",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "sandboxId": {
+            "type": "string",
+            "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox"
+          }
+        },
+        "required": [
+          "tenantId",
+          "sandboxId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxes.list": {
+      "route": "POST /api/compute/sandboxes/list",
+      "kind": "read",
+      "action": "compute:sandboxes:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "scope": {
+            "enum": [
+              "mine",
+              "all"
+            ],
+            "default": "mine"
+          },
+          "deleted": {
+            "type": "boolean",
+            "default": false,
+            "description": "Include deleted sandboxes"
+          },
+          "templateId": {
+            "type": "string",
+            "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The sandbox template"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The last sandbox id of the previous page"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sandboxes.snapshot": {
+      "route": "POST /api/compute/sandboxes/snapshot",
+      "kind": "mutation",
+      "action": "compute:sandboxes:update",
+      "resource": "compute-sandbox",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.5",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "sandboxId": {
+            "type": "string",
+            "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox"
+          },
+          "includeMemory": {
+            "type": "boolean",
+            "default": true,
+            "description": "Capture memory state too (a running restore); false: disk only"
+          },
+          "keep": {
+            "type": "boolean",
+            "default": false,
+            "description": "Keep the snapshot after the sandbox is deleted"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "Makes the snapshot id deterministic; a retry returns the same snapshot"
+          }
+        },
+        "required": [
+          "tenantId",
+          "sandboxId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "secrets.delete": {
+      "route": "POST /api/compute/secrets/delete",
+      "kind": "mutation",
+      "action": "compute:secrets:manage",
+      "resource": "compute-tenant",
+      "alternatives": [
+        "compute:secrets:manage @ compute-fleet"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "fleet"
+            ],
+            "default": "tenant"
+          }
+        },
+        "required": [
+          "tenantId",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "secrets.put": {
+      "route": "POST /api/compute/secrets/put",
+      "kind": "mutation",
+      "action": "compute:secrets:manage",
+      "resource": "compute-tenant",
+      "alternatives": [
+        "compute:secrets:manage @ compute-fleet"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "tenant",
+              "fleet"
+            ],
+            "default": "tenant"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "name",
+          "value",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "siteTokens.create": {
+      "route": "POST /api/compute/siteTokens/create",
+      "kind": "mutation",
+      "action": "compute:sites:manage",
+      "resource": "compute-site",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "siteId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 86400
+          },
+          "maxUses": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16,
+            "default": 1
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId",
+          "ttlSeconds",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "siteTokens.revoke": {
+      "route": "POST /api/compute/siteTokens/revoke",
+      "kind": "mutation",
+      "action": "compute:sites:manage",
+      "resource": "compute-site",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "siteId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "tokenId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^jt_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId",
+          "tokenId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sites.create": {
+      "route": "POST /api/compute/sites/create",
+      "kind": "mutation",
+      "action": "compute:sites:manage",
+      "resource": "compute-fleet",
+      "alternatives": [
+        "compute:sites:manage @ compute-tenant"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "dedicated",
+              "custom"
+            ]
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "iamRegion": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._~:/+=-]{1,128}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "kind",
+          "region",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sites.delete": {
+      "route": "POST /api/compute/sites/delete",
+      "kind": "mutation",
+      "action": "compute:sites:manage",
+      "resource": "compute-site",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "siteId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sites.get": {
+      "route": "POST /api/compute/sites/get",
+      "kind": "read",
+      "action": "compute:sites:read",
+      "resource": "compute-site",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "siteId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sites.list": {
+      "route": "POST /api/compute/sites/list",
+      "kind": "read",
+      "action": "compute:sites:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": true,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "dedicated",
+              "custom"
+            ]
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "sites.update": {
+      "route": "POST /api/compute/sites/update",
+      "kind": "mutation",
+      "action": "compute:sites:manage",
+      "resource": "compute-site",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "siteId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^site_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "iamRegion": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "clearIamRegion": {
+            "type": "boolean",
+            "default": false
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "tenantId",
+          "siteId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "system.selfCheck": {
+      "route": "POST /api/compute/system/selfCheck",
+      "kind": "read",
+      "action": "compute:fleet:admin",
+      "resource": "compute-fleet",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "system.version": {
+      "route": "POST /api/compute/system/version",
+      "kind": "public",
+      "action": null,
+      "resource": null,
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "system.whoami": {
+      "route": "POST /api/compute/system/whoami",
+      "kind": "public",
+      "action": null,
+      "resource": null,
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    "tunnels.open": {
+      "route": "POST /api/compute/tunnels/open",
+      "kind": "mutation",
+      "action": "compute:instances:exec",
+      "resource": "compute-instance",
+      "alternatives": [
+        "compute:nodes:console @ compute-node"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128
+          },
+          "instanceId": {
+            "type": "string",
+            "pattern": "^inst_[0-9a-z]{26,52}$",
+            "maxLength": 57,
+            "description": "Exec, ssh or tcp into this instance; give exactly one of instanceId or nodeId"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The console of this node"
+          },
+          "op": {
+            "enum": [
+              "exec",
+              "console",
+              "ssh",
+              "tcp"
+            ],
+            "description": "console for a node; exec, ssh or tcp for an instance"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "tcp only: the port to reach"
+          }
+        },
+        "required": [
+          "tenantId",
+          "op"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "usage.export": {
+      "route": "POST /api/compute/usage/export",
+      "kind": "read",
+      "action": "compute:usage:read",
+      "resource": "compute-tenant",
+      "alternatives": [
+        "compute:usage:read @ compute-project"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "projectId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "meter": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+          },
+          "from": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "to": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "csv",
+              "jsonl"
+            ]
+          }
+        },
+        "required": [
+          "tenantId",
+          "from",
+          "to"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "usage.list": {
+      "route": "POST /api/compute/usage/list",
+      "kind": "read",
+      "action": "compute:usage:read",
+      "resource": "compute-tenant",
+      "alternatives": [
+        "compute:usage:read @ compute-project"
+      ],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.1",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+          },
+          "projectId": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^prj_[0-9a-hjkmnp-tv-z]{26,52}$"
+          },
+          "meter": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+          },
+          "from": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "to": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_-]{1,256}$"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.create": {
+      "route": "POST /api/compute/webhooks/create",
+      "kind": "mutation",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "x-bc": {
+              "kind": "url"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(\\*|[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)*(\\.\\*)?)$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "x-bc": {
+              "kind": "list"
+            }
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "url",
+          "events"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.delete": {
+      "route": "POST /api/compute/webhooks/delete",
+      "kind": "mutation",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "webhookId": {
+            "type": "string",
+            "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "webhookId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.deliveries": {
+      "route": "POST /api/compute/webhooks/deliveries",
+      "kind": "read",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "webhookId": {
+            "type": "string",
+            "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "delivered",
+              "dead",
+              "cancelled"
+            ],
+            "x-bc": {
+              "kind": "option"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "x-bc": {
+              "kind": "int"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "webhookId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.eventTypes": {
+      "route": "POST /api/compute/webhooks/eventTypes",
+      "kind": "read",
+      "action": "compute:webhooks:manage",
+      "resource": null,
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": null,
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.get": {
+      "route": "POST /api/compute/webhooks/get",
+      "kind": "read",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "webhookId": {
+            "type": "string",
+            "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "webhookId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.list": {
+      "route": "POST /api/compute/webhooks/list",
+      "kind": "read",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.ping": {
+      "route": "POST /api/compute/webhooks/ping",
+      "kind": "mutation",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "webhookId": {
+            "type": "string",
+            "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "webhookId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.redeliver": {
+      "route": "POST /api/compute/webhooks/redeliver",
+      "kind": "mutation",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "deliveryId": {
+            "type": "string",
+            "pattern": "^dlv_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "deliveryId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.rotateSecret": {
+      "route": "POST /api/compute/webhooks/rotateSecret",
+      "kind": "mutation",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "webhookId": {
+            "type": "string",
+            "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "keepPreviousSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "x-bc": {
+              "kind": "int"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "webhookId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "webhooks.update": {
+      "route": "POST /api/compute/webhooks/update",
+      "kind": "mutation",
+      "action": "compute:webhooks:manage",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.3",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "webhookId": {
+            "type": "string",
+            "pattern": "^whk_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "x-bc": {
+              "kind": "url"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(\\*|[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)*(\\.\\*)?)$",
+              "x-bc": {
+                "kind": "string"
+              }
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "x-bc": {
+              "kind": "list"
+            }
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "x-bc": {
+              "kind": "string"
+            }
+          },
+          "active": {
+            "type": "boolean",
+            "x-bc": {
+              "kind": "boolean"
+            }
+          }
+        },
+        "required": [
+          "tenantId",
+          "webhookId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "workflows.abort": {
+      "route": "POST /api/compute/workflows/abort",
+      "kind": "mutation",
+      "action": "compute:workflows:manage",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node the workflow runs on"
+          },
+          "workflowId": {
+            "type": "string",
+            "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 55,
+            "description": "The workflow"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "Recorded on the workflow"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "workflowId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "workflows.get": {
+      "route": "POST /api/compute/workflows/get",
+      "kind": "read",
+      "action": "compute:workflows:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node the workflow runs on"
+          },
+          "workflowId": {
+            "type": "string",
+            "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 55,
+            "description": "The workflow"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "workflowId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "workflows.list": {
+      "route": "POST /api/compute/workflows/list",
+      "kind": "read",
+      "action": "compute:workflows:read",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node the workflow runs on"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 20,
+            "description": "Page size"
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The cursor of the previous page"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "workflows.pause": {
+      "route": "POST /api/compute/workflows/pause",
+      "kind": "mutation",
+      "action": "compute:workflows:manage",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node the workflow runs on"
+          },
+          "workflowId": {
+            "type": "string",
+            "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 55,
+            "description": "The workflow"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "workflowId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "workflows.resume": {
+      "route": "POST /api/compute/workflows/resume",
+      "kind": "mutation",
+      "action": "compute:workflows:manage",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node the workflow runs on"
+          },
+          "workflowId": {
+            "type": "string",
+            "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 55,
+            "description": "The workflow"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "workflowId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "workflows.retry": {
+      "route": "POST /api/compute/workflows/retry",
+      "kind": "mutation",
+      "action": "compute:workflows:manage",
+      "resource": "compute-node",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v0.2",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "nodeId": {
+            "type": "string",
+            "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 57,
+            "description": "The node the workflow runs on"
+          },
+          "workflowId": {
+            "type": "string",
+            "pattern": "^wf_[0-9a-hjkmnp-tv-z]{26,52}$",
+            "maxLength": 55,
+            "description": "The workflow"
+          },
+          "fromStep": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The step id to start from (default: the first main step that did not succeed)"
+          }
+        },
+        "required": [
+          "tenantId",
+          "nodeId",
+          "workflowId"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "errors": {
+    "ACCESS_DENIED": 403,
+    "CAPACITY_UNAVAILABLE": 409,
+    "CONFIG_DRIFT": 409,
+    "CONFIRMATION_REQUIRED": 403,
+    "CONFLICT": 409,
+    "CSRF_REJECTED": 403,
+    "DRIVER_ERROR": 502,
+    "INTERNAL_ERROR": 500,
+    "INVALID_CONFIG": 500,
+    "INVALID_INPUT": 400,
+    "INVALID_STATE": 409,
+    "METHOD_NOT_ALLOWED": 405,
+    "MISSING_DEPENDENCY": 500,
+    "NOT_FOUND": 404,
+    "NOT_IMPLEMENTED": 501,
+    "PAYLOAD_TOO_LARGE": 413,
+    "PROVIDER_ERROR": 502,
+    "QUOTA_EXCEEDED": 409,
+    "RATE_LIMITED": 429,
+    "SPEND_LIMIT_REACHED": 402,
+    "TENANT_SUSPENDED": 403,
+    "UNAUTHENTICATED": 401,
+    "UNAVAILABLE": 503,
+    "UNSUPPORTED": 422,
+    "UNTRUSTED_ORIGIN": 403,
+    "UPGRADE_REQUIRED": 426
+  }
+}
