@@ -1944,6 +1944,40 @@ describe('the v0.4 pool-lease placer', () => {
     });
   });
 
+  it('reports one placement per reservation of a batch to onPlacement', async () => {
+    const seen: { placer: string; outcome: string; conflicts: number }[] = [];
+    const observed = capacityModule({
+      random: () => 0,
+      topN: 1,
+      placer: 'pool-lease',
+      onPlacement: ({ placer, outcome, conflicts }) => seen.push({ placer, outcome, conflicts }),
+    });
+    const observedApi = observed.api!(moduleContext(db)) as CapacityApi;
+    for (const [key, gpus] of [
+      ['o1', 4],
+      ['o2', 4],
+      ['o3', 4],
+    ] as const)
+      await call(
+        'reservations',
+        'create',
+        create({ devices: [{ class: 'gpu', count: gpus }], idempotencyKey: key }),
+        { api: observedApi },
+      );
+    await observed
+      .reconcilers!.find((entry) => entry.name === 'capacity.placer')!
+      .run({ ...moduleContext(db), signal: new AbortController().signal }, poolId);
+    // Admission answered `queued` three times; the batch placed two and left one pending.
+    expect(seen).toEqual([
+      { placer: 'pool-lease', outcome: 'queued', conflicts: 0 },
+      { placer: 'pool-lease', outcome: 'queued', conflicts: 0 },
+      { placer: 'pool-lease', outcome: 'queued', conflicts: 0 },
+      { placer: 'batch', outcome: 'placed', conflicts: 0 },
+      { placer: 'batch', outcome: 'placed', conflicts: 0 },
+      { placer: 'batch', outcome: 'pending', conflicts: 0 },
+    ]);
+  });
+
   it('leaves what does not fit Unschedulable, and batches at most maxBatch', async () => {
     const queued = [];
     for (const key of ['a', 'b', 'c', 'd']) queued.push(await queue(key, 4));

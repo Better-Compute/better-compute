@@ -49,7 +49,14 @@ import {
   truncateAllocation,
 } from './spot.js';
 import { lockPool, readPool, readPoolNodes } from './store.js';
-import { bulkCommittable, commitPlansBulk, placeFromIndex, planOnIndex } from './placer.js';
+import {
+  bulkCommittable,
+  commitPlansBulk,
+  observePlacement,
+  placeFromIndexCounted,
+  planOnIndex,
+  type PlacementObserver,
+} from './placer.js';
 import type { NodePlan } from './pipeline.js';
 import { PoolIndex, type PoolIndexCache } from './pool-index.js';
 import {
@@ -598,6 +605,8 @@ export interface ReservationDeps {
   spotNoticeMs?: number;
   /** Verifies node-signed `AllocationBound` reports before a binding counts (see `verifyBindings`). */
   attestedBindings?: AllocationBindingCheck;
+  /** The pool-lease batch reports each reservation's placement here (§14 metrics). */
+  onPlacement?: PlacementObserver;
 }
 
 /** Scheduler plugins, weights, top-N and randomness for the placer. */
@@ -926,7 +935,9 @@ export async function placeQueued(
 
   // 1. Plan every simple request on the index (each recorded tentatively for the next ones), then
   //    commit them with set-based statements. The rest, and whatever lost a race, go one by one.
-  type Entry = { row: ReservationRow; during: TimeRange; request: PlacementRequest };
+  // `lost`: its bulk commit lost a race (a conflict, reported with its final outcome).
+  type Entry = { row: ReservationRow; during: TimeRange; request: PlacementRequest; lost?: true };
+  const started = performance.now();
   const planned: (Entry & { plan: NodePlan })[] = [];
   const oneByOne: Entry[] = [];
   for (const { id } of batch) {
@@ -959,16 +970,28 @@ export async function placeQueued(
         ...entry.request,
         excludeNodes: [...(entry.request.excludeNodes ?? []), entry.plan.nodeId],
       },
+      lost: true,
     });
   });
   await settlePlacedMany(deps, tx, settled);
+  // One observation per reservation (§14): the bulk share of the time for those that landed.
+  const bulkSeconds = (performance.now() - started) / 1000 / Math.max(1, planned.length);
+  for (let n = 0; n < settled.length; n++)
+    observePlacement(deps.onPlacement, {
+      placer: 'batch',
+      outcome: 'placed',
+      conflicts: 0,
+      seconds: bulkSeconds,
+    });
 
   // 2. One by one: requests with scalars, lost races, and what did not fit (which may preempt spot).
   let placed = settled.length;
   for (const entry of oneByOne) {
     const row = entry.row;
     let during = entry.during;
-    let outcome = await placeFromIndex(tx, index, entry.request, context);
+    const stats = { conflicts: entry.lost ? 1 : 0 };
+    const attemptStarted = performance.now();
+    let outcome = await placeFromIndexCounted(tx, index, entry.request, context, {}, stats);
     if (outcome.status === 'pending' && row.request.spot !== true) {
       const preempted = await preemptFor(deps, tx, row, during);
       if (preempted) {
@@ -979,6 +1002,12 @@ export async function placeQueued(
     }
     const next = await settlePlacement(deps, tx, row, during, outcome);
     if (next.state === 'placed') placed++;
+    observePlacement(deps.onPlacement, {
+      placer: 'batch',
+      outcome: outcome.status,
+      conflicts: stats.conflicts,
+      seconds: (performance.now() - attemptStarted) / 1000,
+    });
   }
   return {
     placed,

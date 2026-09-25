@@ -31,7 +31,7 @@ import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
 import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
-import { inlinePlacer, poolLeasePlacer } from './placer.js';
+import { inlinePlacer, poolLeasePlacer, type PlacementObserver } from './placer.js';
 import { leaseCandidates, leaseGroups } from './node-lease.js';
 import { PoolIndexCache } from './pool-index.js';
 import { defaultSpotNoticeMs, planPreemption, readSpotAllocations } from './spot.js';
@@ -661,6 +661,12 @@ export interface CapacityModuleOptions extends PlacementOptions {
    * that sign commands turn it on with the server's pki-backed check.
    */
   attestedBindings?: AllocationBindingCheck;
+  /**
+   * Called once per placement by every placer this module runs, and by `createCapacityPort` (§14):
+   * hosts map it to `placements_total{outcome}` and `booking_conflicts_total`. Never throws into
+   * placement.
+   */
+  onPlacement?: PlacementObserver;
 }
 
 function depsFrom(
@@ -684,6 +690,7 @@ function depsFrom(
     },
     ...(options.spotNoticeMs !== undefined ? { spotNoticeMs: options.spotNoticeMs } : {}),
     ...(options.attestedBindings ? { attestedBindings: options.attestedBindings } : {}),
+    ...(options.onPlacement ? { onPlacement: options.onPlacement } : {}),
   };
 }
 
@@ -698,7 +705,10 @@ interface Placers {
 }
 
 function placersFor(options: CapacityModuleOptions): Placers {
-  const settings = options.maxAttempts ? { maxAttempts: options.maxAttempts } : {};
+  const settings = {
+    ...(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {}),
+    ...(options.onPlacement ? { onPlacement: options.onPlacement } : {}),
+  };
   const inline = inlinePlacer(settings);
   return { inline, placer: options.placer === 'pool-lease' ? poolLeasePlacer(settings) : inline };
 }
@@ -1281,7 +1291,10 @@ export function createCapacityPort(
     booking?: { admission?: AdmissionContext },
   ): Promise<PlacementOutcome>;
 } {
-  const placer = inlinePlacer(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {});
+  const placer = inlinePlacer({
+    ...(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {}),
+    ...(options.onPlacement ? { onPlacement: options.onPlacement } : {}),
+  });
   return {
     async reserve(
       tx: SqlTx,

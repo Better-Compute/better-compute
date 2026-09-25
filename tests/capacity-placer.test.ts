@@ -35,6 +35,7 @@ import {
   schedulableSqlTolerating,
   setQuota,
   writeDeviceLinks,
+  type PlacementObservation,
 } from '@better-compute/capacity';
 
 // The SQL half of capacity on PGlite with the base schema: the InlinePlacer's guarded statements,
@@ -606,6 +607,53 @@ describe('rollups and eligibility SQL', () => {
     expect(
       all.filter((view) => isSchedulable(view, { ownerTenantId: 'root' })).map((v) => v.id),
     ).toEqual(['n4', 'n7']);
+  });
+
+  it('reports each placement to onPlacement: outcome, lost races, refusals; a throwing observer changes nothing', async () => {
+    await addNode('node_a', { gpus: 2 });
+    const seen: PlacementObservation[] = [];
+    const observer = (observation: PlacementObservation) => {
+      seen.push(observation);
+      throw new Error('a broken metrics sink');
+    };
+    const observedPlacer = inlinePlacer({ ids, onPlacement: observer });
+    const run = (req: PlacementRequest, ctx = context()) =>
+      db.transaction((tx) => observedPlacer.place(tx, req, ctx));
+    expect((await run(request(1))).status).toBe('placed');
+    // A stale index plans a GPU that was booked since: the guarded commit loses, then it replans.
+    const lost = await db.transaction(async (tx) => {
+      const index = await PoolIndex.load(tx, (await readPool(tx, 'pool_1'))!, T0);
+      await observedPlacer.place(tx, request(1), context());
+      return placeFromIndex(tx, index, request(1), context(), { ids, onPlacement: observer });
+    });
+    expect(lost.status).toBe('pending'); // both GPUs are taken
+    const refuse = {
+      id: 'nope',
+      extension: 'scheduler' as const,
+      async admit() {
+        throw new ComputeError('ACCESS_DENIED', 'Scheduler policy refuses');
+      },
+    };
+    const admission = {
+      tenantId: 'acme',
+      identityId: 'id_1',
+      identityKind: 'user' as const,
+      sessionId: 's',
+      sessionKind: 'user' as const,
+      action: 'compute:reservations:create',
+      resource: { type: 'reservation', id: 'rsv_x' },
+      decidedAt: T0,
+    };
+    await expect(run(request(1), context({ plugins: [refuse], admission }))).rejects.toThrow(
+      /refuses/,
+    );
+    expect(seen.map(({ placer, outcome, conflicts }) => [placer, outcome, conflicts])).toEqual([
+      ['inline', 'placed', 0],
+      ['inline', 'placed', 0],
+      ['batch', 'pending', 1],
+      ['inline', 'refused', 0],
+    ]);
+    expect(seen.every((entry) => entry.seconds >= 0)).toBe(true);
   });
 
   it('places on a node dedicated to a tenant only for that tenant, on every placement path', async () => {
