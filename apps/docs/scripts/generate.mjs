@@ -324,7 +324,9 @@ for (const entry of api) {
     prose(entry.overview) ||
       `Methods of the ${code(entry.group)} group, contributed by ${code(entry.module)}.`,
     '',
-    `${registered} of ${entry.methods.length} methods are served by this release; the others are planned for the phase shown.`,
+    registered === entry.methods.length
+      ? `All ${registered} methods are served by this release.`
+      : `${registered} of ${entry.methods.length} methods are served by this release; the others are planned for the phase shown.`,
     '',
     '| Method | Kind | Authorization | Phase | Status |',
     '| --- | --- | --- | --- | --- |',
@@ -389,8 +391,12 @@ files.set(
     '| --- | --- | --- |',
     ...errors.map(
       (error) =>
-        `| ${code(error.code)} | ${error.status} | ${cell(firstParagraph(error.description))} |`,
+        `| ${error.description ? `[${code(error.code)}](#${error.code.toLowerCase()})` : code(error.code)} | ${error.status} | ${cell(firstParagraph(error.description))} |`,
     ),
+    // The table carries each meaning; a section per code carries the rest (when it happens, what to do).
+    ...errors
+      .filter((error) => error.description)
+      .flatMap((error) => ['', `## ${error.code}`, '', `HTTP ${error.status}.`, '', prose(error.description)]),
   ].join('\n'),
 );
 
