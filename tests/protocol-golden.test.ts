@@ -38,6 +38,7 @@ import {
   wrapAttestedReport,
   wrapCommand,
   wrapDesiredState,
+  workloadTokenRequestSigningInput,
 } from '@better-compute/protocol';
 import type { SigningPurpose } from '@better-compute/protocol';
 
@@ -376,6 +377,22 @@ const signingVectors: {
       epk,
     ],
     built: secretRequestSigningInput(secretRequest),
+  },
+  {
+    name: 'workload-token',
+    purpose: 'workload-token',
+    parts: [
+      utf8('wtr-1'),
+      utf8('inst_01k5w000000000000000000001'),
+      utf8('https://vault.acme.test'),
+      epk,
+    ],
+    built: workloadTokenRequestSigningInput({
+      requestId: 'wtr-1',
+      instanceId: 'inst_01k5w000000000000000000001',
+      audience: 'https://vault.acme.test',
+      epk,
+    }),
   },
   {
     name: 'renew-pop',

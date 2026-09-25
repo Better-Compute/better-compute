@@ -1,6 +1,9 @@
 import type { Timestamp } from '@bufbuild/protobuf/wkt';
 import type { CommandState } from './gen/bettercompute/common/v1/common_pb.js';
-import type { SecretRequest } from './gen/bettercompute/agent/v1/session_pb.js';
+import type {
+  SecretRequest,
+  WorkloadTokenRequest,
+} from './gen/bettercompute/agent/v1/session_pb.js';
 import { ProtocolError } from './errors.js';
 
 /**
@@ -22,6 +25,8 @@ export type SigningPurpose =
   | 'command-update'
   /** Node key; parts [request_id, ref, workflow_id, step_id, allocation_id, epk]. */
   | 'secret-request'
+  /** Node key; parts [request_id, instance_id, audience, epk] (v0.5 workload identity). */
+  | 'workload-token'
   /** Current node key; parts [sha256(csr), node_id, client_time]. */
   | 'renew-pop'
   /** Site agent node key; parts [SignedDiscoveryAssertion.body] (site/v1, draft). */
@@ -112,6 +117,17 @@ export const secretRequestSigningInput = (
     utf8.encode(request.workflowId),
     utf8.encode(request.stepId),
     utf8.encode(request.allocationId),
+    request.epk,
+  ]);
+
+/** Signing input of `WorkloadTokenRequest.node_sig` (v0.5 workload identity, §12.2). */
+export const workloadTokenRequestSigningInput = (
+  request: Pick<WorkloadTokenRequest, 'requestId' | 'instanceId' | 'audience' | 'epk'>,
+): Uint8Array =>
+  signingInput('workload-token', [
+    utf8.encode(request.requestId),
+    utf8.encode(request.instanceId),
+    utf8.encode(request.audience),
     request.epk,
   ]);
 
