@@ -94,6 +94,7 @@ export {
 export {
   gatewayIdentity,
   gatewayOptions,
+  settledCommandOwner,
   startGateway,
   type GatewayIdentity,
   type RevocationSetLike,

@@ -10,7 +10,7 @@ import {
   type SampledGateway,
 } from '@better-compute/observability';
 import { tunnelAuthorizer } from '@better-compute/iam';
-import { gatewayReportHandlers } from '@better-compute/server';
+import { builtinJobNames, commandOwner, gatewayReportHandlers } from '@better-compute/server';
 import * as gatewayPackage from '@better-compute/gateway';
 import {
   createRevocationFeed,
@@ -129,6 +129,15 @@ function ticketIssuer(options: AnyComputeOptions): { jwksJson(): unknown } | und
 }
 
 /** The `createGateway()` options `serve` composes; exported for the composition audit. */
+/**
+ * The gateway's `commandOwner`: `<reconciler>:<key>:…` idempotency keys name the work item that waits on a command,
+ * when that reconciler is registered here (never a built-in job, never `node`).
+ */
+export function settledCommandOwner(compute: AnyCompute): (key: string) => { kind: string; key: string } | undefined {
+  const builtin = new Set<string>(builtinJobNames);
+  return (key) => commandOwner(key, (kind) => Object.hasOwn(compute.jobs, kind) && !builtin.has(kind));
+}
+
 export function gatewayOptions(
   pkg: Pick<GatewayPackage, 'xidStatusHandler'>,
   compute: AnyCompute,
@@ -209,6 +218,9 @@ export function gatewayOptions(
       : compute.gatewayServices,
     work: compute.context.work,
     events: compute.context.events,
+    // A settled command wakes its owner (`<reconciler>:<key>:…`) at once, as the command sweeper does for expired
+    // and failed ones; without it the owner only notices at its periodic pass.
+    commandOwner: settledCommandOwner(compute),
     reports: { ...gatewayReportHandlers, ...reports, status: statusHandlers },
   };
 }

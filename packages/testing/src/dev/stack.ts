@@ -52,6 +52,8 @@ import { pglite } from '@better-compute/postgres/pglite';
 import { AgentRole, type JoinRequest, type TunnelFrame } from '@better-compute/protocol';
 import {
   betterCompute,
+  builtinJobNames,
+  commandOwner,
   gatewayReportHandlers,
   pkiJoinCrypto,
   type BetterCompute,
@@ -491,6 +493,12 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       services: compute.gatewayServices,
       work: compute.context.work,
       events: compute.context.events,
+      // A settled command wakes the reconciler waiting on it (`<reconciler>:<key>:…`), as `serve` hosts do.
+      commandOwner: (key: string) =>
+        commandOwner(
+          key,
+          (kind) => Object.hasOwn(compute.jobs, kind) && !(builtinJobNames as readonly string[]).includes(kind),
+        ),
       reports: reportHandlers(options.reports),
       dispatchIntervalMs: 250,
       specSweepMs: 1_000,
