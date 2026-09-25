@@ -221,6 +221,13 @@ function wireInstance(instance: InstanceSpec): Json {
       mac: nic.mac,
       addresses: [...nic.addresses],
     }));
+  if (instance.restoreFrom)
+    wire.restoreFrom = {
+      ref: instance.restoreFrom.imageId,
+      url: instance.restoreFrom.url,
+      sha256: bytesField(instance.restoreFrom.sha256),
+      format: 'raw',
+    };
   return wire;
 }
 

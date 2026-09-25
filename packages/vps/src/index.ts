@@ -21,6 +21,8 @@ export type {
   RuntimeDriver,
   RuntimeInstanceStatus,
   RuntimeIsolation,
+  RuntimeSnapshotResult,
+  RuntimeSnapshotTarget,
   RuntimeTraits,
 } from './runtime.js';
 

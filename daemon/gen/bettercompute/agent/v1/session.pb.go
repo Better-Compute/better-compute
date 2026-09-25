@@ -117,6 +117,9 @@ const (
 	InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING     InstanceDesiredState = 1
 	InstanceDesiredState_INSTANCE_DESIRED_STATE_STOPPED     InstanceDesiredState = 2
 	InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED     InstanceDesiredState = 3
+	// (v0.5, sandboxes warm pools) Booted, then paused with its memory resident; resuming is
+	// desired RUNNING. A runtime that cannot pause keeps it STOPPED and reports STOPPED.
+	InstanceDesiredState_INSTANCE_DESIRED_STATE_PAUSED InstanceDesiredState = 4
 )
 
 // Enum value maps for InstanceDesiredState.
@@ -126,12 +129,14 @@ var (
 		1: "INSTANCE_DESIRED_STATE_RUNNING",
 		2: "INSTANCE_DESIRED_STATE_STOPPED",
 		3: "INSTANCE_DESIRED_STATE_DELETED",
+		4: "INSTANCE_DESIRED_STATE_PAUSED",
 	}
 	InstanceDesiredState_value = map[string]int32{
 		"INSTANCE_DESIRED_STATE_UNSPECIFIED": 0,
 		"INSTANCE_DESIRED_STATE_RUNNING":     1,
 		"INSTANCE_DESIRED_STATE_STOPPED":     2,
 		"INSTANCE_DESIRED_STATE_DELETED":     3,
+		"INSTANCE_DESIRED_STATE_PAUSED":      4,
 	}
 )
 
@@ -224,6 +229,8 @@ const (
 	InstanceObservedState_INSTANCE_OBSERVED_STATE_RUNNING     InstanceObservedState = 1
 	InstanceObservedState_INSTANCE_OBSERVED_STATE_STOPPED     InstanceObservedState = 2
 	InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR       InstanceObservedState = 3
+	// (v0.5) Paused by the runtime (vCPUs stopped, memory resident).
+	InstanceObservedState_INSTANCE_OBSERVED_STATE_PAUSED InstanceObservedState = 4
 )
 
 // Enum value maps for InstanceObservedState.
@@ -233,12 +240,14 @@ var (
 		1: "INSTANCE_OBSERVED_STATE_RUNNING",
 		2: "INSTANCE_OBSERVED_STATE_STOPPED",
 		3: "INSTANCE_OBSERVED_STATE_ERROR",
+		4: "INSTANCE_OBSERVED_STATE_PAUSED",
 	}
 	InstanceObservedState_value = map[string]int32{
 		"INSTANCE_OBSERVED_STATE_UNSPECIFIED": 0,
 		"INSTANCE_OBSERVED_STATE_RUNNING":     1,
 		"INSTANCE_OBSERVED_STATE_STOPPED":     2,
 		"INSTANCE_OBSERVED_STATE_ERROR":       3,
+		"INSTANCE_OBSERVED_STATE_PAUSED":      4,
 	}
 )
 
@@ -3138,8 +3147,12 @@ type InstanceSpec struct {
 	// Secret ref of the NoCloud user-data, fetched with SecretRequest{allocation_id}.
 	UserDataRef string `protobuf:"bytes,9,opt,name=user_data_ref,json=userDataRef,proto3" json:"user_data_ref,omitempty"`
 	// GPU atoms passed through with VFIO (never overcommitted).
-	GpuDeviceIds  []string       `protobuf:"bytes,10,rep,name=gpu_device_ids,json=gpuDeviceIds,proto3" json:"gpu_device_ids,omitempty"`
-	Nics          []*InstanceNic `protobuf:"bytes,11,rep,name=nics,proto3" json:"nics,omitempty"`
+	GpuDeviceIds []string       `protobuf:"bytes,10,rep,name=gpu_device_ids,json=gpuDeviceIds,proto3" json:"gpu_device_ids,omitempty"`
+	Nics         []*InstanceNic `protobuf:"bytes,11,rep,name=nics,proto3" json:"nics,omitempty"`
+	// (v0.5, sandboxes) Boot from this snapshot (an instance.snapshot upload) instead of `image`:
+	// disk and, when captured, memory state. The daemon verifies sha256 before restoring and fails
+	// the instance on a runtime or CPU model mismatch.
+	RestoreFrom   *ImageRef `protobuf:"bytes,12,opt,name=restore_from,json=restoreFrom,proto3" json:"restore_from,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3247,6 +3260,13 @@ func (x *InstanceSpec) GetGpuDeviceIds() []string {
 func (x *InstanceSpec) GetNics() []*InstanceNic {
 	if x != nil {
 		return x.Nics
+	}
+	return nil
+}
+
+func (x *InstanceSpec) GetRestoreFrom() *ImageRef {
+	if x != nil {
+		return x.RestoreFrom
 	}
 	return nil
 }
@@ -5771,7 +5791,7 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fdevice_class\x18\x02 \x01(\tR\vdeviceClass\"V\n" +
 	"\x10InstancesSection\x12B\n" +
-	"\tinstances\x18\x01 \x03(\v2$.bettercompute.agent.v1.InstanceSpecR\tinstances\"\xd2\x03\n" +
+	"\tinstances\x18\x01 \x03(\v2$.bettercompute.agent.v1.InstanceSpecR\tinstances\"\x97\x04\n" +
 	"\fInstanceSpec\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12Q\n" +
@@ -5786,7 +5806,8 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\ruser_data_ref\x18\t \x01(\tR\vuserDataRef\x12$\n" +
 	"\x0egpu_device_ids\x18\n" +
 	" \x03(\tR\fgpuDeviceIds\x127\n" +
-	"\x04nics\x18\v \x03(\v2#.bettercompute.agent.v1.InstanceNicR\x04nics\"\x80\x01\n" +
+	"\x04nics\x18\v \x03(\v2#.bettercompute.agent.v1.InstanceNicR\x04nics\x12C\n" +
+	"\frestore_from\x18\f \x01(\v2 .bettercompute.agent.v1.ImageRefR\vrestoreFrom\"\x80\x01\n" +
 	"\bImageRef\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x16\n" +
@@ -5976,22 +5997,24 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x13BINDING_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fBINDING_HOLD\x10\x01\x12\x14\n" +
 	"\x10BINDING_INSTANCE\x10\x02\x12\x10\n" +
-	"\fBINDING_NODE\x10\x03*\xaa\x01\n" +
+	"\fBINDING_NODE\x10\x03*\xcd\x01\n" +
 	"\x14InstanceDesiredState\x12&\n" +
 	"\"INSTANCE_DESIRED_STATE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eINSTANCE_DESIRED_STATE_RUNNING\x10\x01\x12\"\n" +
 	"\x1eINSTANCE_DESIRED_STATE_STOPPED\x10\x02\x12\"\n" +
-	"\x1eINSTANCE_DESIRED_STATE_DELETED\x10\x03*\xae\x01\n" +
+	"\x1eINSTANCE_DESIRED_STATE_DELETED\x10\x03\x12!\n" +
+	"\x1dINSTANCE_DESIRED_STATE_PAUSED\x10\x04*\xae\x01\n" +
 	"\x11SpecRequestReason\x12#\n" +
 	"\x1fSPEC_REQUEST_REASON_UNSPECIFIED\x10\x00\x12+\n" +
 	"'SPEC_REQUEST_REASON_PATCH_BASE_MISMATCH\x10\x01\x12&\n" +
 	"\"SPEC_REQUEST_REASON_MIN_GENERATION\x10\x02\x12\x1f\n" +
-	"\x1bSPEC_REQUEST_REASON_NO_SPEC\x10\x03*\xad\x01\n" +
+	"\x1bSPEC_REQUEST_REASON_NO_SPEC\x10\x03*\xd1\x01\n" +
 	"\x15InstanceObservedState\x12'\n" +
 	"#INSTANCE_OBSERVED_STATE_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fINSTANCE_OBSERVED_STATE_RUNNING\x10\x01\x12#\n" +
 	"\x1fINSTANCE_OBSERVED_STATE_STOPPED\x10\x02\x12!\n" +
-	"\x1dINSTANCE_OBSERVED_STATE_ERROR\x10\x03*\xa2\x01\n" +
+	"\x1dINSTANCE_OBSERVED_STATE_ERROR\x10\x03\x12\"\n" +
+	"\x1eINSTANCE_OBSERVED_STATE_PAUSED\x10\x04*\xa2\x01\n" +
 	"\fSectionState\x12\x1d\n" +
 	"\x19SECTION_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17SECTION_STATE_CONVERGED\x10\x01\x12\x1d\n" +
@@ -6175,41 +6198,42 @@ var file_bettercompute_agent_v1_session_proto_depIdxs = []int32{
 	1,  // 65: bettercompute.agent.v1.InstanceSpec.desired_state:type_name -> bettercompute.agent.v1.InstanceDesiredState
 	37, // 66: bettercompute.agent.v1.InstanceSpec.image:type_name -> bettercompute.agent.v1.ImageRef
 	38, // 67: bettercompute.agent.v1.InstanceSpec.nics:type_name -> bettercompute.agent.v1.InstanceNic
-	2,  // 68: bettercompute.agent.v1.SpecRequest.reason:type_name -> bettercompute.agent.v1.SpecRequestReason
-	46, // 69: bettercompute.agent.v1.StatusReport.sections:type_name -> bettercompute.agent.v1.SectionStatus
-	47, // 70: bettercompute.agent.v1.StatusReport.conditions:type_name -> bettercompute.agent.v1.Condition
-	45, // 71: bettercompute.agent.v1.StatusReport.instances:type_name -> bettercompute.agent.v1.InstanceStatus
-	44, // 72: bettercompute.agent.v1.StatusReport.pressure:type_name -> bettercompute.agent.v1.HostPressure
-	3,  // 73: bettercompute.agent.v1.InstanceStatus.state:type_name -> bettercompute.agent.v1.InstanceObservedState
-	4,  // 74: bettercompute.agent.v1.SectionStatus.state:type_name -> bettercompute.agent.v1.SectionState
-	5,  // 75: bettercompute.agent.v1.Condition.status:type_name -> bettercompute.agent.v1.ConditionStatus
-	73, // 76: bettercompute.agent.v1.InventorySection.collected_at:type_name -> google.protobuf.Timestamp
-	50, // 77: bettercompute.agent.v1.EventBatch.events:type_name -> bettercompute.agent.v1.Event
-	73, // 78: bettercompute.agent.v1.Event.observed_at:type_name -> google.protobuf.Timestamp
-	51, // 79: bettercompute.agent.v1.Event.attested:type_name -> bettercompute.agent.v1.AttestedReport
-	55, // 80: bettercompute.agent.v1.Event.allocation_failed:type_name -> bettercompute.agent.v1.AllocationFailed
-	71, // 81: bettercompute.agent.v1.AttestedReport.node_sig:type_name -> bettercompute.common.v1.Signature
-	53, // 82: bettercompute.agent.v1.AttestedReportBody.allocation_bound:type_name -> bettercompute.agent.v1.AllocationBound
-	54, // 83: bettercompute.agent.v1.AttestedReportBody.allocation_released:type_name -> bettercompute.agent.v1.AllocationReleased
-	71, // 84: bettercompute.agent.v1.SecretRequest.node_sig:type_name -> bettercompute.common.v1.Signature
-	71, // 85: bettercompute.agent.v1.WorkloadTokenRequest.node_sig:type_name -> bettercompute.common.v1.Signature
-	73, // 86: bettercompute.agent.v1.WorkloadTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
-	65, // 87: bettercompute.agent.v1.TunnelFrame.opened:type_name -> bettercompute.agent.v1.TunnelOpened
-	66, // 88: bettercompute.agent.v1.TunnelFrame.resize:type_name -> bettercompute.agent.v1.TerminalSize
-	67, // 89: bettercompute.agent.v1.TunnelFrame.closed:type_name -> bettercompute.agent.v1.TunnelClosed
-	6,  // 90: bettercompute.agent.v1.AgentGateway.Join:input_type -> bettercompute.agent.v1.JoinRequest
-	13, // 91: bettercompute.agent.v1.AgentGateway.Renew:input_type -> bettercompute.agent.v1.RenewRequest
-	15, // 92: bettercompute.agent.v1.AgentGateway.Session:input_type -> bettercompute.agent.v1.AgentFrame
-	64, // 93: bettercompute.agent.v1.AgentGateway.Tunnel:input_type -> bettercompute.agent.v1.TunnelFrame
-	8,  // 94: bettercompute.agent.v1.AgentGateway.Join:output_type -> bettercompute.agent.v1.JoinResponse
-	14, // 95: bettercompute.agent.v1.AgentGateway.Renew:output_type -> bettercompute.agent.v1.RenewResponse
-	16, // 96: bettercompute.agent.v1.AgentGateway.Session:output_type -> bettercompute.agent.v1.ServerFrame
-	64, // 97: bettercompute.agent.v1.AgentGateway.Tunnel:output_type -> bettercompute.agent.v1.TunnelFrame
-	94, // [94:98] is the sub-list for method output_type
-	90, // [90:94] is the sub-list for method input_type
-	90, // [90:90] is the sub-list for extension type_name
-	90, // [90:90] is the sub-list for extension extendee
-	0,  // [0:90] is the sub-list for field type_name
+	37, // 68: bettercompute.agent.v1.InstanceSpec.restore_from:type_name -> bettercompute.agent.v1.ImageRef
+	2,  // 69: bettercompute.agent.v1.SpecRequest.reason:type_name -> bettercompute.agent.v1.SpecRequestReason
+	46, // 70: bettercompute.agent.v1.StatusReport.sections:type_name -> bettercompute.agent.v1.SectionStatus
+	47, // 71: bettercompute.agent.v1.StatusReport.conditions:type_name -> bettercompute.agent.v1.Condition
+	45, // 72: bettercompute.agent.v1.StatusReport.instances:type_name -> bettercompute.agent.v1.InstanceStatus
+	44, // 73: bettercompute.agent.v1.StatusReport.pressure:type_name -> bettercompute.agent.v1.HostPressure
+	3,  // 74: bettercompute.agent.v1.InstanceStatus.state:type_name -> bettercompute.agent.v1.InstanceObservedState
+	4,  // 75: bettercompute.agent.v1.SectionStatus.state:type_name -> bettercompute.agent.v1.SectionState
+	5,  // 76: bettercompute.agent.v1.Condition.status:type_name -> bettercompute.agent.v1.ConditionStatus
+	73, // 77: bettercompute.agent.v1.InventorySection.collected_at:type_name -> google.protobuf.Timestamp
+	50, // 78: bettercompute.agent.v1.EventBatch.events:type_name -> bettercompute.agent.v1.Event
+	73, // 79: bettercompute.agent.v1.Event.observed_at:type_name -> google.protobuf.Timestamp
+	51, // 80: bettercompute.agent.v1.Event.attested:type_name -> bettercompute.agent.v1.AttestedReport
+	55, // 81: bettercompute.agent.v1.Event.allocation_failed:type_name -> bettercompute.agent.v1.AllocationFailed
+	71, // 82: bettercompute.agent.v1.AttestedReport.node_sig:type_name -> bettercompute.common.v1.Signature
+	53, // 83: bettercompute.agent.v1.AttestedReportBody.allocation_bound:type_name -> bettercompute.agent.v1.AllocationBound
+	54, // 84: bettercompute.agent.v1.AttestedReportBody.allocation_released:type_name -> bettercompute.agent.v1.AllocationReleased
+	71, // 85: bettercompute.agent.v1.SecretRequest.node_sig:type_name -> bettercompute.common.v1.Signature
+	71, // 86: bettercompute.agent.v1.WorkloadTokenRequest.node_sig:type_name -> bettercompute.common.v1.Signature
+	73, // 87: bettercompute.agent.v1.WorkloadTokenResponse.expires_at:type_name -> google.protobuf.Timestamp
+	65, // 88: bettercompute.agent.v1.TunnelFrame.opened:type_name -> bettercompute.agent.v1.TunnelOpened
+	66, // 89: bettercompute.agent.v1.TunnelFrame.resize:type_name -> bettercompute.agent.v1.TerminalSize
+	67, // 90: bettercompute.agent.v1.TunnelFrame.closed:type_name -> bettercompute.agent.v1.TunnelClosed
+	6,  // 91: bettercompute.agent.v1.AgentGateway.Join:input_type -> bettercompute.agent.v1.JoinRequest
+	13, // 92: bettercompute.agent.v1.AgentGateway.Renew:input_type -> bettercompute.agent.v1.RenewRequest
+	15, // 93: bettercompute.agent.v1.AgentGateway.Session:input_type -> bettercompute.agent.v1.AgentFrame
+	64, // 94: bettercompute.agent.v1.AgentGateway.Tunnel:input_type -> bettercompute.agent.v1.TunnelFrame
+	8,  // 95: bettercompute.agent.v1.AgentGateway.Join:output_type -> bettercompute.agent.v1.JoinResponse
+	14, // 96: bettercompute.agent.v1.AgentGateway.Renew:output_type -> bettercompute.agent.v1.RenewResponse
+	16, // 97: bettercompute.agent.v1.AgentGateway.Session:output_type -> bettercompute.agent.v1.ServerFrame
+	64, // 98: bettercompute.agent.v1.AgentGateway.Tunnel:output_type -> bettercompute.agent.v1.TunnelFrame
+	95, // [95:99] is the sub-list for method output_type
+	91, // [91:95] is the sub-list for method input_type
+	91, // [91:91] is the sub-list for extension type_name
+	91, // [91:91] is the sub-list for extension extendee
+	0,  // [0:91] is the sub-list for field type_name
 }
 
 func init() { file_bettercompute_agent_v1_session_proto_init() }

@@ -1796,6 +1796,156 @@ func (x *DriverInvokeResult) GetResultJson() string {
 	return ""
 }
 
+type InstanceSnapshotRequest struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	InstanceId string                 `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	// Presigned HTTPS PUT URL.
+	UploadUrl     string        `protobuf:"bytes,2,opt,name=upload_url,json=uploadUrl,proto3" json:"upload_url,omitempty"`
+	UploadHeaders []*HttpHeader `protobuf:"bytes,3,rep,name=upload_headers,json=uploadHeaders,proto3" json:"upload_headers,omitempty"`
+	// The snapshot image id the control plane registers the upload under.
+	ImageId string `protobuf:"bytes,4,opt,name=image_id,json=imageId,proto3" json:"image_id,omitempty"`
+	// Include the memory state (a restorable running snapshot); false: disk only.
+	IncludeMemory bool `protobuf:"varint,5,opt,name=include_memory,json=includeMemory,proto3" json:"include_memory,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstanceSnapshotRequest) Reset() {
+	*x = InstanceSnapshotRequest{}
+	mi := &file_bettercompute_agent_v1_commands_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstanceSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstanceSnapshotRequest) ProtoMessage() {}
+
+func (x *InstanceSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bettercompute_agent_v1_commands_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstanceSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*InstanceSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_bettercompute_agent_v1_commands_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *InstanceSnapshotRequest) GetInstanceId() string {
+	if x != nil {
+		return x.InstanceId
+	}
+	return ""
+}
+
+func (x *InstanceSnapshotRequest) GetUploadUrl() string {
+	if x != nil {
+		return x.UploadUrl
+	}
+	return ""
+}
+
+func (x *InstanceSnapshotRequest) GetUploadHeaders() []*HttpHeader {
+	if x != nil {
+		return x.UploadHeaders
+	}
+	return nil
+}
+
+func (x *InstanceSnapshotRequest) GetImageId() string {
+	if x != nil {
+		return x.ImageId
+	}
+	return ""
+}
+
+func (x *InstanceSnapshotRequest) GetIncludeMemory() bool {
+	if x != nil {
+		return x.IncludeMemory
+	}
+	return false
+}
+
+type InstanceSnapshotResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UploadedBytes uint64                 `protobuf:"varint,1,opt,name=uploaded_bytes,json=uploadedBytes,proto3" json:"uploaded_bytes,omitempty"`
+	// SHA-256 of the uploaded object; restoring verifies it (InstanceSpec.restore_from.sha256).
+	Sha256 []byte `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	// The runtime that wrote it; a restore needs the same runtime.
+	Runtime string `protobuf:"bytes,3,opt,name=runtime,proto3" json:"runtime,omitempty"`
+	// The host CPU model the memory state depends on (bc.dev/cpu.model), empty for disk only.
+	CpuModel      string `protobuf:"bytes,4,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InstanceSnapshotResult) Reset() {
+	*x = InstanceSnapshotResult{}
+	mi := &file_bettercompute_agent_v1_commands_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InstanceSnapshotResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InstanceSnapshotResult) ProtoMessage() {}
+
+func (x *InstanceSnapshotResult) ProtoReflect() protoreflect.Message {
+	mi := &file_bettercompute_agent_v1_commands_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InstanceSnapshotResult.ProtoReflect.Descriptor instead.
+func (*InstanceSnapshotResult) Descriptor() ([]byte, []int) {
+	return file_bettercompute_agent_v1_commands_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *InstanceSnapshotResult) GetUploadedBytes() uint64 {
+	if x != nil {
+		return x.UploadedBytes
+	}
+	return 0
+}
+
+func (x *InstanceSnapshotResult) GetSha256() []byte {
+	if x != nil {
+		return x.Sha256
+	}
+	return nil
+}
+
+func (x *InstanceSnapshotResult) GetRuntime() string {
+	if x != nil {
+		return x.Runtime
+	}
+	return ""
+}
+
+func (x *InstanceSnapshotResult) GetCpuModel() string {
+	if x != nil {
+		return x.CpuModel
+	}
+	return ""
+}
+
 var File_bettercompute_agent_v1_commands_proto protoreflect.FileDescriptor
 
 const file_bettercompute_agent_v1_commands_proto_rawDesc = "" +
@@ -1914,7 +2064,20 @@ const file_bettercompute_agent_v1_commands_proto_rawDesc = "" +
 	"\x04args\x18\x05 \x01(\v2\x17.google.protobuf.StructR\x04args\"5\n" +
 	"\x12DriverInvokeResult\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
-	"resultJson*r\n" +
+	"resultJson\"\xe6\x01\n" +
+	"\x17InstanceSnapshotRequest\x12\x1f\n" +
+	"\vinstance_id\x18\x01 \x01(\tR\n" +
+	"instanceId\x12\x1d\n" +
+	"\n" +
+	"upload_url\x18\x02 \x01(\tR\tuploadUrl\x12I\n" +
+	"\x0eupload_headers\x18\x03 \x03(\v2\".bettercompute.agent.v1.HttpHeaderR\ruploadHeaders\x12\x19\n" +
+	"\bimage_id\x18\x04 \x01(\tR\aimageId\x12%\n" +
+	"\x0einclude_memory\x18\x05 \x01(\bR\rincludeMemory\"\x8e\x01\n" +
+	"\x16InstanceSnapshotResult\x12%\n" +
+	"\x0euploaded_bytes\x18\x01 \x01(\x04R\ruploadedBytes\x12\x16\n" +
+	"\x06sha256\x18\x02 \x01(\fR\x06sha256\x12\x18\n" +
+	"\aruntime\x18\x03 \x01(\tR\aruntime\x12\x1b\n" +
+	"\tcpu_model\x18\x04 \x01(\tR\bcpuModel*r\n" +
 	"\bWipeMode\x12\x19\n" +
 	"\x15WIPE_MODE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fWIPE_MODE_QUICK\x10\x01\x12\x1a\n" +
@@ -1943,7 +2106,7 @@ func file_bettercompute_agent_v1_commands_proto_rawDescGZIP() []byte {
 }
 
 var file_bettercompute_agent_v1_commands_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_bettercompute_agent_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_bettercompute_agent_v1_commands_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_bettercompute_agent_v1_commands_proto_goTypes = []any{
 	(WipeMode)(0),                   // 0: bettercompute.agent.v1.WipeMode
 	(ImageFormat)(0),                // 1: bettercompute.agent.v1.ImageFormat
@@ -1974,14 +2137,16 @@ var file_bettercompute_agent_v1_commands_proto_goTypes = []any{
 	(*KexecResult)(nil),             // 26: bettercompute.agent.v1.KexecResult
 	(*DriverInvokeRequest)(nil),     // 27: bettercompute.agent.v1.DriverInvokeRequest
 	(*DriverInvokeResult)(nil),      // 28: bettercompute.agent.v1.DriverInvokeResult
-	nil,                             // 29: bettercompute.agent.v1.InventoryRefreshResult.SectionHashesEntry
-	(*structpb.Struct)(nil),         // 30: google.protobuf.Struct
+	(*InstanceSnapshotRequest)(nil), // 29: bettercompute.agent.v1.InstanceSnapshotRequest
+	(*InstanceSnapshotResult)(nil),  // 30: bettercompute.agent.v1.InstanceSnapshotResult
+	nil,                             // 31: bettercompute.agent.v1.InventoryRefreshResult.SectionHashesEntry
+	(*structpb.Struct)(nil),         // 32: google.protobuf.Struct
 }
 var file_bettercompute_agent_v1_commands_proto_depIdxs = []int32{
 	6,  // 0: bettercompute.agent.v1.DiagNvmlResult.checks:type_name -> bettercompute.agent.v1.DiagnosticCheck
 	5,  // 1: bettercompute.agent.v1.DiagNvmlResult.gpus:type_name -> bettercompute.agent.v1.GpuDiagnostic
 	6,  // 2: bettercompute.agent.v1.GpuDiagnostic.checks:type_name -> bettercompute.agent.v1.DiagnosticCheck
-	29, // 3: bettercompute.agent.v1.InventoryRefreshResult.section_hashes:type_name -> bettercompute.agent.v1.InventoryRefreshResult.SectionHashesEntry
+	31, // 3: bettercompute.agent.v1.InventoryRefreshResult.section_hashes:type_name -> bettercompute.agent.v1.InventoryRefreshResult.SectionHashesEntry
 	10, // 4: bettercompute.agent.v1.LogsCollectRequest.upload_headers:type_name -> bettercompute.agent.v1.HttpHeader
 	16, // 5: bettercompute.agent.v1.GpuResetResult.gpus:type_name -> bettercompute.agent.v1.GpuResetOutcome
 	6,  // 6: bettercompute.agent.v1.DiagDcgmResult.tests:type_name -> bettercompute.agent.v1.DiagnosticCheck
@@ -1992,12 +2157,13 @@ var file_bettercompute_agent_v1_commands_proto_depIdxs = []int32{
 	1,  // 11: bettercompute.agent.v1.DeployImageRequest.format:type_name -> bettercompute.agent.v1.ImageFormat
 	2,  // 12: bettercompute.agent.v1.DeployImageRequest.compression:type_name -> bettercompute.agent.v1.ImageCompression
 	23, // 13: bettercompute.agent.v1.DeployImageRequest.root_disk:type_name -> bettercompute.agent.v1.RootDiskHint
-	30, // 14: bettercompute.agent.v1.DriverInvokeRequest.args:type_name -> google.protobuf.Struct
-	15, // [15:15] is the sub-list for method output_type
-	15, // [15:15] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	32, // 14: bettercompute.agent.v1.DriverInvokeRequest.args:type_name -> google.protobuf.Struct
+	10, // 15: bettercompute.agent.v1.InstanceSnapshotRequest.upload_headers:type_name -> bettercompute.agent.v1.HttpHeader
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_bettercompute_agent_v1_commands_proto_init() }
@@ -2011,7 +2177,7 @@ func file_bettercompute_agent_v1_commands_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bettercompute_agent_v1_commands_proto_rawDesc), len(file_bettercompute_agent_v1_commands_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   27,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

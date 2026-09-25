@@ -1,10 +1,11 @@
 import { createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { refuseSecretRequest, sealSecretResponse } from '@better-compute/pki';
-import type { MessageInitShape } from '@bufbuild/protobuf';
+import { create, type MessageInitShape } from '@bufbuild/protobuf';
 import {
   InstanceDesiredState,
   InstanceObservedState,
+  InstancesSectionSchema,
   SectionState,
   type InstanceSpecSchema,
   type StatusReport,
@@ -226,5 +227,50 @@ describe('FakeDaemon VPS host (instances converger)', () => {
     await t.harness.advance(5_000);
     expect(hypervisor.domains.get('inst_a')).toMatchObject({ state: 'running', boots: 1 });
     expect(t.reported(t.last())).toEqual({ inst_a: 'RUNNING' });
+  });
+});
+
+describe('FakeHypervisor: paused instances, restores and snapshots (v0.5 sandboxes)', () => {
+  const section = (...specs: MessageInitShape<typeof InstanceSpecSchema>[]) =>
+    create(InstancesSectionSchema, { instances: specs });
+
+  it('boots then pauses, resumes without a new boot, and counts paused domains against the host', () => {
+    const hypervisor = new FakeHypervisor({ capacity: { vcpu: 3 } });
+    const paused = spec('inst_w', { desiredState: InstanceDesiredState.PAUSED });
+    expect(hypervisor.converge(section(paused)).state).toBe(SectionState.CONVERGED);
+    expect(hypervisor.domains.get('inst_w')).toMatchObject({ state: 'paused', boots: 1 });
+    expect(hypervisor.statuses()).toMatchObject([
+      { instanceId: 'inst_w', state: InstanceObservedState.PAUSED },
+    ]);
+    // Memory stays resident: a second 2-vCPU instance does not fit next to it.
+    const other = spec('inst_x', { nics: [] });
+    expect(hypervisor.converge(section(paused, other)).state).toBe(SectionState.FAILED);
+    // Resumed in place: running, still one boot.
+    hypervisor.converge(section(spec('inst_w')));
+    expect(hypervisor.domains.get('inst_w')).toMatchObject({ state: 'running', boots: 1 });
+    hypervisor.powerLoss();
+    expect(hypervisor.domains.get('inst_w')!.state).toBe('stopped');
+  });
+
+  it('restores from a snapshot it verifies, and snapshots deterministically', () => {
+    const hypervisor = new FakeHypervisor();
+    hypervisor.converge(section(spec('inst_s')));
+    const first = hypervisor.snapshot('inst_s');
+    expect(first).toMatchObject({ runtime: 'libvirt-kvm', includeMemory: true });
+    expect(first.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(hypervisor.snapshot('inst_s').sha256).not.toBe(first.sha256);
+    expect(() => hypervisor.snapshot('inst_none')).toThrow(/no instance/);
+
+    const digest = Uint8Array.from(Buffer.from(first.sha256, 'hex'));
+    const restoreFrom = { ref: 'img_snap', url: 'https://objects.example/snap', sha256: digest, format: 'raw' };
+    hypervisor.converge(section(spec('inst_s'), spec('inst_r', { restoreFrom, nics: [] })));
+    expect(hypervisor.domains.get('inst_r')).toMatchObject({
+      state: 'running',
+      restoredFrom: first.sha256,
+    });
+    const unverified = { ...restoreFrom, sha256: new Uint8Array(0) };
+    expect(hypervisor.converge(section(spec('inst_u', { restoreFrom: unverified }))).message).toMatch(
+      /no sha256/,
+    );
   });
 });

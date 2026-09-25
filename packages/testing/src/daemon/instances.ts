@@ -26,8 +26,8 @@ import {
 // - Domains outlive the daemon process; a host reboot stops them, and the converger starts the
 //   ones that should run.
 
-/** Domain states as the runtime reports them. */
-export type FakeDomainState = 'running' | 'stopped' | 'error';
+/** Domain states as the runtime reports them (`paused`, v0.5: vCPUs stopped, memory resident). */
+export type FakeDomainState = 'running' | 'stopped' | 'error' | 'paused';
 
 /** A VM (or container) the fake runtime holds. */
 export interface FakeDomain {
@@ -49,8 +49,21 @@ export interface FakeDomain {
   /** The NoCloud user data it booted with. */
   userData: string;
   message?: string;
-  /** Times it was started. */
+  /** Times it was started (a resume from `paused` is not a boot). */
   boots: number;
+  /** (v0.5) Hex sha256 of the snapshot it was restored from (`InstanceSpec.restore_from`). */
+  restoredFrom?: string;
+  /** (v0.5) Snapshots taken of it (`instance.snapshot`). */
+  snapshots?: number;
+}
+
+/** What `FakeHypervisor.snapshot` captured: the upload an `instance.snapshot` command reports. */
+export interface FakeSnapshot {
+  bytes: Uint8Array;
+  /** Hex sha256 of `bytes`. */
+  sha256: string;
+  runtime: string;
+  includeMemory: boolean;
 }
 
 export interface FakeHypervisorOptions {
@@ -79,6 +92,7 @@ const STATE: Record<FakeDomainState, InstanceObservedState> = {
   running: InstanceObservedState.RUNNING,
   stopped: InstanceObservedState.STOPPED,
   error: InstanceObservedState.ERROR,
+  paused: InstanceObservedState.PAUSED,
 };
 const INSTANCE_DIR = '/var/lib/bcd/instances/';
 const IMAGE_FORMATS = new Set(['raw', 'qcow2', 'iso']);
@@ -164,8 +178,13 @@ export class FakeHypervisor {
         fail(spec, `runtime ${spec.runtime} is not installed on this host`);
         continue;
       }
-      const format = spec.image?.format ?? '';
-      if (!IMAGE_FORMATS.has(format) || !spec.image?.url || !spec.image.sha256.length) {
+      const restore = spec.restoreFrom?.url ? spec.restoreFrom : undefined;
+      if (restore && !restore.sha256.length) {
+        fail(spec, `snapshot ${restore.ref || restore.url} has no sha256 to verify`);
+        continue;
+      }
+      const format = restore ? 'raw' : (spec.image?.format ?? '');
+      if (!restore && (!IMAGE_FORMATS.has(format) || !spec.image?.url || !spec.image.sha256.length)) {
         fail(spec, `image ${spec.image?.ref || spec.image?.url || '(none)'} is not a raw, qcow2 or iso image`);
         continue;
       }
@@ -189,7 +208,7 @@ export class FakeHypervisor {
           continue;
         } else userData = fetched.value;
       }
-      this.imageCache.set(hex(spec.image.sha256), spec.image.url);
+      if (spec.image?.sha256.length) this.imageCache.set(hex(spec.image.sha256), spec.image.url);
       const addresses = spec.nics.flatMap((nic) => nic.addresses);
       const macs = spec.nics.map((nic) => nic.mac);
       let domain = existing;
@@ -202,13 +221,14 @@ export class FakeHypervisor {
           vcpu: spec.vcpu,
           memoryBytes: spec.memoryBytes,
           diskBytes: spec.diskBytes,
-          image: hex(spec.image.sha256),
+          image: spec.image ? hex(spec.image.sha256) : '',
           allocationId: spec.allocationId,
           gpus: [...spec.gpuDeviceIds],
           macs,
           addresses,
           userData,
           boots: 0,
+          ...(restore ? { restoredFrom: hex(restore.sha256) } : {}),
         };
         this.domains.set(id, domain);
         this.files.set(overlayPath(id, format), id);
@@ -234,15 +254,17 @@ export class FakeHypervisor {
         domain.message = fault;
         continue;
       }
-      if (spec.desiredState === InstanceDesiredState.RUNNING) {
-        if (domain.state !== 'running') {
+      const wanted = spec.desiredState;
+      if (wanted === InstanceDesiredState.RUNNING || wanted === InstanceDesiredState.PAUSED) {
+        // A paused domain resumes (or stays paused) in place; anything else boots first.
+        if (domain.state !== 'running' && domain.state !== 'paused') {
           if (!this.fits(domain)) {
             fail(spec, 'not enough free vCPU or memory on this host');
             continue;
           }
-          domain.state = 'running';
           domain.boots++;
         }
+        domain.state = wanted === InstanceDesiredState.PAUSED ? 'paused' : 'running';
       } else domain.state = 'stopped';
       delete domain.message;
     }
@@ -321,7 +343,35 @@ export class FakeHypervisor {
 
   /** A host power loss or reboot: every domain stops; definitions and disks stay. */
   powerLoss(): void {
-    for (const domain of this.domains.values()) if (domain.state === 'running') domain.state = 'stopped';
+    for (const domain of this.domains.values())
+      if (domain.state === 'running' || domain.state === 'paused') domain.state = 'stopped';
+  }
+
+  /**
+   * (v0.5) What an `instance.snapshot` command captures: disk (and memory) state of a managed
+   * domain, deterministic per domain and snapshot count, so a restore can be checked by sha256.
+   * Throws for an unknown or foreign domain, or one in error.
+   */
+  snapshot(instanceId: string, includeMemory = true): FakeSnapshot {
+    const domain = this.domains.get(instanceId);
+    if (!domain?.managed) throw new Error(`no instance ${instanceId} on this host`);
+    if (domain.state === 'error') throw new Error(`instance ${instanceId} is in error`);
+    domain.snapshots = (domain.snapshots ?? 0) + 1;
+    const bytes = new TextEncoder().encode(
+      JSON.stringify({
+        instanceId,
+        image: domain.image,
+        restoredFrom: domain.restoredFrom ?? null,
+        memory: includeMemory ? `${domain.memoryBytes}` : null,
+        n: domain.snapshots,
+      }),
+    );
+    return {
+      bytes,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      runtime: domain.runtime,
+      includeMemory,
+    };
   }
 
   /** The host is reinstalled: every domain, disk, tap and cached image is gone. */
@@ -345,7 +395,8 @@ export class FakeHypervisor {
     let vcpu = domain.vcpu;
     let memory = domain.memoryBytes;
     for (const other of this.domains.values())
-      if (other !== domain && other.state === 'running') {
+      // A paused domain keeps its memory resident and its vCPUs reserved.
+      if (other !== domain && (other.state === 'running' || other.state === 'paused')) {
         vcpu += other.vcpu;
         memory += other.memoryBytes;
       }

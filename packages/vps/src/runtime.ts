@@ -64,12 +64,30 @@ export function runtimeNodeLabels(runtime: string): Record<string, string> | und
   return bcdBuiltinRuntimes.has(runtime) ? undefined : { [`bc.dev/driver.${runtime}`]: '*' };
 }
 
-/** An instance as the runtime reports it on its host. */
+/** An instance as the runtime reports it on its host (`paused`: v0.5, a runtime with `pause`). */
 export interface RuntimeInstanceStatus {
   id: string;
-  state: 'running' | 'stopped' | 'error';
+  state: 'running' | 'stopped' | 'error' | 'paused';
   addresses: string[];
   message?: string;
+}
+
+/** Where `RuntimeDriver.snapshot` uploads the captured state (`instance.snapshot`, v0.5). */
+export interface RuntimeSnapshotTarget {
+  /** Presigned HTTPS PUT URL. */
+  uploadUrl: string;
+  uploadHeaders?: Record<string, string>;
+  /** Capture memory state too (a restorable running snapshot); false: disk only. */
+  includeMemory: boolean;
+}
+
+/** What a snapshot upload wrote. */
+export interface RuntimeSnapshotResult {
+  uploadedBytes: number;
+  /** Hex sha256 of the uploaded object. */
+  sha256: string;
+  /** The host CPU model the memory state depends on; absent for disk-only snapshots. */
+  cpuModel?: string;
 }
 
 /** One VPS runtime on one host. Every operation is idempotent by instance id. */
@@ -81,8 +99,9 @@ export interface RuntimeDriver {
    */
   list(): Promise<RuntimeInstanceStatus[]>;
   /**
-   * Converges one instance to `spec` (desired state `running` or `stopped`): caches the base image,
-   * builds the overlay and NoCloud seed, then starts, stops or resizes it.
+   * Converges one instance to `spec` (desired state `running`, `stopped` or, v0.5, `paused`): caches
+   * the base image (or verifies `spec.restoreFrom`), builds the overlay and NoCloud seed, then
+   * starts, stops, pauses or resizes it. A runtime without `pause` treats `paused` as `stopped`.
    */
   apply(spec: InstanceSpec): Promise<RuntimeInstanceStatus>;
   reboot(instanceId: string): Promise<void>;
@@ -90,6 +109,15 @@ export interface RuntimeDriver {
   remove(instanceId: string): Promise<void>;
   /** The serial console, for tunnels (v0.3). */
   console?(instanceId: string): Promise<DuplexStream>;
+  /** (v0.5, sandboxes §3.7) Stops the vCPUs and keeps memory resident; idempotent. */
+  pause?(instanceId: string): Promise<void>;
+  /** (v0.5) Resumes a paused instance; idempotent. */
+  resume?(instanceId: string): Promise<void>;
+  /**
+   * (v0.5) Captures disk (and memory) state and uploads it (`instance.snapshot`). Absent: the
+   * command fails `UNSUPPORTED`.
+   */
+  snapshot?(instanceId: string, target: RuntimeSnapshotTarget): Promise<RuntimeSnapshotResult>;
 }
 
 declare module '@better-compute/core' {

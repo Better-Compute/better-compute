@@ -493,6 +493,10 @@ message InstanceSpec {
   // GPU atoms passed through with VFIO (never overcommitted).
   repeated string gpu_device_ids = 10;
   repeated InstanceNic nics = 11;
+  // (v0.5, sandboxes) Boot from this snapshot (an instance.snapshot upload) instead of `image`:
+  // disk and, when captured, memory state. The daemon verifies sha256 before restoring and fails
+  // the instance on a runtime or CPU model mismatch.
+  ImageRef restore_from = 12;
 }
 
 enum InstanceDesiredState {
@@ -500,6 +504,9 @@ enum InstanceDesiredState {
   INSTANCE_DESIRED_STATE_RUNNING = 1;
   INSTANCE_DESIRED_STATE_STOPPED = 2;
   INSTANCE_DESIRED_STATE_DELETED = 3;
+  // (v0.5, sandboxes warm pools) Booted, then paused with its memory resident; resuming is
+  // desired RUNNING. A runtime that cannot pause keeps it STOPPED and reports STOPPED.
+  INSTANCE_DESIRED_STATE_PAUSED = 4;
 }
 
 // A content-addressed image the daemon may fetch and cache.
@@ -622,6 +629,8 @@ enum InstanceObservedState {
   INSTANCE_OBSERVED_STATE_RUNNING = 1;
   INSTANCE_OBSERVED_STATE_STOPPED = 2;
   INSTANCE_OBSERVED_STATE_ERROR = 3;
+  // (v0.5) Paused by the runtime (vCPUs stopped, memory resident).
+  INSTANCE_OBSERVED_STATE_PAUSED = 4;
 }
 
 message SectionStatus {

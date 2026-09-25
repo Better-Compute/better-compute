@@ -331,6 +331,15 @@ describe('instance states (§11.1)', () => {
     expect(t.terminal).toEqual(['deleted']);
     expect(() => transition(t, 'resizing', 'complete')).toThrow(/cannot complete from resizing/);
   });
+
+  it('pauses and resumes in place (v0.5 warm pools), and a paused instance can be lost or deleted', () => {
+    expect(walk(t, 'running', [['pause'], ['resume']])).toBe('running');
+    expect(walk(t, 'running', [['pause'], ['stop']])).toBe('stopped');
+    expect(walk(t, 'running', [['pause'], ['lose'], ['recover', 'paused']])).toBe('paused');
+    expect(walk(t, 'running', [['pause'], ['delete'], ['complete']])).toBe('deleted');
+    expect(canTransition(t, 'stopped', 'pause')).toBe(false);
+    expect(canTransition(t, 'running', 'resume')).toBe(false);
+  });
 });
 
 describe('workflow and step states (§11.2)', () => {

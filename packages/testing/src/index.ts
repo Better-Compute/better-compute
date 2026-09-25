@@ -160,6 +160,7 @@ export {
   type FakeDomain,
   type FakeDomainState,
   type FakeHypervisorOptions,
+  type FakeSnapshot,
   type InstancesConvergeResult,
   type UserDataFetch,
 } from './daemon/instances.js';

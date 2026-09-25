@@ -456,14 +456,18 @@ export const instanceStates = [
   'deleted',
   'error',
   'lost',
+  // (v0.5, sandboxes §3.7) vCPUs stopped, memory resident: a warm-pool instance.
+  'paused',
 ] as const;
 export type InstanceState = (typeof instanceStates)[number];
-export type InstanceDesiredState = 'running' | 'stopped' | 'deleted';
+/** `paused` (v0.5) keeps a booted instance paused (sandboxes' warm pools, §3.7). */
+export type InstanceDesiredState = 'running' | 'stopped' | 'deleted' | 'paused';
 
 /**
  * `complete` finishes the current phase (scheduled, provisioned, started, rebooted, resized, deleted);
  * a finished resize names `running` or `stopped`. `lose` follows the host's loss; `recover` is the
- * host reporting the instance again, and `recreate` places it anew per pool policy.
+ * host reporting the instance again, and `recreate` places it anew per pool policy. `pause` and
+ * `resume` (v0.5) follow the runtime's report: a paused instance keeps its host and allocation.
  */
 export const instanceVerbs = [
   'schedule',
@@ -477,6 +481,8 @@ export const instanceVerbs = [
   'lose',
   'recover',
   'recreate',
+  'pause',
+  'resume',
 ] as const;
 export type InstanceVerb = (typeof instanceVerbs)[number];
 
@@ -495,6 +501,14 @@ export const instanceStateTable = defineStateTable<InstanceState, InstanceVerb>(
       stop: 'stopped',
       reboot: 'rebooting',
       resize: 'resizing',
+      pause: 'paused',
+      fail: 'error',
+      delete: 'deleting',
+      lose: 'lost',
+    },
+    paused: {
+      resume: 'running',
+      stop: 'stopped',
       fail: 'error',
       delete: 'deleting',
       lose: 'lost',
@@ -516,7 +530,11 @@ export const instanceStateTable = defineStateTable<InstanceState, InstanceVerb>(
     deleting: { complete: 'deleted', fail: 'error' },
     deleted: {},
     error: { start: 'starting', delete: 'deleting', lose: 'lost' },
-    lost: { recover: ['running', 'stopped'], recreate: 'scheduling', delete: 'deleting' },
+    lost: {
+      recover: ['running', 'stopped', 'paused'],
+      recreate: 'scheduling',
+      delete: 'deleting',
+    },
   },
 });
 

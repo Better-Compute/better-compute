@@ -582,6 +582,12 @@ export interface InstanceSpec {
   allocationId?: string;
   /** NICs with their IPAM addresses (CIDR form), in the guest's interface order. */
   nics?: InstanceNicSpec[];
+  /**
+   * (v0.5, sandboxes §3.7) Boot from this snapshot (an `instance.snapshot` upload) instead of
+   * `image`: disk and, when captured, memory. The host verifies `sha256` and fails the instance on
+   * a runtime or CPU model mismatch.
+   */
+  restoreFrom?: { url: string; sha256: string; imageId: string };
 }
 /** One instance NIC: the host bridge or network, its MAC and its IPAM addresses. */
 export interface InstanceNicSpec {

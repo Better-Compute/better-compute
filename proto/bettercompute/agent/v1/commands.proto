@@ -276,3 +276,30 @@ message DriverInvokeResult {
   // The operation's JSON result (bcx InvokeResponse.result_json).
   string result_json = 1;
 }
+
+// ---------------------------------------------------------------------------------------------
+// instance.snapshot (v0.5, sandboxes §3.7): lane bulk, NOT retry-safe (a second run uploads a new
+// state). The runtime captures the instance's disk and memory state (pausing it for the capture)
+// and bcd uploads it to a presigned URL, like logs.collect: state never crosses the session (P8).
+// A runtime without snapshot support fails the command with UNSUPPORTED.
+
+message InstanceSnapshotRequest {
+  string instance_id = 1;
+  // Presigned HTTPS PUT URL.
+  string upload_url = 2;
+  repeated HttpHeader upload_headers = 3;
+  // The snapshot image id the control plane registers the upload under.
+  string image_id = 4;
+  // Include the memory state (a restorable running snapshot); false: disk only.
+  bool include_memory = 5;
+}
+
+message InstanceSnapshotResult {
+  uint64 uploaded_bytes = 1;
+  // SHA-256 of the uploaded object; restoring verifies it (InstanceSpec.restore_from.sha256).
+  bytes sha256 = 2;
+  // The runtime that wrote it; a restore needs the same runtime.
+  string runtime = 3;
+  // The host CPU model the memory state depends on (bc.dev/cpu.model), empty for disk only.
+  string cpu_model = 4;
+}
