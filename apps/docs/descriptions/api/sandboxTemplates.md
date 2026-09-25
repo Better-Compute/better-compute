@@ -27,7 +27,7 @@ A deleted template, or one of another tenant, is `NOT_FOUND`.
 
 Changes a template's flavor, image, user data, TTL bounds or warm pool; returns the template with its version raised.
 
-The pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`.
+The pool, name and runtime stay. A new `flavor` or `imageId` is checked against the pool as on `create`, and the pool must still run the template's runtime (`INVALID_INPUT`). Omitted fields keep their values, `userData: null` removes the user data, and `warm` replaces the warm pool, `max` again defaulting to `min`. A `defaultTtlSeconds` above `maxTtlSeconds` after the change is `INVALID_INPUT`. A deleted or missing template is `NOT_FOUND`. The secrets the template references are decided with the update; if another change added secret references while this one was decided, it is `CONFLICT` with `details.reason: 'secrets-changed'`: retry, and the new references are decided too.
 
 Sandboxes that exist keep their instances, and warm instances already created stay claimable with the shape they were created with; new sandboxes and warm refills use the new values. A lower `warm.max` makes the reconciler delete the excess. Publishes no event.
 
