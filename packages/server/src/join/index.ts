@@ -9,6 +9,8 @@ export type {
   JoinTrustBundle,
 } from './crypto.js';
 export { gatewayReportHandlers } from './gateway-reports.js';
+export { pkiAllocationBindingCheck } from './allocation-binding.js';
+export type { PkiAllocationBindingCheckOptions } from './allocation-binding.js';
 export type { GatewayReportContext, GatewayReportHandlers } from './gateway-reports.js';
 export { createGatewayServices } from './gateway-services.js';
 export { createSecretBroker, maxSecretTtlSeconds } from './secret-broker.js';

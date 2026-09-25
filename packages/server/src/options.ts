@@ -25,6 +25,7 @@ import {
 } from '@better-compute/core';
 import type { CapacityModuleOptions } from '@better-compute/capacity';
 import { localSealedSecretStore, type CommandSigningAuthority } from '@better-compute/pki';
+import { pkiAllocationBindingCheck } from './join/allocation-binding.js';
 import type { JoinCrypto, JoinTrustBundle } from './join/crypto.js';
 import { createCommandSigner, type CommandSigner } from './runtime/command-signing.js';
 import type { TunnelsOptions } from './tunnels/module.js';
@@ -370,6 +371,9 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
   const clock = options.clock ?? anchoredClock();
   const worker = resolveWorker(options.worker);
   const signing = resolveCommandSigning(options.pki, worker.id, clock);
+  // Signed intent on: bindings count only once the node's own signature over them verifies (P14).
+  if (capacity.attestedBindings === undefined && signing.commandSigner)
+    capacity.attestedBindings = pkiAllocationBindingCheck({ now: () => clock.now() });
 
   return {
     database: hooks.database,

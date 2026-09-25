@@ -18,6 +18,11 @@ import type {
 export interface GatewayReportContext {
   nodeId: string;
   work: WorkQueue;
+  /**
+   * The signed envelope as received (AttestedReport body bytes + node_sig), for attested events:
+   * capacity stores it and, with `attestedBindings`, verifies it before `active` (P14).
+   */
+  attested?: { body: Uint8Array; kid: string; sig: Uint8Array };
 }
 
 /** `createGateway({ reports })` for the built-in capacity module. */
@@ -50,12 +55,18 @@ export interface GatewayReportHandlers {
  * ```
  */
 export const gatewayReportHandlers: GatewayReportHandlers = Object.freeze({
-  allocationBound: async (tx: SqlTx, context: GatewayReportContext, report: AllocationBound) =>
-    (await onReportingNode(tx, context, report.allocationId)) &&
-    markAllocationBound(tx, context.work, report.allocationId, {
-      cdiDevices: report.cdiDevices,
-      ...(report.envFile ? { envFile: report.envFile } : {}),
-    }),
+  // capacity refuses another node's allocation itself (`nodeId`) and keeps the signed envelope.
+  allocationBound: (tx: SqlTx, context: GatewayReportContext, report: AllocationBound) =>
+    markAllocationBound(
+      tx,
+      context.work,
+      report.allocationId,
+      {
+        cdiDevices: report.cdiDevices,
+        ...(report.envFile ? { envFile: report.envFile } : {}),
+      },
+      { nodeId: context.nodeId, ...(context.attested ? { evidence: context.attested } : {}) },
+    ),
   allocationReleased: async (
     tx: SqlTx,
     context: GatewayReportContext,
