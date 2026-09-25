@@ -504,11 +504,20 @@ export async function reportInstances(
   return { updated, orphans: orphans.sort() };
 }
 
+/** The host bridge hosted instances' NIC attaches to, unless `vps({ hostNetwork })` names another. */
+export const defaultHostNetwork = 'br0';
+
 /**
  * The `instances` section of a hosted node's spec (§7.3): every live instance placed there, with the
- * image it boots and its GPU atoms; deleting instances are sent as `desiredState: 'deleted'`.
+ * image it boots, its GPU atoms, its allocation (the host names it to fetch the user data) and one
+ * NIC with its IPAM address and a stable locally administered MAC; deleting instances are sent as
+ * `desiredState: 'deleted'`.
  */
-export async function instanceSpecs(tx: SqlTx, nodeId: string): Promise<InstanceSpec[]> {
+export async function instanceSpecs(
+  tx: SqlTx,
+  nodeId: string,
+  options: { network?: string } = {},
+): Promise<InstanceSpec[]> {
   const { rows } = await tx.query<{
     id: string;
     state: InstanceState;
@@ -518,14 +527,24 @@ export async function instanceSpecs(tx: SqlTx, nodeId: string): Promise<Instance
     image: { url: string; sha256: string; format: 'raw' | 'qcow2' | 'iso' } | string | null;
     user_data: string | null;
     ssh_keys: string[];
+    allocation_id: string | null;
     atoms: string[] | null;
+    address: string | null;
+    mac: string;
   }>(
-    `SELECT i.id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys, a.atoms
-       FROM instances i LEFT JOIN allocations a ON a.id = i.allocation_id
+    `SELECT i.id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
+            i.allocation_id, a.atoms, host(l.address) || '/' || masklen(p.cidr) AS address,
+            regexp_replace('02' || substr(encode(sha256(convert_to(i.id, 'UTF8')), 'hex'), 1, 10),
+                           '(..)(?=.)', '\\1:', 'g') AS mac
+       FROM instances i
+       LEFT JOIN allocations a ON a.id = i.allocation_id
+       LEFT JOIN ip_leases l ON l.instance_id = i.id
+       LEFT JOIN ip_pools p ON p.pool_id = l.pool_id
       WHERE i.node_id = $1 AND i.state NOT IN ('deleted', 'pending', 'scheduling') AND NOT i.draft
       ORDER BY i.id`,
     [nodeId],
   );
+  const network = options.network ?? defaultHostNetwork;
   return rows.flatMap((row) => {
     const image = typeof row.image === 'string' ? JSON.parse(row.image) : row.image;
     if (!image) return [];
@@ -548,6 +567,8 @@ export async function instanceSpecs(tx: SqlTx, nodeId: string): Promise<Instance
       }),
     };
     if (row.atoms && row.atoms.length > 0) spec.deviceIds = [...row.atoms];
+    if (row.allocation_id) spec.allocationId = row.allocation_id;
+    spec.nics = [{ network, mac: row.mac, addresses: row.address ? [row.address] : [] }];
     return [spec];
   });
 }

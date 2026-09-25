@@ -464,6 +464,14 @@ describe('hosted instances', () => {
           format: 'qcow2',
         },
         userData: expect.stringContaining(KEY),
+        allocationId: created.allocationId,
+        nics: [
+          {
+            network: 'br0',
+            mac: expect.stringMatching(/^02(:[0-9a-f]{2}){5}$/),
+            addresses: [expect.stringMatching(/^10\.0\.0\.2\/\d+$/)],
+          },
+        ],
       },
     ]);
 

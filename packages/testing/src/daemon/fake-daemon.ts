@@ -3,6 +3,8 @@ import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/p
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
 import { isComputeError } from '@better-compute/core';
 import {
+  createSecretRequest,
+  openSecretResponse,
   signAttestedReport,
   signCommandUpdate,
   verifyCommand,
@@ -49,7 +51,8 @@ import {
   type Command,
   type CommandBody,
   type CommandUpdate,
-  type ConditionSchema,
+  ConditionSchema,
+  type Condition,
   type DesiredState,
   type DevicesSection,
   type DriverManifestSchema,
@@ -68,6 +71,7 @@ import type { AgentConn, CloseInfo } from '../frame-conn.js';
 import { createRng, type Rng } from '../rng.js';
 import type { Scheduler, Timer } from '../scheduler.js';
 import type { DaemonFact, FactSink } from './facts.js';
+import { FakeHypervisor, type FakeHypervisorOptions, type UserDataFetch } from './instances.js';
 import {
   newTunnelJtiCache,
   startTunnel,
@@ -167,6 +171,12 @@ export interface FakeDaemonOptions {
     version?: bigint;
     trustSigner?: SignerTrust;
   };
+  /**
+   * A VPS host (v0.3): the `instances` section is converged on a fake hypervisor (options, or one
+   * the test holds), user data is fetched with SecretRequests signed by `nodeKey`, and every
+   * StatusReport lists the runtimes' whole inventory. Without it the section is UNSUPPORTED.
+   */
+  instances?: FakeHypervisorOptions | FakeHypervisor;
 }
 
 interface Session {
@@ -288,6 +298,10 @@ export class FakeDaemon {
   readonly tunnelOutcomes: TunnelOutcome[] = [];
   /** The daemon's jti set (survives reconnects, like bcd's in-memory set). */
   private readonly tunnelJti: ReplayCache;
+  /** The VPS host's runtimes (`instances` option); they outlive daemon crashes. */
+  readonly hypervisor: FakeHypervisor | undefined;
+  /** SecretRequests in flight: request id → the ref and the one-time key that opens the answer. */
+  private readonly secretRequests = new Map<string, { ref: string; key: KeyObject }>();
 
   private readonly scheduler: Scheduler;
   private readonly rng: Rng;
@@ -305,6 +319,8 @@ export class FakeDaemon {
   private stateValue: FakeDaemonState = 'stopped';
   private revokedValue = false;
   private proc: Process | undefined;
+  /** XIDs injected with `injectXid`, for the boot they happened in. */
+  private faults: { bootId: string; conditions: Condition[] } | undefined;
   private rebootTimer: Timer | undefined;
   private readonly hooks: RuleHooks = {
     rebootedPayload: (entry) =>
@@ -336,6 +352,12 @@ export class FakeDaemon {
     this.journalValue = this.newJournal();
     this.nodeKey = options.nodeKey;
     this.tunnelJti = options.tunnels?.jtiCache ?? newTunnelJtiCache();
+    this.hypervisor =
+      options.instances instanceof FakeHypervisor
+        ? options.instances
+        : options.instances
+          ? new FakeHypervisor(options.instances)
+          : undefined;
   }
 
   // ---- observation ------------------------------------------------------------------------------
@@ -496,6 +518,7 @@ export class FakeDaemon {
     this.crash(options.reason ?? 'reboot');
     this.bootIdValue = this.rng.uuid();
     for (const path of [...this.fs.keys()]) if (path.startsWith('/run/')) this.fs.delete(path);
+    this.hypervisor?.powerLoss();
     if (options.loseJournal) this.loseJournal();
     this.stateValue = 'rebooting';
     this.log('node.reboot', { boot: this.bootIdValue });
@@ -565,6 +588,32 @@ export class FakeDaemon {
     if (session) this.dropSession(session, reason);
   }
 
+  /**
+   * Sim: NVML reports XID `xid` on `gpuUuid`. It is reported as an active device condition `Xid<n>` in every
+   * StatusReport of this boot (a reboot clears it, as bcd's kmsg/NVML state does); the current one is re-sent now.
+   */
+  injectXid(gpuUuid: string, xid: number, message = `Xid ${xid}`): void {
+    const proc = this.requireProcess();
+    if (this.faults?.bootId !== this.bootIdValue) this.faults = { bootId: this.bootIdValue, conditions: [] };
+    const condition = create(ConditionSchema, {
+      type: `Xid${xid}`,
+      status: ConditionStatus.TRUE,
+      deviceId: gpuUuid,
+      reason: `Xid${xid}`,
+      message,
+    });
+    this.faults.conditions.push(condition);
+    if (proc.lastStatus) {
+      const conditions: MessageInitShape<typeof ConditionSchema>[] = [...(proc.lastStatus.conditions ?? []), condition];
+      proc.lastStatus = { ...proc.lastStatus, conditions } as MessageInitShape<typeof StatusReportSchema>;
+      this.sendStatus();
+    }
+  }
+
+  private activeFaults(): Condition[] {
+    return this.faults?.bootId === this.bootIdValue ? this.faults.conditions : [];
+  }
+
   /** Journals a metric-like event (droppable when the journal is full). Sim-only: v1 Events carry no metric body. */
   emitMetric(kind = 'metric.sample'): void {
     this.requireProcess();
@@ -592,8 +641,19 @@ export class FakeDaemon {
         sections.push({ section: name, state: SectionState.CONVERGED, generation: BigInt(generation) });
       else unsupported(name, SECTION_FIELD[name]!);
     };
+    let instances: ReturnType<FakeHypervisor['converge']> | undefined;
     for (const name of SECTION_ORDER) {
-      if (name === 'devices') {
+      if (name === 'instances' && this.hypervisor) {
+        instances = this.hypervisor.converge(spec.instances, (request) => this.fetchUserData(request));
+        if (instances.state === SectionState.PROGRESSING) progressing = true;
+        sections.push({
+          section: 'instances',
+          generation: BigInt(generation),
+          state: instances.state,
+          ...(instances.reason ? { reason: instances.reason } : {}),
+          ...(instances.message ? { message: instances.message } : {}),
+        });
+      } else if (name === 'devices') {
         const report = this.convergeDevices(spec.devices, generation);
         if (report.state === SectionState.PROGRESSING) progressing = true;
         sections.push({ section: 'devices', generation: BigInt(generation), ...report });
@@ -611,7 +671,8 @@ export class FakeDaemon {
       appliedGeneration: BigInt(generation),
       appliedSpecHash: this.journalValue.spec()?.hash ?? new Uint8Array(),
       sections,
-      conditions,
+      conditions: [...conditions, ...this.activeFaults()],
+      ...(instances ? { instances: instances.statuses, instancesComplete: true } : {}),
     };
     this.log('converge', { cause, generation, observed: proc.observedGeneration, progressing });
     this.sendStatus();
@@ -744,6 +805,29 @@ export class FakeDaemon {
         this.revokedValue = true;
         session.conn.close('revoked');
         return;
+      case 'secret': {
+        const pending = this.secretRequests.get(msg.value.requestId);
+        if (!pending || !this.hypervisor) {
+          this.log('frame.ignored', { case: 'secret', why: 'unknown request' });
+          return;
+        }
+        this.secretRequests.delete(msg.value.requestId);
+        try {
+          const value = openSecretResponse(msg.value, pending.key, {
+            ref: pending.ref,
+            requestId: msg.value.requestId,
+            now: this.serverNow(),
+          });
+          this.hypervisor.provideUserData(pending.ref, { value });
+          this.log('secret.received', { ref: pending.ref });
+        } catch (error) {
+          const refusal = isComputeError(error) ? String(error.details?.refusal ?? error.message) : String(error);
+          this.hypervisor.provideUserData(pending.ref, { error: refusal });
+          this.log('secret.refused', { ref: pending.ref, refusal });
+        }
+        this.converge('user-data');
+        return;
+      }
       case 'openTunnel': {
         const tunnels = this.options.tunnels;
         if (!tunnels) {
@@ -809,6 +893,9 @@ export class FakeDaemon {
     this.sendInventory(proc.collected.sections.filter((s) => wanted.has(s.name)));
     this.sendUnackedEvents(session);
     this.sendStatus();
+    // User-data fetches that went out on a closed session are asked again on this one.
+    this.secretRequests.clear();
+    if (this.hypervisor?.retryFetches() && proc.spec) this.converge('welcome');
     const beat = () => {
       if (proc.session !== session || session.conn.closed) return;
       this.heartbeat(session);
@@ -1347,6 +1434,23 @@ export class FakeDaemon {
       });
       this.send(session, { case: 'events', value: { journalId, events: batch } } as AgentFrame['msg']);
     }
+  }
+
+  /**
+   * Sends a SecretRequest for an instance's user data (signed with the node key, bound to its
+   * allocation); false while it cannot (no session yet, or no node key to sign with).
+   */
+  private fetchUserData(request: UserDataFetch): boolean {
+    const session = this.proc?.session;
+    if (!session?.welcomed || session.conn.closed || !this.nodeKey) return false;
+    const { request: frame, ephemeralKey } = createSecretRequest({
+      nodeKey: this.nodeKey,
+      ref: request.ref,
+      ...(request.allocationId ? { allocationId: request.allocationId } : {}),
+    });
+    this.secretRequests.set(frame.requestId, { ref: request.ref, key: ephemeralKey });
+    this.log('secret.request', { ref: request.ref, instance: request.instanceId });
+    return this.send(session, { case: 'secretRequest', value: frame });
   }
 
   private sendStatus(): void {

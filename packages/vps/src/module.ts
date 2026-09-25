@@ -83,6 +83,8 @@ export interface VpsOptions {
   hostReserve?: Partial<HostReserve>;
   /** How often host capacity is re-derived from inventory (default `30s`). */
   hostSyncEvery?: Duration;
+  /** The host bridge hosted instances' NIC attaches to (default `br0`). */
+  hostNetwork?: string;
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -214,6 +216,8 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     runtimeTable.set(runtime, traits);
   }
   const reserve = hostReserve(options.hostReserve);
+  if (options.hostNetwork !== undefined && !/^[A-Za-z0-9_.-]{1,15}$/.test(options.hostNetwork))
+    throw new ComputeError('INVALID_CONFIG', 'vps({ hostNetwork }) must be an interface name');
   const providers = new Map<string, ProviderDefinition>();
   for (const provider of options.providers ?? []) {
     if (provider?.extension !== 'provider')
@@ -507,7 +511,11 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       },
     ],
     async nodeSpec(context, node) {
-      const instances = await instanceSpecs(context.sql, node.id);
+      const instances = await instanceSpecs(
+        context.sql,
+        node.id,
+        options.hostNetwork ? { network: options.hostNetwork } : {},
+      );
       return instances.length > 0 ? { instances } : {};
     },
   });
