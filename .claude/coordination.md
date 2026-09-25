@@ -19,7 +19,8 @@ Several Claude sessions and workflow agents may edit this tree at once. Rules:
   `& "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.5\resources\app\git\cmd\git.exe" <args>`.
 - The global pnpm is 12.x and refuses workspaces pinned to `pnpm@11.19.0`. Run the pinned copy:
   `node node_modules/pnpm/bin/pnpm.mjs <args>` (scripts use `runPnpm` from `scripts/tooling.mjs`).
-- Go is not installed yet (PLAN.md D1); `daemon/` is written but unbuilt until it is.
+- Go go1.27.1 is installed at `C:\Program Files\Go\bin\go.exe` (not on PATH for every shell; call it by full
+  path). `node scripts/daemon-proto-gen.mjs` regenerates `daemon/gen`.
 - Docker is not running; PGlite (PostgreSQL 18, `btree_gist` verified) is the local database. Postgres-only
   suites skip unless `BETTER_COMPUTE_POSTGRES_URL` is set.
 
@@ -127,12 +128,25 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   statements (ff90b8a); supportBundles (fb4a7e2); projects.archive/commands.cancel/usage.export (a567c87); core/proto
   asks: d4a11b9, 7ed9a9b, 0e37c3e, 2e041c2, da404a8, b20a3a1; decision ae3134f (cert role in Subject OU, no private
   OIDs: Go cannot parse the 2.25 arc) → [402c97] implements. Tools: scripts/private-commit.mjs, scripts/head-check.mjs.
-- W1 Go daemon: [6a20b8] (= ex-[016b7b]); Go go1.27.1 is installed.
-- OPEN cross-owner items ([f85da7], keep current): tenant reaction §12.8 (suspend/teardown; [31c64a], design in
-  their thread); tests/sim/nightly.test.ts red at clean HEAD 7e6bd3c ([31c64a]); vps instances.create should adopt
-  `poll` for async-with-wait like reservations (252a69b) ([6a20b8] after W1); capacity validators → structured
-  issues + `validate.jsonSchema` for the API reference ([097b34], queued); modules' `tenantDeleted` hooks once
-  [31c64a]'s core hook lands ([097b34] capacity, [6a20b8] vps); D24 sandboxes = user decision (PLAN §17).
+- W1 Go daemon: [6a20b8] (= ex-[016b7b]); Go go1.27.1 is installed. Landed: c739e54, 91d2491 (node agent, bcd
+  join/node), 485d95b (real bcd e2e tests/e2e/bcd.test.ts on externalTls, BCD_E2E=1 on Windows/WSL; host
+  inventory.Collector; server-time high-water mark per [402c97]), e3dd05b (logs.collect + redaction), a4c305b (bcd
+  status socket), 20e6a84 (access converger: sshd CA/principals/native KRL), bd9eaf4 (tunnels: ticket re-verify,
+  PTY console, ssh/tcp; e2e through the real gateway), 1a7f0b7 (SecretRequest/WorkloadTokenRequest), 86c582d (XIDs
+  from kmsg → Xid<n> conditions; PSI/steal pressure), ab3e493 (gpu.reset). README → [097b34]. Next: ramdisk mode.
+- OPEN cross-owner items ([f85da7], keep current):
+  - nightly sim I8 ("billed 0 atom-ms but booked") red at clean HEAD: [31c64a], with [f02367] helping.
+  - Sandboxes (D24, user said yes): PLAN §3.7 (e645a4d); the `sandboxes` group on vps() is [097b34]'s. They ping
+    [f85da7] before the step 5 proto seams (desired_state PAUSED, restore_from, instance.snapshot).
+  - trust_version (c85e68d proto): node_sessions column [f02367] → gateway writes it [c321a3] → bcd/FakeDaemon
+    report + `pki rotate-command-root --stage switch` check [402c97].
+  - Input schemas: core `describedBy` + the jsonSchema of server/fleet/rollout/vps validators ([c321a3]).
+  - vps tenantDeleted hook ([6a20b8]/[097b34]).
+  - iamGuard (§8.1): `BETTER_COMPUTE_IAM_GUARD=warn|throw`, or `iamGuard` in options ([f85da7]); a full guarded run
+    is in progress.
+  - DONE this round: tenancy §12.8 (ae9a7bb); vps instances.create wait + budget check (32c25ae); wake edge on
+    dedicated nodes (9093323); ramdisk allowed kinds (464788a); capacity jsonSchema (45e9685); PoolIndex lazy load
+    (7e52552).
 
 - [31c64a] round 4: orphan iam streams done (09e6514: agentStreamCloser/gatewayStreamCloser), bench results (e06ec34);
   v0.4 sim scenarios gateway-kill/zombie/DB failover/10-min partition (8878e99, ControlPlaneSim.failDatabase/
@@ -170,7 +184,13 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   partitions + a default one, PKs gained the time column; retentionModule keeps months ahead and prunes superseded
   inventory (180 d), opt-in usage, settled commands (30 d) and uncursored authz_changes (1 d) (7e33342); exit gaps DONE:
   deploy-time image signature re-check (58c737f), standby takes over boot mid-PXE (0ff3f37: awaitCommand `reroutable`
-  for site-relayed BMC commands); `driver.invoke` kind registered in provisionModule (5043442).
+  for site-relayed BMC commands); `driver.invoke` kind registered in provisionModule (5043442). Later: set-based
+  inventory ingest/apply + recordInventoryHashesMany (7d3c343, 154b176, 7effda6, eceb07a: ≤1 inventory statement per
+  join); hygiene sweep DriverMismatch/CertExpiring/DaemonOutdated + host pressure (0cf7c80); MIG layout gate
+  provision/0004 + workflows.pause/resume (037608b); site cache pre-warm `site.cacheImages` (a0d7b73); metal.unrescue
+  (23cbc24); "ready only after a trusted wipe" property (7368ac9); history conformance (835f4e0); doctor findings for
+  retention/provision/metal (e0f802b, b333462); health edges wake capacity reservations (6f19d5d). HEAD green for my
+  suites at eceb07a (420 tests).
 
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
@@ -187,7 +207,7 @@ owner before touching their files. Ask [56cfd7] for anything marked "orchestrato
 | W5a Server runtime + envelope + API groups + JoinService (§3.3-3.4, §8, §9.2 v0.1 rows) and additive `core` contract changes | orchestrator [56cfd7] | `packages/server/**`, `packages/core/**`, `tests/{server,core}-*.test.ts` |
 | W5b Testing kit: `FakeDaemon`, deterministic fleet-sim, real-time harness, `computeFixture` with embedded IAM | orchestrator [56cfd7] ([82e975] declined: it works on better-iam) | `packages/testing/**`, `tests/{testing,sim,realtime}*` |
 | W5c CLI (`pki init/issue-gateway/show`, `daemon install-script`, `iam setup`, then `dev`, `serve` after W5a) | [9ec62d] (after PKI, committed 4fe85b7) | `packages/cli/**`, `tests/cli-*.test.ts` |
-| W1 Go daemon | blocked: Go is not installed (user decision pending) | `daemon/**` |
+| W1 Go daemon | [6a20b8] (Go installed; see round 4) | `daemon/**` |
 
 Rules for v0.1:
 - New packages: the owner adds its manifest, tsconfig, README, LICENSE copy, and one-line inserts in root
