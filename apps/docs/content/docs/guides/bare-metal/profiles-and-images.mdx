@@ -208,8 +208,8 @@ configuration. `userdata.render` builds that configuration from the profile's `u
    `deploy.deploy` passes the reference, and the ramdisk fetches the document with a SecretRequest.
 
 Two templates ship: `bcd-host.yaml.hbs` (cloud-init) and `bcd-host.ign` (Ignition 3.4.0, built as
-JSON so values cannot change its structure). The cloud-init one writes the token to a 0600 file,
-downloads `bcd`, checks its digest and joins:
+JSON so values cannot change its structure). The cloud-init one writes the token to a 0600 file and a
+`bcd.service` unit, downloads `bcd`, checks its digest, joins, then starts the node agent:
 
 ```yaml title="bcd-host.yaml.hbs"
 #cloud-config
@@ -218,17 +218,39 @@ write_files:
   - path: /etc/bcd/join-token
     permissions: '0600'
     content: {{joinToken}}
+  - path: /etc/systemd/system/bcd.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=better-compute node agent
+      After=network-online.target bcd-join.service
+      Wants=network-online.target
+      [Service]
+      ExecStart=/usr/local/bin/bcd node
+      Restart=always
+      RestartSec=5
+      [Install]
+      WantedBy=multi-user.target
 runcmd:
   - [sh, -c, "curl -fsSL {{bcdUrl}} -o /usr/local/bin/bcd && echo '{{bcdSha256}}  /usr/local/bin/bcd' | sha256sum -c - && chmod 0755 /usr/local/bin/bcd"]
-  - [/usr/local/bin/bcd, join, --server, {{controlPlaneUrl}}, --node-id, {{nodeId}}, --token-file, /etc/bcd/join-token]
+  - [/usr/local/bin/bcd, join, --server, {{controlPlaneUrl}}, --token-file, /etc/bcd/join-token, --node-id, {{nodeId}}]
+  - [systemctl, enable, --now, bcd.service]
 ```
 
-<Callout type="warn" title="The shipped templates do not match bcd's flags">
-The Go `bcd join` takes only `--config` and `--role`, reads the token from `BCD_JOIN_TOKEN` or standard input, and
-needs a `config.toml` and `join-encryption.jwk` (see [installing bcd](/docs/daemon/install)). Both shipped templates
-call `bcd join --server ... --node-id ... --token-file ...`, which bcd rejects as a usage error, and write no
-`config.toml`. Until they are brought in line, supply your own template for machines that run the real bcd.
-</Callout>
+The Ignition one does the same with two units: `bcd-join.service`, a oneshot that runs only while the token file
+exists, and `bcd.service` after it. Both run exactly `bcdJoinArgv()` and `bcdNodeArgv()` (exported from
+`@better-compute/provision`), which bcd's own tests check against its flags:
+
+- `bcd join --server URL --token-file PATH --node-id ID` joins with the `provisioned` token and removes the file once
+  joined. bcd refuses an identity other than the node the OS was installed for, and `--server` supplies the join
+  encryption key from the control plane's well-known document when `join-encryption.jwk` is absent (it must match
+  the pinned key).
+- The ramdisk's `deploy.image` installs its pinned `config.toml` and `join-encryption.jwk` into the OS it wrote, so
+  `bcd node` finds its configuration at the default path.
+
+`controlPlaneUrl` and `bcdUrl` must be http(s) URLs without spaces, quotes, commas, brackets or `%`, and `bcdSha256`
+64 lower-case hex digits, so each stays a single argument. `provisionModule` refuses anything else with
+`INVALID_CONFIG`.
 
 - Configure it with `provisionModule({ userData: { controlPlaneUrl, bcdUrl, bcdSha256, templates?, tokenTtlSeconds? } })`.
   Without the three URLs and the digest, rendering fails with `INVALID_CONFIG`.
