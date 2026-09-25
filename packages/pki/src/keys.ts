@@ -9,13 +9,16 @@ import {
 import { ComputeError } from '@better-compute/core';
 
 /**
- * better-compute's private OID arc: `2.25.<uuid>` (ITU-T X.667), which needs no registration.
- * `.1.1` is the role extension on agent certificates.
+ * better-compute's private OID arc: `2.25.<uuid>` (ITU-T X.667). No longer written into certificates: Go's
+ * crypto/x509 cannot parse OID arcs beyond int, so roles moved to `OU=bc-role:<role>` (x509.ts `rolePrefix`).
  */
 export const oidArc = '2.25.121396728463777788658791269357486937304';
-/** Certificate extension carrying the agent role as a UTF8String (`node`, `site`, `ramdisk`, …). */
+/**
+ * @deprecated Read-only compatibility: the role extension of certificates issued before the OU form; parsers
+ * still read it for one release, nothing writes it.
+ */
 export const roleExtensionOid = `${oidArc}.1.1`;
-/** Extended key usage of worker keys that sign commands and desired state (§13). */
+/** @deprecated No longer issued or checked: a command signer is a `bc-role:worker` certificate under a command-signing root. */
 export const commandSigningEkuOid = `${oidArc}.2.1`;
 
 export interface KeyPair {

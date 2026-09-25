@@ -181,8 +181,12 @@ describe('local CAs', () => {
     expect(issued.notAfter - issued.notBefore).toBe(day + 60_000);
 
     const parsed = parseCertificate(issued.certificate);
+    // The role rides in the subject (OU=bc-role:node); no private-arc OID anywhere, which Go cannot parse.
     expect(parsed.role).toBe('node');
-    expect(parsed.extensions.get(roleExtensionOid)?.critical).toBe(false);
+    expect(x509.subject).toContain('OU=bc-role:node');
+    expect(parsed.extensions.has(roleExtensionOid)).toBe(false);
+    for (const oid of [...parsed.extensions.keys(), ...parsed.extKeyUsage])
+      expect(oid.startsWith('2.25.')).toBe(false);
     expect(parsed.authorityKeyId).toEqual(ca.subjectKeyId);
     expect(ca.verify([issued.certificate, ...issued.chain], { usage: 'client' })[0]!.serial).toBe(
       issued.serial,

@@ -58,6 +58,41 @@ export interface NameInput {
   organizationalUnit?: string;
 }
 
+/**
+ * The agent role rides in the subject as `OU=bc-role:<role>` (PLAN.md §13). A private-arc extension (`2.25.<uuid>`)
+ * cannot carry it: Go's crypto/x509 refuses to parse any certificate with an OID arc beyond int, so bcd could
+ * verify neither its own certificate nor a gateway's. Readers accept the old extension for one release.
+ */
+export const rolePrefix = 'bc-role:';
+
+/** `subject` (a DER Name) with the role's OU RDN appended. */
+function withRole(subject: Uint8Array, role: string): Uint8Array {
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(role))
+    throw new ComputeError('INVALID_INPUT', 'A role is 1 to 32 of a-z 0-9 - (starting with a letter)');
+  const rdns = children(expectTag(parseDer(subject), Tag.sequence, 'subject'));
+  if (roleOf(parseDer(subject)) !== undefined)
+    throw new ComputeError('INVALID_INPUT', 'The subject already names a role');
+  return der.sequence(
+    ...rdns.map((rdn) => rdn.bytes),
+    der.set(der.sequence(der.oid(oids.organizationalUnit), der.utf8(`${rolePrefix}${role}`))),
+  );
+}
+
+/** The `bc-role:` OU of a Name, if any; two of them are malformed. */
+function roleOf(name: DerNode): string | undefined {
+  let role: string | undefined;
+  for (const rdn of children(name))
+    for (const attribute of children(rdn)) {
+      const [type, value] = children(attribute);
+      if (!type || !value || decodeOid(type) !== oids.organizationalUnit) continue;
+      const text = decodeString(value);
+      if (!text.startsWith(rolePrefix)) continue;
+      if (role !== undefined) throw malformed('two roles in the subject');
+      role = text.slice(rolePrefix.length);
+    }
+  return role;
+}
+
 /** A DER `Name` (RDNSequence) with one attribute per RDN, O then OU then CN. */
 export function distinguishedName(name: NameInput): Uint8Array {
   const rdns: Uint8Array[] = [];
@@ -95,11 +130,11 @@ export interface CertificateTemplate {
   /** A CA certificate; `pathLength` bounds the CAs below it. */
   ca?: { pathLength?: number };
   usage?: readonly ExtendedKeyUsage[];
-  /** Further extended key usages by OID (the command-signing usage). */
+  /** Further extended key usages by OID (standard ones only: Go refuses private-arc OIDs). */
   extKeyUsageOids?: readonly string[];
   uriSans?: readonly string[];
   dnsSans?: readonly string[];
-  /** The role extension (`node`, `site`, `ramdisk`, `gateway`, `internal`, …). */
+  /** The agent role (`node`, `site`, `ramdisk`, `gateway`, `internal`, `worker`, …), as `OU=bc-role:<role>`. */
   role?: string;
 }
 
@@ -117,7 +152,8 @@ export function buildCertificate(template: CertificateTemplate, signer: KeyObjec
     throw new ComputeError('INVALID_INPUT', 'notAfter must be after notBefore');
   const publicKeyInfo = spkiDer(template.publicKey);
   const extensions: Uint8Array[] = [];
-  const emptySubject = children(parseDer(template.subject)).length === 0;
+  const subject = template.role !== undefined ? withRole(template.subject, template.role) : template.subject;
+  const emptySubject = children(parseDer(subject)).length === 0;
   if (template.ca) {
     const constraints =
       template.ca.pathLength === undefined
@@ -169,15 +205,13 @@ export function buildCertificate(template: CertificateTemplate, signer: KeyObjec
         der.sequence(der.implicit(0, template.authorityKeyId)),
       ),
     );
-  if (template.role !== undefined)
-    extensions.push(extension(roleExtensionOid, false, der.utf8(template.role)));
   const tbs = der.sequence(
     der.explicit(0, der.integer(2)),
     der.integer(template.serial),
     ecdsaWithSha256(),
     template.issuer,
     der.sequence(der.time(template.notBefore), der.time(template.notAfter)),
-    template.subject,
+    subject,
     publicKeyInfo,
     der.explicit(3, der.sequence(...extensions)),
   );
@@ -282,6 +316,8 @@ export function parseCertificate(input: Uint8Array): ParsedCertificate {
   };
   const cn = commonNameOf(subject);
   if (cn !== undefined) parsed.subjectCommonName = cn;
+  const subjectRole = roleOf(subject);
+  if (subjectRole !== undefined) parsed.role = subjectRole;
   if (extensionsNode) {
     for (const node of children(
       expectTag(children(extensionsNode)[0], Tag.sequence, 'extensions'),
@@ -322,7 +358,8 @@ export function parseCertificate(input: Uint8Array): ParsedCertificate {
           break;
         }
         case roleExtensionOid:
-          parsed.role = decodeString(inner());
+          // Certificates issued before the OU form (one release of compatibility); the subject wins.
+          parsed.role ??= decodeString(inner());
           break;
       }
     }

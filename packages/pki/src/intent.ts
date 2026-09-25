@@ -18,7 +18,6 @@ import {
   type SigningPurpose,
 } from '@better-compute/protocol';
 import {
-  commandSigningEkuOid,
   fromPem,
   generateP256KeyPair,
   privateKeyPem,
@@ -137,7 +136,7 @@ export function createCommandSigningAuthority(
           notAfter,
           publicKey: pair.publicKey,
           authorityKeyId: rootKeyId,
-          extKeyUsageOids: [commandSigningEkuOid],
+          // OU=bc-role:worker is the command-signing mark (no private-arc EKU: Go cannot parse it).
           role: 'worker',
         },
         privateKey,
@@ -187,8 +186,8 @@ export function verifyIntentSignature(
   } catch (error) {
     throw denyIntent(String((error as ComputeError).details?.reason ?? 'untrusted signer'));
   }
-  if (!leaf!.extKeyUsage.includes(commandSigningEkuOid))
-    throw denyIntent('not a command-signing key');
+  // The roots are the command-signing roots only; under them, a signer is a worker (OU=bc-role:worker).
+  if (leaf!.role !== 'worker') throw denyIntent('not a command-signing key');
   let valid = false;
   try {
     valid = verify(
