@@ -137,6 +137,87 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  examples/dev:
+    dependencies:
+      '@better-compute-examples/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@better-compute/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@better-compute/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+      '@better-compute/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+
+  examples/emulated-site:
+    dependencies:
+      '@better-compute-examples/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@better-compute/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@better-compute/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+
+  examples/postgres:
+    dependencies:
+      '@better-compute-examples/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@better-compute/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@better-compute/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+
+  examples/shared:
+    dependencies:
+      '@better-compute/audit':
+        specifier: workspace:*
+        version: link:../../packages/audit
+      '@better-compute/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@better-compute/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@better-compute/events':
+        specifier: workspace:*
+        version: link:../../packages/events
+      '@better-compute/fleet':
+        specifier: workspace:*
+        version: link:../../packages/fleet
+      '@better-compute/metal':
+        specifier: workspace:*
+        version: link:../../packages/metal
+      '@better-compute/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@better-compute/pki':
+        specifier: workspace:*
+        version: link:../../packages/pki
+      '@better-compute/postgres':
+        specifier: workspace:*
+        version: link:../../packages/postgres
+      '@better-compute/provision':
+        specifier: workspace:*
+        version: link:../../packages/provision
+      '@better-compute/rollout':
+        specifier: workspace:*
+        version: link:../../packages/rollout
+      '@better-compute/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+      '@better-compute/vps':
+        specifier: workspace:*
+        version: link:../../packages/vps
+
   packages/audit:
     dependencies:
       '@better-compute/core':
@@ -262,6 +343,9 @@ importers:
       '@better-compute/inventory':
         specifier: workspace:*
         version: link:../inventory
+      '@better-compute/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@better-compute/pki':
         specifier: workspace:*
         version: link:../pki

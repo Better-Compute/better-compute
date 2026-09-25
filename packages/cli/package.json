@@ -56,6 +56,7 @@
     "@better-compute/gateway": "workspace:*",
     "@better-compute/iam": "workspace:*",
     "@better-compute/inventory": "workspace:*",
+    "@better-compute/observability": "workspace:*",
     "@better-compute/pki": "workspace:*",
     "@better-compute/postgres": "workspace:*",
     "@better-compute/server": "workspace:*"
