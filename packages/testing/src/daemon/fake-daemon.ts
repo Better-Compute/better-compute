@@ -13,6 +13,7 @@ import {
   batchSubject,
   verifyApproverSetChange,
   verifyBatchCommand,
+  verifyBatchProof,
   verifyCommand,
   verifyDesiredState,
   verifyTrustBundle,
@@ -26,6 +27,7 @@ import {
   AgentRole,
   AttestedReportBodySchema,
   Binding,
+  batchLeafInput,
   CommandErrorSchema,
   CommandRejectReason,
   CommandState,
@@ -386,7 +388,7 @@ export class FakeDaemon {
   private readonly batchVerdicts = new Map<string, 'BATCH_UNAPPROVED' | 'UNBATCHED_LIMIT'>();
   /** Unbatched destructive commands admitted: id → server time, for the rolling-hour cap. */
   private readonly unbatched = new Map<string, number>();
-  /** Batch leaves used: `<batch_id>#<leaf index>` → the command that used it (each leaf runs once). */
+  /** Batch leaves used: the leaf's hex hash → the command that used it (each leaf runs once). */
   private readonly batchLeaves = new Map<string, string>();
   /**
    * What an admitted command will use of the quorum: its batch leaf, or an unbatched slot. Recorded only when the
@@ -1243,8 +1245,23 @@ export class FakeDaemon {
           },
         );
         // Each leaf runs at most once per batch: an approval for N machines is N operations, not N
-        // kinds of operation to repeat. A redelivery of the same command keeps its leaf.
-        const leaf = `${body.batchId}#${command.batchProof!.index}`;
+        // kinds of operation to repeat. A redelivery of the same command keeps its leaf. Keyed by the
+        // leaf's hash, as bcd does (its batch_id is inside), so another approval of the same batch id
+        // with a different tree cannot move a used leaf to a fresh index.
+        const bound =
+          payloadSha256 !== undefined &&
+          verifyBatchProof({
+            batchId: body.batchId,
+            subject,
+            kind: body.kind,
+            payloadSha256,
+            proof: command.batchProof!,
+            root: command.batchApproval!.scopeRoot,
+            size: command.batchApproval!.scopeSize,
+          });
+        const leaf = createHash('sha256')
+          .update(batchLeafInput(body.batchId, subject, body.kind, bound ? payloadSha256 : undefined))
+          .digest('hex');
         const holder = this.batchLeaves.get(leaf);
         if (holder !== undefined && holder !== body.id)
           throw new ComputeError('ACCESS_DENIED', 'This batch leaf already ran', undefined, { reason: 'leaf-used' });
