@@ -64,13 +64,21 @@ const iam = betterIam({
 
 ## 5. Join machines
 
+Serve the release from this deployment (goreleaser's `dist`: the bare `bcd` binaries and the plugin archives) by
+setting `BETTER_COMPUTE_DOWNLOADS_DIR=dist` for the api role, then write the script against the signed release manifest:
+
 ```sh
 better-compute daemon install-script --pool pool_… --site site_… \
   --gateway-url https://gw.eu-1.compute.example.com:8443 --base-url https://compute.example.com \
-  --bcd-version 0.1.0 --out install.sh
+  --bcd-version 0.1.0 --release-manifest dist/manifest.json --release-pins sha256/… --out install.sh
+better-compute join-tokens create --pool pool_… --ttl 2h --max-uses 8 --out join-token
 ```
 
-The script pins the serving CA and JoinService's keys from the bundle. Give each server its join token (`better-compute api joinTokens.create …`) out of band; `bcd` only ever dials out to the gateway.
+The script pins the serving CA and JoinService's keys from the bundle, and the binary's digest from the manifest
+(verified here under the release keys, which bcd then self-updates under). Give each server the join token out of
+band (`BCD_JOIN_TOKEN` or standard input); `bcd` only ever dials out to the gateway. A site agent that drives IPMI
+BMCs also takes `--install-plugins bcx-ipmi` (the plugin archive from the same release, pinned by the manifest);
+`--unprivileged` runs `bcd node` as its own user beside a root `bcd helper`.
 
 ## 6. Operations
 

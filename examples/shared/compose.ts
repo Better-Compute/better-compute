@@ -219,7 +219,12 @@ export function everyModule(
       ? [
           rolloutModule({
             release: { pins },
-            downloadsUrl: env.BETTER_COMPUTE_DOWNLOADS_URL ?? 'https://downloads.example.com',
+            // Where nodes fetch releases: this deployment's own route when it serves them (BETTER_COMPUTE_DOWNLOADS_DIR).
+            downloadsUrl:
+              env.BETTER_COMPUTE_DOWNLOADS_URL ??
+              (env.BETTER_COMPUTE_DOWNLOADS_DIR
+                ? `${(env.BETTER_COMPUTE_BASE_URL ?? 'http://localhost:3000').replace(/\/+$/, '')}/api/compute/downloads`
+                : 'https://downloads.example.com'),
           }),
         ]
       : []),
@@ -250,6 +255,12 @@ export async function exampleOptions(
     baseURL: env.BETTER_COMPUTE_BASE_URL ?? 'http://localhost:3000',
     rootTenantId: env.BETTER_COMPUTE_ROOT_TENANT ?? 'root',
     iam,
+    // GET /api/compute/downloads/{bcd,bcx-ipmi}/{version}/linux-{arch}: goreleaser's dist directory (bare bcd
+    // binaries, plugin archives), for install scripts and self-update. Public: every artifact is checked against the
+    // signed release manifest's digest by whoever installs it.
+    ...(env.BETTER_COMPUTE_DOWNLOADS_DIR
+      ? { downloads: { dir: isAbsolute(env.BETTER_COMPUTE_DOWNLOADS_DIR) ? env.BETTER_COMPUTE_DOWNLOADS_DIR : join(cwd, env.BETTER_COMPUTE_DOWNLOADS_DIR) } }
+      : {}),
     modules: [...everyModule(secret, bundle, env, context.metal), ...(context.modules ?? [])],
     // reconcile_duration_seconds and commands_swept_total from the runtime's workers.
     worker: { observe: runtimeObserver(standard) },
