@@ -23,6 +23,7 @@ export const inventoryLabelKeys = [
   'fabric.domain',
   'cpu.arch',
   'cpu.vendor',
+  'cpu.model',
   'os.distro',
   'os.kernel',
   'kvm.available',
@@ -39,6 +40,22 @@ function one<T>(values: readonly T[]): T | typeof mixedLabelValue | undefined {
 export function majorVersion(version: string): string | undefined {
   const match = /^(\d+)(?:\.|$)/.exec(version.trim());
   return match ? match[1] : undefined;
+}
+
+/**
+ * The `cpu.model` label value of a CPU model string, as the host reports it: trademark marks
+ * dropped, every run of other characters than `A-Z a-z 0-9 . _` turned into one `-`, trimmed, at
+ * most 63 characters. `AMD EPYC 9654 96-Core Processor` → `AMD-EPYC-9654-96-Core-Processor`,
+ * `Intel(R) Xeon(R) Platinum 8480+` → `Intel-Xeon-Platinum-8480`. Memory snapshots restore only on
+ * a host whose value is equal (sandboxes normalize `InstanceSnapshotResult.cpu_model` the same way).
+ */
+export function cpuModelLabelValue(model: string): string {
+  return model
+    .replace(/\((?:r|tm)\)/gi, ' ')
+    .replace(/[^A-Za-z0-9._]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 63)
+    .replace(/[-.]+$/, '');
 }
 
 function gpuLabels(section: GpusSection | undefined, labels: Map<string, string>): void {
@@ -70,6 +87,8 @@ export function inventoryLabels(sections: InventorySections): Label[] {
   if (sections.gpus !== undefined || sections.system !== undefined) gpuLabels(sections.gpus, labels);
   if (sections.cpu?.architecture) labels.set('cpu.arch', sections.cpu.architecture);
   if (sections.cpu?.vendor) labels.set('cpu.vendor', sections.cpu.vendor);
+  const cpuModel = cpuModelLabelValue(sections.cpu?.model ?? '');
+  if (cpuModel) labels.set('cpu.model', cpuModel);
   if (sections.os?.distro) labels.set('os.distro', sections.os.distro);
   if (sections.os?.kernel) labels.set('os.kernel', sections.os.kernel);
   if (sections.os) labels.set('kvm.available', String(sections.os.kvm));

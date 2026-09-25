@@ -24,6 +24,7 @@ import {
   hardwareKey,
   hardwareKeyFromClaims,
   inventoryConditions,
+  cpuModelLabelValue,
   inventoryLabels,
   majorVersion,
   mergeNoScheduleReasons,
@@ -219,11 +220,12 @@ describe('labels and conditions', () => {
   it('derives GFD-style labels, sorted by key', () => {
     const labels = inventoryLabels({
       gpus: board(8),
-      cpu: create(CpuSectionSchema, { architecture: 'x86_64', vendor: 'AuthenticAMD' }),
+      cpu: create(CpuSectionSchema, { architecture: 'x86_64', vendor: 'AuthenticAMD', model: 'AMD EPYC 9654 96-Core Processor' }),
       os: create(OsSectionSchema, { distro: 'ubuntu', kernel: '6.8.0-45', kvm: true }),
     });
     expect(Object.fromEntries(labels.map((l) => [l.key, l.value]))).toEqual({
       'cpu.arch': 'x86_64',
+      'cpu.model': 'AMD-EPYC-9654-96-Core-Processor',
       'cpu.vendor': 'AuthenticAMD',
       'cuda.driver.major': '12',
       'gpu.count': '8',
@@ -239,6 +241,17 @@ describe('labels and conditions', () => {
     });
     expect(labels.every((l) => l.source === 'inventory')).toBe(true);
     expect(labels.map((l) => l.key)).toEqual([...labels.map((l) => l.key)].sort());
+  });
+
+  it('normalizes the CPU model into a label value', () => {
+    expect(cpuModelLabelValue('Intel(R) Xeon(R) Platinum 8480+')).toBe('Intel-Xeon-Platinum-8480');
+    expect(cpuModelLabelValue('Intel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz')).toBe('Intel-Xeon-CPU-E5-2690-v4-2.60GHz');
+    expect(cpuModelLabelValue('  Neoverse-V2 ')).toBe('Neoverse-V2');
+    expect(cpuModelLabelValue('x'.repeat(62) + ' y')).toBe('x'.repeat(62));
+    expect(cpuModelLabelValue('')).toBe('');
+    // No model reported: no label.
+    const labels = inventoryLabels({ cpu: create(CpuSectionSchema, { architecture: 'arm64' }) });
+    expect(labels.some((l) => l.key === 'cpu.model')).toBe(false);
   });
 
   it('labels mixed boards as mixed', () => {

@@ -194,8 +194,11 @@ raises `DuplicateIdentity`.
 
 Inventory also writes node labels with source `inventory`, the way NVIDIA's GPU Feature Discovery does:
 `gpu.present`, `gpu.count`, `gpu.product`, `gpu.model`, `gpu.vramGiB`, `cuda.driver.major`,
-`nvidia.driver.version`, `mig.capable`, `fabric.domain`, `cpu.arch`, `cpu.vendor`, `os.distro`, `os.kernel` and
-`kvm.available`. A label whose GPUs disagree reads `mixed`. `nodes.label` cannot overwrite them.
+`nvidia.driver.version`, `mig.capable`, `fabric.domain`, `cpu.arch`, `cpu.vendor`, `cpu.model`, `os.distro`,
+`os.kernel` and `kvm.available`. A label whose GPUs disagree reads `mixed`. `nodes.label` cannot overwrite them.
+`cpu.model` is the reported model with trademark marks dropped and every other run of characters outside
+`A-Z a-z 0-9 . _` turned into `-` (`AMD EPYC 9654 96-Core Processor` reads `AMD-EPYC-9654-96-Core-Processor`);
+sandbox memory snapshots restore only on hosts with an equal value.
 
 The gateway writes one more kind at every `Hello`: each driver the daemon advertises in `Hello.drivers` becomes
 the label `bc.dev/driver.<id>=<version>` with source `system` (a missing version reads `unknown`; ids outside
