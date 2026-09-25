@@ -71,8 +71,7 @@ function toRecord(row: AuditRow): AuditRecord {
   const admission = parsed(row.admission);
   if (admission !== null && admission !== undefined) record.admission = admission;
   const details = parsed(row.details);
-  if (details !== null && details !== undefined)
-    record.details = details as Record<string, Json>;
+  if (details !== null && details !== undefined) record.details = details as Record<string, Json>;
   return record;
 }
 

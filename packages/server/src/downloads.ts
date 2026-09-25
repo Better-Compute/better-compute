@@ -19,7 +19,8 @@ export interface DownloadsOptions {
 }
 
 /** Semantic version (an optional leading `v` is ignored), then the one supported OS and two arches. */
-const downloadPath = /^downloads\/bcd\/v?(\d{1,6}\.\d{1,6}\.\d{1,6}(?:-[0-9A-Za-z.]{1,40})?)\/(linux)-(amd64|arm64)$/;
+const downloadPath =
+  /^downloads\/bcd\/v?(\d{1,6}\.\d{1,6}\.\d{1,6}(?:-[0-9A-Za-z.]{1,40})?)\/(linux)-(amd64|arm64)$/;
 
 /** The artifact's file name for a download path, or undefined when the path is not one. */
 export function bcdArtifact(path: string): { version: string; file: string } | undefined {

@@ -30,6 +30,9 @@ export default {
 | `preview_reservation` | `capacity.preview` | `compute:pools:read` on the pool |
 | `reserve_gpus` | `reservations.create` | `compute:pools:read` on the pool |
 | `release_reservation` | `reservations.release` | any authenticated caller |
+| `list_reservations` | `reservations.list` (own by default, `scope: 'all'`) | any authenticated caller |
+| `get_reservation` | `reservations.get` | any authenticated caller |
+| `extend_reservation` | `reservations.extend` (confirmation-aware, same key on retry) | any authenticated caller |
 | `node_status` | `nodes.get` | `compute:nodes:read` on the node |
 | `run_diagnostic` | `commands.run` (`diag.nvml`) | `compute:nodes:read` on the node |
 | `create_instance` | `instances.create` | `compute:pools:read` on the pool |

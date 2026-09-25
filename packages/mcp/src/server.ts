@@ -281,6 +281,10 @@ export function gateTools(
     preview_reservation: poolRead,
     reserve_gpus: poolRead,
     release_reservation: { public: true },
+    // Compute decides each on the reservation (OwnReservations, BoundedExtend, confirmations).
+    list_reservations: { public: true },
+    get_reservation: { public: true },
+    extend_reservation: { public: true },
     node_status: nodeRead,
     run_diagnostic: nodeRead,
     create_instance: poolRead,

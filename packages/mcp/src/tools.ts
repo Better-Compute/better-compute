@@ -286,6 +286,98 @@ export function computeTools(
         }),
     },
     {
+      name: 'list_reservations',
+      title: 'List reservations',
+      description:
+        'Lists reservations in this tenant: your own by default, or every one you may see with scope "all". Filter by state or pool; pass the returned cursor for the next page.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['mine', 'all'], description: 'Default mine' },
+          state: {
+            type: 'string',
+            enum: [
+              'awaiting-confirmation',
+              'pending',
+              'placed',
+              'binding',
+              'active',
+              'releasing',
+              'released',
+              'failed',
+              'cancelled',
+              'expired',
+            ],
+            description: 'Only reservations in this state',
+          },
+          poolId: id('pool', 'Only this pool'),
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 200,
+            description: 'Page size (default 50)',
+          },
+          cursor: id('rsv', 'The cursor a previous page returned'),
+        },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('reservations/list', { tenantId: context.tenantId, ...args }),
+    },
+    {
+      name: 'get_reservation',
+      title: 'Show a reservation',
+      description:
+        'Shows one reservation: state, pool, devices, start and end, and once active the booked GPU UUIDs and CDI device names.',
+      inputSchema: {
+        type: 'object',
+        required: ['reservationId'],
+        properties: { reservationId: id('rsv', 'The reservation') },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      run: (args, context) =>
+        context.api.$request('reservations/get', {
+          tenantId: context.tenantId,
+          reservationId: args.reservationId,
+        }),
+    },
+    {
+      name: 'extend_reservation',
+      title: 'Extend a reservation',
+      description:
+        'Extends a placed or active reservation by a duration. The result says whether it was extended, or until when it can be (another booking follows). If a person must approve it, retry with the returned idempotencyKey after they do.',
+      inputSchema: {
+        type: 'object',
+        required: ['reservationId', 'by'],
+        properties: {
+          reservationId: id('rsv', 'The reservation to extend'),
+          by: duration,
+          idempotencyKey,
+        },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      async run(args, context) {
+        const key = (args.idempotencyKey as string | undefined) ?? context.newKey();
+        const extension = await withConfirmation(context, key, () =>
+          context.api.$request('reservations/extend', {
+            tenantId: context.tenantId,
+            reservationId: args.reservationId,
+            by: args.by,
+            idempotencyKey: key,
+          }),
+        );
+        return { idempotencyKey: key, extension };
+      },
+    },
+    {
       name: 'node_status',
       title: 'Show a node',
       description:

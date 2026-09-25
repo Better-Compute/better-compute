@@ -32,9 +32,10 @@ async function setup() {
        '{}', 1, 1, 1, 1, $4, 1)`,
     [NODE, SITE, root.id, shardOf(NODE)],
   );
-  await fixture.database.query('INSERT INTO node_sessions (node_id, session_epoch) VALUES ($1, 0)', [
-    NODE,
-  ]);
+  await fixture.database.query(
+    'INSERT INTO node_sessions (node_id, session_epoch) VALUES ($1, 0)',
+    [NODE],
+  );
   await fixture.database.query(
     "INSERT INTO authz_projection (type, id, tenant_id, attributes) VALUES ('node', $1, $2, '{}')",
     [NODE, root.id],
@@ -45,22 +46,25 @@ async function setup() {
 
 async function run(fixture: ComputeFixture, key: string, traceparent?: string) {
   const response = await fixture.compute.handler(
-    new Request(`${fixture.compute.endpoint.origin}${fixture.compute.endpoint.basePath}/commands/run`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-better-compute': '1',
-        authorization: `Bearer ${fixture.tenants.root.token}`,
-        ...(traceparent !== undefined ? { traceparent } : {}),
+    new Request(
+      `${fixture.compute.endpoint.origin}${fixture.compute.endpoint.basePath}/commands/run`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-better-compute': '1',
+          authorization: `Bearer ${fixture.tenants.root.token}`,
+          ...(traceparent !== undefined ? { traceparent } : {}),
+        },
+        body: JSON.stringify({
+          tenantId: fixture.tenants.root.id,
+          nodeId: NODE,
+          kind: 'inventory.refresh',
+          payload: { sections: ['gpus'] },
+          idempotencyKey: key,
+        }),
       },
-      body: JSON.stringify({
-        tenantId: fixture.tenants.root.id,
-        nodeId: NODE,
-        kind: 'inventory.refresh',
-        payload: { sections: ['gpus'] },
-        idempotencyKey: key,
-      }),
-    }),
+    ),
   );
   const { data, error } = (await response.json()) as { data?: { id: string }; error?: unknown };
   if (!data) throw new Error(`commands/run failed: ${JSON.stringify(error)}`);

@@ -9,12 +9,7 @@ import {
   createEmbeddedTestIam,
   type EmbeddedTestIam,
 } from '@better-compute/iam/testing';
-import {
-  createComputeMcp,
-  gateTools,
-  iamConfirmations,
-  remoteMcpIam,
-} from '@better-compute/mcp';
+import { createComputeMcp, gateTools, iamConfirmations, remoteMcpIam } from '@better-compute/mcp';
 import { pglite } from '@better-compute/postgres/pglite';
 import { betterCompute, type BetterCompute } from '@better-compute/server';
 
@@ -95,7 +90,7 @@ beforeAll(async () => {
       {
         effect: 'allow',
         actions: ['compute:reservations:*'],
-        resources: ['compute-reservation/*'],
+        resources: ['compute-reservation/*', 'compute-tenant/*'],
       },
     ],
   });
@@ -255,6 +250,15 @@ describe('an agent reserves GPUs over MCP with a person’s confirmation (v0.3 a
     expect(replayed.structuredContent.reservation).toMatchObject({ id: reservation.id });
     expect(await bookings()).toEqual({ reservations: 1, gpus: 2 });
 
+    // The agent finds, reads and extends its reservation (extend is not held back for alice).
+    const listed = await call('list_reservations', { state: 'placed' });
+    expect(JSON.stringify(listed.structuredContent)).toContain(reservation.id);
+    const shown = await call('get_reservation', { reservationId: reservation.id });
+    expect(shown.structuredContent).toMatchObject({ id: reservation.id, state: 'placed' });
+    const extended = await call('extend_reservation', { reservationId: reservation.id, by: '1h' });
+    expect(extended.isError, JSON.stringify(extended.structuredContent)).toBeUndefined();
+    expect(extended.structuredContent.extension).toMatchObject({ extended: true });
+
     // 4. Release is not held back: the agent ends the reservation itself.
     const released = await call('release_reservation', { reservationId: reservation.id });
     expect(released.isError).toBeUndefined();
@@ -304,18 +308,22 @@ describe('an agent reserves GPUs over MCP with a person’s confirmation (v0.3 a
     expect(booked.structuredContent.reservation).toMatchObject({ state: 'placed' });
     await call('release_reservation', { reservationId: booked.structuredContent.reservation.id });
     // Another organization's owner cannot see acme's pool through the gate.
-    const outsider = await call('reserve_gpus', { poolId, gpus: 1, duration: '15m' }, (
-      t.other.owner as { token: string }
-    ).token);
+    const outsider = await call(
+      'reserve_gpus',
+      { poolId, gpus: 1, duration: '15m' },
+      (t.other.owner as { token: string }).token,
+    );
     expect(outsider.isError).toBe(true);
   }, 60_000);
 
   it('books at once for a person, and polls only with the caller’s token and tenant', async () => {
     // alice's own session is not delegated: her MCP call books at once, without a confirmation.
     const call = mcpEndpoint();
-    const direct = await call('reserve_gpus', { poolId, gpus: 1, duration: '10m' }, (
-      alice.credential as { token: string }
-    ).token);
+    const direct = await call(
+      'reserve_gpus',
+      { poolId, gpus: 1, duration: '10m' },
+      (alice.credential as { token: string }).token,
+    );
     expect(direct.structuredContent.reservation).toMatchObject({ state: 'placed' });
     await call(
       'release_reservation',

@@ -87,7 +87,9 @@ function bound(nodeId: string, allocationId: string, cdiDevices = ['bcd.dev/gpu=
 
 function evidence(
   key: ReturnType<typeof generateP256KeyPair>['privateKey'],
-  body: ReturnType<typeof bound> | { nodeId: string; report: { case: 'allocationReleased'; value: unknown } },
+  body:
+    | ReturnType<typeof bound>
+    | { nodeId: string; report: { case: 'allocationReleased'; value: unknown } },
 ) {
   const signed = signAttestedReport(key, create(AttestedReportBodySchema, body as never));
   return { body: signed.body, kid: signed.nodeSig!.kid, sig: signed.nodeSig!.sig };

@@ -93,7 +93,12 @@ type McpDelegations = {
   ): Promise<{ confirm?: string[] }>;
   requestConfirmation(
     credential: McpCredentialInput,
-    input: { tenantId: string; action: string; resource: { type: string; id: string }; reason: string },
+    input: {
+      tenantId: string;
+      action: string;
+      resource: { type: string; id: string };
+      reason: string;
+    },
   ): Promise<{ id: string; status: string; expiresAt: number }>;
 };
 

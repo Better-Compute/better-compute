@@ -68,7 +68,9 @@ describe('gateway report handlers', () => {
       allocationId: 'alloc_b1',
       cdiDevices: ['bcd.dev/gpu=GPU-forged'],
     });
-    expect(await db.transaction((tx) => gatewayReportHandlers.allocationBound(tx, as(NODE_A), bound))).toBe(false);
+    expect(
+      await db.transaction((tx) => gatewayReportHandlers.allocationBound(tx, as(NODE_A), bound)),
+    ).toBe(false);
     expect(await allocation('alloc_b1')).toMatchObject({ bound: false, binding: null });
     expect(
       await db.transaction((tx) =>
@@ -91,7 +93,9 @@ describe('gateway report handlers', () => {
     expect(woken).toEqual([]);
 
     // The node the allocation is on binds it.
-    expect(await db.transaction((tx) => gatewayReportHandlers.allocationBound(tx, as(NODE_B), bound))).toBe(true);
+    expect(
+      await db.transaction((tx) => gatewayReportHandlers.allocationBound(tx, as(NODE_B), bound)),
+    ).toBe(true);
     expect(await allocation('alloc_b1')).toMatchObject({
       bound: true,
       binding: { cdiDevices: ['bcd.dev/gpu=GPU-forged'] },
