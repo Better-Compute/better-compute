@@ -153,8 +153,20 @@ session,converge,fakehw}`:
 device-missing | …}`, never drops a hold on its own, and enforces the journaled spec offline.
   Sections without a converger converge when empty and are `UNSUPPORTED` (with a
   `SectionUnsupported` condition) otherwise, as are unknown fields.
+- **VPS host (v0.3):** with `instances: FakeHypervisorOptions | FakeHypervisor`, the `instances`
+  section converges on a fake hypervisor (`daemon.hypervisor`: domains, overlay disks, NoCloud seeds,
+  taps, the base-image cache; `overlayPath`, `seedPath`, `tapName`). DELETED specs and managed
+  domains no spec names are removed with everything they own; domains bcd did not create are
+  reported, never touched. User data is fetched with a node-signed `SecretRequest` for the
+  instance's allocation before the domain is defined. Every StatusReport lists the runtimes' whole
+  inventory (`instances_complete`). Domains outlive daemon crashes; a reboot stops them and the
+  converger starts the ones that should run. Faults: `leakDomain`, `failInstance`, `powerLoss`,
+  `wipe`.
 - **Kinds:** `diag.nvml`, `inventory.refresh`, `logs.collect`, `node.reboot` (knobs in
-  `daemon.knobs`), and the opt-in `fakeGpuReset` (not retry-safe).
+  `daemon.knobs`), and the opt-in `fakeGpuReset` (not retry-safe) and
+  `fakeDriverInvoke({ drivers })` (`driver.invoke`: one operation of a hosted driver, in-process
+  `defineDriver`s or bcx plugins from `@better-compute/driver-sdk`; `invokeDriver` is the host
+  logic). A kind's `run` may return a Promise; its outcome is reported when it settles.
 - **Fake hardware:** `fakeHardware({ seed, variant })` — `hgx-h100` (field for field the Go
   `fakehw`, same seed → same section hashes), `hgx-h100-gpu-missing`, `l40s`, `cpu`.
   `encodeInventorySections()` reproduces the Go goldens byte for byte.
@@ -209,6 +221,7 @@ The real-time harness runs on the wall clock over cleartext HTTP/2 through `crea
   - `join(n)` times each node from its Join call to adopted.
   - `place(n, { ratePerSecond })` times reservations from placed to active: the §16 gate.
 - **`probeLeases(sql)`** samples the `leases` table: renewal gaps, the least headroom before expiry, lapses while owned, and takeovers.
+
 ## Later
 
 - **v0.1:** embedded better-iam on its in-memory SQLite adapter (through the IAM bridge) as the
