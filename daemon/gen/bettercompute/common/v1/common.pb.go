@@ -454,11 +454,17 @@ type TrustBundle struct {
 	ApproverKeys      []*ApproverKey `protobuf:"bytes,3,rep,name=approver_keys,json=approverKeys,proto3" json:"approver_keys,omitempty"`
 	ApproverThreshold uint32         `protobuf:"varint,4,opt,name=approver_threshold,json=approverThreshold,proto3" json:"approver_threshold,omitempty"`
 	// With approver keys set: destructive commands WITHOUT a batch_id this daemon runs per rolling
-	// hour; beyond it they are REJECTED UNBATCHED_LIMIT, so a fleet-wide batch cannot be split into
-	// unbatched commands to dodge the quorum. 0: no unbatched destructive command at all.
+	// hour (break-glass only; the default and recommended value is 0). A daemon cannot count
+	// fleet-wide, so any unbatched allowance lets a compromised worker touch every node once:
+	// fleet-wide limits come from the approvers (see quorum_tiers), never from this cap.
 	UnbatchedDestructivePerHour uint32 `protobuf:"varint,5,opt,name=unbatched_destructive_per_hour,json=unbatchedDestructivePerHour,proto3" json:"unbatched_destructive_per_hour,omitempty"`
-	unknownFields               protoimpl.UnknownFields
-	sizeCache                   protoimpl.SizeCache
+	// Thresholds by batch size, most specific first: a batch with scope_size ≤ max_scope_size needs
+	// `threshold` distinct approver signatures; above every tier, approver_threshold. Small batches can
+	// then be approved by a rate-limited auto-approver (one approver key held by a service outside
+	// api/worker, which is the fleet-wide counter), while large ones need k people.
+	QuorumTiers   []*QuorumTier `protobuf:"bytes,6,rep,name=quorum_tiers,json=quorumTiers,proto3" json:"quorum_tiers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TrustBundle) Reset() {
@@ -526,6 +532,65 @@ func (x *TrustBundle) GetUnbatchedDestructivePerHour() uint32 {
 	return 0
 }
 
+func (x *TrustBundle) GetQuorumTiers() []*QuorumTier {
+	if x != nil {
+		return x.QuorumTiers
+	}
+	return nil
+}
+
+type QuorumTier struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MaxScopeSize  uint32                 `protobuf:"varint,1,opt,name=max_scope_size,json=maxScopeSize,proto3" json:"max_scope_size,omitempty"`
+	Threshold     uint32                 `protobuf:"varint,2,opt,name=threshold,proto3" json:"threshold,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QuorumTier) Reset() {
+	*x = QuorumTier{}
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuorumTier) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuorumTier) ProtoMessage() {}
+
+func (x *QuorumTier) ProtoReflect() protoreflect.Message {
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuorumTier.ProtoReflect.Descriptor instead.
+func (*QuorumTier) Descriptor() ([]byte, []int) {
+	return file_bettercompute_common_v1_common_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *QuorumTier) GetMaxScopeSize() uint32 {
+	if x != nil {
+		return x.MaxScopeSize
+	}
+	return 0
+}
+
+func (x *QuorumTier) GetThreshold() uint32 {
+	if x != nil {
+		return x.Threshold
+	}
+	return 0
+}
+
 // One operator approval key.
 type ApproverKey struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -539,7 +604,7 @@ type ApproverKey struct {
 
 func (x *ApproverKey) Reset() {
 	*x = ApproverKey{}
-	mi := &file_bettercompute_common_v1_common_proto_msgTypes[2]
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -551,7 +616,7 @@ func (x *ApproverKey) String() string {
 func (*ApproverKey) ProtoMessage() {}
 
 func (x *ApproverKey) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_common_v1_common_proto_msgTypes[2]
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -564,7 +629,7 @@ func (x *ApproverKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApproverKey.ProtoReflect.Descriptor instead.
 func (*ApproverKey) Descriptor() ([]byte, []int) {
-	return file_bettercompute_common_v1_common_proto_rawDescGZIP(), []int{2}
+	return file_bettercompute_common_v1_common_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ApproverKey) GetKid() string {
@@ -594,7 +659,7 @@ type SignedTrustBundle struct {
 
 func (x *SignedTrustBundle) Reset() {
 	*x = SignedTrustBundle{}
-	mi := &file_bettercompute_common_v1_common_proto_msgTypes[3]
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -606,7 +671,7 @@ func (x *SignedTrustBundle) String() string {
 func (*SignedTrustBundle) ProtoMessage() {}
 
 func (x *SignedTrustBundle) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_common_v1_common_proto_msgTypes[3]
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -619,7 +684,7 @@ func (x *SignedTrustBundle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedTrustBundle.ProtoReflect.Descriptor instead.
 func (*SignedTrustBundle) Descriptor() ([]byte, []int) {
-	return file_bettercompute_common_v1_common_proto_rawDescGZIP(), []int{3}
+	return file_bettercompute_common_v1_common_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SignedTrustBundle) GetBody() []byte {
@@ -660,7 +725,7 @@ type DriverManifest struct {
 
 func (x *DriverManifest) Reset() {
 	*x = DriverManifest{}
-	mi := &file_bettercompute_common_v1_common_proto_msgTypes[4]
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -672,7 +737,7 @@ func (x *DriverManifest) String() string {
 func (*DriverManifest) ProtoMessage() {}
 
 func (x *DriverManifest) ProtoReflect() protoreflect.Message {
-	mi := &file_bettercompute_common_v1_common_proto_msgTypes[4]
+	mi := &file_bettercompute_common_v1_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -685,7 +750,7 @@ func (x *DriverManifest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DriverManifest.ProtoReflect.Descriptor instead.
 func (*DriverManifest) Descriptor() ([]byte, []int) {
-	return file_bettercompute_common_v1_common_proto_rawDescGZIP(), []int{4}
+	return file_bettercompute_common_v1_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DriverManifest) GetId() string {
@@ -745,13 +810,18 @@ const file_bettercompute_common_v1_common_proto_rawDesc = "" +
 	"\tSignature\x12\x10\n" +
 	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x10\n" +
 	"\x03sig\x18\x02 \x01(\fR\x03sig\x12\x14\n" +
-	"\x05chain\x18\x03 \x03(\fR\x05chain\"\x9a\x02\n" +
+	"\x05chain\x18\x03 \x03(\fR\x05chain\"\xe2\x02\n" +
 	"\vTrustBundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x122\n" +
 	"\x15command_signing_roots\x18\x02 \x03(\fR\x13commandSigningRoots\x12I\n" +
 	"\rapprover_keys\x18\x03 \x03(\v2$.bettercompute.common.v1.ApproverKeyR\fapproverKeys\x12-\n" +
 	"\x12approver_threshold\x18\x04 \x01(\rR\x11approverThreshold\x12C\n" +
-	"\x1eunbatched_destructive_per_hour\x18\x05 \x01(\rR\x1bunbatchedDestructivePerHour\":\n" +
+	"\x1eunbatched_destructive_per_hour\x18\x05 \x01(\rR\x1bunbatchedDestructivePerHour\x12F\n" +
+	"\fquorum_tiers\x18\x06 \x03(\v2#.bettercompute.common.v1.QuorumTierR\vquorumTiers\"P\n" +
+	"\n" +
+	"QuorumTier\x12$\n" +
+	"\x0emax_scope_size\x18\x01 \x01(\rR\fmaxScopeSize\x12\x1c\n" +
+	"\tthreshold\x18\x02 \x01(\rR\tthreshold\":\n" +
 	"\vApproverKey\x12\x10\n" +
 	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x19\n" +
 	"\bspki_der\x18\x02 \x01(\fR\aspkiDer\"i\n" +
@@ -816,7 +886,7 @@ func file_bettercompute_common_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_bettercompute_common_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_bettercompute_common_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_bettercompute_common_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_bettercompute_common_v1_common_proto_goTypes = []any{
 	(RunsOn)(0),               // 0: bettercompute.common.v1.RunsOn
 	(AgentRole)(0),            // 1: bettercompute.common.v1.AgentRole
@@ -825,19 +895,21 @@ var file_bettercompute_common_v1_common_proto_goTypes = []any{
 	(CommandRejectReason)(0),  // 4: bettercompute.common.v1.CommandRejectReason
 	(*Signature)(nil),         // 5: bettercompute.common.v1.Signature
 	(*TrustBundle)(nil),       // 6: bettercompute.common.v1.TrustBundle
-	(*ApproverKey)(nil),       // 7: bettercompute.common.v1.ApproverKey
-	(*SignedTrustBundle)(nil), // 8: bettercompute.common.v1.SignedTrustBundle
-	(*DriverManifest)(nil),    // 9: bettercompute.common.v1.DriverManifest
+	(*QuorumTier)(nil),        // 7: bettercompute.common.v1.QuorumTier
+	(*ApproverKey)(nil),       // 8: bettercompute.common.v1.ApproverKey
+	(*SignedTrustBundle)(nil), // 9: bettercompute.common.v1.SignedTrustBundle
+	(*DriverManifest)(nil),    // 10: bettercompute.common.v1.DriverManifest
 }
 var file_bettercompute_common_v1_common_proto_depIdxs = []int32{
-	7, // 0: bettercompute.common.v1.TrustBundle.approver_keys:type_name -> bettercompute.common.v1.ApproverKey
-	5, // 1: bettercompute.common.v1.SignedTrustBundle.signature:type_name -> bettercompute.common.v1.Signature
-	0, // 2: bettercompute.common.v1.DriverManifest.runs_on:type_name -> bettercompute.common.v1.RunsOn
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	8, // 0: bettercompute.common.v1.TrustBundle.approver_keys:type_name -> bettercompute.common.v1.ApproverKey
+	7, // 1: bettercompute.common.v1.TrustBundle.quorum_tiers:type_name -> bettercompute.common.v1.QuorumTier
+	5, // 2: bettercompute.common.v1.SignedTrustBundle.signature:type_name -> bettercompute.common.v1.Signature
+	0, // 3: bettercompute.common.v1.DriverManifest.runs_on:type_name -> bettercompute.common.v1.RunsOn
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_bettercompute_common_v1_common_proto_init() }
@@ -851,7 +923,7 @@ func file_bettercompute_common_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bettercompute_common_v1_common_proto_rawDesc), len(file_bettercompute_common_v1_common_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

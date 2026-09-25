@@ -55,9 +55,20 @@ message TrustBundle {
   repeated ApproverKey approver_keys = 3;
   uint32 approver_threshold = 4;
   // With approver keys set: destructive commands WITHOUT a batch_id this daemon runs per rolling
-  // hour; beyond it they are REJECTED UNBATCHED_LIMIT, so a fleet-wide batch cannot be split into
-  // unbatched commands to dodge the quorum. 0: no unbatched destructive command at all.
+  // hour (break-glass only; the default and recommended value is 0). A daemon cannot count
+  // fleet-wide, so any unbatched allowance lets a compromised worker touch every node once:
+  // fleet-wide limits come from the approvers (see quorum_tiers), never from this cap.
   uint32 unbatched_destructive_per_hour = 5;
+  // Thresholds by batch size, most specific first: a batch with scope_size ≤ max_scope_size needs
+  // `threshold` distinct approver signatures; above every tier, approver_threshold. Small batches can
+  // then be approved by a rate-limited auto-approver (one approver key held by a service outside
+  // api/worker, which is the fleet-wide counter), while large ones need k people.
+  repeated QuorumTier quorum_tiers = 6;
+}
+
+message QuorumTier {
+  uint32 max_scope_size = 1;
+  uint32 threshold = 2;
 }
 
 // One operator approval key.
