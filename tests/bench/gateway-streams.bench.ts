@@ -390,7 +390,19 @@ interface Host {
   takeover(): Promise<void>;
   killOld(): Promise<void>;
   query<T>(sql: string): Promise<T[]>;
-  stop(): Promise<{ rssMax: number; rssLast: number; heapMax: number; loopP99: number; loopMax: number }>;
+  stop(): Promise<Measured>;
+}
+
+/** The gateway process while measuring (bytes, ms). `arrayBuffers` holds WebAssembly memory (PGlite). */
+interface Measured {
+  rssFirst: number;
+  rssMax: number;
+  rssLast: number;
+  heapMax: number;
+  arrayBuffersFirst: number;
+  arrayBuffersMax: number;
+  loopP99: number;
+  loopMax: number;
 }
 
 async function inProcessHost(ids: string[], pki: BenchPki | undefined): Promise<Host> {
@@ -402,6 +414,7 @@ async function inProcessHost(ids: string[], pki: BenchPki | undefined): Promise<
   const loop = monitorEventLoopDelay({ resolution: 10 });
   const rss: number[] = [];
   const heap: number[] = [];
+  const arrayBuffers: number[] = [];
   let sampler: ReturnType<typeof setInterval> | undefined;
   return {
     port: () => current.served.port,
@@ -418,6 +431,7 @@ async function inProcessHost(ids: string[], pki: BenchPki | undefined): Promise<
           const memory = process.memoryUsage();
           rss.push(memory.rss);
           heap.push(memory.heapUsed);
+          arrayBuffers.push(memory.arrayBuffers);
         }, 1_000);
       } else {
         loop.disable();
@@ -439,9 +453,12 @@ async function inProcessHost(ids: string[], pki: BenchPki | undefined): Promise<
       await current.served.close(500);
       await db.close();
       return {
+        rssFirst: rss[0] ?? 0,
         rssMax: Math.max(0, ...rss),
         rssLast: rss.at(-1) ?? 0,
         heapMax: Math.max(0, ...heap),
+        arrayBuffersFirst: arrayBuffers[0] ?? 0,
+        arrayBuffersMax: Math.max(0, ...arrayBuffers),
         loopP99: loop.percentile(99) / 1e6,
         loopMax: loop.max / 1e6,
       };
@@ -521,13 +538,7 @@ async function childHost(ids: string[], pki: BenchPki | undefined): Promise<Host
     query: async <T>(sql: string) => (await ask({ type: 'query', sql }, 'rows', true)).rows as T[],
     async stop() {
       const reply = await ask({ type: 'stop' }, 'stopped');
-      return {
-        rssMax: reply.memory.rssMax,
-        rssLast: reply.memory.rssLast,
-        heapMax: reply.memory.heapMax,
-        loopP99: reply.loop.p99,
-        loopMax: reply.loop.max,
-      };
+      return { ...reply.memory, loopP99: reply.loop.p99, loopMax: reply.loop.max } as Measured;
     },
   };
 }
@@ -705,8 +716,17 @@ describe('gateway-streams gate', () => {
         enqueueErrors,
         dispatched: steadyLatencies.length,
         dispatchMs: dispatch,
-        rssMiB: { max: Math.round(maxRss / 2 ** 20), last: Math.round(measured.rssLast / 2 ** 20) },
+        rssMiB: {
+          first: Math.round(measured.rssFirst / 2 ** 20),
+          max: Math.round(maxRss / 2 ** 20),
+          last: Math.round(measured.rssLast / 2 ** 20),
+        },
         heapMiB: { max: Math.round(measured.heapMax / 2 ** 20) },
+        // WebAssembly memory (PGlite's database with PGlite): growth here is the store's, not the gateway's.
+        arrayBuffersMiB: {
+          first: Math.round(measured.arrayBuffersFirst / 2 ** 20),
+          max: Math.round(measured.arrayBuffersMax / 2 ** 20),
+        },
         eventLoopDelayMs: { p99: Math.round(measured.loopP99), max: Math.round(measured.loopMax) },
       },
       storm: stormResult,

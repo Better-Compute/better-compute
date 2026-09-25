@@ -44,7 +44,8 @@ let config;
 let current;
 const retired = [];
 const loop = monitorEventLoopDelay({ resolution: 10 });
-const memory = { rss: [], heap: [] };
+// `arrayBuffers` holds WebAssembly memory (PGlite's database lives there), apart from the JS heap.
+const memory = { rss: [], heap: [], arrayBuffers: [] };
 let sampler;
 
 async function seed(ids) {
@@ -150,6 +151,7 @@ const handlers = {
         const usage = process.memoryUsage();
         memory.rss.push(usage.rss);
         memory.heap.push(usage.heapUsed);
+        memory.arrayBuffers.push(usage.arrayBuffers);
       }, 1_000);
     } else {
       loop.disable();
@@ -180,6 +182,9 @@ const handlers = {
         rssMax: Math.max(0, ...memory.rss),
         rssLast: memory.rss.at(-1) ?? 0,
         heapMax: Math.max(0, ...memory.heap),
+        arrayBuffersFirst: memory.arrayBuffers[0] ?? 0,
+        arrayBuffersMax: Math.max(0, ...memory.arrayBuffers),
+        rssFirst: memory.rss[0] ?? 0,
       },
       loop: { p99: loop.percentile(99) / 1e6, max: loop.max / 1e6 },
     };

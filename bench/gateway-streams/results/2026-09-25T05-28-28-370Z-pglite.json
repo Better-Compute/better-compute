@@ -1,0 +1,69 @@
+{
+  "suite": "gateway-streams",
+  "date": "2026-09-25T05:28:28.370Z",
+  "commit": "06fce0e",
+  "referenceHardware": false,
+  "machine": {
+    "cpus": 64,
+    "cpuModel": "AMD Ryzen Threadripper PRO 9995WX 96-Cores",
+    "memoryBytes": 274182045696
+  },
+  "node": "v25.6.0",
+  "adapter": "pglite",
+  "config": {
+    "sessions": 5000,
+    "durationMs": 300000,
+    "commandsPerSecond": 50,
+    "streamsPerConnection": 1,
+    "heartbeatMs": 10000,
+    "transport": "mtls",
+    "storm": false
+  },
+  "certificatesIssuedMs": 1185,
+  "loadGeneratorInProcess": false,
+  "ramp": {
+    "established": 5000,
+    "ms": 32045,
+    "handshakeRetries": 0,
+    "dialRetries": 0
+  },
+  "steady": {
+    "heldSessions": 5000,
+    "unexpectedCloses": 0,
+    "enqueued": 15000,
+    "enqueueErrors": 0,
+    "dispatched": 15000,
+    "dispatchMs": {
+      "p50": 13,
+      "p90": 19,
+      "p99": 23,
+      "max": 133
+    },
+    "rssMiB": {
+      "first": 1127,
+      "max": 1355,
+      "last": 1355
+    },
+    "heapMiB": {
+      "max": 159
+    },
+    "arrayBuffersMiB": {
+      "first": 86,
+      "max": 310
+    },
+    "eventLoopDelayMs": {
+      "p99": 25,
+      "max": 132
+    }
+  },
+  "closeReasons": {
+    "close 0": 5000
+  },
+  "gate": {
+    "sessions": true,
+    "dispatchP99": true,
+    "rss": true,
+    "durationAtLeast30Min": false,
+    "met": false
+  }
+}
