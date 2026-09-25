@@ -248,7 +248,8 @@ func TestBMCThroughAHostedDriver(t *testing.T) {
 		o.Drivers = []HostedDriver{{Manifest: &commonv1.DriverManifest{Id: "ipmi", Kinds: []string{"power", "management"}}, Host: ipmi}}
 	})
 	s, _ := h.open()
-	s.push(command(body("q1", "bmc.query", &sitev1.BmcOperationRequest{Driver: "ipmi", Address: "10.0.0.7", CredentialsRef: "secret://t/bmc", Operation: "power.getPower"})))
+	s.push(command(body("q1", "bmc.query", &sitev1.BmcOperationRequest{Driver: "ipmi", Address: "10.0.0.7", CredentialsRef: "secret://t/bmc", Operation: "power.getPower",
+		DriverOptionsJson: `{"cipherSuite":3}`})))
 	answerSecret(t, s, `{"username":"admin","password":"pw"}`)
 	done := s.update(t, "q1", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
 	res := &sitev1.BmcOperationResult{}
@@ -264,6 +265,7 @@ func TestBMCThroughAHostedDriver(t *testing.T) {
 		secrets[sv.GetField()] = string(sv.GetValue())
 	}
 	if req.GetKind() != "power" || req.GetOperation() != "getPower" || !strings.Contains(req.GetConfigJson(), `"address":"10.0.0.7"`) ||
+		!strings.Contains(req.GetConfigJson(), `"options":{"cipherSuite":3}`) ||
 		secrets["username"] != "admin" || secrets["password"] != "pw" || strings.Contains(req.GetArgsJson(), "pw") {
 		t.Fatalf("invoke = %v", req)
 	}
@@ -276,5 +278,13 @@ func TestBMCThroughAHostedDriver(t *testing.T) {
 	}
 	if !h.agent.knownBMC("10.0.0.7") {
 		t.Fatal("a BMC driven through a plugin was not remembered")
+	}
+	// The built-in Redfish driver takes no driver options.
+	s.push(command(body("q3", "bmc.query", &sitev1.BmcOperationRequest{Address: "10.0.0.7", CredentialsRef: "secret://t/bmc", Operation: "power.getPower",
+		DriverOptionsJson: `{"cipherSuite":3}`})))
+	done = s.update(t, "q3", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	_ = proto.Unmarshal(done.GetResult(), res)
+	if res.GetOk() || res.GetErrorCode() != "invalid-config" {
+		t.Fatalf("q3 = %v", res)
 	}
 }

@@ -129,6 +129,17 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 			return bmcResult(false, nil, "unsupported-driver", fmt.Sprintf("no hosted driver %s implements %s", d, concern))
 		}
 	}
+	// Per-BMC driver options (enrollment's, e.g. bcx-ipmi's cipher suite): a JSON object the driver
+	// validates; the built-in Redfish driver takes none.
+	if o := req.GetDriverOptionsJson(); o != "" {
+		var options map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(o), &options); err != nil {
+			return journal.Result{}, invalidPayload(fmt.Errorf("driver_options_json: %w", err))
+		}
+		if plugin == nil && len(options) > 0 {
+			return bmcResult(false, nil, "invalid-config", "the redfish driver takes no driver options")
+		}
+	}
 	args := map[string]any{}
 	if s := req.GetArgsJson(); s != "" {
 		if err := json.Unmarshal([]byte(s), &args); err != nil {
@@ -180,7 +191,8 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 	return bmcResult(true, result, "", "")
 }
 
-// pluginBMC runs a BMC operation through a hosted bcx driver: the address and TLS pin as config,
+// pluginBMC runs a BMC operation through a hosted bcx driver: the address, TLS pin and driver
+// options as config,
 // the credentials (and a rotation's new password) as secrets, never in the arguments.
 func (a *Agent) pluginBMC(ctx context.Context, cmd dispatch.Command, d *HostedDriver, req *sitev1.BmcOperationRequest, concern, operation string, cred bmcCredential, args map[string]any) (journal.Result, error) {
 	secrets := []*driverv1.SecretValue{
@@ -191,7 +203,11 @@ func (a *Agent) pluginBMC(ctx context.Context, cmd dispatch.Command, d *HostedDr
 		secrets = append(secrets, &driverv1.SecretValue{Field: "newPassword", Value: []byte(next)})
 		delete(args, "newPassword")
 	}
-	config, _ := json.Marshal(map[string]string{"address": req.GetAddress(), "tlsSpkiSha256": hex.EncodeToString(req.GetTlsSpkiSha256())})
+	cfg := map[string]any{"address": req.GetAddress(), "tlsSpkiSha256": hex.EncodeToString(req.GetTlsSpkiSha256())}
+	if o := req.GetDriverOptionsJson(); o != "" {
+		cfg["options"] = json.RawMessage(o) // as enrollment set them; nested, so they never override the target
+	}
+	config, _ := json.Marshal(cfg)
 	argsJSON, _ := json.Marshal(args)
 	ireq := &driverv1.InvokeRequest{
 		DriverId: d.Manifest.GetId(), Kind: concern, Operation: operation,

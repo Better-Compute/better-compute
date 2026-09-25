@@ -8,7 +8,7 @@
 //	inspect.inspect                         fru print 0, chassis power status, mc info, lan print, sdr list
 //	                                        ? the Redfish driver's shape, less the host's NICs and UUID
 //
-// The BMC's address comes as config ({"address": "10.0.0.5[:623]", "cipherSuite": 17|3}) and its
+// The BMC's address comes as config ({"address": "10.0.0.5[:623]", "options": {"cipherSuite": 17}}) and its
 // credentials as secrets (username, password). The password reaches ipmitool through a pipe it
 // reads once (-f /dev/fd/3): never its arguments (a process listing) nor its environment (readable
 // in /proc by any process of the same user). The cipher suite is explicit (17: HMAC-SHA256,
@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,7 +71,7 @@ type driver struct {
 
 func (d *driver) Describe(context.Context, *connect.Request[driverv1.DescribeRequest]) (*connect.Response[driverv1.DescribeResponse], error) {
 	return connect.NewResponse(&driverv1.DescribeResponse{
-		Drivers:         []*commonv1.DriverManifest{{Id: "ipmi", Version: version, Kinds: []string{"power", "management", "inspect"}, RunsOn: commonv1.RunsOn_RUNS_ON_SITE, ConfigSchemaJson: `{"type":"object","required":["address"],"properties":{"address":{"type":"string"},"cipherSuite":{"enum":[3,17]}}}`}},
+		Drivers:         []*commonv1.DriverManifest{{Id: "ipmi", Version: version, Kinds: []string{"power", "management", "inspect"}, RunsOn: commonv1.RunsOn_RUNS_ON_SITE, ConfigSchemaJson: `{"type":"object","required":["address"],"properties":{"address":{"type":"string"},"options":{"type":"object","additionalProperties":false,"properties":{"cipherSuite":{"enum":[3,8,12,17]}}}}}`}},
 		PluginVersion:   version,
 		ProtocolVersion: bcx.ProtocolVersion,
 	}), nil
@@ -139,22 +140,35 @@ func target(address string) (host, port string, err error) {
 
 func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, error) {
 	var config struct {
-		Address       string `json:"address"`
-		CipherSuite   int    `json:"cipherSuite"`
-		TLSSpkiSha256 string `json:"tlsSpkiSha256"`
+		Address       string          `json:"address"`
+		TLSSpkiSha256 string          `json:"tlsSpkiSha256"`
+		Options       json.RawMessage `json:"options"`
 	}
 	if err := json.Unmarshal([]byte(req.GetConfigJson()), &config); err != nil || config.Address == "" {
 		return "", fail("invalid-config", "the ipmi driver needs config.address")
 	}
+	// The BMC's driver options (set at enrollment): only cipherSuite, decoded strictly.
+	var options struct {
+		CipherSuite int `json:"cipherSuite"`
+	}
+	if len(config.Options) > 0 && string(config.Options) != "null" {
+		dec := json.NewDecoder(bytes.NewReader(config.Options))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&options); err != nil {
+			return "", fail("invalid-config", "ipmi driver options: %v", err)
+		}
+	}
 	if config.TLSSpkiSha256 != "" {
 		return "", fail("pin-unsupported", "this BMC has a key pin, and IPMI has no TLS to check it against: use a Redfish driver, or remove the pin")
 	}
-	switch config.CipherSuite {
+	// Only suites with an integrity HMAC and AES: 0 is the IPMI authentication bypass, 1 and 2 send
+	// in the clear.
+	switch options.CipherSuite {
 	case 0:
-		config.CipherSuite = 17
-	case 3, 17:
+		options.CipherSuite = 17
+	case 3, 8, 12, 17:
 	default:
-		return "", fail("invalid-config", "cipherSuite %d is not 17 or 3", config.CipherSuite)
+		return "", fail("invalid-config", "cipherSuite %d is not one of 17, 12, 8 or 3 (integrity and AES)", options.CipherSuite)
 	}
 	host, port, err := target(config.Address)
 	if err != nil {
@@ -181,7 +195,7 @@ func (d *driver) run(ctx context.Context, req *driverv1.InvokeRequest) (string, 
 		}
 	}
 	str := func(k string) string { s, _ := args[k].(string); return strings.ToLower(s) }
-	argv := []string{"-I", "lanplus", "-H", host, "-U", secrets["username"], "-C", strconv.Itoa(config.CipherSuite), "-f", "/dev/fd/3"}
+	argv := []string{"-I", "lanplus", "-H", host, "-U", secrets["username"], "-C", strconv.Itoa(options.CipherSuite), "-f", "/dev/fd/3"}
 	if port != "" {
 		argv = append(argv, "-p", port)
 	}

@@ -66,6 +66,17 @@ func TestIPMIOperations(t *testing.T) {
 	}
 }
 
+// An old BMC's enrollment options select cipher suite 3.
+func TestIPMICipherSuiteOption(t *testing.T) {
+	tool, log := fakeTool(t, "Chassis Power is on")
+	_, err := (&driver{tool: tool}).run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower",
+		ConfigJson: `{"address":"10.0.0.9","tlsSpkiSha256":"","options":{"cipherSuite":3}}`,
+		Secrets:    []*driverv1.SecretValue{{Field: "username", Value: []byte("admin")}, {Field: "password", Value: []byte("s3cret")}}})
+	if calls, _ := os.ReadFile(log); err != nil || !strings.Contains(string(calls), "-C 3 ") {
+		t.Fatalf("calls = %s, %v", calls, err)
+	}
+}
+
 // inspect.inspect answers the Redfish driver's shape from fru, mc, lan and sdr.
 func TestIPMIInspect(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -150,7 +161,12 @@ func TestIPMIRefusals(t *testing.T) {
 			return err
 		},
 		"cipher suite": func() error {
-			_, err := d.run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower", ConfigJson: `{"address":"10.0.0.9","cipherSuite":0.5}`,
+			_, err := d.run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower", ConfigJson: `{"address":"10.0.0.9","options":{"cipherSuite":1}}`,
+				Secrets: []*driverv1.SecretValue{{Field: "username", Value: []byte("admin")}, {Field: "password", Value: []byte("x")}}})
+			return err
+		},
+		"unknown option": func() error {
+			_, err := d.run(context.Background(), &driverv1.InvokeRequest{Kind: "power", Operation: "getPower", ConfigJson: `{"address":"10.0.0.9","options":{"lanplus":false}}`,
 				Secrets: []*driverv1.SecretValue{{Field: "username", Value: []byte("admin")}, {Field: "password", Value: []byte("x")}}})
 			return err
 		},
