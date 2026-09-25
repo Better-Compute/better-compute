@@ -47,10 +47,10 @@ package can depend on it. The CLI host mounts it for you when the configuration'
 `standardMetrics(registry)` fixes the names, labels and buckets of every section 14 series, so all packages record
 the same thing. The built-in pieces record: the gateway series sampled by `gatewayCollector`, the gateway service
 calls, outbox events by family, the deployment-wide series `databaseCollector` samples from the database (below),
-and whatever you wrap (`meteredIamPort`, `meteredAttestor`, `meteredProvider`, spans). `gateway_sessions`,
-`gateway_handshakes_total`, `commands_swept_total`, `reconcile_duration_seconds`, `placements_total`,
-`booking_conflicts_total`, `usage_dead_letters_total` and `security_events_total` are defined but no package sets them
-yet; they expose their `HELP` and `TYPE` lines with no samples until your host records them.
+placements through `placementObserver`, and whatever you wrap (`meteredIamPort`, `meteredAttestor`,
+`meteredProvider`, spans). `gateway_sessions`, `gateway_handshakes_total`, `commands_swept_total`,
+`reconcile_duration_seconds`, `usage_dead_letters_total` and `security_events_total` are defined but no package sets
+them yet; they expose their `HELP` and `TYPE` lines with no samples until your host records them.
 </Callout>
 
 ## Wire metrics into a deployment
@@ -186,7 +186,7 @@ collector.start(); // every intervalMs (default 15 s); refresh() polls once; sto
 | Series | Sampled from |
 | --- | --- |
 | `work_queue_depth{kind}` | Due, unclaimed `work_queue` rows by kind |
-| `backlog{queue}` | Pending `commands`, unprocessed `iam_inbox` rows, unrecorded `usage_windows`, pending `webhook_deliveries`, and each `outbox_cursors` reader's lag as `outbox:<name>`; each capped at 100,000 |
+| `backlog{queue}` | Pending `commands`, unprocessed `iam_inbox` rows, unrecorded `usage_windows`, pending `webhook_deliveries`, events a sink gave up on (`outbox_dead_letters`), and each `outbox_cursors` reader's lag as `outbox:<name>`; each capped at 100,000 |
 | `node_connectivity{state}` | Nodes by connectivity |
 | `generation_lag_nodes` | Nodes whose observed generation is behind |
 | `pool_gpus{state}` | `pool_capacity_rollup` GPUs: total, allocatable, allocated, reserved, provisioning, unhealthy, maintenance, unreachable |
@@ -196,15 +196,14 @@ collector.start(); // every intervalMs (default 15 s); refresh() polls once; sto
 
 A table an optional module did not create is skipped, and a label set that disappears reads 0 instead of going
 stale. Latency starts at the first poll, so a restart does not observe history twice, and at most 5,000 settled
-commands are observed per poll. **Run it in one process per deployment**, the worker, so the histogram counts each
-command once. Poll failures go to `onError` and never throw.
+commands are observed per poll. Poll failures go to `onError` and never throw.
 
-<Callout type="info" title="Several worker processes">
-`serve` starts the collector in every process that runs a worker role. With more than one worker process, each
-reports the same deployment-wide gauges, and each observes every settled command in its own
-`command_latency_seconds`. Query one worker instance's series (or `max` the gauges) rather than summing across
-instances.
-</Callout>
+Any number of processes may run the collector, and `serve` starts it in every process with a worker role. Each one
+reports the same deployment-wide gauges, so query them with `max` rather than `sum` across instances. The latency
+histogram counts each command once. Only the holder of the `leases` row `metrics:command-latency` observes
+`command_latency_seconds`: the row is taken or renewed on each poll with a TTL of three polls, and released on
+`stop()`. A stopped collector never takes it again. Pass `latencyLease` to name another row, or `false` to observe in
+every process.
 
 ### Series the instrumentation adds
 
@@ -218,10 +217,16 @@ instances.
 | `better_compute_provider_calls_total`, `provider_call_seconds` | `meteredProvider` | `provider`, `method`, `outcome` |
 | `better_compute_revocation_feed_consecutive_failures` | `revocationFeedCollector` | `feed` |
 | `better_compute_events_total` | `eventCounter` via `eventsModule({ countEvent })` | `family`, `module` |
+| `better_compute_placements_total`, `booking_conflicts_total`, `placement_seconds` | `placementObserver` via `capacityModule({ onPlacement })` | `outcome`; none; `placer` (`inline`, `pool-lease`, `batch`) |
 | `better_compute_spans_total`, `span_duration_seconds` | `createObserver({ metrics })` | `kind`, `name`, `outcome`, `code`; `kind` |
 
 `gatewayCollector` and `meteredGatewayServices` are wired by `serve` for the gateway role; the others are yours to
-wrap around what you register. Outcome labels are bounded: ids, method names, error codes and catalog families.
+wrap around what you register. Placements, for example, are observed by passing capacity's hook the standard
+series (`booking_conflicts_total` counts replans forced by a booking conflict):
+
+```ts
+capacityModule({ onPlacement: placementObserver(standardMetrics(registry), registry) });
+``` Outcome labels are bounded: ids, method names, error codes and catalog families.
 
 ## Spans and traces
 

@@ -83,7 +83,8 @@ bounded miss path above and fails closed. Before this, `reservations.extend` dec
 so a `BoundedExtend`-style policy capped at 72 hours could be passed by one extra hour within the tail interval.
 `tests/server-example-policies.test.ts` runs the example policies against real drafts to hold this.
 
-In remote mode the IAM host decides on its replica's copy, so pass `remoteIam({ refresh: { url, secret, sql? } })`:
+In remote mode the IAM host decides on its replica's copy, so pass `refresh: { url, secret, sql? }` to
+`bridge.remote()` (or `remoteIam()`, which it wraps):
 the port then posts a signed `{ tenantId, type, id, lsn }` to the IAM host's refresh handler
 (`computeIamHost().refreshHandler`), which waits at most 2 seconds until its replica has replayed compute's WAL
 position from after transaction 1 and re-reads the row. Any failure fails the admission with `UNAVAILABLE` (fail
