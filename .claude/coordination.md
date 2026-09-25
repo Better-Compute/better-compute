@@ -128,6 +128,11 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   asks: d4a11b9, 7ed9a9b, 0e37c3e, 2e041c2, da404a8, b20a3a1; decision ae3134f (cert role in Subject OU, no private
   OIDs: Go cannot parse the 2.25 arc) → [402c97] implements. Tools: scripts/private-commit.mjs, scripts/head-check.mjs.
 - W1 Go daemon: [6a20b8] (= ex-[016b7b]); Go go1.27.1 is installed.
+- OPEN cross-owner items ([f85da7], keep current): tenant reaction §12.8 (suspend/teardown; [31c64a], design in
+  their thread); tests/sim/nightly.test.ts red at clean HEAD 7e6bd3c ([31c64a]); vps instances.create should adopt
+  `poll` for async-with-wait like reservations (252a69b) ([6a20b8] after W1); capacity validators → structured
+  issues + `validate.jsonSchema` for the API reference ([097b34], queued); modules' `tenantDeleted` hooks once
+  [31c64a]'s core hook lands ([097b34] capacity, [6a20b8] vps); D24 sandboxes = user decision (PLAN §17).
 
 - [31c64a] round 4: orphan iam streams done (09e6514: agentStreamCloser/gatewayStreamCloser), bench results (e06ec34);
   v0.4 sim scenarios gateway-kill/zombie/DB failover/10-min partition (8878e99, ControlPlaneSim.failDatabase/
@@ -139,15 +144,26 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   (c11554d), I3 (a2c7011), I7 (bcdf2c7, capacity's placeablePending); collector lease + placementObserver
   (90503ef); metricCatalog (2d856dd); both IAM modes: createEmbeddedTestIam({ mode }) + vitest.iam-remote.config.ts
   (3c8a74e, 30/30 green; root script asked of [f85da7]); events catalog rows (b41ebe6). The whole exit-gap list
-  for [31c64a] is DONE. Then: budget-alert handler (9cfe709), subtree-webhook intake (22cceaa). NOW (agreed with
-  [097b34]): NEW files `packages/capacity/src/iam-reactions.ts` (applyBudgetPolicy, withdrawAgentReservations,
-  reassignReservations) + `tests/capacity-iam-reactions.test.ts`; capacity's module/reservations/placer stay [097b34]'s.
+  for [31c64a] is DONE. Then: budget-alert handler (9cfe709), subtree-webhook intake (22cceaa), capacity IAM
+  reactions drafted for [097b34] (c820fdf: withdrawAgentReservations/reassignReservations/applyBudgetPolicy; index
+  export + stop-new admission are [097b34]'s; host wiring [402c97]'s), runtimeObserver (5e6f8b1), writers for
+  gateway_sessions/security_events_total/resolver_lookups_total (423b180).
+  NOW (assigned by [f85da7]): the server-side tenant reaction. NEW `packages/server/src/tenancy/**` (built-in module
+  `tenancy`, migration `tenancy/0001_tenant_states`, `tenantStateHandler`, the envelope gate, teardown reconciler);
+  one-line edits in server index.ts + operations.ts (after preCheck); core: error `TENANT_SUSPENDED` (errors.ts),
+  optional `ComputeModule.tenantDeleted` hook (extension.ts). Then the nightly 10k cold start.
 - [c321a3] round 4 (gateway, server runtime, docs generator): orphan store.ts (d430815); tunnel filters tenantId/anyAgent +
   reauthorizeTunnels (6aeb5c4); generator MDX escaping + MDX compile check (bd57184), events page (c563de7); ramdisk
   exit test + ReportContext.attested (56f8cc1); FakeDaemon signs attested reports (f7fbba7); v0.4 scheduler worker role
   (6b5e189; shard rebalancing itself already existed); duplicate-identity quarantine §7.2 (c583263); sink poison
   isolation + outbox_dead_letters (1a3156d); workflow wakes on settle (e482db1); v0.2 exit "gateway-forged
-  AllocationBound rejected" e2e + signed-spec relay (fac16e4). NOW: join-storm re-measure (realtime-spine bench).
+  AllocationBound rejected" e2e + signed-spec relay (fac16e4); both exit gaps above DONE. Later: UPGRADE_REQUIRED gets
+  daemon.upgrade (a42400f); IMDS workload-token relay (8e16349); set-based section ingest (9475e75) and heartbeat hashes
+  (0ab7c11), join 168→~100 statements/join (1k realtime-spine 73.8 s: CPU-bound in one process); serving-cert hot
+  reload + WS proof key rotation (0b80e6f, d5b3df2); one lease per event sink (aadfaf1); Hello drivers → labels
+  (447023b); TunnelInfo.sessionId/action (6b4b72d); xidStatusHandler records host pressure (6b080de); input JSON Schema
+  (6cf1bc0) → API Input tables (df398c2); metrics page (19e38fb); worker.observe (f39b1d4) + gateway onHandshake
+  (181bf84); WS-fallback tunnels refused at once (c297246). HEAD green at ffedabd (gateway/runtime/docs/e2e, 265).
 - [f02367] round 4 (inventory, migrations, provision, metal): image-cache orphan (c7cd2ec); migrations core/0016
   duplicate_identity, 0017 allocation_evidence, 0019 outbox_dead_letters, 0020 commands.created_at, 0021 signed specs;
   core/0018 PARTITIONED HISTORY (4efd977): audit_events / inventory_snapshots / usage_windows are monthly range
