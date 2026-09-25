@@ -31,6 +31,14 @@ beforeAll(async () => {
             ('pool_plain', 'root', 'site_a', 'metal-host', 'exclusive', 'bcd', '{}', 1)`,
     [JSON.stringify({ tenantRoot: true, firmwareBaseline: simFirmware })],
   );
+  const images = Object.fromEntries(
+    Object.keys(simFirmware).map((component) => [component, { url: `https://firmware.site-a/${component}.bin`, sha256: 'ab'.repeat(32) }]),
+  );
+  await sim.db.query(
+    `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version)
+     VALUES ('pool_reflash', 'root', 'site_a', 'metal-dedicated', 'exclusive', 'bcd', $1::jsonb, 1)`,
+    [JSON.stringify({ tenantRoot: true, firmwareBaseline: simFirmware, firmwareRemediation: 'reflash', firmwareImages: images })],
+  );
 });
 afterAll(() => sim.close());
 
@@ -128,7 +136,7 @@ describe('a dedicated-root lease', () => {
       'power.setPower',
     ]);
     expect(teardown.rows.find((row) => row.action === 'disk.wipe')!.result).toMatchObject({ mode: 'secure-erase', attested: true });
-    expect(teardown.rows.find((row) => row.action === 'metal.firmwareCheck')!.result).toEqual({ verified: 3 });
+    expect(teardown.rows.find((row) => row.action === 'metal.firmwareCheck')!.result).toEqual({ verified: 3, reflashed: [] });
   });
 
   it('quarantines a machine whose firmware drifted during the lease', async () => {
@@ -141,6 +149,37 @@ describe('a dedicated-root lease', () => {
     expect(JSON.stringify(row.last_error)).toContain('bios');
     // Still tenant-root: only a completed teardown clears it.
     expect(row).toMatchObject({ tenant_root: true, trust: 'tenant-controlled' });
+  });
+
+  it('reflashes drifted firmware from the baseline images when the pool says so, and re-verifies', async () => {
+    const node = await readyNode('pool_reflash');
+    const { allocation } = await lease(node, 'pool_reflash');
+    sim.machineOf(node).firmware.bios = '2.4.1-tampered';
+    await endLease(node, allocation);
+    expect(await sim.state(node)).toMatchObject({ provision_state: 'ready', maintenance: false });
+    expect(sim.machineOf(node).firmware.bios).toBe(simFirmware.bios);
+    const flashed = sim.seen.filter((command) => command.kind === 'bmc.firmware' && command.args.component === 'bios');
+    expect(flashed.at(-1)!.args).toEqual({ component: 'bios', url: 'https://firmware.site-a/bios.bin', sha256: 'ab'.repeat(32), version: simFirmware.bios });
+    const { rows } = await sim.db.query<{ result: unknown }>(
+      `SELECT s.result FROM workflow_steps s JOIN workflows w ON w.id = s.workflow_id
+        WHERE w.node_id = $1 AND s.action = 'metal.firmwareCheck' ORDER BY w.created_at DESC LIMIT 1`,
+      [node],
+    );
+    expect(rows[0]!.result).toEqual({ verified: 3, reflashed: ['bios'] });
+  });
+
+  it('quarantines when a reflash does not take', async () => {
+    const node = await readyNode('pool_reflash');
+    const { allocation } = await lease(node, 'pool_reflash');
+    sim.machineOf(node).firmware['gpu-vbios'] = 'implanted';
+    sim.faults.flashFails = true;
+    try {
+      await endLease(node, allocation);
+    } finally {
+      sim.faults.flashFails = false;
+    }
+    expect(await sim.state(node)).toMatchObject({ provision_state: 'failed', failed_from: 'releasing', maintenance: true });
+    expect(JSON.stringify((await nodeRow(node)).last_error)).toContain('gpu-vbios');
   });
 
   it('rotates the BMC password the lessee may have seen, and quarantines when it cannot', async () => {

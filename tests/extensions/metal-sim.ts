@@ -170,6 +170,8 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     rotateRejected: false,
     rotateLoginFails: false,
     rotateUnsigned: false,
+    /** A firmware flash reports success but the component keeps its old version. */
+    flashFails: false,
   };
   // Node keys and certificates from a node CA, as JoinService issues them: every ramdisk boot joins
   // with a fresh key (role ramdisk), so revoking an identity generation never outlives a reboot.
@@ -256,6 +258,12 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
         case 'bmc.denied':
           result = toBinary(site.BmcOperationResultSchema, create(site.BmcOperationResultSchema, { ok: false, errorCode: 'auth', message: 'authentication failed' }));
           break;
+        case 'bmc.firmware': {
+          // The site agent writes the image; a bad flash leaves the old version in place.
+          if (!faults.flashFails) machineOf(target).firmware[args.component] = args.version;
+          result = bmcResult({ flashed: !faults.flashFails });
+          break;
+        }
         case 'bmc.rotate': {
           const m = machineOf(target);
           if (faults.rotateRejected) {

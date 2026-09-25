@@ -77,13 +77,42 @@ export async function newIdentityGeneration(tx: SqlTx, nodeId: string, reason: s
   return revoked.rowCount;
 }
 
-/** Pool policy for tenant-root leases: opted in, and the firmware every component must match. */
-export function tenantRootPolicy(policy: Record<string, unknown> | null): { allowed: boolean; firmwareBaseline?: Record<string, string> } {
-  const allowed = policy?.tenantRoot === true;
+/** A platform firmware image for one component: what `reflash` writes back. */
+export interface FirmwareImage {
+  /** https only. */
+  url: string;
+  /** Hex SHA-256 of the image; the site agent refuses anything else. */
+  sha256: string;
+}
+
+export interface TenantRootPolicy {
+  allowed: boolean;
+  /** Component id → the version it must report. */
+  firmwareBaseline?: Record<string, string>;
+  /** On drift: `quarantine` (default: fail with maintenance on) or `reflash` the baseline images first. */
+  firmwareRemediation: 'quarantine' | 'reflash';
+  /** Component id → its baseline image, for `reflash`. */
+  firmwareImages: Record<string, FirmwareImage>;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+/** Pool policy for tenant-root leases: opted in, the firmware every component must match, and what drift does. */
+export function tenantRootPolicy(policy: Record<string, unknown> | null): TenantRootPolicy {
+  const result: TenantRootPolicy = {
+    allowed: policy?.tenantRoot === true,
+    firmwareRemediation: policy?.firmwareRemediation === 'reflash' ? 'reflash' : 'quarantine',
+    firmwareImages: {},
+  };
   const baseline = policy?.firmwareBaseline;
-  if (!baseline || typeof baseline !== 'object' || Array.isArray(baseline)) return { allowed };
-  const firmwareBaseline = Object.fromEntries(
-    Object.entries(baseline as Record<string, Json>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
-  );
-  return { allowed, firmwareBaseline };
+  if (isRecord(baseline))
+    result.firmwareBaseline = Object.fromEntries(
+      Object.entries(baseline as Record<string, Json>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    );
+  const images = policy?.firmwareImages;
+  if (isRecord(images))
+    for (const [component, image] of Object.entries(images))
+      if (isRecord(image) && typeof image.url === 'string' && image.url.startsWith('https://') && typeof image.sha256 === 'string' && /^[0-9a-f]{64}$/.test(image.sha256))
+        result.firmwareImages[component] = { url: image.url, sha256: image.sha256 };
+  return result;
 }

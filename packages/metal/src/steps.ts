@@ -75,7 +75,7 @@ async function siteAgent(context: StepContext, nodeId: string): Promise<string> 
 /** A BMC operation relayed to the site agent (`BmcOperationRequest`). */
 async function bmc(
   context: StepContext,
-  kind: 'bmc.query' | 'bmc.boot' | 'bmc.power',
+  kind: 'bmc.query' | 'bmc.boot' | 'bmc.power' | 'bmc.firmware',
   operation: string,
   args: Record<string, Json>,
   key?: string,
@@ -543,26 +543,43 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     input: manifest({}),
     async run(_input, context) {
       const node = await metalNode(context);
-      const { firmwareBaseline } = tenantRootPolicy(node.pool_policy);
-      if (!firmwareBaseline || Object.keys(firmwareBaseline).length === 0)
+      const policy = tenantRootPolicy(node.pool_policy);
+      const baseline = policy.firmwareBaseline;
+      if (!baseline || Object.keys(baseline).length === 0)
         throw new ComputeError('INVALID_CONFIG', `Pool ${node.pool_id} has no policy.firmwareBaseline to verify against`);
-      const result = (await bmc(context, 'bmc.query', 'firmware.components', {})) as Record<string, Json>;
-      const reported = new Map<string, string>();
-      for (const component of Array.isArray(result.components) ? result.components : [])
-        if (component && typeof component === 'object' && !Array.isArray(component)) {
-          const { id, version } = component as Record<string, Json>;
-          if (typeof id === 'string' && typeof version === 'string') reported.set(id, version);
-        }
-      const drift = Object.entries(firmwareBaseline)
-        .filter(([id, version]) => reported.get(id) !== version)
-        .map(([id, expected]) => ({ component: id, expected, found: reported.get(id) ?? null }));
-      // Drift quarantines the machine: the workflow fails, and the node fails with maintenance on.
-      if (drift.length)
-        throw new ComputeError('DRIVER_ERROR', `Firmware differs from the pool baseline: ${drift.map((d) => d.component).join(', ')}`, undefined, {
+      const driftOf = async (key?: string) => {
+        const result = (await bmc(context, 'bmc.query', 'firmware.components', {}, key)) as Record<string, Json>;
+        const reported = new Map<string, string>();
+        for (const component of Array.isArray(result.components) ? result.components : [])
+          if (component && typeof component === 'object' && !Array.isArray(component)) {
+            const { id, version } = component as Record<string, Json>;
+            if (typeof id === 'string' && typeof version === 'string') reported.set(id, version);
+          }
+        return Object.entries(baseline)
+          .filter(([id, version]) => reported.get(id) !== version)
+          .map(([id, expected]) => ({ component: id, expected, found: reported.get(id) ?? null }));
+      };
+      const quarantine = (drift: { component: string }[], reflashed: string[]) =>
+        new ComputeError('DRIVER_ERROR', `Firmware differs from the pool baseline: ${drift.map((d) => d.component).join(', ')}`, undefined, {
           code: 'FIRMWARE_DRIFT',
           drift,
+          reflashed,
         });
-      return { verified: Object.keys(firmwareBaseline).length };
+      let drift = await driftOf();
+      if (!drift.length) return { verified: Object.keys(baseline).length, reflashed: [] };
+      // Drift quarantines the machine (the workflow fails; the node fails with maintenance on), unless
+      // the pool reflashes: every drifted component needs a baseline image, then everything is checked
+      // again, and anything still off quarantines after all.
+      if (policy.firmwareRemediation !== 'reflash' || drift.some((d) => !policy.firmwareImages[d.component])) throw quarantine(drift, []);
+      const reflashed: string[] = [];
+      for (const { component, expected } of drift) {
+        const image = policy.firmwareImages[component]!;
+        await bmc(context, 'bmc.firmware', 'firmware.update', { component, url: image.url, sha256: image.sha256, version: expected }, `flash-${component}`);
+        reflashed.push(component);
+      }
+      drift = await driftOf('recheck');
+      if (drift.length) throw quarantine(drift, reflashed);
+      return { verified: Object.keys(baseline).length, reflashed };
     },
   });
 

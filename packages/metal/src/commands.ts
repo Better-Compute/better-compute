@@ -55,6 +55,16 @@ export const metalCommandKinds: readonly CommandKindSpec[] = Object.freeze([
     roles: ['site'],
     payload: metalPayloads.bmcOperation,
   },
+  // Writes a platform firmware image to one component through the BMC (firmware remediation, §13).
+  {
+    kind: 'bmc.firmware',
+    lane: 'control',
+    retrySafe: false,
+    destructive: true,
+    timeout: '1h',
+    roles: ['site'],
+    payload: metalPayloads.bmcOperation,
+  },
   { kind: 'boot.prepareRamdisk', lane: 'control', retrySafe: true, timeout: '2m', roles: ['site'], payload: metalPayloads.proxyDhcpEntry },
   { kind: 'boot.cleanUp', lane: 'control', retrySafe: true, timeout: '2m', roles: ['site'], payload: metalPayloads.bootCleanUp },
   { kind: 'diag.dcgm', lane: 'provision', retrySafe: true, attested: true, timeout: '1h', roles: ['ramdisk', 'node'], payload: metalPayloads.diagDcgm },
