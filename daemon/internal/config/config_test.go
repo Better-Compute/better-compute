@@ -179,6 +179,12 @@ func TestPluginsSection(t *testing.T) {
 	if _, err := Parse([]byte(required() + "[plugins]\ncgroup = \"relative\"\n")); err == nil {
 		t.Fatal("a relative cgroup was accepted")
 	}
+	if _, err := Parse([]byte(required() + "[plugins]\nuser = \"root\"\n")); err == nil {
+		t.Fatal("every plugin as root was accepted")
+	}
+	if cfg, err := Parse([]byte(required() + "[plugins]\nprivileged = \"kata\"\n")); err != nil || cfg.Plugins.Privileged != "kata" {
+		t.Fatalf("privileged = %+v, %v", cfg.Plugins, err)
+	}
 }
 
 func TestDecodePin(t *testing.T) {

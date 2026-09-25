@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"syscall"
 	"unsafe"
@@ -83,6 +84,9 @@ func RunShim(args []string) error {
 	if len(args) < 1 {
 		return errors.New("bcx shim: no plugin name")
 	}
+	// no_new_privs and the filter are per thread: everything, the execve included, happens on this
+	// one, and the filter is synchronised to every other thread of the process (TSYNC).
+	goruntime.LockOSThread()
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("bcx shim: no_new_privs: %w", err)
 	}
@@ -100,10 +104,17 @@ const (
 	seccompRetAllow       = 0x7fff0000
 )
 
+// cloneNewFlags are clone's namespace flags (CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER,
+// NEWPID, NEWNET, NEWTIME): a plugin never makes namespaces, which would open nf_tables and other
+// root-in-a-namespace surfaces to it.
+const cloneNewFlags = 0x7e020080
+
 // installSeccomp denies what no driver plugin needs and a compromised one could abuse: loading
-// kernels and modules, mounts, swap, reboot, eBPF, tracing other processes, the kernel keyring,
-// perf, userfaultfd, handle-based opens, raw I/O ports, the system clock, accounting and quotas.
-// Denied calls fail with EPERM; a call from another ABI (x32, a foreign arch) kills the process.
+// kernels and modules, mounts, namespaces (unshare, setns, clone with CLONE_NEW*), swap, reboot,
+// eBPF, io_uring, tracing other processes, the kernel keyring, perf, userfaultfd, handle-based
+// opens, raw I/O ports, the system clock, accounting and quotas. Denied calls fail with EPERM;
+// clone3 fails with ENOSYS (its flags sit in memory a filter cannot read; libc falls back to clone).
+// A call from another ABI (x32, a foreign arch) kills the process.
 func installSeccomp() error {
 	arch, denied, x32 := seccompArch()
 	if arch == 0 {
@@ -124,6 +135,17 @@ func installSeccomp() error {
 			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K, Jt: 0, Jf: 1, K: 0x40000000},
 			ret(seccompRetKillProcess))
 	}
+	jump := func(k uint32, jt, jf uint8) unix.SockFilter {
+		return unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: jt, Jf: jf, K: k}
+	}
+	prog = append(prog,
+		jump(uint32(unix.SYS_CLONE3), 0, 1),
+		ret(seccompRetErrno|uint32(unix.ENOSYS)),
+		jump(uint32(unix.SYS_CLONE), 0, 4),
+		ld(16), // seccomp_data.args[0], its low 32 bits (little-endian): the clone flags
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, Jt: 0, Jf: 1, K: cloneNewFlags},
+		ret(seccompRetErrno|uint32(unix.EPERM)),
+		ret(seccompRetAllow))
 	for _, nr := range denied {
 		prog = append(prog,
 			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: uint32(nr)},
@@ -131,5 +153,9 @@ func installSeccomp() error {
 	}
 	prog = append(prog, ret(seccompRetAllow))
 	fprog := unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]}
-	return unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&fprog)), 0, 0)
+	_, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&fprog)))
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }

@@ -17,5 +17,7 @@ func seccompArch() (arch uint32, denied []uintptr, x32 bool) {
 		unix.SYS_IOPL, unix.SYS_IOPERM,
 		unix.SYS_SETTIMEOFDAY, unix.SYS_CLOCK_SETTIME, unix.SYS_CLOCK_ADJTIME, unix.SYS_ADJTIMEX,
 		unix.SYS_ACCT, unix.SYS_QUOTACTL, unix.SYS_LOOKUP_DCOOKIE, unix.SYS_SYSLOG,
+		unix.SYS_UNSHARE, unix.SYS_SETNS,
+		unix.SYS_IO_URING_SETUP, unix.SYS_IO_URING_ENTER, unix.SYS_IO_URING_REGISTER,
 	}, true
 }

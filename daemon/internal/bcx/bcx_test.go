@@ -39,6 +39,8 @@ func (echoPlugin) Invoke(_ context.Context, req *connect.Request[driverv1.Invoke
 	case "probe":
 		// What a denied system call answers in this process (the sandbox test).
 		return out.Send(&driverv1.InvokeResponse{Msg: &driverv1.InvokeResponse_ResultJson{ResultJson: `"` + probeDenied() + `"`}})
+	case "probe-ns":
+		return out.Send(&driverv1.InvokeResponse{Msg: &driverv1.InvokeResponse_ResultJson{ResultJson: `"` + probeNamespaces() + `"`}})
 	}
 	secret := ""
 	for _, s := range req.Msg.GetSecrets() {

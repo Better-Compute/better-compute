@@ -149,9 +149,12 @@ type Boot struct {
 
 // Plugins is how bcx plugins run ([plugins]).
 type Plugins struct {
-	// User is who they run as when bcd runs as root (default "nobody"); "root" keeps root, for a
-	// runtime plugin that needs it.
+	// User is who they run as when bcd runs as root; empty (the default) gives each plugin its own
+	// uid in systemd's dynamic range (61184-65519), so no plugin can read another's memory.
 	User string
+	// Privileged names the plugins (comma-separated) that run as root without the seccomp filter:
+	// a runtime plugin that makes namespaces and mounts (Kata). Every other plugin is confined.
+	Privileged string
 	// Sandbox runs them with no new privileges and a seccomp filter (default true).
 	Sandbox bool
 	// Cgroup is a delegated cgroup v2 directory (e.g. /sys/fs/cgroup/bcd.plugins, with Delegate=yes);
@@ -302,6 +305,9 @@ func (c *Config) Validate() error {
 	if c.Plugins.Cgroup != "" && !path.IsAbs(c.Plugins.Cgroup) {
 		return fmt.Errorf("plugins.cgroup must be an absolute path, got %q", c.Plugins.Cgroup)
 	}
+	if c.Plugins.User == "root" || c.Plugins.User == "0" {
+		return errors.New("plugins.user may not be root; name the plugins that need root in plugins.privileged")
+	}
 	if c.Plugins.MemoryMax < 0 || c.Plugins.PidsMax < 0 {
 		return errors.New("plugins.memory_max and plugins.pids_max may not be negative")
 	}
@@ -349,6 +355,7 @@ var fields = []field{
 	{section: "log", key: "json", kind: kindBool, set: func(c *Config, v value) { c.Log.JSON = v.boolean }},
 	{section: "plugins", key: "dir", kind: kindString, set: func(c *Config, v value) { c.PluginsDir = v.str }},
 	{section: "plugins", key: "user", kind: kindString, set: func(c *Config, v value) { c.Plugins.User = v.str }},
+	{section: "plugins", key: "privileged", kind: kindString, set: func(c *Config, v value) { c.Plugins.Privileged = v.str }},
 	{section: "plugins", key: "sandbox", kind: kindBool, set: func(c *Config, v value) { c.Plugins.Sandbox = v.boolean }},
 	{section: "plugins", key: "cgroup", kind: kindString, set: func(c *Config, v value) { c.Plugins.Cgroup = v.str }},
 	{section: "plugins", key: "memory_max", kind: kindInt, set: func(c *Config, v value) { c.Plugins.MemoryMax = v.num }},

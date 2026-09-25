@@ -5,6 +5,7 @@ package bcx
 import (
 	"context"
 	"os"
+	goruntime "runtime"
 	"strconv"
 	"testing"
 
@@ -17,6 +18,21 @@ import (
 func probeDenied() string {
 	_, _, errno := unix.Syscall6(unix.SYS_PERF_EVENT_OPEN, 0, 0, ^uintptr(0), ^uintptr(0), 0, 0)
 	return errno.Error()
+}
+
+// probeNamespaces tries to make a user namespace (in a throwaway thread: unshare applies to it).
+func probeNamespaces() string {
+	done := make(chan string)
+	go func() {
+		goruntime.LockOSThread() // never unlocked: the thread exits with the goroutine
+		err := unix.Unshare(unix.CLONE_NEWUSER)
+		if err == nil {
+			done <- "created"
+			return
+		}
+		done <- err.Error()
+	}()
+	return <-done
 }
 
 func TestSandboxedPlugin(t *testing.T) {
@@ -50,6 +66,11 @@ func TestSandboxedPlugin(t *testing.T) {
 	}
 	if err := sandboxed.Health(ctx); err != nil {
 		t.Fatal(err)
+	}
+	// No namespaces: the way to root-in-a-namespace kernel surfaces (nf_tables, mounts).
+	ns, err := sandboxed.Invoke(ctx, &driverv1.InvokeRequest{DriverId: "echo", Kind: "power", Operation: "probe-ns"}, nil)
+	if err != nil || ns != `"`+unix.EPERM.Error()+`"` {
+		t.Fatalf("sandboxed unshare(CLONE_NEWUSER) = %s, %v", ns, err)
 	}
 	// The plugin runs from the hashed file, not its path: /proc/<pid>/exe is the binary it verified.
 	link, err := os.Readlink("/proc/" + strconv.Itoa(sandboxed.cmd.Process.Pid) + "/exe")
