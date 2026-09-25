@@ -307,7 +307,16 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       tx1 (18d9ad1, [097b34]).
     - bcd self-update (de9f380, [6a20b8]): rollout sends the signed release manifest in DaemonSection.signature
       (ecf7cd0). Open: the install script's [update] release_pins ([402c97]); the docs callouts ([75b663]).
-    - Next for [f02367]: a quorum sim scenario (tests/sim, with [31c64a]).
+    - Next for [f02367]: a quorum sim scenario (tests/sim, with [31c64a]), including Talos POSTs with approvers on.
+    - Security review 9 (subagent over bcd self-update, proxy and quorum parity), 3 HIGH:
+      - HIGH-2 epoch rewind: fixed in bcd 7ac5609; the TS pki + FakeDaemon half is [402c97]'s.
+      - HIGH-3 httpProxy: (a) empty targets reach nothing (808379f); (d) anything but GET needs a bound leaf (bcd
+        7ac5609, server 8bfe10c); (b) BMC name→IP memory and (c) a local bmc_networks deny list: [6a20b8].
+      - HIGH-1 release floor starting at 0: [6a20b8] (ldflag + config update.release_sequence + max); the install
+        script seeds it ([402c97]).
+      - MEDIUM-4 manifest expiry must use local OR server time; LOW-5 artifact name + a local clear-failed; LOW-6 dedupe
+        pins; LOW-7 no `previous` after a rollback: all [6a20b8].
+      - Decision: release pins and approver-set pins come only from install-time config, never the well-known.
     - Ramdisk image mount: REDUCED. ext* is written with debugfs, never mounted (1ae1789). The xfs/btrfs/vfat
       fallbacks and the Ignition boot partition remain ([6a20b8]).
       - proto: 525c199, 4f11548;
