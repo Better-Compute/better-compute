@@ -153,8 +153,10 @@ show it.
   vCPU-hours, tenant-billed) until claimed (`instances.claimed_at`). From the claim on they bill as
   the owner's ordinary usage. Where the pool checks budgets (`budgetCheck: 'meter'`, or an offer's
   `stop-new`/`drain`), a spent budget stops refills, and a `drain` offer also empties the pool. The
-  check is `IamPort.billingCheck({ tenantId })`, asked once per tenant per pass and only when a
-  refill or a drain depends on it.
+  check is `IamPort.billingCheck({ tenantId })`, asked at most once a minute per tenant and only
+  when a refill or a drain depends on it. A warm instance records the `secret_refs.version` of every
+  secret its guest was given. When one is rotated (or deleted), claims skip and retire it, and the
+  pass replaces it.
 
 - **Snapshots.** `sandboxes.snapshot({ includeMemory = true, keep = false })` needs
   `vps({ snapshots: SnapshotStore })` (`presign`, optional `delete`). It sends the host
@@ -171,8 +173,10 @@ show it.
   - Objects are deleted by the reconciler, outside request transactions, once no live restore still
     needs them. A pending upload's object
     waits until its command settles.
-  - `create({ fromSnapshot })` restores the caller's own ready snapshot, taken on the same runtime.
-    Another identity's or tenant's snapshot is `NOT_FOUND`.
+  - `create({ fromSnapshot })` restores the caller's own ready snapshot, taken on the same runtime,
+    under the snapshot's own template (its network and env decide the guest's isolation). Another
+    identity's or tenant's snapshot is `NOT_FOUND`. So is, for an agent, a snapshot of a sandbox it
+    did not create: its person's other sandboxes' memory is not its to boot.
   - A memory snapshot places only on nodes labelled with the same `cpu.model`. Its guest resumes
     without cloud-init, so it keeps the source instance's exec principal
     (`restore_from.principalInstanceId`), and `sandboxes.exec` signs for it.

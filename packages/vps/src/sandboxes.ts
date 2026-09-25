@@ -191,6 +191,15 @@ ALTER TABLE sandboxes ADD COLUMN extending_at timestamptz;
 `,
 };
 
+/**
+ * The `secret_refs.version` of each secret a warm instance's guest was given (review 13): a rotated
+ * secret retires the instances that still hold its old value.
+ */
+export const vpsWarmSecretVersionsMigration: Migration = {
+  name: 'vps/0016_warm_secret_versions',
+  sql: `ALTER TABLE instances ADD COLUMN warm_secret_versions jsonb;`,
+};
+
 /** When a sandbox claimed a warm instance: its warm capacity metering ends there (`vps.sandbox.warm`). */
 export const vpsWarmClaimsMigration: Migration = {
   name: 'vps/0006_warm_claims',
@@ -1296,6 +1305,10 @@ async function createManagedInstance(
   await assertTenantSecrets(tx, template.tenantId, templateSecretRefs(template));
   // A memory restore resumes the source guest with its own host key (certified or not, and until
   // when): no new key for it. Anything else boots with the key rendered now.
+  // Read before the secrets are resolved: a rotation in between then shows as stale, never current.
+  const secretsAt = spec.warmTemplateId
+    ? await secretVersions(tx, template.tenantId, templateSecretRefs(template))
+    : undefined;
   const memoryRestore = spec.restoreFrom?.includeMemory === true;
   const { userData: rendered, hostCertValidBefore: generated } = await instanceUserData(
     deps,
@@ -1356,6 +1369,11 @@ async function createManagedInstance(
       hostCertValidBefore === undefined ? null : new Date(hostCertValidBefore).toISOString(),
     ],
   );
+  if (secretsAt && Object.keys(secretsAt).length > 0)
+    await tx.query(`UPDATE instances SET warm_secret_versions = $2::jsonb WHERE id = $1`, [
+      spec.instanceId,
+      JSON.stringify(secretsAt),
+    ]);
   let row = (await readInstance(tx, spec.instanceId, { lock: true }))!;
   await deps.authz.upsert(tx, {
     type: 'instance',
@@ -1606,6 +1624,57 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 /** Warm instance states a claim takes: settled and not on their way out. */
 const claimable = ['stopped', 'paused'];
 
+/** Stale warm instances a claim retires before it falls back to a cold create. */
+const warmClaimAttempts = 4;
+
+/**
+ * The current `secret_refs.version` of each ref (a deleted secret is absent; so is everything
+ * without a `secret_refs` table). Warm instances record them: their guests hold resolved values.
+ */
+async function secretVersions(
+  tx: SqlTx,
+  tenantId: string,
+  refs: readonly string[],
+): Promise<Record<string, number>> {
+  if (refs.length === 0) return {};
+  const present = await tx.query<{ found: string | null }>(
+    `SELECT to_regclass('secret_refs')::text AS found`,
+  );
+  if (!present.rows[0]?.found) return {};
+  const { rows } = await tx.query<{ ref: string; version: string | number }>(
+    `SELECT ref, version FROM secret_refs WHERE tenant_id = $1 AND ref = ANY($2::text[])`,
+    [tenantId, [...refs]],
+  );
+  return Object.fromEntries(rows.map((row) => [row.ref, Number(row.version)]));
+}
+
+/** Whether a warm instance was made with the secrets' current versions (none named: always). */
+function secretsCurrent(recorded: unknown, current: Readonly<Record<string, number>>): boolean {
+  const parsed: Record<string, number> | null =
+    typeof recorded === 'string' ? JSON.parse(recorded) : (recorded as Record<string, number>);
+  const wanted = Object.entries(current);
+  const had = Object.keys(parsed ?? {});
+  if (wanted.length === 0 && had.length === 0) return true;
+  return (
+    parsed !== null &&
+    had.length === wanted.length &&
+    wanted.every(([ref, version]) => parsed[ref] === version)
+  );
+}
+
+/** Asks one warm instance to go (the lifecycle deletes it). */
+async function retireWarm(
+  deps: Pick<InstanceDeps, 'desired' | 'work' | 'events'>,
+  tx: SqlTx,
+  instanceId: string,
+  templateId: string,
+): Promise<void> {
+  const row = (await readInstance(tx, instanceId, { lock: true }))!;
+  const next = await updateInstance(tx, row, { desiredState: 'deleted' });
+  await wake(deps, tx, next);
+  await publishInstance(deps, tx, next, 'instance.deleting', { warmTemplateId: templateId });
+}
+
 /**
  * Claims the oldest settled warm instance of a template for a sandbox (§3.7), or nothing. Rows
  * another claim holds are skipped, so concurrent creates never wait on each other. The instance
@@ -1618,21 +1687,33 @@ async function claimWarm(
   sandbox: RawSandbox,
   until: number,
 ): Promise<InstanceRow | undefined> {
-  const { rows } = await tx.query<{ id: string }>(
-    `SELECT i.id FROM instances i
-      WHERE i.warm_template_id = $1 AND i.tenant_id = $2 AND NOT i.draft
-        AND i.desired_state <> 'deleted' AND i.state = ANY($3::text[])
-        AND i.warm_template_version = $4
-        AND ${certificateCovers('i.', '$5::timestamptz')} AND NOT ${networkUnenforced('i.')}
-      ORDER BY i.created_at, i.id LIMIT 1 FOR UPDATE SKIP LOCKED`,
-    [
-      template.id,
-      template.tenantId,
-      claimable,
-      template.instanceVersion,
-      new Date(until).toISOString(),
-    ],
-  );
+  // A secret rotated since an instance was made: its guest holds the old value. Retire it, try the next.
+  const current = await secretVersions(tx, template.tenantId, templateSecretRefs(template));
+  let rows: { id: string }[] = [];
+  for (let attempt = 0; attempt < warmClaimAttempts; attempt++) {
+    const found = await tx.query<{ id: string; warm_secret_versions: unknown }>(
+      `SELECT i.id, i.warm_secret_versions FROM instances i
+        WHERE i.warm_template_id = $1 AND i.tenant_id = $2 AND NOT i.draft
+          AND i.desired_state <> 'deleted' AND i.state = ANY($3::text[])
+          AND i.warm_template_version = $4
+          AND ${certificateCovers('i.', '$5::timestamptz')} AND NOT ${networkUnenforced('i.')}
+        ORDER BY i.created_at, i.id LIMIT 1 FOR UPDATE SKIP LOCKED`,
+      [
+        template.id,
+        template.tenantId,
+        claimable,
+        template.instanceVersion,
+        new Date(until).toISOString(),
+      ],
+    );
+    const candidate = found.rows[0];
+    if (!candidate) return undefined;
+    if (secretsCurrent(candidate.warm_secret_versions, current)) {
+      rows = [candidate];
+      break;
+    }
+    await retireWarm(deps, tx, candidate.id, template.id);
+  }
   if (!rows[0]) return undefined;
   await tx.query(
     `UPDATE instances
@@ -2442,7 +2523,7 @@ export async function reconcileSandboxes(
   };
   for (const raw of pools) {
     const template = toTemplate(raw);
-    const live = Number(raw.live);
+    let live = Number(raw.live);
     // Warm instances are metered to the tenant: a spent budget stops refills where the pool checks
     // budgets (as it refuses creates), and an offer that drains on one empties the pool.
     const budgeted =
@@ -2459,6 +2540,11 @@ export async function reconcileSandboxes(
       template.deleted || (overBudget && raw.on_budget_exceeded === 'drain')
         ? 0
         : template.warm.max;
+    if (!template.deleted && live > 0) {
+      const rotated = await drainRotatedWarm(deps, sql, template);
+      pass.warmDrained += rotated;
+      live -= rotated;
+    }
     if (Number(raw.stale) > 0)
       pass.warmDrained += await drainWarm(deps, sql, template, Number(raw.stale), true);
     if (live > keep) pass.warmDrained += await drainWarm(deps, sql, template, live - keep, false);
@@ -2629,12 +2715,37 @@ async function drainWarm(
         Math.min(template.defaultTtlSeconds, warmCertificateFloorSeconds),
       ],
     );
-    for (const { id: instanceId } of rows) {
-      const row = (await readInstance(tx, instanceId, { lock: true }))!;
-      const next = await updateInstance(tx, row, { desiredState: 'deleted' });
-      await wake(deps, tx, next);
-      await publishInstance(deps, tx, next, 'instance.deleting', { warmTemplateId: template.id });
-    }
+    for (const { id: instanceId } of rows) await retireWarm(deps, tx, instanceId, template.id);
     return rows.length;
+  });
+}
+
+/**
+ * Retires a template's warm instances made before one of its secrets was rotated (or deleted):
+ * their guests hold the old values. Only templates that name secrets pay for the check.
+ */
+async function drainRotatedWarm(
+  deps: InstanceDeps,
+  sql: SqlExecutor,
+  template: TemplateRow,
+): Promise<number> {
+  const refs = templateSecretRefs(template);
+  if (refs.length === 0) return 0;
+  return sql.transaction(async (tx) => {
+    const current = await secretVersions(tx, template.tenantId, refs);
+    const { rows } = await tx.query<{ id: string; warm_secret_versions: unknown }>(
+      `SELECT i.id, i.warm_secret_versions FROM instances i
+        WHERE i.warm_template_id = $1 AND i.desired_state <> 'deleted'
+          AND i.state NOT IN ('deleting', 'deleted')
+        ORDER BY i.id FOR UPDATE SKIP LOCKED`,
+      [template.id],
+    );
+    let retired = 0;
+    for (const row of rows)
+      if (!secretsCurrent(row.warm_secret_versions, current)) {
+        await retireWarm(deps, tx, row.id, template.id);
+        retired++;
+      }
+    return retired;
   });
 }

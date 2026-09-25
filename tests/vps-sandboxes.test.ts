@@ -1903,6 +1903,42 @@ describe('template env', () => {
     expect(recorded.fleetDecisions).toBe(1);
   });
 
+  it('retires warm instances made before a secret they hold was rotated', async () => {
+    broker = {
+      resolve: async (ref) => `value:${ref}`,
+      put: async (tenantId) => `secret://${tenantId}/sealed`,
+      delete: async () => {},
+    };
+    await putSecret('secret://acme/api-token', 'api-token');
+    const template = await createTemplate({
+      env: { TOKEN: 'secret://acme/api-token' },
+      warm: { min: 2 },
+    });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const warm = async () =>
+      (
+        await db.query<{ id: string }>(
+          `SELECT id FROM instances WHERE warm_template_id = $1 AND desired_state <> 'deleted'
+            ORDER BY id`,
+          [template.id],
+        )
+      ).rows.map((row) => row.id);
+    const before = await warm();
+    expect(before).toHaveLength(2);
+    // The secret is rotated (secrets.put bumps its version): both guests hold the old value.
+    await db.query(
+      `UPDATE secret_refs SET version = version + 1 WHERE ref = 'secret://acme/api-token'`,
+    );
+    // A claim retires what it finds stale and falls back to a cold create.
+    expect((await createSandbox(template.id)).warm).toBe(false);
+    // The pass retires the rest and refills with the new version.
+    await reconcileSandboxes();
+    const after = await warm();
+    expect(after).toHaveLength(2);
+    expect(after.filter((id) => before.includes(id))).toEqual([]);
+  });
+
   it('refuses an update whose decision predates secrets added to the template since', async () => {
     broker = {
       resolve: async (ref) => `value:${ref}`,
