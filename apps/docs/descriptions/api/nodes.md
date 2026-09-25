@@ -81,3 +81,11 @@ The lifetime is `ttlSeconds` (60 to 3,600, default 900), never past the caller's
 Revokes a break-glass SSH certificate before it expires; the node's revocation list carries it from the next NodeSpec on.
 
 Decided as `compute:nodes:ssh-root` and hosted by the tunnels module (v0.3). Revoking again returns the same revocation. A serial not issued for this node is `NOT_FOUND`. Publishes `node.ssh-cert.revoked`.
+
+## listSshCerts
+
+Lists the break-glass SSH certificates the tenant issued for one node, newest first, with each one's principal, issuer, lifetime and state; never the certificate itself.
+
+Decided as `compute:nodes:read` on `compute-node/{nodeId}` and hosted by the tunnels module. `state` is `active`, `expired` or `revoked`; a revoked certificate also carries `revokedAt`, `revokedBy` (an identity, or `iam` when re-authorization revoked it) and `revokeReason` when one was given.
+
+Only unexpired certificates are listed unless `includeExpired` is true; expired certificates are kept for one day, then removed by an hourly clean-up. Pages hold 1 to 500 certificates (100 by default), and `nextCursor` is set while more remain. A node the tenant cannot see is `NOT_FOUND`, and a malformed `cursor` is `INVALID_INPUT`.
