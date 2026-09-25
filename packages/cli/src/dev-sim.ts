@@ -27,7 +27,11 @@ interface DevFleetNotifier extends Notifier {
 }
 interface DevFleet {
   gatewayUrl: string;
-  createPool(options?: { gpuModel?: string | null; key?: string }): Promise<{ poolId: string }>;
+  createPool(options?: {
+    gpuModel?: string | null;
+    key?: string;
+    expectGpuCount?: number;
+  }): Promise<{ poolId: string }>;
   join(options: {
     poolId: string;
     count?: number;
@@ -149,7 +153,13 @@ export async function prepareDevSim(
         );
       const gpuModel =
         sim.variant === 'l40s' ? 'L40S' : sim.variant === 'cpu' ? null : ('H100' as const);
-      const { poolId } = await fleet.createPool({ gpuModel, key: `sim-${sim.variant}` });
+      // Acceptance checks the board's GPU count, so hgx-h100-gpu-missing machines are not adopted.
+      const expectGpuCount = sim.variant === 'l40s' ? 4 : sim.variant === 'cpu' ? undefined : 8;
+      const { poolId } = await fleet.createPool({
+        gpuModel,
+        key: `sim-${sim.variant}`,
+        ...(expectGpuCount === undefined ? {} : { expectGpuCount }),
+      });
       const nodes = await fleet.join({ poolId, count: sim.count, variant: sim.variant });
       sim.note(`Joined ${nodes.length} simulated ${sim.variant} node(s) into ${poolId}`);
       const joinedFleet = fleet;

@@ -182,8 +182,16 @@ export interface DevFleet {
   pins: DevJoinKeys['pins'];
   /** Running FakeDaemons by node id. */
   readonly daemons: ReadonlyMap<string, FakeDaemon>;
-  /** A shared site in the fleet's region and a `metal-host` pool on it, accepting nodes after `diag.nvml`. */
-  createPool(options?: { gpuModel?: string | null; key?: string }): Promise<DevPool>;
+  /**
+   * A shared site in the fleet's region and a `metal-host` pool on it, accepting nodes after `diag.nvml`.
+   * With `expectGpuCount`, acceptance checks that many GPUs (`policy.expect.gpuCount`); without it, a
+   * machine passes with whatever GPUs it reports.
+   */
+  createPool(options?: {
+    gpuModel?: string | null;
+    key?: string;
+    expectGpuCount?: number;
+  }): Promise<DevPool>;
   /**
    * Mints one join token for `count` machines, joins each through the gateway's `Join` RPC with a sealed
    * token and a fresh key, verifies the signed response, then starts its FakeDaemon. Resolves to the node ids.
@@ -330,7 +338,12 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         siteId: site.id,
         class: 'metal-host',
         ...(gpuModel ? { gpuModel } : {}),
-        policy: { acceptance: [{ kind: 'diag.nvml' }] },
+        policy: {
+          acceptance: [{ kind: 'diag.nvml' }],
+          ...(poolOptions.expectGpuCount === undefined
+            ? {}
+            : { expect: { gpuCount: poolOptions.expectGpuCount } }),
+        },
         idempotencyKey: `dev-pool-${key}`,
       });
       return { siteId: site.id, poolId: pool.id };

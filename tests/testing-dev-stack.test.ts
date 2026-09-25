@@ -79,6 +79,35 @@ describe('createDevStack', () => {
     expect(stack.daemons.get(active.binding.nodeId)!.files.size).toBeGreaterThan(0);
   });
 
+  it('does not adopt a machine that fails diag.nvml acceptance', { timeout: 60_000 }, async () => {
+    stack = await createDevStack();
+    // HGX boards have 8 GPUs; acceptance checks the count, not just what the machine reports.
+    const { poolId } = await stack.createPool({ expectGpuCount: 8 });
+    const [good] = await stack.join({ poolId, seed: 'dev-good' });
+    const [bad] = await stack.join({ poolId, variant: 'hgx-h100-gpu-missing', seed: 'dev-bad' });
+    await stack.waitFor([good!], { timeoutMs: 45_000 });
+    // The healthy machine is adopted; the one with a GPU gone ran diag.nvml and did not pass.
+    const deadline = Date.now() + 30_000;
+    let diag: { state: string }[] = [];
+    while (Date.now() < deadline) {
+      diag = (
+        await stack.database.query<{ state: string }>(
+          `SELECT state FROM commands WHERE node_id = $1 AND kind = 'diag.nvml'`,
+          [bad],
+        )
+      ).rows;
+      if (diag.some((row) => !['pending', 'dispatched', 'accepted', 'running'].includes(row.state)))
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(diag.length).toBeGreaterThan(0);
+    const { rows } = await stack.database.query<{ provision_state: string }>(
+      'SELECT provision_state FROM nodes WHERE id = $1',
+      [bad],
+    );
+    expect(rows[0]!.provision_state).not.toBe('adopted');
+  });
+
   it('attaches a fleet only with insecureHeaderAuth: true', async () => {
     stack = await createDevStack();
     await expect(
