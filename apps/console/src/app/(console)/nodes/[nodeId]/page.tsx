@@ -77,6 +77,9 @@ export default function NodePage({ params }: { params: Promise<{ nodeId: string 
               <DetailActions
                 detail={detail}
                 only={['nodes/cordon', 'nodes/uncordon', 'nodes/drain']}
+                confirm={{
+                  'nodes/drain': `Drain ${nodeId}? It is cordoned and its allocations are released within the pool's disruption budget.`,
+                }}
               />
               {node.connectivity === 'connected' && (
                 <p>
