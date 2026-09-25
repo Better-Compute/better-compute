@@ -81,6 +81,24 @@ export const rescueProfile = defineProfile({
   steps: [{ use: 'metal.ensureRamdisk' }],
 });
 
+/**
+ * unrescue: leave the rescue ramdisk for the installed OS: boot from disk, power-cycle, and wait for
+ * the OS to rejoin as `node`. The node stays in `rescue` while this runs and becomes `deployed` only
+ * once it succeeded (§11.1 `rescue ⇄ unrescue`).
+ */
+export const unrescueProfile = defineProfile({
+  id: 'metal-unrescue',
+  version: 1,
+  target: 'metal',
+  description: 'Boot a rescued machine back into its installed OS',
+  steps: [
+    { use: 'management.setBootDevice', with: { device: 'disk', persistent: true } },
+    { use: 'power.setPower', with: { action: 'cycle' } },
+    { use: 'wait.agentJoined', with: { role: 'node' }, timeout: '20m' },
+  ],
+  cleanup: [{ use: 'boot.cleanUp' }],
+});
+
 // Agentless machines (`pool.agent = 'none'`: Talos, appliances, §5.6 walkthrough 3) never run a
 // ramdisk or bcd, so everything happens out of band through the BMC and the site agent. Their wipe
 // can never be node-attested: a release only returns to `ready` when the pool opts in with
@@ -192,6 +210,7 @@ export const metalProfiles: readonly ProfileDocument[] = Object.freeze([
   releaseProfile,
   retireProfile,
   rescueProfile,
+  unrescueProfile,
   inspectOobProfile,
   commissionOobProfile,
   releaseOobProfile,

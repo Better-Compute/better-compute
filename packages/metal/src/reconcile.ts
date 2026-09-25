@@ -16,6 +16,8 @@ import { dueNodeLease, leaseEnded, markLeaseBound, newIdentityGeneration, tenant
 // finishes (`owner: 'metal'`); a slow poll covers anything missed.
 
 export const metalWorkKind = 'metal';
+/** `metal_nodes.phase` while a rescued node boots back into its OS (the state stays `rescue`). */
+export const unrescuePhase = 'unrescue';
 /** How often an active workflow is looked at when nothing wakes the reconciler sooner. */
 export const metalPollMs = 30_000;
 
@@ -98,6 +100,25 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
     if (leased) return leased;
     const state = node.provision_state;
     if (!workflowStates.includes(state)) return { action: 'idle', state };
+
+    // `metal.unrescue` runs its workflow while the node is still in rescue; `unrescue` → deployed
+    // applies only once the installed OS is back.
+    if (state === 'rescue' && node.phase === unrescuePhase && node.workflow_id) {
+      const { rows } = await tx.query<{ state: string; error: Json | null }>('SELECT state, error FROM workflows WHERE id = $1', [node.workflow_id]);
+      const workflow = rows[0];
+      if (workflow && ['pending', 'running', 'paused'].includes(workflow.state)) return { action: 'waiting', state, workflowId: node.workflow_id };
+      if (workflow?.state === 'succeeded') {
+        const to = await applyProvisionVerb(tx, node, 'unrescue');
+        await setMetalWorkflow(tx, nodeId, null, null);
+        await publish(context, tx, node, `node.provision.${to}`, { from: state, verb: 'unrescue', workflowId: node.workflow_id });
+        return { action: 'completed', from: state, to };
+      }
+      const error = (workflow?.error ?? { code: 'WORKFLOW_LOST', message: `workflow ${node.workflow_id} is gone` }) as Json;
+      await applyProvisionVerb(tx, node, 'fail', { error });
+      await setMetalWorkflow(tx, nodeId, null, null);
+      await publish(context, tx, node, 'node.provision.failed', { from: state, verb: 'unrescue', error });
+      return { action: 'failed', from: state, error };
+    }
 
     if (node.workflow_id && node.phase === state) {
       const { rows } = await tx.query<{ state: string; error: Json | null; profile_document: { role?: string } | null }>(

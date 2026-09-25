@@ -62,6 +62,8 @@ export interface SimMachine {
   pxeWaiting?: boolean;
   /** The site agent whose boot entry the machine booted from. */
   bootedBy?: string;
+  /** An OS is installed on the disk: booting from `disk` brings it up as role `node`. */
+  installed?: boolean;
 }
 
 /** The firmware every simulated machine ships with. */
@@ -353,6 +355,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
             m.pendingBios = {};
             if (m.bootDevice === 'pxe' && options.pxe === 'boot-server') m.pxeWaiting = true;
             else if (m.bootDevice === 'pxe') await connect(target, 'ramdisk', `ramdisk-${command.id}`);
+            else if (m.bootDevice === 'disk' && m.installed) await connect(target, 'node', `os-${command.id}`);
             else if (m.bootDevice === 'cd') {
               const boot = options.install?.(target, m);
               if (boot) await connect(target, 'node', boot);

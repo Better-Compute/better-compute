@@ -4,6 +4,7 @@ import {
   isId,
   isSecretRef,
   newId,
+  provisionStateTable,
   recoverTarget,
   shardOf,
   type Json,
@@ -17,7 +18,8 @@ import {
 } from '@better-compute/core';
 import { siteAgentFor } from '@better-compute/provision';
 import type { HardwareProfile } from './module-types.js';
-import { metalWorkKind } from './reconcile.js';
+import { unrescueProfile } from './profiles.js';
+import { metalWorkKind, unrescuePhase } from './reconcile.js';
 import { bmcOperationJson } from './steps.js';
 import { applyProvisionVerb, readMetalNode, resolveDriverBindings, setMetalWorkflow, type MetalNodeRow } from './store.js';
 
@@ -122,6 +124,8 @@ export type MetalApi = {
     deploy: MethodDefinition<DeployInput, MetalNodeView>;
     undeploy: MethodDefinition<UndeployInput, MetalNodeView>;
     rescue: MethodDefinition<MetalNodeInput, MetalNodeView>;
+    /** Boots a rescued node back into its OS; it stays `rescue` until that worked, then `deployed`. */
+    unrescue: MethodDefinition<MetalNodeInput, MetalNodeView>;
     abort: MethodDefinition<AbortInput, MetalNodeView>;
     recover: MethodDefinition<MetalNodeInput, MetalNodeView>;
     retire: MethodDefinition<MetalNodeInput, MetalNodeView>;
@@ -331,6 +335,42 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           }),
       }),
       rescue: simple('rescue'),
+      unrescue: defineMethod<MetalNodeInput, MetalNodeView>({
+        action: 'compute:nodes:provision',
+        kind: 'mutation',
+        resource: onNode,
+        validate: (raw) => nodeInput(raw),
+        handler: (context, input) =>
+          context.sql.transaction(async (tx) => {
+            const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId, lock: true });
+            // Checked against the state table now, applied by the reconciler once the OS is back.
+            if (!provisionStateTable.transitions[node.provision_state]?.unrescue)
+              throw new ComputeError('INVALID_STATE', `A ${node.provision_state} node cannot unrescue`);
+            if (node.phase === unrescuePhase && node.workflow_id) return metalNodeView(node);
+            if (node.workflow_id) {
+              const { rows } = await tx.query<{ state: string }>('SELECT state FROM workflows WHERE id = $1', [node.workflow_id]);
+              if (rows[0] && ['pending', 'running', 'paused'].includes(rows[0].state))
+                throw new ComputeError('CONFLICT', `Node ${node.node_id} is still booting its rescue ramdisk`);
+            }
+            if (!context.workflows) throw new ComputeError('INVALID_CONFIG', 'metal() needs the provision module: ModuleContext.workflows is not set');
+            const { id } = await context.workflows.start(tx, {
+              tenantId: node.tenant_id,
+              profileId: unrescueProfile.id,
+              profileVersion: unrescueProfile.version,
+              nodeId: node.node_id,
+              owner: metalWorkKind,
+            } as Parameters<NonNullable<MethodContext['workflows']>['start']>[1]);
+            await setMetalWorkflow(tx, node.node_id, unrescuePhase, id);
+            await context.work.enqueue(tx, metalWorkKind, node.node_id);
+            await context.events.publish(tx, {
+              type: 'node.provision.unrescuing',
+              tenantId: node.tenant_id,
+              subject: `node/${node.node_id}`,
+              data: { nodeId: node.node_id, workflowId: id },
+            });
+            return metalNodeView(await readMetalNode(tx, node.node_id));
+          }),
+      }),
       abort: defineMethod<AbortInput, MetalNodeView>({
         action: 'compute:nodes:provision',
         kind: 'mutation',

@@ -12,6 +12,7 @@ export const metalVerbs = [
   'deploy',
   'undeploy',
   'rescue',
+  'unrescue',
   'abort',
   'recover',
   'retire',
@@ -33,6 +34,8 @@ export const metalVerbTransitions: Readonly<Record<MetalVerb, ProvisionVerb | nu
     deploy: 'deploy',
     undeploy: 'release',
     rescue: 'rescue',
+    // Applied by the metal reconciler once the unrescue workflow brought the OS back.
+    unrescue: 'unrescue',
     abort: 'abort',
     recover: 'recover',
     retire: 'retire',
