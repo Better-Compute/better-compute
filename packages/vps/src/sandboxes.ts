@@ -1200,16 +1200,23 @@ async function createManagedInstance(
   // The range may have gone since the template was written; never start an instance bcd must stop.
   await assertNetworkDeliverable(tx, template.poolId, template.network);
   // Rendered, then sealed, before the row exists: resolved secrets never touch the table (§6).
-  const { userData: rendered, hostCertified: generated } = await instanceUserData(
+  // Templates written before the tenant-secrets rule may still name other secrets: never resolve them.
+  await assertTenantSecrets(tx, template.tenantId, templateSecretRefs(template));
+  // A memory restore resumes the source guest with its own host key (certified or not, and until
+  // when): no new key for it. Anything else boots with the key rendered now.
+  const memoryRestore = spec.restoreFrom?.includeMemory === true;
+  const { userData: rendered, hostCertValidBefore: generated } = await instanceUserData(
     deps,
     template,
     spec.instanceId,
+    { hostKey: !memoryRestore },
   );
-  // A memory restore resumes the source guest (its host key, certified or not); anything else
-  // boots with the key just rendered.
-  const hostCertified = spec.restoreFrom?.includeMemory
-    ? spec.restoreFrom.hostCertified === true
+  const hostCertValidBefore = memoryRestore
+    ? spec.restoreFrom!.hostCertified
+      ? spec.restoreFrom!.hostCertValidBefore
+      : undefined
     : generated;
+  const hostCertified = hostCertValidBefore !== undefined;
   const sealed = rendered !== null && deps.broker !== undefined && !isSecretRef(rendered);
   const userData = sealed ? await deps.broker!.put(template.tenantId, rendered!) : rendered;
   const desiredState =
@@ -1227,9 +1234,10 @@ async function createManagedInstance(
     `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, image, ssh_keys, user_data,
                             runtime, draft, state, desired_state, owner_identity_id, agent_id, delegation_id,
                             idempotency_key, request_hash, sandbox_id, warm_template_id, restore_from, network_policy,
-                            warm_template_version, user_data_sealed, host_certified, version)
+                            warm_template_version, user_data_sealed, host_certified,
+                            host_cert_valid_before, version)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, '{}', $8, $9, false, 'pending', $10, $11, $12, $13,
-             $14, decode($15, 'hex'), $16, $17, $18::jsonb, $19, $20, $21, $22, 1)`,
+             $14, decode($15, 'hex'), $16, $17, $18::jsonb, $19, $20, $21, $22, $23::timestamptz, 1)`,
     [
       spec.instanceId,
       template.tenantId,
@@ -1253,6 +1261,7 @@ async function createManagedInstance(
       spec.warmTemplateId ? template.instanceVersion : null,
       sealed,
       hostCertified,
+      hostCertValidBefore === undefined ? null : new Date(hostCertValidBefore).toISOString(),
     ],
   );
   let row = (await readInstance(tx, spec.instanceId, { lock: true }))!;
@@ -1378,10 +1387,10 @@ async function instanceUserData(
   deps: InstanceDeps,
   template: TemplateRow,
   instanceId: string,
-): Promise<{ userData: string | null; hostCertified: boolean }> {
+  options: { hostKey: boolean },
+): Promise<{ userData: string | null; hostCertValidBefore?: number }> {
   const names = Object.keys(template.env);
-  if (!deps.sandboxExec && names.length === 0)
-    return { userData: template.userData ?? null, hostCertified: false };
+  if (!deps.sandboxExec && names.length === 0) return { userData: template.userData ?? null };
   assertEnvDeliverable(deps, template.env, template.userData);
   const env: Record<string, string> = {};
   for (const name of names.sort()) {
@@ -1394,14 +1403,14 @@ async function instanceUserData(
   const own = isSecretRef(template.userData)
     ? await deps.secrets.resolve(template.userData)
     : template.userData;
-  const hostKey = await certifiedHostKey(deps, instanceId);
+  const hostKey = options.hostKey ? await certifiedHostKey(deps, instanceId) : undefined;
   return {
     userData: sandboxUserData(own, instanceId, {
       ...(deps.sandboxExec ? { exec: deps.sandboxExec } : {}),
       env,
       ...(hostKey ? { hostKey } : {}),
     }),
-    hostCertified: hostKey !== undefined,
+    ...(hostKey ? { hostCertValidBefore: hostKey.validBefore } : {}),
   };
 }
 
@@ -1437,7 +1446,7 @@ function opensshEcdsaP256(publicKey: KeyObject): string {
 async function certifiedHostKey(
   deps: InstanceDeps,
   instanceId: string,
-): Promise<{ privateKeyPem: string; certificate: string } | undefined> {
+): Promise<{ privateKeyPem: string; certificate: string; validBefore: number } | undefined> {
   const certify = deps.sandboxExec?.certifyHostKey;
   if (!certify) return undefined;
   if (!deps.broker)
@@ -1446,11 +1455,12 @@ async function certifiedHostKey(
       'Certified sandbox host keys travel in sealed user data: they need the secret broker',
     );
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const validBefore = deps.clock.now() + hostCertificateMs;
   const certificate = await certify({
     instanceId,
     principals: [instanceId],
     publicKey: opensshEcdsaP256(publicKey),
-    validBefore: deps.clock.now() + hostCertificateMs,
+    validBefore,
   });
   if (
     typeof certificate !== 'string' ||
@@ -1463,6 +1473,7 @@ async function certifiedHostKey(
   return {
     privateKeyPem: privateKey.export({ type: 'sec1', format: 'pem' }) as string,
     certificate,
+    validBefore,
   };
 }
 
@@ -1545,7 +1556,9 @@ export async function completeCreateSandbox(
   const source =
     raw.from_snapshot === null
       ? undefined
-      : await restoreSource(tx, raw.tenant_id, raw.from_snapshot, raw.owner_identity_id);
+      : await restoreSource(tx, raw.tenant_id, raw.from_snapshot, raw.owner_identity_id, {
+          lock: true,
+        });
   const claimed = source ? undefined : await claimWarm(deps, tx, template, raw);
   const instance =
     claimed ??
@@ -1571,6 +1584,9 @@ export async function completeCreateSandbox(
                 : {}),
               ...(source.hostCertified !== undefined
                 ? { hostCertified: source.hostCertified }
+                : {}),
+              ...(source.hostCertValidBefore !== undefined
+                ? { hostCertValidBefore: source.hostCertValidBefore }
                 : {}),
             },
           }
@@ -1851,14 +1867,14 @@ export async function reconcileSandboxes(
       );
       await deps.authz.remove(tx, { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id });
       // Snapshots hold memory: they go with the sandbox unless kept.
-      dropped.push(...(await dropSnapshots(tx, { sandboxId: raw.id }, deps.authz)));
+      await dropSnapshots(tx, { sandboxId: raw.id });
       await publishSandbox(deps, tx, raw, 'sandbox.deleted', {
         expired: raw.expired_ms !== null,
       });
       pass.deleted++;
     }
   });
-  dropped.push(...(await purgeSettledSnapshots(sql, { batch })));
+  dropped.push(...(await purgeSettledSnapshots(sql, { batch, authz: deps.authz })));
   await purgeSnapshots(options.store, deps.log, dropped);
 
   // Warm pools: what each template holds, then one transaction per change.

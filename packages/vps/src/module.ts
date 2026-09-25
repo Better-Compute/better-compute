@@ -4,6 +4,7 @@ import {
   defineModule,
   describedBy,
   draftId,
+  fleetResourceId,
   newId,
   type ComputeModule,
   type Duration,
@@ -421,6 +422,45 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       action: 'compute:secrets:manage',
       resource: { type: `${typePrefix}tenant`, id: tenantId },
     });
+    // Fleet secrets (BMC credentials of shared sites) live in the root tenant too, with nothing in
+    // `secret_refs` telling them apart: there, naming any secret takes the fleet's own decision.
+    if (context.iam.rootTenantId !== undefined && tenantId === context.iam.rootTenantId)
+      await context.iam.require(context.credential, {
+        tenantId,
+        action: 'compute:secrets:manage',
+        resource: { type: `${typePrefix}fleet`, id: fleetResourceId },
+      });
+  };
+  /**
+   * An update that changes what the guest runs (image, flavor, user data, env, network) hands the
+   * template's secrets to new code, even when it names none itself: decided on the resulting
+   * template's secrets. Read outside any transaction (this is the admission `check`).
+   */
+  const templateUpdateSecretsCheck = async (
+    context: MethodContext,
+    input: TemplateUpdate,
+  ): Promise<void> => {
+    const reshapes =
+      input.flavor !== undefined ||
+      input.imageId !== undefined ||
+      input.userData !== undefined ||
+      input.env !== undefined ||
+      input.network !== undefined;
+    if (!reshapes) return;
+    const { rows } = await context.sql.query<{
+      env: Record<string, string> | string;
+      user_data: string | null;
+    }>(`SELECT env, user_data FROM sandbox_templates WHERE id = $1 AND tenant_id = $2`, [
+      input.templateId,
+      input.tenantId,
+    ]);
+    const current = rows[0];
+    if (!current) return;
+    const env = typeof current.env === 'string' ? JSON.parse(current.env) : current.env;
+    await secretsCheck(context, input.tenantId, {
+      env: input.env ?? env,
+      userData: input.userData === undefined ? current.user_data : input.userData,
+    });
   };
   let sandboxExec: InstanceDeps['sandboxExec'];
   if (options.sandboxExec) {
@@ -815,7 +855,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
             status: 'decide',
             resource: templateResource(input),
           }),
-          check: (context, input) => secretsCheck(context, input.tenantId, input),
+          check: (context, input) => templateUpdateSecretsCheck(context, input),
         },
         handler: (context, input) => updateTemplate(depsOf(context), context.sql, input),
       }),

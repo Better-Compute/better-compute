@@ -8,6 +8,7 @@ import {
 } from './instances.js';
 import {
   dropSnapshots,
+  purgeSettledSnapshots,
   purgeSnapshots,
   type DroppedSnapshot,
   type SnapshotStore,
@@ -36,7 +37,7 @@ export async function vpsTenantDeleted(
   let dropped: DroppedSnapshot[] = [];
   const outcome = await context.sql.transaction(async (tx) => {
     // Its snapshots, kept ones included (tenant data with memory state).
-    dropped = await dropSnapshots(tx, { tenantId }, deps.authz);
+    await dropSnapshots(tx, { tenantId });
     const templates = await tx.query<{ id: string }>(
       `UPDATE sandbox_templates SET deleted = true, version = version + 1
         WHERE tenant_id = $1 AND NOT deleted RETURNING id`,
@@ -80,6 +81,8 @@ export async function vpsTenantDeleted(
     );
     return left.rows.length > 0 ? ('SYNC_AGAIN' as const) : ('DONE' as const);
   });
+  // Objects go once no live restore needs them (the instances above are on their way out).
+  dropped = await purgeSettledSnapshots(context.sql, { authz: deps.authz });
   await purgeSnapshots(store, deps.log, dropped);
   return outcome;
 }

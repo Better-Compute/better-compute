@@ -311,6 +311,7 @@ interface RawInstance {
   warm_template_id: string | null;
   restore_from: InstanceRestore | string | null;
   host_certified: boolean | null;
+  host_cert_valid_ms: number | null;
 }
 
 /** The sandbox snapshot an instance boots from (§3.7), verified by the host against `sha256`. */
@@ -329,6 +330,7 @@ export interface InstanceRestore {
   principalInstanceId?: string;
   /** A memory restore keeps the source guest's host key: certified or not, as the source was. */
   hostCertified?: boolean;
+  hostCertValidBefore?: number;
 }
 
 /**
@@ -394,6 +396,8 @@ export interface InstanceRow {
   restoreFrom?: InstanceRestore;
   /** Its guest's SSH host key is certified by the sandbox CA (exec clients pin it). */
   hostCertified: boolean;
+  /** Until when that certificate is valid (epoch ms). */
+  hostCertValidBefore?: number;
 }
 
 const json = <T>(value: T | string): T =>
@@ -411,6 +415,9 @@ function toRow(raw: RawInstance): InstanceRow {
     sshKeys: raw.ssh_keys ?? [],
     userDataSealed: raw.user_data_sealed === true,
     hostCertified: raw.host_certified === true,
+    ...(raw.host_cert_valid_ms !== null && raw.host_cert_valid_ms !== undefined
+      ? { hostCertValidBefore: Number(raw.host_cert_valid_ms) }
+      : {}),
     runtime: raw.runtime,
     draft: raw.draft,
     state: raw.state,
@@ -444,7 +451,8 @@ const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flav
   i.provider_account_id, i.external_id, i.addresses, i.reported_state, i.quota_charged,
   i.owner_identity_id, i.agent_id, i.delegation_id, i.idempotency_key,
   encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class,
-  i.sandbox_id, i.warm_template_id, i.restore_from, i.host_certified`;
+  i.sandbox_id, i.warm_template_id, i.restore_from, i.host_certified,
+  (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms`;
 
 export async function readInstance(
   tx: SqlTx,

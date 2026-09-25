@@ -95,7 +95,7 @@ beforeAll(async () => {
   // The vps tables, reduced to what sandboxes.exec reads.
   await db.query(`CREATE TABLE instances (id text PRIMARY KEY, tenant_id text NOT NULL, node_id text,
                     state text NOT NULL, draft bool NOT NULL DEFAULT false, restore_from jsonb,
-                    host_certified bool NOT NULL DEFAULT false)`);
+                    host_certified bool NOT NULL DEFAULT false, host_cert_valid_before timestamptz)`);
   await db.query(`CREATE TABLE sandboxes (id text PRIMARY KEY, tenant_id text NOT NULL, instance_id text NOT NULL,
                     draft bool NOT NULL DEFAULT false, deleting_at timestamptz, expires_at timestamptz)`);
   await useSimClock(db, T0);
@@ -219,10 +219,19 @@ describe('sandboxes.exec', () => {
       hostPrincipal: INSTANCE,
       hostCertified: false,
     });
-    await db.query(`UPDATE instances SET host_certified = true`);
+    await db.query(`UPDATE instances SET host_certified = true, host_cert_valid_before = $1`, [
+      new Date(T0 + 3_600_000).toISOString(),
+    ]);
     expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({
       hostPrincipal: INSTANCE,
       hostCertified: true,
+    });
+    // An expired host certificate cannot be pinned: say so rather than fail the client's check.
+    await db.query(`UPDATE instances SET host_cert_valid_before = $1`, [
+      new Date(T0 - 1_000).toISOString(),
+    ]);
+    expect(await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).toMatchObject({
+      hostCertified: false,
     });
   });
 

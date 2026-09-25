@@ -131,6 +131,15 @@ ALTER TABLE sandbox_snapshots ADD COLUMN host_certified bool NOT NULL DEFAULT fa
 `,
 };
 
+/** Until when a guest's certified host key is valid (the certificate's own validBefore). */
+export const vpsHostCertValidityMigration: Migration = {
+  name: 'vps/0012_host_cert_validity',
+  sql: `
+ALTER TABLE instances ADD COLUMN host_cert_valid_before timestamptz;
+ALTER TABLE sandbox_snapshots ADD COLUMN host_cert_valid_before timestamptz;
+`,
+};
+
 export type SnapshotState = 'pending' | 'ready' | 'failed' | 'deleted';
 
 export interface SandboxSnapshot {
@@ -198,6 +207,7 @@ interface RawSnapshot {
   owner_identity_id: string;
   principal_instance_id: string | null;
   host_certified: boolean;
+  host_cert_valid_ms: number | null;
   created_ms: number;
   ready_ms: number | null;
 }
@@ -206,6 +216,7 @@ const snapshotColumnsOf = (a: string) => `${a}id, ${a}tenant_id, ${a}sandbox_id,
   ${a}instance_id, ${a}node_id, ${a}runtime, ${a}include_memory, ${a}keep, ${a}state, ${a}command_id,
   ${a}url, ${a}sha256, ${a}size_bytes, ${a}cpu_model, ${a}reason, ${a}owner_identity_id,
   ${a}principal_instance_id, ${a}host_certified,
+  (extract(epoch FROM ${a}host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms,
   (extract(epoch FROM ${a}created_at) * 1000)::float8 AS created_ms,
   (extract(epoch FROM ${a}ready_at) * 1000)::float8 AS ready_ms`;
 const snapshotColumns = snapshotColumnsOf('');
@@ -251,8 +262,9 @@ export interface RestoreSource {
   cpuModel?: string;
   /** A memory snapshot's guest still accepts this instance's SSH principal. */
   principalInstanceId?: string;
-  /** A memory snapshot's guest keeps its host key: certified or not. */
+  /** A memory snapshot's guest keeps its host key: certified or not, and until when. */
   hostCertified?: boolean;
+  hostCertValidBefore?: number;
 }
 
 /**
@@ -266,10 +278,11 @@ export async function restoreSource(
   tenantId: string,
   snapshotId: string,
   identityId: string,
+  options: { lock?: boolean } = {},
 ): Promise<RestoreSource> {
   const { rows } = await tx.query<RawSnapshot>(
     `SELECT ${snapshotColumns} FROM sandbox_snapshots
-      WHERE id = $1 AND tenant_id = $2 AND owner_identity_id = $3`,
+      WHERE id = $1 AND tenant_id = $2 AND owner_identity_id = $3${options.lock ? ' FOR SHARE' : ''}`,
     [snapshotId, tenantId, identityId],
   );
   const raw = rows[0];
@@ -288,6 +301,8 @@ export async function restoreSource(
   if (raw.include_memory) {
     source.principalInstanceId = raw.principal_instance_id ?? raw.instance_id;
     source.hostCertified = raw.host_certified;
+    if (raw.host_cert_valid_ms !== null)
+      source.hostCertValidBefore = Number(raw.host_cert_valid_ms);
   }
   return source;
 }
@@ -332,8 +347,9 @@ export async function snapshotSandbox(
     instance_id: string;
     draft: boolean;
     deleting_at: string | null;
+    owner_identity_id: string;
   }>(
-    `SELECT id, template_id, instance_id, draft, deleting_at FROM sandboxes
+    `SELECT id, template_id, instance_id, draft, deleting_at, owner_identity_id FROM sandboxes
       WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
     [input.sandboxId, input.tenantId],
   );
@@ -377,8 +393,9 @@ export async function snapshotSandbox(
   const { rows } = await tx.query<RawSnapshot>(
     `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
                                     include_memory, keep, state, command_id, url, owner_identity_id,
-                                    idempotency_key, principal_instance_id, host_certified, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, $15, 1)
+                                    idempotency_key, principal_instance_id, host_certified,
+                                    host_cert_valid_before, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, $15, $16, 1)
      RETURNING ${snapshotColumns}`,
     [
       snapshotId,
@@ -392,11 +409,15 @@ export async function snapshotSandbox(
       input.keep,
       command.id,
       target.url,
-      caller.identityId,
+      // The sandbox owner's, whoever took it: only they may boot its memory (and exec into it).
+      sandbox.owner_identity_id,
       input.idempotencyKey ?? null,
       // A restored guest keeps the principal its memory was captured with.
       instance.restoreFrom?.principalInstanceId ?? instance.id,
       instance.hostCertified,
+      instance.hostCertValidBefore === undefined
+        ? null
+        : new Date(instance.hostCertValidBefore).toISOString(),
     ],
   );
   // Its own resource: a kept snapshot outlives its sandbox (and the sandbox's authz row).
@@ -409,7 +430,7 @@ export async function snapshotSandbox(
       templateId: sandbox.template_id,
       includeMemory: input.includeMemory,
     },
-    ownerId: caller.identityId,
+    ownerId: sandbox.owner_identity_id,
   });
   return snapshotView(rows[0]!);
 }
@@ -487,8 +508,8 @@ export async function getSnapshot(tx: SqlTx, ref: SnapshotRef): Promise<SandboxS
 
 /**
  * `sandboxSnapshots.delete`: the snapshot is gone at once for reads and restores; its stored object
- * is deleted by the next `vps.sandboxes` pass (after its command settled, for a pending upload), so
- * no network call runs in this transaction. Idempotent.
+ * (and its authz row) go with a later `vps.sandboxes` pass, once its upload settled and no live
+ * restore still needs it, so no network call runs in this transaction. Idempotent.
  */
 export async function deleteSnapshot(
   deps: Pick<InstanceDeps, 'authz' | 'events' | 'work'>,
@@ -511,7 +532,6 @@ export async function deleteSnapshot(
       throw new ComputeError('NOT_FOUND', `Snapshot ${ref.snapshotId} not found`);
     return { deleted: true };
   }
-  await deps.authz.remove(tx, { type: 'sandbox-snapshot', id: raw.id, tenantId: raw.tenant_id });
   await publishSnapshot(deps, tx, raw, 'sandbox.snapshot.deleted');
   await deps.work.enqueue(tx, 'vps.sandboxes', 'all');
   return { deleted: true };
@@ -613,35 +633,31 @@ export interface DroppedSnapshot {
   url: string;
 }
 
-/** Marks snapshots deleted: those of `sandboxId` not kept, or every one of `tenantId` (teardown). */
+/**
+ * Marks snapshots deleted: those of `sandboxId` not kept, or every one of `tenantId` (teardown). Their
+ * objects go with `purgeSettledSnapshots`: a pending upload may still land, and a live restore may
+ * still need to (re)download its snapshot.
+ */
 export async function dropSnapshots(
   tx: SqlTx,
   scope: { sandboxId: string } | { tenantId: string },
-  authz?: Pick<InstanceDeps['authz'], 'remove'>,
-): Promise<DroppedSnapshot[]> {
-  // A pending upload may still land: its object is deleted once the command settles
-  // (`purgeSettledSnapshots`), not now.
-  const { rows } = await tx.query<{ id: string; tenant_id: string; url: string; purged: boolean }>(
-    `UPDATE sandbox_snapshots SET state = 'deleted', purged = (state <> 'pending'), version = version + 1
-      WHERE ${'sandboxId' in scope ? 'sandbox_id = $1 AND NOT keep' : 'tenant_id = $1'} AND state <> 'deleted'
-      RETURNING id, tenant_id, url, purged`,
+): Promise<number> {
+  const { rowCount } = await tx.query(
+    `UPDATE sandbox_snapshots SET state = 'deleted', purged = false, version = version + 1
+      WHERE ${'sandboxId' in scope ? 'sandbox_id = $1 AND NOT keep' : 'tenant_id = $1'} AND state <> 'deleted'`,
     ['sandboxId' in scope ? scope.sandboxId : scope.tenantId],
   );
-  if (authz)
-    for (const row of rows)
-      await authz.remove(tx, { type: 'sandbox-snapshot', id: row.id, tenantId: row.tenant_id });
-  return rows
-    .filter((row) => row.purged)
-    .map((row) => ({ tenantId: row.tenant_id, snapshotId: row.id, url: row.url }));
+  return rowCount;
 }
 
 /**
- * Snapshots deleted while their upload was pending, whose command has now settled: marked purged, and
- * their objects returned for `purgeSnapshots` (a late upload never outlives its row).
+ * Deleted snapshots whose objects may go now: their upload settled (a late one never outlives its
+ * row) and no live instance restores from them (a recreate after host loss downloads again). Marked
+ * purged, authz rows removed, objects returned for `purgeSnapshots`.
  */
 export async function purgeSettledSnapshots(
   sql: SqlExecutor,
-  options: { batch?: number } = {},
+  options: { batch?: number; authz?: Pick<InstanceDeps['authz'], 'remove'> } = {},
 ): Promise<DroppedSnapshot[]> {
   return sql.transaction(async (tx) => {
     const { rows } = await tx.query<{ id: string; tenant_id: string; url: string }>(
@@ -649,10 +665,19 @@ export async function purgeSettledSnapshots(
         WHERE s.id IN (SELECT s2.id FROM sandbox_snapshots s2 LEFT JOIN commands c ON c.id = s2.command_id
                         WHERE s2.state = 'deleted' AND NOT s2.purged
                           AND (c.id IS NULL OR c.state IN ('succeeded', 'failed', 'rejected', 'expired', 'cancelled'))
+                          AND NOT EXISTS (SELECT 1 FROM instances i
+                                           WHERE i.restore_from->>'snapshotId' = s2.id AND i.state <> 'deleted')
                         ORDER BY s2.id LIMIT $1 FOR UPDATE OF s2 SKIP LOCKED)
         RETURNING s.id, s.tenant_id, s.url`,
       [options.batch ?? 100],
     );
+    if (options.authz)
+      for (const row of rows)
+        await options.authz.remove(tx, {
+          type: 'sandbox-snapshot',
+          id: row.id,
+          tenantId: row.tenant_id,
+        });
     return rows.map((row) => ({ tenantId: row.tenant_id, snapshotId: row.id, url: row.url }));
   });
 }

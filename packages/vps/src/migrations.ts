@@ -7,6 +7,7 @@ import {
   vpsWarmClaimsMigration,
 } from './sandboxes.js';
 import {
+  vpsHostCertValidityMigration,
   vpsHostCertificatesMigration,
   vpsSandboxMetricIndexesMigration,
   vpsSandboxSnapshotsMigration,
@@ -131,4 +132,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsSnapshotFixesMigration,
   vpsSandboxMetricIndexesMigration,
   vpsHostCertificatesMigration,
+  vpsHostCertValidityMigration,
 ]);

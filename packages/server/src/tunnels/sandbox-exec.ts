@@ -131,6 +131,7 @@ async function sandboxInstance(
   principalInstanceId: string;
   expiresAt: number | null;
   hostCertified: boolean;
+  hostCertValidBefore: number | null;
 }> {
   const present = await tx.query<{ found: string | null }>(
     `SELECT to_regclass('sandboxes')::text AS found`,
@@ -146,10 +147,12 @@ async function sandboxInstance(
     principal_instance_id: string | null;
     expires_ms: number | null;
     host_certified: boolean | null;
+    host_cert_valid_ms: number | null;
   }>(
     `SELECT s.instance_id, s.draft, s.deleting_at IS NOT NULL AS deleting, i.node_id, i.state,
             i.restore_from->>'principalInstanceId' AS principal_instance_id,
-            (extract(epoch FROM s.expires_at) * 1000)::float8 AS expires_ms, i.host_certified
+            (extract(epoch FROM s.expires_at) * 1000)::float8 AS expires_ms, i.host_certified,
+            (extract(epoch FROM i.host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms
        FROM sandboxes s LEFT JOIN instances i ON i.id = s.instance_id
       WHERE s.id = $1 AND s.tenant_id = $2`,
     [sandboxId, tenantId],
@@ -170,6 +173,7 @@ async function sandboxInstance(
     principalInstanceId: row.principal_instance_id ?? row.instance_id,
     expiresAt: row.expires_ms === null ? null : Number(row.expires_ms),
     hostCertified: row.host_certified === true,
+    hostCertValidBefore: row.host_cert_valid_ms === null ? null : Number(row.host_cert_valid_ms),
   };
 }
 
@@ -214,8 +218,14 @@ export function sandboxExecMethod(
         invalid('publicKey must be an Ed25519 or ECDSA P-256 OpenSSH public key');
       }
       const tx = context.sql as SqlTx;
-      const { instanceId, nodeId, principalInstanceId, expiresAt, hostCertified } =
-        await sandboxInstance(tx, input.tenantId, input.sandboxId);
+      const {
+        instanceId,
+        nodeId,
+        principalInstanceId,
+        expiresAt,
+        hostCertified,
+        hostCertValidBefore,
+      } = await sandboxInstance(tx, input.tenantId, input.sandboxId);
       await deps.checkReachable(tx, nodeId, deps.instanceDialCapability);
       const now = context.clock.now();
       // Past its expiry a sandbox is on its way out, even before the reconciler deletes it; a
@@ -305,7 +315,9 @@ export function sandboxExecMethod(
         account: deps.account,
         validBefore: issued.validBefore,
         hostPrincipal: principalInstanceId,
-        hostCertified,
+        // Only while the guest's certificate still holds (with a minute to connect).
+        hostCertified:
+          hostCertified && (hostCertValidBefore === null || hostCertValidBefore - now > 60_000),
       };
     },
   });
