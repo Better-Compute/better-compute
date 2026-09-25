@@ -394,6 +394,17 @@ describe('enroll → ready (§3.5)', () => {
       call('enroll', { tenantId: 'root', siteId: 'site_a', poolId: 'pool_metal', bmc: { ...bmc, credentials: 'hunter2' } }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
+
+  it('takes only strings for the BMC driver, its TLS pin and the MACs (never String()-coerced)', () => {
+    const validate = (input: Record<string, unknown>) =>
+      api.metal.enroll.validate({ tenantId: 'root', siteId: 'site_a', poolId: 'pool_metal', ...input });
+    const bmc = { address: 'https://10.0.0.9', credentials: 'secret://root/1' };
+    expect(() => validate({ bmc })).toThrow(/bmc.driver/);
+    expect(() => validate({ bmc: { ...bmc, driver: true } })).toThrow(/bmc.driver/);
+    expect(() => validate({ bmc: { ...bmc, driver: 'redfish', tlsSpkiSha256: 1 } })).toThrow(/tlsSpkiSha256/);
+    expect(() => validate({ bmc: { ...bmc, driver: 'redfish' }, macs: [123] })).toThrow(/MAC/);
+    expect(validate({ bmc: { ...bmc, driver: 'redfish' }, macs: ['B8-CE-F6-00-00-01'] })).toMatchObject({ macs: ['b8:ce:f6:00:00:01'] });
+  });
 });
 
 describe('deploy, release, retire', () => {

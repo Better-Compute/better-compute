@@ -160,20 +160,26 @@ function validateEnroll(raw: unknown): EnrollInput {
     poolId: isId(input.poolId, 'pool') || typeof input.poolId === 'string' ? text(input.poolId, 'poolId', 128) : fail('poolId is required'),
     bmc: {
       address: text(bmc.address, 'bmc.address', 512),
-      driver: /^[a-z][a-z0-9-]{0,63}$/.test(String(bmc.driver)) ? String(bmc.driver) : fail('bmc.driver must be a driver id such as redfish'),
+      // A string only: String(undefined) would pass the pattern as "undefined".
+      driver:
+        typeof bmc.driver === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(bmc.driver)
+          ? bmc.driver
+          : fail('bmc.driver must be a driver id such as redfish'),
       credentials,
     },
   };
   if (bmc.tlsSpkiSha256 !== undefined) {
-    const pin = String(bmc.tlsSpkiSha256).toLowerCase();
+    if (typeof bmc.tlsSpkiSha256 !== 'string') fail('bmc.tlsSpkiSha256 must be 64 hex digits');
+    const pin = bmc.tlsSpkiSha256.toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(pin)) fail('bmc.tlsSpkiSha256 must be 64 hex digits');
     out.bmc.tlsSpkiSha256 = pin;
   }
   if (input.macs !== undefined) {
     if (!Array.isArray(input.macs) || input.macs.length > 16) fail('macs must be a list of at most 16 MACs');
     out.macs = input.macs.map((mac) => {
-      const normalized = String(mac).toLowerCase().replace(/-/g, ':');
-      return macPattern.test(normalized) ? normalized : fail(`${String(mac)} is not a MAC address`);
+      if (typeof mac !== 'string') fail(`${JSON.stringify(mac)} is not a MAC address`);
+      const normalized = mac.toLowerCase().replace(/-/g, ':');
+      return macPattern.test(normalized) ? normalized : fail(`${mac} is not a MAC address`);
     });
   }
   if (input.productUuid !== undefined) out.productUuid = text(input.productUuid, 'productUuid', 64).toLowerCase();
