@@ -20,7 +20,13 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { auditModule } from '@better-compute/audit';
-import { defineHost, loadPkiBundle, unconfiguredIam, type HostConfig } from '@better-compute/cli';
+import {
+  defineHost,
+  loadPkiBundle,
+  unconfiguredIam,
+  watchAuthorizer,
+  type HostConfig,
+} from '@better-compute/cli';
 import type { ComputeModule, IamPort, SqlExecutor } from '@better-compute/core';
 import { eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
@@ -151,6 +157,7 @@ export async function exampleOptions(
 
 /** The `host` export: SSE events, Prometheus metrics, and the gateway role when its certificate exists. */
 export const exampleHost = defineHost(async ({ compute, env, cwd }) => {
+  const watch = watchAuthorizer(compute);
   const host: HostConfig = {
     http: {
       routes: [
@@ -161,11 +168,8 @@ export const exampleHost = defineHost(async ({ compute, env, cwd }) => {
           handler: (request: Request) =>
             handleWatch(request, {
               sql: (compute as BetterCompute<any, any>).context.sql,
-              authorize: async (watch) => {
-                const token = watch.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
-                const caller = await compute.context.iam.authenticate({ token });
-                return { tenantId: caller.tenantId };
-              },
+              // Decided like events.list: compute:events:read on the tenant, not just "signed in".
+              authorize: watch,
             }),
         },
       ],

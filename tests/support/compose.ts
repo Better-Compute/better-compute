@@ -1,6 +1,6 @@
 import type { ComputeModule } from '@better-compute/core';
 import { auditModule } from '@better-compute/audit';
-import { defineHost } from '@better-compute/cli';
+import { defineHost, watchAuthorizer } from '@better-compute/cli';
 import { eventsModule, handleWatch } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
@@ -108,12 +108,8 @@ export async function composedConfig() {
           handler: (request: Request) =>
             handleWatch(request, {
               sql: compute.context.sql,
-              // The host's IAM decision: the caller's own tenant.
-              authorize: async (watch) => {
-                const token = watch.headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
-                const caller = await compute.context.iam.authenticate({ token });
-                return { tenantId: caller.tenantId };
-              },
+              // Decided like events.list: compute:events:read on the caller's (or ?tenantId=) tenant.
+              authorize: watchAuthorizer(compute),
               pollMs: 50,
             }),
         },

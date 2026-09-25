@@ -98,6 +98,7 @@ export {
 } from './host/gateway.js';
 export { hostFindings } from './host/findings.js';
 export { mountTunnels, type HostTunnelsConfig, type TunnelMount } from './host/tunnels.js';
+export { watchAuthorizer, type WatchAuthorizerOptions } from './host/watch.js';
 export {
   buildSupportBundle,
   knownSecrets,

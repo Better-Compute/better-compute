@@ -139,7 +139,7 @@ export const simCommands = [
     group: 'Setup',
     summary: 'Run the deterministic fleet simulator and check its invariants',
     description:
-      'sim runs --nodes FakeDaemons on fake hardware against the in-memory gateway stub for --duration of simulated time, with a steady workload (diagnostics, inventory refreshes, log collection, reboots, GPU bookings) and --chaos faults (none, light, heavy: crashes, reboots, journal loss, partitions, half-open links, resets, stalls, gateway kills), then quiesces for --settle and checks invariants I1 (no double booking), I2 (at-most-once side effects), I5 (every command terminal) and I8 (usage). Nothing reads the wall clock: the same --seed prints the same digest. It exits SIM_INVARIANT_VIOLATED when an invariant fails. Needs @better-compute/testing.',
+      'sim runs --nodes FakeDaemons on fake hardware against the in-memory gateway stub for --duration of simulated time, with a steady workload (diagnostics, inventory refreshes, log collection, reboots, GPU bookings) and --chaos faults (none, light, heavy: crashes, reboots, journal loss, partitions, half-open links, resets, stalls, gateway kills), then quiesces for --settle and checks invariants I1 (no double booking), I2 (at-most-once side effects), I5 (no allocation released only because its node disconnected) and I8 (usage). Nothing reads the wall clock: the same --seed prints the same digest. It exits SIM_INVARIANT_VIOLATED when an invariant fails. Needs @better-compute/testing.',
     flags: {
       seed: { type: 'string', value: 'SEED', default: 'sim', description: 'The seed' },
       nodes: {
