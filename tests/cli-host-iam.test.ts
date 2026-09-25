@@ -363,6 +363,23 @@ describe('host.iam', () => {
     expect(errors.map((error) => (error as Error).message)).toEqual(['sandbox store down']);
     const { rows } = await compute.context.sql.query<{ id: string }>(`SELECT id FROM reaction_probe ORDER BY id`);
     expect(rows.map((row) => row.id)).toEqual(['revoked', 'second']);
+
+    // An agent stays active in IAM (IamReconcile never re-runs its reactions): a failing agent reaction makes the
+    // event retry (review 10 L8), after the agent's cached authentications were dropped.
+    const dropped: string[] = [];
+    Object.defineProperty(compute, 'caches', {
+      value: { dropIdentity: (id: string) => dropped.push(id), dropSession() {}, dropDecisions() {}, clear() {}, stats: () => ({}) },
+      configurable: true,
+    });
+    installIamHandlers(compute, {
+      bridge: { setHandlers: (handlers) => (installed = handlers) },
+      onError: (error) => errors.push(error),
+      reactions: [{ agent: async () => Promise.reject(new Error('sandbox withdraw failed')) }],
+    });
+    await expect(inTx((tx) => installed.agent!(tx, event('delegation:revoke', 'dlg_2', { agentId: 'agt_2' })))).rejects.toThrow(
+      'sandbox withdraw failed',
+    );
+    expect(dropped).toContain('agt_2');
     const context = { compute: {} as never, options: {} as never, env: {}, cwd: '.' };
     await expect(resolveHost({ iamReactions: [{ agent: 'x' }] }, context)).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     const reaction = { identity: async () => undefined };

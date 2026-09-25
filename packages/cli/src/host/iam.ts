@@ -268,7 +268,7 @@ export function installIamHandlers(
    * A module's reaction under its own savepoint: a failure is reported and undone, never the revocations of the same
    * event (they ran first, in the same transaction). What it missed, the IamReconcile sweep catches (identityHolders).
    */
-  const react = async (tx: SqlTx, event: IamInboxEvent, run: () => Promise<unknown>) => {
+  const react = async (tx: SqlTx, event: IamInboxEvent, run: () => Promise<unknown>, retry = false) => {
     await tx.query('SAVEPOINT host_iam_reaction');
     try {
       await run();
@@ -276,6 +276,9 @@ export function installIamHandlers(
     } catch (error) {
       await tx.query('ROLLBACK TO SAVEPOINT host_iam_reaction');
       report(error, { event });
+      // An agent or delegation stays active in IAM, so IamReconcile never re-runs its reactions: the event itself is
+      // retried (review 10 L8). Its revocations (caches, streams, tunnels) are not undone by that.
+      if (retry) throw error;
     }
   };
   const handlers: IamEventHandlers = {
@@ -295,7 +298,8 @@ export function installIamHandlers(
         if (filter) {
           await withdrawAgentReservations(tx, compute.context, { ...filter, reason: event.action });
           for (const reaction of reactions)
-            if (reaction.agent) await react(tx, event, () => reaction.agent!(tx, compute.context, { ...filter, reason: event.action }));
+            if (reaction.agent)
+              await react(tx, event, () => reaction.agent!(tx, compute.context, { ...filter, reason: event.action }), true);
         }
       }),
     identity:
