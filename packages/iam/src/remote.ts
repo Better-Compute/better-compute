@@ -188,16 +188,15 @@ const sessionKinds: ReadonlySet<string> = new Set([
 /**
  * Headers forwarded to IAM with a caller's credential. Credentials often carry the whole incoming request's
  * headers; forwarding `content-length`, `host` or `content-type` onto a different request would corrupt it,
- * so only identity and client-context headers pass.
+ * so only identity and client-context headers pass. Never the client's own forwarding headers
+ * (`x-forwarded-for`, `x-real-ip`, `forwarded`): behind a proxy that appends to them a caller could choose its
+ * `request.sourceIp`. The address IAM sees is `Credential.sourceIp`, which the host verified.
  */
 export const forwardedCredentialHeaders: readonly string[] = [
   'authorization',
   'cookie',
   'origin',
   'user-agent',
-  'x-forwarded-for',
-  'x-real-ip',
-  'forwarded',
   'x-request-id',
 ];
 
@@ -210,6 +209,10 @@ export function credentialHeaders(credential: Credential): HeadersInit {
     if (value !== null) headers.set(name, value);
   }
   if (credential.token !== undefined) headers.set('authorization', `Bearer ${credential.token}`);
+  // Cookies only when they are the credential: with a bearer, the browser's other cookies stay here.
+  if (headers.has('authorization')) headers.delete('cookie');
+  if (credential.sourceIp !== undefined && credential.sourceIp !== '')
+    headers.set('x-forwarded-for', credential.sourceIp);
   if (!headers.has('authorization') && !headers.has('cookie'))
     throw new ComputeError('UNAUTHENTICATED', 'No credential was presented');
   return headers;

@@ -223,18 +223,29 @@ describe('remoteIam', () => {
       'session=1',
     );
     expect(() => credentialHeaders({})).toThrow(/No credential/);
-    // The incoming request's framing headers never reach IAM's (different) request.
+    // The incoming request's framing headers never reach IAM's (different) request, nor do the client's own
+    // forwarding headers or, beside a bearer, its cookies: the source address is the one the host verified.
     const forwarded = new Headers(
       credentialHeaders({
         headers: {
           authorization: 'Bearer from-request',
+          cookie: 'tracking=1',
           'content-length': '999',
           'content-type': 'text/plain',
           host: 'compute.example.com',
           'x-forwarded-for': '203.0.113.7',
+          'x-real-ip': '203.0.113.7',
+          forwarded: 'for=203.0.113.7',
         },
+        sourceIp: '198.51.100.4',
       }),
     );
     expect([...forwarded.keys()].sort()).toEqual(['authorization', 'x-forwarded-for']);
+    expect(forwarded.get('x-forwarded-for')).toBe('198.51.100.4');
+    expect(
+      new Headers(credentialHeaders({ token: 't', headers: { 'x-forwarded-for': '1.2.3.4' } })).has(
+        'x-forwarded-for',
+      ),
+    ).toBe(false);
   });
 });

@@ -5,6 +5,12 @@
 export interface Credential {
   headers?: HeadersInit;
   token?: string;
+  /**
+   * The caller's address as the host verified it: the socket peer, or the hop a trusted proxy reported. Remote IAM
+   * receives it as `x-forwarded-for` (for `request.sourceIp` policy conditions); forwarding headers the client sent
+   * itself never pass on.
+   */
+  sourceIp?: string;
 }
 
 /** The authenticated caller. */
