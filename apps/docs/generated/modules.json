@@ -28,7 +28,7 @@
     {
       "name": "tenancy",
       "groups": [],
-      "migrations": ["tenancy/0001_tenant_states"]
+      "migrations": ["tenancy/0001_tenant_states", "tenancy/0002_teardown_attempts"]
     },
     {
       "name": "pki",
@@ -81,13 +81,19 @@
         "vps/0007_template_env",
         "vps/0008_template_network",
         "vps/0009_snapshot_fixes",
-        "vps/0010_sandbox_metric_indexes"
+        "vps/0010_sandbox_metric_indexes",
+        "vps/0011_host_certificates",
+        "vps/0012_host_cert_validity"
       ]
     },
     {
       "name": "events",
       "groups": ["webhooks"],
-      "migrations": ["events/0001_webhooks", "events/0002_delivery_retention"]
+      "migrations": [
+        "events/0001_webhooks",
+        "events/0002_delivery_retention",
+        "events/0003_webhooks_by_tenant"
+      ]
     },
     {
       "name": "fleet",
@@ -130,6 +136,7 @@
     "rollout",
     "site-boot",
     "tenancy",
+    "tenancy.resync",
     "tunnels.ssh-certificates-gc",
     "tunnels.ssh-certificates-reauthorize",
     "vps.bootstraps",
