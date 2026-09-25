@@ -177,6 +177,13 @@ export interface FakeDaemonOptions {
    * StatusReport lists the runtimes' whole inventory. Without it the section is UNSUPPORTED.
    */
   instances?: FakeHypervisorOptions | FakeHypervisor;
+  /**
+   * Self-update (§6, v0.4): the `daemon` section is converged by swapping to its version (A/B slots) and
+   * restarting, so the next Hello reports it. A version in `badVersions` crashes on start and the daemon comes
+   * back on its previous slot, reporting the section FAILED for that version from then on. The release signature
+   * is not checked (bcd verifies it against its pins). Without this option the section is UNSUPPORTED.
+   */
+  selfUpdate?: { badVersions?: readonly string[]; swapMs?: number };
 }
 
 interface Session {
@@ -284,7 +291,8 @@ const rejectionCode = (reason: string | undefined): CommandRejectReason =>
 export class FakeDaemon {
   readonly nodeId: string;
   readonly role: AgentRole;
-  readonly daemonVersion: string;
+  /** The running build; a self-update (`selfUpdate`) changes it. */
+  daemonVersion: string;
   readonly knobs: FakeDaemonKnobs;
   /** logs.collect uploads, by URL (unless `objectStore` was given). */
   readonly uploads: Map<string, Uint8Array>;
@@ -321,6 +329,9 @@ export class FakeDaemon {
   private proc: Process | undefined;
   /** XIDs injected with `injectXid`, for the boot they happened in. */
   private faults: { bootId: string; conditions: Condition[] } | undefined;
+  /** Self-update: the version being swapped to, and versions whose build crashed (never retried). */
+  private swapping: string | undefined;
+  private readonly failedUpdates = new Set<string>();
   private rebootTimer: Timer | undefined;
   private readonly hooks: RuleHooks = {
     rebootedPayload: (entry) =>
@@ -610,6 +621,32 @@ export class FakeDaemon {
     }
   }
 
+  /**
+   * The `daemon` section with `selfUpdate`: swaps to the spec's version after `swapMs` (a restart; the next Hello
+   * reports the new version), or, for a bad build, crashes and comes back on the old slot.
+   */
+  private convergeDaemon(section: NodeSpec['daemon']): { state: SectionState; reason?: string; message?: string } {
+    const target = section?.version?.replace(/^v/, '');
+    if (!target || target === this.daemonVersion) return { state: SectionState.CONVERGED };
+    if (this.failedUpdates.has(target))
+      return { state: SectionState.FAILED, reason: 'UpdateFailed', message: `bcd ${target} did not start; running ${this.daemonVersion}` };
+    if (this.swapping !== target) {
+      this.swapping = target;
+      this.scheduler.after(this.options.selfUpdate?.swapMs ?? 2_000, () => {
+        if (this.swapping !== target) return;
+        this.swapping = undefined;
+        if (this.stateValue !== 'running') return;
+        const bad = this.options.selfUpdate?.badVersions?.some((version) => version.replace(/^v/, '') === target) ?? false;
+        this.crash(bad ? 'update-crashed' : 'update-swap');
+        if (bad) this.failedUpdates.add(target);
+        else this.daemonVersion = target;
+        this.log('daemon.update', { target, ok: !bad, running: this.daemonVersion });
+        this.start();
+      });
+    }
+    return { state: SectionState.PROGRESSING, reason: 'Updating' };
+  }
+
   private activeFaults(): Condition[] {
     return this.faults?.bootId === this.bootIdValue ? this.faults.conditions : [];
   }
@@ -657,6 +694,10 @@ export class FakeDaemon {
         const report = this.convergeDevices(spec.devices, generation);
         if (report.state === SectionState.PROGRESSING) progressing = true;
         sections.push({ section: 'devices', generation: BigInt(generation), ...report });
+      } else if (name === 'daemon' && this.options.selfUpdate) {
+        const report = this.convergeDaemon(spec.daemon);
+        if (report.state === SectionState.PROGRESSING) progressing = true;
+        sections.push({ section: 'daemon', generation: BigInt(generation), ...report });
       } else if (name === 'telemetry') {
         // Recorded as the OTLP target; nothing to materialize in the fake.
         sections.push({ section: 'telemetry', state: SectionState.CONVERGED, generation: BigInt(generation) });

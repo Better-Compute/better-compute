@@ -5,13 +5,23 @@ import {
   summarize,
   type ControlPlaneSim,
 } from '@better-compute/testing';
+import { manualClock } from '@better-compute/core';
+import {
+  buildReleaseManifest,
+  createReleaseSigningKey,
+  releaseArtifact,
+  signReleaseManifest,
+  spkiPin,
+} from '@better-compute/pki';
 import { provisionModule } from '@better-compute/provision';
+import { rolloutModule } from '@better-compute/rollout';
 
 // PLAN.md §15 v0.4 sim scenarios on the real control plane and three real gateways under the fleet simulator:
 // - kill 1 of 3 gateways → reconnect in <60 s with 0 unreachable marks and 0 duplicate executions;
 // - a zombie gateway (partitioned from the database) self-fences in <20 s;
 // - a database failover and a 10-minute site partition release nothing;
-// - an XID storm trips the remediation circuit breaker (one faulty node is rebooted; a storm is left alone).
+// - an XID storm trips the remediation circuit breaker (one faulty node is rebooted; a storm is left alone);
+// - a bad daemon build halts its canary (a good one rolls out through every wave).
 // Times are simulated. The invariants (I1 bookings, I2 executions, I5 no release on disconnect, I8 billing) are
 // checked at the end of each.
 
@@ -255,6 +265,116 @@ describe('§15 v0.4 scenarios', () => {
     // Held back, not escalated: no node was put into maintenance.
     const { rows: maintenance } = await rig.database.query('SELECT 1 FROM nodes WHERE maintenance');
     expect(maintenance).toHaveLength(0);
+    assertInvariants(await rig.invariants());
+  }, 600_000);
+
+  it('a bad daemon build halts its canary; a good one goes through every wave', async () => {
+    const key = createReleaseSigningKey();
+    const release = (version: string, sequence: number) =>
+      signReleaseManifest(
+        buildReleaseManifest({
+          product: 'bcd',
+          version,
+          sequence,
+          signers: [key],
+          clock: manualClock(Date.UTC(2026, 0, 1)),
+          artifacts: [
+            releaseArtifact(
+              `bcd_${version}_linux_amd64`,
+              new TextEncoder().encode(`bcd ${version}`),
+              'linux-amd64',
+            ),
+          ],
+        }),
+        [key],
+      );
+    rig = await createControlPlaneSim({
+      seed: 'v04-canary',
+      nodes: 20,
+      gateways: 3,
+      // Every daemon self-updates; the 0.3.0 build crashes on start and bcd falls back to its old slot.
+      daemon: { selfUpdate: { badVersions: ['0.3.0'] } },
+      modules: [
+        rolloutModule({
+          release: { pins: [spkiPin(key.publicKey)] },
+          downloadsUrl: 'https://compute.sim.test/api/compute/downloads',
+          every: '10s',
+        }),
+      ],
+    });
+    await rig.run(3 * MIN);
+    const root = { token: rig.tenants.root.token };
+    const api = rig.compute.api as unknown as Record<
+      string,
+      Record<string, (credential: unknown, input: unknown) => Promise<Record<string, unknown>>>
+    >;
+    for (const [version, sequence] of [
+      ['0.2.0', 1],
+      ['0.3.0', 2],
+    ] as const)
+      await rig.api(() =>
+        api.releases!.register!(root, {
+          tenantId: rig!.tenants.root.id,
+          manifest: release(version, sequence),
+        }),
+      );
+    const versions = async () => {
+      const { rows } = await rig!.database.query<{ daemon_version: string; count: number }>(
+        `SELECT daemon_version, count(*)::int AS count FROM node_sessions GROUP BY daemon_version ORDER BY 1`,
+      );
+      return Object.fromEntries(rows.map((row) => [row.daemon_version, Number(row.count)]));
+    };
+    const rollout = (version: string) =>
+      rig!.api(() =>
+        api.rollouts!.create!(root, {
+          tenantId: rig!.tenants.root.id,
+          version,
+          waves: [5, 50, 100],
+          soakSeconds: 60,
+          upgradeTimeoutSeconds: 120,
+          idempotencyKey: `rollout-${version}`,
+        }),
+      );
+    const state = async (id: string) =>
+      (await rig!.api(() =>
+        api.rollouts!.get!(root, { tenantId: rig!.tenants.root.id, rolloutId: id }),
+      )) as {
+        state: string;
+        wave: number;
+        reason?: string;
+        nodes: Record<string, number>;
+      };
+    const until = async (
+      id: string,
+      done: (rollout: Awaited<ReturnType<typeof state>>) => boolean,
+    ) => {
+      for (let waited = 0; waited < 30 * MIN; waited += 10_000) {
+        if (done(await state(id))) break;
+        await rig!.run(10_000);
+      }
+      return state(id);
+    };
+    expect(await versions()).toEqual({ '0.1.0': 20 });
+
+    // A good build: canary (1 node), then half, then all, each wave soaking before the next.
+    const good = await rollout('0.2.0');
+    const finished = await until(good.id as string, (r) => r.state !== 'running');
+    expect(finished.state).toBe('completed');
+    expect(finished.nodes.succeeded).toBe(20);
+    expect(await versions()).toEqual({ '0.2.0': 20 });
+
+    // A bad build: the canary node's new slot crashes and it comes back on 0.2.0; the wave misses its
+    // deadline, the failure gate pauses the rollout, and no node outside the canary is touched.
+    const bad = await rollout('0.3.0');
+    const halted = await until(bad.id as string, (r) => r.state !== 'running');
+    expect(halted.state).toBe('paused');
+    expect(halted.wave).toBe(0);
+    expect(halted.reason).toMatch(/failure gate/);
+    expect(halted.nodes.failed).toBe(1);
+    expect(halted.nodes.upgrading ?? 0).toBe(0);
+    expect(halted.nodes.succeeded ?? 0).toBe(0);
+    await rig.run(2 * MIN);
+    expect(await versions()).toEqual({ '0.2.0': 20 });
     assertInvariants(await rig.invariants());
   }, 600_000);
 
