@@ -119,5 +119,9 @@ func runRamdisk(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd ramdisk: %v\n", err)
 		return exitFailure
 	}
+	cfg.InstallFiles = map[string][]byte{
+		"/etc/bcd/config.toml":         []byte(config.Render(cfg)),
+		"/etc/bcd/join-encryption.jwk": params.JWK,
+	}
 	return runAgent("ramdisk", cfg, log, stderr, nil)
 }

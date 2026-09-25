@@ -42,6 +42,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/better-compute/better-compute/daemon/internal/journal"
@@ -104,6 +105,10 @@ type Config struct {
 	// GatewayServerName, when set, is the name the gateway's certificate must carry instead of the
 	// gateway_url host (a gateway reached by IP address, e.g. behind an L4 load balancer).
 	GatewayServerName string
+
+	// InstallFiles are files a ramdisk installs into the OS it deploys (set by bcd ramdisk; not a
+	// file key).
+	InstallFiles map[string][]byte
 
 	// ImageCache is the site image cache a ramdisk tries first (set by bcd ramdisk from bc.cache; not
 	// a file key).
@@ -357,4 +362,27 @@ func qualified(section, key string) string {
 		return key
 	}
 	return section + "." + key
+}
+
+// Render writes the join-relevant part of c as a config.toml the parser accepts: the gateway, its
+// server name, the site and the three pins (what a ramdisk hands the OS it installs).
+func Render(c *Config) string {
+	q := func(s string) string { return strconv.Quote(s) }
+	lines := []string{
+		"# Written by bcd ramdisk for the OS it installed (PLAN.md §3.5).",
+		"gateway_url = " + q(c.GatewayURL),
+	}
+	if c.GatewayServerName != "" {
+		lines = append(lines, "gateway_server_name = "+q(c.GatewayServerName))
+	}
+	lines = append(lines,
+		"site = "+q(c.Site),
+		"serving_ca_spki_pin = "+q(c.ServingCASPKIPin),
+		"join_signing_key_pin = "+q(c.JoinSigningKeyPin),
+		"join_encryption_key_pin = "+q(c.JoinEncryptionKeyPin),
+	)
+	if c.DevInsecureH2C {
+		lines = append(lines, "dev_insecure_h2c = true")
+	}
+	return strings.Join(lines, "\n") + "\n"
 }

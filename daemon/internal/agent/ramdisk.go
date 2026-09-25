@@ -300,6 +300,11 @@ func (a *Agent) runDeployImage(ctx context.Context, cmd dispatch.Command) (journ
 			return journal.Result{}, &KindError{Code: "user-data-failed", Message: err.Error()}
 		}
 	}
+	if len(a.o.InstallConfig) > 0 {
+		if err := a.host.InstallFiles(ctx, disk, a.o.InstallConfig); err != nil {
+			return journal.Result{}, &KindError{Code: "user-data-failed", Message: "install the join configuration: " + err.Error()}
+		}
+	}
 	a.mu.Lock()
 	a.rootDisk = disk
 	a.mu.Unlock()

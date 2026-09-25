@@ -80,6 +80,9 @@ type Options struct {
 	HTTPClient *http.Client
 	// ImageCache is the site image cache's base URL a ramdisk tries before an image's source.
 	ImageCache string
+	// InstallConfig are files a ramdisk writes into the OS it deploys (/etc/bcd/config.toml and the
+	// join encryption key), so the installed bcd joins through the same pinned gateway.
+	InstallConfig map[string][]byte
 	// CacheMaxBytes is the site image cache's byte budget (0 = unbounded).
 	CacheMaxBytes uint64
 	// Drivers are the drivers the agent's bcx plugins serve (driver.invoke; advertised in Hello).

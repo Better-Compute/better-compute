@@ -63,6 +63,10 @@ func commands() []command {
 func joinFlags(fs *flag.FlagSet) {
 	fs.String("config", config.DefaultPath, "configuration file written by the install script")
 	fs.String("role", "node", "the agent role to join as: node or site (the token decides what is allowed)")
+	fs.String("token-file", "", "read the join token from this file (removed once the join succeeded)")
+	fs.String("node-id", "", "the node an installed OS joins as (a provisioned token; the identity must match)")
+	fs.String("server", "", "the control plane URL, for its well-known join keys when join-encryption.jwk is absent")
+	fs.String("attestor", "", "the attestor (default join-token; provisioned with --node-id)")
 }
 
 func simFlags(fs *flag.FlagSet) {

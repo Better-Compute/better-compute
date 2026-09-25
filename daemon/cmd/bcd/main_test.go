@@ -3,11 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/better-compute/better-compute/daemon/internal/pki"
 )
 
 func runBCD(args ...string) (code int, stdout, stderr string) {
@@ -157,5 +162,40 @@ func TestRamdiskNeedsBootParameters(t *testing.T) {
 	_ = os.WriteFile(cmdline, []byte("BOOT_IMAGE=/vmlinuz console=ttyS0\n"), 0o644)
 	if code, _, stderr := runBCD("ramdisk", "--cmdline", cmdline, "--data-dir", t.TempDir()); code != exitUsage || !strings.Contains(stderr, "bc.gateway") {
 		t.Fatalf("bcd ramdisk without boot parameters = %d, %q", code, stderr)
+	}
+}
+
+func TestJoinEncryptionKeyFromFileOrWellKnown(t *testing.T) {
+	key, _ := pki.GenerateKey()
+	jwk, _ := pki.PublicJWK(&key.PublicKey)
+	raw, _ := json.Marshal(jwk)
+	pin, _ := pki.SPKISHA256(&key.PublicKey)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/compute/.well-known/better-compute" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"better-compute","join":{"encryptionJwk":` + string(raw) + `}}`))
+	}))
+	defer srv.Close()
+	prev := wellKnownClient
+	wellKnownClient = srv.Client()
+	defer func() { wellKnownClient = prev }()
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "join-encryption.jwk")
+	if got, err := joinEncryptionKey(missing, srv.URL+"/api/compute", pin); err != nil || !got.Equal(&key.PublicKey) {
+		t.Fatalf("well-known key = %v", err)
+	}
+	other, _ := pki.GenerateKey()
+	otherPin, _ := pki.SPKISHA256(&other.PublicKey)
+	if _, err := joinEncryptionKey(missing, srv.URL+"/api/compute", otherPin); err == nil {
+		t.Fatal("a well-known key that does not match the pin was used")
+	}
+	if _, err := joinEncryptionKey(missing, "http://insecure", pin); err == nil {
+		t.Fatal("a plain-http control plane was trusted")
+	}
+	_ = os.WriteFile(missing, raw, 0o644)
+	if got, err := joinEncryptionKey(missing, "", pin); err != nil || !got.Equal(&key.PublicKey) {
+		t.Fatalf("file key = %v", err)
 	}
 }

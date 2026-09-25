@@ -43,6 +43,8 @@ type Host interface {
 	SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (method string, verified bool, err error)
 	RereadPartitions(ctx context.Context, d *inventory.Disk) error
 	InstallUserData(ctx context.Context, d *inventory.Disk, kind string, data []byte) error
+	// InstallFiles writes files (absolute paths, mode 0600) into the root filesystem of the OS on d.
+	InstallFiles(ctx context.Context, d *inventory.Disk, files map[string][]byte) error
 	Kexec(ctx context.Context, d *inventory.Disk, kernel, initrd string, cmdline []string) error
 	RunDCGM(ctx context.Context, level uint32, uuids []string, gpus []*inventory.Gpu) (*agentv1.DiagDcgmResult, error)
 }

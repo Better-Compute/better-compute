@@ -181,6 +181,9 @@ func (h *fakeHost) RereadPartitions(ctx context.Context, d *inventory.Disk) erro
 func (h *fakeHost) InstallUserData(ctx context.Context, d *inventory.Disk, kind string, data []byte) error {
 	return h.real().InstallUserData(ctx, d, kind, data)
 }
+func (h *fakeHost) InstallFiles(ctx context.Context, d *inventory.Disk, files map[string][]byte) error {
+	return h.real().InstallFiles(ctx, d, files)
+}
 func (h *fakeHost) Kexec(ctx context.Context, d *inventory.Disk, kernel, initrd string, cmdline []string) error {
 	return h.real().Kexec(ctx, d, kernel, initrd, cmdline)
 }

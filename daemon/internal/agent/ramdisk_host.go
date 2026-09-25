@@ -224,6 +224,37 @@ func (h *RealHost) InstallUserData(ctx context.Context, d *inventory.Disk, kind 
 	return fmt.Errorf("user data kind %q is not supported by the ramdisk", kind)
 }
 
+// InstallFiles writes files into the installed root filesystem (the partition holding /etc).
+func (h *RealHost) InstallFiles(ctx context.Context, d *inventory.Disk, files map[string][]byte) error {
+	root := ""
+	var unmount func()
+	if h.fake() {
+		root = h.Path("/dev/"+d.Name) + ".root"
+		unmount = func() {}
+	} else {
+		parts, err := h.diskPartitions(ctx, d)
+		if err != nil {
+			return err
+		}
+		dir, _, um, err := h.mountFirst(ctx, parts, false, func(dir string) bool { return exists(filepath.Join(dir, "etc")) })
+		if err != nil {
+			return err
+		}
+		root, unmount = dir, um
+	}
+	defer unmount()
+	for p, data := range files {
+		full := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func exists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil

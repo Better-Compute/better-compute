@@ -5,17 +5,20 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
@@ -103,8 +106,16 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 	log := newLogger(cfg, stderr)
-	token, err := readToken()
-	if err != nil {
+	tokenFile := fs.Lookup("token-file").Value.String()
+	var token string
+	if tokenFile != "" {
+		raw, err := os.ReadFile(tokenFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "bcd join: %v\n", err)
+			return exitFailure
+		}
+		token = strings.TrimSpace(strings.TrimPrefix(string(raw), "\uFEFF"))
+	} else if token, err = readToken(); err != nil {
 		fmt.Fprintf(stderr, "bcd join: %v\n", err)
 		return exitUsage
 	}
@@ -112,19 +123,10 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "bcd join: that is not a join token (bcjt_...)")
 		return exitUsage
 	}
-	jwk, err := os.ReadFile(filepath.Join(filepath.Dir(file), joinKeyFile))
-	if err != nil {
-		fmt.Fprintf(stderr, "bcd join: the JoinService encryption key: %v\n", err)
-		return exitFailure
-	}
-	encKey, err := pki.ParseJWK(jwk)
-	if err != nil {
-		fmt.Fprintf(stderr, "bcd join: %s: %v\n", joinKeyFile, err)
-		return exitFailure
-	}
 	encPin, _ := config.DecodePin(cfg.JoinEncryptionKeyPin)
-	if !pki.MatchesPin(encKey, encPin) {
-		fmt.Fprintf(stderr, "bcd join: %s does not match join_encryption_key_pin\n", joinKeyFile)
+	encKey, err := joinEncryptionKey(filepath.Join(filepath.Dir(file), joinKeyFile), fs.Lookup("server").Value.String(), encPin)
+	if err != nil {
+		fmt.Fprintf(stderr, "bcd join: %v\n", err)
 		return exitFailure
 	}
 	signerPin, _ := config.DecodePin(cfg.JoinSigningKeyPin)
@@ -155,10 +157,18 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "bcd join: --role must be node or site")
 		return exitUsage
 	}
+	// An OS a deploy installed joins as the node it was installed for, with the single-use
+	// provisioned token its user data carried.
+	nodeID := fs.Lookup("node-id").Value.String()
+	attestor := fs.Lookup("attestor").Value.String()
+	if attestor == "" && nodeID != "" {
+		attestor = "provisioned"
+	}
 	state, err := agent.Join(ctx, agent.JoinOptions{
 		Client:        client,
 		Token:         token,
 		Role:          role,
+		Attestor:      attestor,
 		EncryptionKey: encKey,
 		SignerPin:     signerPin,
 		Claims:        agent.Claims(inv, host.Hostname(), bootID),
@@ -171,9 +181,65 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd join: %v\n", err)
 		return exitFailure
 	}
+	if nodeID != "" && state.NodeID != nodeID {
+		fmt.Fprintf(stderr, "bcd join: joined as %s, but this OS was installed for %s\n", state.NodeID, nodeID)
+		return exitFailure
+	}
+	if tokenFile != "" {
+		// Spent (single use): it never stays on disk.
+		_ = os.Remove(tokenFile)
+	}
 	fmt.Fprintf(stdout, "joined as %s (site %s, role %s); certificate valid until %s\n",
 		state.NodeID, state.SiteID, state.Role, state.NotAfter.UTC().Format("2006-01-02 15:04 MST"))
 	return exitOK
+}
+
+// joinEncryptionKey loads the JoinService encryption key from file, or, when there is none and a
+// control plane URL is given, from its /.well-known/better-compute document (PLAN.md §6 Install).
+// Either way the key must match the configured pin: a key from anywhere else is never used.
+func joinEncryptionKey(file, server string, pin []byte) (*ecdsa.PublicKey, error) {
+	raw, err := os.ReadFile(file)
+	if errors.Is(err, os.ErrNotExist) && server != "" {
+		raw, err = wellKnownJWK(server)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the JoinService encryption key: %w", err)
+	}
+	key, err := pki.ParseJWK(raw)
+	if err != nil {
+		return nil, fmt.Errorf("the JoinService encryption key: %w", err)
+	}
+	if !pki.MatchesPin(key, pin) {
+		return nil, errors.New("the JoinService encryption key does not match join_encryption_key_pin")
+	}
+	return key, nil
+}
+
+// wellKnownClient fetches the well-known document (system roots: the control plane's public TLS).
+var wellKnownClient = &http.Client{Timeout: 30 * time.Second}
+
+// wellKnownJWK fetches join.encryptionJwk from <server>/.well-known/better-compute over https.
+func wellKnownJWK(server string) ([]byte, error) {
+	if !strings.HasPrefix(server, "https://") {
+		return nil, errors.New("--server must be an https:// URL")
+	}
+	resp, err := wellKnownClient.Get(strings.TrimRight(server, "/") + "/.well-known/better-compute")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s/.well-known/better-compute returned %s", server, resp.Status)
+	}
+	var doc struct {
+		Join *struct {
+			EncryptionJwk json.RawMessage `json:"encryptionJwk"`
+		} `json:"join"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&doc); err != nil || doc.Join == nil {
+		return nil, errors.New("the control plane publishes no join keys")
+	}
+	return doc.Join.EncryptionJwk, nil
 }
 
 // runtimesFor gives node agents the build's instance runtimes (site agents and ramdisks run none).
@@ -276,6 +342,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		ImageCache:    cfg.ImageCache,
 		Runtimes:      runtimesFor(mode, cfg.DataDir, host),
 		Drivers:       agent.DriversOf(plugins),
+		InstallConfig: cfg.InstallFiles,
 		CacheMaxBytes: uint64(max(cfg.Boot.CacheMaxBytes, 0)),
 		Version:       version,
 		Log:           log,
