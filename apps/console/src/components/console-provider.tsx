@@ -40,6 +40,8 @@ export interface ConsoleContextValue {
   /** The event stream's state, for the "live" badge. */
   connection: WritableStore<WatchStatus>;
   listeners: Set<(event: ComputeEventMessage) => void>;
+  /** The last 300 events this session received, newest first (the activity page). */
+  recent: WritableStore<readonly ComputeEventMessage[]>;
   /** Every event, for detail pages (`detail.applyEvent`); returns an unsubscribe. */
   onEvent(handler: (event: ComputeEventMessage) => void): () => void;
 }
@@ -98,6 +100,7 @@ export function ConsoleProvider({
       resources: createConsoleResources(api, { tenantId }),
       permissions: createPermissions({ authorize: checkPermissions }),
       connection: createStore<WatchStatus>('connecting'),
+      recent: createStore<readonly ComputeEventMessage[]>([]),
       listeners,
       onEvent(handler) {
         listeners.add(handler);
@@ -116,6 +119,7 @@ export function ConsoleProvider({
       onEvent(event) {
         if (accessChanging.test(event.type)) value.permissions.clear();
         void value.resources.applyEvent(event);
+        value.recent.set((events) => [event, ...events].slice(0, 300));
         for (const handler of value.listeners) handler(event);
       },
       onStatus(status) {

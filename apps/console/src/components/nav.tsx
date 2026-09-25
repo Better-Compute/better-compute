@@ -12,6 +12,7 @@ const areas = [
   { href: '/pools', label: 'Pools & capacity' },
   { href: '/quotas', label: 'Quotas' },
   { href: '/usage', label: 'Usage & spend' },
+  { href: '/activity', label: 'Activity' },
 ];
 const admin = [
   { href: '/admin/rollouts', label: 'Rollouts' },
