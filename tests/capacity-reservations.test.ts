@@ -23,6 +23,7 @@ import {
   deviceAssignments,
   activeRecheckMs,
   cancelPendingReservation,
+  capacityTenantDeleted,
   markAllocationBound,
   placeablePending,
   readReservationsBy,
@@ -531,6 +532,50 @@ describe('reservations.create', () => {
       ((await call('reservations', 'get', { tenantId: 'acme', reservationId: mine.id })) as Rsv)
         .state,
     ).toBe('placed');
+  });
+
+  it('tears a deleted tenant down: reservations ended, offers withdrawn, owned pools archived (§12.8)', async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+    const placed = (await call('reservations', 'create', create({ idempotencyKey: 't1' }))) as Rsv;
+    const pending = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 64 }], idempotencyKey: 't2' }),
+    )) as Rsv;
+    await advance(0);
+    await reconcile(placed.id); // → binding
+    const context = moduleContext(db);
+    expect(await capacityTenantDeleted(context, 'acme')).toBe('DONE');
+    const state = async (id: string) =>
+      (await db.query<{ state: string }>(`SELECT state FROM reservations WHERE id = $1`, [id]))
+        .rows[0]!.state;
+    expect(await state(placed.id)).toBe('released');
+    expect(await state(pending.id)).toBe('cancelled');
+    const { rows: offers } = await db.query(`SELECT 1 FROM pool_offers WHERE tenant_id = 'acme'`);
+    expect(offers).toEqual([]);
+    const { rows: quotas } = await db.query(`SELECT 1 FROM quota_usage WHERE tenant_id = 'acme'`);
+    expect(quotas).toEqual([]);
+    expect(recorded.removed).toContainEqual({ type: 'pool', id: poolId, tenantId: 'acme' });
+    // The pool is root's: it stays, unarchived.
+    const { rows: pool } = await db.query<{ archived: boolean }>(
+      `SELECT archived_at IS NOT NULL AS archived FROM pools WHERE id = $1`,
+      [poolId],
+    );
+    expect(pool[0]!.archived).toBe(false);
+    // Idempotent.
+    expect(await capacityTenantDeleted(context, 'acme')).toBe('DONE');
+
+    // Root deleted: its pool is archived, offers to everyone withdrawn.
+    await db.query(`INSERT INTO pool_offers (pool_id, tenant_id) VALUES ($1, 'beta')`, [poolId]);
+    expect(await capacityTenantDeleted(context, 'root')).toBe('DONE');
+    const { rows: archived } = await db.query<{ archived: boolean }>(
+      `SELECT archived_at IS NOT NULL AS archived FROM pools WHERE id = $1`,
+      [poolId],
+    );
+    expect(archived[0]!.archived).toBe(true);
+    const { rows: left } = await db.query(`SELECT 1 FROM pool_offers WHERE pool_id = $1`, [poolId]);
+    expect(left).toEqual([]);
+    expect(recorded.events.map((event) => event.type)).toContain('pool.archived');
   });
 
   it('finds pending reservations an offline solver could place (I7)', async () => {

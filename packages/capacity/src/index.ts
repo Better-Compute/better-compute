@@ -24,3 +24,4 @@ export * from './node-lease.js';
 export * from './pool-index.js';
 export * from './mig.js';
 export * from './iam-reactions.js';
+export * from './tenancy.js';
