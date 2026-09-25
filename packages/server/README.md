@@ -209,7 +209,7 @@ subject, data, time}`, topic = type), `authz` (`authz_projection` plus the `auth
 ## Not yet
 
 - Reconciler back-off counts live in memory (`work_queue.attempts` is not used yet).
-- No runtime job prunes the outbox behind the stored cursors yet (`pruneBehindCursors` in
-  `@better-compute/postgres` needs host wiring); in-process subscribers and SSE watch keep no
-  stored cursor and rely on retention's minimum age.
+- The server itself prunes nothing: `@better-compute/postgres`'s `retentionModule()` (which the
+  CLI adds to every deployment) prunes the outbox behind the stored cursors; in-process
+  subscribers and SSE watch keep no stored cursor and rely on retention's minimum age.
 - `logs.collect` has no upload destination until the downloads BlobStore presigns one.
