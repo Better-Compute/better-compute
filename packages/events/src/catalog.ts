@@ -63,6 +63,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
       'Reservation lifecycle (placed, active, released, ended, …) and awaiting-confirmation',
   },
   {
+    type: 'reservation.reassigned',
+    subject: 'reservation/{id}',
+    module: 'capacity',
+    description:
+      "An offboarded identity's reservation moved to its successor (§12.7): { reservationId, from, to, reason }",
+  },
+  {
     type: 'node.*',
     subject: 'node/{id}',
     module: 'server',

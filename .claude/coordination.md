@@ -162,10 +162,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   reactions drafted for [097b34] (c820fdf: withdrawAgentReservations/reassignReservations/applyBudgetPolicy; index
   export + stop-new admission are [097b34]'s; host wiring [402c97]'s), runtimeObserver (5e6f8b1), writers for
   gateway_sessions/security_events_total/resolver_lookups_total (423b180).
-  NOW (assigned by [f85da7]): the server-side tenant reaction. NEW `packages/server/src/tenancy/**` (built-in module
-  `tenancy`, migration `tenancy/0001_tenant_states`, `tenantStateHandler`, the envelope gate, teardown reconciler);
-  one-line edits in server index.ts + operations.ts (after preCheck); core: error `TENANT_SUSPENDED` (errors.ts),
-  optional `ComputeModule.tenantDeleted` hook (extension.ts). Then the nightly 10k cold start.
+  Tenancy §12.8 DONE (ae9a7bb; hooks: capacity 2e91167, provision/metal f7df0ec; host default handler 7790748;
+  iamTenantReader a6485c8). Cold start DONE at CI size (033cb78: runColdStart, tests/sim/cold-start.test.ts,
+  tests/nightly/cold-start.nightly.ts). NOW: the 10k cold-start run + report; bisecting the nightly I8 fix.
 - [c321a3] round 4 (gateway, server runtime, docs generator): orphan store.ts (d430815); tunnel filters tenantId/anyAgent +
   reauthorizeTunnels (6aeb5c4); generator MDX escaping + MDX compile check (bd57184), events page (c563de7); ramdisk
   exit test + ReportContext.attested (56f8cc1); FakeDaemon signs attested reports (f7fbba7); v0.4 scheduler worker role
