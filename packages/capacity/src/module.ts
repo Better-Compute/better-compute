@@ -1184,6 +1184,14 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         denied: (context, input, tx, error) => denyCreate(context, input, tx, error),
       },
       handler: (context, input) => completeCreate(deps(context), context, input),
+      // §9.1 async-with-wait: `wait` holds the answer while the pool-lease batch runs.
+      poll: {
+        done: (output) => output.operation?.state !== 'running',
+        refresh: async (context, input, output) => {
+          const row = await readReservation(context.sql, input.tenantId, output.id);
+          return row ? reservationView(context.sql, row) : output;
+        },
+      },
     }),
     get: defineMethod({
       action: 'compute:reservations:read',

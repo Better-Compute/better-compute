@@ -2064,6 +2064,24 @@ describe('the v0.4 pool-lease placer', () => {
     });
   });
 
+  it('lets a waiting create follow its queued reservation to placed (poll, §9.1)', async () => {
+    const create_ = batchApi.reservations.create as unknown as {
+      poll: {
+        done(output: Rsv): boolean;
+        refresh(context: MethodContext, input: unknown, output: Rsv): Promise<Rsv>;
+      };
+    };
+    const queued = await queue('wait-1', 2);
+    expect(create_.poll.done(queued)).toBe(false); // running: the batch has not run
+    const context = { ...moduleContext(db), caller, requestId: 'req' } as unknown as MethodContext;
+    const input = { tenantId: 'acme' };
+    expect(create_.poll.done(await create_.poll.refresh(context, input, queued))).toBe(false);
+    await runBatch();
+    const placed = await create_.poll.refresh(context, input, queued);
+    expect(placed).toMatchObject({ state: 'placed', operation: { state: 'succeeded' } });
+    expect(create_.poll.done(placed)).toBe(true);
+  });
+
   it('reports one placement per reservation of a batch to onPlacement', async () => {
     const seen: { placer: string; outcome: string; conflicts: number }[] = [];
     const observed = capacityModule({
