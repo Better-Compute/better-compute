@@ -1,7 +1,10 @@
 // Tenancy (PLAN.md §12.8 `iam:tenants:update|delete` → "suspend admissions; schedule teardown and purge"), hosted:
-// - `compute_tenant_states` mirrors the IAM tenants that are not active (suspended or deleted), written by the IAM
-//   bridge's `tenant` handler (`tenantStateHandler`), which re-reads the tenant's subtree from IAM (a suspension or
-//   deletion cascades to descendants, and the audit event names only the tenant acted on);
+// - `compute_tenant_states` mirrors the IAM tenants that are not active (suspended or deleted). The IAM bridge's
+//   `tenant` handler (`tenantStateHandler`) runs in the inbox transaction, so it makes no IAM call (§8.1): it records a
+//   deleted tenant at once and queues a `sync:<tenant>` key; the `tenancy` reconciler then re-reads the tenant's
+//   subtree from IAM outside any transaction (a suspension or deletion cascades to descendants, and the audit event
+//   names only the tenant acted on), retrying with back-off while IAM is down. A periodic `resync` re-reads the
+//   whole tree from the root as the backstop for anything missed;
 // - the envelope's gate (`createTenantGate`) refuses a suspended tenant's mutations and everything of a deleted
 //   tenant, root callers exempt, with `TENANT_SUSPENDED`;
 // - the `tenancy` reconciler tears a deleted tenant down: every module's `tenantDeleted` hook until all answer
@@ -21,7 +24,8 @@ import {
 } from '@better-compute/core';
 
 export const tenancyModuleName = 'tenancy';
-/** The teardown reconciler's work kind (key: the tenant id; periodic key `sweep`). */
+/** The reconciler's work kind. Keys: a tenant id (its teardown), `sync:<tenant id>` (re-read it and its subtree
+ * from IAM), and the periodic `sweep` (unfinished teardowns) and `resync` (the whole tree). */
 export const tenancyWorkKind = 'tenancy';
 
 export type TenantState = 'active' | 'suspended' | 'deleted';
@@ -187,13 +191,22 @@ export interface IamTenantStatus {
   status: 'active' | 'pending' | 'suspended' | 'deleted' | 'missing';
 }
 
+/** Reads a tenant and every tenant below it from IAM, with their effective statuses. */
+export type TenantReader = (tenantId: string) => Promise<readonly IamTenantStatus[]>;
+
 export interface TenantStateHandlerOptions {
   /**
    * Reads the tenant and every tenant below it from IAM (level-triggered, §12.8): a suspension or deletion cascades
-   * to descendants, and the audit event names only the tenant acted on. Without it, only `iam:tenants:delete` is
-   * applied, to the named tenant alone.
+   * to descendants, and the audit event names only the tenant acted on. It is handed to `compute.tenants` and called
+   * by the tenancy reconciler, never in the inbox transaction. Without one, only `iam:tenants:delete` is applied, to
+   * the named tenant alone.
    */
-  readTenants?(tenantId: string): Promise<readonly IamTenantStatus[]>;
+  readTenants?: TenantReader;
+}
+
+/** The tenancy reconciler's view of the configured reader (set by `tenantStateHandler` or `compute.tenants`). */
+export interface TenantReaderSlot {
+  current?: TenantReader;
 }
 
 /** An IAM inbox event, structurally (the server never imports `@better-compute/iam`). */
@@ -255,22 +268,51 @@ export async function applyTenantStates(
  * Shaped like `IamEventHandlers.tenant` (`(tx, event) => Promise<void>`).
  */
 export function tenantStateHandler(
-  compute: { context: Pick<ModuleContext, 'work' | 'events'>; tenants?: { invalidate(): void } },
+  compute: {
+    context: Pick<ModuleContext, 'work' | 'events'>;
+    tenants?: { invalidate(): void; setReader?(reader: TenantReader): void };
+  },
   options: TenantStateHandlerOptions = {},
 ): (tx: SqlTx, event: TenantEventLike) => Promise<void> {
+  if (options.readTenants) compute.tenants?.setReader?.(options.readTenants);
+  // With a reader here or on the deployment, the reconciler re-reads the subtree.
+  const sync =
+    options.readTenants !== undefined || typeof compute.tenants?.setReader === 'function';
   return async (tx, event) => {
     if (event.action !== 'iam:tenants:update' && event.action !== 'iam:tenants:delete') return;
     const tenantId = event.subjectId || event.tenantId;
     if (!tenantId) return;
-    const statuses: readonly IamTenantStatus[] = options.readTenants
-      ? await options.readTenants(tenantId)
-      : event.action === 'iam:tenants:delete'
-        ? [{ tenantId, status: 'deleted' }]
+    // Only SQL in the inbox transaction: a deletion of the named tenant is certain without asking IAM, so it is
+    // refused from this commit on; the subtree (and any suspension) comes from the reconciler's IAM read.
+    const changed =
+      event.action === 'iam:tenants:delete'
+        ? await applyTenantStates(
+            tx,
+            compute.context,
+            [{ tenantId, status: 'deleted' }],
+            event.action,
+          )
         : [];
-    const changed = await applyTenantStates(tx, compute.context, statuses, event.action);
+    if (sync) await compute.context.work.enqueue(tx, tenancyWorkKind, `${syncPrefix}${tenantId}`);
     // This process reloads the gate before its next call; others within the gate's refresh (5 s).
     if (changed.length > 0) compute.tenants?.invalidate();
   };
+}
+
+const syncPrefix = 'sync:';
+
+/**
+ * Re-reads `tenantId`'s subtree through `reader` (outside any transaction) and applies it in a transaction of its
+ * own. Throws when IAM cannot answer, so the reconciler retries with back-off.
+ */
+export async function syncTenantStates(
+  context: Pick<ModuleContext, 'work' | 'events'> & { sql: Pick<SqlExecutor, 'transaction'> },
+  reader: TenantReader,
+  tenantId: string,
+  reason: string,
+): Promise<{ tenantId: string; state: TenantState }[]> {
+  const statuses = await reader(tenantId);
+  return context.sql.transaction((tx) => applyTenantStates(tx, context, statuses, reason));
 }
 
 // --- Teardown ------------------------------------------------------------------------------------------------
@@ -316,8 +358,23 @@ export async function tearDownTenant(
  */
 export function createTenancyModule(options: {
   modules: () => readonly ComputeModule[];
-  gate?: Pick<TenantGate, 'start' | 'stop'>;
+  gate?: Pick<TenantGate, 'start' | 'stop' | 'invalidate'>;
+  /** The IAM reader (`compute.tenants.setReader`); without one, sync keys only log. */
+  reader?: TenantReaderSlot;
+  /** The IAM root tenant: `resync` re-reads the whole tree from it. */
+  rootTenantId?: string;
 }): ComputeModule<typeof tenancyModuleName> {
+  const apply = async (context: ReconcileContext, tenantId: string, reason: string) => {
+    const reader = options.reader?.current;
+    if (!reader) {
+      context.log.warn('No IAM tenant reader is configured; a tenant subtree was not re-read', {
+        tenantId,
+      });
+      return;
+    }
+    const changed = await syncTenantStates(context, reader, tenantId, reason);
+    if (changed.length > 0) options.gate?.invalidate();
+  };
   return Object.freeze(
     defineModule<typeof tenancyModuleName>({
       name: tenancyModuleName,
@@ -338,8 +395,21 @@ export function createTenancyModule(options: {
           shardBy: 'none',
           // Every unfinished teardown comes back from here: a module still releasing (SYNC_AGAIN) is asked again
           // on the next sweep, and a lost work item is recovered.
-          periodic: [{ key: 'sweep', every: '30s' }],
+          periodic: [
+            { key: 'sweep', every: '30s' },
+            { key: 'resync', every: '15m' },
+          ],
           async run(context: ReconcileContext, key: string) {
+            // IAM reads happen here, outside any transaction; a failure throws and is retried with back-off.
+            if (key.startsWith(syncPrefix)) {
+              await apply(context, key.slice(syncPrefix.length), 'iam:tenants:sync');
+              return 'DONE';
+            }
+            if (key === 'resync') {
+              if (options.rootTenantId && options.reader?.current)
+                await apply(context, options.rootTenantId, 'iam:tenants:resync');
+              return 'DONE';
+            }
             if (key === 'sweep') {
               const { rows } = await context.sql.query<{ tenant_id: string }>(
                 `SELECT tenant_id FROM compute_tenant_states

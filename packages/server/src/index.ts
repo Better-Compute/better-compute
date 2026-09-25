@@ -34,7 +34,12 @@ import {
 } from './runtime/index.js';
 import { createSelfCheck, type SelfCheckReport } from './self-check.js';
 import { createSiteBootModule } from './site-boot-module.js';
-import { createTenancyModule, createTenantGate } from './tenancy/tenancy.js';
+import {
+  createTenancyModule,
+  createTenantGate,
+  type TenantReader,
+  type TenantReaderSlot,
+} from './tenancy/tenancy.js';
 import { createAuditSinksModule } from './audit-sinks-module.js';
 import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
@@ -96,6 +101,7 @@ export { siteBootLeaseName, siteBootTtlSeconds, tickSiteBoot } from './controlle
 export {
   applyTenantStates,
   createTenantGate,
+  syncTenantStates,
   tearDownTenant,
   tenancyModuleName,
   tenancyWorkKind,
@@ -104,6 +110,7 @@ export {
   type IamTenantStatus,
   type TenantEventLike,
   type TenantGate,
+  type TenantReader,
   type TenantState,
   type TenantStateHandlerOptions,
 } from './tenancy/tenancy.js';
@@ -181,8 +188,9 @@ export interface BetterCompute<
   /**
    * The envelope's tenant gate (§12.8): `invalidate()` makes this process reload suspended and deleted tenants
    * before its next call (`tenantStateHandler` does it after a change; other processes refresh every 5 s).
+   * `setReader` gives the tenancy reconciler its IAM reader (`tenantStateHandler(compute, { readTenants })` calls it).
    */
-  tenants: { invalidate(): void };
+  tenants: { invalidate(): void; setReader(reader: TenantReader): void };
   /** The authorization projection: one primary-key read (the IAM bridge keeps the memory copy). */
   authz: AuthzProjection;
   /** Reports configuration and storage problems; only reads. */
@@ -209,7 +217,9 @@ export function betterCompute<
 >(options: ComputeOptions<M, P>): BetterCompute<M, P> {
   const resolved = resolveOptions(options);
   const runtime = createRuntime(resolved);
-  // The envelope's §12.8 tenant gate, loaded and refreshed by the tenancy module.
+  // The envelope's §12.8 tenant gate, loaded and refreshed by the tenancy module, and the IAM reader its
+  // reconciler re-reads tenant subtrees with (set by `tenantStateHandler`).
+  const tenantReader: TenantReaderSlot = {};
   const tenantGate = createTenantGate({
     sql: resolved.database,
     rootTenantId: resolved.rootTenantId ?? '',
@@ -231,10 +241,17 @@ export function betterCompute<
     inventoryModule,
     capacityModule(resolved.capacity),
     // §12.8 tenants: suspended/deleted states, the teardown of deleted tenants (every module's tenantDeleted).
-    createTenancyModule({ modules: () => hosted, gate: tenantGate }),
+    createTenancyModule({
+      modules: () => hosted,
+      gate: tenantGate,
+      reader: tenantReader,
+      ...(resolved.rootTenantId ? { rootTenantId: resolved.rootTenantId } : {}),
+    }),
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
     ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
-    ...(options.tunnels ? [tunnelsModule({ typePrefix: resolved.typePrefix, ...options.tunnels })] : []),
+    ...(options.tunnels
+      ? [tunnelsModule({ typePrefix: resolved.typePrefix, ...options.tunnels })]
+      : []),
     // Audit sinks (`sinks.audit` and modules' AuditSink extensions): committed audit rows, in order.
     ...(resolved.auditSinks.length ? [createAuditSinksModule(resolved.auditSinks)] : []),
     ...(options.modules ?? []),
@@ -396,7 +413,14 @@ export function betterCompute<
     context: moduleContext,
     registry,
     caches: operations.caches,
-    tenants: Object.freeze({ invalidate: () => tenantGate.invalidate() }),
+    tenants: Object.freeze({
+      invalidate: () => tenantGate.invalidate(),
+      setReader: (reader: TenantReader) => {
+        if (typeof reader !== 'function')
+          throw new ComputeError('INVALID_CONFIG', 'tenants.setReader takes a function');
+        tenantReader.current = reader;
+      },
+    }),
     authz: Object.freeze({
       get: (type: string, id: string, tenantId: string) => runtime.authzRow(type, id, tenantId),
     }),

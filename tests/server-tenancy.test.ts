@@ -7,14 +7,17 @@ import { fakeIam } from './support/fake-iam.js';
 import { ACME, OTHER, ROOT, acme, options } from './support/server.js';
 
 // Tenancy (PLAN.md §12.8 `iam:tenants:update|delete` → "suspend admissions; schedule teardown and purge"): the IAM
-// bridge's tenant handler mirrors suspended and deleted tenants (their whole subtree, re-read from IAM), the
-// envelope refuses a suspended tenant's mutations and a deleted tenant's everything (root exempt), and the
-// tenancy reconciler tears a deleted tenant down through every module's tenantDeleted hook.
+// bridge's tenant handler records a deletion at once and queues a re-read, making no IAM call in the inbox
+// transaction (§8.1); the tenancy reconciler reads the whole subtree from IAM outside any transaction (retrying while
+// IAM is down; a periodic resync from the root catches anything missed); the envelope refuses a suspended tenant's
+// mutations and a deleted tenant's everything (root exempt); and the reconciler tears a deleted tenant down through
+// every module's tenantDeleted hook.
 
 const T0 = Date.UTC(2026, 8, 24, 12);
 const USER = 'token-acme-user-0123456789';
 const CHILD = 'token-child-user-0123456789';
 const ADMIN = 'token-root-admin-0123456789';
+const OTHER_USER = 'token-other-user-0123456789';
 const ACME_CHILD = 'tenant-acme-child';
 
 let db: SqlExecutor;
@@ -31,8 +34,8 @@ describe('tenancy', () => {
     iam.addCaller(USER, { tenantId: ACME, identityId: 'id-user', sessionId: 'ses-user' });
     iam.addCaller(CHILD, { tenantId: ACME_CHILD, identityId: 'id-child', sessionId: 'ses-child' });
     iam.addCaller(ADMIN, { tenantId: ROOT, identityId: 'id-admin', mfa: true });
-    iam.addCaller('token-other-user-0123456789', { tenantId: OTHER, identityId: 'id-other' });
-    for (const token of [USER, CHILD, ADMIN, 'token-other-user-0123456789']) iam.allow({ token });
+    iam.addCaller(OTHER_USER, { tenantId: OTHER, identityId: 'id-other' });
+    for (const token of [USER, CHILD, ADMIN, OTHER_USER]) iam.allow({ token });
     // A module holding something per tenant: the first teardown pass is still releasing, the second is done.
     const released: string[] = [];
     let passes = 0;
@@ -45,7 +48,13 @@ describe('tenancy', () => {
         return 'DONE';
       },
     });
-    const compute = betterCompute({ ...options(db, iam), plugins: [acme, holder] });
+    // One simulated time for compute's own clock (its leases) and the store's compute_now().
+    let now = T0;
+    const compute = betterCompute({
+      ...options(db, iam),
+      clock: { now: () => now },
+      plugins: [acme, holder],
+    });
     await compute.initialize();
     await useSimClock(db, T0);
     try {
@@ -53,17 +62,48 @@ describe('tenancy', () => {
         compute.api.plugins.acme.widgets.poke({ token }, { tenantId, widgetId });
       const get = (token: string, tenantId: string, widgetId: string) =>
         compute.api.plugins.acme.widgets.get({ token }, { tenantId, widgetId });
+      const events = async (type: string) =>
+        (
+          await db.query<{ subject: string }>(
+            `SELECT payload->>'subject' AS subject FROM outbox WHERE topic = $1 ORDER BY txid, seq`,
+            [type],
+          )
+        ).rows.map((row) => row.subject);
       expect(await poke(USER, ACME, 'w1')).toMatchObject({ poked: 'w1' });
 
-      // IAM suspends acme; the suspension cascades to its child organization.
+      // IAM's view, and whether it answers.
       let iamStates: IamTenantStatus[] = [
         { tenantId: ACME, status: 'suspended' },
         { tenantId: ACME_CHILD, status: 'suspended' },
       ];
-      const handler = tenantStateHandler(compute, { readTenants: async () => iamStates });
+      let iamDown = false;
+      const reads: string[] = [];
+      const handler = tenantStateHandler(compute, {
+        readTenants: async (tenantId) => {
+          reads.push(tenantId);
+          if (iamDown) throw Object.assign(new Error('IAM is down'), { code: 'UNAVAILABLE' });
+          return iamStates;
+        },
+      });
       const deliver = (action: string, subjectId = ACME) =>
         db.transaction((tx) => handler(tx, { tenantId: ROOT, action, subjectId, metadata: {} }));
+      const tick = () => compute.jobs['tenancy']!.tick();
+      /** Time moves in small steps, as it does for real (the singleton lease renews between them). */
+      const advance = async (ms: number) => {
+        for (let left = ms; left > 0; left -= 5_000) {
+          now += Math.min(5_000, left);
+          await setSimClock(db, now);
+          await tick();
+        }
+      };
+
+      // IAM suspends acme; the suspension cascades to its child organization. The inbox transaction asks IAM
+      // nothing: the reconciler reads the subtree.
       await deliver('iam:tenants:update');
+      expect(reads).toEqual([]);
+      expect(await poke(USER, ACME, 'w1b')).toMatchObject({ poked: 'w1b' });
+      await tick();
+      expect(reads).toContain(ACME);
 
       await expect(poke(USER, ACME, 'w2')).rejects.toMatchObject({
         code: 'TENANT_SUSPENDED',
@@ -76,32 +116,33 @@ describe('tenancy', () => {
       // Reads go on; root may still act in the suspended tenant; other tenants are untouched.
       expect(await get(USER, ACME, 'w1')).toMatchObject({ exists: true });
       expect(await poke(ADMIN, ACME, 'w-root')).toMatchObject({ poked: 'w-root' });
-      expect(await poke('token-other-user-0123456789', OTHER, 'w-other')).toMatchObject({
-        poked: 'w-other',
-      });
+      expect(await poke(OTHER_USER, OTHER, 'w-other')).toMatchObject({ poked: 'w-other' });
 
-      // A replay changes nothing; reactivation lifts the refusal.
-      const events = async (type: string) =>
-        (
-          await db.query<{ subject: string }>(
-            `SELECT payload->>'subject' AS subject FROM outbox WHERE topic = $1 ORDER BY txid, seq`,
-            [type],
-          )
-        ).rows.map((row) => row.subject);
+      // A replay changes nothing.
       await deliver('iam:tenants:update');
+      await tick();
       expect(await events('tenant.state-changed')).toEqual([
         `tenant/${ACME}`,
         `tenant/${ACME_CHILD}`,
       ]);
+
+      // IAM is down while the reactivation is read: nothing changes (no fail-open), and the key is retried with
+      // back-off until IAM answers.
       iamStates = [
         { tenantId: ACME, status: 'active' },
         { tenantId: ACME_CHILD, status: 'active' },
       ];
+      iamDown = true;
       await deliver('iam:tenants:update');
+      await tick();
+      await expect(poke(USER, ACME, 'w4')).rejects.toMatchObject({ code: 'TENANT_SUSPENDED' });
+      iamDown = false;
+      await advance(5_000);
       expect(await poke(USER, ACME, 'w4')).toMatchObject({ poked: 'w4' });
 
-      // Deleted: everything is refused, and the teardown runs until every module is done.
+      // Deleted: refused from the inbox commit on, even with IAM down; everything is refused.
       iamStates = [{ tenantId: ACME_CHILD, status: 'deleted' }];
+      iamDown = true;
       await deliver('iam:tenants:delete', ACME_CHILD);
       await expect(poke(CHILD, ACME_CHILD, 'w5')).rejects.toMatchObject({
         code: 'TENANT_SUSPENDED',
@@ -111,20 +152,11 @@ describe('tenancy', () => {
         details: { state: 'deleted' },
       });
       expect(await poke(USER, ACME, 'w6')).toMatchObject({ poked: 'w6' });
+      iamDown = false;
 
-      const tick = () => compute.jobs['tenancy']!.tick();
+      // The teardown runs until every module is done: the one still releasing is asked again by the sweep (30 s).
       await tick();
       expect(passes).toBeGreaterThanOrEqual(1);
-      // The module still releasing is asked again by the sweep (every 30 s) until it is done. Time moves in
-      // small steps, as it does for real (the singleton lease renews between them).
-      let now = T0;
-      const advance = async (ms: number) => {
-        for (let left = ms; left > 0; left -= 5_000) {
-          now += Math.min(5_000, left);
-          await setSimClock(db, now);
-          await tick();
-        }
-      };
       await advance(35_000);
       await tick();
       expect(passes).toBe(2);
@@ -139,12 +171,60 @@ describe('tenancy', () => {
       await advance(65_000);
       expect(passes).toBe(2);
 
-      // Without a reader, only a deletion is applied (to the named tenant).
-      const bare = tenantStateHandler(compute);
-      await db.transaction((tx) =>
-        bare(tx, { tenantId: ROOT, action: 'iam:tenants:update', subjectId: OTHER, metadata: {} }),
-      );
-      expect(await poke('token-other-user-0123456789', OTHER, 'w7')).toMatchObject({ poked: 'w7' });
+      // The periodic resync (every 15 min, from the root) catches a suspension whose event never arrived.
+      iamStates = [
+        { tenantId: ROOT, status: 'active' },
+        { tenantId: OTHER, status: 'suspended' },
+        { tenantId: ACME_CHILD, status: 'deleted' },
+      ];
+      reads.length = 0;
+      await advance(15 * 60_000);
+      expect(reads).toContain(ROOT);
+      await expect(poke(OTHER_USER, OTHER, 'w-resync')).rejects.toMatchObject({
+        code: 'TENANT_SUSPENDED',
+      });
+      iamStates = [{ tenantId: OTHER, status: 'active' }];
+      await deliver('iam:tenants:update', OTHER);
+      await tick();
+      expect(await poke(OTHER_USER, OTHER, 'w7')).toMatchObject({ poked: 'w7' });
+      expect(passes).toBe(2);
+    } finally {
+      await compute.stop();
+    }
+  });
+
+  it('applies only deletions, to the named tenant, without a reader', async () => {
+    const iam = fakeIam();
+    iam.addCaller(OTHER_USER, { tenantId: OTHER, identityId: 'id-other' });
+    iam.allow({ token: OTHER_USER });
+    const compute = betterCompute({ ...options(db, iam), plugins: [acme] });
+    await compute.initialize();
+    try {
+      // A bare handler on a structural compute (no `tenants.setReader`): no sync key, no IAM read.
+      const bare = tenantStateHandler({
+        context: compute.context,
+        tenants: { invalidate: compute.tenants.invalidate },
+      });
+      const deliver = (action: string) =>
+        db.transaction((tx) =>
+          bare(tx, { tenantId: ROOT, action, subjectId: 'tenant-gone', metadata: {} }),
+        );
+      await deliver('iam:tenants:update');
+      const states = async () =>
+        (
+          await db.query<{ state: string }>(
+            `SELECT state FROM compute_tenant_states WHERE tenant_id = 'tenant-gone'`,
+          )
+        ).rows.map((row) => row.state);
+      expect(await states()).toEqual([]);
+      await deliver('iam:tenants:delete');
+      expect(await states()).toEqual(['deleted']);
+      expect(
+        await compute.api.plugins.acme.widgets.poke(
+          { token: OTHER_USER },
+          { tenantId: OTHER, widgetId: 'w' },
+        ),
+      ).toMatchObject({ poked: 'w' });
     } finally {
       await compute.stop();
     }
