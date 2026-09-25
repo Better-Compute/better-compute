@@ -194,7 +194,7 @@ describe('pki commands', () => {
     expect(group.stdout).toContain('pki issue-gateway');
     expect((await run(['help', 'pki', 'show'])).stdout).toContain('public half');
     expect(await run(['pki'])).toMatchObject({ ok: false, code: 'INVALID_COMMAND' });
-    expect((await run(['pki'])).message).toContain('init, show, add-sandbox-ca, reseal, rotate-command-root, renew-ca, issue-gateway');
+    expect((await run(['pki'])).message).toContain('init, show, add-sandbox-ca, reseal, rotate-command-root, trust-version, renew-ca, issue-gateway');
   });
 });
 
@@ -347,6 +347,15 @@ describe('daemon install-script', () => {
     const checked = spawnSync(shell, ['-n', file], { encoding: 'utf8' });
     expect(checked.stderr).toBe('');
     expect(checked.status).toBe(0);
+  });
+
+  it('pins the deployment’s approver set in config.toml with --approver-set-sha256', async () => {
+    const digest = 'ab'.repeat(32);
+    const script = (await run([...base, '--approver-set-sha256', digest])).stdout;
+    const config = script.split("<<'BCD_CONFIG'\n")[1]!.split('BCD_CONFIG\n')[0]!;
+    expect(config).toContain(`approver_set_sha256 = "${digest}"`);
+    expect(await run([...base, '--approver-set-sha256', 'AB'.repeat(32)])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+    expect(await run([...base, '--approver-set-sha256', '"; rm -rf /'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 
   it('gives a node with [plugins] the plugin drop-in, keeps the operator’s sections on upgrade', async () => {

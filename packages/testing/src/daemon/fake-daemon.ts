@@ -9,6 +9,7 @@ import {
   openWorkloadTokenResponse,
   signAttestedReport,
   signCommandUpdate,
+  approverSetDigest,
   approverSetOf,
   batchSubject,
   verifyApproverSetChange,
@@ -202,6 +203,12 @@ export interface FakeDaemonOptions {
     quorum?: FakeQuorumTrust;
     /** The deployment's trust domain (JoinResponseBody.trust_domain), for a quorum a Welcome bundle brings. */
     trustDomain?: string;
+    /**
+     * (review 7 M2) SHA-256 of the approver set this daemon must first take (config.toml approver_set_sha256, from
+     * the install script): while it holds no approver keys it takes only a matching set, and refuses destructive
+     * commands (BATCH_UNAPPROVED) until it has one, so a compromised api cannot hand a new node its own set.
+     */
+    approverSetSha256?: Uint8Array;
   };
   /**
    * A VPS host (v0.3): the `instances` section is converged on a fake hypervisor (options, or one
@@ -1086,6 +1093,10 @@ export class FakeDaemon {
         // rest of the bundle (roots, version) applies.
         const held = this.quorum;
         try {
+          // A keyless daemon with a pin takes only the pinned set (never the api's word for the first one).
+          const pin = this.options.intent.approverSetSha256;
+          if (!held && pin && Buffer.compare(approverSetDigest(approverSetOf(bundle)), pin) !== 0)
+            throw new ComputeError('ACCESS_DENIED', 'The approver set is not the pinned one', undefined, { reason: 'pin-mismatch' });
           verifyApproverSetChange(
             held
               ? {
@@ -1232,9 +1243,16 @@ export class FakeDaemon {
    */
   private checkQuorum(command: Command, body: CommandBody): void {
     const quorum = this.quorum;
-    if (!quorum) return;
     const kind = this.kinds.get(body.kind);
     const destructive = kind?.destructive ?? (isCommandKind(body.kind) && commandKinds[body.kind].destructive);
+    if (!quorum) {
+      // Pinned to a set it has not received yet: fail closed (review 7 M2).
+      if (destructive && this.options.intent?.approverSetSha256) {
+        this.batchVerdicts.set(body.id, 'BATCH_UNAPPROVED');
+        this.log('command.batch-unapproved', { id: body.id, batch: body.batchId, reason: 'awaiting-pinned-set' });
+      }
+      return;
+    }
     if (!destructive) return;
     // Approvals expire in server time; the unbatched hourly window counts on the local clock, which a gateway
     // cannot move forward (a Welcome can).

@@ -13,6 +13,7 @@ import {
   readPkiPins,
   renewBundleCa,
   rotateCommandSigningRoot,
+  approverSetDigest,
   sameApproverSet,
   toPem,
   type ApproverSet,
@@ -683,6 +684,10 @@ export const pkiCommands = [
         // What this configuration would publish: the same version, or the next one.
         nextVersion: matches === false ? published.version + 1 : published.version,
         approverSetEpoch: published.approverSetEpoch,
+        // What install scripts pin (daemon install-script --approver-set-sha256): a new node's first set.
+        ...(published.approverSet?.approverKeys.length
+          ? { approverSetSha256: Buffer.from(approverSetDigest(published.approverSet)).toString('hex') }
+          : {}),
         quorumChanged,
         ...(quorumChanged ? { signQuorumForEpoch: published.approverSetEpoch + 1 } : {}),
         connected: lag.connected,

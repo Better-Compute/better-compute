@@ -168,6 +168,11 @@ export const daemonCommands = [
         description: 'Release keys that must have signed (default 1)',
       },
       plugins: { type: 'boolean', description: 'Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)' },
+      'approver-set-sha256': {
+        type: 'string',
+        value: 'HEX',
+        description: "Pin the deployment's approver set (pki trust-version prints it): its first set, or nothing destructive",
+      },
       'privileged-plugins': {
         type: 'string',
         value: 'NAMES',
@@ -234,6 +239,7 @@ export const daemonCommands = [
           x: string;
           y: string;
         },
+        ...(flags['approver-set-sha256'] ? { approverSetSha256: flags['approver-set-sha256'] } : {}),
         ...(flags.plugins || flags['privileged-plugins']
           ? {
               plugins: {

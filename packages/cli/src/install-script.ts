@@ -36,6 +36,11 @@ export interface InstallScriptOptions {
    * `privileged` names the plugins that run as root without the seccomp filter (a Kata runtime plugin).
    */
   plugins?: { privileged?: readonly string[] };
+  /**
+   * (review 7 M2) Hex SHA-256 of the deployment's approver set (`better-compute pki trust-version`): bcd takes only
+   * that set as its first, and refuses destructive commands until it has it.
+   */
+  approverSetSha256?: string;
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -81,6 +86,8 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
     if (!hexPattern.test(hash!))
       throw invalid('--sha256', `for ${arch} must be 64 lower-case hex digits`);
   }
+  if (options.approverSetSha256 !== undefined && !hexPattern.test(options.approverSetSha256))
+    throw invalid('--approver-set-sha256', 'must be 64 lower-case hex digits (pki trust-version prints it)');
   for (const name of options.plugins?.privileged ?? [])
     if (!idPattern.test(name)) throw invalid('--privileged-plugins', 'must name plugins by letters, digits and . _ -');
   const jwk = options.joinEncryptionJwk;
@@ -102,7 +109,7 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
 export function renderBcdConfig(
   options: Pick<
     InstallScriptOptions,
-    'gatewayUrl' | 'siteId' | 'servingCaSpkiPin' | 'joinSigningKeyPin' | 'joinEncryptionKeyPin'
+    'gatewayUrl' | 'siteId' | 'servingCaSpkiPin' | 'joinSigningKeyPin' | 'joinEncryptionKeyPin' | 'approverSetSha256'
   >,
 ): string {
   return [
@@ -112,6 +119,7 @@ export function renderBcdConfig(
     `serving_ca_spki_pin = "${options.servingCaSpkiPin}"`,
     `join_signing_key_pin = "${options.joinSigningKeyPin}"`,
     `join_encryption_key_pin = "${options.joinEncryptionKeyPin}"`,
+    ...(options.approverSetSha256 ? [`approver_set_sha256 = "${options.approverSetSha256}"`] : []),
     '',
   ].join('\n');
 }

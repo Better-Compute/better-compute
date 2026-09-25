@@ -3,6 +3,7 @@ import { timestampFromMs } from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 import { manualClock } from '@better-compute/core';
 import {
+  approverSetDigest,
   batchScope,
   createApproverKey,
   createCommandSigningAuthority,
@@ -464,6 +465,40 @@ describe('FakeDaemon signed intent', () => {
     // Both current approvers signed the change: it applies, and the quorum is lifted.
     const { h, cmd } = await run([0, 1]);
     accepted(h, cmd.id);
+  });
+
+  it('a pinned daemon without keys takes only the pinned first set, and nothing destructive before it (review 7 M2)', async () => {
+    const [a, b, intruder] = [createApproverKey(), createApproverKey(), createApproverKey()];
+    const pinned = { approverKeys: [a.key, b.key], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    const kinds = {
+      'test.destroy': { lane: Lane.CONTROL, roles: [AgentRole.NODE], destructive: true, run: () => ({ outcome: 'succeeded' as const }) },
+    };
+    const boot = (set: typeof pinned) =>
+      daemon({
+        intent: {
+          roots: [authority.certificate],
+          version: 1n,
+          trustSigner: { publicKey: joinKey.publicKey },
+          trustDomain: 'compute.test',
+          approverSetSha256: approverSetDigest(pinned),
+        },
+        kinds,
+        autoWelcome: () => ({
+          trust: signTrustBundle({ version: 2, commandSigningRoots: [authority.certificate], ...set, approverSetEpoch: 1 }, joinKey),
+        }),
+      });
+    // A compromised api hands the new node its own set (k = 1): refused, and destructive commands wait.
+    let h = await boot({ approverKeys: [intruder.key], approverThreshold: 1, quorumTiers: [], unbatchedDestructivePerHour: 5 });
+    const early = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+    const plain = send(h, h.commandBody('diag.nvml'), (bytes) => signer.sign(bytes));
+    await h.advance(5);
+    expect(states(h, early.id)).toEqual(['REJECTED:BATCH_UNAPPROVED']);
+    expect(states(h, plain.id).filter((state) => state.startsWith('REJECTED'))).toEqual([]);
+    // The pinned set: taken, and the quorum applies (no unbatched allowance here).
+    h = await boot(pinned);
+    const later = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+    await h.advance(5);
+    expect(states(h, later.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
   });
 
   it('without signed intent configured, behaves as v0.1 (nothing checked)', async () => {
