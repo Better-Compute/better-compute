@@ -114,6 +114,10 @@ export interface DriverContext {
   /** Stable across retries of the same operation. */
   idempotencyKey: string;
   signal: AbortSignal;
+  /** Epoch ms the operation must finish by, when the caller set one (carried to bcx plugins). */
+  deadline?: number;
+  /** W3C trace context of the calling step (carried to bcx plugins). */
+  traceparent?: string;
   clock: Clock;
   secrets: SecretResolver;
   log: Logger;
@@ -845,6 +849,11 @@ export interface PkiPort {
       siteId?: string;
       ttlSeconds: number;
       maxUses?: number;
+      /**
+       * Binds the token to one machine (`join_tokens.expect`): a join whose hardware claims or
+       * attestation differ is refused without spending the token.
+       */
+      expect?: { mac?: string; productUuid?: string; serial?: string; gpuUuid?: string };
     },
   ): Promise<{ id: string; token: string }>;
 }
