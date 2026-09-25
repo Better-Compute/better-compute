@@ -181,8 +181,10 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         fresh-only warm claims (template instance_version), selfCheck findings (7d03d6d), vps.sandbox.warm meter
         (83d0ebd). bcd still owes network_policy nftables + instance.snapshot ([6a20b8] told).
     - [31c64a]:
-      - tests/e2e/sandboxes.test.ts (500 TTL expiries, zero-leak diff, warm claim with no placement);
-      - widen vitest.iam-remote beyond 9 files.
+      - tests/e2e/sandboxes.test.ts: written and green at 20 sandboxes; the 500 run is in progress;
+      - both IAM modes: DONE (d5816ac). The server/capacity/vps suites run on fakeIam and have no mode;
+        the §9.2 matrix through IamPort covers the contract in both.
+      - nightly I8: fixed (aa5faeb, 5/5 green).
     - [6a20b8]:
       - bcd instance-address dial + advertise `tunnel.instance-dial`: DONE (13aa5cf), plus converger PAUSED (fab94d4)
         and a real bcd vps e2e (0fc0405);
@@ -231,7 +233,10 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   Tenancy §12.8 DONE (ae9a7bb; hooks: capacity 2e91167, provision/metal f7df0ec; host default handler 7790748;
   iamTenantReader a6485c8; security fix, IAM reads moved out of the inbox tx: 6670778). 10k cold start DONE (033cb78,
   8af096c workerPasses; 1cc354b: 10k ready in 80 s simulated, back in 40 s after a power cycle, 0 violations).
-  Nightly I8 is intermittent (~50%, not fixed by any commit): [f02367] is chasing it (f791008 logs i8Details).
+  Nightly I8 fixed (aa5faeb, [f02367]'s triage). Tenancy follow-ups: deletions wait for IAM (392cb86), events purge
+  (4d1f489), tenant gauges (c647307), sim e2e (4ee6e47). Both IAM modes: matrix through the port + wider remote
+  config (d5816ac). Sandboxes (harness + metrics; group is [097b34]'s): catalog abc38ac, metrics 823a309, exec
+  re-auth d7557a0; NOW tests/e2e/sandboxes.test.ts (green at 20, 500 running).
 - [c321a3] round 4 (gateway, server runtime, docs generator): orphan store.ts (d430815); tunnel filters tenantId/anyAgent +
   reauthorizeTunnels (6aeb5c4); generator MDX escaping + MDX compile check (bd57184), events page (c563de7); ramdisk
   exit test + ReportContext.attested (56f8cc1); FakeDaemon signs attested reports (f7fbba7); v0.4 scheduler worker role
