@@ -19,6 +19,11 @@ export interface RuntimeTraits {
   gpuPassthrough: boolean;
   /** Image formats it boots. */
   imageFormats: readonly ImageFormat[];
+  /**
+   * (v0.5) It implements `pause`/`resume`: sandbox warm pools keep its instances `paused` (memory
+   * resident, fastest claim) instead of `stopped`.
+   */
+  pause?: boolean;
 }
 
 /**
@@ -31,18 +36,21 @@ export const builtinRuntimeTraits: Readonly<Record<string, RuntimeTraits>> = Obj
     multiTenant: true,
     gpuPassthrough: true,
     imageFormats: ['qcow2', 'raw', 'iso'],
+    pause: true,
   },
   'cloud-hypervisor': {
     isolation: 'microvm',
     multiTenant: true,
     gpuPassthrough: true,
     imageFormats: ['raw', 'qcow2'],
+    pause: true,
   },
   firecracker: {
     isolation: 'microvm',
     multiTenant: true,
     gpuPassthrough: false,
     imageFormats: ['raw'],
+    pause: true,
   },
   containerd: {
     isolation: 'container',

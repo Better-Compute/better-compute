@@ -178,7 +178,7 @@ async function reconcileSandboxes(): Promise<void> {
 }
 
 /** The host runtime reports every instance placed on each node in `state`, then they reconcile. */
-async function hostsReport(state: 'running' | 'stopped' | 'absent'): Promise<void> {
+async function hostsReport(state: 'running' | 'stopped' | 'paused' | 'absent'): Promise<void> {
   const { rows } = await db.query<{ id: string; node_id: string }>(
     `SELECT id, node_id FROM instances WHERE node_id IS NOT NULL AND state <> 'deleted' AND NOT draft`,
   );
@@ -587,7 +587,7 @@ describe('sandboxes', () => {
 });
 
 describe('warm pools', () => {
-  it('keep warm.min stopped instances, claimed by creates without a placement, and refilled', async () => {
+  it('keep warm.min paused instances, claimed by creates without a placement, and refilled', async () => {
     const template = await createTemplate({ warm: { min: 2 } });
     await reconcileSandboxes();
     const warm = await db.query<{ id: string; desired_state: string; owner_identity_id: string }>(
@@ -595,7 +595,7 @@ describe('warm pools', () => {
       [template.id],
     );
     expect(warm.rows).toHaveLength(2);
-    expect(warm.rows.every((row) => row.desired_state === 'stopped')).toBe(true);
+    expect(warm.rows.every((row) => row.desired_state === 'paused')).toBe(true);
     // Warm instances count against the tenant's quota when created.
     expect(await used()).toMatchObject({ vcpu: 4 });
     // Not the tenant's to see in lists or to move.
@@ -605,8 +605,12 @@ describe('warm pools', () => {
     await expect(
       call('instances', 'start', { tenantId: 'acme', instanceId: warm.rows[0]!.id }),
     ).rejects.toMatchObject({ code: 'INVALID_STATE', message: expect.stringContaining('warm') });
-    // Not claimable before the runtime reports them stopped.
-    await hostsReport('stopped');
+    // Claimable once the runtime reports them paused (booted, then paused: memory resident).
+    await hostsReport('paused');
+    expect(
+      (await db.query(`SELECT DISTINCT state FROM instances WHERE warm_template_id IS NOT NULL`))
+        .rows,
+    ).toEqual([{ state: 'paused' }]);
 
     const allocations = async () =>
       Number(
@@ -651,10 +655,36 @@ describe('warm pools', () => {
     ).toHaveLength(2);
   });
 
+  it('keep instances stopped on a runtime that cannot pause', async () => {
+    const template = await createTemplate({ warm: { min: 1 } });
+    const noPause = vps({
+      runtimes: ['cloud-hypervisor'],
+      runtimeTraits: {
+        'cloud-hypervisor': {
+          isolation: 'microvm',
+          multiTenant: true,
+          gpuPassthrough: true,
+          imageFormats: ['raw', 'qcow2'],
+        },
+      },
+      images,
+    });
+    await noPause
+      .reconcilers!.find((entry) => entry.name === sandboxWork)!
+      .run({ ...moduleContext(db), signal: new AbortController().signal }, 'all');
+    expect(
+      (
+        await db.query(`SELECT desired_state FROM instances WHERE warm_template_id = $1`, [
+          template.id,
+        ])
+      ).rows,
+    ).toEqual([{ desired_state: 'stopped' }]);
+  });
+
   it('drain beyond warm.max and when the template is deleted; a miss falls back to a cold create', async () => {
     const template = await createTemplate({ warm: { min: 2 } });
     await reconcileSandboxes();
-    // Unclaimable (not reported stopped yet): a cold create.
+    // Unclaimable (not reported paused yet): a cold create.
     const cold = await createSandbox(template.id);
     expect(cold.warm).toBe(false);
     await call('sandboxTemplates', 'update', {

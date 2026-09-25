@@ -33,6 +33,7 @@ import {
   moveInstance,
   publishInstance,
   readInstance,
+  runtimeTable,
   scheduleHosted,
   sealUserData,
   shapeOf,
@@ -904,7 +905,8 @@ interface ManagedInstance {
   ownerIdentityId: string;
   agentId?: string;
   delegationId?: string;
-  desiredState: 'running' | 'stopped';
+  /** `warm`: paused when the runtime can pause (memory resident), else stopped. */
+  desiredState: 'running' | 'warm';
   sandboxId?: string;
   warmTemplateId?: string;
   admission?: AdmissionContext;
@@ -917,6 +919,12 @@ async function createManagedInstance(
 ): Promise<InstanceRow> {
   const template = spec.template;
   const { flavor, image, runtime } = await resolveTemplate(deps, tx, template);
+  const desiredState =
+    spec.desiredState === 'running'
+      ? 'running'
+      : runtimeTable(deps).get(runtime)?.pause
+        ? 'paused'
+        : 'stopped';
   const shape = shapeOf(flavor);
   const idempotencyKey = spec.sandboxId ? `sandbox:${spec.sandboxId}` : `warm:${spec.instanceId}`;
   const hash = await sha256Hex(
@@ -938,7 +946,7 @@ async function createManagedInstance(
       JSON.stringify(image),
       template.userData ?? null,
       runtime,
-      spec.desiredState,
+      desiredState,
       spec.ownerIdentityId,
       spec.agentId ?? null,
       spec.delegationId ?? null,
@@ -1332,7 +1340,7 @@ export async function reconcileSandboxes(
             instanceId: newId('inst'),
             template,
             ownerIdentityId: template.createdBy,
-            desiredState: 'stopped',
+            desiredState: 'warm',
             warmTemplateId: template.id,
           }),
         );

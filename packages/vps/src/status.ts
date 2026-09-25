@@ -19,6 +19,7 @@ export interface InstanceStatusHandlerOptions {
 const observed: Partial<Record<InstanceObservedState, InstanceReport['state']>> = {
   [InstanceObservedState.RUNNING]: 'running',
   [InstanceObservedState.STOPPED]: 'stopped',
+  [InstanceObservedState.PAUSED]: 'paused',
   [InstanceObservedState.ERROR]: 'error',
 };
 

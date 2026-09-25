@@ -43,25 +43,36 @@ export const pollTransitionalMs = 10_000;
 export const pollSteadyMs = 60_000;
 
 /** Runtime states the daemon reports, plus `absent` (the runtime no longer holds the instance). */
-export type ReportedState = 'running' | 'stopped' | 'error' | 'absent';
+export type ReportedState = 'running' | 'stopped' | 'paused' | 'error' | 'absent';
 
-/** Walks `row` to `target` through `complete` steps and `stop`/`start` (e.g. provisioning → running → stopped). */
-async function advance(
-  tx: SqlTx,
-  row: InstanceRow,
-  target: 'running' | 'stopped',
-): Promise<InstanceRow> {
+/** The settled states a runtime reports and an instance can be asked for. */
+type Settled = 'running' | 'stopped' | 'paused';
+const settled = (state: string | undefined): state is Settled =>
+  state === 'running' || state === 'stopped' || state === 'paused';
+
+/**
+ * Walks `row` to `target` through `complete` steps and `stop`/`start`/`pause`/`resume`
+ * (e.g. provisioning → starting → running → paused).
+ */
+async function advance(tx: SqlTx, row: InstanceRow, target: Settled): Promise<InstanceRow> {
   let current = row;
-  for (let step = 0; step < 4 && current.state !== target; step++) {
+  for (let step = 0; step < 5 && current.state !== target; step++) {
     const state: InstanceState = current.state;
     if (state === 'provisioning') current = await moveInstance(tx, current, 'complete', 'starting');
     else if (state === 'starting' || state === 'rebooting')
       current = await moveInstance(tx, current, 'complete', 'running');
-    else if (state === 'resizing') current = await moveInstance(tx, current, 'complete', target);
-    else if (state === 'running' && target === 'stopped')
-      current = await moveInstance(tx, current, 'stop');
-    else if (state === 'stopped' && target === 'running')
-      current = await moveInstance(tx, current, 'start');
+    else if (state === 'resizing')
+      current = await moveInstance(
+        tx,
+        current,
+        'complete',
+        target === 'stopped' ? 'stopped' : 'running',
+      );
+    else if (state === 'running')
+      current = await moveInstance(tx, current, target === 'stopped' ? 'stop' : 'pause');
+    else if (state === 'paused')
+      current = await moveInstance(tx, current, target === 'stopped' ? 'stop' : 'resume');
+    else if (state === 'stopped') current = await moveInstance(tx, current, 'start');
     else if (state === 'lost') current = await moveInstance(tx, current, 'recover', target);
     else break;
   }
@@ -184,10 +195,7 @@ async function reconcileHosted(
 
   if (row.state === 'lost') {
     const connectivity = row.nodeId ? await nodeConnectivity(tx, row.nodeId) : undefined;
-    if (
-      connectivity === 'connected' &&
-      (row.reportedState === 'running' || row.reportedState === 'stopped')
-    ) {
+    if (connectivity === 'connected' && settled(row.reportedState)) {
       const recovered = await moveInstance(tx, row, 'recover', row.reportedState);
       await publishInstance(deps, tx, recovered, 'instance.recovered');
       return now;
@@ -222,7 +230,7 @@ async function reconcileHosted(
   }
 
   const reported = row.reportedState;
-  if (reported === row.desiredState && (reported === 'running' || reported === 'stopped')) {
+  if (reported === row.desiredState && settled(reported)) {
     if (row.state !== reported) {
       const next = await advance(tx, row, reported);
       if (next.state !== row.state) await publishInstance(deps, tx, next, `instance.${next.state}`);
@@ -442,7 +450,7 @@ export async function reconcileInstance(
 /** One instance as a host runtime reports it. */
 export interface InstanceReport {
   id: string;
-  state: 'running' | 'stopped' | 'error';
+  state: 'running' | 'stopped' | 'paused' | 'error';
   addresses?: readonly string[];
   message?: string;
 }
@@ -523,7 +531,7 @@ export async function instanceSpecs(
   const { rows } = await tx.query<{
     id: string;
     state: InstanceState;
-    desired_state: 'running' | 'stopped' | 'deleted';
+    desired_state: 'running' | 'stopped' | 'paused' | 'deleted';
     runtime: string;
     flavor: { vcpu: number; memoryGiB: number; diskGiB: number; gpus: number } | string;
     image: { url: string; sha256: string; format: 'raw' | 'qcow2' | 'iso' } | string | null;
