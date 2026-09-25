@@ -1,4 +1,5 @@
 import type { CommandSpec } from '../framework.js';
+import { adminCommands } from './admin.js';
 import { apiCommands } from './api.js';
 import { authCommands } from './auth.js';
 import { batchCommands } from './batch.js';
@@ -37,6 +38,7 @@ export const builtinCommands: readonly CommandSpec<any>[] = [
   ...eventCommands,
   ...operationCommands,
   ...catalogCommands,
+  ...adminCommands,
   ...fleetCommands,
   ...pkiCommands,
   ...batchCommands,

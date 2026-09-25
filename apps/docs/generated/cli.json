@@ -6514,6 +6514,1133 @@
       "examples": ["better-compute webhooks event-types"]
     },
     {
+      "name": "pools get",
+      "aliases": [],
+      "group": "Pools",
+      "summary": "Show a pool: its class, policy and offers (pools.get)",
+      "description": "Show a pool: its class, policy and offers (pools.get)",
+      "usage": "better-compute pools get POOL --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "pool",
+          "description": "The pool id (pool_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pools get pool_01k5w…"]
+    },
+    {
+      "name": "pools create",
+      "aliases": [],
+      "group": "Pools",
+      "summary": "Create a pool in a site (pools.create)",
+      "description": "pools create makes a --class pool in --site, owned by the tenant. --policy-file is a PoolPolicy as JSON; --owner-quota sets the owner’s own limits (default: unlimited GPUs). Provider pools name their --provider-account and run no agent. Decided as compute:pools:create.",
+      "usage": "better-compute pools create --tenant ID --site ID --class CLASS [--gpu-model MODEL] [--sharing MODE] [--policy-file PATH] [--owner-quota RES=N,…] [--provider-account ID] [--key KEY] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--site",
+          "value": "ID",
+          "optional": false,
+          "description": "The site (site_…)"
+        },
+        {
+          "flag": "--class",
+          "value": "CLASS",
+          "optional": false,
+          "description": "The pool class",
+          "choices": ["metal-host", "metal-dedicated", "vps-host", "provider"]
+        },
+        {
+          "flag": "--gpu-model",
+          "value": "MODEL",
+          "optional": true,
+          "description": "The GPU model it holds (H100, …)"
+        },
+        {
+          "flag": "--sharing",
+          "value": "MODE",
+          "optional": true,
+          "description": "How GPUs are shared (default exclusive)",
+          "choices": ["exclusive", "mig", "timeslice", "mps"]
+        },
+        {
+          "flag": "--policy-file",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PoolPolicy, as JSON"
+        },
+        {
+          "flag": "--owner-quota",
+          "value": "RES=N,…",
+          "optional": true,
+          "description": "The owner’s limits, e.g. gpus=64"
+        },
+        {
+          "flag": "--provider-account",
+          "value": "ID",
+          "optional": true,
+          "description": "Provider pools: the account (pacct_…)"
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key: a retry returns the same pool"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute pools create --site site_01k5w… --class metal-host --gpu-model H100 --owner-quota gpus=64"
+      ]
+    },
+    {
+      "name": "pools update",
+      "aliases": [],
+      "group": "Pools",
+      "summary": "Replace a pool’s policy or change its GPU model (pools.update)",
+      "description": "Replace a pool’s policy or change its GPU model (pools.update)",
+      "usage": "better-compute pools update POOL --tenant ID [--policy-file PATH] [--gpu-model MODEL] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "pool",
+          "description": "The pool id (pool_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--policy-file",
+          "value": "PATH",
+          "optional": true,
+          "description": "The new PoolPolicy, as JSON (replaces the old one)"
+        },
+        {
+          "flag": "--gpu-model",
+          "value": "MODEL",
+          "optional": true,
+          "description": "The new GPU model"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pools update pool_01k5w… --policy-file policy.json"]
+    },
+    {
+      "name": "pools archive",
+      "aliases": [],
+      "group": "Pools",
+      "summary": "Archive a pool (pools.archive)",
+      "description": "Archive a pool (pools.archive)",
+      "usage": "better-compute pools archive POOL --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "pool",
+          "description": "The pool id (pool_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pools archive pool_01k5w…"]
+    },
+    {
+      "name": "pools offer",
+      "aliases": [],
+      "group": "Pools",
+      "summary": "Offer a pool to another tenant with a quota (pools.offer)",
+      "description": "Offer a pool to another tenant with a quota (pools.offer)",
+      "usage": "better-compute pools offer POOL --tenant ID --to TENANT --quota RES=N,… [--include-descendants] [--priority N] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "pool",
+          "description": "The pool id (pool_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--to",
+          "value": "TENANT",
+          "optional": false,
+          "description": "The tenant it is offered to"
+        },
+        {
+          "flag": "--quota",
+          "value": "RES=N,…",
+          "optional": false,
+          "description": "That tenant’s limits, e.g. gpus=8"
+        },
+        {
+          "flag": "--include-descendants",
+          "optional": true,
+          "description": "Also that tenant’s child tenants"
+        },
+        {
+          "flag": "--priority",
+          "value": "N",
+          "optional": true,
+          "description": "Scheduling priority"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pools offer pool_01k5w… --to org_research --quota gpus=16"]
+    },
+    {
+      "name": "pools unoffer",
+      "aliases": [],
+      "group": "Pools",
+      "summary": "Withdraw a pool’s offer to a tenant (pools.unoffer)",
+      "description": "Withdraw a pool’s offer to a tenant (pools.unoffer)",
+      "usage": "better-compute pools unoffer POOL --tenant ID --to TENANT [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "pool",
+          "description": "The pool id (pool_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--to",
+          "value": "TENANT",
+          "optional": false,
+          "description": "The tenant to withdraw it from"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute pools unoffer pool_01k5w… --to org_research"]
+    },
+    {
+      "name": "join-requests list",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "List a pool’s join requests, pending by default (joinRequests.list)",
+      "description": "List a pool’s join requests, pending by default (joinRequests.list)",
+      "usage": "better-compute join-requests list --tenant ID --pool ID [--state STATE] [--limit N] [--cursor CURSOR] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": false,
+          "description": "The pool"
+        },
+        {
+          "flag": "--state",
+          "value": "STATE",
+          "optional": true,
+          "description": "Which requests (default pending)",
+          "choices": ["pending", "approved", "rejected", "expired", "consumed", "all"]
+        },
+        {
+          "flag": "--limit",
+          "value": "N",
+          "optional": true,
+          "description": "Page size (at most 200)"
+        },
+        {
+          "flag": "--cursor",
+          "value": "CURSOR",
+          "optional": true,
+          "description": "The cursor of the previous page"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute join-requests list --pool h100-eu"]
+    },
+    {
+      "name": "join-requests approve",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "Let a machine that asked join the pool (joinRequests.approve)",
+      "description": "join-requests approve admits the machine behind the request into --pool; the approval waits --ttl seconds (default 3600) for the machine to retry. Check its claims (join-requests list) first: approving is what makes an unknown machine a node. Decided as compute:join-tokens:create.",
+      "usage": "better-compute join-requests approve REQUEST --tenant ID --pool ID [--reason TEXT] [--ttl SECONDS] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "request",
+          "description": "The request id (jreq_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": false,
+          "description": "The pool"
+        },
+        {
+          "flag": "--reason",
+          "value": "TEXT",
+          "optional": true,
+          "description": "Recorded on the request"
+        },
+        {
+          "flag": "--ttl",
+          "value": "SECONDS",
+          "optional": true,
+          "description": "How long it may join"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute join-requests approve jreq_01k5w… --pool h100-eu"]
+    },
+    {
+      "name": "join-requests reject",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "Turn a machine’s join request down (joinRequests.reject)",
+      "description": "Turn a machine’s join request down (joinRequests.reject)",
+      "usage": "better-compute join-requests reject REQUEST --tenant ID --pool ID [--reason TEXT] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "request",
+          "description": "The request id (jreq_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--pool",
+          "value": "ID",
+          "optional": false,
+          "description": "The pool"
+        },
+        {
+          "flag": "--reason",
+          "value": "TEXT",
+          "optional": true,
+          "description": "Recorded on the request"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute join-requests reject jreq_01k5w… --pool h100-eu"]
+    },
+    {
+      "name": "inventory get",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "Show a node’s current hardware inventory (inventory.get)",
+      "description": "Show a node’s current hardware inventory (inventory.get)",
+      "usage": "better-compute inventory get NODE --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "node",
+          "description": "The node id (node_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute inventory get node_01k5w… --query gpus"]
+    },
+    {
+      "name": "inventory history",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "List a node’s inventory snapshots, newest first (inventory.history)",
+      "description": "List a node’s inventory snapshots, newest first (inventory.history)",
+      "usage": "better-compute inventory history NODE --tenant ID [--limit N] [--cursor CURSOR] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "node",
+          "description": "The node id (node_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--limit",
+          "value": "N",
+          "optional": true,
+          "description": "Page size (at most 100)"
+        },
+        {
+          "flag": "--cursor",
+          "value": "CURSOR",
+          "optional": true,
+          "description": "The cursor of the previous page (inv_…)"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute inventory history node_01k5w…"]
+    },
+    {
+      "name": "inventory diff",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "Show what changed in a node’s hardware between two snapshots (inventory.diff)",
+      "description": "inventory diff compares --from and --to (snapshot ids from inventory history, or inventory digests). Without --to it is the latest snapshot, without --from the one before --to.",
+      "usage": "better-compute inventory diff NODE --tenant ID [--from SNAPSHOT] [--to SNAPSHOT] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "node",
+          "description": "The node id (node_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--from",
+          "value": "SNAPSHOT",
+          "optional": true,
+          "description": "The older snapshot (inv_…) or digest"
+        },
+        {
+          "flag": "--to",
+          "value": "SNAPSHOT",
+          "optional": true,
+          "description": "The newer snapshot (inv_…) or digest"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute inventory diff node_01k5w…"]
+    },
+    {
+      "name": "secrets put",
+      "aliases": [],
+      "group": "Secrets",
+      "summary": "Store a secret for secret:// references (secrets.put)",
+      "description": "secrets put stores the value of --value-file, or of standard input with --stdin, under --name; user data, sandbox environments and plugins name it as secret://<tenant>/<name>. The value never goes on the command line (shell history, the process list). --scope fleet stores a platform secret. Decided as compute:secrets:manage.",
+      "usage": "better-compute secrets put --tenant ID --name NAME [--value-file PATH] [--stdin] [--scope SCOPE] [--key KEY] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--name",
+          "value": "NAME",
+          "optional": false,
+          "description": "The secret name"
+        },
+        {
+          "flag": "--value-file",
+          "value": "PATH",
+          "optional": true,
+          "description": "Read the value from this file"
+        },
+        {
+          "flag": "--stdin",
+          "optional": true,
+          "description": "Read the value from standard input"
+        },
+        {
+          "flag": "--scope",
+          "value": "SCOPE",
+          "optional": true,
+          "description": "Default tenant",
+          "choices": ["tenant", "fleet"]
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key, to retry the same request"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute secrets put --name hf-token --value-file ./hf-token",
+        "vault read -field=token secret/hf | better-compute secrets put --name hf-token --stdin"
+      ]
+    },
+    {
+      "name": "secrets delete",
+      "aliases": [],
+      "group": "Secrets",
+      "summary": "Delete a secret (secrets.delete)",
+      "description": "Delete a secret (secrets.delete)",
+      "usage": "better-compute secrets delete --tenant ID --name NAME [--scope SCOPE] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--name",
+          "value": "NAME",
+          "optional": false,
+          "description": "The secret name"
+        },
+        {
+          "flag": "--scope",
+          "value": "SCOPE",
+          "optional": true,
+          "description": "Default tenant",
+          "choices": ["tenant", "fleet"]
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute secrets delete --name hf-token"]
+    },
+    {
+      "name": "site-tokens create",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "Create a token a site agent joins a site with (siteTokens.create)",
+      "description": "site-tokens create mints a token for up to --max-uses site agents (default 1) to join --site within --ttl seconds. It is printed once: with --out it goes to a new 0600 file instead. Decided as compute:sites:manage.",
+      "usage": "better-compute site-tokens create --tenant ID --site ID --ttl SECONDS [--max-uses N] [--out PATH] [--key KEY] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--site",
+          "value": "ID",
+          "optional": false,
+          "description": "The site (site_…)"
+        },
+        {
+          "flag": "--ttl",
+          "value": "SECONDS",
+          "optional": false,
+          "description": "How long it is valid"
+        },
+        {
+          "flag": "--max-uses",
+          "value": "N",
+          "optional": true,
+          "description": "Site agents it admits (default 1)"
+        },
+        {
+          "flag": "--out",
+          "value": "PATH",
+          "optional": true,
+          "description": "Write the token to this new file instead of printing it"
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key, to retry the same request"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute site-tokens create --site site_01k5w… --ttl 3600 --out ./site-token"
+      ]
+    },
+    {
+      "name": "site-tokens revoke",
+      "aliases": [],
+      "group": "Nodes",
+      "summary": "Revoke a site token (siteTokens.revoke)",
+      "description": "Revoke a site token (siteTokens.revoke)",
+      "usage": "better-compute site-tokens revoke TOKEN --tenant ID --site ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "token",
+          "description": "The token id (jt_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--site",
+          "value": "ID",
+          "optional": false,
+          "description": "The site"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute site-tokens revoke jt_01k5w… --site site_01k5w…"]
+    },
+    {
+      "name": "drivers list",
+      "aliases": [],
+      "group": "Pools",
+      "summary": "List the drivers this deployment runs (drivers.list)",
+      "description": "List the drivers this deployment runs (drivers.list)",
+      "usage": "better-compute drivers list --tenant ID [--kind KIND] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--kind",
+          "value": "KIND",
+          "optional": true,
+          "description": "Only this kind (runtime, bmc, …)"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute drivers list --kind runtime"]
+    },
+    {
       "name": "fleet export",
       "aliases": [],
       "group": "Fleet",

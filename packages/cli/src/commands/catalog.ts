@@ -21,7 +21,7 @@ function list(value: string | undefined): string[] {
 }
 
 /** Writes a one-time secret (or an export) to a new file, 0600, never over an existing one. */
-async function writeNewFile(file: string, content: string): Promise<void> {
+export async function writeNewFile(file: string, content: string): Promise<void> {
   try {
     await writeFile(file, content, { mode: 0o600, flag: 'wx' });
   } catch (error) {
