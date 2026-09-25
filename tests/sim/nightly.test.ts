@@ -26,6 +26,8 @@ describe('nightly simulation (CI size)', () => {
       chaos: 'light',
       invariants: i7,
     });
+    // Logged before the checks, so a red run shows what the store said about each allocation I8 names.
+    console.log(JSON.stringify({ ...report, violations: report.violations.length }));
     assertInvariants(report.violations);
     expect(report.ok).toBe(true);
     expect(Object.values(report.workload).reduce((sum, n) => sum + n, 0)).toBeGreaterThan(20);
@@ -36,7 +38,6 @@ describe('nightly simulation (CI size)', () => {
         (report.reservations.ended ?? 0),
     ).toBeGreaterThan(0);
     expect(report.commands.succeeded ?? 0).toBeGreaterThan(0);
-    console.log(JSON.stringify({ ...report, violations: report.violations.length }));
 
     // The same seed asks for exactly the same workload.
     const again = await runNightly({
