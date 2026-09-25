@@ -307,7 +307,7 @@ export function FleetBoard({ className }: { className?: string }) {
         </span>
       </div>
 
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_13.5rem]">
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_16rem] xl:grid-cols-[minmax(0,1fr)_19rem]">
         <ol
           className="scanlines flex flex-col gap-1.5 px-3 py-3"
           aria-label="Simulated GPU nodes and CPU hosts"
@@ -327,19 +327,17 @@ export function FleetBoard({ className }: { className?: string }) {
                 )}
               >
                 <span className="w-14 shrink-0 text-text-secondary">{machine.name}</span>
-                <span className="flex gap-2.5">
+                {/* Cells stretch like drive bays, so a row fills the panel at any width. */}
+                <span className="flex flex-1 gap-2.5">
                   {groups.map((start) => (
-                    <span key={start} className={cx('flex', cpu ? 'gap-0.5' : 'gap-1')}>
+                    <span key={start} className={cx('flex flex-1', cpu ? 'gap-0.5' : 'gap-1')}>
                       {row.slice(start, start + width).map((cell, i) => {
                         const fresh = cell !== null && fleet.fresh[cell] !== undefined;
                         return (
                           <span
                             key={start + i}
                             title={cell ?? (machine.cordoned ? 'cordoned' : 'idle')}
-                            className={cx(
-                              'gpu-cell block',
-                              cpu ? 'h-3.5 w-[5px] sm:h-4 sm:w-[6px]' : 'size-3.5 sm:size-4',
-                            )}
+                            className="gpu-cell block h-3.5 min-w-[4px] flex-1 sm:h-4"
                             data-state={
                               machine.cordoned
                                 ? 'cordoned'
@@ -355,7 +353,7 @@ export function FleetBoard({ className }: { className?: string }) {
                     </span>
                   ))}
                 </span>
-                <span className="ms-auto text-end tabular-nums text-text-tertiary">
+                <span className="ms-auto w-[5.5rem] shrink-0 text-end tabular-nums text-text-tertiary">
                   {machine.cordoned ? (
                     <span className="tracking-[0.06em] uppercase">cordoned</span>
                   ) : (

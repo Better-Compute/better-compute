@@ -66,12 +66,23 @@ more), and every color is a BoardUI semantic token or one of the signal tokens b
 - `components/site/*`: the marketing shell, drawn as a rack.
   - A status strip and a header with mono navigation.
   - Two mounting rails with square holes (`.rack-frame`) that every band hangs between.
-  - Square screws where bands meet the rails, and `U02`-style unit tags on the landing chapters.
+  - Square screws where bands meet the rails, and `U02`-style unit tags on the landing sections.
   - The footer and Lenis smooth scrolling.
 - `components/docs/*`: Fumadocs' `Callout` as a panel annotation (amber stripe for warnings) and `Cards` as a patch
   panel.
-- `components/home/fleet-board.tsx`: the hero's simulated fleet board, which follows the placer's default scoring
-  in miniature and is labelled as a simulation.
+- `app/(home)/page.tsx` and `components/home/*`: the landing page, laid out as an operator's console rather than a
+  scroll of chapters. In order:
+  - `hero.tsx`: the claim, and `fleet-board.tsx`, a simulated site whose GPU nodes and CPU hosts book and release
+    capacity under the placer's default scoring in miniature, labelled as a simulation.
+  - `resources.tsx` / `resource-switch.tsx`: GPU, CPU and sandbox as tabs, each with spec rows and the real API calls,
+    highlighted on the server.
+  - `signal-path.tsx`: a request's path from caller to node as a schematic, with amber pulses on the wires.
+  - `deep-dives.tsx`: the interactive models (join, placement, sandboxes, bare metal, commands, fleet as code,
+    audit, IAM) as channels of one monitor; only the selected one is mounted.
+  - `spec-sheet.tsx`: the guarantees as a datasheet, each with its mechanism and the test that checks it.
+  - `module-rack.tsx`: the modules as rack units, read from `generated/modules.json`.
+  - `quickstart-terminal.tsx`: the quickstart as a terminal session.
+  - A closing unit with the reference counts from `lib/stats.ts`.
 - `components/logo.tsx`: the amber chip mark beside the `better/compute` wordmark in Plex Mono.
 - `lib/code-themes.ts`: instrument Shiki themes (amber keywords on graphite).
 - `components/mermaid.tsx`: schematics in Plex Mono with amber wires on a blueprint grid.

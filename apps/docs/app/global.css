@@ -160,6 +160,62 @@ figure.shiki {
   mask-image: linear-gradient(to bottom, black, transparent 85%);
 }
 
+/* A wire between two stations of a schematic, with an amber pulse travelling along it (down, or right from lg). */
+.wire::after {
+  content: '';
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: var(--color-signal-fill);
+  box-shadow: 0 0 6px var(--color-signal-500);
+  left: -2px;
+  top: 0;
+  animation: wire-down 1.6s linear infinite;
+}
+
+@keyframes wire-down {
+  from {
+    top: -2px;
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  to {
+    top: calc(100% - 3px);
+    opacity: 0;
+  }
+}
+
+@media (min-width: 64rem) {
+  .wire::after {
+    top: -2px;
+    animation-name: wire-right;
+  }
+}
+
+@keyframes wire-right {
+  from {
+    left: -2px;
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  to {
+    left: calc(100% - 3px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wire::after {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 /* A blueprint grid behind schematics (Mermaid diagrams), not faded. */
 .grid-lines-full {
   background-image:
@@ -307,46 +363,19 @@ figure.shiki {
   background: transparent !important;
 }
 
-/* The pipeline's code pane dims the lines the current stage is not about. */
-.pipeline-code .line {
-  transition: opacity 300ms ease;
+/* Numbered lines for landing code panes (the resource switch), like a listing on a terminal. */
+.code-lines code {
+  counter-reset: code-line;
 }
 
-.pipeline-code[data-focus='credential'] .line:nth-child(n + 4),
-.pipeline-code[data-focus='call'] .line:nth-child(-n + 3) {
-  opacity: 0.35;
-}
-
-/* The hero's code pane numbers its lines and dims the ones its scene is not running (hero-window.tsx lights those). */
-.hero-code code {
-  counter-reset: hero-line;
-}
-
-.hero-code .line {
-  opacity: 0.4;
-  transition: opacity 300ms ease;
-}
-
-.hero-code .line::before {
-  counter-increment: hero-line;
-  content: counter(hero-line);
+.code-lines .line::before {
+  counter-increment: code-line;
+  content: counter(code-line);
   display: inline-block;
-  width: 1rem;
-  margin-inline-end: 0.875rem;
+  width: 1.25rem;
+  margin-inline-end: 1rem;
   text-align: end;
   color: var(--color-text-tertiary);
-  transition: color 300ms ease;
-}
-
-/* Pointing at the code, or preferring less motion, shows every line at full strength. */
-.hero-code:hover .line {
-  opacity: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .hero-code .line {
-    opacity: 1;
-  }
 }
 
 .caret {
