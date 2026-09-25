@@ -141,6 +141,16 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       sandboxHolders are wired in the examples and the console (2eb20d4, 45b3263).
   - daemon install-script --plugins/--privileged-plugins: the bcx plugin drop-in whenever the node has [plugins];
     upgrades keep the operator's config sections (4225772).
+  - Quorum follow-ups (reviews 7-9), all landed:
+    - trust domain in approver-set signatures (4835f4f), approver-set epoch (c6214dc), unchanged set keeps its epoch
+      (bb91a99), first-set pin approver_set_sha256 (9b7a199);
+    - every kind signed once roots are held (12ccfa1);
+    - IAM reactions under savepoints, revocations first (b3f7a81);
+    - batch payload decode "Operations:" (8fe1fb8), trust-domain pin (f0cf592), review-7 Lows (3416f9d);
+    - M5 published-version switch gate, doctor pki.quorum-unsigned, pki trust-version (03bdbc9).
+  - install-script config: [update] release_pins/threshold/sequence (9cf8462, 588e135), [site] bmc_networks
+    (291101d), approver_set_sha256 (9b7a199).
+  - serve's gateway role relays Welcome.trust (a38f338; [f02367]'s finding).
 - [f85da7]: DONE: MCP → IAM confirmation → same-key retry as one flow (39b3eda); known-key replay matrix step
   (542885d); §12.6 policies incl. DelegatedSmall extend on real drafts (cc62e03, which also fixed stale-projection
   admissions); node-scoped gateway reports (6725423). Later: remote-IAM MCP remoteMcpIam (3afe9c1) + reservation
