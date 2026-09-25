@@ -12,8 +12,12 @@ export interface FrameEndpoint {
   /** A returned promise is awaited before the next frame is delivered. */
   onFrame(handler: (frame: AgentFrame) => void | Promise<void>): void;
   onClose(handler: (info: { reason: string }) => void | Promise<void>): void;
-  close(reason?: string): void;
+  /** `info.retryAfterMs`: a busy refusal's pushback (`grpc-retry-pushback-ms` over HTTP/2). */
+  close(reason?: string, info?: { retryAfterMs?: number }): void;
 }
+
+const closeInfo = (error: GrpcError | undefined) =>
+  error?.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : undefined;
 
 const codeNames = new Map<number, string>(Object.entries(GrpcCode).map(([name, code]) => [code, name]));
 
@@ -35,11 +39,12 @@ export function attachFrameConn(gateway: Gateway, peer: PeerIdentity, conn: Fram
     handle = gateway.open(peer, {
       send: (frame) => void conn.send(frame),
       close: (error) => {
-        if (!conn.closed) conn.close(closeReason(error));
+        if (!conn.closed) conn.close(closeReason(error), closeInfo(error));
       },
     });
   } catch (error) {
-    conn.close(closeReason(toGrpcError(error)));
+    const status = toGrpcError(error);
+    conn.close(closeReason(status), closeInfo(status));
     return false;
   }
   const session = handle;

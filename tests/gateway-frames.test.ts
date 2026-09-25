@@ -9,6 +9,7 @@ import { agentFrame, gatewayFixture, helloFrame, type GatewayFixture } from './s
 class Endpoint implements FrameEndpoint {
   closed = false;
   reason: string | undefined;
+  retryAfterMs: number | undefined;
   readonly received: ServerFrame[] = [];
   private frameHandler: ((frame: AgentFrame) => void | Promise<void>) | undefined;
   private closeHandlers: ((info: { reason: string }) => void | Promise<void>)[] = [];
@@ -24,10 +25,11 @@ class Endpoint implements FrameEndpoint {
   onClose(handler: (info: { reason: string }) => void | Promise<void>) {
     this.closeHandlers.push(handler);
   }
-  close(reason = 'closed') {
+  close(reason = 'closed', info?: { retryAfterMs?: number }) {
     if (this.closed) return;
     this.closed = true;
     this.reason = reason;
+    this.retryAfterMs = info?.retryAfterMs;
     for (const handler of this.closeHandlers) void handler({ reason });
   }
   /** The daemon side sends a frame. */
@@ -76,6 +78,18 @@ describe('attachFrameConn', () => {
     const refused = new Endpoint();
     expect(attachFrameConn(f.gateway, { nodeId: node }, refused)).toBe(false);
     expect(refused.reason).toBe('UNAVAILABLE: gateway is draining');
+    expect(refused.retryAfterMs).toBeUndefined();
+  });
+
+  it("passes a busy refusal's retry pushback to the endpoint", async () => {
+    const g = await f.another({ handshakesPerSecond: 1 });
+    const [a, b] = [await f.addNode(), await f.addNode()];
+    expect(attachFrameConn(g, { nodeId: a, role: 'node' }, new Endpoint())).toBe(true);
+    const refused = new Endpoint();
+    expect(attachFrameConn(g, { nodeId: b, role: 'node' }, refused)).toBe(false);
+    expect(refused.reason).toMatch(/^RESOURCE_EXHAUSTED: handshake rate exceeded/);
+    expect(refused.retryAfterMs).toBeGreaterThanOrEqual(250);
+    await g.stop();
   });
 
   it('formats statuses', () => {
