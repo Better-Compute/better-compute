@@ -42,6 +42,10 @@ message ProxyDhcpEntry {
   string workflow_id = 6;
   // Server time after which the entry is dropped.
   google.protobuf.Timestamp not_after = 7;
+  // Secret ref of this machine's MAC-bound discovery join token. The site agent fetches it with
+  // SecretRequest{workflow_id} and puts it only into the ramdisk's boot parameters it serves, so the
+  // token never travels in plaintext in commands.body.
+  string discovery_token_ref = 8;
 }
 
 enum BootArch {
