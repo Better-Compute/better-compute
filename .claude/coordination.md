@@ -196,6 +196,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
     - §16 gateway gate: met on the workstation (bc596e5: 5k mTLS sessions in a split process, 0 drops,
       dispatch p99 26 ms, storm back in 39 s; listen backlog 4096 in 03dc281, [c321a3]); only the 30-min
       reference-Postgres run is left.
+    - Docs session [75b663] (ex-[731f14]) findings at be1e7d9:
+      - HIGH: provision renderers and Robot bootstrap run `bcd join --server/--node-id/--token-file` and
+        `bcd node --join-token-file`, which bcd rejects (exit 2), so deployed machines never join. bcd adopts
+        those flags plus a Go contract test fed from scripts/daemon-fixtures.mjs ([6a20b8]); renderers
+        emit exactly that ([f02367]).
+      - Redfish system path, ramdisk/iPXE image build + site/ramdisk e2e, BIOS/RAID/firmware BMC ops: [6a20b8].
     - Open, no owner:
       - the real-hardware nightly (needs hardware);
       - a Postgres CPU <50% bench and the 30-min gateway run (need reference Postgres);
