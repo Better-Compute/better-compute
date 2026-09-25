@@ -34,7 +34,12 @@ export async function identityEndOf(
     typeof event.metadata?.successorId === 'string' && event.metadata.successorId
       ? event.metadata.successorId
       : undefined;
-  const successor = async () => named ?? (await successorOf?.(event.tenantId, identityId));
+  // A named successor that was offboarded since hands on along the remembered chain (IAM checked it was active in
+  // this tenant when it was named).
+  const successor = async () =>
+    named !== undefined
+      ? ((await successorOf?.(event.tenantId, named)) ?? named)
+      : await successorOf?.(event.tenantId, identityId);
   const end = (successorId: string | undefined): IdentityEnd => ({
     tenantId: event.tenantId,
     identityId,

@@ -46,6 +46,7 @@ import {
   successorsMigration,
   type FlushUsageResult,
   type IamEventHandlers,
+  type IdentityHolders,
   type IdentityState,
 } from './worker.js';
 
@@ -60,6 +61,11 @@ export interface ComputeIamBridgeOptions extends ComputeCatalogOptions {
    * `usageFlushCounter`). Never allowed to fail the flush.
    */
   onUsageFlush?(result: FlushUsageResult): void;
+  /**
+   * More identities IamReconcile re-reads besides reservation owners (§12.8): another module's owners, agents and
+   * delegations, e.g. vps's `sandboxHolders`.
+   */
+  identityHolders?: readonly IdentityHolders[];
 }
 
 /** An IAM host as the bridge's embedded mode reads it: the port's surface plus its store. */
@@ -251,7 +257,11 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
         }),
         reconciler('iam.reconcile', [{ key: 'identities', every: '5m' }], async (store) => {
           if (!host?.store) return false;
-          await reconcileIamIdentities(store, { readIdentity, handlers });
+          await reconcileIamIdentities(store, {
+            readIdentity,
+            handlers,
+            ...(options.identityHolders ? { holders: options.identityHolders } : {}),
+          });
           return false;
         }),
         reconciler('iam.usage', [{ key: 'usage', every: '1h' }], async (store) => {

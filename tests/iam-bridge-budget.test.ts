@@ -120,6 +120,13 @@ describe('identityEndOf', () => {
     expect(await identityEndOf(ended('iam:identities:update'), successors)).toBeUndefined();
     expect(await identityEndOf(ended('auth:session:revoke'), successors)).toBeUndefined();
     expect(await identityEndOf(ended('identity:delete', {}, ''), successors)).toBeUndefined();
+    // A named successor offboarded since hands on along the remembered chain.
+    expect(
+      await identityEndOf(
+        ended('identity:offboard', { successorId: 'idn_bob' }, 'idn_carl'),
+        successors,
+      ),
+    ).toEqual({ tenantId: 'ten_a', identityId: 'idn_carl', successorId: 'idn_alice' });
     // A successor that is the identity itself is none.
     expect(await identityEndOf(ended('identity:offboard', { successorId: 'idn_bob' }))).toEqual({
       tenantId: 'ten_a',

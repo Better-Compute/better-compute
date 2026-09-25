@@ -235,9 +235,20 @@ export interface IdentityState {
   kind?: 'user' | 'service' | 'agent';
 }
 
+/**
+ * Identities that hold something compute must take back when they end (§12.8), beyond reservation owners: another
+ * module's owners, agents and delegations (vps sandboxes, for one). Returns at most `limit`.
+ */
+export type IdentityHolders = (
+  sql: Pick<SqlExecutor, 'query'>,
+  limit: number,
+) => Promise<readonly { tenantId: string; identityId: string }[]>;
+
 export interface ReconcileIdentitiesOptions {
   /** Reads the identity from IAM (embedded: the IAM store; remote: the root SA). */
   readIdentity(tenantId: string, identityId: string): Promise<IdentityState>;
+  /** More holders to re-read besides reservation owners (a module's, which iam cannot import). */
+  holders?: readonly IdentityHolders[];
   /** Called for every identity that is no longer active; receives a synthetic `identity` event. */
   handlers?: Pick<IamEventHandlers, 'identity' | 'onError'>;
   /** Identities per pass. Default 1000. */
@@ -254,18 +265,29 @@ const liveStates = reservationStateTable.states.filter(
 );
 
 /**
- * One IamReconcile pass: every identity that owns a non-terminal reservation is re-read from IAM; each one
- * that is no longer active is handed to `handlers.identity` as if its event had arrived (§12.8).
+ * One IamReconcile pass: every identity that owns a non-terminal reservation, or that one of `holders` names, is
+ * re-read from IAM; each one that is no longer active is handed to `handlers.identity` as if its event had arrived
+ * (§12.8).
  */
 export async function reconcileIamIdentities(
   sql: SqlExecutor,
   options: ReconcileIdentitiesOptions,
 ): Promise<ReconcileIdentitiesResult> {
-  const { rows } = await sql.query<{ tenant_id: string; identity_id: string }>(
+  const limit = options.limit ?? 1000;
+  const { rows: owners } = await sql.query<{ tenant_id: string; identity_id: string }>(
     `SELECT DISTINCT tenant_id, owner_identity_id AS identity_id FROM reservations
       WHERE state = ANY($1::text[]) ORDER BY tenant_id, identity_id LIMIT $2`,
-    [liveStates, options.limit ?? 1000],
+    [liveStates, limit],
   );
+  const byKey = new Map<string, { tenant_id: string; identity_id: string }>();
+  for (const row of owners) byKey.set(`${row.tenant_id}\u0000${row.identity_id}`, row);
+  for (const holders of options.holders ?? [])
+    for (const holder of await holders(sql, limit))
+      byKey.set(`${holder.tenantId}\u0000${holder.identityId}`, {
+        tenant_id: holder.tenantId,
+        identity_id: holder.identityId,
+      });
+  const rows = [...byKey.values()].slice(0, limit);
   const inactive: ReconcileIdentitiesResult['inactive'] = [];
   for (const row of rows) {
     const state = await options.readIdentity(row.tenant_id, row.identity_id);

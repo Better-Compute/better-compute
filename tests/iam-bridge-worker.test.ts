@@ -238,6 +238,25 @@ describe('reconcileIamIdentities', () => {
     expect(result.checked).toBe(3);
     expect(result.inactive.map((item) => item.identityId).sort()).toEqual(['idn_bob', 'idn_dan']);
     expect(handled.sort()).toEqual(['idn_bob:disabled', 'idn_dan:missing']);
+
+    // Another module's holders (a sandbox's owner and agent) are re-read too, each identity once.
+    handled.length = 0;
+    const withHolders = await reconcileIamIdentities(db, {
+      readIdentity: async (_tenantId, identityId) => ({ status: states[identityId] ?? 'missing' }),
+      holders: [
+        async () => [
+          { tenantId: 'ten_a', identityId: 'idn_eve' },
+          { tenantId: 'ten_a', identityId: 'idn_bob' },
+        ],
+      ],
+      handlers: {
+        identity: async (_tx, event) => {
+          handled.push(`${event.subjectId}:${String(event.metadata.status)}`);
+        },
+      },
+    });
+    expect(withHolders.checked).toBe(4);
+    expect(handled.sort()).toEqual(['idn_bob:disabled', 'idn_dan:missing', 'idn_eve:missing']);
   });
 });
 
