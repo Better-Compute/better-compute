@@ -47,6 +47,10 @@ export interface ColdStartPhase {
   allReadyMs?: number;
   /** `node.unreachable` marks published during the phase. */
   unreachableMarks: number;
+  /** Of those marks, how many hit a node that had not connected yet in the phase (still waiting to get in). */
+  unreachableBeforeConnect: number;
+  /** Why links closed during the phase (`<side>: <reason>`, the most frequent first), for triage. */
+  closeReasons: Record<string, number>;
 }
 
 export interface ColdStartReport {
@@ -70,6 +74,19 @@ export interface ColdStartReport {
   schedulable: number;
   violations: InvariantViolation[];
   ok: boolean;
+}
+
+/** Link closes logged by the simulator in [from, to], by `<side>: <reason>` (reasons cut at the first digit run). */
+function closeReasons(rig: ControlPlaneSim, from: number, to: number): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of rig.sim.log.entries) {
+    if (entry.event !== 'close' || entry.t < from || entry.t > to) continue;
+    const data = entry.data ?? {};
+    const reason = String(data.reason ?? '').replace(/\d+/g, 'N');
+    const key = `${String(data.side ?? '?')}: ${reason || '(none)'}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Object.fromEntries([...counts].sort((a, b) => b[1] - a[1]).slice(0, 12));
 }
 
 /** Yields to the event loop (a long simulation otherwise starves the test runner's own I/O). */
@@ -98,9 +115,22 @@ async function firstAfter(
   return new Map(rows.map((row) => [row.node_id, Date.parse(row.at) - since]));
 }
 
-async function unreachableBetween(rig: ControlPlaneSim, from: number, to: number) {
+async function unreachableBetween(
+  rig: ControlPlaneSim,
+  from: number,
+  to: number,
+): Promise<{ marks: number; beforeConnect: number }> {
   const marks = await firstAfter(rig, 'node.unreachable', from);
-  return [...marks.values()].filter((ms) => from + ms <= to).length;
+  const connected = await firstAfter(rig, 'node.connected', from);
+  let count = 0;
+  let beforeConnect = 0;
+  for (const [nodeId, ms] of marks) {
+    if (from + ms > to) continue;
+    count++;
+    const first = connected.get(nodeId);
+    if (first === undefined || first > ms) beforeConnect++;
+  }
+  return { marks: count, beforeConnect };
 }
 
 /** Runs the fleet in `stepMs` steps until `ready()` or `capMs` passed; returns when it was ready. */
@@ -160,6 +190,10 @@ export async function runColdStart(options: ColdStartOptions): Promise<ColdStart
     const { sim } = rig;
     const n = rig.nodes.length;
     const powerOn = sim.scheduler.now();
+    const unreachable = async (from: number) => {
+      const { marks, beforeConnect } = await unreachableBetween(rig, from, sim.scheduler.now());
+      return { unreachableMarks: marks, unreachableBeforeConnect: beforeConnect };
+    };
 
     // Boot.
     const bootWall = Date.now();
@@ -175,7 +209,8 @@ export async function runColdStart(options: ColdStartOptions): Promise<ColdStart
       adoptedMs: summarize([...adopted.values()]),
       notAdopted: n - adopted.size,
       ...(bootReadyMs === undefined ? {} : { allReadyMs: bootReadyMs }),
-      unreachableMarks: await unreachableBetween(rig, powerOn, sim.scheduler.now()),
+      ...(await unreachable(powerOn)),
+      closeReasons: closeReasons(rig, powerOn, sim.scheduler.now()),
     };
     const bootMs = Date.now() - bootWall;
 
@@ -201,7 +236,8 @@ export async function runColdStart(options: ColdStartOptions): Promise<ColdStart
         connectedMs: summarize([...back.values()]),
         notConnected: n - back.size,
         ...(readyMs === undefined ? {} : { allReadyMs: readyMs }),
-        unreachableMarks: await unreachableBetween(rig, downAt, sim.scheduler.now()),
+        ...(await unreachable(downAt)),
+        closeReasons: closeReasons(rig, downAt, sim.scheduler.now()),
       };
     }
     const restartMs = Date.now() - restartWall;
