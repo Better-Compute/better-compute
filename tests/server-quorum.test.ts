@@ -352,6 +352,22 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
       signature: s.sign(created, 1),
     });
     expect(approved).toMatchObject({ state: 'approved', commands: { pending: 1 } });
+    // Operators follow the batch's commands.
+    const members = await s.api.members(s.cred, { tenantId: ACME, batchId: created.batchId });
+    expect(members).toEqual({
+      items: [
+        {
+          commandId: queued.id,
+          nodeId: NODE_Q,
+          subject: NODE_Q,
+          kind: 'node.reboot',
+          state: 'pending',
+        },
+      ],
+    });
+    expect(
+      (await s.api.members(s.cred, { tenantId: ACME, batchId: created.batchId, state: 'succeeded' })).items,
+    ).toEqual([]);
     expect(await due()).toBe(true);
     const released = await commands.get(s.cred, { tenantId: ACME, nodeId: NODE_Q, commandId: queued.id });
     expect(released.awaitingApproval).toBeUndefined();

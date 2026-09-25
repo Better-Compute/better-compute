@@ -558,6 +558,7 @@ group('commandBatches', 'quorum', [
   ['get', 'read', 'batches:read', 'tenant', 'v1.0'],
   ['list', 'read', 'batches:read', 'tenant', 'v1.0'],
   ['scope', 'read', 'batches:read', 'tenant', 'v1.0'],
+  ['members', 'read', 'batches:read', 'tenant', 'v1.0'],
   ['approve', 'mutation', 'batches:approve', 'tenant', 'v1.0'],
   ['cancel', 'mutation', 'batches:approve', 'tenant', 'v1.0'],
 ]);

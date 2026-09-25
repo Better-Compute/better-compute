@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   ComputeError,
+  commandStates,
   defineMethod,
   defineModule,
   describedBy,
@@ -27,7 +28,7 @@ import {
   type BatchApproval,
   type Signature,
 } from '@better-compute/protocol';
-import { derivedId } from '../api/common.js';
+import { derivedId, patterns } from '../api/common.js';
 import {
   trustBundleApproverSetMigration,
   trustBundleHistoryMigration,
@@ -572,6 +573,26 @@ export interface BatchScopeInput extends BatchRef {
   cursor?: number;
   limit?: number;
 }
+export interface BatchMembersInput extends BatchRef {
+  state?: string;
+  /** At most 500 (100 by default). */
+  limit?: number;
+  /** The previous page's `next` (a command id). */
+  cursor?: string;
+}
+
+/** A command enqueued into a batch, as operators follow it. */
+export interface BatchMember {
+  commandId: string;
+  nodeId: string;
+  subject: string;
+  kind: string;
+  state: string;
+  reason?: string;
+  /** Held until the batch is approved. */
+  awaitingApproval?: true;
+}
+
 /** One leaf of a batch as approvers page through it. */
 export interface BatchScopeItem {
   leafIndex: number;
@@ -659,6 +680,15 @@ const schemas = {
     ['tenantId'],
   ),
   scope: strictObject({ ...refSchema, cursor: whole, limit: whole }, ['tenantId', 'batchId']),
+  members: strictObject(
+    {
+      ...refSchema,
+      state: { enum: [...commandStates] },
+      limit: whole,
+      cursor: text,
+    },
+    ['tenantId', 'batchId'],
+  ),
   approve: strictObject(
     { ...refSchema, signature: strictObject({ kid: text, sig: text }, ['kid', 'sig']) },
     ['tenantId', 'batchId', 'signature'],
@@ -730,6 +760,7 @@ export type CommandBatchesApi = {
     get: MethodDefinition<BatchRef, CommandBatchView>;
     list: MethodDefinition<ListBatchesInput, { items: CommandBatchView[]; next?: string }>;
     scope: MethodDefinition<BatchScopeInput, { items: BatchScopeItem[]; next?: number }>;
+    members: MethodDefinition<BatchMembersInput, { items: BatchMember[]; next?: string }>;
     approve: MethodDefinition<ApproveBatchInput, CommandBatchView>;
     cancel: MethodDefinition<BatchRef, CommandBatchView>;
   };
@@ -906,6 +937,56 @@ export function commandBatchesApi(options: {
               : {}),
           }));
           return rows.length > limit ? { items, next: Number(rows[limit]!.leaf_index) } : { items };
+        },
+      }),
+      members: defineMethod<BatchMembersInput, { items: BatchMember[]; next?: string }>({
+        action: 'compute:batches:read',
+        kind: 'read',
+        resource: tenant,
+        validate: describedBy(schemas.members, (raw): BatchMembersInput => {
+          const input = parseRef(raw, ['state', 'limit', 'cursor']);
+          const result: BatchMembersInput = { tenantId: input.tenantId, batchId: input.batchId };
+          if (input.state !== undefined) result.state = input.state as string;
+          if (input.limit !== undefined) result.limit = limitOf(input.limit, 500, 100);
+          if (input.cursor !== undefined) {
+            if (typeof input.cursor !== 'string' || !patterns.command.test(input.cursor))
+              throw new ComputeError('INVALID_INPUT', 'cursor is a command id');
+            result.cursor = input.cursor;
+          }
+          return result;
+        }),
+        handler: async (context, input) => {
+          await readBatch(context.sql, input.tenantId, input.batchId);
+          const limit = input.limit ?? 100;
+          const { rows } = await context.sql.query<{
+            command_id: string;
+            node_id: string;
+            subject: string;
+            kind: string;
+            state: string;
+            reason: string | null;
+            held: boolean;
+          }>(
+            `SELECT m.command_id, c.node_id, m.subject, m.kind, c.state, c.reason,
+                    c.not_before = 'infinity' AS held
+               FROM command_batch_members m JOIN commands c ON c.id = m.command_id
+              WHERE m.batch_id = $1 AND ($2::text IS NULL OR c.state = $2)
+                AND ($3::text IS NULL OR m.command_id > $3)
+              ORDER BY m.command_id LIMIT $4`,
+            [input.batchId, input.state ?? null, input.cursor ?? null, limit + 1],
+          );
+          const items = rows.slice(0, limit).map(
+            (row): BatchMember => ({
+              commandId: row.command_id,
+              nodeId: row.node_id,
+              subject: row.subject,
+              kind: row.kind,
+              state: row.state,
+              ...(row.reason ? { reason: row.reason } : {}),
+              ...(row.held ? { awaitingApproval: true as const } : {}),
+            }),
+          );
+          return rows.length > limit ? { items, next: items.at(-1)!.commandId } : { items };
         },
       }),
       approve: defineMethod<ApproveBatchInput, CommandBatchView>({

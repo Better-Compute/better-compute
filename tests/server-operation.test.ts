@@ -254,6 +254,7 @@ describe('betterCompute()', () => {
       'commandBatches/get',
       'commandBatches/list',
       'commandBatches/scope',
+      'commandBatches/members',
       'commandBatches/approve',
       'commandBatches/cancel',
       'workflows/abort',
