@@ -69,7 +69,8 @@ export function signApproverSet(
  * Whether a daemon holding `current` (at its epoch) may take `next` (from a trust bundle verified under the join key):
  * - no current approver keys: yes, the first set only adds restrictions;
  * - the same quorum fields: yes, nothing about the quorum changes, and the verifier KEEPS the epoch it holds (never
- *   the incoming one: a lower one would let an old signed change be replayed, a higher one lock out the next one);
+ *   the incoming one: a lower one would let an old signed change be replayed, a higher one lock out the next one)
+ *   unless `requireSignatures` (moving the same set to a higher epoch needs its own signatures: approverSetTransition);
  * - otherwise only for a higher epoch, with valid `approver_set_signatures` over (next.epoch, next's fields, the
  *   verifier's own `trustDomain`) by at least the current threshold of distinct CURRENT approver keys (kid =
  *   SHA-256 of the SPKI).
@@ -85,9 +86,10 @@ export function verifyApproverSetChange(
     /** The verifier's own trust domain (never the bundle's word for it). */
     trustDomain?: string | undefined;
   },
+  options: { requireSignatures?: boolean } = {},
 ): string[] {
   if (!current?.approverKeys.length) return [];
-  if (sameApproverSet(current, next)) return [];
+  if (sameApproverSet(current, next) && !options.requireSignatures) return [];
   const deny = (reason: string) =>
     new ComputeError('ACCESS_DENIED', 'The trust bundle changes the quorum without its approvers', undefined, { reason });
   if (!(next.epoch > current.epoch)) throw deny('stale-epoch');
@@ -105,4 +107,50 @@ export function verifyApproverSetChange(
   }
   if (approvers.size < current.approverThreshold) throw deny('approver-set-unsigned');
   return [...approvers].sort();
+}
+
+/** What a daemon does with the quorum part of a trust bundle (`approverSetTransition`). */
+export interface ApproverSetTransition {
+  /** Take the bundle's set and epoch (else keep the held ones, and still apply the rest of the bundle). */
+  adopt: boolean;
+  /** The held approvers that admitted it (empty for a first set). */
+  approvers: string[];
+  /** Why not, when it is refused (an unchanged set without its own signatures for a higher epoch is kept silently). */
+  reason?: string;
+}
+
+/**
+ * The daemon's rule for the quorum part of a trust bundle (common.proto, review 10 M3): holding set H at epoch e, it
+ * takes (N, e') only when e' > e AND k-of-H (H's threshold) signed (e', N, its own trust domain), N == H included,
+ * so an unchanged set advances only with its own signatures and replaying an intermediate epoch fails. Holding no
+ * keys (never had any, or a signed removal): the first set is taken as it comes, never at or below the epoch held
+ * (a pinned daemon checks the pin itself, before this). approver_set_signatures may carry the previous set's
+ * signatures and the new set's own: only held keys count.
+ */
+export function approverSetTransition(
+  held: (ApproverSet & { epoch: bigint }) | undefined,
+  next: ApproverSet & {
+    epoch: bigint;
+    approverSetSignatures: readonly Pick<Signature, 'kid' | 'sig'>[];
+    trustDomain?: string | undefined;
+  },
+): ApproverSetTransition {
+  if (!held?.approverKeys.length) {
+    if (held && !sameApproverSet(held, next) && !(next.epoch > held.epoch))
+      return { adopt: false, approvers: [], reason: 'stale-epoch' };
+    if (held && sameApproverSet(held, next)) return { adopt: false, approvers: [] };
+    return { adopt: true, approvers: [] };
+  }
+  const same = sameApproverSet(held, next);
+  // The same set at the same or a lower epoch: nothing to do.
+  if (same && !(next.epoch > held.epoch)) return { adopt: false, approvers: [] };
+  try {
+    // A different set, or the same set at a higher epoch: k-of-H over (e', N, domain).
+    const approvers = verifyApproverSetChange(held, next, { requireSignatures: true });
+    return { adopt: true, approvers };
+  } catch (error) {
+    const reason = String((error as { details?: { reason?: string } }).details?.reason ?? (error as Error).message);
+    // The same set without its own signatures for the new epoch is kept silently.
+    return same ? { adopt: false, approvers: [] } : { adopt: false, approvers: [], reason };
+  }
 }

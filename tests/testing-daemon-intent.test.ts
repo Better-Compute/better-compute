@@ -505,6 +505,65 @@ describe('FakeDaemon signed intent', () => {
     expect(states(h, cmd.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
   });
 
+  it('adopts an epoch only with k of the held set, so S→T→S cannot replay T (review 10 M3), and reports what it holds (M5)', async () => {
+    const [a, b, c] = [createApproverKey(), createApproverKey(), createApproverKey()];
+    const S = { approverKeys: [a.key, b.key], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    const T = { approverKeys: [a.key, b.key, c.key], approverThreshold: 1, quorumTiers: [], unbatchedDestructivePerHour: 5 };
+    const sign = (epoch: number, set: typeof S, keys: typeof a[]) =>
+      keys.map((key) => signApproverSet({ epoch, set, trustDomain: 'compute.test' }, key.privateKey));
+    const bundle = (version: number, set: typeof S, epoch: number, signatures: ReturnType<typeof sign>) =>
+      signTrustBundle({ version, commandSigningRoots: [authority.certificate], ...set, approverSetEpoch: epoch, approverSetSignatures: signatures }, joinKey);
+    const tAt2 = bundle(2, T, 2, sign(2, T, [a, b]));
+    // S at 3, admitted by T (k = 1) and signed by S's own keys: what moves a daemon holding S@1 to S@3.
+    const sAt3 = bundle(3, S, 3, [...sign(3, S, [a]), ...sign(3, S, [a, b])]);
+    const run = async (welcomes: ReturnType<typeof bundle>[]) => {
+      let session = 0;
+      const h = await daemon({
+        intent: {
+          roots: [authority.certificate],
+          version: 1n,
+          trustSigner: { publicKey: joinKey.publicKey },
+          quorum: { approverKeys: S.approverKeys, threshold: 2, unbatchedPerHour: 0, trustDomain: 'compute.test', epoch: 1n },
+        },
+        kinds: {
+          'test.destroy': { lane: Lane.CONTROL, roles: [AgentRole.NODE], destructive: true, run: () => ({ outcome: 'succeeded' }) },
+        },
+        autoWelcome: () => ({ trust: welcomes[Math.min(session++, welcomes.length - 1)]! }),
+      });
+      for (let i = 1; i < welcomes.length; i++) {
+        h.server.conn.close('failover');
+        await h.advance(30_000);
+      }
+      const cmd = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+      await h.advance(5);
+      return { h, cmd };
+    };
+    // S@1 → S@3 (its own signatures) → the old T@2 replayed: refused, S still enforced (no unbatched allowance).
+    let { h, cmd } = await run([sAt3, tAt2]);
+    expect(states(h, cmd.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
+    // The held epoch and digest are reported with the trust version.
+    const spec = storedDesiredState({ nodeId: 'node_a', generation: 1, spec: {} });
+    h.server.send({ case: 'desired', value: desiredStateFromStored(spec.body, signer.signDesiredState(spec.body)) });
+    await h.advance(20_000);
+    const status = h.server.of('status').at(-1)!;
+    expect(status.approverSetEpoch).toBe(3n);
+    expect(Buffer.from(status.approverSetSha256).equals(Buffer.from(approverSetDigest(S)))).toBe(true);
+    // The same set at a higher epoch WITHOUT its own signatures: kept at the held epoch (then T@2 still refused).
+    const tAt2Later = bundle(3, T, 2, sign(2, T, [a, b]));
+    ({ h, cmd } = await run([bundle(2, S, 3, []), tAt2Later]));
+    // T@2 with k-of-S signatures is a genuine change from S@1: taken (k = 1, 5 unbatched allowed).
+    expect(states(h, cmd.id).filter((state) => state.startsWith('REJECTED'))).toEqual([]);
+    // A signed removal keeps its epoch: an older set is never taken back by the now keyless daemon.
+    const none = { approverKeys: [], approverThreshold: 0, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    ({ h, cmd } = await run([bundle(2, none, 4, sign(4, none, [a, b])), tAt2Later]));
+    h.server.send({ case: 'desired', value: desiredStateFromStored(spec.body, signer.signDesiredState(spec.body)) });
+    await h.advance(20_000);
+    const after = h.server.of('status').at(-1)!;
+    expect(after.trustVersion).toBe(3n);
+    expect(after.approverSetEpoch).toBe(4n);
+    expect(after.approverSetSha256).toHaveLength(0);
+  });
+
   it('a pinned daemon without keys takes only the pinned first set, and nothing destructive before it (review 7 M2)', async () => {
     const [a, b, intruder] = [createApproverKey(), createApproverKey(), createApproverKey()];
     const pinned = { approverKeys: [a.key, b.key], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };

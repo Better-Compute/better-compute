@@ -680,7 +680,7 @@ export const batchCommands = [
     group: 'Quorum',
     summary: 'Sign a change of the approver set with a current approver key',
     description:
-      "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for approver-set --epoch (one above the current set's; better-compute pki trust-version prints it) in the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers.setSignatures with pki.approvers.epoch; they stay valid on every later trust bundle version while the set is current. Prints the set's digest and the signature.",
+      "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for approver-set --epoch (one above the current set's; better-compute pki trust-version prints it) in the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Members of the NEW set sign it too (their signatures move daemons that already hold that set to the new epoch); give all the signatures to the deployment's pki.approvers.setSignatures with pki.approvers.epoch; they stay valid on every later trust bundle version while the set is current. Prints the set's digest and the signature.",
     output: 'json',
     flags: {
       key: { type: 'string', value: 'PATH', required: true, description: 'Your CURRENT approver private key (PEM)' },
@@ -753,7 +753,8 @@ export const batchCommands = [
           ? `Signing, as ${kid}, a quorum of ${threshold} of ${approverKeys.length}: ${approverKeys.map((key) => key.kid).join(', ')}.`
           : `Signing, as ${kid}, the REMOVAL of the quorum: destructive batches will no longer need approvals.`,
       );
-      if (!approverKeys.some((key) => key.kid === kid)) note(`Your own key ${kid} is not in the new set.`);
+      if (!approverKeys.some((key) => key.kid === kid))
+        note(`Your own key ${kid} is not in the new set: this signature only counts as one of the current approvers'.`);
       note(`For approver-set epoch ${flags.epoch} of ${trustDomain}.`);
       const signature = signApproverSet({ epoch: flags.epoch!, set, trustDomain }, privateKey);
       return {

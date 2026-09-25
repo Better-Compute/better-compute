@@ -2,6 +2,7 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   approverSetDigest,
+  approverSetTransition,
   createApproverKey,
   sameApproverSet,
   signApproverSet,
@@ -32,6 +33,41 @@ const reason = (run: () => unknown) => {
     return (error as { details?: { reason?: string } }).details?.reason;
   }
 };
+
+describe('approver-set transitions (review 10 M3)', () => {
+  const sign = (epoch: bigint, set: ApproverSet, keys: { privateKey: Parameters<typeof signApproverSet>[1] }[]) =>
+    keys.map((key) => signApproverSet({ epoch, set, trustDomain: 'compute.test' }, key.privateKey));
+  const held = { ...current, epoch: 1n };
+  const to = (set: ApproverSet, epoch: bigint, signatures: ReturnType<typeof sign>) => ({
+    ...set,
+    epoch,
+    approverSetSignatures: signatures,
+    trustDomain: 'compute.test',
+  });
+
+  it('advances the same set only with its own signatures for a higher epoch', () => {
+    expect(approverSetTransition(held, to(current, 3n, sign(3n, current, [a, b])))).toMatchObject({ adopt: true });
+    expect(approverSetTransition(held, to(current, 3n, sign(3n, current, [a])))).toEqual({ adopt: false, approvers: [] });
+    expect(approverSetTransition(held, to(current, 3n, []))).toEqual({ adopt: false, approvers: [] });
+    expect(approverSetTransition(held, to(current, 1n, sign(1n, current, [a, b])))).toEqual({ adopt: false, approvers: [] });
+  });
+
+  it('takes a different set for a higher epoch with k-of-held, and refuses an older epoch', () => {
+    expect(approverSetTransition(held, to(next, 2n, sign(2n, next, [a, b])))).toMatchObject({ adopt: true });
+    expect(approverSetTransition({ ...held, epoch: 3n }, to(next, 2n, sign(2n, next, [a, b])))).toMatchObject({
+      adopt: false,
+      reason: 'stale-epoch',
+    });
+    expect(approverSetTransition(held, to(next, 2n, sign(2n, next, [c])))).toMatchObject({ adopt: false, reason: 'approver-set-unsigned' });
+  });
+
+  it('holding no keys: the first set as it comes, never at or below a held epoch', () => {
+    expect(approverSetTransition(undefined, to(current, 1n, []))).toMatchObject({ adopt: true });
+    const removed = { approverKeys: [], approverThreshold: 0, quorumTiers: [], unbatchedDestructivePerHour: 0, epoch: 4n };
+    expect(approverSetTransition(removed, to(current, 2n, []))).toMatchObject({ adopt: false, reason: 'stale-epoch' });
+    expect(approverSetTransition(removed, to(current, 5n, []))).toMatchObject({ adopt: true });
+  });
+});
 
 describe('approver sets', () => {
   it('digests the canonical fields (keys in any order) and signs the protocol bytes', () => {

@@ -11,9 +11,8 @@ import {
   signCommandUpdate,
   approverSetDigest,
   approverSetOf,
+  approverSetTransition,
   batchSubject,
-  sameApproverSet,
-  verifyApproverSetChange,
   verifyBatchCommand,
   verifyBatchProof,
   verifyCommand,
@@ -404,6 +403,8 @@ export class FakeDaemon {
    * What an admitted command will use of the quorum: its batch leaf, or an unbatched slot. Recorded only when the
    * command is accepted, so deliveries rejected for a bad signature, another node or a past deadline use nothing.
    */
+  /** The approver-set epoch held (TrustBundle.approver_set_epoch); kept through a signed removal of the quorum. */
+  private approverEpoch = 0n;
   private readonly quorumClaims = new Map<string, { leaf: string } | { unbatched: true }>();
   /** Desired states refused by signed intent, in arrival order. */
   private readonly specRejectionsValue: { generation: number; reason: string }[] = [];
@@ -435,6 +436,7 @@ export class FakeDaemon {
       this.intentRoots = [...options.intent.roots];
       this.intentVersion = options.intent.version;
       this.quorum = options.intent.quorum;
+      this.approverEpoch = options.intent.quorum?.epoch ?? 0n;
     }
     this.role = options.role ?? AgentRole.NODE;
     this.daemonVersion = options.daemonVersion ?? options.profile?.daemonVersion ?? '0.1.0';
@@ -505,6 +507,10 @@ export class FakeDaemon {
   get welcomed(): boolean {
     return this.proc?.session?.welcomed === true;
   }
+  /** (`intent`) The trust bundle in force: its version, command-signing roots and quorum (undefined: none). */
+  get trust(): { version: bigint | undefined; roots: readonly Uint8Array[]; quorum: FakeQuorumTrust | undefined } {
+    return { version: this.intentVersion, roots: this.intentRoots ?? [], quorum: this.quorum };
+  }
   /** The epoch of the last Welcome (journal meta last_epoch). */
   get epoch(): number {
     return this.journalValue.meta().lastEpoch;
@@ -537,6 +543,25 @@ export class FakeDaemon {
     for (const hold of this.observedAllocations().values()) for (const id of hold.deviceIds) out.add(id);
     return out;
   }
+  /**
+   * The approver set this daemon enforces, as Hello and StatusReport carry it beside the trust version (review 10 M5):
+   * a bundle's version can be taken while its quorum part is refused.
+   */
+  private heldApproverSet(): { approverSetEpoch: bigint; approverSetSha256: Uint8Array } {
+    const held = this.quorum;
+    return {
+      approverSetEpoch: this.approverEpoch,
+      approverSetSha256: held
+        ? approverSetDigest({
+            approverKeys: held.approverKeys,
+            approverThreshold: held.threshold,
+            quorumTiers: held.tiers ?? [],
+            unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
+          })
+        : new Uint8Array(),
+    };
+  }
+
   /** Server time as the daemon sees it (local clock + Welcome offset). */
   serverNow(): number {
     return this.localNow() + (this.proc?.offsetMs ?? 0);
@@ -876,7 +901,7 @@ export class FakeDaemon {
       inventoryHashes: Object.fromEntries(proc.collected.sections.map((s) => [s.name, s.sha256])),
       appliedSpecHash: this.journalValue.spec()?.hash ?? new Uint8Array(),
       // The TrustBundle version held: a command-root switch waits until every node reports the new one (§13).
-      ...(this.intentVersion !== undefined && !lacks.has('trustVersion') ? { trustVersion: this.intentVersion } : {}),
+      ...(this.intentVersion !== undefined && !lacks.has('trustVersion') ? { trustVersion: this.intentVersion, ...this.heldApproverSet() } : {}),
     };
   }
 
@@ -1089,9 +1114,9 @@ export class FakeDaemon {
         const bundle = verifyTrustBundle(welcome.trust, this.options.intent.trustSigner, this.intentVersion);
         this.intentRoots = [...bundle.commandSigningRoots];
         this.intentVersion = bundle.version;
-        // A change of the quorum, removal included, needs the CURRENT approvers' signatures for a higher epoch (the
-        // join key alone, which the api holds, cannot lift or replace it). Refused, the old quorum stays while the
-        // rest of the bundle (roots, version) applies.
+        // The quorum part (common.proto, review 10 M3): holding (H, e), take (N, e') only when e' > e and k-of-H signed
+        // (e', N, the own trust domain), N == H included. Refused, the held quorum stays while the rest of the bundle
+        // (roots, version) applies. A signed removal keeps its epoch, so an older set is never taken back.
         const held = this.quorum;
         const heldSet = held
           ? {
@@ -1101,40 +1126,37 @@ export class FakeDaemon {
               unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
               epoch: held.epoch ?? 0n,
             }
-          : undefined;
-        // The same set: nothing changes, the held epoch included (review 9 HIGH-2). Taking a lower one would let an
-        // old, genuinely signed change be replayed; a higher one, unsigned, would lock out the next real change.
-        if (!heldSet || !sameApproverSet(heldSet, approverSetOf(bundle)))
-          try {
-            // A keyless daemon with a pin takes only the pinned set (never the api's word for the first one).
-            const pin = this.options.intent.approverSetSha256;
-            if (!held && pin && Buffer.compare(approverSetDigest(approverSetOf(bundle)), pin) !== 0)
-              throw new ComputeError('ACCESS_DENIED', 'The approver set is not the pinned one', undefined, { reason: 'pin-mismatch' });
-            verifyApproverSetChange(heldSet, {
-              ...approverSetOf(bundle),
-              epoch: bundle.approverSetEpoch,
-              approverSetSignatures: bundle.approverSetSignatures,
-              // The deployment's own trust domain, as for batch approvals.
-              trustDomain: held?.trustDomain ?? this.options.intent.trustDomain,
-            });
-            // The quorum travels in the same signed bundle: a signed one without approver keys lifts it.
-            this.quorum = bundle.approverKeys.length
-              ? {
-                  approverKeys: bundle.approverKeys.map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
-                  threshold: bundle.approverThreshold,
-                  tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
-                  unbatchedPerHour: bundle.unbatchedDestructivePerHour,
-                  // The deployment's own trust domain (absent: every approval fails, closed).
-                  trustDomain: this.quorum?.trustDomain ?? this.options.intent.trustDomain ?? '',
-                  epoch: bundle.approverSetEpoch,
-                }
-              : undefined;
-          } catch (error) {
-            this.log('trust.quorum-refused', {
-              version: Number(bundle.version),
-              reason: isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error),
-            });
-          }
+          : this.approverEpoch > 0n
+            ? { approverKeys: [], approverThreshold: 0, quorumTiers: [], unbatchedDestructivePerHour: 0, epoch: this.approverEpoch }
+            : undefined;
+        // A keyless daemon with a pin takes only the pinned set (never the api's word for the first one).
+        const pin = this.options.intent.approverSetSha256;
+        const transition =
+          !held && pin && Buffer.compare(approverSetDigest(approverSetOf(bundle)), pin) !== 0
+            ? { adopt: false, approvers: [], reason: 'pin-mismatch' }
+            : approverSetTransition(heldSet, {
+                ...approverSetOf(bundle),
+                epoch: bundle.approverSetEpoch,
+                approverSetSignatures: bundle.approverSetSignatures,
+                // The deployment's own trust domain, as for batch approvals.
+                trustDomain: held?.trustDomain ?? this.options.intent.trustDomain,
+              });
+        if (transition.adopt) {
+          // The quorum travels in the same signed bundle: a signed one without approver keys lifts it.
+          this.quorum = bundle.approverKeys.length
+            ? {
+                approverKeys: bundle.approverKeys.map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
+                threshold: bundle.approverThreshold,
+                tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
+                unbatchedPerHour: bundle.unbatchedDestructivePerHour,
+                // The deployment's own trust domain (absent: every approval fails, closed).
+                trustDomain: this.quorum?.trustDomain ?? this.options.intent.trustDomain ?? '',
+                epoch: bundle.approverSetEpoch,
+              }
+            : undefined;
+          this.approverEpoch = bundle.approverSetEpoch;
+        } else if (transition.reason)
+          this.log('trust.quorum-refused', { version: Number(bundle.version), reason: transition.reason });
         this.log('trust.updated', { version: Number(bundle.version), roots: bundle.commandSigningRoots.length });
       } catch (error) {
         this.log('trust.ignored', {
@@ -1932,7 +1954,7 @@ export class FakeDaemon {
       ...(this.pressure ? { pressure: this.pressure } : {}),
       // A bundle applied from Welcome.trust after Hello is acknowledged here, without a reconnect.
       ...(this.intentVersion !== undefined && !this.options.profile?.withoutHello?.includes('trustVersion')
-        ? { trustVersion: this.intentVersion }
+        ? { trustVersion: this.intentVersion, ...this.heldApproverSet() }
         : {}),
     };
     this.send(proc.session, { case: 'status', value } as AgentFrame['msg']);

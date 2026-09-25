@@ -176,9 +176,16 @@ export const supportCommands = [
       const { compute, options, source } = await deployment();
       const check = await compute.selfCheck();
       const findings: Finding[] = [...check.findings];
-      findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, compute.context.sql)));
-      findings.push(...(await quorumFindings(compute.context.sql, options)));
-      findings.push(...(await daemonFindings(compute.context.sql)));
+      // An unreachable database is selfCheck's finding (and the bundle is most needed then): the checks that read it
+      // would only throw.
+      const reachable = !check.findings.some((finding) => finding.check === 'database' && finding.severity === 'error');
+      findings.push(
+        ...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, reachable ? compute.context.sql : undefined)),
+      );
+      if (reachable) {
+        findings.push(...(await quorumFindings(compute.context.sql, options)));
+        findings.push(...(await daemonFindings(compute.context.sql)));
+      }
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));
       const now = new Date();
