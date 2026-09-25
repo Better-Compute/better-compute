@@ -149,6 +149,103 @@ describe('OutboxDispatch', () => {
     expect(steady.delivered.flat()).toHaveLength(1);
   });
 
+  describe('poison isolation', () => {
+    /** A sink that refuses any batch holding a `node.poison` event, or everything while `down`. */
+    function pickySink() {
+      const delivered: ComputeEvent[] = [];
+      const state = { down: false, calls: 0 };
+      const sink = defineSink({
+        kind: 'events',
+        id: 'picky',
+        async deliver(events) {
+          state.calls++;
+          if (state.down) throw new Error('endpoint down');
+          if (events.some((event) => event.type === 'node.poison')) throw new Error('cannot map node.poison');
+          delivered.push(...events);
+        },
+      });
+      return { sink, delivered, state };
+    }
+    const recordingLog = () => {
+      const errors: Record<string, unknown>[] = [];
+      return { errors, log: { ...quiet(), error: (_message: string, fields?: Record<string, unknown>) => void errors.push(fields ?? {}) } };
+    };
+
+    async function setup() {
+      const fixture = await computeFixture();
+      const picky = pickySink();
+      const { errors, log } = recordingLog();
+      const compute = await sibling(fixture, { sinks: { events: [picky.sink] }, log });
+      const publish = (...types: string[]) =>
+        compute.context.sql.transaction(async (tx) => {
+          for (const type of types)
+            await compute.context.events.publish(tx, { type, tenantId: fixture.tenants.acme.id, subject: 'node/n1', data: null });
+        });
+      /** Ticks (advancing past every back-off) until a pass delivers nothing and nothing is pending. */
+      const drain = async (passes = 40) => {
+        for (let pass = 0; pass < passes; pass++) {
+          await fixture.advance(301_000);
+          await compute.jobs['outbox-dispatch']!.tick();
+        }
+      };
+      const deadLetters = async () => {
+        const { rows } = await fixture.database.query<{ present: boolean }>(
+          `SELECT to_regclass('outbox_dead_letters') IS NOT NULL AS present`,
+        );
+        if (!rows[0]!.present) return undefined;
+        return (await fixture.database.query<{ sink: string; event: { type: string }; attempts: number; error: string }>(
+          'SELECT sink, event, attempts, error FROM outbox_dead_letters ORDER BY seq',
+        )).rows;
+      };
+      return { fixture, compute, picky, errors, publish, drain, deadLetters };
+    }
+
+    it('bisects a failing batch, dead-letters the one event that fails alone, and delivers the rest in order', async () => {
+      const { picky, errors, publish, drain, deadLetters } = await setup();
+      await publish('node.a', 'node.b', 'node.poison', 'node.c', 'node.d', 'node.e');
+      await drain();
+      expect(picky.delivered.map((event) => event.type)).toEqual(['node.a', 'node.b', 'node.c', 'node.d', 'node.e']);
+      expect(errors).toEqual([expect.objectContaining({ sink: 'picky', type: 'node.poison', attempts: 5 })]);
+      const dead = await deadLetters();
+      if (dead)
+        expect(dead).toEqual([
+          { sink: 'picky', event: expect.objectContaining({ type: 'node.poison' }), attempts: 5, error: 'cannot map node.poison' },
+        ]);
+
+      // Later events flow in full batches again.
+      picky.state.calls = 0;
+      await publish('node.f', 'node.g', 'node.h');
+      await drain(3);
+      expect(picky.delivered.map((event) => event.type).slice(-3)).toEqual(['node.f', 'node.g', 'node.h']);
+      expect(picky.state.calls).toBeLessThanOrEqual(2);
+    });
+
+    it('never dead-letters while the sink is down: everything arrives once it is back', async () => {
+      const { picky, errors, publish, drain, deadLetters } = await setup();
+      await publish('node.a', 'node.b', 'node.c');
+      picky.state.down = true;
+      await drain(30);
+      expect(picky.delivered).toEqual([]);
+      picky.state.down = false;
+      await drain(5);
+      expect(picky.delivered.map((event) => event.type)).toEqual(['node.a', 'node.b', 'node.c']);
+      expect(errors).toEqual([]);
+      expect((await deadLetters()) ?? []).toEqual([]);
+    });
+
+    it('keeps retrying a failing last event: without a neighbour nothing can tell poison from an outage', async () => {
+      const { picky, errors, publish, drain } = await setup();
+      await publish('node.a', 'node.poison');
+      await drain(20);
+      expect(picky.delivered.map((event) => event.type)).toEqual(['node.a']);
+      expect(errors).toEqual([]);
+      await publish('node.b');
+      await drain(10);
+      expect(picky.delivered.map((event) => event.type)).toEqual(['node.a', 'node.b']);
+      expect(errors).toHaveLength(1);
+    });
+  });
+
   it('delivers only while holding its singleton lease', async () => {
     const fixture = await computeFixture();
     const sink = collectingSink('only');

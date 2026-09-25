@@ -282,8 +282,8 @@ function tunnel(stream: ServerHttp2Stream, gateway: Gateway, peer: PeerIdentity)
 
 /**
  * Serves `gateway` as the gRPC `AgentGateway` service on HTTP/2 (§7.1). `Join` needs no client
- * certificate; `Renew` and `Session` need one that `authenticate` accepts. `Tunnel` answers
- * `UNIMPLEMENTED` until v0.3.
+ * certificate; `Renew`, `Session` and `Tunnel` (v0.3, the daemon's side of an interactive tunnel)
+ * need one that `authenticate` accepts. Unknown methods answer `UNIMPLEMENTED`.
  */
 export async function serveGateway(
   gateway: Gateway,

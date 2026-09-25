@@ -269,6 +269,17 @@ const saveCursor = `INSERT INTO outbox_cursors (name, stream, txid, seq)
     updated_at = compute_now()
   WHERE (outbox_cursors.txid, outbox_cursors.seq) < (EXCLUDED.txid, EXCLUDED.seq)`;
 
+const deadLetterTablePresent = `SELECT to_regclass('outbox_dead_letters') IS NOT NULL AS present`;
+
+const insertDeadLetter = `INSERT INTO outbox_dead_letters (sink, txid, seq, event, error, attempts)
+  VALUES ($1, $2::xid8, $3::bigint, $4::jsonb, $5, $6) ON CONFLICT (sink, txid, seq) DO NOTHING`;
+
+/** The cursor of an event read from the outbox (its `sequence` is `<txid>:<seq>`). */
+function cursorOf(event: ComputeEvent): OutboxCursor {
+  const [txid = '0', seq = '0'] = event.sequence.split(':');
+  return { txid, seq };
+}
+
 /** Whether `a` sorts after `b` in (txid, seq) order. */
 function isAfter(a: OutboxCursor, b: OutboxCursor): boolean {
   const [at, bt] = [BigInt(a.txid), BigInt(b.txid)];
@@ -286,9 +297,22 @@ export interface SinkDispatch {
   cursors(): Record<string, OutboxCursor>;
 }
 
+/** How long a lone event may fail before it is tested for poison (default 5 attempts). */
+export interface SinkDispatchOptions {
+  maxEventAttempts?: number;
+}
+
 /**
  * OutboxDispatch's delivery to event sinks, run by the lease holder. Each sink has its own cursor,
  * so one failing sink backs off without holding the others back.
+ *
+ * Poison isolation (as the usage sink's, §12.7): a failing batch is bisected (the next attempt
+ * delivers half as many events, growing back after successes) until the failing event is alone.
+ * After `maxEventAttempts` failures it is tested against its neighbour: when the next event goes
+ * through on its own, the lone one is poison and goes to `outbox_dead_letters` (with the error and
+ * the attempt count; logged only on a schema without the table) and the cursor moves past both.
+ * When the neighbour fails too, the sink itself is down: nothing is dead-lettered and the back-off
+ * continues, so an outage never loses events.
  *
  * Cursors are durable in `outbox_cursors` (`sink:<id>`, stream `outbox`): saved after each
  * delivered batch and loaded whenever this process takes the lease, so a new holder resumes where
@@ -303,14 +327,21 @@ export function createSinkDispatch(
   log: Logger,
   batchSize: number,
   now: () => number,
+  options: SinkDispatchOptions = {},
 ): SinkDispatch {
+  const maxEventAttempts = Math.max(1, options.maxEventAttempts ?? 5);
   const state = sinks.map((sink) => ({
     sink,
     name: sinkCursorName(sink.id),
     cursor: outboxOrigin as OutboxCursor,
     failures: 0,
     retryAt: -Infinity,
+    /** Events per delivery: halved on a failing batch, doubled back on success. */
+    limit: batchSize,
+    /** The lone event that keeps failing (its sequence) and how often it failed. */
+    suspect: undefined as { sequence: string; attempts: number } | undefined,
   }));
+  let deadLetters: boolean | undefined;
   /** Whether cursors are stored (probed once per load until the table exists). */
   let durable = false;
   let loaded = false;
@@ -351,6 +382,71 @@ export function createSinkDispatch(
     }
   }
 
+  const backOff = (entry: (typeof state)[number]) => {
+    entry.failures += 1;
+    entry.retryAt = now() + Math.min(1000 * 2 ** (entry.failures - 1), 300_000);
+  };
+
+  async function deadLetter(entry: (typeof state)[number], event: ComputeEvent, error: unknown, attempts: number) {
+    log.error('An event sink rejected an event on every attempt; dead-lettered', {
+      sink: entry.sink.id,
+      event: event.id,
+      type: event.type,
+      sequence: event.sequence,
+      attempts,
+      error: message(error),
+    });
+    deadLetters ??= (await database.query<{ present: boolean }>(deadLetterTablePresent)).rows[0]?.present === true;
+    if (!deadLetters) return;
+    const at = cursorOf(event);
+    await database.query(insertDeadLetter, [
+      entry.sink.id,
+      at.txid,
+      at.seq,
+      JSON.stringify(event),
+      message(error).slice(0, 2000),
+      attempts,
+    ]);
+  }
+
+  /**
+   * A lone event failed. Below `maxEventAttempts` it backs off like any failure; after that its
+   * neighbour decides: delivered alone, the event is poison (dead-lettered, cursor past both);
+   * failing too, the sink is down (back off, dead-letter nothing). Returns events delivered.
+   */
+  async function lone(
+    entry: (typeof state)[number],
+    event: ComputeEvent,
+    after: OutboxCursor,
+    error: unknown,
+  ): Promise<number> {
+    const attempts = entry.suspect?.sequence === event.sequence ? entry.suspect.attempts + 1 : 1;
+    entry.suspect = { sequence: event.sequence, attempts };
+    backOff(entry);
+    log.warn('An event sink failed; retrying with back-off', {
+      sink: entry.sink.id,
+      event: event.id,
+      attempts,
+      error: message(error),
+    });
+    if (attempts < maxEventAttempts) return 0;
+    const next = await readEvents(database, after, 1);
+    // Nothing after it yet: no neighbour to compare with, so keep retrying it.
+    if (!next.events.length) return 0;
+    try {
+      await entry.sink.deliver(next.events);
+    } catch {
+      return 0; // the neighbour fails as well: the sink is down, not the event
+    }
+    await deadLetter(entry, event, error, attempts);
+    entry.cursor = next.cursor;
+    entry.failures = 0;
+    entry.retryAt = -Infinity;
+    entry.suspect = undefined;
+    await save(entry);
+    return 1;
+  }
+
   return {
     async dispatch(epoch) {
       if (!state.length) return 0;
@@ -362,22 +458,29 @@ export function createSinkDispatch(
       let delivered = 0;
       for (const entry of state) {
         if (now() < entry.retryAt) continue;
-        const page = await readEvents(database, entry.cursor, batchSize);
+        const page = await readEvents(database, entry.cursor, entry.limit);
         if (!page.events.length) continue;
         try {
           await entry.sink.deliver(page.events);
         } catch (error) {
-          entry.failures += 1;
-          entry.retryAt = now() + Math.min(1000 * 2 ** (entry.failures - 1), 300_000);
-          log.warn('An event sink failed; retrying with back-off', {
-            sink: entry.sink.id,
-            attempts: entry.failures,
-            error: message(error),
-          });
+          if (page.events.length > 1) {
+            // Bisect: the next pass delivers the first half alone (no back-off yet: the failure
+            // may be one event's, and a halved batch finds it in log2(batchSize) passes).
+            entry.limit = Math.ceil(page.events.length / 2);
+            log.warn('An event sink failed a batch; retrying a smaller one', {
+              sink: entry.sink.id,
+              events: page.events.length,
+              error: message(error),
+            });
+            continue;
+          }
+          delivered += await lone(entry, page.events[0]!, page.cursor, error);
           continue;
         }
         entry.cursor = page.cursor;
         entry.failures = 0;
+        entry.suspect = undefined;
+        entry.limit = Math.min(batchSize, entry.limit * 2);
         delivered += page.events.length;
         await save(entry);
       }
