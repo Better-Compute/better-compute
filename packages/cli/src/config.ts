@@ -15,6 +15,7 @@ import {
   type ComputeConfigFactory,
   type ComputeOptions,
 } from '@better-compute/server';
+import { retentionModule } from '@better-compute/postgres';
 import { CliError } from './errors.js';
 import type { CommandSpec } from './framework.js';
 import type { HostExport } from './host/config.js';
@@ -136,15 +137,29 @@ export async function importConfigModule(path: string): Promise<ConfigModule> {
   }
 }
 
+/**
+ * The options plus the store's own housekeeping, which the server cannot register itself (it never
+ * imports the store): `retentionModule()` from @better-compute/postgres (the periodic `core.retention`
+ * pass that prunes the outbox and authz changes behind their cursors, spent attestation uses and expired
+ * join requests), unless the configuration registers a `retention` module already.
+ */
+export function withHostModules(options: AnyComputeOptions): AnyComputeOptions {
+  const modules = options.modules ?? [];
+  if (modules.some((module) => module.name === 'retention')) return options;
+  return { ...options, modules: [...modules, retentionModule()] };
+}
+
 /** Builds the control plane for `options`; the database is closed again when the options are invalid. */
-export function createDeployment(options: AnyComputeOptions, source: string): Deployment {
+export function createDeployment(given: AnyComputeOptions, source: string): Deployment {
   let compute: AnyCompute;
+  let options = given;
   try {
+    options = withHostModules(given);
     compute = betterCompute(options);
   } catch (error) {
     // The executors connect lazily, but a pool may exist already; nothing will use it.
     void Promise.resolve()
-      .then(() => options?.database?.close?.())
+      .then(() => given?.database?.close?.())
       .catch(() => undefined);
     throw error;
   }

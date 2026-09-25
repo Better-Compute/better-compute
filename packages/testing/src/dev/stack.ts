@@ -42,6 +42,7 @@ import {
   type ExecTicketIssuer,
   type SignerTrust,
 } from '@better-compute/pki';
+import { retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { AgentRole, type JoinRequest, type TunnelFrame } from '@better-compute/protocol';
 import {
@@ -704,7 +705,8 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     rootTenantId: iam.rootTenantId,
     secret: options.secret ?? DEV_SECRET,
     baseURL,
-    modules: [...(iam.modules ?? []), ...(options.modules ?? [])],
+    // The store's housekeeping (outbox and authz changes behind cursors, spent attestations, expired joins).
+    modules: [...(iam.modules ?? []), ...(options.modules ?? []), retentionModule()],
     pki: keys.pki,
     tunnels: { issuer: tunnels.issuer },
     notifier,

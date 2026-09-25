@@ -58,6 +58,7 @@ export {
   configFileNames,
   configFromEnv,
   createDeployment,
+  withHostModules,
   findConfigFile,
   importOptional,
   loadConfig,

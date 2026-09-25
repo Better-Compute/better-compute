@@ -8,6 +8,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import {
   createCli,
+  createDeployment,
+  unconfiguredIam,
+  withHostModules,
   gatewayIdentity,
   gatewayOptions,
   hostFindings,
@@ -335,6 +338,26 @@ describe('serve composition audit', () => {
     });
     expect(typeof mount?.upgrade).toBe('function');
     mount?.close();
+  });
+
+  it('adds the store retention pass to every CLI deployment, once', () => {
+    const names = (options: any) =>
+      (withHostModules(options).modules ?? []).map((module: { name: string }) => module.name);
+    expect(names({})).toEqual(['retention']);
+    const own = { name: 'retention' };
+    expect(withHostModules({ modules: [own] } as any).modules).toEqual([own]);
+    const deployment = createDeployment(
+      {
+        database: pglite(),
+        iam: unconfiguredIam(),
+        secret: COMPOSE_SECRET,
+        baseURL: 'http://127.0.0.1:3000',
+        rootTenantId: 'root',
+      },
+      'test',
+    );
+    expect(Object.keys(deployment.compute.jobs)).toContain('core.retention');
+    void deployment.close();
   });
 
   it('doctor reports host wiring problems', () => {

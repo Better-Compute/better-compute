@@ -27,7 +27,7 @@ import { fleetModule } from '@better-compute/fleet';
 import { metal } from '@better-compute/metal';
 import { createMetrics, eventCounter, standardMetrics } from '@better-compute/observability';
 import type { PkiBundle } from '@better-compute/pki';
-import { postgres } from '@better-compute/postgres';
+import { postgres, retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
 import { rolloutModule } from '@better-compute/rollout';
@@ -95,6 +95,8 @@ export function everyModule(
     provisionModule({ modules: [metalModule] }),
     metalModule,
     vps(),
+    // The store's housekeeping: prunes the outbox and authz changes behind their cursors (every 5 min).
+    retentionModule(),
     eventsModule({ secret, countEvent: eventCounter(metrics) }),
     fleetModule(),
     // bcd self-update needs the offline release keys' pins.
