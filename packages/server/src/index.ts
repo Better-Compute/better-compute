@@ -42,6 +42,7 @@ import {
 } from './tenancy/tenancy.js';
 import { createAuditSinksModule } from './audit-sinks-module.js';
 import { createQuorumModule, quorumConfigOf } from './quorum/quorum.js';
+import { trustVersionSettler } from './quorum/trust-version.js';
 import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
 
@@ -141,6 +142,11 @@ export {
   type ListBatchesInput,
   type QuorumConfig,
 } from './quorum/quorum.js';
+export {
+  trustBundleDigest,
+  trustBundleStateMigration,
+  trustVersionSettler,
+} from './quorum/trust-version.js';
 
 /** One `authz_projection` row as the resolver reads it (PLAN.md §12.4). */
 export interface AuthzProjectionRow extends AuthzRow {
@@ -370,6 +376,11 @@ export function betterCompute<
     }
     return failures;
   };
+  // The trust bundle's version follows its content (review #6 M5): settled at initialize, or before a
+  // gateway-only process first serves it.
+  const trustBundleReady = resolved.trustBundle
+    ? trustVersionSettler(resolved.database, resolved.trustBundle)
+    : undefined;
   const initialize = (): Promise<void> =>
     (initializing ??= (async () => {
       const fatal = registry.problems().filter((problem) => problem.kind !== 'undeclared');
@@ -382,6 +393,7 @@ export function betterCompute<
         );
       await resolved.database.migrate(registry.migrations);
       await runtime.initialize();
+      await trustBundleReady?.();
       try {
         for (const module of hosted) {
           if (typeof module.start !== 'function') continue;
@@ -417,6 +429,7 @@ export function betterCompute<
       secrets: resolved.secretStores,
       // Signed intent: command-signing roots in JoinResponse.trust and (signed) Welcome.trust.
       ...(resolved.trustBundle ? { trustBundle: resolved.trustBundle } : {}),
+      ...(trustBundleReady ? { trustBundleReady } : {}),
       // v0.5 workload identity: WorkloadTokenRequest → the instance's JWT sealed to its one-time key.
       ...(options.workloadIdentity ? { workloadIdentity: options.workloadIdentity } : {}),
     }),

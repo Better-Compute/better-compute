@@ -94,6 +94,8 @@ export interface GatewayServicesInput {
   allocationRefs?: SecretBrokerOptions['allocationRefs'];
   /** The command-signing trust bundle (`JoinResponse.trust`, and signed for `Welcome.trust`). */
   trustBundle?: JoinTrustBundle;
+  /** Settles `trustBundle.version` against the deployment's record before it is first served. */
+  trustBundleReady?: () => Promise<void>;
   /** `ComputeOptions.workloadIdentity`: turns on `workloadToken` (v0.5). */
   workloadIdentity?: WorkloadIdentityOptions;
 }
@@ -118,6 +120,7 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
     const bundle = input.trustBundle ?? input.pki?.join?.trustBundle;
     const crypto = input.pki?.join;
     if (!bundle || !crypto) return undefined;
+    await input.trustBundleReady?.();
     const body = toBinary(
       TrustBundleSchema,
       create(TrustBundleSchema, {
@@ -158,7 +161,11 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
     : undefined;
   return Object.freeze({
     ...(workloadBroker ? { workloadToken: workloadBroker.workloadToken } : {}),
-    join: (request: JoinRequest, context?: GatewayCallContext) => service.join(request, context),
+    join: async (request: JoinRequest, context?: GatewayCallContext) => {
+      // JoinResponse.trust carries the bundle: its version must be settled first.
+      await input.trustBundleReady?.();
+      return service.join(request, context);
+    },
     renew: (request: RenewRequest, context?: GatewayCallContext) => service.renew(request, context),
     secret: async (
       request: SecretRequest,
