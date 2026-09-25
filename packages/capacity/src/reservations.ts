@@ -2222,6 +2222,8 @@ export const activeRecheckMs = 15 * 60_000;
 /**
  * Wakes the started reservations (`binding`, `active`) with a live allocation on a node, so their
  * conditions follow the node's connectivity and atom health (node-controller and health edges).
+ * Inventory, which cannot import capacity, mirrors this as `wakeStartedReservations` (6f19d5d):
+ * change the rule or the work kind (`capacity.reservations`) there too.
  */
 export async function wakeStartedOnNode(
   tx: SqlTx,
