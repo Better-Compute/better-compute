@@ -26,35 +26,43 @@ In a second terminal, as the root administrator:
 ```sh
 export BETTER_COMPUTE_URL=http://127.0.0.1:3000
 export BETTER_COMPUTE_TOKEN=biam_ses_…   # the root token dev printed
-export TENANT=ten_…                      # the root tenant dev printed
-better-compute api nodes.list tenantId=$TENANT --query "items[].{id: id, state: provisionState, gpus: gpuCount}"
-better-compute api pools.list tenantId=$TENANT
+export BETTER_COMPUTE_TENANT=ten_…       # the root tenant dev printed
+better-compute nodes list
+better-compute pools list
+source <(better-compute completion bash) # optional: tab completion for every command
 ```
+
+Every API group has its commands (`better-compute help` lists them); anything else is `better-compute api GROUP.METHOD`.
 
 ## Reserve GPUs
 
 Offer the pool to your own tenant with a quota, then reserve:
 
 ```sh
-better-compute api pools.list tenantId=$TENANT --query "items[].id" --format table
-export POOL=pool_…                        # the pool dev created
-better-compute api pools.offer tenantId=$TENANT poolId=$POOL toTenantId=$TENANT quota:='{"gpu": 64}'
-better-compute reserve --tenant $TENANT --pool $POOL --gpus 4 --for 1h
-better-compute capacity --tenant $TENANT --pool $POOL
+export POOL=pool_…                        # the pool dev created (pools list)
+better-compute pools offer $POOL --to $BETTER_COMPUTE_TENANT --quota gpu=64
+better-compute reserve --pool $POOL --gpus 4 --for 1h
+better-compute capacity --pool $POOL
 ```
 
 The reservation is placed on one machine. It binds through the node's desired state, and becomes `active` once the simulated daemon reports `AllocationBound`: its CDI devices are in the reservation's `binding`.
 
 ## Watch events
 
-Server-sent events of your tenant, from the transactional outbox:
+Server-sent events of your tenant, from the transactional outbox, one JSON line each:
 
 ```sh
-curl -N -H "Authorization: Bearer $BETTER_COMPUTE_TOKEN" "http://127.0.0.1:3000/watch?types=node.*,reservation.*"
+better-compute events watch --types "node.*,reservation.*"
 ```
 
-Cordon a node in another terminal (`better-compute api nodes.cordon tenantId=$TENANT nodeId=node_… reason=demo`) and watch `node.cordoned` arrive.
+Cordon a node in another terminal (`better-compute nodes cordon node_… --reason demo`) and watch `node.cordoned` arrive. The stream is plain server-sent events at `GET /watch`, so `curl -N -H "Authorization: Bearer $BETTER_COMPUTE_TOKEN" "$BETTER_COMPUTE_URL/watch?types=node.*"` shows the same.
 
 ## Tunnels
 
-`tunnels.open` (exec and console sessions into nodes) arrives with the v0.3 tunnels wiring. Once the configuration sets `tunnels: { issuer }`, `better-compute serve` mounts the relay. This example will gain an `exec` walkthrough then.
+`dev --sim` mounts the tunnel relay with a throwaway ticket issuer, so a simulated machine takes a console session:
+
+```sh
+better-compute console --node node_…
+```
+
+The simulated daemon answers with a line shell: `size` prints your terminal size, `exit` ends the session with status 0, `false` with 1, and Ctrl-] detaches. With a real `bcd`, the same command opens a root console on the node (`compute:nodes:console`), and `console --instance inst_…` opens a VM's serial console.
