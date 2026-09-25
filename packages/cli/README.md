@@ -122,6 +122,32 @@ better-compute iam setup --audience https://compute.example.com   # example poli
   `--meters --iam-url URL --root-tenant ID` and a root `BETTER_IAM_TOKEN`, it also creates the
   §12.7 root meters through the optional peer `@better-iam/client`.
 
+## Destructive batches (quorum)
+
+A fleet-wide reimage, wipe or BMC power action runs only after k approvers sign it. Each approver holds a P-256
+key off the control plane, and every daemon checks the signatures itself (PLAN.md §13).
+
+```sh
+BETTER_COMPUTE_APPROVER_PASSPHRASE=… better-compute batch keygen --out ~/.better-compute/approver.pem
+better-compute batch list --state pending
+better-compute batch show --batch batch_… [--scope-out batch.json]
+better-compute batch approve --batch batch_… --key ~/.better-compute/approver.pem [--expect my-nodes.txt] --yes
+better-compute batch sign --key approver.pem --scope batch.json   # offline; then approve --signature FILE
+better-compute batch cancel --batch batch_…
+```
+
+- **`batch keygen`** writes the private key (mode 0600, encrypted under `BETTER_COMPUTE_APPROVER_PASSPHRASE`
+  when set) and `<out>.pub`. The public key goes into the deployment's `pki.approvers.keys`; the examples read
+  `BETTER_COMPUTE_APPROVER_KEYS` and `_THRESHOLD`.
+- **`batch approve`** pages the batch's scope and recomputes the Merkle root from it. It refuses with
+  `SCOPE_MISMATCH` when the listed commands do not give the root the server asks it to sign. It then prints every
+  subject by kind and signs the root, size, expiry and trust domain. Without `--yes` it stops after the summary.
+  `--root` approves only the root you reviewed, `--expect` only the subjects you list, and `--max-hours` (default
+  72) refuses long approval windows.
+- **`batch sign`** does the same offline from `batch show --scope-out`. Signing a bare `--root` needs
+  `--unchecked`.
+- Key files readable by others are refused, as ssh does.
+
 ## Output and exit codes
 
 - Results print as indented JSON. `--format compact|table` changes the format, and
