@@ -134,7 +134,10 @@ show it.
   `ttlSeconds`, and is bounded by `maxTtlSeconds`. Like `create`, it runs capacity's budget check
   where the pool asks for one (`budgetCheck: 'meter'`, or an offer's `stop-new`/`drain`): a spent
   budget is `SPEND_LIMIT_REACHED` and clears the pending lifetime, as does a handler that throws after
-  the allow (`admission.abandoned`). `delete` and expiry are both an ordinary instance delete.
+  the allow (`admission.abandoned`). One extend at a time is decided per sandbox
+  (`sandboxes.extending_request`): the projection holds one pending value, so a concurrent extend is
+  `CONFLICT` (`extend-in-flight`) instead of replacing the lifetime being decided, and a stalled one
+  is taken over after 60 s. `delete` and expiry are both an ordinary instance delete.
 
   Events: `sandbox.created`, `ready` (stamped when the instance first runs), `extended`, `expiring`,
   `expired`, `deleted`. `expiring` is published once, 5 minutes (or a quarter of the lifetime, if

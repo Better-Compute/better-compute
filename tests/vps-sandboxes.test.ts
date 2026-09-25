@@ -748,15 +748,59 @@ describe('sandboxes', () => {
     // A handler that throws after the allow (the sandbox changed in between) rolls back its own
     // clearing; the envelope's abandon hook clears the pending lifetime in its own transaction.
     const extend = (api.sandboxes as Record<string, Definition>).extend!;
+    const as = (tx: SqlTx) =>
+      ({ ...moduleContext(within(tx)), caller: alice, requestId: 'req-x' }) as MethodContext;
+    const staged = extend.validate({ tenantId: 'acme', sandboxId: sandbox.id, by: '10m' });
+    await db.transaction((tx) => extend.admission!.prepare(as(tx), staged, tx));
     recorded.pending = [];
     await db.transaction((tx) =>
-      extend.admission!.abandoned!(
-        { ...moduleContext(within(tx)), caller: alice, requestId: 'req' } as MethodContext,
-        { tenantId: 'acme', sandboxId: sandbox.id, until: T0 + 1800_000 },
-        tx,
-        new Error('changed'),
-      ),
+      extend.admission!.abandoned!(as(tx), staged, tx, new Error('changed')),
     );
+    expect(recorded.pending).toEqual([{ id: sandbox.id, attributes: null }]);
+  });
+
+  it('decide one extend at a time: a concurrent one never replaces the lifetime being decided', async () => {
+    const template = await createTemplate({ defaultTtlSeconds: 600, maxTtlSeconds: 7200 });
+    const sandbox = await createSandbox(template.id);
+    const extend = (api.sandboxes as Record<string, Definition>).extend!;
+    const as = (tx: SqlTx, requestId: string) =>
+      ({ ...moduleContext(within(tx)), caller: alice, requestId }) as MethodContext;
+    const prepare = (requestId: string, input: unknown) =>
+      db.transaction((tx) => extend.admission!.prepare(as(tx, requestId), input, tx));
+    const handle = (requestId: string, input: unknown) =>
+      db.transaction((tx) => extend.handler(as(tx, requestId), input));
+    const cleanup = (requestId: string, input: unknown) =>
+      db.transaction((tx) => extend.admission!.abandoned!(as(tx, requestId), input, tx, 'x'));
+    const input = (by: string) =>
+      extend.validate({ tenantId: 'acme', sandboxId: sandbox.id, by }) as Record<string, unknown>;
+
+    // B (long) is being decided; A (short) must not overwrite its pending lifetime.
+    const long = input('60m');
+    const short = input('5m');
+    recorded.pending = [];
+    await prepare('req-b', long);
+    await expect(prepare('req-a', short)).rejects.toMatchObject({
+      code: 'CONFLICT',
+      details: { reason: 'extend-in-flight' },
+    });
+    expect(recorded.pending).toEqual([{ id: sandbox.id, attributes: { ttlSeconds: 4200 } }]);
+    // A's cleanup (its refusal) leaves B's pending alone.
+    await cleanup('req-a', short);
+    expect(recorded.pending).toHaveLength(1);
+    expect(await handle('req-b', long)).toMatchObject({ expiresAt: T0 + 4200_000 });
+    expect(recorded.pending.at(-1)).toEqual({ id: sandbox.id, attributes: null });
+
+    // A stalled extend is taken over after a minute; its late transaction 2 then applies nothing.
+    const stalled = input('10m');
+    await prepare('req-c', stalled);
+    await advance(61_000);
+    const next = input('20m');
+    await prepare('req-d', next);
+    recorded.pending = [];
+    await expect(handle('req-c', stalled)).rejects.toMatchObject({ code: 'CONFLICT' });
+    await cleanup('req-c', stalled);
+    expect(recorded.pending).toEqual([]);
+    expect(await handle('req-d', next)).toMatchObject({ expiresAt: T0 + 5400_000 });
     expect(recorded.pending).toEqual([{ id: sandbox.id, attributes: null }]);
   });
 

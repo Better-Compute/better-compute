@@ -177,6 +177,18 @@ export const vpsSandboxExpiringMigration: Migration = {
   sql: `ALTER TABLE sandboxes ADD COLUMN expiring_at timestamptz;`,
 };
 
+/**
+ * The extend being decided on a sandbox (its request id, and since when): the authz projection holds
+ * one pending value per resource, so only one extend at a time may stage it (`sandboxes.extend`).
+ */
+export const vpsSandboxExtendingMigration: Migration = {
+  name: 'vps/0014_sandbox_extending',
+  sql: `
+ALTER TABLE sandboxes ADD COLUMN extending_request text;
+ALTER TABLE sandboxes ADD COLUMN extending_at timestamptz;
+`,
+};
+
 /** When a sandbox claimed a warm instance: its warm capacity metering ends there (`vps.sandbox.warm`). */
 export const vpsWarmClaimsMigration: Migration = {
   name: 'vps/0006_warm_claims',
@@ -948,6 +960,7 @@ interface RawSandbox {
   from_snapshot: string | null;
   agent_id: string | null;
   delegation_id: string | null;
+  extending_request: string | null;
 }
 
 const ms = (column: string) => `(extract(epoch FROM ${column}) * 1000)::float8`;
@@ -956,7 +969,8 @@ const sandboxColumns = `s.id, s.tenant_id, s.template_id, s.pool_id, s.instance_
   ${ms('s.expired_at')} AS expired_ms, ${ms('s.deleting_at')} AS deleting_ms,
   ${ms('s.deleted_at')} AS deleted_ms, s.owner_identity_id, s.idempotency_key,
   encode(s.request_hash, 'hex') AS request_hash, s.version, ${ms('s.created_at')} AS created_ms,
-  i.state AS instance_state, i.addresses, i.node_id, s.from_snapshot, s.agent_id, s.delegation_id`;
+  i.state AS instance_state, i.addresses, i.node_id, s.from_snapshot, s.agent_id, s.delegation_id,
+  s.extending_request`;
 const sandboxFrom = `sandboxes s LEFT JOIN instances i ON i.id = s.instance_id`;
 
 async function readSandbox(
@@ -2045,6 +2059,7 @@ export async function prepareExtendSandbox(
   // decided on the same lifetime must not add up to one no decision covered.
   input.until = expires;
   delete input.by;
+  await holdExtending(tx, raw.id, context.requestId, context.clock.now());
   await context.authz.setPending(
     tx,
     { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id },
@@ -2053,16 +2068,62 @@ export async function prepareExtendSandbox(
   return { status: 'decide', resource: { type: 'sandbox', id: raw.id } };
 }
 
+/**
+ * One extend at a time stages the sandbox's pending lifetime: the projection holds a single pending
+ * value, so a second extend overwriting it would have the first decided on the second's lifetime
+ * (a short one), then apply its own (a long one). Another request's hold older than
+ * `extendHoldMs` (its caller gave up between the transactions) is taken over.
+ */
+const extendHoldMs = 60_000;
+
+async function holdExtending(
+  tx: SqlTx,
+  sandboxId: string,
+  requestId: string,
+  now: number,
+): Promise<void> {
+  const { rowCount } = await tx.query(
+    `UPDATE sandboxes SET extending_request = $2, extending_at = $3::timestamptz
+      WHERE id = $1 AND (extending_request IS NULL OR extending_request = $2
+                         OR extending_at < $3::timestamptz - make_interval(secs => $4::float8))`,
+    [sandboxId, requestId, new Date(now).toISOString(), extendHoldMs / second],
+  );
+  if (rowCount === 0)
+    throw new ComputeError(
+      'CONFLICT',
+      `Another extend of sandbox ${sandboxId} is being decided; retry once it settles (a stalled one is taken over after ${extendHoldMs / second} s)`,
+      undefined,
+      { sandboxId, reason: 'extend-in-flight', retryAfterSeconds: extendHoldMs / second },
+    );
+}
+
+/** Ends this request's hold, if it still has it, and clears the pending lifetime it staged. */
+async function releaseExtending(
+  context: MethodContext,
+  tx: SqlTx,
+  ref: SandboxRef,
+): Promise<boolean> {
+  const { rowCount } = await tx.query(
+    `UPDATE sandboxes SET extending_request = NULL, extending_at = NULL
+      WHERE id = $1 AND tenant_id = $2 AND extending_request = $3`,
+    [ref.sandboxId, ref.tenantId, context.requestId],
+  );
+  if (rowCount === 0) return false;
+  await context.authz.setPending(
+    tx,
+    { type: 'sandbox', id: ref.sandboxId, tenantId: ref.tenantId },
+    null,
+  );
+  return true;
+}
+
+/** `sandboxes.extend` refused, or its handler threw: clears the pending lifetime if it is still ours. */
 export async function denyExtendSandbox(
   context: MethodContext,
   input: SandboxRef,
   tx: SqlTx,
 ): Promise<void> {
-  await context.authz.setPending(
-    tx,
-    { type: 'sandbox', id: input.sandboxId, tenantId: input.tenantId },
-    null,
-  );
+  await releaseExtending(context, tx, input);
 }
 
 /**
@@ -2099,13 +2160,18 @@ export async function extendSandbox(
     throw new ComputeError('INVALID_STATE', `Sandbox ${raw.id} is being deleted`);
   const expires = extendedExpiry(raw, input);
   const lifetime = Math.ceil((expires - Number(raw.created_ms)) / second);
+  // The decision was made on this request's pending lifetime only while it held the sandbox: after a
+  // takeover, IAM may have seen another request's.
+  if (raw.extending_request !== context.requestId)
+    throw new ComputeError(
+      'CONFLICT',
+      `Another extend of sandbox ${raw.id} took over while this one was decided; retry`,
+      undefined,
+      { sandboxId: raw.id, reason: 'extend-in-flight' },
+    );
   // Checked in transaction 1 already; again for a template changed in between.
   const template = await assertExtendable(tx, raw, expires, deps.clock.now());
-  await context.authz.setPending(
-    tx,
-    { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id },
-    null,
-  );
+  await releaseExtending(context, tx, { tenantId: raw.tenant_id, sandboxId: raw.id });
   if (expires <= Number(raw.expires_ms)) return sandboxView(raw);
   await tx.query(
     `UPDATE sandboxes SET expires_at = $2::timestamptz, ttl_seconds = $3, expiring_at = NULL,
