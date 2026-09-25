@@ -1,5 +1,7 @@
+import type { KeyObject } from 'node:crypto';
 import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
+import { signCommandUpdate } from '@better-compute/pki';
 import {
   AccessSectionSchema,
   AgentFrameSchema,
@@ -126,6 +128,11 @@ export interface FakeDaemonOptions {
   objectStore?: Map<string, Uint8Array>;
   facts?: FactSink;
   log?: EventLog;
+  /**
+   * The node key the daemon joined with. Results of kinds whose outcome asks for it (`attest`) carry
+   * `node_sig` made with it, as bcd signs wipe and diagnostics results. Without a key they go unsigned.
+   */
+  nodeKey?: KeyObject;
 }
 
 interface Session {
@@ -239,6 +246,10 @@ export class FakeDaemon {
   readonly uploads: Map<string, Uint8Array>;
   /** Side effects started per command id, over the node's whole life (survives crashes). */
   readonly executions = new Map<string, number>();
+  /** The key `node_sig` is made with; tests may swap it (a stolen or wrong identity). */
+  nodeKey: KeyObject | undefined;
+  /** Commands whose result is node-signed, also when a journal replay reports it again. */
+  private readonly attestedResults = new Set<string>();
 
   private readonly scheduler: Scheduler;
   private readonly rng: Rng;
@@ -276,6 +287,7 @@ export class FakeDaemon {
       else this.kinds.set(name, kind);
     this.bootIdValue = this.rng.uuid();
     this.journalValue = this.newJournal();
+    this.nodeKey = options.nodeKey;
   }
 
   // ---- observation ------------------------------------------------------------------------------
@@ -896,6 +908,7 @@ export class FakeDaemon {
         : { outcome: 'failed', reason: outcome.code, bootId: this.bootIdValue };
     if (outcome.outcome === 'failed' && outcome.message) result.message = outcome.message;
     if (outcome.result) result.payload = outcome.result;
+    if (outcome.attest) this.attestedResults.add(exec.id);
     complete(this.journalValue, exec.id, result, this.localNow());
     this.fact({ type: 'execution.ended', ...this.identityOf(exec.body), outcome: result.outcome, rebooted: false });
     this.log('command.done', { id: exec.id, outcome: result.outcome, reason: result.reason ?? null, cancelRequested: exec.cancelRequested });
@@ -969,6 +982,9 @@ export class FakeDaemon {
     if (result.outcome === 'rejected') update.rejectReason = rejectionCode(result.reason);
     if (result.outcome === 'failed')
       update.error = create(CommandErrorSchema, { code: result.reason ?? 'internal', message: result.message ?? '' });
+    // "This node says" (§6, §13): the node key signs the update, so the gateway cannot alter it.
+    if (this.attestedResults.has(id) && this.nodeKey)
+      update.nodeSig = signCommandUpdate(this.nodeKey, { commandId: id, state: update.state, result: update.result });
     return update;
   }
 

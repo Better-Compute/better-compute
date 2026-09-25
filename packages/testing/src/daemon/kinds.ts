@@ -59,8 +59,8 @@ export interface FakeKindContext {
 
 /** A command outcome a handler returns. */
 export type FakeKindOutcome =
-  | { outcome: 'succeeded'; result?: Uint8Array }
-  | { outcome: 'failed'; code: string; message?: string; result?: Uint8Array };
+  | { outcome: 'succeeded'; result?: Uint8Array; attest?: true }
+  | { outcome: 'failed'; code: string; message?: string; result?: Uint8Array; attest?: true };
 
 /**
  * The daemon's view of one kind (Go: dispatch.Kind): its lane and allowed roles, how long its side
