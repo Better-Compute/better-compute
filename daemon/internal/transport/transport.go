@@ -241,6 +241,10 @@ const maxPushback = 15 * time.Minute
 // Pushback returns the wait a failed call's gRPC retry pushback asks for. A negative value means
 // "do not retry" in gRPC; bcd always retries, so it is ignored like a missing one.
 func Pushback(err error) (time.Duration, bool) {
+	var wr *WSRejected
+	if errors.As(err, &wr) && wr.RetryAfter > 0 {
+		return min(wr.RetryAfter, maxPushback), true
+	}
 	var ce *connect.Error
 	if !errors.As(err, &ce) {
 		return 0, false

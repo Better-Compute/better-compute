@@ -62,6 +62,8 @@ type Options struct {
 	Dial    Dialer
 	// Renewer renews the certificate at ~60% of its lifetime; nil disables renewal.
 	Renewer Renewer
+	// RenewAfter, when set, brings the first renewal forward to this long after start (tests).
+	RenewAfter time.Duration
 	// OnRenewed is called after a renewal is stored (the caller rebuilds its mTLS client).
 	OnRenewed func(*State, *ecdsa.PrivateKey)
 	// SignerPin is join_signing_key_pin: Welcome trust bundles must be signed by that key.

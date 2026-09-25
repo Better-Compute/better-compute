@@ -116,6 +116,9 @@ type Config struct {
 	// Update configures self-update ([update]).
 	Update Update
 
+	// WebSocket is the WebSocket fallback ([websocket]); a URL turns it on.
+	WebSocket WebSocket
+
 	// BMCNetworks are the CIDRs of the site's BMC networks ([site] bmc_networks, comma-separated): a
 	// site agent never proxies a request into them, whatever the control plane asks.
 	BMCNetworks string
@@ -181,6 +184,18 @@ type Plugins struct {
 	Cgroup    string
 	MemoryMax int64
 	PidsMax   int64
+}
+
+// WebSocket is the session's WebSocket fallback (PLAN.md §7.1) for networks whose TLS-inspecting
+// proxy strips client certificates: the Session and renewals go to URL, each side proves itself in
+// band, and only signed commands and specs are taken.
+type WebSocket struct {
+	// URL is the gateway's WS endpoint (wss://gw…[:port]/v1/session); empty: gRPC only.
+	URL string
+	// ProxyCAFile is a PEM file of the proxy's CA, trusted for the TLS connection only.
+	ProxyCAFile string
+	// Audience is the gateway's public host the proof names (default: the URL's host).
+	Audience string
 }
 
 // Update is self-update ([update], PLAN.md §6 "Self-update"). Without release pins bcd takes no new
@@ -351,6 +366,15 @@ func (c *Config) Validate() error {
 	if _, err := c.BMCNets(); err != nil {
 		return err
 	}
+	if c.WebSocket.URL != "" {
+		u, err := url.Parse(c.WebSocket.URL)
+		if err != nil || u.Host == "" || u.User != nil || !(u.Scheme == "wss" || (u.Scheme == "ws" && c.DevInsecureH2C)) {
+			return fmt.Errorf("websocket.url must be a wss:// URL without credentials, got %q", c.WebSocket.URL)
+		}
+	}
+	if c.WebSocket.ProxyCAFile != "" && !path.IsAbs(c.WebSocket.ProxyCAFile) {
+		return fmt.Errorf("websocket.proxy_ca_file must be an absolute path, got %q", c.WebSocket.ProxyCAFile)
+	}
 	if !path.IsAbs(c.DataDir) {
 		return fmt.Errorf("data_dir must be an absolute path, got %q", c.DataDir)
 	}
@@ -467,6 +491,9 @@ var fields = []field{
 	{section: "update", key: "release_threshold", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseThreshold = v.num }},
 	{section: "update", key: "release_sequence", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseSequence = v.num }},
 	{section: "update", key: "entrypoint", kind: kindString, set: func(c *Config, v value) { c.Update.Entrypoint = v.str }},
+	{section: "websocket", key: "url", kind: kindString, set: func(c *Config, v value) { c.WebSocket.URL = v.str }},
+	{section: "websocket", key: "proxy_ca_file", kind: kindString, set: func(c *Config, v value) { c.WebSocket.ProxyCAFile = v.str }},
+	{section: "websocket", key: "audience", kind: kindString, set: func(c *Config, v value) { c.WebSocket.Audience = v.str }},
 	{section: "site", key: "bmc_networks", kind: kindString, set: func(c *Config, v value) { c.BMCNetworks = v.str }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},

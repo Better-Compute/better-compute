@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
@@ -371,7 +372,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 			return exitFailure
 		}
 	}
-	a, err := agent.New(agent.Options{
+	opts := agent.Options{
 		State:   state,
 		Key:     key,
 		DataDir: cfg.DataDir,
@@ -404,7 +405,18 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		Version:        version,
 		Log:            log,
 		Update:         update,
-	})
+	}
+	if d, err := time.ParseDuration(os.Getenv("BCD_RENEW_AFTER")); devBuild && err == nil {
+		opts.RenewAfter = d // fakehw builds only: renew soon after start (e2e)
+	}
+	if cfg.WebSocket.URL != "" && (mode == "node" || mode == "site") {
+		if err := useWebSocket(&opts, cfg); err != nil {
+			fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
+			return exitFailure
+		}
+		log.Warn("the session uses the WebSocket fallback: signed commands and specs only, no tunnels", "url", cfg.WebSocket.URL)
+	}
+	a, err := agent.New(opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure

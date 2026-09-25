@@ -241,6 +241,18 @@ func TestSiteBMCNetworks(t *testing.T) {
 	}
 }
 
+func TestWebSocketSection(t *testing.T) {
+	cfg, err := Parse([]byte(required() + "[websocket]\nurl = \"wss://gw.example.com:8443/v1/session\"\nproxy_ca_file = \"/etc/bcd/proxy-ca.pem\"\naudience = \"gw.example.com\"\n"))
+	if err != nil || cfg.WebSocket.URL == "" || cfg.WebSocket.ProxyCAFile != "/etc/bcd/proxy-ca.pem" || cfg.WebSocket.Audience != "gw.example.com" {
+		t.Fatalf("websocket = %+v, %v", cfg.WebSocket, err)
+	}
+	for _, bad := range []string{"url = \"ws://gw.example.com\"\n", "url = \"https://gw.example.com\"\n", "proxy_ca_file = \"ca.pem\"\n"} {
+		if _, err := Parse([]byte(required() + "[websocket]\n" + bad)); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
 func TestDecodePin(t *testing.T) {
 	digest, err := DecodePin(testPin)
 	if err != nil {
