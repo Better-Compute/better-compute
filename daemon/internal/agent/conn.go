@@ -321,6 +321,8 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 	}
 	s.welcomed = true
 	a.mu.Unlock()
+	// A gateway took this binary: a self-update that started it is confirmed.
+	a.confirmUpgrade()
 	interval := time.Duration(w.GetHeartbeatIntervalMs()) * time.Millisecond
 	if interval <= 0 {
 		interval = session.DefaultHeartbeat

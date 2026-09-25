@@ -234,6 +234,8 @@ type harness struct {
 	agent  *Agent
 	cancel context.CancelFunc
 	done   chan struct{}
+	// runErr is what Run returned (read after done is closed).
+	runErr error
 }
 
 func newHarness(t *testing.T, mutate func(*Options)) *harness {
@@ -280,7 +282,8 @@ func (h *harness) start(mutate func(*Options)) {
 	done := make(chan struct{})
 	h.agent, h.cancel, h.done = a, cancel, done
 	go func() {
-		_ = a.Run(ctx)
+		err := a.Run(ctx)
+		h.runErr = err
 		close(done)
 	}()
 	h.t.Cleanup(func() {

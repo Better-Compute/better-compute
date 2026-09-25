@@ -362,6 +362,13 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	}
 	client.Store(first)
 	signerPin, _ := config.DecodePin(cfg.JoinSigningKeyPin)
+	var update *agent.UpdateOptions
+	if mode == "node" || mode == "site" {
+		if update, err = updateOptions(cfg); err != nil {
+			fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
+			return exitFailure
+		}
+	}
 	a, err := agent.New(agent.Options{
 		State:   state,
 		Key:     key,
@@ -392,6 +399,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		CacheMaxBytes: uint64(max(cfg.Boot.CacheMaxBytes, 0)),
 		Version:       version,
 		Log:           log,
+		Update:        update,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
@@ -406,6 +414,11 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	}
 	log.Info("bcd "+mode+" starting", "version", version, "node", state.NodeID, "site", state.SiteID, "gateway", cfg.GatewayURL, "hardware", hardwareBackend)
 	if err := a.Run(ctx); err != nil {
+		if errors.Is(err, agent.ErrRestart) {
+			// Self-update: main execs the entrypoint (now the other slot) once this returns.
+			restartInto = update.Slots.Entrypoint
+			return exitOK
+		}
 		fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 		return exitFailure
 	}

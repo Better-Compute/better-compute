@@ -219,7 +219,11 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	a.devices.generation = generation
 	a.access.generation = generation
-	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, []converge.Converger{a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}})
+	convergers := []converge.Converger{a.devices, a.access, a.instances, telemetryConverger{}, siteConverger{a}}
+	if a.o.Update != nil {
+		convergers = append(convergers, daemonConverger{a})
+	}
+	report, err := converge.Run(ctx, converge.Spec{Generation: generation, Sections: sections}, convergers)
 	if err != nil {
 		return false
 	}
@@ -284,6 +288,8 @@ func failedReason(s converge.Section) string {
 		return "AllocationFailed"
 	case converge.SectionInstances:
 		return "InstanceFailed"
+	case converge.SectionDaemon:
+		return "UpdateFailed"
 	}
 	return "ConvergeFailed"
 }

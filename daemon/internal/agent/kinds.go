@@ -18,7 +18,17 @@ import (
 // builtinKinds is the v0.1 kind table; lanes, roles and flags agree with @better-compute/protocol
 // commandKinds.
 func builtinKinds(a *Agent) []*Kind {
-	return append(siteKinds(a), []*Kind{
+	kinds := siteKinds(a)
+	if a.o.Update != nil {
+		kinds = append(kinds, &Kind{
+			Name:            "daemon.upgrade",
+			Lane:            dispatch.LaneControl,
+			Roles:           []dispatch.Role{dispatch.RoleNode, dispatch.RoleSite},
+			SelfTerminating: true,
+			Exec:            a.runDaemonUpgrade,
+		})
+	}
+	return append(kinds, []*Kind{
 		{
 			Name:  "inventory.refresh",
 			Lane:  dispatch.LaneControl,

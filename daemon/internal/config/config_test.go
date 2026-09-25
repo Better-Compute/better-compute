@@ -187,6 +187,31 @@ func TestPluginsSection(t *testing.T) {
 	}
 }
 
+func TestUpdateSection(t *testing.T) {
+	cfg, err := Parse([]byte(required()))
+	if pins, _ := cfg.Update.Pins(); err != nil || len(pins) != 0 || cfg.Update.Entrypoint != "/usr/local/bin/bcd" || cfg.Update.ReleaseThreshold != 1 {
+		t.Fatalf("defaults = %+v, %v", cfg.Update, err)
+	}
+	cfg, err = Parse([]byte(required() + "[update]\nrelease_pins = \"" + testPin + ", " + testPin + "\"\nrelease_threshold = 2\nentrypoint = \"/opt/bcd/bcd\"\n"))
+	if pins, _ := cfg.Update.Pins(); err != nil || len(pins) != 2 || cfg.Update.Entrypoint != "/opt/bcd/bcd" {
+		t.Fatalf("update = %+v, %v", cfg.Update, err)
+	}
+	for _, bad := range []string{
+		"release_pins = \"sha256/short\"\n",
+		"release_pins = \"" + testPin + "\"\nrelease_threshold = 2\n",
+		"release_threshold = 0\n",
+		"entrypoint = \"bcd\"\n",
+	} {
+		if _, err := Parse([]byte(required() + "[update]\n" + bad)); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	rendered, err := Parse([]byte(Render(cfg)))
+	if err != nil || rendered.Update != cfg.Update {
+		t.Fatalf("Render lost [update]: %+v, %v", rendered.Update, err)
+	}
+}
+
 func TestDecodePin(t *testing.T) {
 	digest, err := DecodePin(testPin)
 	if err != nil {

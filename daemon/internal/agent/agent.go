@@ -96,6 +96,8 @@ type Options struct {
 	TunnelProgram TunnelProgramFactory
 	// HealthInterval is how often host pressure is sampled and reported (default 30 s).
 	HealthInterval time.Duration
+	// Update enables self-update (NodeSpec.daemon, daemon.upgrade); nil reports both unsupported.
+	Update *UpdateOptions
 }
 
 // Agent is the node agent.
@@ -136,6 +138,10 @@ type Agent struct {
 	convergeCh chan struct{}
 	rng        *rand.Rand
 	ctx        context.Context
+	// stop cancels Run's context; restarting makes Run return ErrRestart (self-update).
+	stop       context.CancelFunc
+	restarting atomic.Bool
+	upd        updater
 	// key is the node key (read without mu: attested results are signed under it).
 	key atomic.Pointer[ecdsa.PrivateKey]
 
@@ -275,6 +281,7 @@ func (a *Agent) runtime() journal.Runtime {
 		Incarnation:     a.incarnation,
 		Now:             time.Now(),
 		RebootedPayload: a.rebootedPayload,
+		Restarted:       a.restartedResult,
 	}
 }
 
@@ -302,9 +309,16 @@ func wireRole(role string) commonv1.AgentRole {
 }
 
 // Run starts the agent: it recovers the journal, converges the stored spec and keeps a session to
-// the gateway until ctx is done (nil) or the certificate is revoked (ErrRevoked).
+// the gateway until ctx is done (nil), the certificate is revoked (ErrRevoked) or a self-update
+// swapped the binary slots (ErrRestart).
 func (a *Agent) Run(ctx context.Context) error {
+	ctx, a.stop = context.WithCancel(ctx)
+	defer a.stop()
 	a.ctx = ctx
+	a.checkUpgrade()
+	if a.restarting.Load() {
+		return ErrRestart
+	}
 	a.mu.Lock()
 	recovered, err := journal.Recover(a.j, a.runtime())
 	a.mu.Unlock()
@@ -342,6 +356,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		welcomed, after, err := a.runSession(ctx)
 		if ctx.Err() != nil {
+			if a.restarting.Load() {
+				return ErrRestart
+			}
 			return nil
 		}
 		a.mu.Lock()
@@ -368,6 +385,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		a.log.Info("session ended; redialing", "reason", reason, "in", delay.String())
 		if err := sleepCtx(ctx, delay); err != nil {
+			if a.restarting.Load() {
+				return ErrRestart
+			}
 			return nil
 		}
 	}

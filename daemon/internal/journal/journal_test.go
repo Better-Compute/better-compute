@@ -258,6 +258,38 @@ func TestRecordRejectionAndRebootedPayload(t *testing.T) {
 	}
 }
 
+// daemon.upgrade restarts the process without a reboot: Runtime.Restarted keeps the entry running
+// until the new binary is welcomed, or fails it after a rollback.
+func TestRestartedSelfTerminating(t *testing.T) {
+	j := NewMemory("node_1", MemoryOptions{})
+	rt := runtimeOf("boot-1", "inc-1")
+	up := Delivery{ID: "up", Kind: "daemon.upgrade", RetrySafe: true, SelfTerminating: true}
+	deliverNew(t, j, up, rt)
+	if err := MarkRunning(j, "up", rt); err != nil {
+		t.Fatal(err)
+	}
+	var decided *Result
+	next := runtimeOf("boot-1", "inc-2")
+	next.Restarted = func(c Command) (*Result, bool) { return decided, c.Kind == "daemon.upgrade" }
+	if done, err := Recover(j, next); err != nil || len(done) != 0 {
+		t.Fatalf("Recover while awaiting Welcome = %+v, %v", done, err)
+	}
+	if dec, err := Resolve(j, up, next); err != nil || dec.Action != ActionReattach {
+		t.Fatalf("redelivery while awaiting Welcome = %+v, %v", dec, err)
+	}
+	decided = &Result{Outcome: OutcomeFailed, Reason: "update-failed", Message: "rolled back"}
+	done, err := Recover(j, runtimeOf("boot-1", "inc-3"))
+	if err != nil || len(done) != 0 {
+		t.Fatalf("without the hook a retry-safe entry waits for its redelivery: %+v, %v", done, err)
+	}
+	last := runtimeOf("boot-1", "inc-4")
+	last.Restarted = next.Restarted
+	done, err = Recover(j, last)
+	if err != nil || len(done) != 1 || done[0].Result.Reason != "update-failed" || done[0].Result.BootID != "boot-1" {
+		t.Fatalf("Recover after a rollback = %+v, %v", done, err)
+	}
+}
+
 func TestLifecycleErrors(t *testing.T) {
 	j := NewMemory("node_1", MemoryOptions{})
 	rt := runtimeOf("boot-1", "inc-1")

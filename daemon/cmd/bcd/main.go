@@ -38,7 +38,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%v\n", bcx.RunShim(os.Args[2:]))
 		os.Exit(exitFailure)
 	}
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	code := run(os.Args[1:], os.Stdout, os.Stderr)
+	if restartInto != "" {
+		// A self-update swapped the binary slots: the same command, from the other binary.
+		fmt.Fprintf(os.Stderr, "bcd: restart into %s: %v\n", restartInto, execInto(restartInto))
+		os.Exit(exitFailure)
+	}
+	os.Exit(code)
 }
 
 type command struct {

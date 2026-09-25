@@ -31,6 +31,11 @@
 //	[log]                       # optional
 //	level = "info"
 //	json = true
+//
+//	[update]                    # optional; self-update needs release pins
+//	release_pins = "sha256/<...>,sha256/<...>"
+//	release_threshold = 1
+//	entrypoint = "/usr/local/bin/bcd"
 package config
 
 import (
@@ -101,6 +106,9 @@ type Config struct {
 	// Plugins sandbox the bcx plugins (PLAN.md §5.5).
 	Plugins Plugins
 
+	// Update configures self-update ([update]).
+	Update Update
+
 	// IMDSListen is where a VPS host serves its instances' metadata service ([imds] listen, e.g.
 	// "169.254.169.254:80" on the instances' bridge); empty disables it.
 	IMDSListen string
@@ -164,6 +172,34 @@ type Plugins struct {
 	PidsMax   int64
 }
 
+// Update is self-update ([update], PLAN.md §6 "Self-update"). Without release pins bcd takes no new
+// binary: a release must be signed by the pinned keys, never only by the control plane's word.
+type Update struct {
+	// ReleasePins are the release keys' "sha256/<base64>" SPKI pins, comma-separated.
+	ReleasePins string
+	// ReleaseThreshold is how many distinct pinned keys must have signed a release (default 1).
+	ReleaseThreshold int64
+	// Entrypoint is the path bcd.service starts (default /usr/local/bin/bcd); the first update makes
+	// it a symlink to <data_dir>/bin/current.
+	Entrypoint string
+}
+
+// Pins decodes ReleasePins.
+func (u Update) Pins() ([][]byte, error) {
+	var pins [][]byte
+	for _, p := range strings.Split(u.ReleasePins, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		digest, err := DecodePin(p)
+		if err != nil {
+			return nil, fmt.Errorf("update.release_pins: %w", err)
+		}
+		pins = append(pins, digest)
+	}
+	return pins, nil
+}
+
 // Journal bounds the journal. Values may lower the PLAN.md §6 caps but never raise them.
 type Journal struct {
 	// MaxBytes caps the journal's size (default and maximum 64 MiB).
@@ -190,6 +226,7 @@ func Defaults() *Config {
 		Journal:    Journal{MaxBytes: journal.DefaultMaxBytes, MaxEvents: journal.DefaultMaxEvents},
 		Log:        Log{Level: "info", JSON: true},
 		Plugins:    Plugins{Sandbox: true},
+		Update:     Update{ReleaseThreshold: 1, Entrypoint: "/usr/local/bin/bcd"},
 	}
 }
 
@@ -311,6 +348,16 @@ func (c *Config) Validate() error {
 	if c.Plugins.MemoryMax < 0 || c.Plugins.PidsMax < 0 {
 		return errors.New("plugins.memory_max and plugins.pids_max may not be negative")
 	}
+	releasePins, err := c.Update.Pins()
+	if err != nil {
+		return err
+	}
+	if c.Update.ReleaseThreshold < 1 || (len(releasePins) > 0 && c.Update.ReleaseThreshold > int64(len(releasePins))) || c.Update.ReleaseThreshold > 16 {
+		return fmt.Errorf("update.release_threshold must be between 1 and the number of release pins, got %d", c.Update.ReleaseThreshold)
+	}
+	if !path.IsAbs(c.Update.Entrypoint) {
+		return fmt.Errorf("update.entrypoint must be an absolute path, got %q", c.Update.Entrypoint)
+	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -360,6 +407,9 @@ var fields = []field{
 	{section: "plugins", key: "cgroup", kind: kindString, set: func(c *Config, v value) { c.Plugins.Cgroup = v.str }},
 	{section: "plugins", key: "memory_max", kind: kindInt, set: func(c *Config, v value) { c.Plugins.MemoryMax = v.num }},
 	{section: "plugins", key: "pids_max", kind: kindInt, set: func(c *Config, v value) { c.Plugins.PidsMax = v.num }},
+	{section: "update", key: "release_pins", kind: kindString, set: func(c *Config, v value) { c.Update.ReleasePins = v.str }},
+	{section: "update", key: "release_threshold", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseThreshold = v.num }},
+	{section: "update", key: "entrypoint", kind: kindString, set: func(c *Config, v value) { c.Update.Entrypoint = v.str }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},
@@ -423,6 +473,14 @@ func Render(c *Config) string {
 	}
 	if c.DevInsecureH2C {
 		lines = append(lines, "dev_insecure_h2c = true")
+	}
+	if c.Update.ReleasePins != "" {
+		// The installed OS takes releases signed by the same keys.
+		lines = append(lines, "", "[update]", "release_pins = "+q(c.Update.ReleasePins),
+			"release_threshold = "+strconv.FormatInt(c.Update.ReleaseThreshold, 10))
+		if c.Update.Entrypoint != "" && c.Update.Entrypoint != Defaults().Update.Entrypoint {
+			lines = append(lines, "entrypoint = "+q(c.Update.Entrypoint))
+		}
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

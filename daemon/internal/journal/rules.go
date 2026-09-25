@@ -29,6 +29,11 @@ type Runtime struct {
 	// RebootedPayload, when set, gives the result body of a self-terminating command completed by
 	// the reboot it caused (node.reboot: NodeRebootResult{previous_boot_id = the entry's BootID}).
 	RebootedPayload func(Command) []byte
+	// Restarted, when set, decides a running self-terminating command that ended its process without
+	// a reboot: daemon.upgrade execs the new binary and completes through upgrade.json (PLAN.md §6
+	// "Self-update"). handled=false: not such a command (the other rules apply). A nil result leaves
+	// the entry running for this process to complete (the new binary waits for its Welcome).
+	Restarted func(Command) (r *Result, handled bool)
 }
 
 // Delivery is what the rules need from a delivered CommandBody.
@@ -85,6 +90,8 @@ type Decision struct {
 //   - no entry → ActionExecute;
 //   - done → ActionResend with the stored result;
 //   - accepted or running in this incarnation → ActionReattach;
+//   - running a self-terminating kind that Runtime.Restarted decides → its result, ActionReport, or
+//     ActionReattach while this process still completes it;
 //   - running a self-terminating kind in an earlier incarnation and an earlier boot → the reboot
 //     it caused completed it: SUCCEEDED{rebooted}, ActionReport;
 //   - otherwise left by an earlier incarnation → ActionReexecute if retry-safe, else
@@ -104,7 +111,10 @@ func Resolve(j Journal, d Delivery, rt Runtime) (Decision, error) {
 	case c.Incarnation == rt.Incarnation:
 		return Decision{Action: ActionReattach}, nil
 	}
-	r, reexecute := interrupted(c, rt)
+	r, reexecute, pending := interrupted(c, rt)
+	if pending {
+		return Decision{Action: ActionReattach}, nil
+	}
 	if reexecute {
 		return Decision{Action: ActionReexecute}, nil
 	}
@@ -209,8 +219,8 @@ func Recover(j Journal, rt Runtime) ([]Command, error) {
 		if c.State == StateDone || c.Incarnation == rt.Incarnation {
 			continue
 		}
-		r, reexecute := interrupted(c, rt)
-		if reexecute {
+		r, reexecute, pending := interrupted(c, rt)
+		if reexecute || pending {
 			continue
 		}
 		done, err := finish(j, c, r, rt.Now)
@@ -246,22 +256,32 @@ func Sweep(j Journal, now time.Time, ttl time.Duration, incarnation string) (int
 }
 
 // interrupted decides an entry an earlier incarnation left accepted or running: the result to
-// report, or reexecute=true for a retry-safe command.
-//
-// TODO(v0.4): daemon.upgrade execs the new binary without a reboot; it completes through
-// upgrade.json (PLAN.md §6 "Self-update"), not through boot_id.
-func interrupted(c Command, rt Runtime) (Result, bool) {
+// report, reexecute=true for a retry-safe command, or pending=true for one this process completes
+// later (Runtime.Restarted).
+func interrupted(c Command, rt Runtime) (r Result, reexecute, pending bool) {
+	if c.State == StateRunning && c.SelfTerminating && rt.Restarted != nil {
+		if decided, handled := rt.Restarted(c); handled {
+			if decided == nil {
+				return Result{}, false, true
+			}
+			r = *decided
+			if r.BootID == "" {
+				r.BootID = rt.BootID
+			}
+			return r, false, false
+		}
+	}
 	if c.State == StateRunning && c.SelfTerminating && c.BootID != rt.BootID {
 		r := Result{Outcome: OutcomeSucceeded, Rebooted: true, BootID: rt.BootID}
 		if rt.RebootedPayload != nil {
 			r.Payload = rt.RebootedPayload(c)
 		}
-		return r, false
+		return r, false, false
 	}
 	if c.RetrySafe {
-		return Result{}, true
+		return Result{}, true, false
 	}
-	return Result{Outcome: OutcomeFailed, Reason: ReasonInterrupted, BootID: rt.BootID}, false
+	return Result{Outcome: OutcomeFailed, Reason: ReasonInterrupted, BootID: rt.BootID}, false, false
 }
 
 // RecordRejection journals a terminal rejection (UNSUPPORTED, EXPIRED, STALE_GENERATION,
