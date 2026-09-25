@@ -332,6 +332,21 @@ describe('serve composition audit', () => {
       await composed.tunnels.reauthorize({ ...tunnel, sessionId: 'ses_1', action: 'compute:nodes:ssh-root' }),
     ).toBe(false);
     expect(decided).toHaveLength(1);
+    // A sandboxes.exec tunnel (the gateway's TunnelInfo.sandboxId → the ticket's sbx) is re-decided on the sandbox.
+    expect(
+      await composed.tunnels.reauthorize({
+        ...tunnel,
+        op: 'ssh',
+        instanceId: 'inst_1',
+        sandboxId: 'sbx_1',
+        sessionId: 'ses_1',
+        action: 'compute:sandboxes:exec',
+      }),
+    ).toBe(true);
+    expect(decided[1]).toEqual([
+      { identityId: 'idn_1', sessionId: 'ses_1' },
+      { tenantId: 'ten_a', action: 'compute:sandboxes:exec', resource: { type: 'compute-sandbox', id: 'sbx_1' } },
+    ]);
     composed.observe.onHandshake('welcomed');
     expect(registry.expose()).toContain('better_compute_gateway_handshakes_total{outcome="welcomed"} 1');
   });

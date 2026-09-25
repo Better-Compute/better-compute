@@ -193,6 +193,13 @@ describe('command-signing root rotation', () => {
     const after = JSON.parse(out.join('\n'));
     expect(after).toMatchObject({ authenticated: true, servingCaSpkiPin: before.servingCaSpkiPin });
     expect(await readFile(target, 'utf8')).toContain('"sealed"');
+    // Commands that write the bundle back never accept the unauthenticated opt-in: only reseal (with its pins).
+    await expect(
+      createCli().run(['pki', 'rotate-command-root', '--stage', 'add'], {
+        ...io,
+        env: { ...io.env, BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED: '1' },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE', message: /does not accept an unauthenticated bundle/ });
     await createCli().run(['pki', 'rotate-command-root', '--stage', 'add'], io);
   });
 

@@ -88,6 +88,21 @@ export async function loadPkiBundle(path: string, env: NodeJS.ProcessEnv): Promi
 }
 
 /**
+ * Loads the bundle for a command that writes it back sealed in the current format: that would vouch for whatever
+ * the file holds, so an unauthenticated bundle is never accepted here, only by `pki reseal` (which prints the pins
+ * it seals). BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED is refused rather than silently honored.
+ */
+async function loadPkiBundleForRewrite(path: string, env: NodeJS.ProcessEnv): Promise<PkiBundle> {
+  if (env.BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED === '1')
+    throw new CliError(
+      'INVALID_STATE',
+      'This command writes the bundle back; it does not accept an unauthenticated bundle',
+      'Check the pins, run better-compute pki reseal first, then unset BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED.',
+    );
+  return loadPkiBundle(path, env);
+}
+
+/**
  * The pins of the bundle at `path`, checked against its seal when BETTER_COMPUTE_SECRET is set. Without it they come
  * from a file nothing vouches for, and `warn` says so.
  */
@@ -350,7 +365,7 @@ export const pkiCommands = [
     examples: ['better-compute pki add-sandbox-ca'],
     async run({ flags, env, path, note }) {
       const target = path(flags.pki ?? defaultPkiPath);
-      const bundle = await loadPkiBundle(target, env);
+      const bundle = await loadPkiBundleForRewrite(target, env);
       if (bundle.sandboxSshCa)
         throw new CliError('INVALID_STATE', `${target} already has a sandbox SSH CA`, 'pki show prints its public key.');
       const { createSshCertificateAuthority } = await import('@better-compute/pki');
@@ -414,7 +429,7 @@ export const pkiCommands = [
     ],
     async run({ flags, env, path, note, configPath, deployment }) {
       const target = path(flags.pki ?? defaultPkiPath);
-      const bundle = await loadPkiBundle(target, env);
+      const bundle = await loadPkiBundleForRewrite(target, env);
       const stage = flags.stage as CommandRootRotationStage;
       // Switch only after 100% acknowledgment (§13): a daemon still on the old version would reject every
       // command signed under the new root. Disconnected daemons get the bundle in Welcome before any command.
@@ -500,6 +515,7 @@ export const pkiCommands = [
       const target = path(flags.pki ?? defaultPkiPath);
       const secret = env.BETTER_COMPUTE_SECRET;
       const rootKeyPath = flags['root-key'] ? path(flags['root-key']) : undefined;
+      if (env.BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED === '1') await loadPkiBundleForRewrite(target, env);
       const bundle = importPkiBundle(await readBundleText(target), {
         ...pkiUnlockOptions(env),
         ...(rootKeyPath ? { rootKey: await readFile(rootKeyPath, 'utf8') } : {}),

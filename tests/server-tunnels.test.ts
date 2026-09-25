@@ -569,6 +569,7 @@ describe('nodes.issueSshCert', () => {
     const gone = (await issue({}, { ...mfa, sessionId: 'ses_gone' })) as unknown as { serial: string };
     const flaky = (await issue({}, { ...mfa, sessionId: 'ses_flaky' })) as unknown as { serial: string };
     const denied = (await issue({}, { ...mfa, sessionId: 'ses_denied' })) as unknown as { serial: string };
+    const reviewer = (await issue({}, { ...mfa, sessionId: 'ses_reviewer' })) as unknown as { serial: string };
     // A certificate of a tenant compute holds suspended: revoked without asking IAM.
     await db.query(`CREATE TABLE IF NOT EXISTS compute_tenant_states (tenant_id text PRIMARY KEY, state text NOT NULL,
                       reason text, updated_at timestamptz, teardown_done_at timestamptz)`);
@@ -601,8 +602,10 @@ describe('nodes.issueSshCert', () => {
             // The binding was deleted (IAM announced nothing compute reacts to), or IAM is down.
             if (session.sessionId === 'ses_flaky') throw new Error('IAM unreachable');
             // An error that means "no": revoked like a false.
-            if (session.sessionId === 'ses_denied')
-              throw Object.assign(new Error('denied'), { code: 'ACCESS_DENIED' });
+            if (session.sessionId === 'ses_denied') throw Object.assign(new Error('gone'), { code: 'NOT_FOUND' });
+            // Compute's own reviewer credential refused: IAM trouble, not a denial of the holder.
+            if (session.sessionId === 'ses_reviewer')
+              throw Object.assign(new Error('reviewer refused'), { code: 'ACCESS_DENIED' });
             return session.sessionId !== 'ses_gone';
           },
         },
@@ -625,15 +628,17 @@ describe('nodes.issueSshCert', () => {
       `SELECT serial, revoked_at IS NOT NULL AS revoked, reauthorized_at IS NOT NULL AS checked,
               revoke_reason AS reason
          FROM ssh_certificates WHERE serial = ANY($1) ORDER BY serial`,
-      [[kept.serial, gone.serial, flaky.serial, denied.serial, '777']],
+      [[kept.serial, gone.serial, flaky.serial, denied.serial, reviewer.serial, '777']],
     );
     const by = Object.fromEntries(rows.map((row) => [row.serial, row]));
     expect(by[kept.serial]).toMatchObject({ revoked: false, checked: true });
     expect(by[gone.serial]).toMatchObject({ revoked: true, reason: 'access-withdrawn' });
     expect(by[denied.serial]).toMatchObject({ revoked: true, reason: 'access-withdrawn' });
-    // IAM unreachable: kept (break-glass is for outages) and reported, but stamped, so it never crowds out the rest.
+    // IAM unreachable or compute's reviewer refused: kept (break-glass is for outages) and reported, but stamped,
+    // so it never crowds out the rest.
     expect(by[flaky.serial]).toMatchObject({ revoked: false, checked: true });
-    expect(warnings).toHaveLength(1);
+    expect(by[reviewer.serial]).toMatchObject({ revoked: false, checked: true });
+    expect(warnings).toHaveLength(2);
     expect(by['777']).toMatchObject({ revoked: true, reason: 'tenant-suspended' });
     expect(decisions.map((entry) => (entry as [string])[0])).not.toContain('ses_frozen');
     expect(invalidated).toEqual([NODE, NODE, NODE]);
@@ -710,6 +715,11 @@ describe('nodes.issueSshCert', () => {
     // Another tenant sees nothing of acme's (the node is not theirs).
     await expect(list({ tenantId: 'other' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(list({ cursor: 'bm9wZQ' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('refuses the break-glass CA as the sandbox CA (a sandbox certificate must never open a node)', () => {
+    expect(() => tunnelsModule({ issuer, ssh: ca, sandboxSsh: ca })).toThrow(/different CA/);
+    expect(() => tunnelsModule({ issuer, ssh: ca, sandboxSsh: createSshCertificateAuthority() })).not.toThrow();
   });
 
   it('allows only the configured accounts', async () => {

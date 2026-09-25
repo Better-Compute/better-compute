@@ -82,15 +82,14 @@ function slidingLimit(max: number, windowMs: number, what: string) {
   };
 }
 
-/** IAM answers that mean "no longer allowed" when re-deciding a certificate (unlike IAM being unreachable). */
-const deniedCodes: ReadonlySet<string> = new Set([
-  'ACCESS_DENIED',
-  'UNAUTHENTICATED',
-  'NOT_FOUND',
-  'TENANT_SUSPENDED',
-  'SESSION_EXPIRED',
-  'SESSION_REVOKED',
-]);
+/**
+ * IAM errors that mean "no longer allowed" when re-deciding a certificate. `authorizeSession` answers false for
+ * everything about the holder (session gone, identity gone or inactive, simulation says no); it throws only when
+ * compute's own reviewer read fails: ACCESS_DENIED / UNAUTHENTICATED then mean compute's credential was refused, 5xx
+ * and 429 that IAM is struggling. Those keep the certificate (and warn), or an expired service token would revoke
+ * every break-glass certificate within a minute, mid-outage.
+ */
+const deniedCodes: ReadonlySet<string> = new Set(['NOT_FOUND', 'TENANT_SUSPENDED']);
 
 /** The certificate principal for `account` on `nodeId`: node-bound, never a bare account. */
 export const sshPrincipal = (account: string, nodeId: string): string => `${account}@${nodeId}`;
@@ -543,6 +542,13 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
       'INVALID_CONFIG',
       'The sandbox SSH CA public key must be a single printable line',
     );
+  // Separate CAs keep a sandbox certificate from ever opening a node (and a break-glass one from opening a sandbox).
+  if (
+    options.ssh &&
+    options.sandboxSsh &&
+    options.ssh.publicKey.split(' ')[1] === options.sandboxSsh.publicKey.split(' ')[1]
+  )
+    throw new ComputeError('INVALID_CONFIG', 'tunnels.sandboxSsh must be a different CA from tunnels.ssh');
   const sandboxAccount = options.sandboxAccount ?? 'sandbox';
   if (!accountPattern.test(sandboxAccount))
     throw new ComputeError('INVALID_CONFIG', 'tunnels.sandboxAccount must be a Unix account name');

@@ -166,6 +166,7 @@ export function gatewayOptions(
         instanceId?: string;
         sessionId?: string;
         action?: string;
+        sandboxId?: string;
       }) =>
         authorize({
           claims: {
@@ -176,7 +177,9 @@ export function gatewayOptions(
             ...(info.tenantId ? { tnt: info.tenantId } : {}),
             ...(info.instanceId ? { inst: info.instanceId } : {}),
             ...(info.action ? { act: info.action } : {}),
-          },
+            // sandboxes.exec tickets are re-decided as compute:sandboxes:exec on the sandbox (§3.7).
+            ...(info.sandboxId ? { sbx: info.sandboxId } : {}),
+          } as Parameters<typeof authorize>[0]['claims'],
         })
     : undefined;
   // Status handlers compose (the gateway runs each): XID health always, then the configuration's, such
