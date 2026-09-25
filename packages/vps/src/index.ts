@@ -19,6 +19,7 @@ export * from './bootstraps.js';
 export * from './sandboxes.js';
 export * from './snapshots.js';
 export * from './tenancy.js';
+export * from './describe.js';
 export { builtinRuntimeTraits } from './runtime.js';
 export type {
   RuntimeDriver,

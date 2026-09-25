@@ -77,6 +77,7 @@ import {
 } from './bootstraps.js';
 import { vpsMigrations } from './migrations.js';
 import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
+import { describeCreateInstance, describeCreateSandbox, describeExtendSandbox } from './describe.js';
 import {
   hostReserve,
   hostResourcesWork,
@@ -566,6 +567,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         admission: {
           prepare: (context, input, tx) =>
             prepareCreateInstance(depsOf(context), context, input, tx),
+          describe: (input) => describeCreateInstance(input),
           denied: (context, input, tx) => denyCreateInstance(context, input, tx),
           // A pool's budget policy (stop-new/drain offers, `budgetCheck: 'meter'`) covers
           // instances as it covers reservations: SPEND_LIMIT_REACHED, with the draft kept.
@@ -808,6 +810,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         admission: {
           prepare: (context, input, tx) =>
             prepareCreateSandbox(depsOf(context), context, input, tx),
+          describe: (input) => describeCreateSandbox(input),
           denied: (context, input, tx) => denyCreateSandbox(depsOf(context), context, input, tx),
           check: async (context, input) => {
             const poolId = await templatePool(context.sql, input);
@@ -842,6 +845,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         validate: describedBy(schemas.extendSandbox, parseExtendSandbox),
         admission: {
           prepare: (context, input, tx) => prepareExtendSandbox(context, input, tx),
+          describe: (input) => describeExtendSandbox(input),
           denied: (context, input, tx) => denyExtendSandbox(context, input, tx),
           check: (context, input) => budgetExtendSandboxCheck(context, input),
           // Transaction 2 threw (the sandbox or its template changed in between): its own

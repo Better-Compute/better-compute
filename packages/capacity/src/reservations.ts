@@ -1717,6 +1717,9 @@ export async function prepareExtend(
       status: 'replay',
       result: { reservation: await reservationView(tx, row), extended: false },
     };
+  // The handler applies this absolute end, not "current + by" again, and the approval text names it.
+  input.until = end;
+  delete input.by;
   const gpuCount = wholeGpus(row.request.devices) * (row.request.gang?.size ?? 1);
   const hold = newId('hold');
   await holdExtend(tx, row.id, hold);

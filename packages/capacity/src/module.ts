@@ -30,6 +30,7 @@ import {
 } from '@better-compute/core';
 import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
+import { describeCreateReservation, describeExtendReservation } from './describe.js';
 import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
 import { inlinePlacer, poolLeasePlacer, type PlacementObserver } from './placer.js';
@@ -1197,6 +1198,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       admission: {
         prepare: (context, input, tx) => prepareCreate(context, input, tx),
         denied: (context, input, tx, error) => denyCreate(context, input, tx, error),
+        describe: (input) => describeCreateReservation(input),
         check: (context, input) => budgetAdmissionCheck(context, input.tenantId, input.poolId),
       },
       handler: (context, input) => completeCreate(deps(context), context, input),
@@ -1258,6 +1260,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       admission: {
         prepare: (context, input, tx) => prepareExtend(context, input, tx),
         denied: (context, input, tx) => denyPending(context, input, tx),
+        describe: (input) => describeExtendReservation(input),
         check: (context, input) => budgetExtendCheck(context, input),
         // Transaction 2 threw (the reservation changed in between): its own clearing rolled back.
         abandoned: (context, input, tx) => denyPending(context, input, tx),
