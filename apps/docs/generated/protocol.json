@@ -4295,7 +4295,7 @@
             "number": 6,
             "type": "string",
             "label": "",
-            "description": "(review 13 H2) The InstanceSpec.identity_rebind_ref the guest acknowledged (its nonce written\nback); empty until then. The control plane treats a restored instance as not ready until it\nmatches the spec's."
+            "description": "(review 13 H2) The InstanceSpec.identity_rebind_ref the guest acknowledged (its nonce written\nback); empty until then. Until it matches the spec's, the control plane refuses exec into a\nrestored instance (it would still carry the snapshot's identity); readiness still means \"runs\",\nsince guests restored from snapshots taken before the guest half existed never ack."
           }
         ]
       },
@@ -6485,6 +6485,13 @@
             "type": "bytes",
             "label": "",
             "description": "SHA-256 of the BMC certificate's SubjectPublicKeyInfo, when pinned."
+          },
+          {
+            "name": "driver_options_json",
+            "number": 7,
+            "type": "string",
+            "label": "",
+            "description": "Per-BMC driver options set at enrollment, canonical JSON (e.g. bcx-ipmi {\"cipherSuite\": 3} for\nold BMCs). The site agent hands them to the driver as they are; the driver validates them and\nrefuses unknown keys. Never credentials: those travel only as credentials_ref."
           }
         ]
       },
