@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -495,7 +495,9 @@ describe('daemon install-script', () => {
       const block = script
         .slice(script.indexOf("cat > /etc/bcd/config.toml.new"), script.indexOf('systemctl daemon-reload'))
         .split('/etc/')
-        .join(`${root}/etc/`);
+        .join(`${root}/etc/`)
+        .split('/usr/local/lib/')
+        .join(`${root}/usr/local/lib/`);
       const file = join(scratch, 'helper-check.sh');
       const shims = [
         'command -v chmod >/dev/null 2>&1 || chmod() { :; }',
@@ -540,6 +542,9 @@ describe('daemon install-script', () => {
     expect(node.dropIn).toContain('User=bcd\nGroup=bcd\nSupplementaryGroups=systemd-journal adm\n');
     expect(node.dropIn).toContain('Requires=bcd-helper.service');
     expect(node.dropIn).not.toContain('libvirt');
+    // The helper's self-update slots: root's, 0755 (bcd node runs what the entrypoint links to there).
+    expect(node.script).toContain('install -d -m 0755 /usr/local/lib/bcd\n  chmod 0755 /usr/local/lib/bcd');
+    expect((await stat(`${root}/usr/local/lib/bcd`)).isDirectory()).toBe(true);
     // The first start: the identity bcd join wrote belongs to bcd, and the helper starts before the node.
     const start = node.script.slice(node.script.indexOf('bcd join --config'));
     expect(start.indexOf('chown -R bcd:bcd /var/lib/bcd')).toBeGreaterThan(0);

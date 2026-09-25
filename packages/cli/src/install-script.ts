@@ -557,6 +557,10 @@ ${bcdUnprivilegedDropIn}BCD_UNPRIVILEGED
   fi
   chmod 0644 /etc/systemd/system/bcd.service.d/unprivileged.conf.new
   mv -f /etc/systemd/system/bcd.service.d/unprivileged.conf.new /etc/systemd/system/bcd.service.d/unprivileged.conf
+  # The helper keeps the self-update slots here, root's; bcd node must be able to run what the entrypoint links to
+  # (the helper's UMask would make the directory 0700).
+  install -d -m 0755 /usr/local/lib/bcd
+  chmod 0755 /usr/local/lib/bcd
   # bcd node reads its config as the bcd group; nothing else of /etc/bcd becomes readable to it.
   chgrp bcd /etc/bcd /etc/bcd/config.toml
   chmod 0750 /etc/bcd
