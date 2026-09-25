@@ -76,6 +76,7 @@ describe('migrate', () => {
       'core/0014_ssh_certificates',
       'core/0015_inventory_images',
       'core/0016_duplicate_identity',
+      'core/0017_allocation_evidence',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -332,6 +333,21 @@ describe('duplicate-identity counters (core/0016)', () => {
     expect(rows).toEqual([
       { column_name: 'duplicate_hellos', column_default: '0' },
       { column_name: 'duplicate_since', column_default: null },
+    ]);
+  });
+});
+
+describe('allocation evidence (core/0017)', () => {
+  it('stores the attested AllocationBound report next to the allocation', async () => {
+    const { rows } = await db.query<{ column_name: string; data_type: string }>(
+      `SELECT column_name, data_type FROM information_schema.columns
+        WHERE table_name = 'allocations' AND column_name LIKE 'bound\\_%' ORDER BY 1`,
+    );
+    expect(rows).toEqual([
+      { column_name: 'bound_at', data_type: 'timestamp with time zone' },
+      { column_name: 'bound_report', data_type: 'bytea' },
+      { column_name: 'bound_sig', data_type: 'bytea' },
+      { column_name: 'bound_sig_kid', data_type: 'text' },
     ]);
   });
 });
