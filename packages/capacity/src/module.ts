@@ -35,6 +35,7 @@ import { planPlacement, summarizeRejections } from './pipeline.js';
 import { inlinePlacer, poolLeasePlacer, type PlacementObserver } from './placer.js';
 import { freezeMigLayouts, migGateWork, runMigGate } from './mig.js';
 import { dedicatedTaintPrefix } from './eligibility.js';
+import { describedBy, schemas } from './schemas.js';
 import { leaseCandidates, leaseGroups } from './node-lease.js';
 import { PoolIndexCache } from './pool-index.js';
 import { defaultSpotNoticeMs, planPreemption, readSpotAllocations } from './spot.js';
@@ -726,7 +727,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:pools:read',
       kind: 'read',
       resource: tenantResource,
-      validate: parseTenant,
+      validate: describedBy(schemas.tenant, parseTenant),
       handler: async (context, input) => ({
         items: await tenantPools(context.sql, input.tenantId),
       }),
@@ -735,7 +736,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:pools:read',
       kind: 'read',
       resource: poolResource,
-      validate: parsePool,
+      validate: describedBy(schemas.pool, parsePool),
       handler: async (context, input) => {
         const [pool] = await tenantPools(context.sql, input.tenantId, input.poolId);
         if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
@@ -746,7 +747,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:pools:create',
       kind: 'mutation',
       resource: tenantResource,
-      validate: parseCreatePool,
+      validate: describedBy(schemas.createPool, parseCreatePool),
       // With an idempotency key, a finished request replays without a second decision (§3.4 step 4).
       admission: {
         async prepare(context, input, tx) {
@@ -830,7 +831,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:capacity:read',
       kind: 'read',
       resource: poolResource,
-      validate: parsePool,
+      validate: describedBy(schemas.pool, parsePool),
       handler: async (context, input) => {
         const [pool] = await tenantPools(context.sql, input.tenantId, input.poolId);
         if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
@@ -841,7 +842,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:pools:share',
       kind: 'mutation',
       resource: poolResource,
-      validate: parseOfferPool,
+      validate: describedBy(schemas.offerPool, parseOfferPool),
       handler: async (context, input) => {
         const tx = context.sql;
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
@@ -873,14 +874,14 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:pools:share',
       kind: 'mutation',
       resource: poolResource,
-      validate: (raw) => {
+      validate: describedBy(schemas.unofferPool, (raw) => {
         const input = object(raw, ['tenantId', 'poolId', 'toTenantId']);
         return {
           tenantId: tenant(input.tenantId),
           poolId: id(input.poolId, 'pool', 'poolId'),
           toTenantId: tenant(input.toTenantId, 'toTenantId'),
         };
-      },
+      }),
       handler: async (context, input) => {
         const tx = context.sql;
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
@@ -908,7 +909,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:pools:manage',
       kind: 'mutation',
       resource: poolResource,
-      validate: parseUpdatePool,
+      validate: describedBy(schemas.updatePool, parseUpdatePool),
       handler: async (context, input) => {
         const tx = context.sql;
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
@@ -967,7 +968,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:pools:manage',
       kind: 'mutation',
       resource: poolResource,
-      validate: parsePool,
+      validate: describedBy(schemas.pool, parsePool),
       handler: async (context, input) => {
         const tx = context.sql;
         const pool = await ownedPool(tx, input.tenantId, input.poolId, true);
@@ -1002,7 +1003,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:capacity:read',
       kind: 'read',
       resource: tenantResource,
-      validate: parseTenant,
+      validate: describedBy(schemas.tenant, parseTenant),
       handler: async (context, input) => {
         const visible = await tenantPools(context.sql, input.tenantId);
         const rollups = await readPoolsCapacity(
@@ -1036,7 +1037,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:capacity:read',
       kind: 'read',
       resource: poolResource,
-      validate: parsePool,
+      validate: describedBy(schemas.pool, parsePool),
       handler: async (context, input) => {
         const [pool] = await tenantPools(context.sql, input.tenantId, input.poolId);
         if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} not found`);
@@ -1047,7 +1048,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:capacity:read',
       kind: 'read',
       resource: poolResource,
-      validate: parseCreateReservation,
+      validate: describedBy(schemas.createReservation, parseCreateReservation),
       handler: async (context, input) => {
         const tx = context.sql;
         const [visible] = await tenantPools(tx, input.tenantId, input.poolId);
@@ -1140,7 +1141,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:capacity:read',
       kind: 'read',
       resource: poolResource,
-      validate: parseTimeline,
+      validate: describedBy(schemas.timeline, parseTimeline),
       handler: async (context, input) => {
         const tx = context.sql;
         const [visible] = await tenantPools(tx, input.tenantId, input.poolId);
@@ -1191,7 +1192,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       kind: 'mutation',
       // The envelope decides on the draft `prepare` returns; this names the draft's kind.
       resource: (input) => ({ type: 'reservation', id: `draft:${input.idempotencyKey}` }),
-      validate: parseCreateReservation,
+      validate: describedBy(schemas.createReservation, parseCreateReservation),
       admission: {
         prepare: (context, input, tx) => prepareCreate(context, input, tx),
         denied: (context, input, tx, error) => denyCreate(context, input, tx, error),
@@ -1211,7 +1212,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:reservations:read',
       kind: 'read',
       resource: reservationResource,
-      validate: parseReservation,
+      validate: describedBy(schemas.reservation, parseReservation),
       handler: async (context, input) => {
         const row = await readReservation(context.sql, input.tenantId, input.reservationId);
         if (!row || row.state === 'draft')
@@ -1223,7 +1224,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:reservations:read',
       kind: 'read',
       resource: tenantResource,
-      validate: parseListReservations,
+      validate: describedBy(schemas.listReservations, parseListReservations),
       handler: (context, input) => {
         const { scope, ...filters } = input;
         return listReservations(context.sql, {
@@ -1236,7 +1237,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:reservations:release',
       kind: 'mutation',
       resource: reservationResource,
-      validate: parseReservation,
+      validate: describedBy(schemas.reservation, parseReservation),
       handler: (context, input) =>
         releaseReservation(deps(context), context.sql, input.tenantId, input.reservationId),
     }),
@@ -1244,7 +1245,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:reservations:release',
       kind: 'mutation',
       resource: reservationResource,
-      validate: parseReservation,
+      validate: describedBy(schemas.reservation, parseReservation),
       handler: (context, input) =>
         cancelReservation(deps(context), context.sql, input.tenantId, input.reservationId),
     }),
@@ -1252,7 +1253,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:reservations:extend',
       kind: 'mutation',
       resource: reservationResource,
-      validate: parseExtendReservation,
+      validate: describedBy(schemas.extendReservation, parseExtendReservation),
       admission: {
         prepare: (context, input, tx) => prepareExtend(context, input, tx),
         denied: (context, input, tx) => denyPending(context, input, tx),
@@ -1264,7 +1265,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:reservations:extend',
       kind: 'mutation',
       resource: reservationResource,
-      validate: parseReservation,
+      validate: describedBy(schemas.reservation, parseReservation),
       handler: (context, input) =>
         renewReservation(deps(context), context.sql, input.tenantId, input.reservationId),
     }),
@@ -1275,12 +1276,12 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:quotas:read',
       kind: 'read',
       resource: tenantResource,
-      validate: (raw) => {
+      validate: describedBy(schemas.quotasGet, (raw) => {
         const input = object(raw, ['tenantId', 'poolId']);
         const result: TenantInput & { poolId?: string } = { tenantId: tenant(input.tenantId) };
         if (input.poolId !== undefined) result.poolId = id(input.poolId, 'pool', 'poolId');
         return result;
-      },
+      }),
       handler: async (context, input) => ({
         items: await readQuotas(context.sql, input.tenantId, input.poolId),
       }),
@@ -1290,7 +1291,7 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
       action: 'compute:quotas:manage',
       kind: 'mutation',
       resource: () => ({ type: 'fleet', id: fleetResourceId }),
-      validate: parseSetQuota,
+      validate: describedBy(schemas.setQuota, parseSetQuota),
       handler: async (context, input) => {
         const tx = context.sql;
         const pool = await readPool(tx, input.poolId);
