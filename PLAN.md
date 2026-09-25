@@ -269,8 +269,8 @@ A sandbox is a VPS instance with a template, a lifetime and a fast start, and it
 - **Templates** (`sandbox_templates`, per tenant) hold:
   - `poolId`, `flavor`, `imageId` and `runtime`. The runtime is per pool today, so a template's `runtime` must equal its pool's (`policy.runtime` or the vps default). A microVM template therefore points at a `cloud-hypervisor` pool. Containers are allowed only on `singleTenant` pools, as for instances;
   - `userData`;
-  - (with exec, step 6) `env` as `secret://` references, resolved by the secret broker for the sandbox's own tenant only;
-  - (with exec, step 6) `network`: `egress` by default, or `none` or `private`;
+  - `env` as `secret://` references, resolved by the secret broker for the sandbox's own tenant only. Template env and `secret://` user data may name only secrets the tenant wrote itself (`secrets.put`, a `secret_refs` row), and writing such a template also decides `compute:secrets:manage` on the tenant. Otherwise `sandboxes:manage` could read any secret in the tenant, and in root that includes join tokens and BMC passwords;
+  - `network`: `egress` by default, or `none` (the host only) or `private`. `private` is the pool's whole IPAM subnet plus the host, so on a pool offered to several tenants it includes their sandboxes too: it isolates per pool, not per tenant. `private` and `none` need the pool's IP range, because bcd enforces them on the instance's addresses and fails closed;
   - `defaultTtl` and `maxTtl`;
   - `warm: {min, max}`.
 

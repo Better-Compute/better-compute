@@ -14,7 +14,7 @@ import {
 import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { capacityMigrations, capacityModule, createCapacityPort } from '@better-compute/capacity';
-import { defineProvider, vps, vpsMigrations } from '@better-compute/vps';
+import { defineProvider, setIpPool, vps, vpsMigrations } from '@better-compute/vps';
 import {
   canonical,
   checkDrift,
@@ -290,6 +290,7 @@ beforeEach(async () => {
     'fleet_names',
     'fleet_applied',
     'sandbox_templates',
+    'ip_pools',
     'flavors',
     'quota_usage',
     'pool_offers',
@@ -400,6 +401,12 @@ describe('sandbox templates (v0.5, PLAN §3.7)', () => {
     next.sandboxTemplates![0]!.warm = { min: 1, max: 3 };
     next.sandboxTemplates![0]!.imageId = 'ubuntu-26.04';
     next.sandboxTemplates![0]!.network = 'private';
+    // 'private' is enforced on the instances' IPAM addresses, so the pool needs an IP range.
+    await setIpPool(db, {
+      poolId: await draftId('pool', 'root', 'usr_root', fleetKey('root', 'pool', 'vps-fra')),
+      cidr: '10.40.0.0/24',
+      gateway: '10.40.0.1',
+    });
     const planned = await plan(next);
     expect(planned.changes.find((change) => change.kind === 'sandboxTemplate')).toMatchObject({
       action: 'update',
