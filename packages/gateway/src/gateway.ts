@@ -197,6 +197,18 @@ export interface GatewayStatus {
   maxStreams: number;
   /** The `gateway:<id>` lease epoch, or null while fenced. */
   leaseEpoch: number | null;
+  /** Per background loop (dispatch, lease, liveness, specs, status), for alerting on a stuck one. */
+  loops: Record<string, GatewayLoopHealth>;
+}
+
+export interface GatewayLoopHealth {
+  /** Failed runs since the last clean one: the alerting signal. */
+  consecutiveFailures: number;
+  /** Failed runs since start. */
+  failures: number;
+  /** Clock time of the last clean run; null before one. */
+  lastOkMs: number | null;
+  lastError?: string;
 }
 
 export interface Gateway {
@@ -760,11 +772,37 @@ export function createGateway(options: GatewayOptions): Gateway {
     return sent;
   }
 
-  function job(run: () => Promise<number>): GatewayJob {
+  const loops: Record<string, GatewayLoopHealth> = {};
+  const loopHealth = (name: string) =>
+    (loops[name] ??= { consecutiveFailures: 0, failures: 0, lastOkMs: null });
+  /** Records a failed run; loops that catch their own errors (the lease) call it directly. */
+  function loopFailed(name: string, error: unknown) {
+    const health = loopHealth(name);
+    health.failures++;
+    health.consecutiveFailures++;
+    health.lastError = String(error);
+  }
+
+  function job(name: string, run: () => Promise<number>): GatewayJob {
     let running: Promise<number> | undefined;
+    const run_ = async () => {
+      const health = loopHealth(name);
+      const before = health.failures;
+      try {
+        const done = await run();
+        if (health.failures === before) {
+          health.consecutiveFailures = 0;
+          health.lastOkMs = clock.now();
+        }
+        return done;
+      } catch (error) {
+        loopFailed(name, error);
+        throw error;
+      }
+    };
     return {
       tick() {
-        running ??= run().finally(() => {
+        running ??= run_().finally(() => {
           running = undefined;
         });
         return running;
@@ -773,7 +811,7 @@ export function createGateway(options: GatewayOptions): Gateway {
   }
 
   const jobs = {
-    dispatch: job(async () => {
+    dispatch: job('dispatch', async () => {
       if (!lease || stopping) return 0;
       const live = [...sessions.values()].filter((session) => !session.closed && !session.upgradeRequired);
       if (!live.length) return 0;
@@ -836,7 +874,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       return sent.length;
     }),
 
-    liveness: job(async () => {
+    liveness: job('liveness', async () => {
       const now = clock.now();
       let handled = await tunnelRegistry.sweep();
       for (const session of [...sessions.values()])
@@ -877,7 +915,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       return handled + open.length;
     }),
 
-    lease: job(async () => {
+    lease: job('lease', async () => {
       const name = `gateway:${id}`;
       try {
         const epoch = await store.acquireLease(name, id, gatewayLeaseTtlMs);
@@ -891,15 +929,16 @@ export function createGateway(options: GatewayOptions): Gateway {
         return 1;
       } catch (error) {
         // Self-fence after TTL/2 without a successful renewal (§7.8).
+        loopFailed('lease', error);
         if (clock.now() - lastLeaseOkMs > gatewayLeaseTtlMs / 2) await fence('lease renewal failing');
         log.warn('gateway: lease renewal failed', { cause: String(error) });
         return 0;
       }
     }),
 
-    specs: job(() => pushSpecs([...sessions.values()])),
+    specs: job('specs', () => pushSpecs([...sessions.values()])),
 
-    status: job(async () => {
+    status: job('status', async () => {
       let flushed = 0;
       for (const session of sessions.values()) {
         const report = session.pendingStatus;
@@ -1176,6 +1215,7 @@ export function createGateway(options: GatewayOptions): Gateway {
         sessions: sessions.size,
         maxStreams,
         leaseEpoch: lease?.epoch ?? null,
+        loops: Object.fromEntries(Object.entries(loops).map(([name, health]) => [name, { ...health }])),
       };
     },
   };

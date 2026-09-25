@@ -15,6 +15,7 @@ export type {
   Gateway,
   GatewayJob,
   GatewayOptions,
+  GatewayLoopHealth,
   GatewaySessionInfo,
   GatewayStatus,
   LaneCreditLimits,

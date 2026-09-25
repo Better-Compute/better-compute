@@ -43,6 +43,32 @@ describe('internalHandler', () => {
       sessions: 0,
       maxStreams: 5_000,
       leaseEpoch: 1,
+      loops: { lease: { consecutiveFailures: 0, failures: 0, lastOkMs: expect.any(Number) } },
+    });
+  });
+
+  it('counts consecutive loop failures until a clean run', async () => {
+    const node = await f.addNode();
+    await f.connect(node);
+    const store = f.gateway.store as { dispatch: (...args: never[]) => Promise<unknown> };
+    const real = store.dispatch;
+    store.dispatch = async () => {
+      throw new Error('database gone');
+    };
+    await expect(f.gateway.jobs.dispatch.tick()).rejects.toThrow('database gone');
+    await expect(f.gateway.jobs.dispatch.tick()).rejects.toThrow('database gone');
+    expect(f.gateway.status().loops.dispatch).toEqual({
+      consecutiveFailures: 2,
+      failures: 2,
+      lastOkMs: null,
+      lastError: 'Error: database gone',
+    });
+    store.dispatch = real;
+    await f.gateway.jobs.dispatch.tick();
+    expect((await (await call('GET', '/v1/health')).json()).loops.dispatch).toMatchObject({
+      consecutiveFailures: 0,
+      failures: 2,
+      lastOkMs: expect.any(Number),
     });
   });
 
