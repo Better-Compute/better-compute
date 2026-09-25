@@ -123,6 +123,8 @@ export async function composedConfig() {
     metrics: { registry: metrics, bearerToken: METRICS_TOKEN },
     // The test IAM has no sessionReviewer (so no authorizeSession): tunnels re-authorize explicitly.
     tunnels: { authorize: async () => false },
+    // IAM events reach compute: a revoked delegation closes its tunnels on every gateway.
+    iam: { bridge: iam.bridge },
     gateway: {
       region: 'eu-1',
       listen: { host: '127.0.0.1', port: 0 },

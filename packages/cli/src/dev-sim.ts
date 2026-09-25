@@ -7,6 +7,7 @@ import type {
 } from '@better-compute/core';
 import { createExecTicketIssuer, type ExecTicketIssuer } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from './config.js';
+import type { HostIamConfig } from './host/iam.js';
 import type { HostTunnelsConfig } from './host/tunnels.js';
 import { importOptional } from './config.js';
 import { CliError } from './errors.js';
@@ -60,13 +61,16 @@ interface TestingDev {
 }
 interface EmbeddedTestIam {
   port: IamPort & { rootTenantId?: string };
-  bridge: { modules: readonly ComputeModule[] };
+  bridge: { modules: readonly ComputeModule[] } & HostIamConfig['bridge'];
   root: { tenantId: string; credential: Credential };
   bind(sql: SqlExecutor): Promise<void>;
   close(): Promise<void>;
 }
 interface IamTesting {
-  createEmbeddedTestIam(options?: { now?: () => number }): Promise<EmbeddedTestIam>;
+  createEmbeddedTestIam(options?: {
+    now?: () => number;
+    runIamJobs?: boolean;
+  }): Promise<EmbeddedTestIam>;
 }
 
 export interface DevSim {
@@ -74,6 +78,8 @@ export interface DevSim {
   options: AnyComputeOptions;
   /** How the dev server mounts tunnels to the simulated machines (`host.tunnels`). */
   hostTunnels: HostTunnelsConfig;
+  /** The embedded IAM's bridge (`host.iam`), when dev started one: its events reach compute. */
+  hostIam?: HostIamConfig;
   /** After migrations: binds the embedded IAM's projection to the store. */
   afterMigrate(): Promise<void>;
   /** Once the server runs: attaches the gateway, creates the pool, joins the machines. */
@@ -108,7 +114,8 @@ export async function prepareDevSim(
       '@better-compute/iam/testing',
       'better-compute dev --sim without configured IAM',
     );
-    embedded = await iamTesting.createEmbeddedTestIam({ now: () => Date.now() });
+    // With IAM's jobs on the iam worker role, its audit events reach compute's inbox (as in embedded mode).
+    embedded = await iamTesting.createEmbeddedTestIam({ now: () => Date.now(), runIamJobs: true });
     iam = embedded.port;
     root = embedded.root.credential;
     rootTenantId = embedded.root.tenantId;
@@ -149,6 +156,7 @@ export async function prepareDevSim(
   return {
     options: simOptions,
     hostTunnels,
+    ...(embedded ? { hostIam: { bridge: embedded.bridge } } : {}),
     // The IAM bridge's module binds its projection to the runtime's store in `initialize()`.
     async afterMigrate() {},
     async started(compute) {

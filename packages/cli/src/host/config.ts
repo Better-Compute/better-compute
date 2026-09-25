@@ -4,6 +4,7 @@ import type { MetricsRegistry } from '@better-compute/observability';
 import type { RevocationSet } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
 import type { HostRoute, HostUpgradeHandler } from './http.js';
+import type { HostIamConfig } from './iam.js';
 import type { HostTunnelsConfig } from './tunnels.js';
 
 // The named `host` export of `better-compute.config.ts`: what `serve` runs around the control plane that the
@@ -84,6 +85,12 @@ export interface HostConfig {
    * the re-authorizer (default `tunnelAuthorizer(iam)`) and the TLS to gateways' control APIs.
    */
   tunnels?: HostTunnelsConfig;
+  /**
+   * The IAM bridge whose inbox the worker roles drain, so IAM events reach compute: a revoked delegation
+   * or suspended agent closes its tunnels on every gateway (within the inbox's 2 s poll), and revocations
+   * drop this process's IAM caches. The gateway clients use `tunnels.control` TLS.
+   */
+  iam?: HostIamConfig;
   http?: {
     routes?: readonly HostRoute[];
     upgrade?: readonly HostUpgradeHandler[];
@@ -119,9 +126,17 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       'INVALID_CONFIG',
       'The host export must be defineHost({ … }) or a factory',
     );
-  const { http, gateway, metrics } = value as HostConfig;
+  const { http, gateway, metrics, iam } = value as HostConfig;
   if (http !== undefined && !isRecord(http))
     throw new ComputeError('INVALID_CONFIG', 'host.http must be an object');
+  if (
+    iam !== undefined &&
+    (!isRecord(iam) || !isRecord(iam.bridge) || typeof iam.bridge.setHandlers !== 'function')
+  )
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'host.iam needs the IAM bridge: { bridge } from createComputeIamBridge() (@better-compute/iam)',
+    );
   if (metrics !== undefined) {
     if (!isRecord(metrics) || !isRecord(metrics.registry))
       throw new ComputeError(

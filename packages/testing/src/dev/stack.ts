@@ -26,6 +26,7 @@ import {
   gatewayTunnelRelay,
   serveGateway,
   serveInternal,
+  xidStatusHandler,
   type Gateway,
   type GatewayOptions,
   type ServedGateway,
@@ -40,6 +41,7 @@ import {
   parseCertificate,
   publicJwk,
   type ExecTicketIssuer,
+  type ReplayCache,
   type SignerTrust,
 } from '@better-compute/pki';
 import { retentionModule } from '@better-compute/postgres';
@@ -191,14 +193,21 @@ export interface DevFleetOptions {
   gateway?: { host?: string; port?: number } & Partial<
     Omit<GatewayOptions, 'database' | 'services' | 'region' | 'work' | 'events' | 'reports'>
   >;
+  /**
+   * More gateway report hooks, over the server's `gatewayReportHandlers`. `status` handlers run after the
+   * XID health handler (as `serve` composes them), e.g. vps's `instanceStatusHandler({ events })`.
+   */
+  reports?: Partial<NonNullable<GatewayOptions['reports']>>;
   /** Options for every FakeDaemon (default reconnect backoff 100 ms → 5 s). */
   daemon?: Partial<Omit<FakeDaemonOptions, 'nodeId' | 'scheduler' | 'dial' | 'hardware'>>;
   /**
    * Interactive tunnels (§7.6): the control plane's exec-ticket issuer (`ComputeOptions.tunnels.issuer`).
    * The gateway verifies its tickets and serves its control API on loopback h2c (for the api's relay);
-   * every FakeDaemon answers OpenTunnel with its echo shell.
+   * every FakeDaemon answers OpenTunnel with its echo shell. `jtiCache` is the gateway's single-use record of
+   * tickets (default: its own in-memory cache); a fresh one per test plays a failover gateway that never saw
+   * a ticket, which only the daemon's own check can then refuse.
    */
-  tunnels?: { issuer: ExecTicketIssuer; issuerName?: string };
+  tunnels?: { issuer: ExecTicketIssuer; issuerName?: string; jtiCache?: ReplayCache };
 }
 
 export interface DevFleet {
@@ -327,6 +336,18 @@ function gatewayTunnelConn(
   };
 }
 
+/** The server's report hooks plus `extra`; status handlers compose after XID health, as in `serve`. */
+function reportHandlers(
+  extra: DevFleetOptions['reports'] = {},
+): NonNullable<GatewayOptions['reports']> {
+  const { status, ...rest } = extra;
+  return {
+    ...gatewayReportHandlers,
+    ...rest,
+    status: [xidStatusHandler, ...(status === undefined ? [] : Array.isArray(status) ? status : [status])],
+  } as NonNullable<GatewayOptions['reports']>;
+}
+
 /** Adds a gateway on h2c and simulated machines to a running control plane. */
 export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet> {
   if (options.insecureHeaderAuth !== true)
@@ -379,6 +400,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
             tunnels: {
               jwks: () => tunnelIssuer.jwksJson(),
               ...(options.tunnels?.issuerName ? { issuer: options.tunnels.issuerName } : {}),
+              ...(options.tunnels?.jtiCache ? { jtiCache: options.tunnels.jtiCache } : {}),
             },
           }
         : {}),
@@ -387,7 +409,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       services: compute.gatewayServices,
       work: compute.context.work,
       events: compute.context.events,
-      reports: gatewayReportHandlers,
+      reports: reportHandlers(options.reports),
       dispatchIntervalMs: 250,
       specSweepMs: 1_000,
       revocations,
@@ -631,7 +653,8 @@ export interface DevStackIam {
   modules?: readonly ComputeModule[];
 }
 
-export interface DevStackOptions extends Pick<DevFleetOptions, 'region' | 'gateway' | 'daemon'> {
+export interface DevStackOptions
+  extends Pick<DevFleetOptions, 'region' | 'gateway' | 'daemon' | 'reports'> {
   /** The store (default: PGlite in memory). The stack migrates it and closes it on `close()`. */
   database?: SqlExecutor;
   /** Default: a fake IAM that authenticates `DEV_ROOT_TOKEN` as a root administrator and allows everything. */
@@ -646,6 +669,8 @@ export interface DevStackOptions extends Pick<DevFleetOptions, 'region' | 'gatew
   /** Worker tuning (default: `pollMs` 100, so a local loop reacts at once). */
   worker?: WorkerOptions;
   log?: Logger;
+  /** The gateway's exec-ticket replay cache (`DevFleetOptions.tunnels.jtiCache`). */
+  tunnels?: { jtiCache?: ReplayCache };
 }
 
 export interface DevStack extends DevFleet {
@@ -698,7 +723,11 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
   const baseURL = options.baseURL ?? 'http://127.0.0.1:3000';
   // Tunnels on: the api issues exec tickets, the gateway and the daemons verify them.
   const issuerName = new URL(baseURL).origin;
-  const tunnels = { issuer: createExecTicketIssuer({ issuer: issuerName }), issuerName };
+  const tunnels = {
+    issuer: createExecTicketIssuer({ issuer: issuerName }),
+    issuerName,
+    ...(options.tunnels?.jtiCache ? { jtiCache: options.tunnels.jtiCache } : {}),
+  };
   const compute = betterCompute<readonly ComputeModule[], []>({
     database,
     iam: iam.port,
@@ -736,6 +765,7 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
       ...(options.region ? { region: options.region } : {}),
       ...(options.gateway ? { gateway: options.gateway } : {}),
       ...(options.daemon ? { daemon: options.daemon } : {}),
+      ...(options.reports ? { reports: options.reports } : {}),
     });
   } catch (error) {
     await close().catch(() => {});

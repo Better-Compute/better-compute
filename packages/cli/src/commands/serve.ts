@@ -18,6 +18,7 @@ import { defineCommand, type FlagSpec } from '../framework.js';
 import { resolveHost, type HostConfig } from '../host/config.js';
 import { startGateway, type RunningGateway } from '../host/gateway.js';
 import { hostListener } from '../host/http.js';
+import { installIamHandlers } from '../host/iam.js';
 import { mountTunnels, type TunnelMount } from '../host/tunnels.js';
 
 // `serve` and `dev` (PLAN.md §9.3): one process runs the HTTP API (`compute.nodeHandler`) and the
@@ -87,8 +88,17 @@ export async function runServer(
   let server: Server | undefined;
   let gateway: RunningGateway | undefined;
   let tunnels: TunnelMount | undefined;
+  let iamHandlers: { close(): void } | undefined;
   let stopping = false;
   try {
+    // IAM events reach compute through the inbox the worker roles drain: install the reactions first.
+    const iamConfig = options.hostConfig?.iam;
+    if (iamConfig)
+      iamHandlers = installIamHandlers(compute, iamConfig, {
+        ...(options.hostConfig?.tunnels?.control?.tls
+          ? { tls: options.hostConfig.tunnels.control.tls }
+          : {}),
+      });
     if (options.roles.length) await compute.start({ roles: [...options.roles] });
     if (options.gateway) {
       const config = options.hostConfig?.gateway;
@@ -147,6 +157,7 @@ export async function runServer(
     if (server) await closeServer(server);
     tunnels?.close();
     await compute.stop();
+    iamHandlers?.close();
   }
 }
 
@@ -409,6 +420,12 @@ export const serveCommands = [
       const devHost: HostConfig = {
         ...(configured?.http ? { http: configured.http } : {}),
         ...(configured?.metrics ? { metrics: configured.metrics } : {}),
+        // IAM events (revoked delegations close their tunnels): the configuration's bridge, else --sim's.
+        ...(configured?.iam
+          ? { iam: configured.iam }
+          : sim?.hostIam
+            ? { iam: sim.hostIam }
+            : {}),
         // Tunnels to the simulated machines: dev's re-authorization, over the config's.
         ...(sim ? { tunnels: { ...configured?.tunnels, ...sim.hostTunnels } } : {}),
       };

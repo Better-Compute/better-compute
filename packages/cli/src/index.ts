@@ -98,6 +98,13 @@ export {
 } from './host/gateway.js';
 export { hostFindings } from './host/findings.js';
 export { mountTunnels, type HostTunnelsConfig, type TunnelMount } from './host/tunnels.js';
+export {
+  installIamHandlers,
+  liveGateways,
+  type HostIamConfig,
+  type LiveGateways,
+  type LiveGatewaysOptions,
+} from './host/iam.js';
 export type { HostMetricsConfig } from './host/config.js';
 export {
   parseRoles,

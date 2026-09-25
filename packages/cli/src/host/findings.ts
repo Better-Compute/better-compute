@@ -37,6 +37,15 @@ export function hostFindings(
       fix: 'bridge.embedded(iam, { sessionReviewer }) (or remote authorizeSessions), or host.tunnels.authorize',
     });
   }
+  const bridged = (options.modules ?? []).some((module) => module.name === 'iam');
+  if (bridged && !host.iam)
+    findings.push({
+      check: 'host.iam',
+      severity: 'warning',
+      message:
+        'The IAM bridge is registered but its events have no reactions: a revoked delegation or suspended agent keeps its tunnels until the next re-authorization (up to 60 s), and revoked sessions stay cached for up to 30 s',
+      fix: 'Export host = defineHost({ iam: { bridge } }) with the bridge from createComputeIamBridge()',
+    });
   const gateway = host.gateway;
   if (!gateway) return findings;
   try {
