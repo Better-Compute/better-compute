@@ -83,6 +83,7 @@ describe('migrate', () => {
       'core/0021_signed_specs',
       'core/0022_ssh_certificate_sessions',
       'core/0023_session_trust_version',
+      'core/0024_session_capabilities',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -373,6 +374,13 @@ describe('outbox dead letters and command latency (core/0019, core/0020)', () =>
     );
     expect(rows).toEqual([{ is_nullable: 'NO', column_default: 'compute_now()' }]);
     expect(await indexDefinition('commands_settled')).toMatch(/\(updated_at\) WHERE \(state = ANY/);
+  });
+
+  it("keeps the current session's daemon capabilities (core/0024)", async () => {
+    const { rows } = await db.query<{ data_type: string; column_default: string; is_nullable: string }>(
+      `SELECT data_type, column_default, is_nullable FROM information_schema.columns WHERE table_name = 'node_sessions' AND column_name = 'capabilities'`,
+    );
+    expect(rows).toEqual([{ data_type: 'ARRAY', column_default: "'{}'::text[]", is_nullable: 'NO' }]);
   });
 
   it('keeps the trust bundle version each session applied (core/0023)', async () => {
