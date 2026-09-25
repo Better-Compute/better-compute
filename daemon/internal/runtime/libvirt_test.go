@@ -316,6 +316,15 @@ func TestLibvirtRuntime(t *testing.T) {
 		t.Fatalf("the clone does not say what it was restored from: %+v", d)
 	}
 
+	// The serial console is the pty the live domain names; a definition without one (or a foreign
+	// domain) has none.
+	if _, err := l.Console(ctx, "inst_clone"); err == nil || !strings.Contains(err.Error(), "serial console") {
+		t.Fatalf("console without a pty = %v", err)
+	}
+	if _, err := l.Console(ctx, "someone-elses"); err == nil {
+		t.Fatal("a foreign domain's console was opened")
+	}
+
 	// Destroyed: definition and files gone.
 	if err := l.Destroy(ctx, "inst_web"); err != nil {
 		t.Fatal(err)

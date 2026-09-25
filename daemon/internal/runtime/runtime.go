@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -290,6 +291,37 @@ func (f *Fake) Destroy(_ context.Context, id string) error {
 		delete(st.Domains, id)
 	}
 	return f.save(st)
+}
+
+// Console is a running managed domain's serial console: the fake echoes what it is sent, prefixed
+// with "console: ".
+func (f *Fake) Console(_ context.Context, id string) (io.ReadWriteCloser, error) {
+	f.mu.Lock()
+	st, err := f.load()
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if d, ok := st.Domains[id]; !ok || !d.Managed || d.State != StateRunning {
+		return nil, fmt.Errorf("no running managed domain %s", id)
+	}
+	local, guest := net.Pipe()
+	go func() {
+		defer guest.Close()
+		buf := make([]byte, 4096)
+		for {
+			n, err := guest.Read(buf)
+			if n > 0 {
+				if _, werr := guest.Write(append([]byte("console: "), buf[:n]...)); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return local, nil
 }
 
 // Leak defines a domain bcd did not create (tests: the control plane must report it).

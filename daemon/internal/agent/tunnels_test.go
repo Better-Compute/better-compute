@@ -196,7 +196,7 @@ func TestInstanceTicketsDialTheInstanceOnly(t *testing.T) {
 		"stopped":          {Op: "ssh", Inst: "inst_off"},
 		"elsewhere":        {Op: "ssh", Inst: "inst_elsewhere"},
 		"exec":             {Op: "exec", Inst: "inst_web"},
-		"console":          {Op: "console", Inst: "inst_web"},
+		"stopped console":  {Op: "console", Inst: "inst_off"},
 		"tcp without port": {Op: "tcp", Inst: "inst_web"},
 	} {
 		if _, err := h.agent.instanceTunnelProgram(ctx, claims, tio); err == nil {
@@ -206,4 +206,22 @@ func TestInstanceTicketsDialTheInstanceOnly(t *testing.T) {
 	if len(dialed) != 2 {
 		t.Fatalf("a refused ticket dialed: %v", dialed)
 	}
+
+	// console is the instance's serial console, from its runtime (no address, no host shell).
+	got := make(chan string, 4)
+	console, err := h.agent.instanceTunnelProgram(ctx, pki.ExecTicketClaims{Op: "console", Inst: "inst_web"},
+		TunnelIO{Write: func(_ uint32, p []byte) { got <- string(p) }, Exit: func(int32, string) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	console.Data([]byte("hello\n"), 0)
+	select {
+	case line := <-got:
+		if line != "console: hello\n" {
+			t.Fatalf("console answered %q", line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the console did not answer")
+	}
+	console.Hangup()
 }

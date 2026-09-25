@@ -139,12 +139,17 @@ type devicesXML struct {
 	Disks      []diskXML      `xml:"disk"`
 	Interfaces []interfaceXML `xml:"interface"`
 	Hostdevs   []hostdevXML   `xml:"hostdev"`
-	Serial     *struct {
-		Type string `xml:"type,attr"`
-	} `xml:"serial"`
-	Console *struct {
+	Serial     *serialXML     `xml:"serial"`
+	Console    *struct {
 		Type string `xml:"type,attr"`
 	} `xml:"console"`
+}
+
+type serialXML struct {
+	Type   string `xml:"type,attr"`
+	Source *struct {
+		Path string `xml:"path,attr"`
+	} `xml:"source,omitempty"`
 }
 
 type diskXML struct {
@@ -256,9 +261,7 @@ func (l *Libvirt) domainFor(spec *agentv1.InstanceSpec, dir, cdrom string, meta 
 		h.Source.Address.Slot, h.Source.Address.Function = "0x"+m[3], "0x"+m[4]
 		d.Devices.Hostdevs = append(d.Devices.Hostdevs, h)
 	}
-	d.Devices.Serial = &struct {
-		Type string `xml:"type,attr"`
-	}{"pty"}
+	d.Devices.Serial = &serialXML{Type: "pty"}
 	d.Devices.Console = &struct {
 		Type string `xml:"type,attr"`
 	}{"pty"}
@@ -791,4 +794,21 @@ func (l *Libvirt) unpack(restore *Restore, dir string) error {
 		return errors.New("the snapshot has no disk")
 	}
 	return nil
+}
+
+// Console opens a running managed domain's serial console: the pty libvirt gave its serial port
+// (the live domain XML names it), which bcd opens as root.
+func (l *Libvirt) Console(ctx context.Context, id string) (io.ReadWriteCloser, error) {
+	raw, err := l.virsh(ctx, "dumpxml", id)
+	if err != nil {
+		return nil, err
+	}
+	var x domainXML
+	if err := xml.Unmarshal(raw, &x); err != nil || x.Metadata == nil || x.Metadata.Instance.ID != id {
+		return nil, fmt.Errorf("no managed domain %s", id)
+	}
+	if x.Devices.Serial == nil || x.Devices.Serial.Source == nil || !strings.HasPrefix(x.Devices.Serial.Source.Path, "/dev/pts/") {
+		return nil, fmt.Errorf("domain %s has no serial console (is it running?)", id)
+	}
+	return os.OpenFile(x.Devices.Serial.Source.Path, os.O_RDWR|syscallNoCTTY, 0)
 }

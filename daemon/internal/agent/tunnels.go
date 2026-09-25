@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	osexec "os/exec"
@@ -223,11 +224,14 @@ func DefaultTunnelProgram(claims pki.ExecTicketClaims, tio TunnelIO) (TunnelProg
 const InstanceDialCapability = "tunnel.instance-dial"
 
 // instanceTunnelProgram serves an instance ticket: ssh and tcp are dialed to the instance's own
-// address (its running, managed domain, as the runtime reports it); never the host. exec and
-// console into a guest need its guest agent and are refused.
+// address (its running, managed domain, as the runtime reports it), never the host; console is the
+// instance's serial console, from its runtime. exec into a guest needs its guest agent and is
+// refused.
 func (a *Agent) instanceTunnelProgram(ctx context.Context, claims pki.ExecTicketClaims, tio TunnelIO) (TunnelProgram, error) {
 	port := 22
 	switch claims.Op {
+	case "console":
+		return a.instanceConsole(ctx, claims.Inst, tio)
 	case "ssh":
 	case "tcp":
 		if claims.Port < 1 || claims.Port > 65535 {
@@ -242,6 +246,36 @@ func (a *Agent) instanceTunnelProgram(ctx context.Context, claims pki.ExecTicket
 		return nil, err
 	}
 	return dialAddress(ip, port, tio)
+}
+
+// instanceConsole opens the serial console of a running, managed instance of this host.
+func (a *Agent) instanceConsole(ctx context.Context, id string, tio TunnelIO) (TunnelProgram, error) {
+	for _, rt := range a.o.Runtimes {
+		domains, err := rt.List(ctx)
+		if err != nil {
+			continue
+		}
+		for _, d := range domains {
+			if d.ID != id {
+				continue
+			}
+			if !d.Managed || d.State != "running" {
+				return nil, fmt.Errorf("instance %s is not running on this host", id)
+			}
+			c, ok := rt.(interface {
+				Console(ctx context.Context, id string) (io.ReadWriteCloser, error)
+			})
+			if !ok {
+				return nil, fmt.Errorf("runtime %s has no serial console", rt.Name())
+			}
+			rw, err := c.Console(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			return streamProgram(rw, tio), nil
+		}
+	}
+	return nil, fmt.Errorf("instance %s is not on this host", id)
 }
 
 // instanceAddress is the first usable address of a running instance of this host. An address the
@@ -312,8 +346,9 @@ func (a *Agent) instanceAddress(ctx context.Context, id string) (net.IP, error) 
 
 // ---- tcp ---------------------------------------------------------------------------------------
 
+// tcpProgram relays a byte stream (a TCP connection, a serial console) over a tunnel.
 type tcpProgram struct {
-	conn net.Conn
+	conn io.ReadWriteCloser
 	tio  TunnelIO
 }
 
@@ -329,6 +364,11 @@ func dialAddress(ip net.IP, port int, tio TunnelIO) (TunnelProgram, error) {
 	if err != nil {
 		return nil, err
 	}
+	return streamProgram(conn, tio), nil
+}
+
+// streamProgram relays conn both ways until it closes.
+func streamProgram(conn io.ReadWriteCloser, tio TunnelIO) TunnelProgram {
 	p := &tcpProgram{conn: conn, tio: tio}
 	go func() {
 		buf := make([]byte, 32<<10)
@@ -343,7 +383,7 @@ func dialAddress(ip net.IP, port int, tio TunnelIO) (TunnelProgram, error) {
 			}
 		}
 	}()
-	return p, nil
+	return p
 }
 
 func (p *tcpProgram) Data(b []byte, _ uint32) { _, _ = p.conn.Write(b) }
