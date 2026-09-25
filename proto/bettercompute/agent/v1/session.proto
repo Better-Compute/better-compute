@@ -173,6 +173,8 @@ message AgentFrame {
     InventorySection inventory = 6;
     SpecRequest spec_request = 7;
     SecretRequest secret_request = 8;
+    // (v0.5) A hosted instance's IMDS asks for its workload identity token (§12.2, §13).
+    WorkloadTokenRequest workload_token_request = 9;
   }
 }
 
@@ -187,6 +189,8 @@ message ServerFrame {
     Drain drain = 7;
     RevocationNotice revoked = 8;
     SecretResponse secret = 9;
+    // (v0.5) The answer to a WorkloadTokenRequest.
+    WorkloadTokenResponse workload_token = 10;
   }
 }
 
@@ -769,6 +773,31 @@ message SecretResponse {
   string jwe = 2;
   string request_id = 3;
   // Set instead of jwe on refusal: "not-found", "not-bound", "access-denied", "unavailable".
+  string error = 4;
+}
+
+// (v0.5) Workload identity (§12.2, §13): a VPS host's IMDS, bound to one instance, asks for that
+// instance's token. The control plane mints it only for a live instance placed on this node, in a
+// pool with workload identity on, for a configured audience.
+message WorkloadTokenRequest {
+  // Correlates the WorkloadTokenResponse.
+  string request_id = 1;
+  string instance_id = 2;
+  string audience = 3;
+  // Fresh ephemeral P-256 public key, uncompressed SEC1 point (65 bytes). Used once: the token is
+  // sealed to it, so a gateway relaying it never holds a usable token.
+  bytes epk = 4;
+  // Node key. Purpose "workload-token", parts [request_id, instance_id, audience, epk].
+  bettercompute.common.v1.Signature node_sig = 5;
+}
+
+message WorkloadTokenResponse {
+  string request_id = 1;
+  // Compact JWE (ECDH-ES+A256KW / A256GCM) of the workload JWT to WorkloadTokenRequest.epk.
+  string jwe = 2;
+  google.protobuf.Timestamp expires_at = 3;
+  // Set instead of jwe on refusal: "not-bound", "disabled", "audience", "rate-limited",
+  // "access-denied", "unavailable".
   string error = 4;
 }
 

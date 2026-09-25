@@ -895,7 +895,10 @@ export interface ModuleContext {
   log: Logger;
   /** v0.2 (provision). */
   workflows?: WorkflowEngine;
-  /** v0.3 (vps usage windows). */
+  /**
+   * Reserved: the server does not set it. Usage windows are written by capacity (reservations,
+   * instances, node leases) and sent to IAM billing by the IAM bridge (§12.7).
+   */
   usage?: UsageRecorder;
   /** v0.2. */
   secrets?: SecretBroker;

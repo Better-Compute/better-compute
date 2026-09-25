@@ -94,6 +94,11 @@ export interface PoolPolicy {
   runtime?: string;
   /** (v0.3) Only one tenant besides the owner may be offered this pool; set for container runtimes (§13). */
   singleTenant?: boolean;
+  /**
+   * (v0.5) Hosted instances may get workload identity tokens from their host's IMDS (§12.2, §13);
+   * off by default.
+   */
+  workloadIdentity?: boolean;
 }
 
 /** A scheduling and policy domain in one site, with exactly one GPU model. */
