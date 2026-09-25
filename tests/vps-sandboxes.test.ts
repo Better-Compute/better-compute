@@ -25,6 +25,7 @@ import { encodeMessage, InstanceSnapshotResultSchema } from '@better-compute/pro
 import {
   instanceSpecs,
   instanceWork,
+  meterInstances,
   reportInstances,
   sandboxWork,
   setIpPool,
@@ -697,6 +698,41 @@ describe('warm pools', () => {
         )
       ).rows,
     ).toHaveLength(2);
+  });
+
+  it('meter vps.sandbox.warm to the tenant until claimed, then the owner’s usage from the claim', async () => {
+    const template = await createTemplate({ warm: { min: 1 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    await advance(30 * 60_000);
+    const sandbox = await createSandbox(template.id, {}, bob);
+    expect(sandbox.warm).toBe(true);
+    await advance(90 * 60_000);
+    await db.transaction((tx) => meterInstances(tx, clock.now()));
+    const { rows } = await db.query<{
+      meter: string;
+      identity_id: string | null;
+      start_ms: number;
+      quantity: string;
+    }>(
+      `SELECT meter, identity_id, (extract(epoch FROM window_start) * 1000)::float8 AS start_ms, quantity
+         FROM usage_windows ORDER BY meter, window_start`,
+    );
+    const lines = rows.map((row) => [
+      row.meter,
+      row.identity_id,
+      Number(row.start_ms) - T0,
+      Number(row.quantity),
+    ]);
+    expect(lines).toEqual([
+      ['vps.memory.gib.hours', 'usr_bob', 0, 2],
+      ['vps.memory.gib.hours', 'usr_bob', 3600_000, 4],
+      // 2 vCPU warm for half an hour, the tenant's.
+      ['vps.sandbox.warm', null, 0, 1],
+      // Bob's from the claim on: half of the first hour, then the whole second.
+      ['vps.vcpu.hours', 'usr_bob', 0, 1],
+      ['vps.vcpu.hours', 'usr_bob', 3600_000, 2],
+    ]);
   });
 
   it('keep instances stopped on a runtime that cannot pause', async () => {

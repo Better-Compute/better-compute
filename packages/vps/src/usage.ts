@@ -10,8 +10,17 @@ import {
 // Instance metering (PLAN.md §12.7): hosted instances accrue `vps.vcpu.hours`,
 // `vps.memory.gib.hours` and, for GPU flavors, `gpu.<model>.hours`, from placement until their
 // allocation is released. Provider instances have no allocation and are billed by their provider.
+// Warm sandbox instances accrue `vps.sandbox.warm` to the tenant until a sandbox claims them.
+
+/**
+ * Warm sandbox capacity (§3.7): warm vCPU-hours of an instance kept for a template's warm pool,
+ * billed to the tenant (no identity), from placement until a sandbox claims it or it is drained.
+ */
+export const warmMeter = 'vps.sandbox.warm';
 
 interface MeterableInstance {
+  warm: boolean;
+  claimed_ms: number | null;
   allocation_id: string;
   tenant_id: string;
   owner_identity_id: string;
@@ -34,7 +43,8 @@ export async function meterInstances(
 ): Promise<{ allocations: number; windows: number }> {
   const lookback = options.lookbackMs ?? 48 * hourMs;
   const { rows } = await tx.query<MeterableInstance>(
-    `SELECT a.id AS allocation_id, i.tenant_id, i.owner_identity_id, i.agent_id, i.delegation_id, i.project_id,
+    `SELECT i.warm_template_id IS NOT NULL AS warm, (extract(epoch FROM i.claimed_at) * 1000)::float8 AS claimed_ms,
+            a.id AS allocation_id, i.tenant_id, i.owner_identity_id, i.agent_id, i.delegation_id, i.project_id,
             i.pool_id, p.gpu_model, s.region, i.flavor,
             (extract(epoch FROM lower(a.during)) * 1000)::float8 AS from_ms,
             (extract(epoch FROM a.released_at) * 1000)::float8 AS to_ms
@@ -60,19 +70,43 @@ export async function meterInstances(
     if (row.gpu_model) tags.gpuModel = row.gpu_model;
     if (row.project_id) tags.project = row.project_id;
     if (row.delegation_id && row.agent_id) tags.agent = row.agent_id;
-    windows += await meterAllocation(
-      tx,
-      {
-        allocationId: row.allocation_id,
-        tenantId: row.tenant_id,
-        identityId: row.owner_identity_id,
-        lines,
-        tags,
-        from: Number(row.from_ms),
-        to: row.to_ms === null ? Number.POSITIVE_INFINITY : Number(row.to_ms),
-      },
-      now,
-    );
+    const from = Number(row.from_ms);
+    const to = row.to_ms === null ? Number.POSITIVE_INFINITY : Number(row.to_ms);
+    // A warm sandbox instance (§3.7) is warm capacity until claimed, then its sandbox owner's.
+    const claimed = row.claimed_ms === null ? undefined : Number(row.claimed_ms);
+    const warmUntil = row.warm ? to : claimed;
+    if (warmUntil !== undefined)
+      windows += await meterAllocation(
+        tx,
+        {
+          allocationId: row.allocation_id,
+          tenantId: row.tenant_id,
+          // The first line's idempotency key has no meter suffix and belongs to the claimed phase's
+          // first line; the empty line keeps the warm line on its own suffixed key.
+          lines: [
+            { meter: 'vps.vcpu.hours', perHour: 0 },
+            { meter: warmMeter, perHour: flavor.vcpu },
+          ],
+          tags,
+          from,
+          to: Math.min(warmUntil, to),
+        },
+        now,
+      );
+    if (!row.warm)
+      windows += await meterAllocation(
+        tx,
+        {
+          allocationId: row.allocation_id,
+          tenantId: row.tenant_id,
+          identityId: row.owner_identity_id,
+          lines,
+          tags,
+          from: claimed ?? from,
+          to,
+        },
+        now,
+      );
   }
   return { allocations: rows.length, windows };
 }

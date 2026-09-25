@@ -142,6 +142,12 @@ CREATE INDEX sandboxes_open ON sandboxes (tenant_id, created_at) WHERE NOT draft
 `,
 };
 
+/** When a sandbox claimed a warm instance: its warm capacity metering ends there (`vps.sandbox.warm`). */
+export const vpsWarmClaimsMigration: Migration = {
+  name: 'vps/0006_warm_claims',
+  sql: `ALTER TABLE instances ADD COLUMN claimed_at timestamptz;`,
+};
+
 // --- Templates ---------------------------------------------------------------------------------
 
 export interface SandboxTemplate {
@@ -1109,9 +1115,9 @@ async function claimWarm(
   await tx.query(
     `UPDATE instances
         SET warm_template_id = NULL, sandbox_id = $2, owner_identity_id = $3, desired_state = 'running',
-            version = version + 1
+            claimed_at = $4::timestamptz, version = version + 1
       WHERE id = $1`,
-    [rows[0].id, sandbox.id, sandbox.owner_identity_id],
+    [rows[0].id, sandbox.id, sandbox.owner_identity_id, new Date(deps.clock.now()).toISOString()],
   );
   const row = (await readInstance(tx, rows[0].id, { lock: true }))!;
   await deps.authz.upsert(tx, {
