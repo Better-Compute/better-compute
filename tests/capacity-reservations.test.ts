@@ -900,15 +900,16 @@ describe('the reservation lifecycle', () => {
     const long = input('8h', 'long');
     const short = input('1h', 'short');
     recorded.pending = [];
-    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-b'), long, tx));
+    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-same'), long, tx));
+    // Every call shares one request id (callers choose it): the hold is the admission's own nonce.
     // A (short) must not overwrite B's (long) pending duration while B is decided.
     await expect(
-      db.transaction((tx) => extend.admission.prepare(as(tx, 'req-a'), short, tx)),
+      db.transaction((tx) => extend.admission.prepare(as(tx, 'req-same'), short, tx)),
     ).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'extend-in-flight' } });
-    await db.transaction((tx) => extend.admission.abandoned(as(tx, 'req-a'), short, tx, 'x'));
+    await db.transaction((tx) => extend.admission.abandoned(as(tx, 'req-same'), short, tx, 'x'));
     expect(recorded.pending).toHaveLength(1);
     expect(recorded.pending[0]!.pending).toMatchObject({ durationHours: 10 });
-    const done = (await db.transaction((tx) => extend.handler(as(tx, 'req-b'), long))) as {
+    const done = (await db.transaction((tx) => extend.handler(as(tx, 'req-same'), long))) as {
       extended: boolean;
     };
     expect(done.extended).toBe(true);
@@ -916,17 +917,17 @@ describe('the reservation lifecycle', () => {
 
     // A stalled extend is taken over after a minute; its late transaction 2 then applies nothing.
     const stalled = input('1h', 'stalled');
-    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-c'), stalled, tx));
+    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-same'), stalled, tx));
     await advance(61_000);
     const next = input('2h', 'next');
-    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-d'), next, tx));
+    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-same'), next, tx));
     recorded.pending = [];
     await expect(
-      db.transaction((tx) => extend.handler(as(tx, 'req-c'), stalled)),
+      db.transaction((tx) => extend.handler(as(tx, 'req-same'), stalled)),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
-    await db.transaction((tx) => extend.admission.abandoned(as(tx, 'req-c'), stalled, tx, 'x'));
+    await db.transaction((tx) => extend.admission.abandoned(as(tx, 'req-same'), stalled, tx, 'x'));
     expect(recorded.pending).toEqual([]);
-    await db.transaction((tx) => extend.handler(as(tx, 'req-d'), next));
+    await db.transaction((tx) => extend.handler(as(tx, 'req-same'), next));
     expect(recorded.pending.at(-1)).toEqual({ id: created.id, pending: null });
     expect((await db.query(`SELECT 1 FROM capacity_extend_holds`)).rows).toEqual([]);
   });

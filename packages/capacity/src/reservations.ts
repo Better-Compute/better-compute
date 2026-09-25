@@ -3,6 +3,7 @@ import {
   draftId,
   isComputeError,
   isId,
+  newId,
   parseDuration,
   reservationStateTable,
   transition,
@@ -1089,7 +1090,7 @@ export async function placeQueued(
       const start = Math.max(row.request.start ?? now, now);
       await settlePlacement(deps, tx, row, { start, end: start + requestedDuration(row) }, archived);
     }
-    return { placed: 0, pending: batch.length, more: false };
+    return { placed: 0, pending: batch.length, more: rows.length > limit };
   }
 
   // 1. Plan every simple request on the index (each recorded tentatively for the next ones), then
@@ -1648,6 +1649,12 @@ export interface ExtendReservationInput {
   until?: number;
   by?: number;
   idempotencyKey: string;
+  /**
+   * Set by `prepare`, never by the caller (the parser keeps known fields only): the hold this
+   * admission took on the reservation's pending change, a nonce minted here. Not the request id,
+   * which callers choose (`x-request-id`): two extends sharing one would share the hold.
+   */
+  hold?: string;
 }
 
 export function parseExtendReservation(raw: unknown): ExtendReservationInput {
@@ -1711,7 +1718,9 @@ export async function prepareExtend(
       result: { reservation: await reservationView(tx, row), extended: false },
     };
   const gpuCount = wholeGpus(row.request.devices) * (row.request.gang?.size ?? 1);
-  await holdExtend(tx, row.id, context.requestId, context.clock.now());
+  const hold = newId('hold');
+  await holdExtend(tx, row.id, hold);
+  input.hold = hold;
   await context.authz.setPending(
     tx,
     { type: 'reservation', id: row.id, tenantId: row.tenantId },
@@ -1732,19 +1741,14 @@ export async function prepareExtend(
  */
 const extendHoldMs = 60_000;
 
-async function holdExtend(
-  tx: SqlTx,
-  reservationId: string,
-  requestId: string,
-  now: number,
-): Promise<void> {
+async function holdExtend(tx: SqlTx, reservationId: string, hold: string): Promise<void> {
+  // The database's clock: replicas' clocks may disagree about when a hold went stale.
   const { rowCount } = await tx.query(
     `INSERT INTO capacity_extend_holds AS h (reservation_id, request_id, held_at)
-     VALUES ($1, $2, $3::timestamptz)
+     VALUES ($1, $2, compute_now())
      ON CONFLICT (reservation_id) DO UPDATE SET request_id = EXCLUDED.request_id, held_at = EXCLUDED.held_at
-      WHERE h.request_id = EXCLUDED.request_id
-         OR h.held_at < EXCLUDED.held_at - make_interval(secs => $4::float8)`,
-    [reservationId, requestId, new Date(now).toISOString(), extendHoldMs / 1000],
+      WHERE h.held_at < EXCLUDED.held_at - make_interval(secs => $3::float8)`,
+    [reservationId, hold, extendHoldMs / 1000],
   );
   if (rowCount === 0)
     throw new ComputeError(
@@ -1758,12 +1762,13 @@ async function holdExtend(
 /** `reservations.extend` refused, or its handler threw: clear the pending change if it is still ours. */
 export async function denyPending(
   context: MethodContext,
-  input: { tenantId: string; reservationId: string },
+  input: { tenantId: string; reservationId: string; hold?: string },
   tx: SqlTx,
 ): Promise<void> {
+  if (input.hold === undefined) return;
   const { rowCount } = await tx.query(
     `DELETE FROM capacity_extend_holds WHERE reservation_id = $1 AND request_id = $2`,
-    [input.reservationId, context.requestId],
+    [input.reservationId, input.hold],
   );
   if (rowCount === 0) return;
   await context.authz.setPending(
@@ -1788,10 +1793,13 @@ export async function completeExtend(
   const ref = { type: 'reservation', id: row.id, tenantId: row.tenantId };
   // The decision was made on this request's pending change only while it held the reservation:
   // after a takeover, IAM may have seen another request's.
-  const { rowCount: held } = await tx.query(
-    `DELETE FROM capacity_extend_holds WHERE reservation_id = $1 AND request_id = $2`,
-    [row.id, context.requestId],
-  );
+  const { rowCount: held } =
+    input.hold === undefined
+      ? { rowCount: 0 }
+      : await tx.query(
+          `DELETE FROM capacity_extend_holds WHERE reservation_id = $1 AND request_id = $2`,
+          [row.id, input.hold],
+        );
   if (held === 0)
     throw new ComputeError(
       'CONFLICT',
