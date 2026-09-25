@@ -87,6 +87,7 @@ const capacity = capacityModule({ plugins: [], weights: { spread: 0.5 }, topN: 5
 
   The server passes a pki-backed check when command signing is configured. Node leases are exempt,
   since metal binds them.
+
 - **`capacity.preview`** dry-runs a request without booking it.
 
 ```ts
@@ -194,12 +195,12 @@ to every attempt.
 
 ### Choosing a placer
 
-| | `placer: 'inline'` (default) | `placer: 'pool-lease'` (recommended in production) |
-|---|---|---|
-| `reservations.create` answers | `placed` or `pending` | `pending` with a `Queued` condition, then `placed` once the batch runs |
-| Where placement runs | the admission transaction | the `capacity.placer` worker that owns the pool's shard (`shardBy: 'pool'`) |
-| Pool lock | only around the commit (a few ms) | never at admission; once per batch of ≤64 |
-| Throughput (bench/placements, PGlite, 1k nodes) | ~35 placements/s | ~690 placements/s (placeQueued; 10k nodes: ~1,000) |
+|                                                 | `placer: 'inline'` (default)      | `placer: 'pool-lease'` (recommended in production)                          |
+| ----------------------------------------------- | --------------------------------- | --------------------------------------------------------------------------- |
+| `reservations.create` answers                   | `placed` or `pending`             | `pending` with a `Queued` condition, then `placed` once the batch runs      |
+| Where placement runs                            | the admission transaction         | the `capacity.placer` worker that owns the pool's shard (`shardBy: 'pool'`) |
+| Pool lock                                       | only around the commit (a few ms) | never at admission; once per batch of ≤64                                   |
+| Throughput (bench/placements, PGlite, 1k nodes) | ~35 placements/s                  | ~690 placements/s (placeQueued; 10k nodes: ~1,000)                          |
 
 ```ts
 capacityModule({ placer: 'pool-lease', maxBatch: 64 });
@@ -257,6 +258,7 @@ holds.
 
   `reservations.create` with `wait: { timeoutMs ≤ 30000 }` is held by the envelope while the
   operation is `running`. An inline create is done at once, so swapping placers changes no client.
+
 - **Budgets.** With `policy.admission.budgetCheck: 'meter'`, or an offer whose
   `onBudgetExceeded` is `stop-new` / `drain`, `reservations.create` and `extend` call
   `iam.billingCheck` for the caller after the IAM decision, outside any transaction. A spent budget
