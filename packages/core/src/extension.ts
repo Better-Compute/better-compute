@@ -174,6 +174,8 @@ export interface PlacementRequest {
   gang?: GangSpec;
   /** Scalar claims (`vcpu`, `memoryGiB`, `diskGiB`), multiplied by the pool's overcommit. */
   resources?: Readonly<Record<string, number>>;
+  /** The image the placement will boot (VPS instances), for the `image-cached` scorer (§10.3). */
+  imageId?: string;
   during: TimeRange;
   priority?: number;
   /** Nodes to leave out (a replan after a conflict). */
