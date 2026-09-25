@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
+	driverv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/driver/v1"
 	sitev1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/site/v1"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"google.golang.org/protobuf/proto"
@@ -218,5 +220,61 @@ func TestParseCredentialForms(t *testing.T) {
 	}
 	if c := parseCredential([]byte("bare-pw\n"), "admin"); c.Username != "admin" || c.Password != "bare-pw" {
 		t.Fatalf("bare = %+v", c)
+	}
+}
+
+// bmcDriver is a hosted bcx driver that records what it was asked.
+type bmcDriver struct {
+	mu   sync.Mutex
+	reqs []*driverv1.InvokeRequest
+}
+
+func (d *bmcDriver) Invoke(_ context.Context, req *driverv1.InvokeRequest, _ func(*driverv1.Progress)) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.reqs = append(d.reqs, req)
+	if req.GetOperation() == "getPower" {
+		return `{"power":"on"}`, nil
+	}
+	return `{}`, nil
+}
+
+// A BMC driver other than Redfish is a hosted bcx plugin: the operation's concern and name, the
+// address as config, the credentials as secrets (never in the arguments).
+func TestBMCThroughAHostedDriver(t *testing.T) {
+	ipmi := &bmcDriver{}
+	h := newHarness(t, func(o *Options) {
+		o.State.Role = "site"
+		o.Drivers = []HostedDriver{{Manifest: &commonv1.DriverManifest{Id: "ipmi", Kinds: []string{"power", "management"}}, Host: ipmi}}
+	})
+	s, _ := h.open()
+	s.push(command(body("q1", "bmc.query", &sitev1.BmcOperationRequest{Driver: "ipmi", Address: "10.0.0.7", CredentialsRef: "secret://t/bmc", Operation: "power.getPower"})))
+	answerSecret(t, s, `{"username":"admin","password":"pw"}`)
+	done := s.update(t, "q1", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	res := &sitev1.BmcOperationResult{}
+	_ = proto.Unmarshal(done.GetResult(), res)
+	if !res.GetOk() || res.GetResultJson() != `{"power":"on"}` {
+		t.Fatalf("result = %v", res)
+	}
+	ipmi.mu.Lock()
+	req := ipmi.reqs[0]
+	ipmi.mu.Unlock()
+	secrets := map[string]string{}
+	for _, sv := range req.GetSecrets() {
+		secrets[sv.GetField()] = string(sv.GetValue())
+	}
+	if req.GetKind() != "power" || req.GetOperation() != "getPower" || !strings.Contains(req.GetConfigJson(), `"address":"10.0.0.7"`) ||
+		secrets["username"] != "admin" || secrets["password"] != "pw" || strings.Contains(req.GetArgsJson(), "pw") {
+		t.Fatalf("invoke = %v", req)
+	}
+	// A driver the agent does not host, or one without the concern: refused, nothing invoked.
+	s.push(command(body("q2", "bmc.query", &sitev1.BmcOperationRequest{Driver: "idrac", Address: "10.0.0.7", CredentialsRef: "secret://t/bmc", Operation: "power.getPower"})))
+	done = s.update(t, "q2", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	_ = proto.Unmarshal(done.GetResult(), res)
+	if res.GetOk() || res.GetErrorCode() != "unsupported-driver" {
+		t.Fatalf("q2 = %v", res)
+	}
+	if !h.agent.knownBMC("10.0.0.7") {
+		t.Fatal("a BMC driven through a plugin was not remembered")
 	}
 }

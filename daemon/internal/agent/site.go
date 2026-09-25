@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,17 +16,21 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	driverv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/driver/v1"
 	sitev1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/site/v1"
+	"github.com/better-compute/better-compute/daemon/internal/bcx"
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/redfish"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // The site agent's kinds (`bcd site`, PLAN.md §3.5; packages/metal/src/commands.ts): BMC operations
@@ -109,8 +114,20 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 	if !bmcOperations[cmd.Kind][req.GetOperation()] {
 		return journal.Result{}, invalidPayload(fmt.Errorf("%s is not a %s operation", req.GetOperation(), cmd.Kind))
 	}
+	// Redfish is built in; any other driver is a bcx plugin this agent hosts (IPMI, a vendor's BMC)
+	// implementing the operation's concern. The kind's allowlist, quorum and BMC memory apply alike.
+	var plugin *HostedDriver
+	concern, operation, _ := strings.Cut(req.GetOperation(), ".")
 	if d := req.GetDriver(); d != "" && d != "redfish" {
-		return bmcResult(false, nil, "unsupported-driver", "the site agent drives redfish BMCs; not "+d)
+		for i := range a.o.Drivers {
+			if hd := a.o.Drivers[i]; hd.Manifest.GetId() == d && slices.Contains(hd.Manifest.GetKinds(), concern) {
+				plugin = &hd
+				break
+			}
+		}
+		if plugin == nil {
+			return bmcResult(false, nil, "unsupported-driver", fmt.Sprintf("no hosted driver %s implements %s", d, concern))
+		}
 	}
 	args := map[string]any{}
 	if s := req.GetArgsJson(); s != "" {
@@ -144,6 +161,9 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 		args["url"] = cached
 	}
 	a.rememberBMC(req.GetAddress())
+	if plugin != nil {
+		return a.pluginBMC(ctx, cmd, plugin, req, concern, operation, cred, args)
+	}
 	client, err := redfish.New(req.GetAddress(), cred.Username, cred.Password, req.GetTlsSpkiSha256())
 	if err != nil {
 		return bmcResult(false, nil, "invalid-address", err.Error())
@@ -158,6 +178,43 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 	}
 	a.log.Info("bmc operation", "operation", req.GetOperation(), "bmc", req.GetAddress())
 	return bmcResult(true, result, "", "")
+}
+
+// pluginBMC runs a BMC operation through a hosted bcx driver: the address and TLS pin as config,
+// the credentials (and a rotation's new password) as secrets, never in the arguments.
+func (a *Agent) pluginBMC(ctx context.Context, cmd dispatch.Command, d *HostedDriver, req *sitev1.BmcOperationRequest, concern, operation string, cred bmcCredential, args map[string]any) (journal.Result, error) {
+	secrets := []*driverv1.SecretValue{
+		{Field: "username", Value: []byte(cred.Username)},
+		{Field: "password", Value: []byte(cred.Password)},
+	}
+	if next, ok := args["newPassword"].(string); ok {
+		secrets = append(secrets, &driverv1.SecretValue{Field: "newPassword", Value: []byte(next)})
+		delete(args, "newPassword")
+	}
+	config, _ := json.Marshal(map[string]string{"address": req.GetAddress(), "tlsSpkiSha256": hex.EncodeToString(req.GetTlsSpkiSha256())})
+	argsJSON, _ := json.Marshal(args)
+	ireq := &driverv1.InvokeRequest{
+		DriverId: d.Manifest.GetId(), Kind: concern, Operation: operation,
+		ConfigJson: string(config), ArgsJson: string(argsJSON), Secrets: secrets,
+		IdempotencyKey: cmd.ID, Traceparent: cmd.Traceparent,
+	}
+	if !cmd.NotAfter.IsZero() {
+		ireq.Deadline = timestamppb.New(cmd.NotAfter)
+	}
+	result, err := d.Host.Invoke(ctx, ireq, nil)
+	if err != nil {
+		var de *bcx.Error
+		if errors.As(err, &de) {
+			return bmcResult(false, nil, de.Code, de.Message)
+		}
+		return bmcResult(false, nil, "bmc-error", err.Error())
+	}
+	var out any
+	if strings.TrimSpace(result) != "" && json.Unmarshal([]byte(result), &out) != nil {
+		return bmcResult(false, nil, "bmc-error", "the driver answered no JSON")
+	}
+	a.log.Info("bmc operation", "operation", req.GetOperation(), "bmc", req.GetAddress(), "driver", d.Manifest.GetId())
+	return bmcResult(true, out, "", "")
 }
 
 // BMCNetworksCapability (Hello.capabilities) says a site agent's local configuration names its BMC
