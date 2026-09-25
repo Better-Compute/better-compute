@@ -39,6 +39,13 @@
     - Snapshots: `sandboxes.snapshot` sends `instance.snapshot` through `vps({ snapshots: SnapshotStore })` into a tenant-private `sandbox_snapshots` table. `create({ fromSnapshot })` restores on the same runtime and `cpu.model`, and FakeHypervisor carries guest memory across.
     - Exec without an in-guest agent: tunnels' `sandboxes.exec` returns an `ssh` ticket (`act`, `inst`, `sbx`) plus a ≤15 min certificate from the `sandboxSsh` CA for `<account>@<instanceId>`, which vps renders into the guest's trust.
     - Also: `readyAt` stamped at first run, selfCheck findings, and `vps().tenantDeleted`, which deletes every instance of a deleted tenant (hosted instances' inline allocations were never released before).
+    - Later the same day:
+      - Guest host keys certified by the sandbox CA (exec pins guests). A sandbox never outlives its certificate: claims take only covering warm instances, warm pools recycle short ones, a fresh sandbox's expiry is capped, and restores or extends past it are refused. `sandboxes.exec` answers `hostCertificate: valid|expired|none`.
+      - Secrets: templates use only secrets the tenant put, never fleet-scoped ones, and writing one decides `compute:secrets:manage`.
+      - `private`/`none` networks place only on hosts whose bcd enforces them. Warm instances on a host that stops doing so are replaced, and running ones are a doctor error (`vps.sandboxes.network`).
+      - §12.8 IAM reactions: `withdrawAgentSandboxes`, `reassignSandboxes` (`sandboxIamReactions` for the host) and `sandboxHolders` for the IamReconcile sweep.
+      - Budgets: `extend` runs the budget check. Warm pools stop refilling on a spent budget, and a `drain` offer empties them.
+      - `sandbox.expiring` (vps/0013), and `sandboxes.snapshot` is `UNSUPPORTED` up front without `RuntimeTraits.snapshot`.
   - `daemon/README.md` rewritten for the v0.1 daemon.
 
 - Metal attestation and dedicated-root leases:
