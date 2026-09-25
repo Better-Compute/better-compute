@@ -228,6 +228,12 @@ type Update struct {
 	SlotsDir string
 }
 
+// nested reports whether one of two clean absolute paths contains the other (or they are equal).
+func nested(a, b string) bool {
+	in := func(x, y string) bool { return x == y || strings.HasPrefix(x, strings.TrimSuffix(y, "/")+"/") }
+	return in(a, b) || in(b, a)
+}
+
 // UpdateDirs are where the slots, and the upgrade and release records, live.
 func (c *Config) UpdateDirs() (slots, state string) {
 	switch {
@@ -440,7 +446,7 @@ func (c *Config) Validate() error {
 	if c.Update.SlotsDir != "" && !path.IsAbs(c.Update.SlotsDir) {
 		return fmt.Errorf("update.slots_dir must be an absolute path, got %q", c.Update.SlotsDir)
 	}
-	if slots, _ := c.UpdateDirs(); c.Helper.Socket != "" && (slots == c.DataDir || strings.HasPrefix(slots, strings.TrimSuffix(c.DataDir, "/")+"/")) {
+	if slots, _ := c.UpdateDirs(); c.Helper.Socket != "" && nested(path.Clean(slots), path.Clean(c.DataDir)) {
 		// The node owns its data directory: slots there would let it plant the binary root trusts.
 		return fmt.Errorf("under bcd helper, update.slots_dir may not be inside data_dir (%s)", c.DataDir)
 	}

@@ -45,6 +45,7 @@ func updateManager(cfg *config.Config, log func(string, ...any)) (*selfupdate.Ma
 		StateDir:     state,
 		StagingDir:   filepath.Join(cfg.DataDir, "staging"),
 		Executable:   exe,
+		SelfVersion:  version,
 		Pins:         pins,
 		Threshold:    int(cfg.Update.ReleaseThreshold),
 		Platform:     runtime.GOOS + "-" + runtime.GOARCH,

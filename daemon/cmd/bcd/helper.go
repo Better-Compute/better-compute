@@ -85,10 +85,23 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd helper: %v\n", err)
 		return exitFailure
 	}
+	u32 := uint32(uid)
+	manager.StagedUID = &u32 // only the node's own staged file
 	srv.Update = manager
 	srv.OnSwap = func(p *selfupdate.Pending) { watchUpdate(manager, p, log) }
 	if st, err := manager.Status(); err == nil && st.Pending != nil && st.Pending.State == selfupdate.StateSwapped {
 		watchUpdate(manager, st.Pending, log)
+	}
+	if os.Geteuid() == 0 {
+		// Every directory on the way to the slots and to the socket must be root's alone: a path the
+		// node could swap for a symlink would steer root's writes (review 11 L1, L2).
+		slots, _ := cfg.UpdateDirs()
+		for _, p := range []string{slots, filepath.Dir(cfg.Helper.Socket)} {
+			if err := rootOnlyPath(p); err != nil {
+				fmt.Fprintf(stderr, "bcd helper: %v\n", err)
+				return exitFailure
+			}
+		}
 	}
 	ln, err := listenHelper(cfg.Helper.Socket, int(gid))
 	if err != nil {
@@ -142,9 +155,7 @@ func listenHelper(socket string, gid int) (*net.UnixListener, error) {
 			return fail(err)
 		}
 	}
-	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fail(err)
-	}
+	// Rename replaces a stale socket atomically; nothing is removed by name first.
 	if err := os.Rename(bound, socket); err != nil {
 		return fail(err)
 	}

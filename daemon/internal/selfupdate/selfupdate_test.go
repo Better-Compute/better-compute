@@ -29,10 +29,10 @@ func TestAdoptStageSwap(t *testing.T) {
 	if cur, err := s.Current(); err != nil || cur != "" {
 		t.Fatalf("Current before adopting = %q, %v", cur, err)
 	}
-	if err := s.Adopt(s.Entrypoint, "1.0.0"); err != nil {
+	if err := s.Adopt(s.Entrypoint, "1.0.0", 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Adopt(s.Entrypoint, "1.0.0"); err != nil {
+	if err := s.Adopt(s.Entrypoint, "1.0.0", 0); err != nil {
 		t.Fatalf("Adopt again: %v", err)
 	}
 	if target, _ := os.Readlink(s.Entrypoint); target != filepath.Join(s.Dir, "current") {
@@ -44,16 +44,16 @@ func TestAdoptStageSwap(t *testing.T) {
 	v2 := []byte("v2 binary")
 	sum := sha256.Sum256(v2)
 	bad := sha256.Sum256([]byte("other"))
-	if _, err := s.Stage(bytes.NewReader(v2), int64(len(v2)), bad[:], "2.0.0"); err == nil {
+	if _, err := s.Stage(bytes.NewReader(v2), int64(len(v2)), bad[:], "2.0.0", 0); err == nil {
 		t.Fatal("a wrong digest was staged")
 	}
-	if _, err := s.Stage(bytes.NewReader(v2), int64(len(v2))-1, sum[:], "2.0.0"); err == nil {
+	if _, err := s.Stage(bytes.NewReader(v2), int64(len(v2))-1, sum[:], "2.0.0", 0); err == nil {
 		t.Fatal("a longer body than the manifest's size was staged")
 	}
 	if _, err := os.Lstat(filepath.Join(s.Dir, "bcd-b")); err == nil {
 		t.Fatal("a refused binary was left in slot b")
 	}
-	slot, err := s.Stage(bytes.NewReader(v2), int64(len(v2)), sum[:], "2.0.0")
+	slot, err := s.Stage(bytes.NewReader(v2), int64(len(v2)), sum[:], "2.0.0", 0)
 	if err != nil || slot != "b" || !s.Holds("b", sum[:]) || s.Versions()["b"] != "2.0.0" || s.Versions()["a"] != "1.0.0" {
 		t.Fatalf("Stage = %q, %v; versions %v", slot, err, s.Versions())
 	}
@@ -79,7 +79,7 @@ func TestEntrypointLinkedElsewhereRefused(t *testing.T) {
 	if err := os.Symlink(other, s.Entrypoint); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Adopt(other, "1.0.0"); err == nil || !strings.Contains(err.Error(), "entrypoint") {
+	if err := s.Adopt(other, "1.0.0", 0); err == nil || !strings.Contains(err.Error(), "entrypoint") {
 		t.Fatalf("Adopt = %v", err)
 	}
 }
@@ -156,12 +156,12 @@ func TestOlder(t *testing.T) {
 
 func TestRevertDropsPrevious(t *testing.T) {
 	s, _ := newSlots(t)
-	if err := s.Adopt(s.Entrypoint, "1.0.0"); err != nil {
+	if err := s.Adopt(s.Entrypoint, "1.0.0", 0); err != nil {
 		t.Fatal(err)
 	}
 	v2 := []byte("v2")
 	sum := sha256.Sum256(v2)
-	if _, err := s.Stage(bytes.NewReader(v2), 2, sum[:], "2.0.0"); err != nil {
+	if _, err := s.Stage(bytes.NewReader(v2), 2, sum[:], "2.0.0", 0); err != nil {
 		t.Fatal(err)
 	}
 	_ = s.Swap("b")
@@ -180,14 +180,14 @@ func TestRevertDropsPrevious(t *testing.T) {
 // update adopts that file, never the older binary the current slot held.
 func TestAdoptAfterScriptReinstall(t *testing.T) {
 	s, _ := newSlots(t)
-	if err := s.Adopt(s.Entrypoint, "1.0.0"); err != nil {
+	if err := s.Adopt(s.Entrypoint, "1.0.0", 0); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.Remove(s.Entrypoint)
 	if err := os.WriteFile(s.Entrypoint, []byte("v1.5 from the script"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Adopt(s.Entrypoint, "1.5.0"); err != nil {
+	if err := s.Adopt(s.Entrypoint, "1.5.0", 0); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(s.Entrypoint); string(b) != "v1.5 from the script" {

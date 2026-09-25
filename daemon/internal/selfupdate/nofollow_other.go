@@ -6,17 +6,19 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
-// openNoFollow opens a file for reading, refusing a symlink (checked, then opened: bcd runs on
-// Linux, where the unix version refuses in the open itself).
-func openNoFollow(path string) (*os.File, error) {
-	fi, err := os.Lstat(path)
+// openStaged: bcd runs on Linux; elsewhere a symlink or non-regular file is refused, checked
+// before the open.
+func openStaged(dir, name string, _ *uint32) (*os.File, error) {
+	p := filepath.Join(dir, name)
+	fi, err := os.Lstat(p)
 	if err != nil {
 		return nil, err
 	}
-	if fi.Mode()&fs.ModeSymlink != 0 {
-		return nil, errors.New("selfupdate: a symlink is not a staged binary")
+	if fi.Mode()&fs.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
 	}
-	return os.Open(path)
+	return os.Open(p)
 }

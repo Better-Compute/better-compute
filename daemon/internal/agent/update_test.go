@@ -194,15 +194,16 @@ func TestSelfUpdateSwapsAndConfirms(t *testing.T) {
 		t.Fatal("a confirmed update was rolled back")
 	}
 
-	// A rollout rolled back: the version in the other slot, by its digest, needs no manifest.
+	// Rolling a confirmed update back to the binary in the other slot would go below the release
+	// floor (review 11 H1): refused, whatever its digest; a rollout moves forward with a new release.
 	old := sha256.Sum256([]byte("bcd 0.3.0\n"))
 	s.push(desired(2, &agentv1.NodeSpec{Daemon: &agentv1.DaemonSection{Version: "v0.3.0", Sha256: old[:]}}))
-	n.restart(t, "0.3.0")
-	if n.link(t, "current") != "bcd-a" || n.link(t, "previous") != "bcd-b" || r.requests != 1 {
-		t.Fatalf("current = %s, previous = %s, %d downloads", n.link(t, "current"), n.link(t, "previous"), r.requests)
+	if st := daemonStatus(t, s, agentv1.SectionState_SECTION_STATE_FAILED); !strings.Contains(st.GetMessage(), "manifest") {
+		t.Fatalf("daemon section = %v", st)
 	}
-	s, _ = n.open()
-	daemonStatus(t, s, agentv1.SectionState_SECTION_STATE_CONVERGED)
+	if n.link(t, "current") != "bcd-b" || r.requests != 1 {
+		t.Fatalf("current = %s, %d downloads", n.link(t, "current"), r.requests)
+	}
 }
 
 // No Welcome by the deadline: the new binary swaps back, and the old one reports the version failed

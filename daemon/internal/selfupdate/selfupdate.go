@@ -19,6 +19,7 @@ package selfupdate
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,18 +85,45 @@ func (s Slots) readLink(name string) (string, error) {
 	return "", fmt.Errorf("selfupdate: %s links to %q, not a slot", s.link(name), target)
 }
 
-// Versions returns the version in each slot (slots.json).
-func (s Slots) Versions() map[string]string {
-	out := map[string]string{}
-	if b, err := os.ReadFile(s.link("slots.json")); err == nil {
-		_ = json.Unmarshal(b, &out)
+// SlotInfo is what slots.json records about a slot: the release it holds, its manifest sequence
+// (0: unknown, e.g. the adopted install) and the SHA-256 of the bytes written into it.
+type SlotInfo struct {
+	Version  string `json:"version"`
+	Sequence int64  `json:"sequence,omitempty"`
+	Sha256   string `json:"sha256,omitempty"`
+}
+
+// Infos returns each slot's record (slots.json; an older file of bare versions is read too).
+func (s Slots) Infos() map[string]SlotInfo {
+	out := map[string]SlotInfo{}
+	b, err := os.ReadFile(s.link("slots.json"))
+	if err != nil {
+		return out
+	}
+	if json.Unmarshal(b, &out) == nil {
+		return out
+	}
+	old := map[string]string{}
+	if json.Unmarshal(b, &old) == nil {
+		for slot, v := range old {
+			out[slot] = SlotInfo{Version: v}
+		}
 	}
 	return out
 }
 
-func (s Slots) setVersion(slot, version string) error {
-	v := s.Versions()
-	v[slot] = version
+// Versions returns the version in each slot.
+func (s Slots) Versions() map[string]string {
+	out := map[string]string{}
+	for slot, info := range s.Infos() {
+		out[slot] = info.Version
+	}
+	return out
+}
+
+func (s Slots) setInfo(slot string, info SlotInfo) error {
+	v := s.Infos()
+	v[slot] = info
 	b, _ := json.Marshal(v)
 	return writeAtomic(s.link("slots.json"), b, 0o600)
 }
@@ -103,7 +131,7 @@ func (s Slots) setVersion(slot, version string) error {
 // Adopt makes the slots exist: before the first update it copies exe (the binary that runs, of
 // version) into slot a, points current at it and replaces the entrypoint with a symlink to current.
 // Afterwards it only checks that the entrypoint still links to current.
-func (s Slots) Adopt(exe, version string) error {
+func (s Slots) Adopt(exe, version string, sequence int64) error {
 	cur, err := s.Current()
 	if err != nil {
 		return err
@@ -112,16 +140,20 @@ func (s Slots) Adopt(exe, version string) error {
 		if err := os.MkdirAll(s.Dir, 0o755); err != nil {
 			return err
 		}
+		// Explicitly: a umask of 077 (a hardened unit) would leave the slots unreachable to the node.
+		if err := os.Chmod(s.Dir, 0o755); err != nil {
+			return err
+		}
 		f, err := os.Open(exe)
 		if err != nil {
 			return err
 		}
-		_, err = s.write("a", f, -1, nil)
+		sum, err := s.write("a", f, -1, nil)
 		f.Close()
 		if err != nil {
 			return err
 		}
-		if err := s.setVersion("a", version); err != nil {
+		if err := s.setInfo("a", SlotInfo{Version: version, Sequence: sequence, Sha256: hex.EncodeToString(sum)}); err != nil {
 			return err
 		}
 		if err := s.relink("current", "a"); err != nil {
@@ -135,12 +167,12 @@ func (s Slots) Adopt(exe, version string) error {
 		if err != nil {
 			return err
 		}
-		_, err = s.write(cur, f, -1, nil)
+		sum, err := s.write(cur, f, -1, nil)
 		f.Close()
 		if err != nil {
 			return err
 		}
-		if err := s.setVersion(cur, version); err != nil {
+		if err := s.setInfo(cur, SlotInfo{Version: version, Sequence: sequence, Sha256: hex.EncodeToString(sum)}); err != nil {
 			return err
 		}
 	}
@@ -172,7 +204,7 @@ func (s Slots) linkEntrypoint() error {
 
 // Stage writes r into the slot that is not current, checking its size and SHA-256 as it goes, and
 // returns that slot. Nothing is swapped.
-func (s Slots) Stage(r io.Reader, size int64, sum []byte, version string) (string, error) {
+func (s Slots) Stage(r io.Reader, size int64, sum []byte, version string, sequence int64) (string, error) {
 	cur, err := s.Current()
 	if err != nil {
 		return "", err
@@ -181,14 +213,19 @@ func (s Slots) Stage(r io.Reader, size int64, sum []byte, version string) (strin
 		return "", errors.New("selfupdate: no slots yet (Adopt first)")
 	}
 	next := Other(cur)
-	if _, err := s.write(next, r, size, sum); err != nil {
+	written, err := s.write(next, r, size, sum)
+	if err != nil {
 		return "", err
 	}
-	return next, s.setVersion(next, version)
+	return next, s.setInfo(next, SlotInfo{Version: version, Sequence: sequence, Sha256: hex.EncodeToString(written)})
 }
 
-// Holds reports whether slot holds a binary with this SHA-256.
+// Holds reports whether slot holds a binary with this SHA-256 (the digest recorded when it was
+// written, else the file hashed).
 func (s Slots) Holds(slot string, sum []byte) bool {
+	if rec := s.Infos()[slot].Sha256; rec != "" {
+		return rec == hex.EncodeToString(sum)
+	}
 	f, err := os.Open(s.slot(slot))
 	if err != nil {
 		return false
@@ -201,13 +238,14 @@ func (s Slots) Holds(slot string, sum []byte) bool {
 	return subtle.ConstantTimeCompare(h.Sum(nil), sum) == 1
 }
 
-// write replaces slot with r (size -1: any size up to MaxBinaryBytes; sum nil: unchecked).
-func (s Slots) write(slot string, r io.Reader, size int64, sum []byte) (string, error) {
+// write replaces slot with r (size -1: any size up to MaxBinaryBytes; sum nil: unchecked) and returns
+// the SHA-256 of what it wrote.
+func (s Slots) write(slot string, r io.Reader, size int64, sum []byte) ([]byte, error) {
 	tmp := s.slot(slot) + ".tmp"
 	_ = os.Remove(tmp)
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer os.Remove(tmp)
 	limit := int64(MaxBinaryBytes)
@@ -219,7 +257,8 @@ func (s Slots) write(slot string, r io.Reader, size int64, sum []byte) (string, 
 	if err == nil && (n > limit || (size >= 0 && n != size)) {
 		err = fmt.Errorf("selfupdate: the binary is %d bytes, not %d", n, limit)
 	}
-	if err == nil && sum != nil && subtle.ConstantTimeCompare(h.Sum(nil), sum) != 1 {
+	digest := h.Sum(nil)
+	if err == nil && sum != nil && subtle.ConstantTimeCompare(digest, sum) != 1 {
 		err = errors.New("selfupdate: the binary's SHA-256 does not match")
 	}
 	if err == nil {
@@ -232,12 +271,12 @@ func (s Slots) write(slot string, r io.Reader, size int64, sum []byte) (string, 
 		err = cerr
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := os.Rename(tmp, s.slot(slot)); err != nil {
-		return "", err
+		return nil, err
 	}
-	return s.slot(slot), syncDir(s.Dir)
+	return digest, syncDir(s.Dir)
 }
 
 // Swap points current at slot and previous at the slot that was current.

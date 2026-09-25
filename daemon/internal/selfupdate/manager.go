@@ -26,6 +26,12 @@ type Manager struct {
 	StagingDir string
 	// Executable is adopted into slot a on the first update (the install script's binary).
 	Executable string
+	// SelfVersion is the version of the process running the manager (the helper's own, or the
+	// agent's): the running version before the first adoption. After it, slots.json says; what a
+	// node claims (Target.Running) is never trusted under the helper.
+	SelfVersion string
+	// StagedUID, when set, is the only owner a staged binary may have (the node's uid).
+	StagedUID *uint32
 	// Pins and Threshold are the release keys; Platform the os-arch this host takes.
 	Pins      [][]byte
 	Threshold int
@@ -50,7 +56,8 @@ type Target struct {
 	Sha256  []byte `json:"sha256"`
 	// Manifest is the signed release manifest (DaemonSection.signature).
 	Manifest []byte `json:"manifest,omitempty"`
-	// Running is the version the node runs now (it labels slot a on adoption and the record).
+	// Running is the version the node says it runs: used only by a manager without SelfVersion
+	// (the in-process one, whose own version it is); the helper reads its slots instead.
 	Running string `json:"running"`
 	// CommandID is the daemon.upgrade command, if any.
 	CommandID string `json:"commandId,omitempty"`
@@ -126,8 +133,26 @@ func (m *Manager) Prepare(t Target) (*pki.ReleaseArtifact, error) {
 	return m.prepareLocked(t)
 }
 
+// running is the version that runs now: the current slot's record, else this process's own.
+func (m *Manager) running(t Target) string {
+	if cur, err := m.Slots.Current(); err == nil && cur != "" {
+		if v := m.Slots.Infos()[cur].Version; v != "" {
+			return Bare(v)
+		}
+	}
+	if m.SelfVersion != "" {
+		return Bare(m.SelfVersion)
+	}
+	return Bare(t.Running)
+}
+
+// floor is the lowest release sequence taken: the highest this node ran or was installed at.
+func (m *Manager) floor() int64 {
+	return max(LoadRecord(m.StateDir).Sequence, m.Sequence)
+}
+
 func (m *Manager) prepareLocked(t Target) (*pki.ReleaseArtifact, error) {
-	target, running := Bare(t.Version), Bare(t.Running)
+	target, running := Bare(t.Version), m.running(t)
 	if !versionName.MatchString(target) {
 		return nil, refuse("%q is not a release version", t.Version)
 	}
@@ -138,9 +163,13 @@ func (m *Manager) prepareLocked(t Target) (*pki.ReleaseArtifact, error) {
 	if len(t.Sha256) != 32 {
 		return nil, refuse("the release sha256 must be 32 bytes")
 	}
+	// The other slot may already hold the target (swapped away from, and back to). Without a manifest
+	// that is taken only for a release whose recorded sequence meets the floor: a binary the node
+	// once ran is never a way below it (review 11 H1).
 	if cur, err := m.Slots.Current(); err == nil && cur != "" {
 		next := Other(cur)
-		if Bare(m.Slots.Versions()[next]) == target && m.Slots.Holds(next, t.Sha256) {
+		info := m.Slots.Infos()[next]
+		if Bare(info.Version) == target && info.Sequence > 0 && info.Sequence >= m.floor() && m.Slots.Holds(next, t.Sha256) {
 			return nil, nil
 		}
 	}
@@ -154,7 +183,7 @@ func (m *Manager) prepareLocked(t Target) (*pki.ReleaseArtifact, error) {
 	if err != nil {
 		return nil, refuse("%v", err)
 	}
-	floor := max(rec.Sequence, m.Sequence)
+	floor := m.floor()
 	now := m.now()
 	if t.ServerTime.After(now) {
 		now = t.ServerTime // a later clock can only refuse more
@@ -199,8 +228,8 @@ func (m *Manager) Swap(t Target) (*Pending, error) {
 	if err != nil {
 		return nil, err
 	}
-	target, running := Bare(t.Version), Bare(t.Running)
-	if err := m.Slots.Adopt(m.Executable, running); err != nil {
+	target, running := Bare(t.Version), m.running(t)
+	if err := m.Slots.Adopt(m.Executable, running, m.Sequence); err != nil {
 		return nil, fmt.Errorf("adopt the running binary: %w", err)
 	}
 	if m.InstallUnits != nil {
@@ -217,19 +246,24 @@ func (m *Manager) Swap(t Target) (*Pending, error) {
 		return nil, err
 	}
 	p := &Pending{Version: target, FromVersion: running, From: cur, To: Other(cur), CommandID: t.CommandID}
-	if art != nil {
-		f, err := openNoFollow(m.StagedPath(target))
+	if art == nil {
+		p.Sequence = m.Slots.Infos()[p.To].Sequence
+	} else {
+		man, err := pki.VerifyReleaseManifest(t.Manifest, m.Pins, max(m.Threshold, 1))
+		if err != nil {
+			return nil, refuse("%v", err)
+		}
+		p.Sequence = man.Sequence
+		// Beneath the staging directory's parent, no symlink, no FIFO (O_NONBLOCK), a regular file
+		// with one link owned by the node: the node owns the staging directory.
+		f, err := openStaged(m.StagingDir, "bcd-"+target, m.StagedUID)
 		if err != nil {
 			return nil, fmt.Errorf("the staged binary: %w", err)
 		}
-		_, err = m.Slots.Stage(f, art.Size, t.Sha256, target)
+		_, err = m.Slots.Stage(f, art.Size, t.Sha256, target, man.Sequence)
 		f.Close()
 		if err != nil {
 			return nil, err
-		}
-		man, _ := pki.VerifyReleaseManifest(t.Manifest, m.Pins, max(m.Threshold, 1))
-		if man != nil {
-			p.Sequence = man.Sequence
 		}
 	}
 	p.State = StateSwapped
@@ -255,6 +289,9 @@ func (m *Manager) Confirm(version string) error {
 	}
 	if p == nil || p.State != StateSwapped || p.Version != Bare(version) {
 		return errors.New("no swap to that version is pending")
+	}
+	if cur, _ := m.Slots.Current(); cur != p.To {
+		return errors.New("the pending version is not the current slot")
 	}
 	rec := LoadRecord(m.StateDir)
 	if p.Sequence > rec.Sequence {
@@ -297,10 +334,11 @@ func (m *Manager) rollBackLocked(version, reason string) (*Pending, error) {
 	return p, nil
 }
 
-// Settle is a process start running version running: a new binary awaits its Welcome (or, past
-// the deadline, is swapped back: "restart"); the old binary back in its slot records the version
-// as failed.
-func (m *Manager) Settle(running string) (Settlement, error) {
+// Settle is a process start: where current points decides, never what the process claims (review
+// 11 M2). Current on the new slot: the new binary awaits its Welcome (past the deadline it is
+// swapped back: "restart"). Current back on the old slot (swapped back by the new binary, the
+// helper, bcd-rollback.service or by hand): the version is recorded as failed.
+func (m *Manager) Settle(_ string) (Settlement, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, err := LoadPending(m.StateDir)
@@ -311,9 +349,9 @@ func (m *Manager) Settle(running string) (Settlement, error) {
 	if p == nil {
 		return Settlement{Action: "none"}, nil
 	}
-	running = Bare(running)
+	cur, _ := m.Slots.Current()
 	switch {
-	case p.State == StateSwapped && running == p.Version:
+	case p.State == StateSwapped && cur == p.To:
 		if !m.now().Before(p.Deadline) {
 			rolled, err := m.rollBackLocked(p.Version, fmt.Sprintf("bcd %s was not welcomed by a gateway before its deadline", p.Version))
 			if err != nil {
@@ -322,7 +360,7 @@ func (m *Manager) Settle(running string) (Settlement, error) {
 			return Settlement{Action: "restart", Pending: rolled}, nil
 		}
 		return Settlement{Action: "await", Pending: p}, nil
-	case running == p.FromVersion:
+	case cur == p.From:
 		reason := p.Reason
 		if p.State != StateRolledBack || reason == "" {
 			reason = fmt.Sprintf("bcd %s did not start", p.Version)

@@ -196,6 +196,8 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 		<-ctx.Done()
 		_ = l.Close()
 	}()
+	// At most maxConns requests at once: a peer cannot pile up goroutines and descriptors.
+	slots := make(chan struct{}, maxConns)
 	for {
 		conn, err := l.AcceptUnix()
 		if err != nil {
@@ -204,9 +206,21 @@ func (s *Server) Serve(ctx context.Context, l *net.UnixListener) error {
 			}
 			return err
 		}
-		go s.handle(ctx, conn)
+		select {
+		case slots <- struct{}{}:
+		default:
+			_ = conn.Close()
+			continue
+		}
+		go func() {
+			defer func() { <-slots }()
+			s.handle(ctx, conn)
+		}()
 	}
 }
+
+// maxConns bounds the requests the helper serves at once.
+const maxConns = 32
 
 func (s *Server) logf(msg string, args ...any) {
 	if s.Log != nil {
