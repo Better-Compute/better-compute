@@ -81,6 +81,21 @@ describe('createDevStack', () => {
     expect(stack.daemons.get(active.binding.nodeId)!.files.size).toBeGreaterThan(0);
   });
 
+  it('runs under signed intent: joined daemons hold the roots and every command is signed', { timeout: 60_000 }, async () => {
+    stack = await createDevStack({ signedIntent: true });
+    const { poolId } = await stack.createPool();
+    const [nodeId] = await stack.join({ poolId, seed: 'dev-signed' });
+    // Adoption needs diag.nvml to run: a daemon holding roots runs only signed commands.
+    await stack.waitFor([nodeId!], { timeoutMs: 45_000 });
+    const { rows } = await stack.database.query<{ unsigned: number; total: number }>(
+      `SELECT count(*) FILTER (WHERE signature IS NULL)::int AS unsigned, count(*)::int AS total
+         FROM commands WHERE node_id = $1`,
+      [nodeId],
+    );
+    expect(rows[0]!.total).toBeGreaterThan(0);
+    expect(rows[0]!.unsigned).toBe(0);
+  });
+
   it('does not adopt a machine that fails diag.nvml acceptance', { timeout: 60_000 }, async () => {
     stack = await createDevStack();
     // HGX boards have 8 GPUs; acceptance checks the count, not just what the machine reports.

@@ -32,6 +32,7 @@ import {
   type ServedGateway,
 } from '@better-compute/gateway';
 import {
+  createCommandSigningAuthority,
   createExecTicketIssuer,
   createNodeCa,
   createRevocationFeed,
@@ -827,6 +828,11 @@ export interface DevStackOptions
   capacity?: ComputeOptions<readonly ComputeModule[], []>['capacity'];
   /** Workload identity (v0.5), as for `betterCompute()`: VPS hosts' IMDS get instance tokens. */
   workloadIdentity?: ComputeOptions<readonly ComputeModule[], []>['workloadIdentity'];
+  /**
+   * Signed intent (§13): a command-signing root (`pki.commandSigning`), so every command and spec is signed and
+   * joining daemons receive the roots in JoinResponse.trust (a WS-mode bcd refuses to run without them).
+   */
+  signedIntent?: boolean;
 }
 
 export interface DevStack extends DevFleet {
@@ -904,7 +910,11 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     baseURL,
     // The store's housekeeping (outbox and authz changes behind cursors, spent attestations, expired joins).
     modules: [...(iam.modules ?? []), ...(options.modules ?? []), retentionModule()],
-    pki: { ...keys.pki, ...(external ? { servingCa: external.servingCa } : {}) },
+    pki: {
+      ...keys.pki,
+      ...(external ? { servingCa: external.servingCa } : {}),
+      ...(options.signedIntent ? { commandSigning: createCommandSigningAuthority() } : {}),
+    },
     ...(external
       ? {
           gateway: {
