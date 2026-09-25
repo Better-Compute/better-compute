@@ -7,7 +7,7 @@ description: "Destructive-command batches (v1.0 quorum). A batch fixes a set of 
 
 Destructive-command batches (v1.0 quorum). A batch fixes a set of (subject, kind) leaves, optionally bound to exact payloads, under one Merkle root when it is created (modules create them through `commands.createBatch`). When the deployment publishes approver keys (`pki.approvers`), the batch's commands wait until enough approvers, holding keys off the control plane, have signed its root for the trust domain. The gateway then sends each command with the approval and its leaf's proof, and the daemon verifies both. Without approver keys a batch is recorded for audit and its commands go out at once. See [Security](/docs/operations/security).
 
-All 6 methods are served by this release.
+All 7 methods are served by this release.
 
 | Method                | Kind     | Authorization                                | Phase | Status     |
 | --------------------- | -------- | -------------------------------------------- | ----- | ---------- |
@@ -15,6 +15,7 @@ All 6 methods are served by this release.
 | [`get`](#get)         | read     | `compute:batches:read` @ `compute-tenant`    | v1.0  | registered |
 | [`list`](#list)       | read     | `compute:batches:read` @ `compute-tenant`    | v1.0  | registered |
 | [`scope`](#scope)     | read     | `compute:batches:read` @ `compute-tenant`    | v1.0  | registered |
+| [`members`](#members) | read     | `compute:batches:read` @ `compute-tenant`    | v1.0  | registered |
 | [`approve`](#approve) | mutation | `compute:batches:approve` @ `compute-tenant` | v1.0  | registered |
 | [`cancel`](#cancel)   | mutation | `compute:batches:approve` @ `compute-tenant` | v1.0  | registered |
 
@@ -114,6 +115,25 @@ An empty `payloadSha256` marks a leaf that admits any payload of its kind, which
 | `batchId`  | string  | yes      |             |
 | `cursor`   | integer |          |             |
 | `limit`    | integer |          |             |
+
+## members
+
+`POST /api/compute/commandBatches/members`
+
+- **Kind:** read
+- **Authorization:** `compute:batches:read` @ `compute-tenant`
+- **Module:** `quorum`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type                                                                                                          | Required | Constraints |
+| ---------- | ------------------------------------------------------------------------------------------------------------- | -------- | ----------- |
+| `tenantId` | string                                                                                                        | yes      |             |
+| `batchId`  | string                                                                                                        | yes      |             |
+| `state`    | one of `pending`, `dispatched`, `acked`, `running`, `succeeded`, `failed`, `rejected`, `expired`, `cancelled` |          |             |
+| `limit`    | integer                                                                                                       |          |             |
+| `cursor`   | string                                                                                                        |          |             |
 
 ## approve
 

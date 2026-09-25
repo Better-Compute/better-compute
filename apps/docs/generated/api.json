@@ -428,6 +428,52 @@
         "description": "Returns a batch's leaves in leaf order, for approvers to review before signing: each leaf's index, subject, kind and `payloadSha256`.\n\nAn empty `payloadSha256` marks a leaf that admits any payload of its kind, which approvers should look at closely. Pages hold 1 to 5,000 leaves (1,000 by default); `next` is the leaf index to pass as `cursor`."
       },
       {
+        "method": "members",
+        "route": "POST /api/compute/commandBatches/members",
+        "kind": "read",
+        "action": "compute:batches:read",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "quorum",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "batchId": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "dispatched",
+                "acked",
+                "running",
+                "succeeded",
+                "failed",
+                "rejected",
+                "expired",
+                "cancelled"
+              ]
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "cursor": {
+              "type": "string"
+            }
+          },
+          "required": ["tenantId", "batchId"],
+          "additionalProperties": false
+        },
+        "summary": "",
+        "description": ""
+      },
+      {
         "method": "approve",
         "route": "POST /api/compute/commandBatches/approve",
         "kind": "mutation",

@@ -488,6 +488,51 @@
         "additionalProperties": false
       }
     },
+    "commandBatches.members": {
+      "route": "POST /api/compute/commandBatches/members",
+      "kind": "read",
+      "action": "compute:batches:read",
+      "resource": "compute-tenant",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "batchId": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "dispatched",
+              "acked",
+              "running",
+              "succeeded",
+              "failed",
+              "rejected",
+              "expired",
+              "cancelled"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "cursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenantId",
+          "batchId"
+        ],
+        "additionalProperties": false
+      }
+    },
     "commandBatches.scope": {
       "route": "POST /api/compute/commandBatches/scope",
       "kind": "read",

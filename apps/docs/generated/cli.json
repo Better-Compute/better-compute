@@ -2528,7 +2528,7 @@
       "aliases": [],
       "group": "PKI",
       "summary": "Show the trust bundle version the deployment publishes, and the one to sign a quorum change for",
-      "description": "pki trust-version reads the trust bundle the deployment last published (its version follows its content: a changed bundle publishes the next version, pki.trustVersion is a floor) and compares it with this configuration and PKI bundle: whether they publish the same bundle, whether the configured approver quorum differs (then its current approvers sign it for nextVersion: better-compute batch sign-approvers --version <nextVersion>, with pki.trustVersion set to it), and how many connected daemons hold that version.",
+      "description": "pki trust-version reads the trust bundle the deployment last published (its version follows its content: a changed bundle publishes the next version, pki.trustVersion is a floor) and compares it with this configuration and PKI bundle: whether they publish the same bundle, the published approver-set epoch, whether the configured approver quorum differs (then its current approvers sign it for signQuorumForEpoch: better-compute batch sign-approvers --epoch <n>, with pki.approvers.epoch set to it), and how many connected daemons hold that version.",
       "usage": "better-compute pki trust-version [--pki PATH] [--config PATH]",
       "target": "config",
       "args": [],
@@ -2816,8 +2816,8 @@
       "aliases": [],
       "group": "Quorum",
       "summary": "Sign a change of the approver set with a current approver key",
-      "description": "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version of the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
-      "usage": "better-compute batch sign-approvers --key PATH --version N [--approvers PATHS] [--threshold K] [--tiers SIZE:K,…] [--unbatched N] [--trust-domain DOMAIN] [--pki PATH]",
+      "description": "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for approver-set --epoch (one above the current set's; better-compute pki trust-version prints it) in the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers.setSignatures with pki.approvers.epoch; they stay valid on every later trust bundle version while the set is current. Prints the set's digest and the signature.",
+      "usage": "better-compute batch sign-approvers --key PATH --epoch N [--approvers PATHS] [--threshold K] [--tiers SIZE:K,…] [--unbatched N] [--trust-domain DOMAIN] [--pki PATH]",
       "target": "none",
       "args": [],
       "flags": [
@@ -2828,10 +2828,10 @@
           "description": "Your CURRENT approver private key (PEM)"
         },
         {
-          "flag": "--version",
+          "flag": "--epoch",
           "value": "N",
           "optional": false,
-          "description": "The trust bundle version that publishes the new set"
+          "description": "The new set's epoch: one above the current set's"
         },
         {
           "flag": "--approvers",
@@ -2887,7 +2887,7 @@
         }
       ],
       "examples": [
-        "better-compute batch sign-approvers --key alice.pem --version 4 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2"
+        "better-compute batch sign-approvers --key alice.pem --epoch 2 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2"
       ]
     },
     {
@@ -3176,7 +3176,7 @@
       "group": "Fleet",
       "summary": "Write the POSIX sh script that installs bcd on a server and joins it to a pool",
       "description": "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band. --plugins prepares the node for bcx driver plugins: a [plugins] section (dir /usr/local/lib/bcd/plugins, a child of bcd's delegated cgroup) and a bcd.service.d drop-in that lets bcd run each plugin under its own uid in its own cgroup (CAP_SETUID/CAP_SETGID/CAP_KILL, Delegate=yes); --privileged-plugins names the ones that run as root and make namespaces (Kata). Any node whose config.toml has a [plugins] section gets the drop-in, and an upgrade keeps the sections the operator configured.",
-      "usage": "better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--privileged-plugins NAMES] [--pki PATH] [--out PATH]",
+      "usage": "better-compute daemon install-script --pool ID --site ID --gateway-url URL --base-url URL [--base-path PATH] --bcd-version VERSION [--sha256 ARCH=HEX,…] [--release-manifest PATH] [--release-pins PINS] [--release-threshold N] [--plugins] [--approver-set-sha256 HEX] [--privileged-plugins NAMES] [--pki PATH] [--out PATH]",
       "target": "none",
       "args": [],
       "flags": [
@@ -3249,6 +3249,12 @@
           "flag": "--plugins",
           "optional": true,
           "description": "Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)"
+        },
+        {
+          "flag": "--approver-set-sha256",
+          "value": "HEX",
+          "optional": true,
+          "description": "Pin the deployment's approver set (pki trust-version prints it): its first set, or nothing destructive"
         },
         {
           "flag": "--privileged-plugins",
