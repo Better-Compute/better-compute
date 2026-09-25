@@ -27,6 +27,7 @@ import { ACME, options } from './support/server.js';
 const T0 = Date.UTC(2026, 8, 25, 12);
 const TOKEN = 'op-token';
 const TRUST_DOMAIN = 'compute.test';
+const NODE_Q = 'node_01k5w00000000000000000000q';
 let db: SqlExecutor | undefined;
 afterEach(async () => {
   await db?.close();
@@ -261,6 +262,72 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
       'cancelled',
       'expired',
     ]);
+  });
+
+  it('creates batches through the API and runs a batched reboot once approved', async () => {
+    const s = await setup();
+    await db!.query(
+      `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_q', $1, 'shared', 'eu', 1)`,
+      [ACME],
+    );
+    await db!.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+         trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($2, 'site_q', $1, 'host', 'ready', false, false, 'disconnected', 'platform', 0, 0, 1, 1, 0, 1)`,
+      [ACME, NODE_Q],
+    );
+    // What the API's visibility check reads (a real node gets it from the node pass).
+    await db!.query(
+      `INSERT INTO authz_projection (type, id, tenant_id, attributes) VALUES ('node', $1, $2, '{}')`,
+      [NODE_Q, ACME],
+    );
+    const request = {
+      tenantId: ACME,
+      reason: 'reboot after the kernel update',
+      scope: [{ subject: NODE_Q, kind: 'node.reboot' }],
+      idempotencyKey: 'reboot-q',
+    };
+    const created = await s.api.create(s.cred, request);
+    // One leaf: the tier that needs one approval.
+    expect(created).toMatchObject({
+      state: 'pending',
+      scopeSize: 1,
+      requiredApprovals: 1,
+      trustDomain: TRUST_DOMAIN,
+      createdBy: 'usr_ops',
+    });
+    // A retry is the same batch; the key for another request is refused.
+    expect((await s.api.create(s.cred, request)).batchId).toBe(created.batchId);
+    await expect(
+      s.api.create(s.cred, { ...request, scope: [{ subject: NODE_Q, kind: 'disk.wipe' }] }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(
+      s.api.create(s.cred, { ...request, idempotencyKey: 'bad', scope: [{ subject: NODE_Q, kind: 'Reboot' }] }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+
+    const commands = s.compute.api.commands;
+    const run = { tenantId: ACME, nodeId: NODE_Q, kind: 'node.reboot' };
+    // With approvers and no break-glass allowance, a reboot needs its batch.
+    await expect(commands.run(s.cred, { ...run, idempotencyKey: 'r0' })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      details: { reason: 'batch-required' },
+    });
+    const queued = await commands.run(s.cred, { ...run, idempotencyKey: 'r1', batchId: created.batchId });
+    const due = async () =>
+      (
+        await db!.query<{ due: boolean }>(
+          `SELECT not_before <= compute_now() AS due FROM commands WHERE id = $1`,
+          [queued.id],
+        )
+      ).rows[0]!.due;
+    expect(await due()).toBe(false);
+    const approved = await s.api.approve(s.cred, {
+      tenantId: ACME,
+      batchId: created.batchId,
+      signature: s.sign(created, 1),
+    });
+    expect(approved).toMatchObject({ state: 'approved', commands: { pending: 1 } });
+    expect(await due()).toBe(true);
   });
 
   it('needs no approvals where the deployment publishes no approver keys', async () => {

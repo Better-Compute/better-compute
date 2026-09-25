@@ -11,6 +11,11 @@
 // it starts over on the new HEAD, so nobody's commit is ever reverted. Afterwards the shared index
 // entries for the paths are reset to the new HEAD, so a later commit elsewhere cannot revert them.
 // `GIT` overrides the git executable (default: GitHub Desktop's bundled git on this machine).
+//
+// `--use <path>=<file>` (repeatable) commits <file>'s content at <path> instead of the working tree's:
+// for a shared file that also holds another session's uncommitted hunks, prepare HEAD's text plus only
+// your hunks in a scratch file (`git show HEAD:<path> > scratch`, then edit it) and commit that. The
+// working tree is left alone.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -31,7 +36,9 @@ const gitPath = process.env.GIT ?? (existsSync(defaultGit) ? defaultGit : 'git')
 
 function usage(message) {
   if (message) console.error(message);
-  console.error('Usage: node scripts/private-commit.mjs -F <message-file> -- <path>...');
+  console.error(
+    'Usage: node scripts/private-commit.mjs -F <message-file> [--use <path>=<file>]... -- [<path>...]',
+  );
   process.exit(2);
 }
 
@@ -41,8 +48,20 @@ const dashes = argv.indexOf('--');
 if (at < 0 || !argv[at + 1] || dashes < 0) usage();
 const messageFile = argv[at + 1];
 const paths = argv.slice(dashes + 1);
-if (!paths.length) usage('No paths given');
+/** [repository path, file whose content to commit there] */
+const uses = [];
+argv.slice(0, dashes).forEach((arg, index, options) => {
+  if (arg !== '--use') return;
+  const value = options[index + 1] ?? '';
+  const split = value.indexOf('=');
+  if (split <= 0) usage(`--use takes <path>=<file>, got ${JSON.stringify(value)}`);
+  const [path, file] = [value.slice(0, split).replaceAll('\\', '/'), value.slice(split + 1)];
+  if (!existsSync(file)) usage(`No file ${file} for --use ${path}`);
+  uses.push([path, file]);
+});
+if (!paths.length && !uses.length) usage('No paths given');
 if (!existsSync(messageFile)) usage(`No message file ${messageFile}`);
+const committed = [...paths, ...uses.map(([path]) => path)];
 
 const git = (args, env) =>
   execFileSync(gitPath, args, {
@@ -59,7 +78,12 @@ for (let attempt = 1; attempt <= 10; attempt++) {
   try {
     git(['read-tree', head], env);
     // -A also records deletions of the given paths.
-    git(['add', '-A', '--', ...paths], env);
+    if (paths.length) git(['add', '-A', '--', ...paths], env);
+    for (const [path, file] of uses) {
+      const blob = git(['hash-object', '-w', '--path', path, file]);
+      const mode = git(['ls-files', '-s', '--', path], env).split(' ')[0] || '100644';
+      git(['update-index', '--add', '--cacheinfo', `${mode},${blob},${path}`], env);
+    }
     const tree = git(['write-tree'], env);
     if (tree === git(['rev-parse', `${head}^{tree}`])) {
       console.log('Nothing to commit for the given paths.');
@@ -74,7 +98,7 @@ for (let attempt = 1; attempt <= 10; attempt++) {
     }
     // The shared index still holds the old blobs for these paths; make it match the new HEAD.
     try {
-      git(['reset', '-q', commit, '--', ...paths]);
+      git(['reset', '-q', commit, '--', ...committed]);
     } catch {
       // A path that no longer exists anywhere has no index entry to reset.
     }

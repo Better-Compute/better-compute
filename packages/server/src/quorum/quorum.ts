@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ComputeError,
   defineMethod,
@@ -24,6 +25,7 @@ import {
   type BatchApproval,
   type Signature,
 } from '@better-compute/protocol';
+import { derivedId } from '../api/common.js';
 import { trustBundleApproverSetMigration, trustBundleStateMigration } from './trust-version.js';
 
 // The destructive-batch quorum, server side (PLAN.md §13, v1.0). A batch is a set of (subject, kind)
@@ -107,6 +109,12 @@ ALTER TABLE command_batch_members ADD COLUMN payload_sha256 bytea NOT NULL DEFAU
 `,
 };
 
+/** `commandBatches.create` retries: the request a caller's key stands for. */
+export const quorumRequestMigration: Migration = {
+  name: 'quorum/0005_batch_request',
+  sql: `ALTER TABLE command_batches ADD COLUMN request_sha256 bytea;`,
+};
+
 /** The quorum a deployment publishes in its trust bundle (`pki.approvers`). */
 export interface QuorumConfig {
   approverKeys: readonly ApproverKey[];
@@ -166,6 +174,13 @@ export interface CreateBatchInput {
   /** When the batch stops admitting commands (default 24 h); approvals are signed up to it. */
   notAfterMs?: number;
   createdBy?: string;
+  /**
+   * A deterministic id (the API derives it from the caller's idempotency key) with the digest of
+   * the request it stands for: the same request again returns the stored batch (`replayed`), a
+   * different one under the same id is `CONFLICT`.
+   */
+  batchId?: string;
+  requestSha256?: Uint8Array;
 }
 
 /**
@@ -176,7 +191,13 @@ export async function createCommandBatch(
   tx: SqlTx,
   input: CreateBatchInput,
   options: { now: number; quorum?: QuorumConfig | undefined },
-): Promise<{ batchId: string; held: boolean; required: number; size: number }> {
+): Promise<{
+  batchId: string;
+  held: boolean;
+  required: number;
+  size: number;
+  replayed?: true;
+}> {
   if (typeof input.reason !== 'string' || !input.reason.trim() || input.reason.length > 500)
     throw new ComputeError('INVALID_INPUT', 'A batch needs a reason of at most 500 characters');
   if (!Array.isArray(input.scope) || input.scope.length === 0)
@@ -190,7 +211,7 @@ export async function createCommandBatch(
       !/^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$/.test(entry.kind)
     )
       throw new ComputeError('INVALID_INPUT', 'Batch scope entries are { subject, kind }');
-  const batchId = newId('batch');
+  const batchId = input.batchId ?? newId('batch');
   const scope = batchScope(batchId, input.scope);
   if (scope.size > maxBatchLeaves)
     throw new ComputeError('INVALID_INPUT', `A batch holds at most ${maxBatchLeaves} leaves`);
@@ -201,10 +222,11 @@ export async function createCommandBatch(
   const required = quorum?.approverKeys.length
     ? requiredApprovals(scope.size, quorum.threshold, quorum.tiers)
     : 0;
-  await tx.query(
+  const inserted = await tx.query(
     `INSERT INTO command_batches (id, tenant_id, reason, scope_root, scope_size, required, not_after,
-                                  state, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8 / 1000), 'pending', $8)`,
+                                  state, created_by, request_sha256)
+     VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8 / 1000), 'pending', $8, $9)
+     ON CONFLICT (id) DO NOTHING RETURNING id`,
     [
       batchId,
       input.tenantId,
@@ -214,8 +236,32 @@ export async function createCommandBatch(
       required,
       notAfter,
       input.createdBy ?? null,
+      input.requestSha256 ? Buffer.from(input.requestSha256) : null,
     ],
   );
+  if (inserted.rows.length === 0) {
+    // Only a caller-chosen id collides: the same request again, or a key reused for another.
+    const { rows } = await tx.query<{
+      tenant_id: string;
+      request_sha256: Uint8Array | null;
+      required: number;
+      scope_size: number;
+    }>(
+      'SELECT tenant_id, request_sha256, required, scope_size FROM command_batches WHERE id = $1',
+      [batchId],
+    );
+    const existing = rows[0];
+    if (
+      !existing ||
+      existing.tenant_id !== input.tenantId ||
+      !existing.request_sha256 ||
+      !input.requestSha256 ||
+      !Buffer.from(existing.request_sha256).equals(Buffer.from(input.requestSha256))
+    )
+      throw new ComputeError('CONFLICT', 'The idempotency key was already used for a different request');
+    const stored = Number(existing.required);
+    return { batchId, held: stored > 0, required: stored, size: Number(existing.scope_size), replayed: true };
+  }
   const hexOf = (digest: Uint8Array | undefined) => Buffer.from(digest ?? []).toString('hex');
   const leaves = new Map<string, BatchScopeEntry>();
   for (const entry of input.scope)
@@ -426,6 +472,23 @@ export interface BatchScopeInput extends BatchRef {
   cursor?: number;
   limit?: number;
 }
+export interface CreateBatchRequest {
+  tenantId: string;
+  /** Shown to approvers (at most 500 characters). */
+  reason: string;
+  /**
+   * The leaves approvers sign: `subject` is the node id for kinds a node runs on itself,
+   * `bmc:<site agent node id>/<address>` for bmc.*, `node:<target>` for site.httpProxy.
+   * `payloadSha256` (hex) binds a leaf to one exact payload; without it the leaf admits any payload
+   * of its kind (approvers see it flagged).
+   */
+  scope: { subject: string; kind: string; payloadSha256?: string }[];
+  /** How long the batch admits commands (and approvals), 60 s to 72 h; 24 h by default. */
+  notAfterSeconds?: number;
+  /** Scoped to (tenant, caller identity): a retry returns the same batch, never a second one. */
+  idempotencyKey: string;
+}
+
 export interface ApproveBatchInput extends BatchRef {
   /** One approver's signature over the batch (pki signBatchApproval): `sig` is base64url. */
   signature: { kid: string; sig: string };
@@ -439,13 +502,62 @@ const parseRef = (
   return { ...input, tenantId: tenantOf(input.tenantId), batchId: batchIdOf(input.batchId) };
 };
 
+const idempotencyKeyPattern = /^[A-Za-z0-9._~:/+=-]{1,128}$/;
+
+function parseCreate(raw: unknown): CreateBatchRequest {
+  const input = record(raw, ['tenantId', 'reason', 'scope', 'notAfterSeconds', 'idempotencyKey']);
+  if (typeof input.reason !== 'string' || !input.reason.trim() || input.reason.length > 500)
+    throw new ComputeError('INVALID_INPUT', 'reason is required (at most 500 characters)');
+  if (typeof input.idempotencyKey !== 'string' || !idempotencyKeyPattern.test(input.idempotencyKey))
+    throw new ComputeError('INVALID_INPUT', 'idempotencyKey is invalid');
+  if (!Array.isArray(input.scope) || input.scope.length === 0 || input.scope.length > maxBatchLeaves)
+    throw new ComputeError('INVALID_INPUT', `scope is 1 to ${maxBatchLeaves} leaves`);
+  const scope = input.scope.map((raw, index) => {
+    const entry = record(raw, ['subject', 'kind', 'payloadSha256']);
+    if (typeof entry.subject !== 'string' || !entry.subject || entry.subject.length > 512)
+      throw new ComputeError('INVALID_INPUT', `scope[${index}].subject is invalid`);
+    if (typeof entry.kind !== 'string' || !/^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$/.test(entry.kind))
+      throw new ComputeError('INVALID_INPUT', `scope[${index}].kind is not a command kind`);
+    if (
+      entry.payloadSha256 !== undefined &&
+      (typeof entry.payloadSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.payloadSha256))
+    )
+      throw new ComputeError('INVALID_INPUT', `scope[${index}].payloadSha256 is a hex SHA-256`);
+    return {
+      subject: entry.subject,
+      kind: entry.kind,
+      ...(entry.payloadSha256 ? { payloadSha256: entry.payloadSha256 as string } : {}),
+    };
+  });
+  const result: CreateBatchRequest = {
+    tenantId: tenantOf(input.tenantId),
+    reason: input.reason,
+    scope,
+    idempotencyKey: input.idempotencyKey,
+  };
+  if (input.notAfterSeconds !== undefined) {
+    if (
+      !Number.isInteger(input.notAfterSeconds) ||
+      (input.notAfterSeconds as number) < 60 ||
+      (input.notAfterSeconds as number) > 72 * 3600
+    )
+      throw new ComputeError('INVALID_INPUT', 'notAfterSeconds is 60 to 259200 (72 h)');
+    result.notAfterSeconds = input.notAfterSeconds as number;
+  }
+  return result;
+}
+
 export type CommandBatchesApi = {
   commandBatches: {
+    create: MethodDefinition<CreateBatchRequest, CommandBatchView>;
     get: MethodDefinition<BatchRef, CommandBatchView>;
     list: MethodDefinition<ListBatchesInput, { items: CommandBatchView[]; next?: string }>;
     scope: MethodDefinition<
       BatchScopeInput,
-      { items: { leafIndex: number; subject: string; kind: string }[]; next?: number }
+      {
+        items: { leafIndex: number; subject: string; kind: string; payloadSha256: string }[];
+        next?: number;
+      }
     >;
     approve: MethodDefinition<ApproveBatchInput, CommandBatchView>;
     cancel: MethodDefinition<BatchRef, CommandBatchView>;
@@ -463,6 +575,59 @@ export function commandBatchesApi(options: {
 
   return {
     commandBatches: {
+      create: defineMethod<CreateBatchRequest, CommandBatchView>({
+        action: 'compute:batches:create',
+        kind: 'mutation',
+        resource: tenant,
+        validate: parseCreate,
+        handler: async (context, input) => {
+          const tx = context.sql as unknown as SqlTx;
+          const scope = input.scope.map((entry) => ({
+            subject: entry.subject,
+            kind: entry.kind,
+            ...(entry.payloadSha256
+              ? { payloadSha256: new Uint8Array(Buffer.from(entry.payloadSha256, 'hex')) }
+              : {}),
+          }));
+          // What the key stands for: the same leaves (in any order), reason and lifetime.
+          const requestSha256 = createHash('sha256')
+            .update(
+              JSON.stringify([
+                input.reason.trim(),
+                input.notAfterSeconds ?? defaultBatchTtlMs / 1000,
+                input.scope
+                  .map((entry) => [entry.subject, entry.kind, entry.payloadSha256 ?? ''])
+                  .sort((a, b) => (a.join('\0') < b.join('\0') ? -1 : 1)),
+              ]),
+            )
+            .digest();
+          const created = await createCommandBatch(
+            tx,
+            {
+              tenantId: input.tenantId,
+              scope,
+              reason: input.reason,
+              notAfterMs: context.clock.now() + (input.notAfterSeconds ?? defaultBatchTtlMs / 1000) * 1000,
+              ...(context.caller?.identityId ? { createdBy: context.caller.identityId } : {}),
+              batchId: await derivedId('batch', input.tenantId, context, input.idempotencyKey),
+              requestSha256: new Uint8Array(requestSha256),
+            },
+            { now: context.clock.now(), quorum },
+          );
+          if (!created.replayed)
+            await context.events.publish(tx, {
+              type: 'command.batch.created',
+              tenantId: input.tenantId,
+              subject: `batch/${created.batchId}`,
+              data: {
+                batchId: created.batchId,
+                scopeSize: created.size,
+                requiredApprovals: created.required,
+              },
+            });
+          return batchView(tx, await readBatch(tx, input.tenantId, created.batchId), trustDomain);
+        },
+      }),
       get: defineMethod<BatchRef, CommandBatchView>({
         action: 'compute:batches:read',
         kind: 'read',
@@ -694,6 +859,7 @@ export function createQuorumModule(options: {
         quorumPayloadMigration,
         trustBundleStateMigration,
         trustBundleApproverSetMigration,
+        quorumRequestMigration,
       ],
       api: () => commandBatchesApi(options),
       reconcilers: [expiryReconciler()],

@@ -69,6 +69,11 @@ export interface RunCommandInput {
   idempotencyKey: string;
   /** How long the command may wait for the node before it expires (default 600, at most 3600). */
   notAfterSeconds?: number;
+  /**
+   * (v1.0 §13) The destructive-batch this command belongs to (`commandBatches.create`): it waits
+   * until the batch's approvers sign it. With approver keys configured, `node.reboot` needs one.
+   */
+  batchId?: string;
 }
 export interface GetCommandInput {
   tenantId: string;
@@ -122,6 +127,7 @@ const parseRun = parser({
   payload: v.optional(v.anyObject()),
   idempotencyKey: fields.idempotencyKey,
   notAfterSeconds: v.withDefault(v.int({ min: 10, max: 3600 }), 600),
+  batchId: v.optional(v.string({ pattern: /^batch_[0-9a-z]{26,52}$/, max: 64 })),
 });
 function runInput(input: unknown): RunCommandInput {
   const parsed = parseRun(input);
@@ -292,6 +298,7 @@ export function commandsApi(bundles?: SupportBundlesOptions): CommandsApi {
             payload: requestMessage(input, upload),
             idempotencyKey,
             notAfter: context.clock.now() + (input.notAfterSeconds ?? 600) * 1000,
+            ...(input.batchId ? { batchId: input.batchId } : {}),
           });
           const { rows } = await context.sql.query<CommandRow>(
             `SELECT ${columns} FROM commands c WHERE c.id = $1`,

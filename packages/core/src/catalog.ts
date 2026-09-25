@@ -91,7 +91,7 @@ const definitions = {
       ...a('providers', 'read', 'manage'),
       ...a('sandboxes', 'read', 'manage'),
       // v1.0 destructive-batch quorum (§13): on top of the approvers' signatures, never instead.
-      ...a('batches', 'read', 'approve'),
+      ...a('batches', 'read', 'create', 'approve'),
     ],
   },
   project: {
@@ -552,6 +552,7 @@ group('sandboxSnapshots', 'vps', [
   ['delete', 'mutation', 'sandboxes:delete', 'sandbox-snapshot', 'v0.5'],
 ]);
 group('commandBatches', 'quorum', [
+  ['create', 'mutation', 'batches:create', 'tenant', 'v1.0'],
   ['get', 'read', 'batches:read', 'tenant', 'v1.0'],
   ['list', 'read', 'batches:read', 'tenant', 'v1.0'],
   ['scope', 'read', 'batches:read', 'tenant', 'v1.0'],
