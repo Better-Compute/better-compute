@@ -26,7 +26,10 @@ export interface ComputeMcpEndpointOptions
     endpoint: { origin: string; basePath: string };
   };
   /**
-   * The gate in front, required: `createMcpGate({ iam, tenantId, tools: gateTools(), unlisted: 'deny' })`. Its
+   * The gate in front, required: `createMcpGate({ iam, tenantId, tools: gateTools(), unlisted: 'deny',
+   * confirmations: false })`. Gate actions only check visibility; confirmations belong to compute's own
+   * decisions, which carry the request (review 14 M2: a wildcard confirm list would otherwise match the gate's
+   * read actions and file confirmations from unvalidated arguments). Its
    * `tenantId` is the organization that runs this endpoint (fixed), or a per-caller choice you make deliberately:
    * deciding in each caller's own tenant would let any organization grant itself access.
    */

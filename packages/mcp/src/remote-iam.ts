@@ -102,8 +102,12 @@ type McpDelegations = {
   ): Promise<{ id: string; status: string; expiresAt: number }>;
 };
 
-/** Headers that carry who the caller is; nothing else of the incoming request is forwarded. */
-const forwarded = ['authorization', 'cookie', 'user-agent', 'x-forwarded-for', 'x-request-id'];
+/**
+ * Headers that carry who the caller is; nothing else of the incoming request is forwarded. Not the
+ * client's own `x-forwarded-for` (review 14 L3: behind an appending proxy the caller would choose
+ * `request.sourceIp` for policy conditions) and not cookies (the MCP endpoint takes bearer tokens only).
+ */
+const forwarded = ['authorization', 'user-agent', 'x-request-id'];
 
 function callerOptions(credential: McpCredentialInput): CallOptions {
   const given = new Headers(credential.headers);

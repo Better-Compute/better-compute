@@ -265,13 +265,19 @@ export function gateTools(
   options: { typePrefix?: string; execCommand?: boolean; fleet?: boolean } = {},
 ): Record<string, GateToolRule> {
   const prefix = options.typePrefix ?? 'compute-';
+  // The gate runs before compute validates anything, and a resource id can end up in a confirmation a
+  // person reads: only well-formed ids pass; anything else throws, and the gate denies (review 14 M2).
+  const idOf = (value: unknown, pattern: RegExp, what: string): string => {
+    if (typeof value !== 'string' || !pattern.test(value)) throw new Error(`${what} is not a valid id`);
+    return value;
+  };
   const pool = (args: Record<string, unknown>) => ({
     type: `${prefix}pool`,
-    id: String(args.poolId ?? ''),
+    id: idOf(args.poolId, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, 'poolId'),
   });
   const node = (args: Record<string, unknown>) => ({
     type: `${prefix}node`,
-    id: String(args.nodeId ?? ''),
+    id: idOf(args.nodeId, /^node_[0-9a-hjkmnp-tv-z]{26,52}$/, 'nodeId'),
   });
   const poolRead = { action: 'compute:pools:read', resource: pool };
   const nodeRead = { action: 'compute:nodes:read', resource: node };
@@ -300,7 +306,7 @@ export function gateTools(
       action: 'compute:sandboxes:read',
       resource: (args: Record<string, unknown>) => ({
         type: `${prefix}sandbox-template`,
-        id: String(args.templateId ?? ''),
+        id: idOf(args.templateId, /^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$/, 'templateId'),
       }),
     },
     list_sandboxes: { public: true },

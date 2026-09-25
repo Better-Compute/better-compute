@@ -151,12 +151,19 @@ async function withConfirmation(
     const polling = context.confirmations;
     if (!polling || !confirmationId) return pending;
     const deadline = Date.now() + (polling.timeoutMs ?? 25_000);
-    while (Date.now() < deadline) {
-      const state = await polling.status(confirmationId);
-      if (state === 'approved') return call();
-      if (state === 'denied' || state === 'expired')
-        return { status: `confirmation-${state}`, confirmationId, idempotencyKey: key };
-      await context.sleep(polling.intervalMs ?? 2000);
+    // A polling failure still answers with the key (review 14 L4): a retry with a new key would file
+    // a second draft and a second confirmation request for the same person.
+    try {
+      while (Date.now() < deadline) {
+        const state = await polling.status(confirmationId);
+        if (state === 'approved') return call();
+        if (state === 'denied' || state === 'expired')
+          return { status: `confirmation-${state}`, confirmationId, idempotencyKey: key };
+        await context.sleep(polling.intervalMs ?? 2000);
+      }
+    } catch (failure) {
+      if (failure instanceof ComputeClientError && failure.code !== 'CONFIRMATION_REQUIRED') throw failure;
+      return { ...pending, message: `${pending.message} (Checking the approval failed; retry with the same idempotencyKey.)` };
     }
     return pending;
   }
@@ -331,7 +338,7 @@ export function computeTools(
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
       run: (args, context) =>
-        context.api.$request('reservations/list', { tenantId: context.tenantId, ...args }),
+        context.api.$request('reservations/list', { ...args, tenantId: context.tenantId }),
     },
     {
       name: 'get_reservation',
@@ -453,12 +460,8 @@ export function computeTools(
             pattern: '^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$',
             description: 'The image, e.g. "ubuntu-24.04"',
           },
-          sshKeys: {
-            type: 'array',
-            maxItems: 32,
-            items: { type: 'string', maxLength: 8192, description: 'An OpenSSH public key line' },
-            description: 'Public keys to install for the default user',
-          },
+          // No sshKeys (review 14 H1): an approver cannot see which key a prompt-injected agent would
+          // install. People add keys themselves; the agent reaches the VM through tunnels.
           idempotencyKey,
           waitSeconds: {
             type: 'integer',
@@ -483,7 +486,6 @@ export function computeTools(
             poolId: args.poolId,
             flavor: args.flavor,
             imageId: args.imageId,
-            ...(args.sshKeys ? { sshKeys: args.sshKeys } : {}),
             idempotencyKey: key,
             wait: { timeoutMs: ((args.waitSeconds as number | undefined) ?? 20) * 1000 },
           }),
@@ -508,7 +510,7 @@ export function computeTools(
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
       run: (args, context) =>
-        context.api.$request('instances/list', { tenantId: context.tenantId, ...args }),
+        context.api.$request('instances/list', { ...args, tenantId: context.tenantId }),
     },
     ...(['get', 'start', 'stop', 'delete'] as const).map(
       (verb): ComputeTool => ({
@@ -556,8 +558,17 @@ export function computeTools(
         'Lists the sandbox templates of this tenant: pool, flavor, image, runtime, TTL bounds and warm pool size. Pick one for create_sandbox.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, openWorldHint: false },
-      run: (_args, context) =>
-        context.api.$request('sandboxTemplates/list', { tenantId: context.tenantId }),
+      // Without userData or env (review 14 L2): inline cloud-config may hold credentials, and it is other
+      // members' text, which has no place in an agent's context.
+      run: async (_args, context) => {
+        const page = (await context.api.$request('sandboxTemplates/list', {
+          tenantId: context.tenantId,
+        })) as { items?: Record<string, unknown>[] } & Record<string, unknown>;
+        return {
+          ...page,
+          items: (page.items ?? []).map(({ userData: _userData, env: _env, ...template }) => template),
+        };
+      },
     },
     {
       name: 'create_sandbox',
@@ -622,7 +633,7 @@ export function computeTools(
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
       run: (args, context) =>
-        context.api.$request('sandboxes/list', { tenantId: context.tenantId, ...args }),
+        context.api.$request('sandboxes/list', { ...args, tenantId: context.tenantId }),
     },
     {
       name: 'extend_sandbox',
@@ -666,7 +677,7 @@ export function computeTools(
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
       run: (args, context) =>
-        context.api.$request('commandBatches/list', { tenantId: context.tenantId, ...args }),
+        context.api.$request('commandBatches/list', { ...args, tenantId: context.tenantId }),
     },
     {
       name: 'get_command_batch',
@@ -703,7 +714,7 @@ export function computeTools(
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
       run: (args, context) =>
-        context.api.$request('sandboxSnapshots/list', { tenantId: context.tenantId, ...args }),
+        context.api.$request('sandboxSnapshots/list', { ...args, tenantId: context.tenantId }),
     },
     {
       name: 'delete_sandbox_snapshot',
@@ -905,9 +916,12 @@ export function validateArguments(
         return `${path} must be an object`;
       const record = value as Record<string, unknown>;
       for (const key of schema.required ?? [])
-        if (record[key] === undefined) return `${path}.${key} is required`;
+        if (!Object.hasOwn(record, key) || record[key] === undefined)
+          return `${path}.${key} is required`;
       for (const [key, item] of Object.entries(record)) {
-        const property = schema.properties?.[key];
+        // Own properties only: `constructor`, `__proto__`, `toString` are not arguments (review 14 L1).
+        const property =
+          schema.properties && Object.hasOwn(schema.properties, key) ? schema.properties[key] : undefined;
         if (!property) {
           if (schema.additionalProperties === false)
             return `${path}.${key} is not a known argument`;
@@ -923,6 +937,10 @@ export function validateArguments(
       if (!Array.isArray(value)) return `${path} must be an array`;
       if (schema.maxItems !== undefined && value.length > schema.maxItems)
         return `${path} has more than ${schema.maxItems} items`;
+      if (schema.minItems !== undefined && value.length < schema.minItems)
+        return `${path} needs at least ${schema.minItems} items`;
+      if (schema.uniqueItems && new Set(value.map((item) => JSON.stringify(item))).size !== value.length)
+        return `${path} has duplicate items`;
       if (schema.items)
         for (const [index, item] of value.entries()) {
           const problem = validateArguments(schema.items, item, `${path}[${index}]`);

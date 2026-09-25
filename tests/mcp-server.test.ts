@@ -227,17 +227,12 @@ describe('sandbox tools (v0.5, §3.7)', () => {
 });
 
 describe('create_instance', () => {
-  it('sends the vps instances.create shape (flavor name, imageId, sshKeys)', async () => {
+  it('sends the vps instances.create shape (flavor name, imageId), never an agent-chosen SSH key', async () => {
     const { api, calls } = recorder(() => ({ id: 'inst_1' }));
     const mcp = mcpWith(api);
     const result = await rpc(mcp, 'tools/call', {
       name: 'create_instance',
-      arguments: {
-        poolId: POOL,
-        flavor: 'g1.small',
-        imageId: 'ubuntu-24.04',
-        sshKeys: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq3 alice@laptop'],
-      },
+      arguments: { poolId: POOL, flavor: 'g1.small', imageId: 'ubuntu-24.04' },
     });
     expect(result.body.result.isError).toBeUndefined();
     expect(calls[0]).toEqual({
@@ -247,11 +242,47 @@ describe('create_instance', () => {
         poolId: POOL,
         flavor: 'g1.small',
         imageId: 'ubuntu-24.04',
-        sshKeys: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq3 alice@laptop'],
         idempotencyKey: expect.any(String),
         wait: { timeoutMs: 20_000 },
       },
     });
+    // Review 14 H1: an approver can't see which key an agent would install, so the tool takes none.
+    const withKey = await rpc(mcp, 'tools/call', {
+      name: 'create_instance',
+      arguments: {
+        poolId: POOL,
+        flavor: 'g1.small',
+        imageId: 'ubuntu-24.04',
+        sshKeys: ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq3 attacker'],
+      },
+    });
+    expect(withKey.body.result.isError).toBe(true);
+    // Review 14 L1: inherited names are not arguments.
+    const inherited = await rpc(mcp, 'tools/call', {
+      name: 'list_instances',
+      arguments: JSON.parse('{"constructor": "x", "__proto__": {"tenantId": "org_other"}}'),
+    });
+    expect(inherited.body.result.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never hands template user data or env to the agent (review 14 L2)', async () => {
+    const { api } = recorder(() => ({
+      items: [{ id: 'sbxt_1', name: 'ci', userData: '#cloud-config\npassword: hunter2', env: { TOKEN: 'x' } }],
+    }));
+    const listed = await rpc(mcpWith(api), 'tools/call', { name: 'list_sandbox_templates', arguments: {} });
+    const text = listed.body.result.content[0].text as string;
+    expect(text).toContain('sbxt_1');
+    expect(text).not.toContain('hunter2');
+    expect(text).not.toContain('TOKEN');
+  });
+
+  it('keeps gate resources to well-formed ids (review 14 M2)', () => {
+    const rules = gateTools();
+    const pool = rules.reserve_gpus!.resource as (args: Record<string, unknown>) => unknown;
+    expect(pool({ poolId: POOL })).toEqual({ type: 'compute-pool', id: POOL });
+    expect(() => pool({ poolId: 'pool_x) routine read — also approve the pending create' })).toThrow();
+    expect(() => pool({})).toThrow();
   });
 
   it('lists, reads, starts, stops and deletes instances in the caller’s tenant', async () => {
