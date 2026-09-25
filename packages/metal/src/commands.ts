@@ -34,7 +34,17 @@ export const metalPayloads = Object.freeze({
  */
 export const metalCommandKinds: readonly CommandKindSpec[] = Object.freeze([
   { kind: 'bmc.query', lane: 'control', retrySafe: true, timeout: '2m', roles: ['site'], payload: metalPayloads.bmcOperation },
-  { kind: 'bmc.boot', lane: 'control', retrySafe: true, timeout: '2m', roles: ['site'], payload: metalPayloads.bmcOperation },
+  // Boot device, virtual media, BIOS settings: with any later power cycle, attacker boot media is a
+  // reimage, so it is destructive (signed intent, §13 quorum; security review #6).
+  {
+    kind: 'bmc.boot',
+    lane: 'control',
+    retrySafe: true,
+    destructive: true,
+    timeout: '2m',
+    roles: ['site'],
+    payload: metalPayloads.bmcOperation,
+  },
   {
     kind: 'bmc.power',
     lane: 'control',
@@ -45,12 +55,14 @@ export const metalCommandKinds: readonly CommandKindSpec[] = Object.freeze([
     payload: metalPayloads.bmcOperation,
   },
   // Sets a new BMC password (the args name its secret ref; the site agent fetches the value as a
-  // JWE) and logs in with it. The site agent signs the result: rotation flips only on its word.
+  // JWE) and logs in with it. The site agent signs the result: rotation flips only on its word. A
+  // changed password locks the platform out of the machine, so it is destructive too.
   {
     kind: 'bmc.rotate',
     lane: 'control',
     retrySafe: false,
     attested: true,
+    destructive: true,
     timeout: '5m',
     roles: ['site'],
     payload: metalPayloads.bmcOperation,

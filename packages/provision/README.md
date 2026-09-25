@@ -144,7 +144,10 @@ export const adopt = defineProfile({
 
 `defineStep(step)` returns a frozen `StepDefinition` stamped with `extension: 'step'`.
 
-- A `control-plane` step needs `run(input, context)` and sends no command.
+- A `control-plane` step needs `run(input, context)`. One that builds a command and relays it to an
+  agent itself (`awaitCommand`) names the places in `relays` (so profiles may write `on: site`) and
+  every kind it may send in `sends`. The engine refuses any other kind, so a profile's full command set
+  is known before it runs: `profileCommandKinds(profile, steps)`, the approval scope of a §13 batch.
 - A step that runs on a `site`, `node` or `ramdisk` agent is exactly one `command`, for example
   `driver.invoke` for driver operations. It may also set `await: 'rejoin'`.
 - `input` may be any Standard Schema.

@@ -44,14 +44,19 @@ describe('batch scope', () => {
   it('scopes the destructive kinds per machine, BMC operations to the machine’s BMC', async () => {
     const kinds = await profileCommandKinds(releaseProfile, steps());
     const scope = await sim.db.transaction((tx) => metalBatchScope(tx, registry, nodes, kinds));
-    expect(scope).toEqual([
-      { subject: 'bmc:https://10.20.0.1', kind: 'bmc.power' },
-      { subject: 'bmc:https://10.20.0.2', kind: 'bmc.power' },
-      { subject: nodes[0], kind: 'disk.wipe' },
-      { subject: nodes[1], kind: 'disk.wipe' },
-    ].sort((a, b) => (a.subject < b.subject ? -1 : 1)));
-    // Non-destructive kinds (boot entries, boot device) are not held by the quorum.
-    expect(scope.some((leaf) => leaf.kind === 'bmc.boot' || leaf.kind.startsWith('boot.'))).toBe(false);
+    // The boot device counts: attacker boot media plus any power cycle is a reimage (review #6).
+    expect(scope).toEqual(
+      [
+        { subject: 'bmc:https://10.20.0.1', kind: 'bmc.boot' },
+        { subject: 'bmc:https://10.20.0.1', kind: 'bmc.power' },
+        { subject: 'bmc:https://10.20.0.2', kind: 'bmc.boot' },
+        { subject: 'bmc:https://10.20.0.2', kind: 'bmc.power' },
+        { subject: nodes[0]!, kind: 'disk.wipe' },
+        { subject: nodes[1]!, kind: 'disk.wipe' },
+      ].sort((a, b) => (a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : a.kind < b.kind ? -1 : 1)),
+    );
+    // Non-destructive kinds (the site's boot entries) are not held by the quorum.
+    expect(scope.some((leaf) => leaf.kind.startsWith('boot.'))).toBe(false);
     await expect(sim.db.transaction((tx) => metalBatchScope(tx, registry, ['node_not_metal'], kinds))).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
