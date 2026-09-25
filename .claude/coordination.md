@@ -186,6 +186,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - template env and network: DONE (a8c8020; 7c73072 on [f85da7]'s seam 5a946c9). Also: readyAt at first run,
         fresh-only warm claims (template instance_version), selfCheck findings (7d03d6d), vps.sandbox.warm meter
         (83d0ebd). bcd still owes network_policy nftables + instance.snapshot ([6a20b8] told).
+      - 2026-09-25 later: host-cert coverage + fleet-scoped secret refusal e372acc; §12.8 sandbox IAM reactions
+        9ecd28f (`sandboxIamReactions`, wired by [402c97] as host iamReactions); RuntimeTraits.snapshot 569f324;
+        review #3 fixes 34f4084 (extend pending, network-unenforced warm, reassign attribution); doctor
+        vps.sandboxes.network bd18e35. Routed: instances.create fleet-scope gap → [6a20b8]; envelope pending leak
+        after a failed tx2/check → [c321a3]; successor validation + IamReconcile sandbox holders → [402c97].
+        Open: budget `drain` doesn't drain warm pools (refills have no budget check).
     - [31c64a]:
       - tests/e2e/sandboxes.test.ts: v0.5 sandboxes EXIT MET (a8f3dfc): 500 TTL expiries with a zero-leak diff,
         the warm claim, the memory round trip, the drain;
