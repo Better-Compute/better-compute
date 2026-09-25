@@ -21,5 +21,6 @@ export * from './streams.js';
 export * from './budget.js';
 export * from './identity-ends.js';
 export * from './webhook-intake.js';
+export * from './tenants.js';
 export * from './body.js';
 export * from './bridge.js';

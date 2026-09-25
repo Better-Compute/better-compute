@@ -104,13 +104,32 @@ export function createTenantGate(options: TenantGateOptions): TenantGate {
     return loading;
   };
 
+  /** Reported once per run of failures (an outage logs when it starts, not every refresh). */
+  let failing = false;
   const report = (error: unknown) => {
+    if (failing) return;
+    failing = true;
     try {
       options.onError?.(error);
     } catch {
       // A broken reporter changes nothing.
     }
   };
+  const stop = () => {
+    if (timer) clearInterval(timer);
+    timer = undefined;
+  };
+  const refresh = () =>
+    load().then(
+      () => {
+        failing = false;
+      },
+      (error: unknown) => {
+        // A process that closed its store without stopping compute (a one-shot CLI command) is done.
+        if (error instanceof Error && /executor is closed/.test(error.message)) return stop();
+        report(error);
+      },
+    );
 
   return {
     load,
@@ -122,15 +141,10 @@ export function createTenantGate(options: TenantGateOptions): TenantGate {
         report(error);
       });
       if (timer) return;
-      timer = setInterval(() => {
-        load().catch(report);
-      }, options.refreshMs ?? 5_000);
+      timer = setInterval(() => void refresh(), options.refreshMs ?? 5_000);
       timer.unref?.();
     },
-    stop() {
-      if (timer) clearInterval(timer);
-      timer = undefined;
-    },
+    stop,
     async check(caller, tenantIds, mutation) {
       if (caller.tenantId === options.rootTenantId) return;
       if (stale) await load();
