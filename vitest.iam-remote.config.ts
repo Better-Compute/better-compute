@@ -22,6 +22,11 @@ export default defineConfig({
       'tests/cli-host-watch.test.ts',
       'tests/e2e/access.test.ts',
       'tests/e2e/spine.test.ts',
+      // Every §9.2 (action, resource type) pair, decided through bridge.remote.
+      'tests/iam-bridge-matrix.test.ts',
+      'tests/iam-bridge-budget.test.ts',
+      'tests/iam-bridge-webhook-intake.test.ts',
+      'tests/cli-serve-compose.test.ts',
     ],
     env: { ...base.test?.env, BETTER_COMPUTE_IAM_MODE: 'remote' },
   },

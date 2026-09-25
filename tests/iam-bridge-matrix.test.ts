@@ -13,12 +13,20 @@ import {
   type ComputeIamBridge,
   type ProjectionRow,
 } from '@better-compute/iam';
-import { closeIamFixtures, iamFixture, type Credential, type IamFixture } from './support/iam.js';
+import type { IamPort } from '@better-compute/core';
+import {
+  ORIGIN,
+  closeIamFixtures,
+  iamFixture,
+  type Credential,
+  type IamFixture,
+} from './support/iam.js';
 
 // The IAM side of the authz matrix (PLAN.md §9.2, §16 "the authz matrix is at 100%"): every (action, resource
 // type) pair the API decides on is accepted by a real better-iam carrying the bridge's plugin and resolver,
 // allows once granted, and denies otherwise. The envelope side (every registered method) is W5a's generated
-// tests/generated/authz-matrix.test.ts.
+// tests/generated/authz-matrix.test.ts. Decisions go through compute's own IamPort: `bridge.embedded`, or with
+// BETTER_COMPUTE_IAM_MODE=remote (vitest.iam-remote.config.ts) `bridge.remote` over the same IAM's HTTP API.
 
 afterEach(closeIamFixtures);
 
@@ -59,6 +67,24 @@ async function loadProjection(bridge: ComputeIamBridge, tenantId: string) {
   await bridge.projection.load();
 }
 
+const remote = process.env.BETTER_COMPUTE_IAM_MODE === 'remote';
+/** Requests the remote port sent (so a remote run provably went over HTTP). */
+let httpCalls = 0;
+
+/** Compute's port onto the fixture's IAM, in the mode the run asks for. */
+function portFor(bridge: ComputeIamBridge, f: IamFixture): IamPort {
+  if (!remote) return bridge.embedded(f.iam, { rootTenantId: f.rootTenantId });
+  return bridge.remote({
+    baseURL: ORIGIN,
+    fetch: async (input, init) => {
+      httpCalls++;
+      return f.iam.handler(new Request(input, init));
+    },
+    serviceToken: () => f.rootCredential.token,
+    rootTenantId: f.rootTenantId,
+  });
+}
+
 const idOf = (f: IamFixture, kind: ComputeResourceKind) =>
   kind === 'fleet' ? fleetResourceId : kind === 'tenant' ? f.tenantId : `matrix-${kind}`;
 
@@ -75,7 +101,7 @@ describe('the IAM side of the authz matrix', () => {
       plugins: [bridge.plugin({ inbox: memoryInbox() })],
       resolveResource: bridge.resolveResource(),
     });
-    bridge.embedded(f.iam, { rootTenantId: f.rootTenantId });
+    const port = portFor(bridge, f);
     await loadProjection(bridge, f.tenantId);
 
     // Fleet pairs are decided in the root tenant by a root member; every other pair in Acme.
@@ -129,14 +155,11 @@ describe('the IAM side of the authz matrix', () => {
       action: string,
       kind: ComputeResourceKind,
     ) =>
-      (
-        await f.iam.authorize({
-          ...credential,
-          tenantId,
-          action,
-          resource: { type: resourceType(kind), id: idOf(f, kind) },
-        })
-      ).allowed;
+      port.authorize(credential, {
+        tenantId,
+        action,
+        resource: { type: resourceType(kind), id: idOf(f, kind) },
+      });
 
     // Denials first: the root member holds nothing yet, `nobody` never does.
     for (const pair of fleetPairs)
@@ -178,6 +201,8 @@ describe('the IAM side of the authz matrix', () => {
       }
     expect(leaks).toEqual([]);
     expect(all.length).toBeGreaterThan(60);
+    // Remote: at least one HTTP decision per pair and phase (denied, then granted).
+    if (remote) expect(httpCalls).toBeGreaterThanOrEqual(2 * all.length);
   });
 
   it('the wildcard finding: compute:* validates everywhere, but decides only where the plugin is installed', async () => {
