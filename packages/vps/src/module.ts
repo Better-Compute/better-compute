@@ -520,6 +520,18 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     sandboxExec = { caPublicKey, account, ...(certifyHostKey ? { certifyHostKey } : {}) };
   }
 
+  // Warm pools ask a tenant's budget at most once a minute: a drain offer with warm instances
+  // would otherwise cost an IAM call every 15 s pass. (IAM caches budget standing briefly too.)
+  const warmBudgets = new Map<string, { at: number; allowed: boolean }>();
+  const warmBudget = async (context: ModuleContext, tenantId: string): Promise<boolean> => {
+    const now = context.clock.now();
+    const known = warmBudgets.get(tenantId);
+    if (known && now - known.at < 60_000) return known.allowed;
+    const { allowed } = await context.iam.billingCheck({ tenantId });
+    warmBudgets.set(tenantId, { at: now, allowed });
+    return allowed;
+  };
+
   const depsOf = (context: ModuleContext): InstanceDeps => {
     const deps: InstanceDeps = {
       clock: context.clock,
@@ -990,7 +1002,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
               ...(options.snapshots ? { store: options.snapshots } : {}),
               // No caller here: both IAM modes answer for the named tenant (remote as the root
               // service account, an ancestor of every tenant; [31c64a] c7a5312).
-              budget: async (tenantId) => (await context.iam.billingCheck({ tenantId })).allowed,
+              budget: (tenantId) => warmBudget(context, tenantId),
             });
           return 'DONE';
         },

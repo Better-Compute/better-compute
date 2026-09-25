@@ -1558,11 +1558,12 @@ async function claimWarm(
   until: number,
 ): Promise<InstanceRow | undefined> {
   const { rows } = await tx.query<{ id: string }>(
-    `SELECT id FROM instances
-      WHERE warm_template_id = $1 AND tenant_id = $2 AND NOT draft AND desired_state <> 'deleted'
-        AND state = ANY($3::text[]) AND warm_template_version = $4
-        AND ${certificateCovers('', '$5::timestamptz')} AND NOT ${networkUnenforced('')}
-      ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`,
+    `SELECT i.id FROM instances i
+      WHERE i.warm_template_id = $1 AND i.tenant_id = $2 AND NOT i.draft
+        AND i.desired_state <> 'deleted' AND i.state = ANY($3::text[])
+        AND i.warm_template_version = $4
+        AND ${certificateCovers('i.', '$5::timestamptz')} AND NOT ${networkUnenforced('i.')}
+      ORDER BY i.created_at, i.id LIMIT 1 FOR UPDATE SKIP LOCKED`,
     [
       template.id,
       template.tenantId,
@@ -2113,19 +2114,24 @@ export async function extendSandbox(
     [raw.id, new Date(expires).toISOString(), lifetime],
   );
   const extended = (await readSandbox(tx, raw.id))!;
-  if (template) {
-    const flavor = await readFlavorByName(tx, template.poolId, template.flavor);
-    if (flavor)
-      await deps.authz.upsert(tx, {
-        type: 'sandbox',
-        id: raw.id,
-        tenantId: raw.tenant_id,
-        attributes: sandboxAttributes(template, flavor, lifetime, raw.from_snapshot ?? undefined),
-        parentType: 'pool',
-        parentId: raw.pool_id,
-        ownerId: raw.owner_identity_id,
-      });
-  }
+  // The shape the sandbox runs, not its template's current flavor (which may have changed or gone).
+  const instance = await readInstance(tx, raw.instance_id);
+  await deps.authz.upsert(tx, {
+    type: 'sandbox',
+    id: raw.id,
+    tenantId: raw.tenant_id,
+    attributes: instance
+      ? sandboxAttributes(
+          { id: raw.template_id, warm: template?.warm ?? { min: 0, max: 0 } },
+          instance.shape,
+          lifetime,
+          raw.from_snapshot ?? undefined,
+        )
+      : { templateId: raw.template_id, ttlSeconds: lifetime },
+    parentType: 'pool',
+    parentId: raw.pool_id,
+    ownerId: raw.owner_identity_id,
+  });
   await publishSandbox(deps, tx, extended, 'sandbox.extended', {
     expiresAt: Number(extended.expires_ms),
   });
@@ -2136,9 +2142,11 @@ export async function extendSandbox(
 
 /**
  * How long before `expiresAt` a sandbox gets `sandbox.expiring`: five minutes, or a quarter of its
- * lifetime when that is shorter (a 60 s sandbox is warned 15 s ahead, one reconciler pass).
+ * lifetime when that is shorter, but never under two reconciler passes
+ * (`sandboxExpiringMinLeadSeconds`, capped at the lifetime), or a pass could miss the window.
  */
 export const sandboxExpiringLeadSeconds = 300;
+export const sandboxExpiringMinLeadSeconds = 30;
 
 /** What one reconciler pass did. */
 export interface SandboxPass {
@@ -2190,10 +2198,13 @@ export async function reconcileSandboxes(
     const expiring = await tx.query<RawSandbox>(
       `SELECT ${sandboxColumns} FROM ${sandboxFrom}
         WHERE NOT s.draft AND s.deleting_at IS NULL AND s.expiring_at IS NULL
+          AND i.state NOT IN ('deleting', 'deleted')
           AND s.expires_at > $1::timestamptz
-          AND s.expires_at <= $1::timestamptz + make_interval(secs => least($2::float8, s.ttl_seconds / 4.0))
-        ORDER BY s.expires_at, s.id LIMIT $3 FOR UPDATE OF s SKIP LOCKED`,
-      [at, sandboxExpiringLeadSeconds, batch],
+          AND s.expires_at <= $1::timestamptz + make_interval(secs => $2::float8)
+          AND s.expires_at <= $1::timestamptz + make_interval(secs => least(s.ttl_seconds::float8,
+                greatest($3::float8, least($2::float8, s.ttl_seconds / 4.0))))
+        ORDER BY s.expires_at, s.id LIMIT $4 FOR UPDATE OF s SKIP LOCKED`,
+      [at, sandboxExpiringLeadSeconds, sandboxExpiringMinLeadSeconds, batch],
     );
     for (const raw of expiring.rows) {
       await tx.query(`UPDATE sandboxes SET expiring_at = $2::timestamptz WHERE id = $1`, [
@@ -2455,20 +2466,21 @@ export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
  * A warm instance no claim takes: made from an older template version, failed, or with a host
  * certificate that ends within `cover` seconds of `now`.
  */
-const warmStale = (a: string, version: string, now: string, cover: string) =>
+const warmStale = (a: `${string}.`, version: string, now: string, cover: string) =>
   `(${a}warm_template_version IS DISTINCT FROM ${version} OR ${a}state IN ('error', 'lost')
     OR NOT ${certificateCovers(a, `${now}::timestamptz + make_interval(secs => ${cover})`)}
     OR ${networkUnenforced(a)})`;
 
 /** Whether an instance's host certificate, if it has one, lasts until `until` (none known: it does not). */
-const certificateCovers = (a: string, until: string) =>
+const certificateCovers = (a: `${string}.`, until: string) =>
   `(NOT ${a}host_certified OR coalesce(${a}host_cert_valid_before, '-infinity'::timestamptz) >= ${until})`;
 
 /**
  * A private or none network on a host that does not say it enforces it (placed before the
- * capability constraint, or its bcd since downgraded): the guest would have full egress.
+ * capability constraint, or its bcd since downgraded): the guest would have full egress. `a` must
+ * name the instances alias: a bare `node_id` in the subquery would resolve to `node_labels`' own.
  */
-const networkUnenforced = (a: string) =>
+const networkUnenforced = (a: `${string}.`) =>
   `(${a}network_policy IS NOT NULL AND ${a}node_id IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM node_labels nl WHERE nl.node_id = ${a}node_id AND nl.key = '${networkPolicyCapabilityLabel}'))`;
 
@@ -2485,10 +2497,11 @@ async function drainWarm(
 ): Promise<number> {
   return sql.transaction(async (tx) => {
     const { rows } = await tx.query<{ id: string }>(
-      `SELECT id FROM instances
-        WHERE warm_template_id = $1 AND desired_state <> 'deleted' AND state NOT IN ('deleting', 'deleted')
-          AND ${warmStale('', '$3', '$5', '$6')} = $4
-        ORDER BY created_at DESC, id DESC LIMIT $2 FOR UPDATE SKIP LOCKED`,
+      `SELECT i.id FROM instances i
+        WHERE i.warm_template_id = $1 AND i.desired_state <> 'deleted'
+          AND i.state NOT IN ('deleting', 'deleted')
+          AND ${warmStale('i.', '$3', '$5', '$6')} = $4
+        ORDER BY i.created_at DESC, i.id DESC LIMIT $2 FOR UPDATE SKIP LOCKED`,
       [
         template.id,
         count,

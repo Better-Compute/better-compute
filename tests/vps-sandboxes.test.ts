@@ -698,13 +698,24 @@ describe('sandboxes', () => {
     expect(warnings()[1]!.data).toMatchObject({ expiresAt: T0 + 1800_000 });
   });
 
-  it('warn a short sandbox a quarter of its lifetime ahead', async () => {
+  it('warn a short sandbox at least two passes (30 s) ahead, a longer one a quarter ahead', async () => {
+    // 60 s: a quarter (15 s) is less than two passes, so 30 s.
     const template = await createTemplate({ defaultTtlSeconds: 60 });
     await createSandbox(template.id);
-    await advance(44_000);
+    await advance(28_000);
     await reconcileSandboxes();
     expect(eventTypes()).not.toContain('sandbox.expiring');
-    await advance(2_000);
+    await advance(3_000);
+    await reconcileSandboxes();
+    expect(eventTypes()).toContain('sandbox.expiring');
+    // 10 min: a quarter, 150 s.
+    recorded.events = [];
+    const tenMinutes = await createTemplate({ name: 'ten', defaultTtlSeconds: 600 });
+    await createSandbox(tenMinutes.id, { idempotencyKey: 'ten' });
+    await advance(448_000);
+    await reconcileSandboxes();
+    expect(eventTypes()).not.toContain('sandbox.expiring');
+    await advance(4_000);
     await reconcileSandboxes();
     expect(eventTypes()).toContain('sandbox.expiring');
   });
@@ -913,15 +924,22 @@ describe('warm pools', () => {
           [template.id],
         )
       ).rows.length;
+    // The answer is kept a minute (at most one IAM call per tenant per minute).
+    const minute = () => advance(61_000);
     budgetSpent = true;
     try {
+      await minute();
       await reconcileSandboxes();
       expect(await warm()).toBe(0);
       budgetSpent = false;
       await reconcileSandboxes();
+      expect(await warm()).toBe(0);
+      await minute();
+      await reconcileSandboxes();
       expect(await warm()).toBe(2);
       // `stop-new` keeps what is there; `drain` empties the pool while the budget is spent.
       budgetSpent = true;
+      await minute();
       await reconcileSandboxes();
       expect(await warm()).toBe(2);
       await db.query(
@@ -933,6 +951,7 @@ describe('warm pools', () => {
     } finally {
       budgetSpent = false;
     }
+    await minute();
     await reconcileSandboxes();
     expect(await warm()).toBe(2);
   });
@@ -1585,8 +1604,17 @@ describe('template network and versions', () => {
     } = await db.query<{ id: string }>(`SELECT id FROM instances WHERE warm_template_id = $1`, [
       template.id,
     ]);
-    // The hosts' bcd is downgraded: the capability label goes, and guests would get full egress.
-    await db.query(`DELETE FROM node_labels WHERE key = 'bc.dev/cap.instance.network-policy'`);
+    // Their hosts' bcd is downgraded, and guests there would get full egress. Another host still
+    // enforces it: the check is about the instance's own host, not any host.
+    await db.query(
+      `DELETE FROM node_labels WHERE key = 'bc.dev/cap.instance.network-policy'
+          AND node_id IN (SELECT node_id FROM instances WHERE id = ANY($1::text[]))`,
+      [[warm!.id, refill!.id]],
+    );
+    const kept = await db.query(
+      `SELECT 1 FROM node_labels WHERE key = 'bc.dev/cap.instance.network-policy'`,
+    );
+    expect(kept.rows.length).toBeGreaterThan(0);
     const findings = await module.selfCheck!(moduleContext(db));
     expect(findings.find((finding) => finding.check === 'vps.sandboxes.network')).toMatchObject({
       severity: 'error',
