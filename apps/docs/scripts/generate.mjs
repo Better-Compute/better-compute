@@ -616,7 +616,10 @@ if (check) {
   if (drift.length || leftovers.length) {
     for (const path of drift) console.error(`out of date: apps/docs/${path}`);
     for (const path of leftovers) console.error(`stale: apps/docs/${path}`);
-    console.error('Run: node apps/docs/scripts/generate.mjs');
+    // From committed code only (other sessions' uncommitted dists never reach the reference):
+    console.error(
+      'Run: node scripts/head-check.mjs --run apps/docs/scripts/sync-from-head.mjs <absolute checkout root>',
+    );
     process.exitCode = 1;
   } else console.log(`apps/docs: ${files.size} generated files are up to date.`);
 } else {
