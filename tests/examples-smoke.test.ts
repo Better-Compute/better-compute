@@ -1,9 +1,10 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
+import { exampleOptions } from '../examples/shared/compose.ts';
 
 // The examples/ configurations (PLAN.md §4 layout): each loads, migrates and passes `doctor` with every
 // module registered; examples/dev also runs `dev --sim` and serves its host routes.
@@ -50,7 +51,6 @@ describe('examples', () => {
     expect(await run(['migrate', '--config', config('dev')], quorum, cwd)).toContain('applied');
     const report = JSON.parse(await run(['doctor', '--config', config('dev')], quorum, cwd)) as { ok: boolean };
     expect(report.ok).toBe(true);
-    const { exampleOptions } = await import('../examples/shared/compose.ts');
     const options = await exampleOptions({ env: quorum, cwd });
     expect(options.pki?.approvers).toMatchObject({ threshold: 2, unbatchedDestructivePerHour: 0 });
     expect(options.pki?.approvers?.keys).toHaveLength(2);
@@ -62,6 +62,43 @@ describe('examples', () => {
     await expect(
       run(['doctor', '--config', config('dev')], { ...quorum, BETTER_COMPUTE_APPROVER_KEYS: 'alice.pem' }, cwd),
     ).rejects.toThrow();
+
+    // Changing the quorum: doctor and pki trust-version say which version its current approvers sign.
+    const trust = async (env: NodeJS.ProcessEnv) =>
+      JSON.parse(await run(['pki', 'trust-version', '--config', config('dev')], env, cwd)) as Record<string, unknown>;
+    const published = await trust(quorum);
+    expect(published).toMatchObject({ configurationMatches: true, quorumChanged: false });
+    const v = published.version as number;
+    await run(['batch', 'keygen', '--out', 'carol.pem'], env, cwd);
+    const wider = { ...quorum, BETTER_COMPUTE_APPROVER_KEYS: 'alice.pem.pub,bob.pem.pub,carol.pem.pub' };
+    expect(await trust(wider)).toMatchObject({ version: v, quorumChanged: true, signQuorumFor: v + 1 });
+    const unsigned = JSON.parse(await run(['doctor', '--config', config('dev')], wider, cwd)) as {
+      findings: { check: string; fix?: string }[];
+    };
+    const finding = unsigned.findings.find((item) => item.check === 'pki.quorum-unsigned');
+    expect(finding?.fix).toContain(`--version ${v + 1}`);
+    for (const name of ['alice', 'bob']) {
+      const signed = await run(
+        ['batch', 'sign-approvers', '--key', `${name}.pem`, '--version', String(v + 1), '--approvers', 'alice.pem.pub,bob.pem.pub,carol.pem.pub', '--threshold', '2'],
+        env,
+        cwd,
+      );
+      await writeFile(join(cwd, `${name}.set.json`), signed);
+    }
+    const signedEnv = { ...wider, BETTER_COMPUTE_APPROVER_SET_SIGNATURES: 'alice.set.json,bob.set.json' };
+    const signedOptions = await exampleOptions({ env: signedEnv, cwd });
+    expect(signedOptions.pki).toMatchObject({ trustVersion: v + 1 });
+    expect(signedOptions.pki?.approvers?.setSignatures).toHaveLength(2);
+    await signedOptions.database.close?.();
+    const checked = JSON.parse(await run(['doctor', '--config', config('dev')], signedEnv, cwd)) as { findings: { check: string }[] };
+    expect(checked.findings.map((item) => item.check)).toContain('pki.quorum-change');
+    // Deployed: the signed quorum is published at that version.
+    await run(['migrate', '--config', config('dev')], signedEnv, cwd);
+    expect(await trust(signedEnv)).toMatchObject({ version: v + 1, configurationMatches: true, quorumChanged: false });
+    // Signatures over another quorum are refused at startup.
+    await expect(
+      exampleOptions({ env: { ...signedEnv, BETTER_COMPUTE_APPROVER_THRESHOLD: '3' }, cwd }),
+    ).rejects.toThrow(/signs another quorum/);
   });
 
   it('postgres refuses to run on PGlite', async () => {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
-import { pkiFindings } from '../packages/cli/src/commands/pki.js';
+import { configuredTrustDigest, pkiFindings } from '../packages/cli/src/commands/pki.js';
 import {
   commandSigningOptions,
   createPkiBundle,
@@ -300,6 +300,25 @@ describe('command-signing root rotation', () => {
       expect(findings.find((finding) => finding.check === 'pki.rotation')?.message).toMatch(/1 of 2 connected/);
       await db.query(`UPDATE node_sessions SET trust_version = 2 WHERE node_id = 'node_old'`);
     });
+    // The version daemons get follows the bundle's content (M5): when the deployment published this bundle as a
+    // later version than the bundle's floor, the gate waits for THAT version, not the floor.
+    // (This environment-only deployment publishes nothing itself: record what a configured one would.)
+    const bundle = importPkiBundle(await readFile(join(cwd, '.better-compute', 'pki.json'), 'utf8'), { secret: SECRET });
+    const digest = configuredTrustDigest(bundle, {} as never)!;
+    await at((db) =>
+      db.query(`INSERT INTO trust_bundle_state (id, version, digest) VALUES ('current', 5, $1)`, [Buffer.from(digest)]),
+    );
+    await expect(createCli().run(['pki', 'rotate-command-root', '--stage', 'switch'], io)).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: /2 of 2 connected node\(s\) have not applied it/,
+    });
+    // A deployment still publishing the bundle without the new root: not switching.
+    await at((db) => db.query(`UPDATE trust_bundle_state SET version = 2, digest = '\\x00'`));
+    await expect(createCli().run(['pki', 'rotate-command-root', '--stage', 'switch'], io)).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: /still publishes trust version 2 without the new root/,
+    });
+    await at((db) => db.query(`UPDATE trust_bundle_state SET digest = $1`, [Buffer.from(digest)]));
     await createCli().run(['pki', 'rotate-command-root', '--stage', 'switch'], io);
     expect(notes).toContain('All 2 connected node(s) hold trust version 2.');
   });

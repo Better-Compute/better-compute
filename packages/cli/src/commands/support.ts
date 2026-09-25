@@ -7,7 +7,7 @@ import { defineCommand } from '../framework.js';
 import { resolveHost } from '../host/config.js';
 import { hostFindings } from '../host/findings.js';
 import { isUnconfiguredIam } from '../iam.js';
-import { defaultPkiPath, pkiFindings, pkiFlag } from './pki.js';
+import { defaultPkiPath, pkiFindings, quorumFindings, pkiFlag } from './pki.js';
 
 // `better-compute support bundle` (PLAN.md §6, §14): what an operator attaches to a support request about the
 // control plane: versions, the configuration's shape, doctor's findings, applied migrations, gateway and worker
@@ -176,6 +176,7 @@ export const supportCommands = [
       const check = await compute.selfCheck();
       const findings: Finding[] = [...check.findings];
       findings.push(...(await pkiFindings(path(flags.pki ?? defaultPkiPath), env, undefined, compute.context.sql)));
+      findings.push(...(await quorumFindings(compute.context.sql, options)));
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));
       const now = new Date();

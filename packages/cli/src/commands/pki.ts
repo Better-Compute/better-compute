@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
@@ -12,13 +13,17 @@ import {
   readPkiPins,
   renewBundleCa,
   rotateCommandSigningRoot,
+  sameApproverSet,
   toPem,
+  type ApproverSet,
   type BundleCa,
   type CommandRootRotationStage,
   type PkiBundle,
 } from '@better-compute/pki';
 import type { ImportPkiBundleOptions } from '@better-compute/pki';
 import type { Finding, SqlExecutor } from '@better-compute/core';
+import { trustBundleDigest } from '@better-compute/server';
+import type { AnyComputeOptions } from '../config.js';
 import { CliError, usageError } from '../errors.js';
 import { defineCommand, type FlagSpec } from '../framework.js';
 
@@ -173,6 +178,119 @@ const lagText = (lag: TrustLag) =>
   `${lag.behind} of ${lag.connected} connected node(s) have not applied it (${lag.sample
     .map((node) => `${node.nodeId} at ${node.trustVersion}`)
     .join(', ')}${lag.behind > lag.sample.length ? ', …' : ''})`;
+
+/** What the deployment last published as its trust bundle (`trust_bundle_state`, quorum review 6 M5). */
+export interface PublishedTrust {
+  version: number;
+  digest: Uint8Array;
+  approverSet?: ApproverSet;
+}
+
+/** The published trust bundle's record, or undefined before the quorum module migrated (or published). */
+export async function publishedTrust(sql: Pick<SqlExecutor, 'query'>): Promise<PublishedTrust | undefined> {
+  const { rows: table } = await sql.query<{ name: string | null }>(`SELECT to_regclass('trust_bundle_state')::text AS name`);
+  if (!table[0]?.name) return undefined;
+  const { rows } = await sql.query<{
+    version: string;
+    digest: Uint8Array;
+    approver_set: { keys: { kid: string; spki: string }[]; threshold: number; tiers: ApproverSet['quorumTiers']; unbatched: number } | null;
+  }>(`SELECT version::text AS version, digest, approver_set FROM trust_bundle_state WHERE id = 'current'`);
+  const row = rows[0];
+  if (!row) return undefined;
+  const stored = row.approver_set;
+  return {
+    version: Number(row.version),
+    digest: new Uint8Array(row.digest),
+    ...(stored
+      ? {
+          approverSet: {
+            approverKeys: stored.keys.map((key) => ({ kid: key.kid, spkiDer: new Uint8Array(Buffer.from(key.spki, 'base64')) })),
+            approverThreshold: stored.threshold,
+            quorumTiers: stored.tiers,
+            unbatchedDestructivePerHour: stored.unbatched,
+          },
+        }
+      : {}),
+  };
+}
+
+interface ConfiguredApprovers {
+  keys?: readonly Uint8Array[];
+  threshold?: number;
+  tiers?: readonly { maxScopeSize: number; threshold: number }[];
+  unbatchedDestructivePerHour?: number;
+  setSignatures?: readonly unknown[];
+}
+const approversOf = (options: AnyComputeOptions) =>
+  (options as { pki?: { approvers?: ConfiguredApprovers; trustVersion?: number | bigint } }).pki;
+
+/** The quorum fields `pki.approvers` configures, as the server publishes them (kid = base64url SHA-256 of the SPKI). */
+export function configuredApproverSet(options: AnyComputeOptions): ApproverSet {
+  const approvers = approversOf(options)?.approvers;
+  return {
+    approverKeys: (approvers?.keys ?? []).map((spkiDer) => ({
+      kid: createHash('sha256').update(spkiDer).digest('base64url'),
+      spkiDer: new Uint8Array(spkiDer),
+    })),
+    approverThreshold: approvers?.threshold ?? 0,
+    quorumTiers: approvers?.tiers ?? [],
+    unbatchedDestructivePerHour: approvers?.unbatchedDestructivePerHour ?? 0,
+  };
+}
+
+/**
+ * The digest of the trust bundle this bundle and configuration publish, version aside: its command-signing roots
+ * (the signing root, then a rotation's next and previous ones) and the configured quorum, as the server hashes them.
+ */
+export function configuredTrustDigest(bundle: PkiBundle, options: AnyComputeOptions): Uint8Array | undefined {
+  if (!bundle.commandSigning) return undefined;
+  const roots = [
+    bundle.commandSigning.certificate,
+    ...(bundle.commandSigningNext ? [bundle.commandSigningNext.certificate] : []),
+    ...(bundle.commandSigningPrevious ? [bundle.commandSigningPrevious] : []),
+  ];
+  return trustBundleDigest({ version: 0n, commandSigningRoots: roots, ...configuredApproverSet(options) } as never);
+}
+
+/**
+ * doctor's quorum check (review 6 H1): a configured approver quorum that differs from the published one reaches the
+ * daemons that hold approver keys only when k of the CURRENT approvers signed it for the next version.
+ */
+export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: AnyComputeOptions): Promise<Finding[]> {
+  const published = await publishedTrust(sql);
+  if (!published?.approverSet) return [];
+  const configured = configuredApproverSet(options);
+  if (sameApproverSet(published.approverSet, configured)) return [];
+  const next = published.version + 1;
+  const pki = approversOf(options);
+  const signed = (pki?.approvers?.setSignatures?.length ?? 0) > 0 && Number(pki?.trustVersion) === next;
+  if (!published.approverSet.approverKeys.length)
+    return [
+      {
+        check: 'pki.quorum-change',
+        severity: 'info',
+        message: `This configuration introduces an approver quorum (published trust version ${published.version} has none): daemons take the first set as it comes`,
+        fix: 'Nothing to sign: roll the configuration out to every process',
+      },
+    ];
+  if (signed)
+    return [
+      {
+        check: 'pki.quorum-change',
+        severity: 'info',
+        message: `The configured approver quorum is signed for trust version ${next}: daemons take it on their next session`,
+        fix: 'Roll the configuration out to every process',
+      },
+    ];
+  return [
+    {
+      check: 'pki.quorum-unsigned',
+      severity: 'warning',
+      message: `The configured approver quorum differs from the one published at trust version ${published.version}, and no current approvers signed it for version ${next}: daemons that hold approver keys will refuse the new bundle and keep the old quorum`,
+      fix: `Each of ${published.approverSet.approverThreshold} current approver(s): better-compute batch sign-approvers --key <key> --version ${next} --approvers <new .pub files> --threshold <k>; then set pki.trustVersion to ${next} and pki.approvers.setSignatures to their signatures`,
+    },
+  ];
+}
 
 /** CAs expiring within this window are reported by `doctor`. */
 export const caExpiryWarningMs = 30 * 86_400_000;
@@ -464,14 +582,28 @@ export const pkiCommands = [
       // Switch only after 100% acknowledgment (§13): a daemon still on the old version would reject every
       // command signed under the new root. Disconnected daemons get the bundle in Welcome before any command.
       if (stage === 'switch' && bundle.commandSigningNext && !flags.force) {
-        const version = pkiPins(bundle).trustVersion ?? 1;
+        let version = pkiPins(bundle).trustVersion ?? 1;
         if (!(await configPath()) && !env.BETTER_COMPUTE_DATABASE_URL)
           throw new CliError(
             'INVALID_STATE',
             `Cannot check which daemons hold trust version ${version}: no configuration or database`,
             "Run it where the deployment's configuration is (or set BETTER_COMPUTE_DATABASE_URL), or pass --force once you have checked.",
           );
-        const lag = await trustLag((await deployment()).compute.context.sql, version);
+        const { compute, options } = await deployment();
+        // The version daemons get follows the bundle's content (M5): gate on the version the deployment published for
+        // THIS bundle (with the new root), and refuse while it still publishes the one without it.
+        const published = await publishedTrust(compute.context.sql);
+        const expected = configuredTrustDigest(bundle, options);
+        if (published && expected) {
+          if (Buffer.compare(published.digest, expected) !== 0)
+            throw new CliError(
+              'INVALID_STATE',
+              `Not switching: the deployment still publishes trust version ${published.version} without the new root`,
+              'Roll the bundle from --stage add out to every process (restart them), then switch.',
+            );
+          version = published.version;
+        }
+        const lag = await trustLag(compute.context.sql, version);
         if (lag.behind > 0)
           throw new CliError(
             'INVALID_STATE',
@@ -504,6 +636,45 @@ export const pkiCommands = [
         ...(pins.commandSigningPreviousRootSha256
           ? { previousRoot: pins.commandSigningPreviousRootSha256 }
           : {}),
+      };
+    },
+  }),
+  defineCommand({
+    name: 'pki trust-version',
+    group: 'PKI',
+    summary: 'Show the trust bundle version the deployment publishes, and the one to sign a quorum change for',
+    description:
+      "pki trust-version reads the trust bundle the deployment last published (its version follows its content: a changed bundle publishes the next version, pki.trustVersion is a floor) and compares it with this configuration and PKI bundle: whether they publish the same bundle, whether the configured approver quorum differs (then its current approvers sign it for nextVersion: better-compute batch sign-approvers --version <nextVersion>, with pki.trustVersion set to it), and how many connected daemons hold that version.",
+    target: 'config',
+    output: 'json',
+    flags: { pki: pkiFlag },
+    examples: ['better-compute pki trust-version'],
+    async run({ flags, env, path, deployment }) {
+      const { compute, options } = await deployment();
+      const sql = compute.context.sql;
+      const published = await publishedTrust(sql);
+      if (!published)
+        throw new CliError(
+          'NOT_FOUND',
+          'The deployment has published no trust bundle yet',
+          'Migrate, and start a process whose configuration has pki.commandSigning.',
+        );
+      const bundle = await loadPkiBundle(path(flags.pki ?? defaultPkiPath), env);
+      const expected = configuredTrustDigest(bundle, options);
+      const matches = expected ? Buffer.compare(published.digest, expected) === 0 : undefined;
+      const quorumChanged = published.approverSet
+        ? !sameApproverSet(published.approverSet, configuredApproverSet(options))
+        : false;
+      const lag = await trustLag(sql, published.version);
+      return {
+        version: published.version,
+        ...(matches === undefined ? {} : { configurationMatches: matches }),
+        // What this configuration would publish: the same version, or the next one.
+        nextVersion: matches === false ? published.version + 1 : published.version,
+        quorumChanged,
+        ...(quorumChanged ? { signQuorumFor: published.version + 1 } : {}),
+        connected: lag.connected,
+        behind: lag.behind,
       };
     },
   }),

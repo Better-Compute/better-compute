@@ -187,6 +187,7 @@ describe('help and the manifest', () => {
       'pki add-sandbox-ca',
       'pki reseal',
       'pki rotate-command-root',
+      'pki trust-version',
       'pki renew-ca',
       'pki issue-gateway',
       'batch keygen',

@@ -19,6 +19,10 @@
 // - BETTER_COMPUTE_APPROVER_KEYS: approver public keys (`better-compute batch keygen` .pub files, comma-separated)
 //   with BETTER_COMPUTE_APPROVER_THRESHOLD (k of them): the v1.0 destructive-batch quorum, in every daemon's trust
 //   bundle. BETTER_COMPUTE_UNBATCHED_PER_HOUR (default 0): destructive commands a node runs per hour outside a batch.
+//   Changing a quorum daemons already hold needs its current approvers' signatures: BETTER_COMPUTE_APPROVER_SET_SIGNATURES
+//   (the JSON files `batch sign-approvers` printed, comma-separated) for the version they sign, which becomes
+//   pki.trustVersion (`better-compute pki trust-version` says which to sign for). BETTER_COMPUTE_TRUST_VERSION sets
+//   that floor by itself.
 //
 // IAM: until you wire better-iam (see the README of examples/postgres), no credential authenticates.
 // `better-compute dev --sim N` replaces that with an embedded, in-memory better-iam and prints a root token.
@@ -44,7 +48,13 @@ import {
   runtimeObserver,
   standardMetrics,
 } from '@better-compute/observability';
-import { approverKeyOf, bootstrapPins, commandSigningOptions, type PkiBundle } from '@better-compute/pki';
+import {
+  approverKeyOf,
+  approverSetDigest,
+  bootstrapPins,
+  commandSigningOptions,
+  type PkiBundle,
+} from '@better-compute/pki';
 import { postgres, retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
@@ -101,6 +111,60 @@ async function approversOf(env: NodeJS.ProcessEnv, cwd: string) {
   if (!Number.isInteger(perHour) || perHour < 0)
     throw new Error('BETTER_COMPUTE_UNBATCHED_PER_HOUR must be a whole number ≥ 0');
   return { keys, threshold, unbatchedDestructivePerHour: perHour };
+}
+
+/**
+ * `pki.approvers.setSignatures` from BETTER_COMPUTE_APPROVER_SET_SIGNATURES (`batch sign-approvers` outputs), checked
+ * to sign this quorum and one version, and the `pki.trustVersion` they need.
+ */
+async function setSignaturesOf(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  approvers: NonNullable<Awaited<ReturnType<typeof approversOf>>> | undefined,
+) {
+  const floor = env.BETTER_COMPUTE_TRUST_VERSION ? Number(env.BETTER_COMPUTE_TRUST_VERSION) : undefined;
+  if (floor !== undefined && !(Number.isInteger(floor) && floor >= 1))
+    throw new Error('BETTER_COMPUTE_TRUST_VERSION must be a whole number ≥ 1');
+  const paths = (env.BETTER_COMPUTE_APPROVER_SET_SIGNATURES ?? '')
+    .split(',')
+    .map((path) => path.trim())
+    .filter(Boolean);
+  if (paths.length === 0) return floor === undefined ? undefined : { trustVersion: floor };
+  const signed = await Promise.all(
+    paths.map(async (path) => {
+      const value = JSON.parse(await readFile(resolve(cwd, path), 'utf8')) as {
+        version?: unknown;
+        setSha256?: unknown;
+        signature?: { kid?: unknown; sig?: unknown };
+      };
+      if (
+        typeof value.version !== 'number' ||
+        typeof value.setSha256 !== 'string' ||
+        typeof value.signature?.kid !== 'string' ||
+        typeof value.signature.sig !== 'string'
+      )
+        throw new Error(`${path} is not the output of better-compute batch sign-approvers`);
+      return { path, version: value.version, setSha256: value.setSha256, kid: value.signature.kid, sig: value.signature.sig };
+    }),
+  );
+  const version = signed[0]!.version;
+  if (signed.some((entry) => entry.version !== version))
+    throw new Error('BETTER_COMPUTE_APPROVER_SET_SIGNATURES sign different trust versions: sign them all for one');
+  if (floor !== undefined && floor !== version)
+    throw new Error(`The approver-set signatures are for trust version ${version}, not BETTER_COMPUTE_TRUST_VERSION ${floor}`);
+  // They must sign exactly the configured quorum (a stale signature would be published for nothing).
+  const expected = Buffer.from(
+    approverSetDigest({
+      approverKeys: (approvers?.keys ?? []).map((spkiDer) => approverKeyOf(spkiDer)),
+      approverThreshold: approvers?.threshold ?? 0,
+      quorumTiers: [],
+      unbatchedDestructivePerHour: approvers?.unbatchedDestructivePerHour ?? 0,
+    }),
+  ).toString('hex');
+  for (const entry of signed)
+    if (entry.setSha256 !== expected)
+      throw new Error(`${entry.path} signs another quorum than BETTER_COMPUTE_APPROVER_KEYS / _THRESHOLD / BETTER_COMPUTE_UNBATCHED_PER_HOUR`);
+  return { trustVersion: version, setSignatures: signed.map(({ kid, sig }) => ({ kid, sig })) };
 }
 
 function database(env: NodeJS.ProcessEnv, cwd: string, requirePostgres: boolean): SqlExecutor {
@@ -173,6 +237,7 @@ export async function exampleOptions(
   if (!secret) throw new Error('Set BETTER_COMPUTE_SECRET (at least 32 characters)');
   const bundle = await bundleOf(env, cwd);
   const approvers = await approversOf(env, cwd);
+  const trust = await setSignaturesOf(env, cwd, approvers);
   if (approvers && !bundle?.commandSigning)
     throw new Error('BETTER_COMPUTE_APPROVER_KEYS needs a PKI bundle with a command-signing root (pki init)');
   const iam: IamPort = unconfiguredIam();
@@ -214,8 +279,11 @@ export async function exampleOptions(
             // Signed intent (v0.2): commands and specs signed under the bundle's command-signing root, with the
             // roots and trust version of a rotation in progress (pki rotate-command-root).
             ...commandSigningOptions(bundle),
+            ...(trust ? { trustVersion: trust.trustVersion } : {}),
             // The destructive-batch quorum (v1.0): k-of-n approver keys, checked by every daemon.
-            ...(approvers ? { approvers } : {}),
+            ...(approvers
+              ? { approvers: { ...approvers, ...(trust?.setSignatures ? { setSignatures: trust.setSignatures } : {}) } }
+              : {}),
           },
         }
       : {}),
