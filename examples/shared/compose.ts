@@ -35,6 +35,7 @@ import {
   createMetrics,
   eventCounter,
   placementObserver,
+  runtimeObserver,
   standardMetrics,
 } from '@better-compute/observability';
 import type { PkiBundle } from '@better-compute/pki';
@@ -108,7 +109,8 @@ export function everyModule(
     vps(),
     // The store's housekeeping: prunes the outbox and authz changes behind their cursors (every 5 min).
     retentionModule(),
-    eventsModule({ secret, countEvent: eventCounter(metrics) }),
+    // events_total{family,module} and security_events_total{type}.
+    eventsModule({ secret, countEvent: eventCounter(metrics, standard) }),
     fleetModule(),
     // bcd self-update needs the offline release keys' pins.
     ...(pins.length
@@ -143,6 +145,8 @@ export async function exampleOptions(
     rootTenantId: env.BETTER_COMPUTE_ROOT_TENANT ?? 'root',
     iam,
     modules: [...everyModule(secret, bundle, env, context.metal), ...(context.modules ?? [])],
+    // reconcile_duration_seconds and commands_swept_total from the runtime's workers.
+    worker: { observe: runtimeObserver(standard) },
     capacity: {
       ...(context.placer ? { placer: context.placer } : {}),
       // §14 placements_total{outcome}, booking_conflicts_total and placement_seconds{placer}, from every placement.

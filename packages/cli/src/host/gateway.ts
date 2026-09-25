@@ -268,7 +268,11 @@ export async function startGateway(
   });
   feed.start();
   // Sessions by role, stream headroom, draining, lease held, in-flight commands: sampled at scrape.
-  if (metrics) gatewayCollector(metrics, () => [gateway as unknown as SampledGateway]);
+  if (metrics)
+    gatewayCollector(metrics, () => [gateway as unknown as SampledGateway], {
+      // Also the standard gateway_sessions{role}.
+      metrics: standardMetrics(metrics),
+    });
   const listeners: Served[] = [];
   const watches: { close(): void }[] = [];
   const stop = async () => {
