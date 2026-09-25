@@ -338,7 +338,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - Next for [6a20b8]: update.swap, so self-update works in helper mode.
     - Instance serial consoles over tunnels.open (798e710, compute:instances:exec; sandbox instances refused).
     - bcx-ipmi on site agents: downloads route (97b2ac2) plus install-script --install-plugins (adf2ae9).
-    - Security review 12 ([402c97] over cloud-hypervisor 2598f0a), 2 HIGH, OPEN ([6a20b8]):
+    - Security review 12 ([402c97] over cloud-hypervisor 2598f0a), 2 HIGH, FIXED in 933c51b (both runtimes: images
+      checked with an explicit format and refused with a backing or data file; taps persistent and bridged plus an
+      nft backstop; the VMM unit confined; M1-M3 and L1-L7 too). bcd e2e 11/11. The original findings:
       - taps come back off the policed bridge after a guest reboot;
       - the root VMM follows a tenant qcow2 backing file (host or other-tenant disk).
       libvirt-kvm is being checked for the same backing-file issue. The docs mark cloud-hypervisor not production-safe
