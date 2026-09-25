@@ -20,6 +20,7 @@ import {
   outboxTail,
   parseCursor,
   pruneWebhookDeliveries,
+  purgeTenantWebhooks,
   readOutbox,
   sealSecret,
   signatureHeader,
@@ -196,6 +197,34 @@ describe('webhook delivery', () => {
   const policy = { secret, allowPrivate: false as const };
   const store = webhookStore({ ...policy, clock: systemClock });
   const resolve = async () => ['93.184.216.34'];
+
+  it("purges a deleted tenant's subscriptions and their deliveries, in batches (§12.8)", async () => {
+    await fanOutWebhooks(db);
+    for (const url of [
+      'https://a1.example.com/in',
+      'https://a2.example.com/in',
+      'https://a3.example.com/in',
+    ])
+      await db.transaction((tx) => store.create(tx, { tenantId: 'ten_a', url, events: ['*'] }));
+    await db.transaction((tx) =>
+      store.create(tx, { tenantId: 'ten_b', url: 'https://b.example.com/in', events: ['*'] }),
+    );
+    await emit('ten_a', 'reservation.released');
+    await emit('ten_b', 'reservation.released');
+    expect(await fanOutWebhooks(db)).toMatchObject({ queued: 4 });
+    // Two per call: the third subscription needs a second pass.
+    expect(await purgeTenantWebhooks(db, 'ten_a', 2)).toBe('SYNC_AGAIN');
+    expect(await purgeTenantWebhooks(db, 'ten_a', 2)).toBe('DONE');
+    expect(await purgeTenantWebhooks(db, 'ten_a', 2)).toBe('DONE');
+    const deliveries = await db.query<{ tenant_id: string; n: number }>(
+      'SELECT tenant_id, count(*)::int AS n FROM webhook_deliveries GROUP BY tenant_id',
+    );
+    expect(deliveries.rows).toEqual([{ tenant_id: 'ten_b', n: 1 }]);
+    const hooks = await db.query<{ tenant_id: string }>('SELECT tenant_id FROM webhooks');
+    expect(hooks.rows).toEqual([{ tenant_id: 'ten_b' }]);
+    // The events module runs it as its tenancy teardown hook.
+    expect(typeof eventsModule({ secret }).tenantDeleted).toBe('function');
+  });
 
   it('fans out matching events once and delivers them signed with the returned secret', async () => {
     await fanOutWebhooks(db); // starts the cursor at the tail: no history replay

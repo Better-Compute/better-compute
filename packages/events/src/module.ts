@@ -15,7 +15,12 @@ import {
 } from '@better-compute/core';
 import { eventCatalog, type EventFamily } from './catalog.js';
 import { eventsMigrations } from './migrations.js';
-import { deliveryRetention, pruneWebhookDeliveries, type DeliveryRetention } from './retention.js';
+import {
+  deliveryRetention,
+  pruneWebhookDeliveries,
+  purgeTenantWebhooks,
+  type DeliveryRetention,
+} from './retention.js';
 import type { UrlPolicy } from './safe-url.js';
 import {
   deliverWebhooks,
@@ -256,5 +261,8 @@ export function eventsModule(options: EventsModuleOptions): ComputeModule<'event
     selfCheck,
     // Anchor the fan-out cursor now, so events committed before the first fan-out pass are not skipped.
     start: (context) => ensureFanOutCursor(context.sql),
+    // §12.8 purge: a deleted tenant's subscriptions (and, by cascade, their deliveries and sealed secrets) go, so
+    // nothing more is sent to its endpoints; bounded per call.
+    tenantDeleted: (context, tenantId) => purgeTenantWebhooks(context.sql, tenantId),
   });
 }

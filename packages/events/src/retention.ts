@@ -44,3 +44,21 @@ export async function pruneWebhookDeliveries(
   );
   return rowCount ?? 0;
 }
+
+/**
+ * §12.8 purge for a deleted tenant: deletes up to `limit` of its webhook subscriptions (default 100), and by
+ * cascade their deliveries (pending ones included) and sealed secrets, so nothing more reaches its endpoints.
+ * `SYNC_AGAIN` while more remain: the shape of `ComputeModule.tenantDeleted`.
+ */
+export async function purgeTenantWebhooks(
+  sql: Pick<SqlExecutor, 'query'>,
+  tenantId: string,
+  limit = 100,
+): Promise<'DONE' | 'SYNC_AGAIN'> {
+  const { rowCount } = await sql.query(
+    `DELETE FROM webhooks WHERE id IN (
+       SELECT id FROM webhooks WHERE tenant_id = $1 ORDER BY id LIMIT $2)`,
+    [tenantId, limit],
+  );
+  return (rowCount ?? 0) >= limit ? 'SYNC_AGAIN' : 'DONE';
+}
