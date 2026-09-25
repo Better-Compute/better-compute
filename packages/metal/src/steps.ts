@@ -21,6 +21,7 @@ import {
   type CommandOutcome,
   type ImageUseOptions,
 } from '@better-compute/provision';
+import { endAdvisoryInventory } from '@better-compute/inventory';
 import { isIP } from 'node:net';
 import { nodeSignedResults, pkiNodeSignatureCheck } from './attestation.js';
 import {
@@ -766,6 +767,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       return context.sql.transaction(async (tx) => {
         const revoked = await newIdentityGeneration(tx, nodeId, 'tenant-root-exit');
         await tx.query(`UPDATE nodes SET trust = 'platform' WHERE id = $1`, [nodeId]);
+        // The lessee's inventory was advisory; the next report under platform trust applies for real.
+        await endAdvisoryInventory(tx, nodeId);
         await tx.query(
           'UPDATE metal_nodes SET tenant_root = false, lease_allocation_id = NULL, updated_at = compute_now(), version = version + 1 WHERE node_id = $1',
           [nodeId],

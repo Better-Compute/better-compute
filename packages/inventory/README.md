@@ -63,6 +63,14 @@ the always-on built-in module that the server registers before any injected modu
      unique index is caught in a savepoint and becomes `DuplicateIdentity`;
    - publishes `node.inventory.changed` plus one `node.<change>` event per diff entry.
 
+   A `tenant-controlled` node (a dedicated-root lease: the lessee has root) is advisory (PLAN.md
+   §10.1 Trust). Its set is appended as a snapshot and announced as `node.inventory.changed` with
+   `advisory: true`, and nothing else changes: devices, health, labels, conditions, the image cache
+   and the hardware key keep the platform's last view, and `recordXid` ignores its XIDs. Otherwise a
+   GPU the lessee reports missing or unhealthy would leave the lease's bill. The applied digest is
+   stored as `advisory:<digest>`. When metal ends the lease it calls `endAdvisoryInventory`, so the
+   next report applies the same set under platform trust.
+
 Pure building blocks: `verifySection`, `sectionsToRequest`, `mergeSections`, `inventoryDigest`,
 `devicesFromGpus`, `gpuLinks` (undirected GPU pairs for placement), `planDevices`,
 `inventoryLabels`, `inventoryConditions`, `mergeNoScheduleReasons`, `diffInventory`,

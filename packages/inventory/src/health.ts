@@ -207,7 +207,9 @@ export interface XidOutcome {
  * An XID event from the node (`node.event`, §10.1): sets the condition, quarantines the GPU for
  * device-level faults (the quarantine stays until `clearDeviceHealth`), and for node-level faults
  * makes the node NoSchedule; the health reconciler then drains and remediates it. XIDs without a
- * policy change nothing. Takes the node row lock.
+ * policy change nothing, and neither do XIDs from a tenant-controlled node (a dedicated-root lease:
+ * the lessee has root, so its reports are advisory, §10.1 Trust; a quarantine would also leave the
+ * GPU out of the lease's bill). Takes the node row lock.
  */
 export async function recordXid(
   tx: SqlTx,
@@ -216,8 +218,11 @@ export async function recordXid(
 ): Promise<XidOutcome> {
   const policy = classifyXid(event.xid);
   if (!policy) return { xid: event.xid, quarantined: false, noSchedule: false };
-  const node = await tx.query<{ no_schedule_reasons: string[] }>('SELECT no_schedule_reasons FROM nodes WHERE id = $1 FOR UPDATE', [nodeId]);
+  const node = await tx.query<{ no_schedule_reasons: string[]; trust: string }>('SELECT no_schedule_reasons, trust FROM nodes WHERE id = $1 FOR UPDATE', [
+    nodeId,
+  ]);
   if (!node.rows[0]) return { xid: event.xid, policy, quarantined: false, noSchedule: false };
+  if (node.rows[0].trust === 'tenant-controlled') return { xid: event.xid, quarantined: false, noSchedule: false };
   await upsertCondition(tx, nodeId, policy.condition, 'true', `xid ${event.xid} on ${event.gpuUuid}`.slice(0, 512));
   const device = await tx.query(
     `INSERT INTO device_health (device_id, node_id, reason, source, message)

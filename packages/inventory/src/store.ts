@@ -56,6 +56,13 @@ const derivedClasses = ['gpu', 'gpu.mig', 'gpu.slot'];
 const nodeNotFound = (nodeId: string) => new ComputeError('NOT_FOUND', `Node ${nodeId} does not exist`);
 
 /**
+ * `node_inventory.applied_digest` after an advisory pass (tenant-controlled node): distinct from the
+ * digest itself, so the same set is applied for real once the node is back under platform trust.
+ */
+const advisoryDigest = (digest: string) => `advisory:${digest}`;
+const alreadyApplied = (applied: string | null, digest: string) => applied === digest || applied === advisoryDigest(digest);
+
+/**
  * Hello / heartbeat: stores the hashes the node reports and returns the sections to pull
  * (`Welcome.request_sections`), comparing against the stored section bytes. Enqueues inventory
  * application when nothing needs pulling but the set changed (a section vanished, or a pull
@@ -80,7 +87,7 @@ export async function recordInventoryHashes(
   if (upsert.rowCount === 0) throw nodeNotFound(nodeId);
   const stored = await storedSectionHashes(tx, nodeId);
   const request = sectionsToRequest(stored, hashes);
-  if (request.length === 0 && upsert.rows[0]!.applied_digest !== inventoryDigest(hashes))
+  if (request.length === 0 && !alreadyApplied(upsert.rows[0]!.applied_digest, inventoryDigest(hashes)))
     await work.enqueue(tx, inventoryWorkKind, nodeId);
   return request;
 }
@@ -133,7 +140,7 @@ export async function recordInventoryHashesMany(
     for (const row of rows) {
       const hashes = latest.get(row.node_id)!.hashes;
       const request = sectionsToRequest((row.stored ?? {}) as SectionHashes, hashes);
-      if (request.length === 0 && row.applied_digest !== inventoryDigest(hashes)) apply.push(row.node_id);
+      if (request.length === 0 && !alreadyApplied(row.applied_digest, inventoryDigest(hashes))) apply.push(row.node_id);
       answers.set(row.node_id, request);
     }
     apply.sort();
@@ -258,6 +265,12 @@ export type ApplyInventoryResult =
   | { status: 'incomplete'; missing: InventorySectionName[] }
   /** The reported set is the one already applied. */
   | { status: 'unchanged'; digest: string }
+  /**
+   * A tenant-controlled node (a dedicated-root lease, §10.1 Trust): the lessee has root, so its
+   * inventory is recorded as a snapshot only. Devices, health, labels, conditions and the hardware
+   * key keep the platform's last view until the node is back under platform trust.
+   */
+  | { status: 'advisory'; snapshotId: string; digest: string; changes: ReturnType<typeof diffInventory> }
   | {
       status: 'applied';
       snapshotId: string;
@@ -279,9 +292,19 @@ export interface ApplyInventoryOptions {
   expect?: InventoryExpectation;
 }
 
+/**
+ * The node is back under platform trust (a dedicated-root lease ended, metal.exitTenantRoot): an
+ * advisory digest no longer counts as applied, so the next hash report applies the set for real
+ * even if it is unchanged.
+ */
+export async function endAdvisoryInventory(tx: SqlTx, nodeId: string): Promise<void> {
+  await tx.query(`UPDATE node_inventory SET applied_digest = NULL WHERE node_id = $1 AND applied_digest LIKE 'advisory:%'`, [nodeId]);
+}
+
 interface NodeRow {
   id: string;
   owner_tenant_id: string;
+  trust: string;
   site_id: string;
   role: string;
   pool_id: string | null;
@@ -315,7 +338,7 @@ export async function applyInventory(
     // Two statements on purpose: the node row first, then its inventory row (the lock order the
     // gateway's Hello follows too; one joined statement could take them the other way round).
     const nodes = await tx.query<NodeRow>(
-      `SELECT n.id, n.owner_tenant_id, n.site_id, n.role, n.pool_id, n.no_schedule_reasons, n.hardware_key,
+      `SELECT n.id, n.owner_tenant_id, n.trust, n.site_id, n.role, n.pool_id, n.no_schedule_reasons, n.hardware_key,
               n.hardware_key_trusted, p.gpu_model, p.policy, p.sharing
          FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id
         WHERE n.id = $1 FOR UPDATE OF n`,
@@ -332,7 +355,8 @@ export async function applyInventory(
     const reportedNames = INVENTORY_SECTIONS.filter((name) => reported[name] !== undefined);
     if (reportedNames.length === 0) return { status: 'incomplete', missing: [] };
     const digest = inventoryDigest(reported);
-    if (state.rows[0]!.applied_digest === digest) return { status: 'unchanged', digest };
+    const advisory = node.trust === 'tenant-controlled';
+    if (state.rows[0]!.applied_digest === (advisory ? advisoryDigest(digest) : digest)) return { status: 'unchanged', digest };
 
     const stored = await tx.query<{ section: InventorySectionName; sha256: string; content: Uint8Array }>(
       'SELECT section, sha256, content FROM node_inventory_sections WHERE node_id = $1',
@@ -367,6 +391,24 @@ export async function applyInventory(
        VALUES ($1, $2, decode($3, 'hex'), $4::jsonb, $5::jsonb, $6, compute_now())`,
       [snapshotId, nodeId, digest, JSON.stringify(reported), JSON.stringify(json), state.rows[0]!.boot_id],
     );
+
+    if (advisory) {
+      // The lessee has root: its report is history, never the node's devices, health, labels or
+      // identity (a GPU it reports missing or unhealthy would otherwise leave its bill). The applied
+      // snapshot stays the platform's last one.
+      await tx.query(`UPDATE node_inventory SET applied_digest = $2 WHERE node_id = $1`, [nodeId, advisoryDigest(digest)]);
+      if (options.events) {
+        const event = {
+          type: 'node.inventory.changed',
+          tenantId: node.owner_tenant_id,
+          subject: `node/${nodeId}`,
+          data: { snapshotId, digest, sections: reportedNames, changes: changes.length, advisory: true },
+        };
+        if (options.events.publishMany) await options.events.publishMany(tx, [event]);
+        else await options.events.publish(tx, event);
+      }
+      return { status: 'advisory', snapshotId, digest, changes };
+    }
 
     // Health first, so the device plan already sees this inventory's quarantines.
     const health = inventoryHealthFindings(sections.gpus);

@@ -13,6 +13,7 @@ import {
 } from '@better-compute/protocol';
 import {
   applyInventory,
+  endAdvisoryInventory,
   gpuAtomFamily,
   ingestInventorySection,
   ingestInventorySections,
@@ -22,6 +23,7 @@ import {
   latestInventory,
   recordInventoryHashes,
   recordInventoryHashesMany,
+  recordXid,
   sha256Hex,
 } from '@better-compute/inventory';
 
@@ -240,6 +242,55 @@ describe('report → pull → apply', () => {
     if (later.status !== 'applied') throw new Error(later.status);
     expect(later.devices.removed).toBe(1);
     expect((await db.query('SELECT 1 FROM devices WHERE id = $1', [`GPU-${node}-3`])).rowCount).toBe(0);
+  });
+
+  it("records a tenant-controlled node's inventory as advisory, and applies it for real after the lease", async () => {
+    await report(node, { gpus: encoded.gpus(8), system: encoded.system('SER-LEASE'), nics: encoded.nics('b8:ce:f6:00:00:42') });
+    await applyInventory(db, node);
+    const platformKey = (await nodeRow()).hardware_key;
+    // A dedicated-root lease starts: the lessee has root and reports 6 GPUs, an XID and new hardware.
+    await db.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [node]);
+    published.length = 0;
+    enqueued.length = 0;
+    await report(node, { gpus: encoded.gpus(6), system: encoded.system('SER-OTHER'), nics: encoded.nics('b8:ce:f6:00:00:43') });
+    const result = await applyInventory(db, node, { events, work });
+    expect(result.status).toBe('advisory');
+    if (result.status !== 'advisory') return;
+    expect(result.changes.filter((c) => c.type === 'gpu.missing')).toHaveLength(2);
+    expect(await db.transaction((tx) => recordXid(tx, node, { gpuUuid: `GPU-${node}-0`, xid: 79 }))).toEqual({
+      xid: 79,
+      quarantined: false,
+      noSchedule: false,
+    });
+    // The platform's view stands: all 8 GPUs healthy, labels, conditions, key and reasons untouched.
+    const devices = await db.query<{ healthy: boolean }>('SELECT healthy FROM devices WHERE node_id = $1', [node]);
+    expect(devices.rows).toHaveLength(8);
+    expect(devices.rows.every((d) => d.healthy)).toBe(true);
+    const count = await db.query<{ value: string }>(`SELECT value FROM node_labels WHERE node_id = $1 AND key = 'gpu.count'`, [node]);
+    expect(count.rows).toEqual([{ value: '8' }]);
+    const row = await nodeRow();
+    expect(row.no_schedule_reasons).toEqual([]);
+    expect(Buffer.from(row.hardware_key!).equals(Buffer.from(platformKey!))).toBe(true);
+    expect((await db.query('SELECT 1 FROM device_health WHERE node_id = $1', [node])).rowCount).toBe(0);
+    // History keeps it, flagged; the applied snapshot stays the platform's.
+    expect(published).toEqual([expect.objectContaining({ type: 'node.inventory.changed', data: expect.objectContaining({ advisory: true }) })]);
+    const applied = await db.query<{ applied_snapshot_id: string }>('SELECT applied_snapshot_id FROM node_inventory WHERE node_id = $1', [node]);
+    expect(applied.rows[0]!.applied_snapshot_id).not.toBe(result.snapshotId);
+    // The same report again is neither re-queued nor re-recorded.
+    enqueued.length = 0;
+    await report(node, { gpus: encoded.gpus(6), system: encoded.system('SER-OTHER'), nics: encoded.nics('b8:ce:f6:00:00:43') });
+    expect(enqueued).toEqual([]);
+    expect((await applyInventory(db, node)).status).toBe('unchanged');
+
+    // The lease ends (metal.exitTenantRoot): the unchanged set is applied under platform trust.
+    await db.transaction(async (tx) => {
+      await tx.query(`UPDATE nodes SET trust = 'platform' WHERE id = $1`, [node]);
+      await endAdvisoryInventory(tx, node);
+    });
+    await report(node, { gpus: encoded.gpus(6), system: encoded.system('SER-OTHER'), nics: encoded.nics('b8:ce:f6:00:00:43') });
+    expect(enqueued).toEqual([`inventory:${node}`]);
+    expect((await applyInventory(db, node)).status).toBe('applied');
+    expect((await nodeRow()).no_schedule_reasons).toEqual(['GpuCountMismatch']);
   });
 
   it('marks a second node with the same trusted hardware key as DuplicateIdentity', async () => {

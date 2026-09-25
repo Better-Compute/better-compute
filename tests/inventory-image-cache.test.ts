@@ -144,11 +144,12 @@ describe('the images section', () => {
     expect(ready.map((entry) => entry.nodeId)).toEqual([warm]);
     const byDigest = await imageCacheNodes(db, { poolId: 'pool_v', sha256: Buffer.from(digest('ubuntu')).toString('hex'), states: ['ready', 'pulling'] });
     expect(byDigest.map((entry) => entry.nodeId).sort()).toEqual([pulling, warm].sort());
-    // [13084d]'s scorer query reads the table directly, in this shape.
+    // [13084d]'s scorer query reads the table directly, in this shape. A tenant-controlled node's
+    // inventory is advisory, so its cache never reaches the table at all.
     const scorer = await db.query<{ node_id: string }>(
       `SELECT c.node_id FROM node_image_cache c JOIN nodes n ON n.id = c.node_id WHERE n.pool_id = $1 AND c.image_id = $2 AND c.state = 'ready'`,
       ['pool_v', 'img_ubuntu'],
     );
-    expect(scorer.rows.map((row) => row.node_id).sort()).toEqual([lessee, warm].sort());
+    expect(scorer.rows.map((row) => row.node_id)).toEqual([warm]);
   });
 });
