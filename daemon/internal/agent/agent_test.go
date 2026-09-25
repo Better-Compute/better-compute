@@ -686,3 +686,17 @@ func TestLogsCollectUploadsARedactedBundle(t *testing.T) {
 		t.Fatalf("http upload = %v", u)
 	}
 }
+
+func TestStatusReportsTheSession(t *testing.T) {
+	h := newHarness(t, nil)
+	if st := h.agent.Status(); st.Connected || st.NodeID != testNode {
+		t.Fatalf("before Welcome: %+v", st)
+	}
+	s, _ := h.open()
+	s.push(desired(4, &agentv1.NodeSpec{}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return f.GetStatus() != nil })
+	st := h.agent.Status()
+	if !st.Connected || st.Epoch != 1 || st.AppliedGeneration != 4 || st.ObservedGeneration != 4 || len(st.Sections) != 6 || st.CommandSigning {
+		t.Fatalf("status = %+v", st)
+	}
+}

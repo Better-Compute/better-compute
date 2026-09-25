@@ -135,6 +135,7 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
         `join_signing_key_pin = "${spkiPin(createPublicKey({ key: dev.pins.joinSigningKey as any, format: 'jwk' }))}"`,
         `join_encryption_key_pin = "${spkiPin(createPublicKey({ key: dev.pins.joinEncryptionJwk as any, format: 'jwk' }))}"`,
         `data_dir = "${dataDir}"`,
+        `socket_path = "${dataDir}/bcd.sock"`,
         '',
         '[log]',
         'level = "debug"',
@@ -170,6 +171,11 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       [nodeId],
     );
     expect(rows[0]!.n).toBeGreaterThanOrEqual(1);
+
+    // bcd status answers on the agent's unix socket.
+    const status = await runLinux([toLinux(binary), 'status', '--socket', `${dataDir}/bcd.sock`, '--json']);
+    expect(status.status, status.stderr).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({ nodeId, connected: true, role: 'node' });
 
     const refresh = await api.commands.run(dev.root, {
       tenantId: dev.rootTenantId,

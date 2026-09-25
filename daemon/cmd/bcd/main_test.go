@@ -44,7 +44,6 @@ func TestHelpAndUsage(t *testing.T) {
 
 func TestUnimplementedModesExitTwo(t *testing.T) {
 	phases := map[string]string{
-		"status":  "v0.1",
 		"site":    "v0.2",
 		"ramdisk": "v0.2",
 		"sim":     "v0.4",
@@ -135,5 +134,12 @@ func TestDoctor(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "hardware  "+hardwareBackend) {
 		t.Fatalf("doctor does not report the %s backend: %q", hardwareBackend, stdout)
+	}
+}
+
+func TestStatusWithoutAnAgent(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "bcd.sock")
+	if code, _, stderr := runBCD("status", "--socket", socket); code != exitFailure || !strings.Contains(stderr, "not running") {
+		t.Fatalf("bcd status without an agent = %d, %q", code, stderr)
 	}
 }

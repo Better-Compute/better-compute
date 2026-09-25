@@ -2,7 +2,7 @@
 // datacenter (site), inside the PXE ramdisk (ramdisk) and on test hosts (sim), plus the local
 // commands join, status, doctor and version (PLAN.md §6).
 //
-// join, node, doctor and version work; every other command parses its flags and then exits 2 with
+// join, node, status, doctor and version work; every other command parses its flags and then exits 2 with
 // the phase it arrives in. The release version is set at link time:
 //
 //	go build -ldflags "-X main.version=0.1.0" ./cmd/bcd
@@ -54,7 +54,7 @@ func commands() []command {
 		{name: "ramdisk", summary: "run inside the PXE ramdisk: inspect, diag, wipe, image stream, kexec", flags: noFlags, run: notYet("v0.2")},
 		{name: "sim", summary: "run simulated daemons on fakehw against a gateway", flags: simFlags, run: notYet("v0.4")},
 		{name: "join", summary: "join the fleet; the token is read from BCD_JOIN_TOKEN or stdin", flags: withConfig, run: runJoin},
-		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: notYet("v0.1")},
+		{name: "status", summary: "show the running node agent's state", flags: statusFlags, run: runStatus},
 		{name: "doctor", summary: "check this host: configuration, NVML, hardware backend", flags: withConfig, run: runDoctor},
 		{name: "version", summary: "print the version", flags: noFlags, run: runVersion},
 	}
@@ -68,6 +68,7 @@ func simFlags(fs *flag.FlagSet) {
 
 func statusFlags(fs *flag.FlagSet) {
 	fs.String("socket", config.DefaultSocketPath, "the node agent's root-only unix socket")
+	fs.Bool("json", false, "print the status as JSON")
 }
 
 func run(args []string, stdout, stderr io.Writer) int {

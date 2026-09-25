@@ -237,6 +237,8 @@ func runNode(fs *flag.FlagSet, _, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bcd node: %v\n", err)
 		return exitFailure
 	}
+	stopStatus := serveStatus(cfg.SocketPath, a, log)
+	defer stopStatus()
 	ctx, cancel := signalContext()
 	defer cancel()
 	log.Info("bcd node starting", "version", version, "node", state.NodeID, "site", state.SiteID, "gateway", cfg.GatewayURL, "hardware", hardwareBackend)
