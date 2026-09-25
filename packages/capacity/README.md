@@ -245,6 +245,33 @@ config unit. A change must never repartition booked GPUs, so it goes through a g
 Events: `node.mig.scheduled`, `node.mig.granted`, `node.mig.applied`. Rollups don't count partition
 holds.
 
+## Operations, budgets and IAM reactions
+
+- **Async-with-wait (§9.1).** Every reservation view carries `operation: { id, state, error? }`:
+  - `running`: queued for a pool-lease batch;
+  - `pending`: Unschedulable, or awaiting a person;
+  - `succeeded`: placed or later;
+  - `failed`: failed, denied, cancelled or expired, with the reason.
+
+  `reservations.create` with `wait: { timeoutMs ≤ 30000 }` is held by the envelope while the
+  operation is `running`. An inline create is done at once, so swapping placers changes no client.
+- **Budgets.** With `policy.admission.budgetCheck: 'meter'`, or an offer whose
+  `onBudgetExceeded` is `stop-new` / `drain`, `reservations.create` and `extend` call
+  `iam.billingCheck` for the caller after the IAM decision, outside any transaction. A spent budget
+  refuses with `SPEND_LIMIT_REACHED`, and the draft stays for a retry once the window resets.
+  `applyBudgetPolicy` handles the alert itself: notify, and for `drain` it cancels the tenant's
+  unstarted reservations.
+- **IAM reactions (§12.8).** `withdrawAgentReservations` (an agent suspended, a delegation revoked)
+  and `reassignReservations` (an owner offboarded) cancel unstarted reservations, or move them to
+  the successor along with their authz row. Building blocks: `cancelPendingReservation`,
+  `readReservationsBy`, `reservationAuthzRow`.
+- **Active conditions (§10.5, P6).** An active reservation carries `Degraded` (`BindingLost`,
+  `AtomUnhealthy`) and `NodeUnreachable`. These are conditions only; nothing is released.
+  Node-controller and health edges wake it with `wakeStartedOnNode`, and it rechecks every 15
+  minutes otherwise.
+- **Input schemas.** Every method's `validate` carries `jsonSchema` (`schemas.ts`) for the API
+  reference. Structural problems are reported together as `details.issues`.
+
 ## Metrics and invariants
 
 - `onPlacement(observation)` (module and placer option) reports every placement: placer, outcome,
