@@ -60,6 +60,7 @@ import {
   renewReservation,
   reservationView,
   reservationWork,
+  type AllocationBindingCheck,
   type CreateReservationInput,
   type ExtendReservationInput,
   type ExtendResult,
@@ -651,6 +652,12 @@ export interface CapacityModuleOptions extends PlacementOptions {
   placer?: 'inline' | 'pool-lease';
   /** Reservations per pool-lease batch (≤64, default 64). */
   maxBatch?: number;
+  /**
+   * (v0.2, P14) Verify node-signed `AllocationBound` reports before a reservation goes active; an
+   * unsigned or forged report never counts (`reservation.binding-rejected`). Off by default; hosts
+   * that sign commands turn it on with the server's pki-backed check.
+   */
+  attestedBindings?: AllocationBindingCheck;
 }
 
 function depsFrom(
@@ -673,6 +680,7 @@ function depsFrom(
       topN: options.topN ?? 5,
     },
     ...(options.spotNoticeMs !== undefined ? { spotNoticeMs: options.spotNoticeMs } : {}),
+    ...(options.attestedBindings ? { attestedBindings: options.attestedBindings } : {}),
   };
 }
 
@@ -1321,6 +1329,8 @@ export function capacityModule(
   const placerReconciler: Reconciler = {
     name: placerWork,
     shardBy: 'pool',
+    // Placers scale apart from the controllers (§8.1): their own membership and shard leases.
+    role: 'scheduler',
     async run(context, poolId) {
       const deps = depsFrom(context, placers, options);
       const { more, keep } = await inTx(context, (tx) =>

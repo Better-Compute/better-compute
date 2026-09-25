@@ -28,6 +28,7 @@ import {
   readQuotas,
   reservationWork,
   wakePendingForNode,
+  type AllocationBindingCheck,
   type CapacityApi,
 } from '@better-compute/capacity';
 
@@ -1957,5 +1958,122 @@ describe('the v0.4 pool-lease placer', () => {
       );
     });
     expect(recorded.work).toContainEqual({ kind: 'capacity.placer', key: poolId });
+  });
+});
+
+describe('attested bindings (v0.2, P14: a gateway-forged AllocationBound is rejected)', () => {
+  // A stand-in for the server's pki-backed check: a "signature" is valid when kid is 'node-key' and
+  // sig is the body's bytes reversed; the body is JSON {allocationId, cdiDevices}.
+  const encoder = new TextEncoder();
+  const sign = (body: object, kid = 'node-key') => {
+    const bytes = encoder.encode(JSON.stringify(body));
+    return { body: bytes, kid, sig: Uint8Array.from(bytes).reverse() };
+  };
+  const checked: { allocationId: string; nodeId: string }[] = [];
+  const check: AllocationBindingCheck = async (_tx, { allocationId, nodeId, evidence }) => {
+    checked.push({ allocationId, nodeId });
+    const reversed = Uint8Array.from(evidence.body).reverse();
+    if (evidence.kid !== 'node-key' || Buffer.compare(reversed, evidence.sig) !== 0)
+      return { ok: false, reason: 'bad signature' };
+    const body = JSON.parse(new TextDecoder().decode(evidence.body)) as {
+      allocationId: string;
+      cdiDevices: string[];
+    };
+    if (body.allocationId !== allocationId)
+      return { ok: false, reason: 'report names another allocation' };
+    return { ok: true, cdiDevices: body.cdiDevices, envFile: '' };
+  };
+  const attested = capacityModule({ random: () => 0, topN: 1, attestedBindings: check });
+  const reconcileAttested = (key: string) =>
+    attested
+      .reconcilers!.find((entry) => entry.name === reservationWork)!
+      .run({ ...moduleContext(db), signal: new AbortController().signal }, key);
+  const get = async (id: string) =>
+    (await call('reservations', 'get', { tenantId: 'acme', reservationId: id })) as Rsv;
+  const allocationOf = async (id: string) =>
+    (
+      await db.query<{ id: string; node_id: string; bound: boolean; binding: unknown }>(
+        `SELECT id, node_id, bound_at IS NOT NULL AS bound, binding FROM allocations
+          WHERE owner_id = $1 AND released_at IS NULL`,
+        [id],
+      )
+    ).rows[0]!;
+  const bind = (
+    allocationId: string,
+    options: Parameters<typeof markAllocationBound>[4],
+    cdiDevices = ['nvidia.com/gpu=claimed'],
+  ) =>
+    db.transaction((tx) =>
+      markAllocationBound(tx, moduleContext(db).work, allocationId, { cdiDevices }, options),
+    );
+
+  it('counts a binding only once its node-signed report verifies', async () => {
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    await reconcileAttested(created.id);
+    expect((await get(created.id)).state).toBe('binding');
+    const allocation = await allocationOf(created.id);
+
+    // Another node's session cannot report it.
+    expect(await bind(allocation.id, { nodeId: 'node_01jz00000000000000000000zz' })).toBe(false);
+    expect((await allocationOf(created.id)).bound).toBe(false);
+
+    // Unsigned (a gateway inventing the report): never counts, nothing billed.
+    expect(await bind(allocation.id, { nodeId: allocation.node_id })).toBe(true);
+    await reconcileAttested(created.id);
+    expect((await get(created.id)).state).toBe('binding');
+    expect(await allocationOf(created.id)).toMatchObject({
+      bound: false,
+      binding: { rejected: 'unsigned report' },
+    });
+
+    // Forged: signed with a key that is not the node's.
+    await bind(allocation.id, {
+      evidence: sign({ allocationId: allocation.id, cdiDevices: ['x'] }, 'gateway-key'),
+    });
+    await reconcileAttested(created.id);
+    expect(await allocationOf(created.id)).toMatchObject({
+      bound: false,
+      binding: { rejected: 'bad signature' },
+    });
+    // Replayed: the node's valid report of another allocation.
+    await bind(allocation.id, {
+      evidence: sign({ allocationId: 'alloc_other', cdiDevices: ['x'] }),
+    });
+    await reconcileAttested(created.id);
+    expect((await get(created.id)).state).toBe('binding');
+    expect(
+      recorded.events
+        .filter((event) => event.type === 'reservation.binding-rejected')
+        .map((event) => (event.data as { reason: string }).reason),
+    ).toEqual(['unsigned report', 'bad signature', 'report names another allocation']);
+
+    // The node's own signed report: active, with the devices it signed (not the gateway's claim).
+    await bind(allocation.id, {
+      nodeId: allocation.node_id,
+      evidence: sign({ allocationId: allocation.id, cdiDevices: ['nvidia.com/gpu=0'] }),
+    });
+    await reconcileAttested(created.id);
+    expect(await get(created.id)).toMatchObject({
+      state: 'active',
+      binding: { nodeId: allocation.node_id, cdiDevices: ['nvidia.com/gpu=0'] },
+    });
+    expect(checked.at(-1)).toEqual({ allocationId: allocation.id, nodeId: allocation.node_id });
+
+    // Active: a forged re-report marks the binding lost (Degraded) instead of replacing it.
+    await bind(allocation.id, { evidence: sign({ allocationId: allocation.id }, 'gateway-key') });
+    await reconcileAttested(created.id);
+    const degraded = await get(created.id);
+    expect(degraded.state).toBe('active');
+    expect(degraded.conditions).toMatchObject([{ type: 'Degraded', reason: 'BindingLost' }]);
+    expect((await allocationOf(created.id)).bound).toBe(true); // billing keeps the real binding
+  });
+
+  it('without the option, an unsigned report binds as before', async () => {
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    await reconcile(created.id);
+    const allocation = await allocationOf(created.id);
+    await bind(allocation.id, {});
+    await reconcile(created.id);
+    expect((await get(created.id)).state).toBe('active');
   });
 });

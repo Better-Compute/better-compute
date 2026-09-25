@@ -596,6 +596,8 @@ export interface ReservationDeps {
   placement: Omit<PlacementContext, 'clock' | 'admission'>;
   /** The notice a preempted spot reservation gets (default `defaultSpotNoticeMs`, 2 min). */
   spotNoticeMs?: number;
+  /** Verifies node-signed `AllocationBound` reports before a binding counts (see `verifyBindings`). */
+  attestedBindings?: AllocationBindingCheck;
 }
 
 /** Scheduler plugins, weights, top-N and randomness for the placer. */
@@ -1506,26 +1508,137 @@ export async function renewReservation(
 
 // --- Lifecycle ---------------------------------------------------------------------------------
 
+/** A node's signed `AllocationBound`, as the gateway received it (`AttestedReport`). */
+export interface BindingEvidence {
+  /** The serialized `AttestedReportBody`. */
+  body: Uint8Array;
+  /** `node_sig`: the key id and the signature over the body. */
+  kid: string;
+  sig: Uint8Array;
+}
+
 /**
- * Records a node's `AllocationBound` report (the gateway calls it) and wakes the lifecycle.
- * Returns `false` when the allocation is unknown or released.
+ * Records a node's `AllocationBound` report (the gateway calls it) and wakes the lifecycle. The
+ * signed report, when there is one, is stored as received (`bound_report`, `bound_sig_kid`,
+ * `bound_sig`; core/0017): with `attestedBindings` configured the reservation worker verifies it
+ * before the reservation goes active (P14). With `nodeId` (the session's node), a report about
+ * another node's allocation is refused. Returns `false` when the allocation is unknown, released or
+ * not on `nodeId`.
  */
 export async function markAllocationBound(
   tx: SqlTx,
   work: ModuleContext['work'],
   allocationId: string,
   binding: { cdiDevices: readonly string[]; envFile?: string },
+  options: { nodeId?: string; evidence?: BindingEvidence } = {},
 ): Promise<boolean> {
   const { rows } = await tx.query<{ owner_id: string; owner_kind: string }>(
     `UPDATE allocations SET binding = $2::jsonb, bound_at = COALESCE(bound_at, compute_now()),
+                            bound_report = $4, bound_sig_kid = $5, bound_sig = $6,
                             version = version + 1
-      WHERE id = $1 AND released_at IS NULL RETURNING owner_id, owner_kind`,
+      WHERE id = $1 AND released_at IS NULL AND ($3::text IS NULL OR node_id = $3)
+      RETURNING owner_id, owner_kind`,
     [
       allocationId,
       JSON.stringify({ cdiDevices: [...binding.cdiDevices], envFile: binding.envFile ?? '' }),
+      options.nodeId ?? null,
+      options.evidence?.body ?? null,
+      options.evidence?.kid ?? null,
+      options.evidence?.sig ?? null,
     ],
   );
   return wakeOwner(tx, work, rows[0]);
+}
+
+/**
+ * Verifies a stored `AllocationBound` (`CapacityModuleOptions.attestedBindings`): the node's
+ * signature over the body, from a certificate of that node, and a body that reports exactly this
+ * allocation bound. Answers the signed binding, or why it does not hold; never throws for a bad
+ * report. `@better-compute/server` builds the pki-backed one.
+ */
+export type AllocationBindingCheck = (
+  tx: SqlTx,
+  report: { allocationId: string; nodeId: string; evidence: BindingEvidence },
+) => Promise<
+  { ok: true; cdiDevices: readonly string[]; envFile: string } | { ok: false; reason: string }
+>;
+
+/**
+ * With `attestedBindings`: checks every bound allocation of a reservation not yet verified since its
+ * last report. A good report replaces the binding with the signed one (`attested`). A bad or unsigned
+ * one never counts: in `binding` its `bound_at` is cleared (nothing is billed; the reservation waits
+ * for a real report or its bind timeout), in `active` the binding is marked lost (`Degraded`). Each
+ * rejection publishes `reservation.binding-rejected`.
+ */
+async function verifyBindings(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  row: ReservationRow,
+): Promise<void> {
+  const check = deps.attestedBindings;
+  // Node leases are bound by metal's own worker once the deploy workflow verified it, not by a report.
+  if (!check || isNodeBinding(row)) return;
+  const { rows } = await tx.query<{
+    id: string;
+    node_id: string;
+    bound_report: Uint8Array | null;
+    bound_sig_kid: string | null;
+    bound_sig: Uint8Array | null;
+  }>(
+    `SELECT id, node_id, bound_report, bound_sig_kid, bound_sig FROM allocations
+      WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL
+        AND bound_at IS NOT NULL AND NOT (binding ? 'attested') AND NOT (binding ? 'lost')
+      ORDER BY id FOR UPDATE`,
+    [row.id],
+  );
+  for (const allocation of rows) {
+    let outcome: Awaited<ReturnType<AllocationBindingCheck>>;
+    if (!allocation.bound_report || !allocation.bound_sig_kid || !allocation.bound_sig)
+      outcome = { ok: false, reason: 'unsigned report' };
+    else
+      try {
+        outcome = await check(tx, {
+          allocationId: allocation.id,
+          nodeId: allocation.node_id,
+          evidence: {
+            body: new Uint8Array(allocation.bound_report),
+            kid: allocation.bound_sig_kid,
+            sig: new Uint8Array(allocation.bound_sig),
+          },
+        });
+      } catch {
+        outcome = { ok: false, reason: 'verification failed' };
+      }
+    if (outcome.ok) {
+      await tx.query(
+        `UPDATE allocations SET binding = $2::jsonb, version = version + 1 WHERE id = $1`,
+        [
+          allocation.id,
+          JSON.stringify({
+            cdiDevices: [...outcome.cdiDevices],
+            envFile: outcome.envFile,
+            attested: true,
+          }),
+        ],
+      );
+      continue;
+    }
+    const reason = outcome.reason.slice(0, 200);
+    await tx.query(
+      row.state === 'binding'
+        ? `UPDATE allocations SET bound_at = NULL, binding = jsonb_build_object('rejected', $2::text),
+                                  version = version + 1 WHERE id = $1`
+        : `UPDATE allocations SET binding = COALESCE(binding, '{}'::jsonb)
+                                  || jsonb_build_object('lost', true, 'rejected', $2::text),
+                                  version = version + 1 WHERE id = $1`,
+      [allocation.id, reason],
+    );
+    await publish(deps, tx, row, 'reservation.binding-rejected', {
+      allocationId: allocation.id,
+      nodeId: allocation.node_id,
+      reason,
+    });
+  }
 }
 
 async function wakeOwner(
@@ -1685,16 +1798,21 @@ export async function reconcileReservation(
   }
 
   if (row.state === 'binding') {
+    await verifyBindings(deps, tx, row);
+    // With attested bindings only verified ones count: a report that committed after the check
+    // above waits for the next run.
+    const attested = deps.attestedBindings !== undefined && !isNodeBinding(row);
     const { rows } = await tx.query<{
       total: string | number;
       bound: string | number;
       failed: string | number;
     }>(
-      `SELECT count(*) AS total, count(bound_at) AS bound,
+      `SELECT count(*) AS total,
+              count(*) FILTER (WHERE bound_at IS NOT NULL AND (NOT $2 OR binding ? 'attested')) AS bound,
               count(*) FILTER (WHERE binding ? 'failed') AS failed
          FROM allocations
         WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL`,
-      [id],
+      [id, attested],
     );
     const total = Number(rows[0]?.total ?? 0);
     const bound = Number(rows[0]?.bound ?? 0);
@@ -1730,7 +1848,9 @@ export async function reconcileReservation(
     return now;
   }
 
-  // active: Degraded while a node reports it lost an assignment it had bound.
+  // active: Degraded while a node reports it lost an assignment it had bound (or re-reports it
+  // bound without a valid signature).
+  await verifyBindings(deps, tx, row);
   const { rows } = await tx.query<{ lost: string | number }>(
     `SELECT count(*) FILTER (WHERE binding ? 'lost') AS lost FROM allocations
       WHERE owner_kind = 'reservation' AND owner_id = $1 AND released_at IS NULL`,
