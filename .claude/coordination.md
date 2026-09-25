@@ -198,7 +198,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         review #3 fixes 34f4084 (extend pending, network-unenforced warm, reassign attribution); doctor
         vps.sandboxes.network bd18e35. Routed: instances.create fleet-scope gap → [6a20b8]; envelope pending leak
         after a failed tx2/check → [c321a3]; successor validation + IamReconcile sandbox holders → [402c97].
-        Open: budget `drain` doesn't drain warm pools (refills have no budget check).
+        Then: extend budget check f3b7f9e; sandboxHolders fce2ac5 (wired by [402c97]); sandbox.expiring
+        (vps/0013) f169205; warm pools follow the budget 4080816 (billingCheck({tenantId}) answers for the named
+        tenant in both modes, [31c64a] c7a5312); review #4 7fb1e01 (HIGH: the network-capability check
+        matched node_labels' own node_id); admission.abandoned wired for both extends a2288ec ([f85da7]
+        d14564e). Routed to [31c64a]: the IamReconcile sweep never withdraws for swept agents; two
+        e2e/sandboxes exit bullets (another tenant's snapshot, instance methods refused) have no e2e assertion.
     - [31c64a]:
       - tests/e2e/sandboxes.test.ts: v0.5 sandboxes EXIT MET (a8f3dfc): 500 TTL expiries with a zero-leak diff,
         the warm claim, the memory round trip, the drain;
