@@ -838,3 +838,31 @@ func TestGpuResetRefusesHeldGPUs(t *testing.T) {
 		t.Fatalf("resets = %v", h.host.resets)
 	}
 }
+
+// Within the skew allowance a Welcome is accepted, but the clock never moves back.
+func TestWelcomeWithinSkewDoesNotMoveTheClockBack(t *testing.T) {
+	h := newHarness(t, func(o *Options) { o.Backoff.Min, o.Backoff.Max = time.Millisecond, 10*time.Millisecond })
+	s, _ := h.open()
+	s.push(&agentv1.ServerFrame{Msg: &agentv1.ServerFrame_Drain{Drain: &agentv1.Drain{ReconnectAfterMs: 1}}})
+	s2 := h.gw.accept()
+	s2.next(t, "Hello", func(f *agentv1.AgentFrame) bool { return f.GetHello() != nil })
+	earlier := welcome()
+	earlier.GetWelcome().ServerTime = timestamppb.New(time.Now().Add(-4 * time.Minute))
+	s2.push(earlier)
+	s2.push(command(body("ok2", "inventory.refresh", nil)))
+	s2.update(t, "ok2", commonv1.CommandState_COMMAND_STATE_SUCCEEDED)
+	if skew := time.Since(h.agent.serverNow()); skew > 5*time.Second {
+		t.Fatalf("the clock moved back by %s", skew)
+	}
+}
+
+func TestInstanceTicketsNeverReachTheHost(t *testing.T) {
+	for _, op := range []string{"ssh", "tcp", "exec", "console"} {
+		if _, err := DefaultTunnelProgram(pki.ExecTicketClaims{Op: op, Inst: "inst_1", Port: 8080}, TunnelIO{}); err == nil {
+			t.Errorf("%s with an instance was allowed", op)
+		}
+	}
+	if _, err := DefaultTunnelProgram(pki.ExecTicketClaims{Op: "exec"}, TunnelIO{}); err == nil {
+		t.Error("an exec ticket without an instance opened a host shell")
+	}
+}

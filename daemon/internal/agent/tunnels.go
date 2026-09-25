@@ -79,7 +79,8 @@ func (a *Agent) onOpenTunnel(ot *agentv1.OpenTunnel) {
 		Remember: func(jti string, expiresAt time.Time) (bool, error) {
 			a.mu.Lock()
 			defer a.mu.Unlock()
-			return a.j.RememberTicket(jti, expiresAt, a.serverNowLocked())
+			// Kept past any clock skew a Welcome may still bring (MaxServerTimeRegression).
+			return a.j.RememberTicket(jti, expiresAt.Add(MaxServerTimeRegression), a.serverNowLocked())
 		},
 	})
 	if err != nil {
@@ -185,9 +186,16 @@ func (a *Agent) runTunnel(id string, claims pki.ExecTicketClaims) {
 	a.log.Info("tunnel closed", "tunnel", id)
 }
 
-// DefaultTunnelProgram runs what the op asks for: console → a login shell on a PTY; ssh → the
-// node's sshd on loopback; tcp → a loopback port. exec into an instance needs the VM runtime (v0.3).
+// DefaultTunnelProgram runs what a node ticket (no instance) asks for: console → a login shell on a
+// PTY; ssh → the node's sshd on loopback; tcp → a loopback port. Instance tickets (exec, and ssh/tcp
+// to an instance) wait for the instances runtime.
 func DefaultTunnelProgram(claims pki.ExecTicketClaims, tio TunnelIO) (TunnelProgram, error) {
+	// A ticket for an instance must reach that instance and nothing of the host: the host's loopback
+	// (its sshd, admin ports, other tenants' forwards) is off limits to tenants. Until the instances
+	// runtime can resolve an instance's own address, every instance ticket is refused.
+	if claims.Inst != "" {
+		return nil, fmt.Errorf("%s into instance %s needs the instances runtime", claims.Op, claims.Inst)
+	}
 	switch claims.Op {
 	case "console":
 		return startShell(tio)
@@ -199,10 +207,8 @@ func DefaultTunnelProgram(claims pki.ExecTicketClaims, tio TunnelIO) (TunnelProg
 		}
 		return dialLoopback(claims.Port, tio)
 	case "exec":
-		if claims.Inst == "" {
-			return startShell(tio)
-		}
-		return nil, errors.New("exec into an instance needs the instances runtime")
+		// exec is into an instance; a host shell is `console` (compute:nodes:console).
+		return nil, errors.New("an exec ticket names no instance")
 	}
 	return nil, fmt.Errorf("op %q", claims.Op)
 }

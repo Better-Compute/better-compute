@@ -246,7 +246,16 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 				"serverTime", serverTime.Format(time.RFC3339), "highWater", meta.ServerTime.Format(time.RFC3339))
 			return false
 		}
+		// Within the skew allowance the session is accepted, but the working clock never moves back:
+		// not behind the persisted mark, nor behind this process's own server clock. Otherwise a
+		// gateway could reconnect "a few minutes earlier" and replay a ticket whose jti was pruned.
+		floor := meta.ServerTime
+		if a.clockSet {
+			floor = maxTime(floor, a.serverNowLocked())
+		}
+		serverTime = maxTime(serverTime, floor)
 		a.offset = serverTime.Sub(time.Now())
+		a.clockSet = true
 		a.advanceServerTimeLocked()
 		next := *a.state
 		next.ServerTime = a.serverNowLocked()
@@ -312,6 +321,13 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 	a.mu.Unlock()
 	go a.heartbeats(ctx, s, interval)
 	return true
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // advanceServerTimeLocked moves the persisted server time high-water mark to serverNow.

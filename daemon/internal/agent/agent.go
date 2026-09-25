@@ -105,10 +105,12 @@ type Agent struct {
 	// key is the node key (read without mu: attested results are signed under it).
 	key atomic.Pointer[ecdsa.PrivateKey]
 
-	mu         sync.Mutex
-	state      *State
-	sess       *sess
-	offset     time.Duration
+	mu     sync.Mutex
+	state  *State
+	sess   *sess
+	offset time.Duration
+	// clockSet: a Welcome set offset in this process (its server clock is then a floor too).
+	clockSet   bool
 	execs      map[string]*execution
 	deferred   map[string]*deferred
 	overflow   []journal.Event
