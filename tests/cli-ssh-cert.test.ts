@@ -108,7 +108,7 @@ describe('ssh-cert', () => {
           '-i',
           join(home, '.ssh', 'id_ed25519'),
           '-o',
-          `CertificateFile=${join(home, '.ssh', 'id_ed25519-cert.pub')}`,
+          `CertificateFile="${join(home, '.ssh', 'id_ed25519-cert.pub')}"`,
           '-o',
           'IdentitiesOnly=yes',
           '-l',

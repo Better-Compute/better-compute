@@ -23,6 +23,9 @@ const TOKEN = 'biam_ses_sandbox_exec_test';
 const ROOT = 'tenant-root';
 const CERT = 'ssh-ed25519-cert-v01@openssh.com AAAAtest sandbox';
 
+/** ssh -o values arrive quoted (paths may contain spaces). */
+const unquote = (value: string) => value.replace(/^"|"$/g, '');
+
 const sshd: TunnelProgramFactory = (context) => ({
   data: (bytes) => context.write(new TextDecoder().decode(bytes).toUpperCase()),
   hangup: () => context.exit(0, 'closed'),
@@ -130,7 +133,7 @@ describe('sandbox exec', () => {
       // Plays ssh: one connection to the forwarded port, a version line out, the "guest's" answer back.
       spawn: async (command, args) => {
         const port = Number(args[args.indexOf('-p') + 1]);
-        const certPath = String(args.find((arg) => arg.startsWith('CertificateFile='))).slice('CertificateFile='.length);
+        const certPath = unquote(String(args.find((arg) => arg.startsWith('CertificateFile='))).slice(16));
         const cert = await readFile(certPath, 'utf8');
         const socket = connect(port, '127.0.0.1');
         let answer = '';
@@ -155,7 +158,14 @@ describe('sandbox exec', () => {
     expect(run!.args).toEqual(expect.arrayContaining(['-l', 'sandbox', '127.0.0.1', 'uname', '-a', 'IdentitiesOnly=yes']));
     expect(run!.args).toContain(`HostKeyAlias=${SANDBOX}`);
     // The certificate's temporary directory is gone afterwards.
-    await expect(readFile(String(run!.args.find((arg) => arg.startsWith('CertificateFile='))).slice(16))).rejects.toThrow();
+    await expect(
+      readFile(unquote(String(run!.args.find((arg) => arg.startsWith('CertificateFile='))).slice(16))),
+    ).rejects.toThrow();
+    // The remote command can never be read as ssh options, and nothing of the user's is handed to the guest.
+    expect(run!.args[run!.args.indexOf('127.0.0.1') - 1]).toBe('--');
+    expect(run!.args).toEqual(
+      expect.arrayContaining(['-a', 'ForwardAgent=no', 'ProxyCommand=none', 'ClearAllForwardings=yes']),
+    );
 
     // ssh's own status becomes the command's.
     status = 3;

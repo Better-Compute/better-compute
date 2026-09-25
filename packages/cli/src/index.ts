@@ -288,7 +288,7 @@ export async function main(
       err(
         'better-compute command failed. Check the configuration and database connectivity (set BETTER_COMPUTE_DEBUG=1 for details).',
       );
-    if (error instanceof CliError && error.hint) err(`Hint: ${error.hint}`);
+    if (error instanceof CliError && error.hint) err(`Hint: ${printable(error.hint)}`);
     else if (known && code !== undefined && Object.hasOwn(codeHints, code)) err(`Hint: ${codeHints[code]}`);
     if (io.env.BETTER_COMPUTE_DEBUG && error instanceof Error && error.stack) err(terminalSafe(error.stack));
     return code !== undefined && usageCodes.has(code) ? 2 : 1;

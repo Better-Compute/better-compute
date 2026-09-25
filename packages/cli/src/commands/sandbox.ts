@@ -287,12 +287,15 @@ export const sandboxCommands = [
         publicKey,
         ttlSeconds: (flags.minutes ?? 10) * 60,
       });
+      // The account comes from the server: a Unix name only (it reaches ssh's %r/%u expansions).
+      if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(granted.account))
+        throw new CliError('INVALID_RESPONSE', 'The server named an invalid guest account');
+      const run =
+        io.spawn ?? (() => Promise.reject(new CliError('UNSUPPORTED', 'This program cannot run ssh (CliIO.spawn)')));
       const dir = await mkdtemp(join(tmpdir(), 'bc-sandbox-'));
-      const certificate = join(dir, 'key-cert.pub');
-      await writeFile(certificate, `${granted.certificate.trim()}\n`, { mode: 0o600 });
-      // One connection, one single-use ticket: the listener closes after the first accept.
       let tunnel: ReturnType<typeof connectTunnel> | undefined;
       const server = createServer((socket) => {
+        // One connection, one single-use ticket: the listener closes after the first accept.
         server.close();
         const opened = connectTunnel({ url: tunnelUrl(origin, basePath, granted.path) });
         tunnel = opened;
@@ -305,24 +308,47 @@ export const sandboxCommands = [
         socket.on('close', () => opened.close());
         socket.on('error', () => opened.close());
       });
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => resolve());
-      });
-      const port = (server.address() as AddressInfo).port;
-      const run = io.spawn ?? (() => Promise.reject(new CliError('UNSUPPORTED', 'This program cannot run ssh (CliIO.spawn)')));
       let status: number;
       try {
+        const certificate = join(dir, 'key-cert.pub');
+        await writeFile(certificate, `${granted.certificate.trim()}\n`, { mode: 0o600 });
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(0, '127.0.0.1', () => resolve());
+        });
+        const port = (server.address() as AddressInfo).port;
+        // ssh splits -o values on whitespace: quote the paths (a temporary directory may contain spaces).
+        const quoted = (value: string) => `"${value.replace(/"/g, '')}"`;
         status = await run(flags.ssh ?? 'ssh', [
           '-i',
           keyPath,
           '-o',
-          `CertificateFile=${certificate}`,
+          `CertificateFile=${quoted(certificate)}`,
           '-o',
           'IdentitiesOnly=yes',
-          // The tunnel already authenticated the node and the instance; the guest's host key is new every boot.
+          // The guest is untrusted: none of the user's ssh config that would hand it anything (the agent, X11,
+          // forwardings, a proxy that sends the connection elsewhere, a shared master, local commands).
+          '-a',
+          '-x',
           '-o',
-          `UserKnownHostsFile=${join(dir, 'known_hosts')}`,
+          'ForwardAgent=no',
+          '-o',
+          'ForwardX11=no',
+          '-o',
+          'ClearAllForwardings=yes',
+          '-o',
+          'ProxyCommand=none',
+          '-o',
+          'ProxyJump=none',
+          '-o',
+          'ControlMaster=no',
+          '-o',
+          'ControlPath=none',
+          '-o',
+          'PermitLocalCommand=no',
+          // The tunnel authenticated the node and the instance; the guest's host key is new every boot.
+          '-o',
+          `UserKnownHostsFile=${quoted(join(dir, 'known_hosts'))}`,
           '-o',
           'StrictHostKeyChecking=accept-new',
           '-o',
@@ -331,6 +357,8 @@ export const sandboxCommands = [
           String(port),
           '-l',
           granted.account,
+          // Everything after the host is the remote command, never an ssh option.
+          '--',
           '127.0.0.1',
           ...args.slice(1),
         ]);

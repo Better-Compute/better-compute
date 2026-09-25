@@ -99,7 +99,8 @@ export const sshCommands = [
           '-i',
           keyPath.slice(0, -'.pub'.length),
           '-o',
-          `CertificateFile=${certificatePath}`,
+          // ssh splits -o values on whitespace (a home directory may contain spaces).
+          `CertificateFile="${certificatePath.replace(/"/g, '')}"`,
           '-o',
           'IdentitiesOnly=yes',
           '-l',
