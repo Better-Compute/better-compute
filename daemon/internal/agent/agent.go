@@ -98,6 +98,7 @@ type Agent struct {
 	lanes       *dispatch.Lanes
 	laneConfig  map[dispatch.Lane]dispatch.LaneConfig
 	devices     *devicesConverger
+	boot        *BootEntries
 	access      *accessConverger
 	convergeCh  chan struct{}
 	rng         *rand.Rand
@@ -214,6 +215,7 @@ func New(o Options) (*Agent, error) {
 		return nil, err
 	}
 	a.devices = &devicesConverger{a: a}
+	a.boot = newBootEntries(o.DataDir)
 	a.access = &accessConverger{a: a}
 	a.key.Store(o.Key)
 	return a, nil
@@ -330,7 +332,9 @@ func (a *Agent) sweepLoop(ctx context.Context) {
 		case <-t.C:
 			a.mu.Lock()
 			_, err := journal.Sweep(a.j, time.Now(), journal.CommandTTL, a.incarnation)
+			now := a.serverNowLocked()
 			a.mu.Unlock()
+			a.boot.Sweep(now)
 			if err != nil {
 				a.log.Warn("journal sweep failed", "error", err.Error())
 			}

@@ -17,7 +17,7 @@ import (
 // builtinKinds is the v0.1 kind table; lanes, roles and flags agree with @better-compute/protocol
 // commandKinds.
 func builtinKinds(a *Agent) []*Kind {
-	return []*Kind{
+	return append(siteKinds(a), []*Kind{
 		{
 			Name:  "inventory.refresh",
 			Lane:  dispatch.LaneControl,
@@ -78,7 +78,7 @@ func builtinKinds(a *Agent) []*Kind {
 			SelfTerminating: true,
 			Exec:            a.runNodeReboot,
 		},
-	}
+	}...)
 }
 
 // payloadOf unpacks a command's request message.
