@@ -90,6 +90,11 @@ type Config struct {
 
 	// Log configures the daemon's logs.
 	Log Log
+
+	// DevInsecureH2C allows an http:// gateway_url: cleartext HTTP/2 to a dev stack's gateway, which
+	// names the node by a header instead of mTLS. Only fakehw builds of bcd accept it (the host build
+	// refuses to start); never set it on a reachable machine.
+	DevInsecureH2C bool
 }
 
 // Journal bounds the journal. Values may lower the PLAN.md §6 caps but never raise them.
@@ -197,7 +202,8 @@ func Parse(data []byte) (*Config, error) {
 // Validate checks every value. Parse calls it; callers that build a Config by hand should too.
 func (c *Config) Validate() error {
 	u, err := url.Parse(c.GatewayURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+	secure := u != nil && (u.Scheme == "https" || (u.Scheme == "http" && c.DevInsecureH2C))
+	if err != nil || !secure || u.Host == "" || u.User != nil {
 		return fmt.Errorf("gateway_url must be an https:// URL without credentials, got %q", c.GatewayURL)
 	}
 	if c.Site == "" || strings.ContainsAny(c.Site, " \t\r\n") {
@@ -270,6 +276,7 @@ var fields = []field{
 	{section: "journal", key: "max_events", kind: kindInt, set: func(c *Config, v value) { c.Journal.MaxEvents = v.num }},
 	{section: "log", key: "level", kind: kindString, set: func(c *Config, v value) { c.Log.Level = v.str }},
 	{section: "log", key: "json", kind: kindBool, set: func(c *Config, v value) { c.Log.JSON = v.boolean }},
+	{key: "dev_insecure_h2c", kind: kindBool, set: func(c *Config, v value) { c.DevInsecureH2C = v.boolean }},
 }
 
 func lookupField(section, key string) *field {

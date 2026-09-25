@@ -44,8 +44,6 @@ func TestHelpAndUsage(t *testing.T) {
 
 func TestUnimplementedModesExitTwo(t *testing.T) {
 	phases := map[string]string{
-		"node":    "v0.1",
-		"join":    "v0.1",
 		"status":  "v0.1",
 		"site":    "v0.2",
 		"ramdisk": "v0.2",
@@ -81,6 +79,37 @@ func TestArgumentsAreNeverEchoed(t *testing.T) {
 	}
 	if code, _, stderr := runBCD("frobnicate"); code != exitUsage || !strings.Contains(stderr, `"frobnicate"`) {
 		t.Fatalf("bcd frobnicate = %d, %q", code, stderr)
+	}
+}
+
+func TestJoinAndNodeNeedAConfiguration(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	for _, name := range []string{"join", "node"} {
+		if code, _, stderr := runBCD(name, "--config", missing); code != exitFailure || !strings.Contains(stderr, "bcd "+name+":") {
+			t.Errorf("bcd %s without a config = %d, %q", name, code, stderr)
+		}
+	}
+	// A node that never joined says so.
+	dir := t.TempDir()
+	pin := "sha256/" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	text := "gateway_url = \"https://gw.example.com\"\nsite = \"lab\"\ndata_dir = \"" + filepath.ToSlash(dir) + "\"\n" +
+		"serving_ca_spki_pin = \"" + pin + "\"\njoin_signing_key_pin = \"" + pin + "\"\njoin_encryption_key_pin = \"" + pin + "\"\n"
+	file := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runBCD("node", "--config", file); code != exitFailure || !strings.Contains(stderr, "has not joined") {
+		t.Fatalf("bcd node before join = %d, %q", code, stderr)
+	}
+	// bcd join without a token is a usage error, and one that is not a token is refused unechoed.
+	t.Setenv("BCD_JOIN_TOKEN", "")
+	stdin = strings.NewReader("")
+	if code, _, stderr := runBCD("join", "--config", file); code != exitUsage || !strings.Contains(stderr, "no join token") {
+		t.Fatalf("bcd join without a token = %d, %q", code, stderr)
+	}
+	stdin = strings.NewReader("not-a-token\n")
+	if code, _, stderr := runBCD("join", "--config", file); code != exitUsage || strings.Contains(stderr, "not-a-token") {
+		t.Fatalf("bcd join with garbage = %d, %q", code, stderr)
 	}
 }
 

@@ -121,6 +121,8 @@ const (
 	OutcomeSucceeded Outcome = "succeeded"
 	OutcomeFailed    Outcome = "failed"
 	OutcomeRejected  Outcome = "rejected"
+	// OutcomeCancelled: Cancel{id} arrived before any action ran (CommandState CANCELLED).
+	OutcomeCancelled Outcome = "cancelled"
 )
 
 // ReasonInterrupted is the failure reason for a non-retry-safe command a crash interrupted.
@@ -131,10 +133,16 @@ type Result struct {
 	Outcome Outcome
 	// Reason explains a failure or rejection, such as ReasonInterrupted or EXPIRED.
 	Reason string
+	// Message is human-readable detail (CommandError.message).
+	Message string
 	// Rebooted marks a self-terminating command completed by the reboot it caused.
 	Rebooted bool
 	// Payload is the kind-specific result body.
 	Payload []byte
+	// BootID is the boot the result was produced in (CommandUpdate.boot_id, also on replay).
+	BootID string
+	// Attested results are signed by the node key when reported (CommandUpdate.node_sig).
+	Attested bool
 }
 
 // Command is one entry of the command table.

@@ -26,6 +26,9 @@ type Runtime struct {
 	Incarnation string
 	// Now is the time entries are stamped with.
 	Now time.Time
+	// RebootedPayload, when set, gives the result body of a self-terminating command completed by
+	// the reboot it caused (node.reboot: NodeRebootResult{previous_boot_id = the entry's BootID}).
+	RebootedPayload func(Command) []byte
 }
 
 // Delivery is what the rules need from a delivered CommandBody.
@@ -158,7 +161,7 @@ func MarkRunning(j Journal, id string, rt Runtime) error {
 // Complete records a command's result.
 func Complete(j Journal, id string, r Result, now time.Time) error {
 	switch r.Outcome {
-	case OutcomeSucceeded, OutcomeFailed, OutcomeRejected:
+	case OutcomeSucceeded, OutcomeFailed, OutcomeRejected, OutcomeCancelled:
 	default:
 		return fmt.Errorf("journal: invalid outcome %q", r.Outcome)
 	}
@@ -220,8 +223,10 @@ func Recover(j Journal, rt Runtime) ([]Command, error) {
 }
 
 // Sweep deletes done commands last updated before now-ttl (CommandTTL in production) and returns
-// how many it removed. Accepted and running entries are never swept.
-func Sweep(j Journal, now time.Time, ttl time.Duration) (int, error) {
+// how many it removed. An accepted or running entry is swept only when an earlier incarnation left
+// it (a retry-safe command Recover kept for a redelivery) and nothing redelivered it within ttl: the
+// server has long expired it. Entries of the running incarnation are in flight and never swept.
+func Sweep(j Journal, now time.Time, ttl time.Duration, incarnation string) (int, error) {
 	all, err := j.Commands()
 	if err != nil {
 		return 0, err
@@ -229,7 +234,7 @@ func Sweep(j Journal, now time.Time, ttl time.Duration) (int, error) {
 	cutoff := now.Add(-ttl)
 	removed := 0
 	for _, c := range all {
-		if c.State != StateDone || !c.UpdatedAt.Before(cutoff) {
+		if !c.UpdatedAt.Before(cutoff) || (c.State != StateDone && c.Incarnation == incarnation) {
 			continue
 		}
 		if err := j.DeleteCommand(c.ID); err != nil {
@@ -247,12 +252,37 @@ func Sweep(j Journal, now time.Time, ttl time.Duration) (int, error) {
 // upgrade.json (PLAN.md §6 "Self-update"), not through boot_id.
 func interrupted(c Command, rt Runtime) (Result, bool) {
 	if c.State == StateRunning && c.SelfTerminating && c.BootID != rt.BootID {
-		return Result{Outcome: OutcomeSucceeded, Rebooted: true}, false
+		r := Result{Outcome: OutcomeSucceeded, Rebooted: true, BootID: rt.BootID}
+		if rt.RebootedPayload != nil {
+			r.Payload = rt.RebootedPayload(c)
+		}
+		return r, false
 	}
 	if c.RetrySafe {
 		return Result{}, true
 	}
-	return Result{Outcome: OutcomeFailed, Reason: ReasonInterrupted}, false
+	return Result{Outcome: OutcomeFailed, Reason: ReasonInterrupted, BootID: rt.BootID}, false
+}
+
+// RecordRejection journals a terminal rejection (UNSUPPORTED, EXPIRED, STALE_GENERATION,
+// BAD_SIGNATURE) as a done entry with outcome rejected and the code as Reason, so a duplicate
+// delivery resends the same answer and Hello replays it until acked. BUSY is never journaled.
+func RecordRejection(j Journal, d Delivery, reason string, rt Runtime) (Result, error) {
+	if d.ID == "" {
+		return Result{}, errors.New("journal: a command needs an id")
+	}
+	r := Result{Outcome: OutcomeRejected, Reason: reason, BootID: rt.BootID}
+	err := j.PutCommand(Command{
+		ID:              d.ID,
+		Kind:            d.Kind,
+		RetrySafe:       d.RetrySafe,
+		SelfTerminating: d.SelfTerminating,
+		State:           StateDone,
+		Incarnation:     rt.Incarnation,
+		Result:          &r,
+		UpdatedAt:       rt.Now,
+	})
+	return r, err
 }
 
 func finish(j Journal, c Command, r Result, now time.Time) (Command, error) {

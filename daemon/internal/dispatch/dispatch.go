@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"time"
 
+	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/journal"
+	"google.golang.org/protobuf/proto"
 )
 
 // Role is an agent role, carried in the node certificate (PLAN.md §6 mode table).
@@ -35,9 +37,9 @@ const (
 	RoleRamdisk Role = "ramdisk"
 )
 
-// Command mirrors agent/v1 CommandBody plus Command.attempt; Payload is the encoded
-// google.protobuf.Any. TODO(v0.1): replace it with the daemon/gen types once protoc-gen-go runs
-// locally.
+// Command is what the dispatcher needs from a delivered agent/v1 Command: the CommandBody fields,
+// Command.attempt, and the decoded Body itself for handlers (FromBody builds it). Payload is the
+// encoded google.protobuf.Any.
 type Command struct {
 	ID              string
 	NodeID          string
@@ -55,6 +57,38 @@ type Command struct {
 	WorkflowID      string
 	StepID          string
 	Attempt         uint32
+	// Body is the decoded CommandBody (handlers unpack Body.Payload); nil in tests that do not need it.
+	Body *agentv1.CommandBody
+}
+
+// FromBody builds the dispatcher's view of a decoded CommandBody.
+func FromBody(body *agentv1.CommandBody, attempt uint32) Command {
+	var payload []byte
+	if body.GetPayload() != nil {
+		payload, _ = proto.Marshal(body.GetPayload())
+	}
+	c := Command{
+		ID:              body.GetId(),
+		NodeID:          body.GetNodeId(),
+		Seq:             body.GetSeq(),
+		Kind:            body.GetKind(),
+		Payload:         payload,
+		Lane:            Lane(body.GetLane()),
+		MinGeneration:   body.GetMinGeneration(),
+		RetrySafe:       body.GetRetrySafe(),
+		IdempotencyKey:  body.GetIdempotencyKey(),
+		Traceparent:     body.GetTraceparent(),
+		SelfTerminating: body.GetSelfTerminating(),
+		Attested:        body.GetAttested(),
+		WorkflowID:      body.GetWorkflowId(),
+		StepID:          body.GetStepId(),
+		Attempt:         attempt,
+		Body:            body,
+	}
+	if body.GetNotAfter() != nil {
+		c.NotAfter = body.GetNotAfter().AsTime()
+	}
+	return c
 }
 
 // Delivery returns what the journal rules need from c.
@@ -148,6 +182,11 @@ type Env struct {
 	AppliedGeneration uint64
 	// Deferred is set when re-checking a command that already waited for min_generation.
 	Deferred bool
+	// UpgradeRequired restricts the session to daemon.upgrade (Welcome.upgrade_required, v0.4).
+	UpgradeRequired bool
+	// BadSignature is the signed-intent verdict on this delivery: a signature that did not verify, or
+	// none where the daemon's kind table requires one.
+	BadSignature bool
 }
 
 // Verdict is Precheck's answer: accept, reject with a code, or defer until a newer spec arrives
@@ -160,11 +199,15 @@ type Verdict struct {
 // Accepted reports whether the command may proceed to admission.
 func (v Verdict) Accepted() bool { return v.Reject == "" && !v.Defer }
 
-// Precheck applies the checks before accepting a new or re-executed command. A command first seen
-// past not_after is EXPIRED; one that waited for min_generation until not_after is
-// STALE_GENERATION. Credits (BUSY) are checked by Lanes.Admit, signatures (BAD_SIGNATURE) from v0.2.
+// Precheck applies the checks before accepting a new or re-executed command, in this order: node
+// and kind (UNSUPPORTED), min_generation (defer, then STALE_GENERATION), not_after (EXPIRED), then
+// the signature (BAD_SIGNATURE). A command first seen past not_after is EXPIRED; one that waited for
+// min_generation until not_after is STALE_GENERATION. Credits (BUSY) are checked by Lanes.Admit.
 func Precheck(cmd Command, reg *Registry, env Env) Verdict {
 	if cmd.NodeID != env.NodeID {
+		return Verdict{Reject: RejectUnsupported}
+	}
+	if env.UpgradeRequired && cmd.Kind != "daemon.upgrade" {
 		return Verdict{Reject: RejectUnsupported}
 	}
 	if _, ok := reg.Lookup(cmd.Kind, env.Role); !ok {
@@ -181,6 +224,9 @@ func Precheck(cmd Command, reg *Registry, env Env) Verdict {
 	}
 	if pastDeadline {
 		return Verdict{Reject: RejectExpired}
+	}
+	if env.BadSignature {
+		return Verdict{Reject: RejectBadSignature}
 	}
 	return Verdict{}
 }

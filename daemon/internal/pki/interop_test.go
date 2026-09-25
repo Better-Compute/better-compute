@@ -12,6 +12,7 @@ import (
 	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
+	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -28,6 +29,12 @@ type interop struct {
 	JoinResponse      string `json:"joinResponse"`
 	JWE               string `json:"jwe"`
 	JWERecipientPKCS8 string `json:"jweRecipientPkcs8"`
+
+	CommandSigningRoot string `json:"commandSigningRoot"`
+	SignedCommand      string `json:"signedCommand"`
+	SignedDesiredState string `json:"signedDesiredState"`
+	NodeSignedCommand  string `json:"nodeSignedCommand"`
+	SignedTrustBundle  string `json:"signedTrustBundle"`
 }
 
 func loadInterop(t *testing.T) interop {
@@ -123,6 +130,74 @@ func TestJoinResponseFromTypeScript(t *testing.T) {
 	tampered.Body[len(tampered.Body)-1] ^= 1
 	if _, err := OpenJoinResponse(tampered, opts); err == nil {
 		t.Fatal("accepted a tampered body")
+	}
+}
+
+func TestSignedIntentFromTypeScript(t *testing.T) {
+	f := loadInterop(t)
+	now := time.UnixMilli(f.Now)
+	roots := [][]byte{unhex(t, f.CommandSigningRoot)}
+
+	cmd := &agentv1.Command{}
+	if err := proto.Unmarshal(unhex(t, f.SignedCommand), cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyIntent(PurposeCommand, cmd.GetBody(), cmd.GetSignature(), roots, now); err != nil {
+		t.Fatalf("a worker-signed command: %v", err)
+	}
+	// The same signature under another purpose, over altered bytes, without roots, after expiry.
+	if err := VerifyIntent(PurposeDesiredState, cmd.GetBody(), cmd.GetSignature(), roots, now); err == nil {
+		t.Fatal("accepted under another purpose")
+	}
+	altered := append([]byte(nil), cmd.GetBody()...)
+	altered[len(altered)-1] ^= 1
+	if err := VerifyIntent(PurposeCommand, altered, cmd.GetSignature(), roots, now); err == nil {
+		t.Fatal("accepted an altered body")
+	}
+	if err := VerifyIntent(PurposeCommand, cmd.GetBody(), cmd.GetSignature(), nil, now); err == nil {
+		t.Fatal("accepted without roots")
+	}
+	if err := VerifyIntent(PurposeCommand, cmd.GetBody(), cmd.GetSignature(), roots, now.Add(48*time.Hour)); err == nil {
+		t.Fatal("accepted an expired worker certificate")
+	}
+	if err := VerifyIntent(PurposeCommand, cmd.GetBody(), nil, roots, now); err == nil {
+		t.Fatal("accepted an unsigned command")
+	}
+
+	desired := &agentv1.DesiredState{}
+	if err := proto.Unmarshal(unhex(t, f.SignedDesiredState), desired); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyIntent(PurposeDesiredState, desired.GetBody(), desired.GetSignature(), roots, now); err != nil {
+		t.Fatalf("a worker-signed desired state: %v", err)
+	}
+
+	// A node certificate is not a command signer, even under roots that include its CA.
+	byNode := &agentv1.Command{}
+	if err := proto.Unmarshal(unhex(t, f.NodeSignedCommand), byNode); err != nil {
+		t.Fatal(err)
+	}
+	withNodeCA := append([][]byte{unhex(t, f.NodeCACert)}, roots...)
+	if err := VerifyIntent(PurposeCommand, byNode.GetBody(), byNode.GetSignature(), withNodeCA, now); err == nil {
+		t.Fatal("accepted a node-signed command")
+	}
+
+	signed := &commonv1.SignedTrustBundle{}
+	if err := proto.Unmarshal(unhex(t, f.SignedTrustBundle), signed); err != nil {
+		t.Fatal(err)
+	}
+	pin := pinBytes(t, f.SigningPin)
+	bundle, err := OpenTrustBundle(signed, pin, 6)
+	if err != nil || bundle.GetVersion() != 7 || len(bundle.GetCommandSigningRoots()) != 1 {
+		t.Fatalf("trust bundle = %v, %v", bundle, err)
+	}
+	if _, err := OpenTrustBundle(signed, pin, 7); err == nil {
+		t.Fatal("accepted a bundle that is not newer")
+	}
+	wrong := append([]byte(nil), pin...)
+	wrong[0] ^= 1
+	if _, err := OpenTrustBundle(signed, wrong, 0); err == nil {
+		t.Fatal("accepted a bundle under another pin")
 	}
 }
 

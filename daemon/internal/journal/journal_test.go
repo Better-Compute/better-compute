@@ -204,7 +204,7 @@ func TestSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := t0.Add(CommandTTL + time.Hour)
-	removed, err := Sweep(j, now, CommandTTL)
+	removed, err := Sweep(j, now, CommandTTL, rt.Incarnation)
 	if err != nil || removed != 1 {
 		t.Fatalf("Sweep = %d, %v; want 1", removed, err)
 	}
@@ -218,6 +218,43 @@ func TestSweep(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "pending,recent" {
 		t.Fatalf("kept %v; want pending,recent", ids)
+	}
+	// A later process: "pending" was left accepted by an earlier incarnation and never redelivered.
+	removed, err = Sweep(j, now, CommandTTL, "inc-2")
+	if err != nil || removed != 1 {
+		t.Fatalf("Sweep (later incarnation) = %d, %v; want 1", removed, err)
+	}
+}
+
+func TestRecordRejectionAndRebootedPayload(t *testing.T) {
+	j := NewMemory("node_1", MemoryOptions{})
+	rt := runtimeOf("boot-1", "inc-1")
+	d := Delivery{ID: "rej", Kind: "diag.nvml"}
+	r, err := RecordRejection(j, d, "EXPIRED", rt)
+	if err != nil || r.Outcome != OutcomeRejected || r.BootID != "boot-1" {
+		t.Fatalf("RecordRejection = %+v, %v", r, err)
+	}
+	dec, err := Resolve(j, d, rt)
+	if err != nil || dec.Action != ActionResend || dec.Result.Reason != "EXPIRED" {
+		t.Fatalf("duplicate of a rejection = %+v, %v", dec, err)
+	}
+
+	reboot := Delivery{ID: "rb", Kind: "node.reboot", SelfTerminating: true}
+	deliverNew(t, j, reboot, rt)
+	if err := MarkRunning(j, "rb", rt); err != nil {
+		t.Fatal(err)
+	}
+	after := runtimeOf("boot-2", "inc-2")
+	after.RebootedPayload = func(c Command) []byte { return []byte(c.BootID) }
+	done, err := Recover(j, after)
+	if err != nil || len(done) != 1 {
+		t.Fatalf("Recover = %+v, %v", done, err)
+	}
+	if res := done[0].Result; !res.Rebooted || res.BootID != "boot-2" || string(res.Payload) != "boot-1" {
+		t.Fatalf("rebooted result = %+v", res)
+	}
+	if err := Complete(j, "x", Result{Outcome: OutcomeCancelled}, t0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cancelled is a valid outcome; got %v", err)
 	}
 }
 

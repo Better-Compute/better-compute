@@ -45,6 +45,34 @@ const { JoinResponseSchema } = await import('@better-compute/protocol');
 const recipient = pki.generateP256KeyPair();
 const jwe = pki.sealJwe('hello from ts', recipient.publicKey, { typ: 'bctest+jwe', rid: 'r1' });
 
+// Signed intent: a command-signing root, a worker key it certifies, a command and a desired state
+// signed by it, a signature by a non-worker certificate under the node CA, and a SignedTrustBundle
+// carrying the root, signed by the JoinService key.
+const { create } = await import('@bufbuild/protobuf');
+const { CommandSchema, CommandBodySchema, DesiredStateSchema, DesiredStateBodySchema, SignedTrustBundleSchema, Lane } = await import(
+  '@better-compute/protocol'
+);
+const authority = pki.createCommandSigningAuthority({ clock });
+const worker = authority.issueWorkerKey({ workerId: 'go-interop' });
+const command = pki.signCommand(
+  create(CommandBodySchema, {
+    id: 'cmd_go_1',
+    nodeId,
+    seq: 1n,
+    kind: 'diag.nvml',
+    lane: Lane.CONTROL,
+    retrySafe: true,
+  }),
+  worker,
+);
+const desired = pki.signDesiredState(
+  create(DesiredStateBodySchema, { nodeId, generation: 3n, baseGeneration: 0n, specHash: new Uint8Array(32), spec: { case: 'full', value: {} } }),
+  worker,
+);
+const nodeSigner = pki.createSigningKey({ privateKey: nodeKey, certificate: issued.certificate });
+const byNode = pki.signCommand(create(CommandBodySchema, { id: 'cmd_go_2', nodeId, kind: 'diag.nvml' }), nodeSigner);
+const trust = pki.signTrustBundle({ version: 7n, commandSigningRoots: [authority.certificate] }, signing);
+
 const out = {
   now,
   nodeId,
@@ -56,6 +84,11 @@ const out = {
   joinResponse: hex(toBinary(JoinResponseSchema, response)),
   jwe,
   jweRecipientPkcs8: hex(recipient.privateKey.export({ type: 'pkcs8', format: 'der' })),
+  commandSigningRoot: hex(authority.certificate),
+  signedCommand: hex(toBinary(CommandSchema, command)),
+  signedDesiredState: hex(toBinary(DesiredStateSchema, desired)),
+  nodeSignedCommand: hex(toBinary(CommandSchema, byNode)),
+  signedTrustBundle: hex(toBinary(SignedTrustBundleSchema, trust)),
 };
 const file = join(root, 'daemon/internal/pki/testdata/interop.json');
 mkdirSync(dirname(file), { recursive: true });
