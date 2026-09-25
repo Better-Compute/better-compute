@@ -22,6 +22,7 @@ import {
   createCapacityPort,
   deviceAssignments,
   markAllocationBound,
+  placeablePending,
   markAllocationFailed,
   markAllocationReleased,
   meterReservations,
@@ -422,6 +423,43 @@ describe('reservations.create', () => {
       conditions: [],
       during: { start: T0 + 60_000, end: T0 + 60_000 + 2 * HOUR },
     });
+  });
+
+  it('finds pending reservations an offline solver could place (I7)', async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+    const first = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 4 }], idempotencyKey: 'f1' }),
+    )) as Rsv;
+    await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 4 }], idempotencyKey: 'f2' }),
+    );
+    const waiting = (await call('reservations', 'create', create({ idempotencyKey: 'w' }))) as Rsv;
+    expect(waiting.state).toBe('pending');
+    expect(await placeablePending(db, { now: T0 })).toEqual([]);
+    // Capacity frees up behind the scheduler's back (no wake-up): the waiting one now fits.
+    await db.query(
+      `DELETE FROM device_bookings WHERE allocation_id IN (SELECT id FROM allocations WHERE owner_id = $1)`,
+      [first.id],
+    );
+    await db.query(`UPDATE allocations SET released_at = compute_now() WHERE owner_id = $1`, [
+      first.id,
+    ]);
+    expect(await placeablePending(db, { now: T0, poolId })).toEqual([
+      { reservationId: waiting.id, poolId, nodeIds: [expect.any(String)] },
+    ]);
+    expect(
+      await placeablePending(db, { now: T0, poolId: 'pool_01jz00000000000000000000zz' }),
+    ).toEqual([]);
+    await reconcile(waiting.id);
+    expect(
+      ((await call('reservations', 'get', { tenantId: 'acme', reservationId: waiting.id })) as Rsv)
+        .state,
+    ).toBe('placed');
+    expect(await placeablePending(db, { now: T0 })).toEqual([]);
   });
 
   it('fails a reservation pending longer than maxPending and refunds its quota', async () => {

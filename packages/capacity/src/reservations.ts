@@ -40,7 +40,7 @@ import {
 } from './bookings.js';
 import { chargeQuota, quotaDemand, refundQuota } from './quota.js';
 import { dedicatedTaint, schedulableSqlTolerating } from './eligibility.js';
-import { assertGang } from './gang.js';
+import { assertGang, planGangs } from './gang.js';
 import { assertSelector } from './selector.js';
 import {
   defaultSpotNoticeMs,
@@ -48,7 +48,7 @@ import {
   readSpotAllocations,
   truncateAllocation,
 } from './spot.js';
-import { lockPool, readPool, readPoolNodes } from './store.js';
+import { loadNodeViews, lockPool, readPool, readPoolNodes, type PoolRow } from './store.js';
 import {
   bulkCommittable,
   commitPlansBulk,
@@ -57,7 +57,7 @@ import {
   planOnIndex,
   type PlacementObserver,
 } from './placer.js';
-import type { NodePlan } from './pipeline.js';
+import { planPlacement, type NodePlan } from './pipeline.js';
 import { PoolIndex, type PoolIndexCache } from './pool-index.js';
 import {
   isTenantRootPool,
@@ -1016,6 +1016,71 @@ export async function placeQueued(
     // Hand the index back to the cache only after this transaction commits.
     ...(checkout ? { keep: checkout.keep } : {}),
   };
+}
+
+/** A pending reservation that would fit right now, and where. */
+export interface PlaceablePending {
+  reservationId: string;
+  poolId: string;
+  /** The best node (one per gang member). */
+  nodeIds: string[];
+}
+
+/**
+ * I7 (PLAN.md §15: nothing pending that an offline solver can place). Plans every `pending`
+ * reservation alone against current capacity for its window, the way its next retry would (the
+ * pipeline, gangs on their topology key), and answers those that would fit now. Reservations still
+ * waiting for their pool-lease batch (`Queued`) and node leases (metal's) are skipped. Pure reads,
+ * no locks: after a quiet period a correct scheduler leaves this empty (retries run every 30 s,
+ * releases wake a pool's pending reservations).
+ */
+export async function placeablePending(
+  tx: SqlTx,
+  options: {
+    now: number;
+    poolId?: string;
+    plugins?: readonly SchedulerPlugin[];
+    weights?: Readonly<Record<string, number>>;
+  },
+): Promise<PlaceablePending[]> {
+  const { rows } = await tx.query<RawReservation>(
+    `SELECT ${reservationColumns} FROM reservations
+      WHERE state = 'pending' AND ($1::text IS NULL OR pool_id = $1)
+        AND NOT conditions @> '[{"type": "Queued"}]'::jsonb
+      ORDER BY created_at, id`,
+    [options.poolId ?? null],
+  );
+  const pools = new Map<string, PoolRow | undefined>();
+  const views = new Map<string, Awaited<ReturnType<typeof loadNodeViews>>>();
+  const out: PlaceablePending[] = [];
+  for (const raw of rows) {
+    const row = toReservation(raw);
+    if (isNodeBinding(row)) continue;
+    if (!pools.has(row.poolId)) pools.set(row.poolId, await readPool(tx, row.poolId));
+    const pool = pools.get(row.poolId);
+    if (!pool || pool.archived) continue;
+    const start = Math.max(row.request.start ?? options.now, options.now);
+    const during = { start, end: start + requestedDuration(row) };
+    const request = placementRequest(row, during);
+    const key = `${pool.id}\u0000${during.start}\u0000${during.end}`;
+    let window = views.get(key);
+    if (!window) views.set(key, (window = await loadNodeViews(tx, pool, during)));
+    const plan = planPlacement(request, window, pool, {
+      ...(options.plugins ? { plugins: options.plugins } : {}),
+      ...(options.weights ? { weights: options.weights } : {}),
+    });
+    if (request.gang !== undefined) {
+      const [best] = planGangs(plan.ranked, window, request.gang).gangs;
+      if (best)
+        out.push({
+          reservationId: row.id,
+          poolId: pool.id,
+          nodeIds: best.members.map((member) => member.nodeId),
+        });
+    } else if (plan.ranked[0])
+      out.push({ reservationId: row.id, poolId: pool.id, nodeIds: [plan.ranked[0].nodeId] });
+  }
+  return out;
 }
 
 /**
