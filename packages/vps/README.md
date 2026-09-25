@@ -119,6 +119,7 @@ show it.
 
   Pool and runtime are fixed once a template exists. Changes to flavor, image, user data, env or
   network bump the template's `instance_version`.
+
 - **`sandboxes.create({ tenantId, templateId, ttlSeconds?, fromSnapshot?, idempotencyKey, wait? })`**
   takes a decision on `compute-sandbox/{draftId}`, with attributes `templateId`, `vcpu`,
   `memoryGiB`, `gpus`, `ttlSeconds`, `warm` and `fromSnapshot`. The budget check runs outside any
@@ -128,6 +129,7 @@ show it.
   - or creates and schedules one with the decision's admission context.
 
   The TTL starts at admission. `wait` holds the answer until the sandbox leaves `starting`.
+
 - **Lifetime.** `extend({ until | by })` is decided with the new lifetime as the pending
   `ttlSeconds`, and is bounded by `maxTtlSeconds`. `delete` and expiry are both an ordinary instance
   delete. Events: `sandbox.created`, `ready` (stamped when the instance first runs), `extended`,
@@ -141,6 +143,7 @@ show it.
   Warm instances count against the tenant's quota and are metered as `vps.sandbox.warm` (warm
   vCPU-hours, tenant-billed) until claimed (`instances.claimed_at`). From the claim on they bill as
   the owner's ordinary usage.
+
 - **Snapshots.** `sandboxes.snapshot({ includeMemory = true, keep = false })` needs
   `vps({ snapshots: SnapshotStore })` (`presign`, optional `delete`). It sends the host
   `instance.snapshot` (registered through `commandKinds`), keyed `vps.sandboxes:<snapshotId>:snapshot`.
@@ -160,6 +163,7 @@ show it.
   certificate that lives at most 15 minutes. Template `env` values are resolved for the tenant into
   `/etc/sandbox/env` (0600) inside user data that the broker seals. Without a broker, env is
   `INVALID_CONFIG`.
+
 - **Network.** A template's `network` becomes the instance's `InstanceSpec.networkPolicy`, which the
   host enforces on the instance's taps.
 
