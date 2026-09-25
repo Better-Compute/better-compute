@@ -29,6 +29,7 @@ import {
   type WorkQueue,
 } from '@better-compute/core';
 import { createSecretBroker, type SecretBrokerOptions } from './secret-broker.js';
+import { createWorkloadBroker, type WorkloadIdentityOptions } from './workload-broker.js';
 import { create, toBinary } from '@bufbuild/protobuf';
 import {
   SignedTrustBundleSchema,
@@ -40,6 +41,8 @@ import {
   type SecretRequest,
   type SecretResponse,
   type SignedTrustBundle,
+  type WorkloadTokenRequest,
+  type WorkloadTokenResponse,
 } from '@better-compute/protocol';
 import type { JoinCrypto, JoinTrustBundle } from './crypto.js';
 import { createJoinService, type GatewayCallContext, type JoinService } from './service.js';
@@ -54,6 +57,15 @@ export interface GatewayServices {
    * `pki.commandSigning` or JoinService keys.
    */
   trustBundle?(): Promise<SignedTrustBundle | undefined>;
+  /**
+   * `WorkloadTokenRequest` → `WorkloadTokenResponse` (v0.5 workload identity, `workload-broker.ts`):
+   * a VPS host's IMDS asks for one instance's token, sealed to the request's one-time key. Present
+   * only with `ComputeOptions.workloadIdentity`. Refusals are answers (`error`), not errors.
+   */
+  workloadToken?(
+    request: WorkloadTokenRequest,
+    context?: GatewayCallContext,
+  ): Promise<WorkloadTokenResponse>;
 }
 
 export interface GatewayServicesInput {
@@ -82,6 +94,8 @@ export interface GatewayServicesInput {
   allocationRefs?: SecretBrokerOptions['allocationRefs'];
   /** The command-signing trust bundle (`JoinResponse.trust`, and signed for `Welcome.trust`). */
   trustBundle?: JoinTrustBundle;
+  /** `ComputeOptions.workloadIdentity`: turns on `workloadToken` (v0.5). */
+  workloadIdentity?: WorkloadIdentityOptions;
 }
 
 /** JoinService behind the gateway-facing interface. */
@@ -128,7 +142,18 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
         ...(input.allocationRefs ? { allocationRefs: input.allocationRefs } : {}),
       })
     : undefined;
+  const workloadBroker = input.workloadIdentity
+    ? createWorkloadBroker({
+        ...input.workloadIdentity,
+        database: input.database,
+        clock: input.clock,
+        events: input.events,
+        ...(input.rootTenantId ? { rootTenantId: input.rootTenantId } : {}),
+        ...(input.log ? { log: input.log } : {}),
+      })
+    : undefined;
   return Object.freeze({
+    ...(workloadBroker ? { workloadToken: workloadBroker.workloadToken } : {}),
     join: (request: JoinRequest, context?: GatewayCallContext) => service.join(request, context),
     renew: (request: RenewRequest, context?: GatewayCallContext) => service.renew(request, context),
     secret: async (

@@ -4,7 +4,9 @@ import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
 import { isComputeError } from '@better-compute/core';
 import {
   createSecretRequest,
+  createWorkloadTokenRequest,
   openSecretResponse,
+  openWorkloadTokenResponse,
   signAttestedReport,
   signCommandUpdate,
   verifyCommand,
@@ -73,6 +75,7 @@ import { createRng, type Rng } from '../rng.js';
 import type { Scheduler, Timer } from '../scheduler.js';
 import type { DaemonFact, FactSink } from './facts.js';
 import { FakeHypervisor, type FakeHypervisorOptions, type UserDataFetch } from './instances.js';
+import { FakeImds } from './imds.js';
 import {
   newTunnelJtiCache,
   startTunnel,
@@ -318,6 +321,13 @@ export class FakeDaemon {
   readonly hypervisor: FakeHypervisor | undefined;
   /** SecretRequests in flight: request id → the ref and the one-time key that opens the answer. */
   private readonly secretRequests = new Map<string, { ref: string; key: KeyObject }>();
+  /** The VPS host's metadata service (v0.5): `handleImds(request, instanceId)` answers a guest. */
+  private imdsService: FakeImds | undefined;
+  /** WorkloadTokenRequests in flight: request id → the instance, the one-time key, the waiter. */
+  private readonly workloadRequests = new Map<
+    string,
+    { instanceId: string; key: KeyObject; settle(result: { token: string } | { error: string }): void }
+  >();
 
   private readonly scheduler: Scheduler;
   private readonly rng: Rng;
@@ -860,6 +870,26 @@ export class FakeDaemon {
         this.revokedValue = true;
         session.conn.close('revoked');
         return;
+      case 'workloadToken': {
+        const pending = this.workloadRequests.get(msg.value.requestId);
+        if (!pending) {
+          this.log('frame.ignored', { case: 'workloadToken', why: 'unknown request' });
+          return;
+        }
+        try {
+          const token = openWorkloadTokenResponse(msg.value, pending.key, {
+            requestId: msg.value.requestId,
+            instanceId: pending.instanceId,
+            now: this.serverNow(),
+          });
+          pending.settle({ token });
+        } catch (error) {
+          pending.settle({
+            error: isComputeError(error) ? String(error.details?.refusal ?? 'access-denied') : 'access-denied',
+          });
+        }
+        return;
+      }
       case 'secret': {
         const pending = this.secretRequests.get(msg.value.requestId);
         if (!pending || !this.hypervisor) {
@@ -1530,6 +1560,55 @@ export class FakeDaemon {
       });
       this.send(session, { case: 'events', value: { journalId, events: batch } } as AgentFrame['msg']);
     }
+  }
+
+  /**
+   * The VPS host's IMDS (§12.2, §13; v0.5) answering a request from `instanceId`'s own interface:
+   * IMDSv2-style session tokens bound to that instance, and its workload token, minted by the control
+   * plane through a WorkloadTokenRequest on this node's session. A host answers only instances it
+   * runs (404 otherwise), and never for another instance than the one the request came from.
+   */
+  async handleImds(request: Request, instanceId: string): Promise<Response> {
+    const domain = this.hypervisor?.domains.get(instanceId);
+    if (!domain?.managed || domain.state !== 'running')
+      return new Response('No such instance on this host', { status: 404 });
+    this.imdsService ??= new FakeImds({
+      now: () => this.serverNow(),
+      mint: (mint) => this.requestWorkloadToken(mint.instanceId, mint.audience),
+    });
+    return this.imdsService.handle(request, instanceId);
+  }
+
+  /** Asks the control plane for an instance's workload token (sealed to a one-time key). */
+  private requestWorkloadToken(
+    instanceId: string,
+    audience?: string,
+  ): Promise<{ token: string } | { error: string }> {
+    const session = this.proc?.session;
+    if (!session?.welcomed || session.conn.closed || !this.nodeKey) return Promise.resolve({ error: 'unavailable' });
+    const { request, ephemeralKey } = createWorkloadTokenRequest({
+      nodeKey: this.nodeKey,
+      instanceId,
+      ...(audience !== undefined ? { audience } : {}),
+    });
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.workloadRequests.delete(request.requestId);
+        resolve({ error: 'unavailable' });
+      }, 10_000);
+      this.workloadRequests.set(request.requestId, {
+        instanceId,
+        key: ephemeralKey,
+        settle: (result) => {
+          clearTimeout(timer);
+          this.workloadRequests.delete(request.requestId);
+          resolve(result);
+        },
+      });
+      this.log('workload.request', { instance: instanceId, audience: audience ?? '' });
+      if (!this.send(session, { case: 'workloadTokenRequest', value: request }))
+        this.workloadRequests.get(request.requestId)?.settle({ error: 'unavailable' });
+    });
   }
 
   /**

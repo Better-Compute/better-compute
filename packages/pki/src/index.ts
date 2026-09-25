@@ -46,4 +46,5 @@ export * from './spiffe.js';
 export * from './ssh.js';
 export * from './tickets.js';
 export * from './workload.js';
+export * from './workload-request.js';
 export * from './x509.js';

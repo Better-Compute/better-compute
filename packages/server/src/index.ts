@@ -329,6 +329,8 @@ export function betterCompute<
       secrets: resolved.secretStores,
       // Signed intent: command-signing roots in JoinResponse.trust and (signed) Welcome.trust.
       ...(resolved.trustBundle ? { trustBundle: resolved.trustBundle } : {}),
+      // v0.5 workload identity: WorkloadTokenRequest → the instance's JWT sealed to its one-time key.
+      ...(options.workloadIdentity ? { workloadIdentity: options.workloadIdentity } : {}),
     }),
     initialize,
     async start(startOptions = {}) {

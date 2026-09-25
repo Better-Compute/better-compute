@@ -674,6 +674,8 @@ export interface DevStackOptions
   tunnels?: { jtiCache?: ReplayCache };
   /** Capacity options, as for `betterCompute()` (e.g. `attestedBindings`). */
   capacity?: ComputeOptions<readonly ComputeModule[], []>['capacity'];
+  /** Workload identity (v0.5), as for `betterCompute()`: VPS hosts' IMDS get instance tokens. */
+  workloadIdentity?: ComputeOptions<readonly ComputeModule[], []>['workloadIdentity'];
 }
 
 export interface DevStack extends DevFleet {
@@ -745,6 +747,7 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     worker: { pollMs: 100, ...options.worker },
     ...(options.log ? { log: options.log } : {}),
     ...(options.capacity ? { capacity: options.capacity } : {}),
+    ...(options.workloadIdentity ? { workloadIdentity: options.workloadIdentity } : {}),
   });
   let started = false;
   let fleet: DevFleet | undefined;

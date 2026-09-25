@@ -30,6 +30,7 @@ import { pkiAllocationBindingCheck } from './join/allocation-binding.js';
 import type { JoinCrypto, JoinTrustBundle } from './join/crypto.js';
 import { createCommandSigner, type CommandSigner } from './runtime/command-signing.js';
 import type { TunnelsOptions } from './tunnels/module.js';
+import type { WorkloadIdentityOptions } from './join/workload-broker.js';
 import { anchoredClock } from './runtime/clock.js';
 import { withCommitHooks, type CommitHook } from './runtime/commit-hooks.js';
 
@@ -157,6 +158,12 @@ export interface ComputeOptions<
    * Without it neither method is registered.
    */
   tunnels?: TunnelsOptions;
+  /**
+   * v0.5 workload identity (§12.2): pki's workload issuer (the host serves its discovery document and
+   * JWKS) and the audiences instances may ask for. Turns on `GatewayServices.workloadToken`, which
+   * mints tokens only for live instances in pools with `policy.workloadIdentity`.
+   */
+  workloadIdentity?: WorkloadIdentityOptions;
   notifier?: Notifier;
   sinks?: SinkOptions;
   downloads?: { dir?: string; blob?: BlobStore };

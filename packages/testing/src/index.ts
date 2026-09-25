@@ -151,6 +151,7 @@ export {
   type DriverInvocation,
   type DriverInvocationContext,
 } from './daemon/drivers.js';
+export { FakeImds, type FakeImdsOptions, type ImdsMint } from './daemon/imds.js';
 export {
   FakeHypervisor,
   overlayPath,
