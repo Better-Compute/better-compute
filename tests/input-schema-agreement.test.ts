@@ -3,11 +3,12 @@ import { ComputeError, describedBy, isComputeError, strictObject } from '@better
 import { eventsModule } from '@better-compute/events';
 import { fleetModule } from '@better-compute/fleet';
 import { metal } from '@better-compute/metal';
-import { generateP256KeyPair, spkiPin } from '@better-compute/pki';
+import { createExecTicketIssuer, generateP256KeyPair, spkiPin } from '@better-compute/pki';
 import { provisionModule } from '@better-compute/provision';
 import { rolloutModule } from '@better-compute/rollout';
 import { vps } from '@better-compute/vps';
 import { closeFixtures, computeFixture } from '@better-compute/testing';
+import { tunnelsModule } from '../packages/server/src/tunnels/module.js';
 
 // Every module's method inputs describe themselves as JSON Schema (`validate.jsonSchema`, core's
 // `describedBy` or a `manifest`), for the generated API reference. The description and the validator
@@ -46,6 +47,8 @@ async function everyModule() {
         release: { pins: [spkiPin(generateP256KeyPair().publicKey)] },
         downloadsUrl: 'https://downloads.example.com',
       }),
+      // What `betterCompute({ tunnels })` adds: tunnels.open, nodes.issueSshCert/revokeSshCert.
+      tunnelsModule({ issuer: createExecTicketIssuer({ issuer: 'https://schemas.invalid' }) }),
     ],
   });
   return compute.registry.methods.filter((method) => !method.plugin);

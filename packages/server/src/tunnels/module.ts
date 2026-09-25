@@ -1,7 +1,9 @@
 import {
   ComputeError,
   defineMethod,
+  describedBy,
   newId,
+  strictObject,
   type ComputeModule,
   type MethodDefinition,
   type MethodResource,
@@ -211,6 +213,59 @@ function invalid(message: string): never {
   throw new ComputeError('INVALID_INPUT', message);
 }
 
+// The inputs as JSON Schema (`describedBy`), for the API reference; the parsers keep every rule.
+const tenantIdSchema = { type: 'string', pattern: tenantPattern.source, maxLength: 128 };
+const nodeIdSchema = { type: 'string', pattern: idPattern('node').source, maxLength: 57 };
+const inputSchemas = {
+  openTunnel: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      instanceId: {
+        type: 'string',
+        pattern: idPattern('inst').source,
+        maxLength: 57,
+        description: 'Exec, ssh or tcp into this instance; give exactly one of instanceId or nodeId',
+      },
+      nodeId: { ...nodeIdSchema, description: 'The console of this node' },
+      op: { enum: [...ops], description: 'console for a node; exec, ssh or tcp for an instance' },
+      port: { type: 'integer', minimum: 1, maximum: 65535, description: 'tcp only: the port to reach' },
+    },
+    ['tenantId', 'op'],
+  ),
+  issueSshCert: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      nodeId: nodeIdSchema,
+      publicKey: {
+        type: 'string',
+        maxLength: 4096,
+        description: 'Your OpenSSH public key line (Ed25519 or ECDSA P-256)',
+      },
+      principal: {
+        type: 'string',
+        pattern: accountPattern.source,
+        default: 'root',
+        description: "The Unix account to log in as, one of the deployment's sshAccounts",
+      },
+      ttlSeconds: { type: 'integer', minimum: 60, maximum: 3600, default: 900 },
+    },
+    ['tenantId', 'nodeId', 'publicKey'],
+  ),
+  revokeSshCert: strictObject(
+    {
+      tenantId: tenantIdSchema,
+      nodeId: nodeIdSchema,
+      serial: {
+        type: 'string',
+        pattern: '^[0-9]{1,20}$',
+        description: 'The certificate serial in decimal, as nodes.issueSshCert returned it',
+      },
+      reason: { type: 'string', maxLength: 500 },
+    },
+    ['tenantId', 'nodeId', 'serial'],
+  ),
+};
+
 export function parseOpenTunnel(raw: unknown): OpenTunnelInput {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
     invalid('input must be an object');
@@ -336,7 +391,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
         action: 'compute:instances:exec',
         kind: 'mutation',
         resource: resourceOf,
-        validate: parseOpenTunnel,
+        validate: describedBy(inputSchemas.openTunnel, parseOpenTunnel),
         async handler(context, input) {
           const caller = context.caller;
           if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
@@ -397,7 +452,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
         action: 'compute:nodes:ssh-root',
         kind: 'mutation',
         resource: (input) => ({ type: 'node', id: input.nodeId }),
-        validate: parseIssueSshCert,
+        validate: describedBy(inputSchemas.issueSshCert, parseIssueSshCert),
         async handler(context, input) {
           const ca = options.ssh;
           if (!ca) throw new ComputeError('UNSUPPORTED', 'No compute SSH CA is configured');
@@ -492,7 +547,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
         action: 'compute:nodes:ssh-root',
         kind: 'mutation',
         resource: (input) => ({ type: 'node', id: input.nodeId }),
-        validate: parseRevokeSshCert,
+        validate: describedBy(inputSchemas.revokeSshCert, parseRevokeSshCert),
         async handler(context, input) {
           const caller = context.caller;
           if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
