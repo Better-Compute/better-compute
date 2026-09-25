@@ -1,6 +1,7 @@
 import {
   ComputeError,
   field,
+  isComputeError,
   manifest,
   type Json,
   type SecretRef,
@@ -37,6 +38,13 @@ import {
   purgeableCredentials,
   rotatedCredentialValue,
 } from './bmc-rotation.js';
+import {
+  assertPxeMacsKnowable,
+  servesBmcOperation,
+  siteDriverKinds,
+  unsupportedBmcCodes,
+  type BmcDriverCapabilities,
+} from './capabilities.js';
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
@@ -71,6 +79,8 @@ export interface MetalStepOptions {
    * development only.
    */
   images?: ImageUseOptions;
+  /** BMC drivers beyond the built-in ones (`metal({ bmcDrivers })`, capabilities.ts). */
+  bmcDrivers?: BmcDriverCapabilities;
 }
 
 function requireNode(context: StepContext): string {
@@ -293,7 +303,28 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     retrySafe: true,
     input: manifest({}),
     async run(_input, context) {
-      const result = (await bmc(context, 'bmc.query', 'inspect.inspect', {})) as Record<string, Json>;
+      const node = await metalNode(context);
+      // Optional (capabilities.ts): a driver without out-of-band inspection skips it, and so does one whose
+      // site agent says it lacks it; the ramdisk inspects in band later. Its PXE MACs must then be known.
+      const reportedKinds = await siteDriverKinds(context.sql, node.site_id, node.bmc_driver);
+      const pxeMacs = () => {
+        if (node.pool_agent === 'none' || node.macs.length > 0) return;
+        assertPxeMacsKnowable(node, { ...(options.bmcDrivers ? { bmcDrivers: options.bmcDrivers } : {}), reportedKinds });
+        throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC: enroll it with macs`);
+      };
+      if (servesBmcOperation(node.bmc_driver, 'inspect.inspect', options.bmcDrivers, reportedKinds) === false) {
+        pxeMacs();
+        return { skipped: `the ${node.bmc_driver} driver does not inspect out of band` };
+      }
+      let result: Record<string, Json>;
+      try {
+        result = (await bmc(context, 'bmc.query', 'inspect.inspect', {}, undefined, node)) as Record<string, Json>;
+      } catch (error) {
+        const code = isComputeError(error, 'DRIVER_ERROR') ? error.details?.errorCode : undefined;
+        if (typeof code !== 'string' || !unsupportedBmcCodes.has(code)) throw error;
+        pxeMacs();
+        return { skipped: `the site agent's ${node.bmc_driver} driver does not inspect out of band (${code})` };
+      }
       // Redfish reports the PXE MACs and the SMBIOS UUID; keep them for the boot entry.
       const macs = Array.isArray(result.macs) ? result.macs.filter((m): m is string => typeof m === 'string').map((m) => m.toLowerCase()) : [];
       const uuid = typeof result.productUuid === 'string' ? result.productUuid.toLowerCase() : null;
@@ -313,6 +344,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
           // The site's agents may now reach (site.httpProxy) the addresses of an agentless machine.
           if (addresses.length && context.node) await invalidateSiteProxyTargets(tx, context.desired, context.node.siteId);
         });
+      // IPMI inspects (FRU, chassis) but cannot name the host's NICs.
+      if (macs.length === 0) pxeMacs();
       return result;
     },
   });

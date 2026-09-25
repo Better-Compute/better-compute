@@ -3,10 +3,13 @@ import {
   isComputeError,
   type Json,
   type ModuleContext,
+  type ProfileDocument,
   type ProvisionState,
   type SqlTx,
 } from '@better-compute/core';
 import { metalBatchScope } from './batch.js';
+import { bmcDriverUnsupported, siteDriverKinds, unmetBmcNeeds, type BmcDriverCapabilities, type UnmetBmcNeed } from './capabilities.js';
+import type { HardwareProfile } from './module-types.js';
 import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { stateProfile, workflowStates } from './profiles.js';
 import { applyProvisionVerb, readMetalNode, setMetalWorkflow, type MetalNodeRow } from './store.js';
@@ -102,8 +105,30 @@ async function batchWorkflow(context: Context, tx: SqlTx, node: MetalNodeRow, wo
   await tx.query('UPDATE workflows SET batch_id = $2 WHERE id = $1', [workflowId, batch.batchId]);
 }
 
+/** What the reconciler checks a node's BMC driver against (`metal()` options). */
+export interface MetalReconcileOptions {
+  hardwareProfiles?: Readonly<Record<string, HardwareProfile>>;
+  bmcDrivers?: BmcDriverCapabilities;
+}
+
+/** Fails a node whose BMC driver cannot serve its state's profile (`UNSUPPORTED`, bmc-driver-unsupported). */
+async function failUnsupported(
+  context: Context,
+  tx: SqlTx,
+  node: MetalNodeRow,
+  state: ProvisionState,
+  unmet: readonly UnmetBmcNeed[],
+): Promise<MetalReconcileOutcome> {
+  const unsupported = bmcDriverUnsupported(node.bmc_driver, unmet);
+  const error = { code: 'UNSUPPORTED', message: unsupported.message, ...(unsupported.details as Record<string, Json>) } as Json;
+  await applyProvisionVerb(tx, node, 'fail', { error });
+  await setMetalWorkflow(tx, node.node_id, null, null);
+  await publish(context, tx, node, 'node.provision.failed', { from: state, error });
+  return { action: 'failed', from: state, error };
+}
+
 /** One reconcile transition, in one transaction. */
-async function step(context: Context, nodeId: string): Promise<MetalReconcileOutcome> {
+async function step(context: Context, nodeId: string, options: MetalReconcileOptions): Promise<MetalReconcileOutcome> {
   return context.sql.transaction(async (tx) => {
     let node: MetalNodeRow;
     try {
@@ -182,6 +207,7 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
 
     if (!context.workflows)
       throw new ComputeError('INVALID_CONFIG', 'metal() needs the provision module: ModuleContext.workflows is not set');
+    const checks = { ...options, reportedKinds: await siteDriverKinds(tx, node.site_id, node.bmc_driver) };
     let profileId: string;
     let profileVersion: number;
     let tenantId = node.tenant_id;
@@ -204,13 +230,28 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
         await publish(context, tx, node, 'node.provision.failed', { from: state, error });
         return { action: 'failed', from: state, error };
       }
+      // A driver that cannot serve the profile fails the node now, naming what it lacks (capabilities.ts).
+      const unmet = unmetBmcNeeds([profile], node, checks);
+      if (unmet.length) return failUnsupported(context, tx, node, state, unmet);
       profileId = profile.id;
       profileVersion = profile.version;
     }
     // `owner` is provision's addition to the core input: the engine wakes this reconciler on finish.
     // Under a bulk verb's batch (metal.bulk), its destructive commands carry it (§13 quorum).
     const input = { tenantId, profileId, profileVersion, nodeId, owner: metalWorkKind, ...(node.batch_id ? { batchId: node.batch_id } : {}) };
+    // A deploy runs the tenant's profile, whose document only the engine resolves: start it under a
+    // savepoint, and take it back if the node's BMC driver cannot serve it.
+    if (state === 'deploying') await tx.query('SAVEPOINT metal_bmc_needs');
     const { id } = await context.workflows.start(tx, input);
+    if (state === 'deploying') {
+      const { rows } = await tx.query<{ profile_document: ProfileDocument | null }>('SELECT profile_document FROM workflows WHERE id = $1', [id]);
+      const unmet = rows[0]?.profile_document ? unmetBmcNeeds([rows[0].profile_document], node, checks) : [];
+      if (unmet.length) {
+        await tx.query('ROLLBACK TO SAVEPOINT metal_bmc_needs');
+        return failUnsupported(context, tx, node, state, unmet);
+      }
+      await tx.query('RELEASE SAVEPOINT metal_bmc_needs');
+    }
     // Without a bulk verb's batch, the workflow's destructive commands get a batch of their own
     // (one node), created before any step sends anything (§13: with approvers set, the command queue
     // refuses unbatched destructive commands).
@@ -225,12 +266,16 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
  * Reconciles one node until it waits or rests: starts the current state's workflow, and settles
  * finished ones (chaining enrolling → inspecting → commissioning → ready without a caller).
  */
-export async function reconcileMetalNode(context: Context, nodeId: string): Promise<MetalReconcileOutcome[]> {
+export async function reconcileMetalNode(
+  context: Context,
+  nodeId: string,
+  options: MetalReconcileOptions = {},
+): Promise<MetalReconcileOutcome[]> {
   const outcomes: MetalReconcileOutcome[] = [];
   for (let i = 0; i < 8; i++) {
     let outcome: MetalReconcileOutcome;
     try {
-      outcome = await step(context, nodeId);
+      outcome = await step(context, nodeId, options);
     } catch (error) {
       // Another workflow still holds the node (an abort's cleanup): try again later.
       if (isComputeError(error, 'CONFLICT')) {

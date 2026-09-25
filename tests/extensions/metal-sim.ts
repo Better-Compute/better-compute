@@ -237,6 +237,8 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     flashFails: false,
     /** The BIOS drops pending settings at boot. */
     biosIgnored: false,
+    /** bcx-ipmi serves inspect.inspect (7818f19); false: an older build without it. */
+    ipmiInspect: true,
   };
   // Node keys and certificates from a node CA, as JoinService issues them: every ramdisk boot joins
   // with a fresh key (role ramdisk), so revoking an identity generation never outlives a reboot.
@@ -320,9 +322,21 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       const bmcAuthFails =
         command.kind.startsWith('bmc.') && machineOf(target).bmcPassword !== undefined && secretsStore.get(payload.credentialsRef) !== machineOf(target).bmcPassword;
       if (bmcAuthFails) command.kind = 'bmc.denied';
+      // A BMC behind bcx-ipmi (daemon/cmd/bcx-ipmi): power, the boot device and FRU inspection without MACs
+      // (`faults.ipmiInspect` false: an older build that hosts no inspect kind at all).
+      const ipmiOperations = ['power.getPower', 'power.setPower', 'management.setBootDevice', ...(faults.ipmiInspect ? ['inspect.inspect'] : [])];
+      if (command.kind.startsWith('bmc.') && payload.driver === 'ipmi' && command.kind !== 'bmc.denied' && !ipmiOperations.includes(payload.operation))
+        command.kind = payload.operation === 'inspect.inspect' ? 'bmc.unsupported-driver' : 'bmc.unsupported-operation';
       switch (command.kind) {
         case 'bmc.denied':
           result = toBinary(site.BmcOperationResultSchema, create(site.BmcOperationResultSchema, { ok: false, errorCode: 'auth', message: 'authentication failed' }));
+          break;
+        case 'bmc.unsupported-driver':
+        case 'bmc.unsupported-operation':
+          result = toBinary(
+            site.BmcOperationResultSchema,
+            create(site.BmcOperationResultSchema, { ok: false, errorCode: command.kind.slice(4), message: `the ipmi driver does not implement ${payload.operation}` }),
+          );
           break;
         case 'bmc.storage': {
           machineOf(target).raid = (args.volumes as { level: string }[]).map((volume) => volume.level);
@@ -350,7 +364,9 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
         case 'bmc.query':
           result = bmcResult(
             payload.operation === 'inspect.inspect'
-              ? { macs: [macOf(target)] }
+              ? payload.driver === 'ipmi'
+                ? { manufacturer: 'Supermicro', model: 'SYS-4029GP', serial: `S${target.slice(-6)}`, power: machineOf(target).power }
+                : { macs: [macOf(target)] }
               : payload.operation === 'firmware.components'
                 ? { components: Object.entries(machineOf(target).firmware).map(([id, version]) => ({ id, version })) }
                 : payload.operation === 'bios.getSettings'
@@ -495,6 +511,6 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       )
     ).rows[0]!;
 
-  return { db, context, api, provision, bareMetal, queue, events, batches, commandBatches, seen, trustedWipes, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, pxeTick, settle, call, state, close: () => db.close() };
+  return { db, context, api, provision, bareMetal, queue, events, batches, commandBatches, seen, trustedWipes, faults, tokens, tokenRequests, secretsStore, machines, machineOf, macOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, pxeTick, settle, call, state, close: () => db.close() };
 }
 export type MetalSim = Awaited<ReturnType<typeof createMetalSim>>;

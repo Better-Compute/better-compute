@@ -33,6 +33,12 @@ export function verbChain(from: ProvisionState, verb: ProvisionVerb): ProvisionS
   const transitions = provisionStateTable.transitions as Partial<Record<ProvisionState, Partial<Record<ProvisionVerb, ProvisionState>>>>;
   const first = transitions[from]?.[verb];
   if (!first) throw new ComputeError('INVALID_STATE', `A ${from} node cannot ${verb}`);
+  return stateChain(first);
+}
+
+/** `first` and each state its `complete` leads to while that state runs a workflow too. */
+export function stateChain(first: ProvisionState): ProvisionState[] {
+  const transitions = provisionStateTable.transitions as Partial<Record<ProvisionState, Partial<Record<ProvisionVerb, ProvisionState>>>>;
   const chain: ProvisionState[] = [];
   for (let state: ProvisionState | undefined = first; state && workflowStates.includes(state) && chain.length < 8; state = transitions[state]?.complete)
     chain.push(state);

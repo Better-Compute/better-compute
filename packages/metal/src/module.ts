@@ -1,6 +1,7 @@
 import { defineModule, type ComputeModule, type ReconcileContext, type Reconciler } from '@better-compute/core';
 import type { ImageUseOptions } from '@better-compute/provision';
 import { metalApi, type MetalApi } from './api.js';
+import type { BmcDriverCapabilities } from './capabilities.js';
 import { metalCommandKinds } from './commands.js';
 import { metalFindings } from './findings.js';
 import { teardownTenantMetal } from './tenancy.js';
@@ -24,6 +25,13 @@ export interface MetalOptions {
    * when it is not the default allowlist. `allowUnsigned: true` is for development only.
    */
   images?: ImageUseOptions;
+  /**
+   * BMC drivers beyond the built-in ones (`redfish`, `ipmi`), or replacements: driver id → the BMC
+   * operations it serves (`bmcOperationNames`, plus `inspect.macs` when its inspection reports the PXE
+   * MACs). A verb whose workflows need an operation the node's driver lacks is refused up front
+   * (`UNSUPPORTED`, reason `bmc-driver-unsupported`). Drivers in neither list are not checked in advance.
+   */
+  bmcDrivers?: BmcDriverCapabilities;
 }
 
 /**
@@ -39,11 +47,12 @@ export interface MetalOptions {
  */
 export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalApi> {
   const hardwareProfiles = options.hardwareProfiles ?? {};
+  const capabilities = { hardwareProfiles, ...(options.bmcDrivers ? { bmcDrivers: options.bmcDrivers } : {}) };
   const reconciler: Reconciler = {
     name: metalWorkKind,
     shardBy: 'node',
     async run(context: ReconcileContext, nodeId: string) {
-      await reconcileMetalNode(context, nodeId);
+      await reconcileMetalNode(context, nodeId, capabilities);
       return 'DONE';
     },
   };
@@ -56,6 +65,7 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
         hardwareProfiles,
         ...(options.verifyAttestation ? { verifyAttestation: options.verifyAttestation } : {}),
         ...(options.images ? { images: options.images } : {}),
+        ...(options.bmcDrivers ? { bmcDrivers: options.bmcDrivers } : {}),
       }),
       profiles: [...metalProfiles],
       commandKinds: [...metalCommandKinds],
@@ -67,7 +77,7 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
       async tenantDeleted(context, tenantId) {
         return (await teardownTenantMetal(context, tenantId)).remaining > 0 ? 'SYNC_AGAIN' : 'DONE';
       },
-      api: () => metalApi(hardwareProfiles),
+      api: () => metalApi(hardwareProfiles, options.bmcDrivers),
     }),
   );
 }

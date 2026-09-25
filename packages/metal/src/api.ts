@@ -12,17 +12,27 @@ import {
   type MethodContext,
   type MethodDefinition,
   type PowerAction,
+  type ProfileDocument,
   type ProvisionState,
   type ProvisionVerb,
   type SecretRef,
+  type SqlTx,
   type WipeMode,
 } from '@better-compute/core';
 import { builtinSteps, siteAgentFor, stepRegistry, type StepRegistry } from '@better-compute/provision';
 import { encodeMessageJson } from '@better-compute/protocol';
-import { batchSubject, verbBatchScope } from './batch.js';
+import { batchSubject, stateChain, verbBatchScope } from './batch.js';
+import {
+  assertBmcNeeds,
+  assertPxeMacsKnowable,
+  bmcDriverUnsupported,
+  servesBmcOperation,
+  siteDriverKinds,
+  type BmcDriverCapabilities,
+} from './capabilities.js';
 import { metalPayloads } from './commands.js';
 import type { HardwareProfile } from './module-types.js';
-import { unrescueProfile } from './profiles.js';
+import { stateProfile, unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
 import { schemas } from './schemas.js';
 import { bmcOperationJson, metalSteps } from './steps.js';
@@ -233,7 +243,24 @@ function validateEnroll(raw: unknown): EnrollInput {
   return out;
 }
 
-async function enroll(context: MethodContext, hardwareProfiles: Readonly<Record<string, HardwareProfile>>, input: EnrollInput): Promise<MetalNodeView> {
+/** What a verb's workflows are checked against: the module's hardware profiles and BMC drivers. */
+interface Capabilities {
+  hardwareProfiles: Readonly<Record<string, HardwareProfile>>;
+  bmcDrivers?: BmcDriverCapabilities;
+}
+
+/**
+ * Refuses (`UNSUPPORTED`, bmc-driver-unsupported) a node now in `node.provision_state` whose chain of
+ * workflows, from that state on, needs a BMC operation its driver lacks (capabilities.ts).
+ */
+async function assertChainServed(tx: SqlTx, node: MetalNodeRow, caps: Capabilities, extra: readonly ProfileDocument[] = []): Promise<void> {
+  const profiles = stateChain(node.provision_state).flatMap((state) => stateProfile(state, node.pool_agent, { tenantRoot: node.tenant_root }) ?? []);
+  if (profiles.length === 0 && extra.length === 0) return;
+  assertBmcNeeds([...extra, ...profiles], node, { ...caps, reportedKinds: await siteDriverKinds(tx, node.site_id, node.bmc_driver) });
+}
+
+async function enroll(context: MethodContext, caps: Capabilities, input: EnrollInput): Promise<MetalNodeView> {
+  const { hardwareProfiles } = caps;
   // Inline credentials go to the secret broker before anything else, so they never reach a row.
   let credentials: SecretRef;
   if (typeof input.bmc.credentials === 'string') credentials = input.bmc.credentials;
@@ -243,14 +270,28 @@ async function enroll(context: MethodContext, hardwareProfiles: Readonly<Record<
     credentials = await context.secrets.put(input.tenantId, JSON.stringify(input.bmc.credentials));
   }
   return context.sql.transaction(async (tx) => {
-    const pools = await tx.query<{ site_id: string; owner_tenant_id: string; policy: { hardwareProfile?: string } | null }>(
-      'SELECT site_id, owner_tenant_id, policy FROM pools WHERE id = $1',
-      [input.poolId],
-    );
+    const pools = await tx.query<{
+      site_id: string;
+      owner_tenant_id: string;
+      agent: 'bcd' | 'none' | null;
+      policy: ({ hardwareProfile?: string } & Record<string, unknown>) | null;
+    }>('SELECT site_id, owner_tenant_id, agent, policy FROM pools WHERE id = $1', [input.poolId]);
     const pool = pools.rows[0];
     if (!pool || pool.owner_tenant_id !== input.tenantId) throw new ComputeError('NOT_FOUND', `Pool ${input.poolId} does not exist`);
     if (pool.site_id !== input.siteId) throw new ComputeError('INVALID_INPUT', `Pool ${input.poolId} is not in site ${input.siteId}`);
     const profile = input.hardwareProfile ?? pool.policy?.hardwareProfile;
+    // Enrollment runs on to ready (enrolling → inspecting → commissioning): the BMC driver must serve all
+    // of it, and a machine the ramdisk boots needs PXE MACs its driver can report or the caller gives.
+    const planned = {
+      bmc_driver: input.bmc.driver,
+      macs: input.macs ?? [],
+      pool_agent: pool.agent,
+      hardware_profile: profile ?? null,
+      pool_policy: pool.policy,
+    };
+    const checks = { ...caps, reportedKinds: await siteDriverKinds(tx, input.siteId, input.bmc.driver) };
+    assertPxeMacsKnowable(planned, checks);
+    assertBmcNeeds(stateChain('enrolling').flatMap((state) => stateProfile(state, pool.agent) ?? []), planned, checks);
     const drivers = resolveDriverBindings(hardwareProfiles, profile, { driver: input.bmc.driver, address: input.bmc.address, credentials });
     const id = newId('node');
     await tx.query(
@@ -302,13 +343,16 @@ async function verb(
   context: MethodContext,
   input: MetalNodeInput,
   provisionVerb: ProvisionVerb,
-  before?: (tx: import('@better-compute/core').SqlTx, node: MetalNodeRow) => Promise<{ to?: ProvisionState } | void>,
+  before?: (tx: import('@better-compute/core').SqlTx, node: MetalNodeRow) => Promise<{ to?: ProvisionState; profiles?: ProfileDocument[] } | void>,
+  caps?: Capabilities,
 ): Promise<MetalNodeView> {
   return context.sql.transaction(async (tx) => {
     const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId, lock: true });
-    const extra = (await before?.(tx, node)) ?? {};
+    const { profiles, ...extra } = (await before?.(tx, node)) ?? {};
     const from = node.provision_state;
     const to = await applyProvisionVerb(tx, node, provisionVerb, extra);
+    // The workflows this verb starts must be ones the node's BMC driver can serve (rolled back if not).
+    if (caps) await assertChainServed(tx, node, caps, profiles);
     await setMetalWorkflow(tx, node.node_id, null, null);
     await context.authz?.upsert(tx, {
       type: 'node',
@@ -329,7 +373,8 @@ async function verb(
 }
 
 /** The metal group over the module's hardware profiles. */
-export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfile>>): MetalApi {
+export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfile>>, bmcDrivers?: BmcDriverCapabilities): MetalApi {
+  const caps: Capabilities = { hardwareProfiles, ...(bmcDrivers ? { bmcDrivers } : {}) };
   const onNode = (input: { nodeId: string }) => ({ type: 'node', id: input.nodeId });
   // The steps metal's state profiles use, for the kinds a bulk verb's workflows can send.
   let steps: StepRegistry | undefined;
@@ -340,7 +385,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
       kind: 'mutation',
       resource: onNode,
       validate: describedBy(schemas.node, (raw) => nodeInput(raw)),
-      handler: (context, input) => verb(context, input, provisionVerb),
+      handler: (context, input) => verb(context, input, provisionVerb, undefined, caps),
     });
 
   return {
@@ -350,7 +395,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         kind: 'mutation',
         resource: (input) => ({ type: 'pool', id: input.poolId }),
         validate: describedBy(schemas.enroll, validateEnroll),
-        handler: (context, input) => enroll(context, hardwareProfiles, input),
+        handler: (context, input) => enroll(context, caps, input),
       }),
       manage: simple('manage'),
       inspect: simple('inspect'),
@@ -366,13 +411,28 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           return { tenantId: input.tenantId, nodeId: input.nodeId, profileId: text(input.profileId, 'profileId', 128), profileVersion: version };
         }),
         handler: (context, input) =>
-          verb(context, input, 'deploy', async (tx, node) => {
-            await tx.query('UPDATE metal_nodes SET deploy_profile_id = $2, deploy_profile_version = $3 WHERE node_id = $1', [
-              node.node_id,
-              input.profileId,
-              input.profileVersion,
-            ]);
-          }),
+          verb(
+            context,
+            input,
+            'deploy',
+            async (tx, node) => {
+              await tx.query('UPDATE metal_nodes SET deploy_profile_id = $2, deploy_profile_version = $3 WHERE node_id = $1', [
+                node.node_id,
+                input.profileId,
+                input.profileVersion,
+              ]);
+              // A stored profile (the tenant's, or a public one) is checked against the BMC driver now; a
+              // module-shipped one when its workflow starts (the reconciler).
+              const { rows } = await tx.query<{ document: ProfileDocument }>(
+                `SELECT document FROM profiles
+                  WHERE id = $1 AND profile_version = $2 AND deleted_at IS NULL AND (tenant_id = $3 OR visibility = 'public')
+                  ORDER BY (tenant_id = $3) DESC LIMIT 1`,
+                [input.profileId, input.profileVersion, node.tenant_id],
+              );
+              return rows[0] ? { profiles: [rows[0].document] } : {};
+            },
+            caps,
+          ),
       }),
       undeploy: defineMethod<UndeployInput, MetalNodeView>({
         action: 'compute:nodes:provision',
@@ -385,9 +445,15 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           return out;
         }),
         handler: (context, input) =>
-          verb(context, input, 'release', async (tx, node) => {
-            await tx.query('UPDATE metal_nodes SET release_wipe = $2 WHERE node_id = $1', [node.node_id, input.wipe ?? 'quick']);
-          }),
+          verb(
+            context,
+            input,
+            'release',
+            async (tx, node) => {
+              await tx.query('UPDATE metal_nodes SET release_wipe = $2 WHERE node_id = $1', [node.node_id, input.wipe ?? 'quick']);
+            },
+            caps,
+          ),
       }),
       rescue: simple('rescue'),
       unrescue: defineMethod<MetalNodeInput, MetalNodeView>({
@@ -402,6 +468,7 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
             if (!provisionStateTable.transitions[node.provision_state]?.unrescue)
               throw new ComputeError('INVALID_STATE', `A ${node.provision_state} node cannot unrescue`);
             if (node.phase === unrescuePhase && node.workflow_id) return metalNodeView(node);
+            assertBmcNeeds([unrescueProfile], node, { ...caps, reportedKinds: await siteDriverKinds(tx, node.site_id, node.bmc_driver) });
             if (node.workflow_id) {
               const { rows } = await tx.query<{ state: string }>('SELECT state FROM workflows WHERE id = $1', [node.workflow_id]);
               if (rows[0] && ['pending', 'running', 'paused'].includes(rows[0].state))
@@ -451,11 +518,17 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
         resource: onNode,
         validate: describedBy(schemas.node, (raw) => nodeInput(raw)),
         handler: (context, input) =>
-          verb(context, input, 'recover', async (_tx, node) => {
-            if (node.provision_state !== 'failed' || !node.failed_from)
-              throw new ComputeError('INVALID_STATE', `Node ${node.node_id} is ${node.provision_state}, not failed`);
-            return { to: recoverTarget(node.failed_from) };
-          }),
+          verb(
+            context,
+            input,
+            'recover',
+            async (_tx, node) => {
+              if (node.provision_state !== 'failed' || !node.failed_from)
+                throw new ComputeError('INVALID_STATE', `Node ${node.node_id} is ${node.provision_state}, not failed`);
+              return { to: recoverTarget(node.failed_from) };
+            },
+            caps,
+          ),
       }),
       retire: simple('retire'),
       power: defineMethod<PowerInput, PowerOutput>({
@@ -471,6 +544,8 @@ export function metalApi(hardwareProfiles: Readonly<Record<string, HardwareProfi
           context.sql.transaction(async (tx) => {
             const node = await readMetalNode(tx, input.nodeId, { tenantId: input.tenantId });
             if (!node.bmc_credentials) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
+            if (servesBmcOperation(node.bmc_driver, 'power.setPower', caps.bmcDrivers, await siteDriverKinds(tx, node.site_id, node.bmc_driver)) === false)
+              throw bmcDriverUnsupported(node.bmc_driver, [{ profile: 'metal.power', step: 'power.setPower', operations: ['power.setPower'] }]);
             if (['deploying', 'releasing', 'commissioning', 'inspecting'].includes(node.provision_state))
               throw new ComputeError('INVALID_STATE', `Node ${node.node_id} is ${node.provision_state}; a workflow controls its power`);
             const agent = await siteAgentFor(tx, node.node_id);
