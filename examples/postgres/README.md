@@ -21,9 +21,12 @@ better-compute pki issue-gateway --san gw.eu-1.compute.example.com --out .better
 export BETTER_COMPUTE_GATEWAY_CERT=.better-compute/gateway/gateway.crt
 export BETTER_COMPUTE_GATEWAY_KEY=.better-compute/gateway/gateway.key
 export BETTER_COMPUTE_REGION=eu-1
+export BETTER_COMPUTE_GATEWAY_URL=https://gw.eu-1.compute.example.com:8443   # published for `bcd join --server`
 ```
 
-The bundle (`.better-compute/pki.json`) turns on JoinService, signed intent (commands and node specs signed under its command-signing root), the audit module and the gateway role. Its node CA carries the revocation set the gateway enforces. `better-compute pki show` prints the pins that install scripts carry.
+The bundle (`.better-compute/pki.json`) turns on JoinService, signed intent (commands and node specs signed under its command-signing root), the audit module and the gateway role. Its node CA carries the revocation set the gateway enforces. `better-compute pki show` prints the pins that install scripts carry; with `BETTER_COMPUTE_SECRET` set it checks them against the seal first. `BETTER_COMPUTE_GATEWAY_URL` (and `_SERVER_NAME` when the TLS name differs) is published in `/.well-known/better-compute` with the serving CA's pin. Prefer install scripts or user data that carry the pins: the well-known document is only as trustworthy as the control plane's TLS certificate.
+
+A bundle sealed before the public parts were authenticated is refused: run `better-compute pki reseal`, compare the pins it prints with your records, then `pki reseal --accept-unauthenticated`. Bundles made before sandboxes get their sandbox SSH CA with `pki add-sandbox-ca`.
 
 ## 3. Run the roles
 
@@ -71,7 +74,8 @@ The script pins the serving CA and JoinService's keys from the bundle. Give each
 
 - **Gateway certificates** (30 days): give `host.gateway.tlsFiles: { key, cert }` (the files `pki issue-gateway` writes; keep `tls.ca` from the bundle) and rerun `pki issue-gateway` before expiry; the gateway picks the new files up for new handshakes without a restart. The internal control API takes `internal.tlsFiles` the same way (and always needs its `ca`).
 - **CA certificates** (1 year; `doctor` warns 30 days ahead): `better-compute pki renew-ca --ca node|serving|internal [--root-key root.key]` renews under the root with the same key, so nothing is re-pinned and no node rejoins. Roll the bundle out to every process.
-- **Command-signing root**: `better-compute pki rotate-command-root --stage add`, roll out; once every daemon has the new trust version, `--stage switch`; a day later, `--stage drop`.
+- **Command-signing root**: `better-compute pki rotate-command-root --stage add`, roll out; once every daemon has the new trust version, `--stage switch` (it refuses while a connected daemon still reports the old version; `doctor` shows the count); a day later, `--stage drop`.
+- **Break-glass and sandbox access**: `better-compute ssh-cert --node … [--connect HOST]` for a node, `better-compute sandbox exec sbx_… [-- command]` for a sandbox, `console`/`exec`/`forward` over tunnels. The tunnel commands (and `sandbox exec`) need `--url`; certificates are short-lived, re-decided every minute and revoked when access ends.
 - **Support**: `better-compute support bundle` writes diagnostics with every token and secret redacted.
 - **Operators' CLI access**: `better-compute auth login --url https://compute.example.com < token` keeps a token (owner-only file) for that deployment only; `better-iam login` sessions are used too.
 - **AI agents**: mount `host.mcp: { handler: computeMcpEndpoint({ compute, gate: createMcpGate({ … }) }).handler }` for the MCP endpoint at `/mcp`.
