@@ -1,6 +1,15 @@
+import { createPublicKey } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createWorkloadIssuer } from '@better-compute/pki';
 import { instanceStatusHandler, setIpPool, vps } from '@better-compute/vps';
-import { createDevStack, type DevStack, type FakeDaemon } from '@better-compute/testing';
+import {
+  createDevStack,
+  createH2cClient,
+  fakeHardware,
+  runAgentJoin,
+  type DevStack,
+  type FakeDaemon,
+} from '@better-compute/testing';
 
 // PLAN.md §16 v0.3 exit, tests/e2e/vps.test.ts: hosted VPS through the whole stack — the real server
 // runtime (placement, NodeSpec, the Instance reconciler, the secret broker), the real gateway (spec
@@ -208,6 +217,61 @@ describe('hosted VPS end to end (§16 v0.3)', () => {
     ).not.toContain('alice@laptop');
     await api.instances.delete(dev.root, { tenantId, instanceId: instance.id });
     await until('first instance deleted', async () => !(await live()).length);
+  }, 60_000);
+
+  it('a tenant VM cannot join as a node with anything it holds (§13)', async () => {
+    const instance = await createInstance();
+    await until('the instance running', async () => {
+      const row = (await live()).find((candidate) => candidate.id === instance.id);
+      return row?.state === 'running';
+    });
+    const domain = daemon(instance.nodeId).hypervisor!.domains.get(instance.id)!;
+    const { rows } = await dev.database.query<{ user_data: string }>(
+      `SELECT user_data FROM instances WHERE id = $1`,
+      [instance.id],
+    );
+    // What a guest could present: its user data, its ref, a workload-identity token, a forged token.
+    const workload = createWorkloadIssuer({
+      issuer: 'https://compute.example',
+      defaultAudience: 'sts.example',
+    }).issue({ tenantId, instanceId: instance.id }).token;
+    const client = createH2cClient({ url: dev.gatewayUrl });
+    const before = await dev.database.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM nodes`,
+    );
+    try {
+      for (const token of [
+        domain.userData,
+        rows[0]!.user_data,
+        workload,
+        `bcjt_node_${'0'.repeat(26)}.${'A'.repeat(43)}`,
+      ])
+        await expect(
+          runAgentJoin({
+            send: (request) => client.join(request),
+            signer: { publicKey: createPublicKey({ key: dev.pins.joinSigningKey, format: 'jwk' }) },
+            wait: sleep,
+            claims: fakeHardware({ seed: `tenant-vm-${token.length}` }).claims,
+            token: {
+              token,
+              joinEncryptionKey: createPublicKey({
+                key: dev.pins.joinEncryptionJwk,
+                format: 'jwk',
+              }),
+            },
+            maxRounds: 1,
+          }),
+          token.slice(0, 16),
+        ).rejects.toThrow();
+    } finally {
+      await client.close();
+    }
+    const after = await dev.database.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM nodes`,
+    );
+    expect(after.rows[0]!.count).toBe(before.rows[0]!.count);
+    await api.instances.delete(dev.root, { tenantId, instanceId: instance.id });
+    await until('the instance deleted', async () => !(await live()).length);
   }, 60_000);
 
   it(`churns ${INSTANCES} instances on 3 hosts without leaking anything`, async () => {
