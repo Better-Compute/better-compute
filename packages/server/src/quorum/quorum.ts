@@ -16,6 +16,7 @@ import {
 } from '@better-compute/core';
 import {
   batchScope,
+  expectedPayloadType,
   requiredApprovals,
   verifyBatchApproval,
   type ApproverKey,
@@ -220,7 +221,8 @@ export async function createCommandBatch(
     /**
      * The payload type a kind's command carries (its spec's `payload.typeName`); a leaf payload
      * labelled with any other type is refused, so an approver never decodes the bytes as a harmless
-     * message the daemon would run as another. Without it, leaves cannot carry payloads.
+     * message the daemon would run as another. Without it (or for a kind it doesn't know), pki's
+     * `expectedPayloadType`, the table the approver CLI decodes by.
      */
     payloadTypeOf?: ((kind: string) => string | undefined) | undefined;
   },
@@ -254,7 +256,8 @@ export async function createCommandBatch(
         'INVALID_INPUT',
         `A leaf payload is { typeUrl, value } of at most ${maxLeafPayloadBytes} bytes`,
       );
-    const typeName = options.payloadTypeOf?.(entry.kind);
+    // The registry's type (plugin kinds included), else the approver CLI's own table, so both agree.
+    const typeName = options.payloadTypeOf?.(entry.kind) ?? expectedPayloadType(entry.kind);
     if (!typeName || typeUrl !== `type.googleapis.com/${typeName}`)
       throw new ComputeError(
         'INVALID_INPUT',
