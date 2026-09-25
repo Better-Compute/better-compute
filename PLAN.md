@@ -622,7 +622,12 @@ Before v0.4, upgrades rerun the install script.
 - accepts only signed `Command`/`DesiredState` frames and JWE-sealed secrets;
 - trusts the configured proxy CA for transport only;
 - authenticates the gateway in-band: the gateway signs the daemon's nonce with a key that chains to the pinned serving CA;
-- authenticates itself with a cert-bound proof JWT (±60 s, single-use `jti`, `x5c` chain, signed by the node key).
+- authenticates itself with a cert-bound proof JWT (±60 s, single-use `jti`, `x5c` chain, signed by the node key);
+- renews its certificate over the same path without a client certificate: `POST wss-host/v1/renew` (HTTPS, body a
+  `RenewRequest`, answer a `RenewResponse`). The request authenticates itself (the current chain, verified to the node
+  CA and not revoked, plus the `renew-pop` signature by the current key, ±60 s, replay cache), exactly as the mTLS
+  `Renew` does, and the gateway rate-limits it per node. Otherwise a WS-only node would lose its identity when its
+  24 h certificate ran out.
 
 Frame metadata (kinds, sizes, timing) stays visible to the proxy. There is no long-poll or unary-sync path before v1.
 
@@ -1603,6 +1608,13 @@ Node keys sign only "this node says" statements: mTLS, CSR proof of possession, 
 | Agent overspend | delegation scope, `confirm[]` (v0.3), guardrails that also cover `extend` (§12.6), per-agent quotas by `agentId`, budgets, `agents.suspendAll` |
 | Replay | command-id journal, `not_after`, `min_generation`, epoch fencing, the journal-lost rule, ticket `jti` sets, a Renew PoP replay cache |
 | TLS-inspecting proxy (WS mode, v0.4) | WS only once all frames are signed; secrets as JWE; in-band gateway authentication; frame metadata stays visible (accepted) |
+
+**Turning the quorum on (upgrade from v0.5).** The v1.0 build brings the quorum tables as expand migrations (`quorum/0001`–`0007`, `trust_bundle_state` among them). The first process to settle records the trust bundle the daemons already hold, at its version and with no bump. Setting `pki.approvers` later changes the bundle's digest, so the version bumps exactly once. Each daemon takes the new bundle, quorum and epoch included, at its next `Welcome`; a first set needs no approver signatures unless the node pins one (`approver_set_sha256`). What destructive commands get at that point:
+- Queued before approvers were set, still pending: the control plane never re-checks them, so they are sent as before. A daemon that already holds the quorum refuses them unbatched (`UNBATCHED_LIMIT`, recorded as `rejected: unbatched-limit`), unless the break-glass allowance admits them. None runs unapproved.
+- New ones without a batch: refused at enqueue (`INVALID_STATE`, `batch-required`).
+- Delivered before a daemon took the new bundle: they ran under the old rules.
+
+Operators who want nothing destructive in flight across the switch cancel pending destructive commands before setting approvers. `tests/sim/upgrade.test.ts` covers this.
 
 **Interactive access.** Instances use tickets (§7.6). Nodes get two paths:
 - allowlisted command kinds via `commands.run`, audited;
