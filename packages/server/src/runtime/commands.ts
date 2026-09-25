@@ -3,6 +3,7 @@ import {
   newId,
   parseDuration,
   type AgentRole,
+  type CommandBatchInput,
   type CommandKindSpec,
   type CommandQueue,
   type EnqueueCommand,
@@ -24,7 +25,8 @@ import {
   ProtocolError,
   type CommandBody,
 } from '@better-compute/protocol';
-import { commandKindAllowed } from '@better-compute/pki';
+import { batchSubject, commandKindAllowed } from '@better-compute/pki';
+import { createCommandBatch, type QuorumConfig } from '../quorum/quorum.js';
 import type { CommandSigner } from './command-signing.js';
 import type { CommitHook } from './commit-hooks.js';
 
@@ -176,6 +178,8 @@ export function encodeCommandBody(input: {
   minGeneration?: number;
   idempotencyKey: string;
   traceparent?: string;
+  /** (v1.0 quorum) The batch this command belongs to (signed with the rest of the body). */
+  batchId?: string;
 }): Uint8Array {
   const { spec } = input;
   const step = workflowKey.exec(input.idempotencyKey);
@@ -201,8 +205,8 @@ export function encodeCommandBody(input: {
     attested: spec.attested ?? false,
     workflowId: step?.[1] ?? '',
     stepId: step?.[2] ?? '',
-    // (v1.0 quorum) Set when the command belongs to an approved batch.
-    batchId: '',
+    // (v1.0 quorum) The batch the command belongs to; the daemon then requires its approval.
+    batchId: input.batchId ?? '',
   };
   try {
     return encodeMessage(CommandBodySchema, body, MAX_COMMAND_BODY_BYTES);
@@ -294,6 +298,46 @@ export interface CommandQueueInput {
   afterCommit(hook: CommitHook): void;
   /** Worker command signing (`createCommandSigner`); without it commands go unsigned (v0.1). */
   signer?: Pick<CommandSigner, 'sign'>;
+  /** (v1.0) The trust bundle's quorum (`quorumConfigOf`); without it batches need no approvals. */
+  quorum?: QuorumConfig;
+  /** Business time, for batch expiry defaults. */
+  now?: () => number;
+}
+
+/**
+ * Checks a command's batch (§13) in `tx`: the batch belongs to the node's owner, still admits
+ * commands, and names this (subject, kind) in its scope. Returns whether the command must wait for
+ * the batch's approvals (a quorum is configured and the batch is not approved yet).
+ */
+async function batchMembership(
+  tx: SqlTx,
+  input: { batchId: string; nodeTenantId: string | null; subject: string; kind: string },
+): Promise<{ held: boolean }> {
+  const { rows } = await tx.query<{
+    tenant_id: string;
+    state: string;
+    required: number;
+    live: boolean;
+    in_scope: boolean;
+  }>(
+    `SELECT b.tenant_id, b.state, b.required, b.not_after > compute_now() AS live,
+            EXISTS (SELECT 1 FROM command_batch_scope s
+                     WHERE s.batch_id = b.id AND s.subject = $2 AND s.kind = $3) AS in_scope
+       FROM command_batches b WHERE b.id = $1 FOR SHARE`,
+    [input.batchId, input.subject, input.kind],
+  );
+  const batch = rows[0];
+  // Another tenant's batch reads as missing.
+  if (!batch || batch.tenant_id !== input.nodeTenantId)
+    throw new ComputeError('NOT_FOUND', `Batch ${input.batchId} not found`);
+  if ((batch.state !== 'pending' && batch.state !== 'approved') || !batch.live)
+    throw new ComputeError('INVALID_STATE', `Batch ${input.batchId} no longer admits commands`);
+  if (!batch.in_scope)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${input.kind} on ${input.subject} is not in the scope of batch ${input.batchId}`,
+    );
+  return { held: Number(batch.required) > 0 && batch.state !== 'approved' };
 }
 
 /** `ctx.commands`. */
@@ -327,9 +371,13 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       const payload = encodePayload(spec, command.payload);
       await checkAllowedKind(tx, command.nodeId, spec.kind);
 
-      const bumped = await tx.query<{ seq: number | bigint; gateway_id: string | null }>(
+      const bumped = await tx.query<{
+        seq: number | bigint;
+        gateway_id: string | null;
+        owner_tenant_id: string | null;
+      }>(
         `UPDATE nodes n SET next_cmd_seq = n.next_cmd_seq + 1 WHERE n.id = $1
-         RETURNING n.next_cmd_seq - 1 AS seq,
+         RETURNING n.next_cmd_seq - 1 AS seq, n.owner_tenant_id,
            (SELECT s.gateway_id FROM node_sessions s WHERE s.node_id = n.id) AS gateway_id`,
         [command.nodeId],
       );
@@ -337,6 +385,28 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       if (!node) throw new ComputeError('NOT_FOUND', `Node ${command.nodeId} does not exist`);
       const seq = Number(node.seq);
       const id = newId('cmd');
+      // (v1.0 §13) A batched command: its subject is computed from the payload the agent will see.
+      let batch: { id: string; subject: string; held: boolean } | undefined;
+      if (command.batchId !== undefined) {
+        if (typeof command.batchId !== 'string' || !command.batchId)
+          throw new ComputeError('INVALID_INPUT', 'batchId must be a batch id');
+        const subject = batchSubject({
+          nodeId: command.nodeId,
+          kind: spec.kind,
+          payload: {
+            $typeName: 'google.protobuf.Any',
+            typeUrl: `type.googleapis.com/${spec.payload.typeName}`,
+            value: payload,
+          },
+        });
+        const { held } = await batchMembership(tx, {
+          batchId: command.batchId,
+          nodeTenantId: node.owner_tenant_id,
+          subject,
+          kind: spec.kind,
+        });
+        batch = { id: command.batchId, subject, held };
+      }
       const body = encodeCommandBody({
         id,
         nodeId: command.nodeId,
@@ -347,6 +417,7 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
         ...(command.minGeneration !== undefined ? { minGeneration: command.minGeneration } : {}),
         idempotencyKey: command.idempotencyKey,
         ...(command.traceparent !== undefined ? { traceparent: command.traceparent } : {}),
+        ...(batch ? { batchId: batch.id } : {}),
       });
       const inserted = await tx.query<{ id: string; seq: number | bigint }>(
         `INSERT INTO commands (id, node_id, seq, kind, body, state, not_before, not_after,
@@ -361,7 +432,8 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
           seq,
           spec.kind,
           body,
-          command.notBefore === undefined ? null : new Date(command.notBefore),
+          // Held until the batch's approval releases it (the quorum module sets not_before then).
+          batch?.held ? 'infinity' : command.notBefore === undefined ? null : new Date(command.notBefore),
           new Date(command.notAfter),
           command.minGeneration ?? null,
           spec.retrySafe,
@@ -379,8 +451,21 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
         if (!winner) throw new ComputeError('CONFLICT', 'The command changed meanwhile; retry');
         return replay(winner, command.kind);
       }
-      poke(node.gateway_id, command.nodeId);
+      if (batch)
+        await tx.query(
+          `INSERT INTO command_batch_members (command_id, batch_id, subject, kind) VALUES ($1, $2, $3, $4)`,
+          [id, batch.id, batch.subject, spec.kind],
+        );
+      if (!batch?.held) poke(node.gateway_id, command.nodeId);
       return { id, seq };
+    },
+
+    /** (v1.0 §13) A destructive-command batch: the quorum module stores its tree and proofs. */
+    async createBatch(tx: SqlTx, batch: CommandBatchInput) {
+      return createCommandBatch(tx, batch, {
+        now: (input.now ?? Date.now)(),
+        ...(input.quorum ? { quorum: input.quorum } : {}),
+      });
     },
 
     /**

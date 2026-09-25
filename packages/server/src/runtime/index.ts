@@ -26,6 +26,7 @@ import {
   sweepCommandsOnce,
   type GatewayPokes,
 } from './commands.js';
+import { quorumConfigOf } from '../quorum/quorum.js';
 import {
   createLocalEvents,
   createSinkDispatch,
@@ -319,6 +320,9 @@ export function createRuntime(options: ResolvedOptions): Runtime {
           afterCommit: options.afterCommit,
           // Signed intent (v0.2): every command signed by this worker's key (`pki.commandSigning`).
           ...(options.commandSigner ? { signer: options.commandSigner } : {}),
+          // v1.0 §13: batches need approvals only when the trust bundle publishes approver keys.
+          ...(quorumConfigOf(options.trustBundle) ? { quorum: quorumConfigOf(options.trustBundle)! } : {}),
+          now: () => options.clock.now(),
         }),
         events: eventPublisher,
         authz: authzWriter,

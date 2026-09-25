@@ -750,6 +750,23 @@ export interface EnqueueCommand<P = unknown> {
   notBefore?: number;
   minGeneration?: number;
   traceparent?: string;
+  /**
+   * (v1.0 §13 quorum) The batch (`createBatch`) this destructive command belongs to. Its (subject,
+   * kind) must be in the batch's scope; it goes into the signed body, and while the batch waits for
+   * its approvals the command stays pending. The daemon then requires the approval and proof.
+   */
+  batchId?: string;
+}
+
+/** A destructive-batch scope: the (subject, kind) leaves approvers sign (§13). */
+export interface CommandBatchInput {
+  tenantId: string;
+  /** subject: the node id; `bmc:<address>` for bmc.* kinds; `node:<target>` for site.httpProxy. */
+  scope: readonly { subject: string; kind: string }[];
+  reason: string;
+  /** When the batch stops admitting commands (default 24 h). */
+  notAfterMs?: number;
+  createdBy?: string;
 }
 
 /** The durable command queue (§7.4). */
@@ -757,6 +774,15 @@ export interface CommandQueue {
   /** Inserts a `pending` command in `tx`; an existing idempotency key returns the existing command. */
   enqueue(tx: SqlTx, command: EnqueueCommand): Promise<{ id: string; seq: number }>;
   cancel(tx: SqlTx, commandId: string): Promise<void>;
+  /**
+   * (v1.0) Creates a destructive-command batch in `tx`. `held`: the deployment's quorum needs
+   * `required` approvals before its commands are sent; without approver keys it is recorded for
+   * audit and its commands go out at once.
+   */
+  createBatch?(
+    tx: SqlTx,
+    batch: CommandBatchInput,
+  ): Promise<{ batchId: string; held: boolean; required: number; size: number }>;
 }
 
 /** Desired state (§7.3): marks a node's spec for recomputation by the NodeSpec controller. */

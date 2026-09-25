@@ -34,6 +34,7 @@ function tracedCommands(commands: CommandQueue, traceparent: string): CommandQue
     enqueue: (tx, command) =>
       commands.enqueue(tx, command.traceparent ? command : { ...command, traceparent }),
     cancel: (tx, commandId) => commands.cancel(tx, commandId),
+    ...(commands.createBatch ? { createBatch: commands.createBatch.bind(commands) } : {}),
   };
 }
 
