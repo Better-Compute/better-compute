@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { newId, type Site } from '@better-compute/core';
 import { ACME, OTHER } from './support/server.js';
@@ -107,14 +108,10 @@ describe('nodes.delete', () => {
        VALUES ($1, $2, 'node', 0, '\\x01', '\\x02', compute_now(), compute_now() + interval '1 day')`,
       [`serial-${node}`, node],
     );
-    await h.store.query(`INSERT INTO node_bindings (attestor, subject, node_id) VALUES ('tpm', $1, $2)`, [
-      new Uint8Array(32).fill(node.charCodeAt(node.length - 2)),
-      node,
-    ]);
-    await h.store.query('UPDATE nodes SET hardware_key = $2, hardware_key_trusted = true WHERE id = $1', [
-      node,
-      new Uint8Array(32).fill(node.charCodeAt(node.length - 1)),
-    ]);
+    // Unique per node: the trusted hardware key and the binding subject are both unique columns.
+    const digest = (label: string) => new Uint8Array(createHash('sha256').update(`${label}:${node}`).digest());
+    await h.store.query(`INSERT INTO node_bindings (attestor, subject, node_id) VALUES ('tpm', $1, $2)`, [digest('ek'), node]);
+    await h.store.query('UPDATE nodes SET hardware_key = $2, hardware_key_trusted = true WHERE id = $1', [node, digest('hk')]);
     return { node, device };
   }
 
