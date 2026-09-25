@@ -84,8 +84,9 @@ owners: each area's new owner finishes (or discards) the orphan files in its are
 | CLI, examples, testing dev stack ([7fe4f7]) + pki, tunnels, console-kit, apps/console, security reviews ([df4a91], [0b2be8]) | [402c97] | `packages/cli/src/{config,index}.ts`, `examples/shared/compose.ts`, `tests/cli-serve-compose.test.ts`, `packages/testing/src/dev/stack.ts` |
 | mcp, fleet, rollout ([9ec62d]; unlisted until now) | [f85da7] | — |
 | apps/docs shell + hand-written pages ([ebe83b]) | "Docs app with better-iam styling" [731f14] | `apps/docs/**` untracked files |
-| W1 Go daemon `daemon/**`, `scripts/daemon-*.mjs` (user asked 2026-09-24 night; Go not installed, so stdlib-only, compiled once Go lands) | [016b7b] | — |
 
+TEST COMMITTED CODE with `node scripts/head-check.mjs [--no-build] [vitest filters]` (52ac77b): a worktree at
+HEAD with junctioned node_modules, so other sessions' uncommitted work never shows up as your failure.
 COMMIT WITH `node scripts/private-commit.mjs -F <msgfile> -- <paths>` (fe7f27e). The old private-index recipe
 (read-tree HEAD; add; commit) silently REVERTS a commit that lands between its read-tree and its commit (f069c84
 reverted core/0019-0021; fixed in 96b8812). The script builds the tree from HEAD + your paths in a throwaway index,
@@ -120,29 +121,35 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
 - [402c97]: support-bundle token scan for TS-produced bundles; a packed-smoke vitest wrapper under `tests/`.
 - [f85da7]: DONE: MCP → IAM confirmation → same-key retry as one flow (39b3eda); known-key replay matrix step
   (542885d); §12.6 policies incl. DelegatedSmall extend on real drafts (cc62e03, which also fixed stale-projection
-  admissions); node-scoped gateway reports (6725423). Next: v0.4 remote-IAM MCP (`McpIam` adapter).
+  admissions); node-scoped gateway reports (6725423). Later: remote-IAM MCP remoteMcpIam (3afe9c1) + reservation
+  tools (ed03816); audit sinks + module-extension sinks/scheduler plugins (b365357); attested bindings server half
+  (3ebbc0a); traceparent (fe7f27e); downloads route (f5e1886); walkthrough 2 acme-cloud (f2ddea3); join-storm
+  statements (ff90b8a); supportBundles (fb4a7e2); projects.archive/commands.cancel/usage.export (a567c87); core/proto
+  asks: d4a11b9, 7ed9a9b, 0e37c3e, 2e041c2, da404a8, b20a3a1; decision ae3134f (cert role in Subject OU, no private
+  OIDs: Go cannot parse the 2.25 arc) → [402c97] implements. Tools: scripts/private-commit.mjs, scripts/head-check.mjs.
+- W1 Go daemon: [6a20b8] (= ex-[016b7b]); Go go1.27.1 is installed.
 
 - [31c64a] round 4: orphan iam streams done (09e6514: agentStreamCloser/gatewayStreamCloser), bench results (e06ec34);
   v0.4 sim scenarios gateway-kill/zombie/DB failover/10-min partition (8878e99, ControlPlaneSim.failDatabase/
-  cutGatewayDatabase). NOW: XID-storm breaker + canary-halt sim scenarios, then remote-mode projection staleness
-  (replicaProjection; [f85da7] does the embedded half), then the rest of the list above.
-- [c321a3] round 4: orphan store.ts done (d430815); tunnel filters tenantId/anyAgent + reauthorizeTunnels for [31c64a]/
-  [402c97] (6aeb5c4); docs generator MDX escaping + check-content MDX compile (bd57184). NOW: v0.4 shard rebalancing
-  (§8.5): `packages/server/src/runtime/{workers,leases,reconcilers}.ts`, `tests/server-runtime-*`. No core/migration
-  changes expected; column asks go to [f02367].
-
-- [402c97] round 4 (CLI/examples/dev stack, pki, security, tunnels, signed intent, console): exit gaps DONE: support
-  bundle + pki `redactSecrets` (2daaa64), packed-smoke wrapper (2c7b18e), v0.3 access e2e tests/e2e/access.test.ts
-  (replayed ticket at gateway AND daemon; delegation:revoke closes tunnel + /watch < 5 s; sign-out closes /watch).
-  Host: `host.iam` = installIamHandlers (agent → tunnels on every live gateway + local SSE; session revocations name
-  the IDENTITY in better-iam, so they close its SSE and re-authorize its tunnels; ended identities close tunnels)
-  (d97af21, 6531312, 6ff87cf); watchAuthorizer (/watch decided as events.list, a0459bb); host.mcp +
-  computeMcpEndpoint (21ff826); databaseCollector + doctor iam.refresh (328f6d5); workload OIDC discovery/JWKS
-  routes (8e02aac); gateway/internal `tlsFiles` hot reload (c6fe0e7); CLI saved credentials + `auth
-  login|status|logout` (e1b5244); console events/audit/retention/IAM handlers + watch registry (16c5760, 6531312).
-  Signed NodeSpecs: pki encoder (1a09f0a), writer (8152140), FakeDaemon `intent.signedSpecs` (e4b5e08).
-  W1 daemon TODO: bcd verifies DesiredState like commands: a signature is required when the spec changes `access`
-  (v0.2) and always from v0.4; a present signature is always checked; refused specs are not applied.
+  cutGatewayDatabase), XID-storm breaker (6e71654, FakeDaemon.injectXid), canary halt (99f9f1f, FakeDaemon
+  selfUpdate); observability databaseCollector (b569f05); events.prune retention (f069c84); remote admission
+  refresh + projection page/refresh race (3371cb0); audit archived months (103068f); faults-1k (0486a1b); SSE
+  /watch revocation + watch registry (7d616be; host wiring asked of [402c97]); resolver-timeout e2e (13b6a7d);
+  usage-restart acceptance with spend read-back (d82cf37); inbox-down scenario (1908f79). NOW: sim invariants
+  I4 (liveness false positives) / I3 (convergence) / I7 (placeable pending), then suites in both IAM modes.
+- [c321a3] round 4 (gateway, server runtime, docs generator): orphan store.ts (d430815); tunnel filters tenantId/anyAgent +
+  reauthorizeTunnels (6aeb5c4); generator MDX escaping + MDX compile check (bd57184), events page (c563de7); ramdisk
+  exit test + ReportContext.attested (56f8cc1); FakeDaemon signs attested reports (f7fbba7); v0.4 scheduler worker role
+  (6b5e189; shard rebalancing itself already existed); duplicate-identity quarantine §7.2 (c583263); sink poison
+  isolation + outbox_dead_letters (1a3156d); workflow wakes on settle (e482db1); v0.2 exit "gateway-forged
+  AllocationBound rejected" e2e + signed-spec relay (fac16e4). NOW: join-storm re-measure (realtime-spine bench).
+- [f02367] round 4 (inventory, migrations, provision, metal): image-cache orphan (c7cd2ec); migrations core/0016
+  duplicate_identity, 0017 allocation_evidence, 0019 outbox_dead_letters, 0020 commands.created_at, 0021 signed specs;
+  core/0018 PARTITIONED HISTORY (4efd977): audit_events / inventory_snapshots / usage_windows are monthly range
+  partitions + a default one, PKs gained the time column; retentionModule keeps months ahead and prunes superseded
+  inventory (180 d), opt-in usage, settled commands (30 d) and uncursored authz_changes (1 d) (7e33342); exit gaps DONE:
+  deploy-time image signature re-check (58c737f), standby takes over boot mid-PXE (0ff3f37: awaitCommand `reroutable`
+  for site-relayed BMC commands); `driver.invoke` kind registered in provisionModule (5043442).
 
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
@@ -348,7 +355,9 @@ Rules for v0.1:
 - LOCK ORDER (all units, set by [38c2f9]'s capacity torture test): any transaction that locks several of these takes
   them in this order: `quota_usage` → `pools` → `nodes` → `devices` → `node_resources` → `pool_capacity_rollup`.
   Releases refund quota FIRST (as reserve charges it first). W5a node verbs (cordon/taint/drain/liveness) that also
-  touch capacity rows must follow it.
+  touch capacity rows must follow it. ([097b34], round 4) `capacity_device_counts` (capacity/0003) is locked by a row
+  trigger on `devices` right after its `devices` row: the order is … → `devices` → `capacity_device_counts` →
+  `node_resources` → …; never lock a counts row before the devices row that feeds it.
 - PITFALL (found by [1f44fd]): in cursor queries over `outbox`/`authz_changes`, never alias a cast column with its
   own name (`txid::text AS txid`): a bare `ORDER BY txid, seq` then sorts the TEXT alias ("1000" < "999", "10" < "2").
   Order by qualified columns (`ORDER BY o.txid, o.seq`) or alias as `txid_text`. Tests must page across a digit
