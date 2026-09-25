@@ -32,6 +32,11 @@
       "migrations": ["tenancy/0001_tenant_states", "tenancy/0002_teardown_attempts"]
     },
     {
+      "name": "confirmations",
+      "groups": [],
+      "migrations": ["confirmations/0001_bindings"]
+    },
+    {
       "name": "quorum",
       "groups": ["commandBatches"],
       "migrations": [
