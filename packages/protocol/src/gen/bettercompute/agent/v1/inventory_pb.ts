@@ -26,7 +26,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bettercompute/agent/v1/inventory.proto.
  */
 export const file_bettercompute_agent_v1_inventory: GenFile = /*@__PURE__*/
-  fileDesc("CiZiZXR0ZXJjb21wdXRlL2FnZW50L3YxL2ludmVudG9yeS5wcm90bxIWYmV0dGVyY29tcHV0ZS5hZ2VudC52MSL7BAoNTm9kZUludmVudG9yeRIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIwCgxjb2xsZWN0ZWRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wElAKDnNlY3Rpb25faGFzaGVzGAMgAygLMjguYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5Ob2RlSW52ZW50b3J5LlNlY3Rpb25IYXNoZXNFbnRyeRI1CgZzeXN0ZW0YCiABKAsyJS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLlN5c3RlbVNlY3Rpb24SLwoDY3B1GAsgASgLMiIuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5DcHVTZWN0aW9uEjUKBm1lbW9yeRgMIAEoCzIlLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTWVtb3J5U2VjdGlvbhIzCgVkaXNrcxgNIAEoCzIkLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuRGlza3NTZWN0aW9uEjEKBG5pY3MYDiABKAsyIy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLk5pY3NTZWN0aW9uEjEKBGdwdXMYDyABKAsyIy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdXNTZWN0aW9uEi8KA2JtYxgQIAEoCzIiLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuQm1jU2VjdGlvbhItCgJvcxgRIAEoCzIhLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuT3NTZWN0aW9uGjQKElNlY3Rpb25IYXNoZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAw6AjgBIuUCCg1TeXN0ZW1TZWN0aW9uEg4KBnZlbmRvchgBIAEoCRIPCgdwcm9kdWN0GAIgASgJEg4KBnNlcmlhbBgDIAEoCRIUCgxwcm9kdWN0X3V1aWQYBCABKAkSFAoMYm9hcmRfdmVuZG9yGAUgASgJEhUKDWJvYXJkX3Byb2R1Y3QYBiABKAkSFAoMYm9hcmRfc2VyaWFsGAcgASgJEhYKDmNoYXNzaXNfc2VyaWFsGAggASgJEhMKC2Jpb3NfdmVuZG9yGAkgASgJEhQKDGJpb3NfdmVyc2lvbhgKIAEoCRIzCglib290X21vZGUYCyABKA4yIC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkJvb3RNb2RlEhgKC3NlY3VyZV9ib290GAwgASgISACIAQESKAoDdHBtGA0gASgLMhsuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5UcG1CDgoMX3NlY3VyZV9ib290IkQKA1RwbRIPCgd2ZXJzaW9uGAEgASgJEhQKDG1hbnVmYWN0dXJlchgCIAEoCRIWCg5la19jZXJ0X2lzc3VlchgDIAEoCSK3AQoKQ3B1U2VjdGlvbhIOCgZ2ZW5kb3IYASABKAkSDQoFbW9kZWwYAiABKAkSFAoMYXJjaGl0ZWN0dXJlGAMgASgJEg8KB3NvY2tldHMYBCABKA0SDQoFY29yZXMYBSABKA0SDwoHdGhyZWFkcxgGIAEoDRINCgVmbGFncxgHIAMoCRI0CgpudW1hX25vZGVzGAggAygLMiAuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5OdW1hTm9kZSI6CghOdW1hTm9kZRIKCgJpZBgBIAEoDRIMCgRjcHVzGAIgASgJEhQKDG1lbW9yeV9ieXRlcxgDIAEoBCK+AQoNTWVtb3J5U2VjdGlvbhITCgt0b3RhbF9ieXRlcxgBIAEoBBI3CglodWdlcGFnZXMYAiADKAsyJC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkh1Z2VwYWdlUG9vbBIrCgVkaW1tcxgDIAMoCzIcLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuRGltbRIyCgRlZGFjGAQgASgLMiQuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5FZGFjQ291bnRlcnMiNgoMSHVnZXBhZ2VQb29sEhcKD3BhZ2Vfc2l6ZV9ieXRlcxgBIAEoBBINCgV0b3RhbBgCIAEoBCKRAQoERGltbRIMCgRzbG90GAEgASgJEhIKCnNpemVfYnl0ZXMYAiABKAQSEQoJc3BlZWRfbXRzGAMgASgNEgwKBHR5cGUYBCABKAkSCwoDZWNjGAUgASgIEhQKDG1hbnVmYWN0dXJlchgGIAEoCRITCgtwYXJ0X251bWJlchgHIAEoCRIOCgZzZXJpYWwYCCABKAkiOgoMRWRhY0NvdW50ZXJzEhMKC2NvcnJlY3RhYmxlGAEgASgEEhUKDXVuY29ycmVjdGFibGUYAiABKAQiOwoMRGlza3NTZWN0aW9uEisKBWRpc2tzGAEgAygLMhwuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5EaXNrIukBCgREaXNrEgwKBG5hbWUYASABKAkSDQoFbW9kZWwYAiABKAkSDgoGc2VyaWFsGAMgASgJEgsKA3d3bhgEIAEoCRISCgpzaXplX2J5dGVzGAUgASgEEhIKCnJvdGF0aW9uYWwYBiABKAgSOAoJdHJhbnNwb3J0GAcgASgOMiUuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5EaXNrVHJhbnNwb3J0EjIKBXNtYXJ0GAggASgLMiMuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5TbWFydFN0YXR1cxIRCglyZW1vdmFibGUYCSABKAgidgoLU21hcnRTdGF0dXMSDwoHaGVhbHRoeRgBIAEoCBIZCgx3ZWFyX3BlcmNlbnQYAiABKA1IAIgBARIZCgxtZWRpYV9lcnJvcnMYAyABKARIAYgBAUIPCg1fd2Vhcl9wZXJjZW50Qg8KDV9tZWRpYV9lcnJvcnMiOAoLTmljc1NlY3Rpb24SKQoEbmljcxgBIAMoCzIbLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTmljIpgCCgNOaWMSDAoEbmFtZRgBIAEoCRILCgNtYWMYAiABKAkSDgoGZHJpdmVyGAMgASgJEhAKCGZpcm13YXJlGAQgASgJEhIKCnNwZWVkX21icHMYBSABKA0SEwoLcGNpX2FkZHJlc3MYBiABKAkSFgoJbnVtYV9ub2RlGAcgASgNSACIAQESFwoPc3Jpb3ZfdG90YWxfdmZzGAggASgNEi4KBHJkbWEYCSABKA4yIC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLlJkbWFUeXBlEi8KBGxpbmsYCiABKA4yIS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkxpbmtTdGF0ZRILCgNtdHUYCyABKA1CDAoKX251bWFfbm9kZSKDAQoLR3B1c1NlY3Rpb24SFgoOZHJpdmVyX3ZlcnNpb24YASABKAkSGwoTY3VkYV9kcml2ZXJfdmVyc2lvbhgCIAEoCRIUCgxudm1sX3ZlcnNpb24YAyABKAkSKQoEZ3B1cxgEIAMoCzIbLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuR3B1Ip0FCgNHcHUSDQoFaW5kZXgYASABKA0SDAoEdXVpZBgCIAEoCRISCgpwY2lfYnVzX2lkGAMgASgJEgwKBG5hbWUYBCABKAkSFAoMYXJjaGl0ZWN0dXJlGAUgASgJEhIKCnZyYW1fYnl0ZXMYBiABKAQSDgoGc2VyaWFsGAcgASgJEhUKDXZiaW9zX3ZlcnNpb24YCCABKAkSGQoRYm9hcmRfcGFydF9udW1iZXIYCSABKAkSFgoJbnVtYV9ub2RlGAogASgNSACIAQESFgoOcG93ZXJfbGltaXRfbXcYCyABKA0SGAoQcGVyc2lzdGVuY2VfbW9kZRgMIAEoCBIUCgxjb21wdXRlX21vZGUYDSABKAkSJQodY3VkYV9jb21wdXRlX2NhcGFiaWxpdHlfbWFqb3IYDiABKA0SJQodY3VkYV9jb21wdXRlX2NhcGFiaWxpdHlfbWlub3IYDyABKA0SKwoDbWlnGBAgASgLMh4uYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5HcHVNaWcSMwoHbnZsaW5rcxgRIAMoCzIiLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTnZsaW5rTGluaxI1Cgh0b3BvbG9neRgSIAMoCzIjLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuR3B1UGVlckxpbmsSMQoGZmFicmljGBMgASgLMiEuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5HcHVGYWJyaWMSKwoDZWNjGBQgASgLMh4uYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5HcHVFY2MSNgoJcm93X3JlbWFwGBUgASgLMiMuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5HcHVSb3dSZW1hcEIMCgpfbnVtYV9ub2RlIusBCgZHcHVNaWcSDwoHY2FwYWJsZRgBIAEoCBIwCgdjdXJyZW50GAIgASgOMh8uYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5NaWdNb2RlEjAKB3BlbmRpbmcYAyABKA4yHy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLk1pZ01vZGUSNAoIcHJvZmlsZXMYBCADKAsyIi5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLk1pZ1Byb2ZpbGUSNgoJaW5zdGFuY2VzGAUgAygLMiMuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5NaWdJbnN0YW5jZSJTCgpNaWdQcm9maWxlEgoKAmlkGAEgASgNEgwKBG5hbWUYAiABKAkSFQoNbWF4X2luc3RhbmNlcxgDIAEoDRIUCgxtZW1vcnlfYnl0ZXMYBCABKAQiSgoLTWlnSW5zdGFuY2USDQoFZ2lfaWQYASABKA0SDQoFY2lfaWQYAiABKA0SDwoHcHJvZmlsZRgDIAEoCRIMCgR1dWlkGAQgASgJImsKCk52bGlua0xpbmsSDAoEbGluaxgBIAEoDRIwCgVzdGF0ZRgCIAEoDjIhLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTGlua1N0YXRlEgwKBHBlZXIYAyABKAkSDwoHdmVyc2lvbhgEIAEoDSJkCgtHcHVQZWVyTGluaxIRCglwZWVyX3V1aWQYASABKAkSMQoEbGluaxgCIAEoDjIjLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuR3B1TGlua1R5cGUSDwoHbnZsaW5rcxgDIAEoDSI0CglHcHVGYWJyaWMSFAoMY2x1c3Rlcl91dWlkGAEgASgJEhEKCWNsaXF1ZV9pZBgCIAEoDSLEAQoGR3B1RWNjEg8KB2VuYWJsZWQYASABKAgSHAoPcGVuZGluZ19lbmFibGVkGAIgASgISACIAQESOgoPdm9sYXRpbGVfY291bnRzGAMgASgLMiEuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5FY2NDb3VudHMSOwoQYWdncmVnYXRlX2NvdW50cxgEIAEoCzIhLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuRWNjQ291bnRzQhIKEF9wZW5kaW5nX2VuYWJsZWQiNwoJRWNjQ291bnRzEhMKC2NvcnJlY3RhYmxlGAEgASgEEhUKDXVuY29ycmVjdGFibGUYAiABKAQiWwoLR3B1Um93UmVtYXASEwoLY29ycmVjdGFibGUYASABKA0SFQoNdW5jb3JyZWN0YWJsZRgCIAEoDRIPCgdwZW5kaW5nGAMgASgIEg8KB2ZhaWx1cmUYBCABKAgibgoKQm1jU2VjdGlvbhIKCgJpcBgBIAEoCRILCgNtYWMYAiABKAkSDgoGdmVuZG9yGAMgASgJEhgKEGZpcm13YXJlX3ZlcnNpb24YBCABKAkSDwoHcmVkZmlzaBgFIAEoCBIMCgRpcG1pGAYgASgIIroBCglPc1NlY3Rpb24SDgoGZGlzdHJvGAEgASgJEhYKDmRpc3Ryb192ZXJzaW9uGAIgASgJEg4KBmtlcm5lbBgDIAEoCRI1CgZjZ3JvdXAYBCABKA4yJS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkNncm91cFZlcnNpb24SCwoDa3ZtGAUgASgIEg0KBWlvbW11GAYgASgIEhAKCHJ1bnRpbWVzGAcgAygJEhAKCGhvc3RuYW1lGAggASgJKk0KCEJvb3RNb2RlEhkKFUJPT1RfTU9ERV9VTlNQRUNJRklFRBAAEhIKDkJPT1RfTU9ERV9VRUZJEAESEgoOQk9PVF9NT0RFX0JJT1MQAiqsAQoNRGlza1RyYW5zcG9ydBIeChpESVNLX1RSQU5TUE9SVF9VTlNQRUNJRklFRBAAEhcKE0RJU0tfVFJBTlNQT1JUX05WTUUQARIXChNESVNLX1RSQU5TUE9SVF9TQVRBEAISFgoSRElTS19UUkFOU1BPUlRfU0FTEAMSGQoVRElTS19UUkFOU1BPUlRfVklSVElPEAQSFgoSRElTS19UUkFOU1BPUlRfVVNCEAUqZwoIUmRtYVR5cGUSGQoVUkRNQV9UWVBFX1VOU1BFQ0lGSUVEEAASEgoOUkRNQV9UWVBFX05PTkUQARIYChRSRE1BX1RZUEVfSU5GSU5JQkFORBACEhIKDlJETUFfVFlQRV9ST0NFEAMqTwoJTGlua1N0YXRlEhoKFkxJTktfU1RBVEVfVU5TUEVDSUZJRUQQABIRCg1MSU5LX1NUQVRFX1VQEAESEwoPTElOS19TVEFURV9ET1dOEAIqUAoHTWlnTW9kZRIYChRNSUdfTU9ERV9VTlNQRUNJRklFRBAAEhUKEU1JR19NT0RFX0RJU0FCTEVEEAESFAoQTUlHX01PREVfRU5BQkxFRBACKrYBCgtHcHVMaW5rVHlwZRIdChlHUFVfTElOS19UWVBFX1VOU1BFQ0lGSUVEEAASFAoQR1BVX0xJTktfVFlQRV9OVhABEhUKEUdQVV9MSU5LX1RZUEVfUElYEAISFQoRR1BVX0xJTktfVFlQRV9QWEIQAxIVChFHUFVfTElOS19UWVBFX1BIQhAEEhYKEkdQVV9MSU5LX1RZUEVfTk9ERRAFEhUKEUdQVV9MSU5LX1RZUEVfU1lTEAYqXQoNQ2dyb3VwVmVyc2lvbhIeChpDR1JPVVBfVkVSU0lPTl9VTlNQRUNJRklFRBAAEhUKEUNHUk9VUF9WRVJTSU9OX1YxEAESFQoRQ0dST1VQX1ZFUlNJT05fVjIQAkJUWlJnaXRodWIuY29tL2JldHRlci1jb21wdXRlL2JldHRlci1jb21wdXRlL2RhZW1vbi9nZW4vYmV0dGVyY29tcHV0ZS9hZ2VudC92MTthZ2VudHYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("CiZiZXR0ZXJjb21wdXRlL2FnZW50L3YxL2ludmVudG9yeS5wcm90bxIWYmV0dGVyY29tcHV0ZS5hZ2VudC52MSKyBQoNTm9kZUludmVudG9yeRIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIwCgxjb2xsZWN0ZWRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wElAKDnNlY3Rpb25faGFzaGVzGAMgAygLMjguYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5Ob2RlSW52ZW50b3J5LlNlY3Rpb25IYXNoZXNFbnRyeRI1CgZzeXN0ZW0YCiABKAsyJS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLlN5c3RlbVNlY3Rpb24SLwoDY3B1GAsgASgLMiIuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5DcHVTZWN0aW9uEjUKBm1lbW9yeRgMIAEoCzIlLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTWVtb3J5U2VjdGlvbhIzCgVkaXNrcxgNIAEoCzIkLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuRGlza3NTZWN0aW9uEjEKBG5pY3MYDiABKAsyIy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLk5pY3NTZWN0aW9uEjEKBGdwdXMYDyABKAsyIy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdXNTZWN0aW9uEi8KA2JtYxgQIAEoCzIiLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuQm1jU2VjdGlvbhItCgJvcxgRIAEoCzIhLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuT3NTZWN0aW9uEjUKBmltYWdlcxgSIAEoCzIlLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuSW1hZ2VzU2VjdGlvbho0ChJTZWN0aW9uSGFzaGVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgMOgI4ASJwCg1JbWFnZXNTZWN0aW9uEjMKBmltYWdlcxgBIAMoCzIjLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuQ2FjaGVkSW1hZ2USFgoOY2FwYWNpdHlfYnl0ZXMYAiABKAQSEgoKdXNlZF9ieXRlcxgDIAEoBCK4AQoLQ2FjaGVkSW1hZ2USEAoIaW1hZ2VfaWQYASABKAkSCwoDcmVmGAIgASgJEg4KBnNoYTI1NhgDIAEoDBISCgpzaXplX2J5dGVzGAQgASgEEjcKBXN0YXRlGAUgASgOMiguYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5DYWNoZWRJbWFnZVN0YXRlEi0KCWxhc3RfdXNlZBgGIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAi5QIKDVN5c3RlbVNlY3Rpb24SDgoGdmVuZG9yGAEgASgJEg8KB3Byb2R1Y3QYAiABKAkSDgoGc2VyaWFsGAMgASgJEhQKDHByb2R1Y3RfdXVpZBgEIAEoCRIUCgxib2FyZF92ZW5kb3IYBSABKAkSFQoNYm9hcmRfcHJvZHVjdBgGIAEoCRIUCgxib2FyZF9zZXJpYWwYByABKAkSFgoOY2hhc3Npc19zZXJpYWwYCCABKAkSEwoLYmlvc192ZW5kb3IYCSABKAkSFAoMYmlvc192ZXJzaW9uGAogASgJEjMKCWJvb3RfbW9kZRgLIAEoDjIgLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuQm9vdE1vZGUSGAoLc2VjdXJlX2Jvb3QYDCABKAhIAIgBARIoCgN0cG0YDSABKAsyGy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLlRwbUIOCgxfc2VjdXJlX2Jvb3QiRAoDVHBtEg8KB3ZlcnNpb24YASABKAkSFAoMbWFudWZhY3R1cmVyGAIgASgJEhYKDmVrX2NlcnRfaXNzdWVyGAMgASgJIrcBCgpDcHVTZWN0aW9uEg4KBnZlbmRvchgBIAEoCRINCgVtb2RlbBgCIAEoCRIUCgxhcmNoaXRlY3R1cmUYAyABKAkSDwoHc29ja2V0cxgEIAEoDRINCgVjb3JlcxgFIAEoDRIPCgd0aHJlYWRzGAYgASgNEg0KBWZsYWdzGAcgAygJEjQKCm51bWFfbm9kZXMYCCADKAsyIC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLk51bWFOb2RlIjoKCE51bWFOb2RlEgoKAmlkGAEgASgNEgwKBGNwdXMYAiABKAkSFAoMbWVtb3J5X2J5dGVzGAMgASgEIr4BCg1NZW1vcnlTZWN0aW9uEhMKC3RvdGFsX2J5dGVzGAEgASgEEjcKCWh1Z2VwYWdlcxgCIAMoCzIkLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuSHVnZXBhZ2VQb29sEisKBWRpbW1zGAMgAygLMhwuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5EaW1tEjIKBGVkYWMYBCABKAsyJC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkVkYWNDb3VudGVycyI2CgxIdWdlcGFnZVBvb2wSFwoPcGFnZV9zaXplX2J5dGVzGAEgASgEEg0KBXRvdGFsGAIgASgEIpEBCgREaW1tEgwKBHNsb3QYASABKAkSEgoKc2l6ZV9ieXRlcxgCIAEoBBIRCglzcGVlZF9tdHMYAyABKA0SDAoEdHlwZRgEIAEoCRILCgNlY2MYBSABKAgSFAoMbWFudWZhY3R1cmVyGAYgASgJEhMKC3BhcnRfbnVtYmVyGAcgASgJEg4KBnNlcmlhbBgIIAEoCSI6CgxFZGFjQ291bnRlcnMSEwoLY29ycmVjdGFibGUYASABKAQSFQoNdW5jb3JyZWN0YWJsZRgCIAEoBCI7CgxEaXNrc1NlY3Rpb24SKwoFZGlza3MYASADKAsyHC5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkRpc2si6QEKBERpc2sSDAoEbmFtZRgBIAEoCRINCgVtb2RlbBgCIAEoCRIOCgZzZXJpYWwYAyABKAkSCwoDd3duGAQgASgJEhIKCnNpemVfYnl0ZXMYBSABKAQSEgoKcm90YXRpb25hbBgGIAEoCBI4Cgl0cmFuc3BvcnQYByABKA4yJS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkRpc2tUcmFuc3BvcnQSMgoFc21hcnQYCCABKAsyIy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLlNtYXJ0U3RhdHVzEhEKCXJlbW92YWJsZRgJIAEoCCJ2CgtTbWFydFN0YXR1cxIPCgdoZWFsdGh5GAEgASgIEhkKDHdlYXJfcGVyY2VudBgCIAEoDUgAiAEBEhkKDG1lZGlhX2Vycm9ycxgDIAEoBEgBiAEBQg8KDV93ZWFyX3BlcmNlbnRCDwoNX21lZGlhX2Vycm9ycyI4CgtOaWNzU2VjdGlvbhIpCgRuaWNzGAEgAygLMhsuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5OaWMimAIKA05pYxIMCgRuYW1lGAEgASgJEgsKA21hYxgCIAEoCRIOCgZkcml2ZXIYAyABKAkSEAoIZmlybXdhcmUYBCABKAkSEgoKc3BlZWRfbWJwcxgFIAEoDRITCgtwY2lfYWRkcmVzcxgGIAEoCRIWCgludW1hX25vZGUYByABKA1IAIgBARIXCg9zcmlvdl90b3RhbF92ZnMYCCABKA0SLgoEcmRtYRgJIAEoDjIgLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuUmRtYVR5cGUSLwoEbGluaxgKIAEoDjIhLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTGlua1N0YXRlEgsKA210dRgLIAEoDUIMCgpfbnVtYV9ub2RlIoMBCgtHcHVzU2VjdGlvbhIWCg5kcml2ZXJfdmVyc2lvbhgBIAEoCRIbChNjdWRhX2RyaXZlcl92ZXJzaW9uGAIgASgJEhQKDG52bWxfdmVyc2lvbhgDIAEoCRIpCgRncHVzGAQgAygLMhsuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5HcHUinQUKA0dwdRINCgVpbmRleBgBIAEoDRIMCgR1dWlkGAIgASgJEhIKCnBjaV9idXNfaWQYAyABKAkSDAoEbmFtZRgEIAEoCRIUCgxhcmNoaXRlY3R1cmUYBSABKAkSEgoKdnJhbV9ieXRlcxgGIAEoBBIOCgZzZXJpYWwYByABKAkSFQoNdmJpb3NfdmVyc2lvbhgIIAEoCRIZChFib2FyZF9wYXJ0X251bWJlchgJIAEoCRIWCgludW1hX25vZGUYCiABKA1IAIgBARIWCg5wb3dlcl9saW1pdF9tdxgLIAEoDRIYChBwZXJzaXN0ZW5jZV9tb2RlGAwgASgIEhQKDGNvbXB1dGVfbW9kZRgNIAEoCRIlCh1jdWRhX2NvbXB1dGVfY2FwYWJpbGl0eV9tYWpvchgOIAEoDRIlCh1jdWRhX2NvbXB1dGVfY2FwYWJpbGl0eV9taW5vchgPIAEoDRIrCgNtaWcYECABKAsyHi5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdU1pZxIzCgdudmxpbmtzGBEgAygLMiIuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5OdmxpbmtMaW5rEjUKCHRvcG9sb2d5GBIgAygLMiMuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5HcHVQZWVyTGluaxIxCgZmYWJyaWMYEyABKAsyIS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdUZhYnJpYxIrCgNlY2MYFCABKAsyHi5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdUVjYxI2Cglyb3dfcmVtYXAYFSABKAsyIy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkdwdVJvd1JlbWFwQgwKCl9udW1hX25vZGUi6wEKBkdwdU1pZxIPCgdjYXBhYmxlGAEgASgIEjAKB2N1cnJlbnQYAiABKA4yHy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLk1pZ01vZGUSMAoHcGVuZGluZxgDIAEoDjIfLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTWlnTW9kZRI0Cghwcm9maWxlcxgEIAMoCzIiLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuTWlnUHJvZmlsZRI2CglpbnN0YW5jZXMYBSADKAsyIy5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLk1pZ0luc3RhbmNlIlMKCk1pZ1Byb2ZpbGUSCgoCaWQYASABKA0SDAoEbmFtZRgCIAEoCRIVCg1tYXhfaW5zdGFuY2VzGAMgASgNEhQKDG1lbW9yeV9ieXRlcxgEIAEoBCJKCgtNaWdJbnN0YW5jZRINCgVnaV9pZBgBIAEoDRINCgVjaV9pZBgCIAEoDRIPCgdwcm9maWxlGAMgASgJEgwKBHV1aWQYBCABKAkiawoKTnZsaW5rTGluaxIMCgRsaW5rGAEgASgNEjAKBXN0YXRlGAIgASgOMiEuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5MaW5rU3RhdGUSDAoEcGVlchgDIAEoCRIPCgd2ZXJzaW9uGAQgASgNImQKC0dwdVBlZXJMaW5rEhEKCXBlZXJfdXVpZBgBIAEoCRIxCgRsaW5rGAIgASgOMiMuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5HcHVMaW5rVHlwZRIPCgdudmxpbmtzGAMgASgNIjQKCUdwdUZhYnJpYxIUCgxjbHVzdGVyX3V1aWQYASABKAkSEQoJY2xpcXVlX2lkGAIgASgNIsQBCgZHcHVFY2MSDwoHZW5hYmxlZBgBIAEoCBIcCg9wZW5kaW5nX2VuYWJsZWQYAiABKAhIAIgBARI6Cg92b2xhdGlsZV9jb3VudHMYAyABKAsyIS5iZXR0ZXJjb21wdXRlLmFnZW50LnYxLkVjY0NvdW50cxI7ChBhZ2dyZWdhdGVfY291bnRzGAQgASgLMiEuYmV0dGVyY29tcHV0ZS5hZ2VudC52MS5FY2NDb3VudHNCEgoQX3BlbmRpbmdfZW5hYmxlZCI3CglFY2NDb3VudHMSEwoLY29ycmVjdGFibGUYASABKAQSFQoNdW5jb3JyZWN0YWJsZRgCIAEoBCJbCgtHcHVSb3dSZW1hcBITCgtjb3JyZWN0YWJsZRgBIAEoDRIVCg11bmNvcnJlY3RhYmxlGAIgASgNEg8KB3BlbmRpbmcYAyABKAgSDwoHZmFpbHVyZRgEIAEoCCJuCgpCbWNTZWN0aW9uEgoKAmlwGAEgASgJEgsKA21hYxgCIAEoCRIOCgZ2ZW5kb3IYAyABKAkSGAoQZmlybXdhcmVfdmVyc2lvbhgEIAEoCRIPCgdyZWRmaXNoGAUgASgIEgwKBGlwbWkYBiABKAgiugEKCU9zU2VjdGlvbhIOCgZkaXN0cm8YASABKAkSFgoOZGlzdHJvX3ZlcnNpb24YAiABKAkSDgoGa2VybmVsGAMgASgJEjUKBmNncm91cBgEIAEoDjIlLmJldHRlcmNvbXB1dGUuYWdlbnQudjEuQ2dyb3VwVmVyc2lvbhILCgNrdm0YBSABKAgSDQoFaW9tbXUYBiABKAgSEAoIcnVudGltZXMYByADKAkSEAoIaG9zdG5hbWUYCCABKAkqlQEKEENhY2hlZEltYWdlU3RhdGUSIgoeQ0FDSEVEX0lNQUdFX1NUQVRFX1VOU1BFQ0lGSUVEEAASHAoYQ0FDSEVEX0lNQUdFX1NUQVRFX1JFQURZEAESHgoaQ0FDSEVEX0lNQUdFX1NUQVRFX1BVTExJTkcQAhIfChtDQUNIRURfSU1BR0VfU1RBVEVfRVZJQ1RJTkcQAypNCghCb290TW9kZRIZChVCT09UX01PREVfVU5TUEVDSUZJRUQQABISCg5CT09UX01PREVfVUVGSRABEhIKDkJPT1RfTU9ERV9CSU9TEAIqrAEKDURpc2tUcmFuc3BvcnQSHgoaRElTS19UUkFOU1BPUlRfVU5TUEVDSUZJRUQQABIXChNESVNLX1RSQU5TUE9SVF9OVk1FEAESFwoTRElTS19UUkFOU1BPUlRfU0FUQRACEhYKEkRJU0tfVFJBTlNQT1JUX1NBUxADEhkKFURJU0tfVFJBTlNQT1JUX1ZJUlRJTxAEEhYKEkRJU0tfVFJBTlNQT1JUX1VTQhAFKmcKCFJkbWFUeXBlEhkKFVJETUFfVFlQRV9VTlNQRUNJRklFRBAAEhIKDlJETUFfVFlQRV9OT05FEAESGAoUUkRNQV9UWVBFX0lORklOSUJBTkQQAhISCg5SRE1BX1RZUEVfUk9DRRADKk8KCUxpbmtTdGF0ZRIaChZMSU5LX1NUQVRFX1VOU1BFQ0lGSUVEEAASEQoNTElOS19TVEFURV9VUBABEhMKD0xJTktfU1RBVEVfRE9XThACKlAKB01pZ01vZGUSGAoUTUlHX01PREVfVU5TUEVDSUZJRUQQABIVChFNSUdfTU9ERV9ESVNBQkxFRBABEhQKEE1JR19NT0RFX0VOQUJMRUQQAiq2AQoLR3B1TGlua1R5cGUSHQoZR1BVX0xJTktfVFlQRV9VTlNQRUNJRklFRBAAEhQKEEdQVV9MSU5LX1RZUEVfTlYQARIVChFHUFVfTElOS19UWVBFX1BJWBACEhUKEUdQVV9MSU5LX1RZUEVfUFhCEAMSFQoRR1BVX0xJTktfVFlQRV9QSEIQBBIWChJHUFVfTElOS19UWVBFX05PREUQBRIVChFHUFVfTElOS19UWVBFX1NZUxAGKl0KDUNncm91cFZlcnNpb24SHgoaQ0dST1VQX1ZFUlNJT05fVU5TUEVDSUZJRUQQABIVChFDR1JPVVBfVkVSU0lPTl9WMRABEhUKEUNHUk9VUF9WRVJTSU9OX1YyEAJCVFpSZ2l0aHViLmNvbS9iZXR0ZXItY29tcHV0ZS9iZXR0ZXItY29tcHV0ZS9kYWVtb24vZ2VuL2JldHRlcmNvbXB1dGUvYWdlbnQvdjE7YWdlbnR2MWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * An assembled snapshot: what the control plane stores (append-only) and what an inspect driver
@@ -93,6 +93,13 @@ export type NodeInventory = Message<"bettercompute.agent.v1.NodeInventory"> & {
    * @generated from field: bettercompute.agent.v1.OsSection os = 17;
    */
   os?: OsSection | undefined;
+
+  /**
+   * (v0.3) Section "images".
+   *
+   * @generated from field: bettercompute.agent.v1.ImagesSection images = 18;
+   */
+  images?: ImagesSection | undefined;
 };
 
 /**
@@ -101,6 +108,85 @@ export type NodeInventory = Message<"bettercompute.agent.v1.NodeInventory"> & {
  */
 export const NodeInventorySchema: GenMessage<NodeInventory> = /*@__PURE__*/
   messageDesc(file_bettercompute_agent_v1_inventory, 0);
+
+/**
+ * @generated from message bettercompute.agent.v1.ImagesSection
+ */
+export type ImagesSection = Message<"bettercompute.agent.v1.ImagesSection"> & {
+  /**
+   * Sorted by sha256; at most 1,000 entries (the most recently used).
+   *
+   * @generated from field: repeated bettercompute.agent.v1.CachedImage images = 1;
+   */
+  images: CachedImage[];
+
+  /**
+   * Cache capacity and use in bytes, when the runtime knows them (0 = unknown).
+   *
+   * @generated from field: uint64 capacity_bytes = 2;
+   */
+  capacityBytes: bigint;
+
+  /**
+   * @generated from field: uint64 used_bytes = 3;
+   */
+  usedBytes: bigint;
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.ImagesSection.
+ * Use `create(ImagesSectionSchema)` to create a new message.
+ */
+export const ImagesSectionSchema: GenMessage<ImagesSection> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_inventory, 1);
+
+/**
+ * @generated from message bettercompute.agent.v1.CachedImage
+ */
+export type CachedImage = Message<"bettercompute.agent.v1.CachedImage"> & {
+  /**
+   * The catalog image id (img_…) the node pulled it for, when it knows it; else empty.
+   *
+   * @generated from field: string image_id = 1;
+   */
+  imageId: string;
+
+  /**
+   * The reference it was pulled by (https URL or OCI ref).
+   *
+   * @generated from field: string ref = 2;
+   */
+  ref: string;
+
+  /**
+   * @generated from field: bytes sha256 = 3;
+   */
+  sha256: Uint8Array;
+
+  /**
+   * @generated from field: uint64 size_bytes = 4;
+   */
+  sizeBytes: bigint;
+
+  /**
+   * @generated from field: bettercompute.agent.v1.CachedImageState state = 5;
+   */
+  state: CachedImageState;
+
+  /**
+   * Last use, truncated to the hour so the section hash does not churn on every use.
+   *
+   * @generated from field: google.protobuf.Timestamp last_used = 6;
+   */
+  lastUsed?: Timestamp | undefined;
+};
+
+/**
+ * Describes the message bettercompute.agent.v1.CachedImage.
+ * Use `create(CachedImageSchema)` to create a new message.
+ */
+export const CachedImageSchema: GenMessage<CachedImage> = /*@__PURE__*/
+  messageDesc(file_bettercompute_agent_v1_inventory, 2);
 
 /**
  * @generated from message bettercompute.agent.v1.SystemSection
@@ -183,7 +269,7 @@ export type SystemSection = Message<"bettercompute.agent.v1.SystemSection"> & {
  * Use `create(SystemSectionSchema)` to create a new message.
  */
 export const SystemSectionSchema: GenMessage<SystemSection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 1);
+  messageDesc(file_bettercompute_agent_v1_inventory, 3);
 
 /**
  * @generated from message bettercompute.agent.v1.Tpm
@@ -212,7 +298,7 @@ export type Tpm = Message<"bettercompute.agent.v1.Tpm"> & {
  * Use `create(TpmSchema)` to create a new message.
  */
 export const TpmSchema: GenMessage<Tpm> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 2);
+  messageDesc(file_bettercompute_agent_v1_inventory, 4);
 
 /**
  * @generated from message bettercompute.agent.v1.CpuSection
@@ -270,7 +356,7 @@ export type CpuSection = Message<"bettercompute.agent.v1.CpuSection"> & {
  * Use `create(CpuSectionSchema)` to create a new message.
  */
 export const CpuSectionSchema: GenMessage<CpuSection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 3);
+  messageDesc(file_bettercompute_agent_v1_inventory, 5);
 
 /**
  * @generated from message bettercompute.agent.v1.NumaNode
@@ -299,7 +385,7 @@ export type NumaNode = Message<"bettercompute.agent.v1.NumaNode"> & {
  * Use `create(NumaNodeSchema)` to create a new message.
  */
 export const NumaNodeSchema: GenMessage<NumaNode> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 4);
+  messageDesc(file_bettercompute_agent_v1_inventory, 6);
 
 /**
  * @generated from message bettercompute.agent.v1.MemorySection
@@ -337,7 +423,7 @@ export type MemorySection = Message<"bettercompute.agent.v1.MemorySection"> & {
  * Use `create(MemorySectionSchema)` to create a new message.
  */
 export const MemorySectionSchema: GenMessage<MemorySection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 5);
+  messageDesc(file_bettercompute_agent_v1_inventory, 7);
 
 /**
  * @generated from message bettercompute.agent.v1.HugepagePool
@@ -361,7 +447,7 @@ export type HugepagePool = Message<"bettercompute.agent.v1.HugepagePool"> & {
  * Use `create(HugepagePoolSchema)` to create a new message.
  */
 export const HugepagePoolSchema: GenMessage<HugepagePool> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 6);
+  messageDesc(file_bettercompute_agent_v1_inventory, 8);
 
 /**
  * @generated from message bettercompute.agent.v1.Dimm
@@ -415,7 +501,7 @@ export type Dimm = Message<"bettercompute.agent.v1.Dimm"> & {
  * Use `create(DimmSchema)` to create a new message.
  */
 export const DimmSchema: GenMessage<Dimm> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 7);
+  messageDesc(file_bettercompute_agent_v1_inventory, 9);
 
 /**
  * @generated from message bettercompute.agent.v1.EdacCounters
@@ -437,7 +523,7 @@ export type EdacCounters = Message<"bettercompute.agent.v1.EdacCounters"> & {
  * Use `create(EdacCountersSchema)` to create a new message.
  */
 export const EdacCountersSchema: GenMessage<EdacCounters> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 8);
+  messageDesc(file_bettercompute_agent_v1_inventory, 10);
 
 /**
  * @generated from message bettercompute.agent.v1.DisksSection
@@ -456,7 +542,7 @@ export type DisksSection = Message<"bettercompute.agent.v1.DisksSection"> & {
  * Use `create(DisksSectionSchema)` to create a new message.
  */
 export const DisksSectionSchema: GenMessage<DisksSection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 9);
+  messageDesc(file_bettercompute_agent_v1_inventory, 11);
 
 /**
  * @generated from message bettercompute.agent.v1.Disk
@@ -519,7 +605,7 @@ export type Disk = Message<"bettercompute.agent.v1.Disk"> & {
  * Use `create(DiskSchema)` to create a new message.
  */
 export const DiskSchema: GenMessage<Disk> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 10);
+  messageDesc(file_bettercompute_agent_v1_inventory, 12);
 
 /**
  * @generated from message bettercompute.agent.v1.SmartStatus
@@ -546,7 +632,7 @@ export type SmartStatus = Message<"bettercompute.agent.v1.SmartStatus"> & {
  * Use `create(SmartStatusSchema)` to create a new message.
  */
 export const SmartStatusSchema: GenMessage<SmartStatus> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 11);
+  messageDesc(file_bettercompute_agent_v1_inventory, 13);
 
 /**
  * @generated from message bettercompute.agent.v1.NicsSection
@@ -565,7 +651,7 @@ export type NicsSection = Message<"bettercompute.agent.v1.NicsSection"> & {
  * Use `create(NicsSectionSchema)` to create a new message.
  */
 export const NicsSectionSchema: GenMessage<NicsSection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 12);
+  messageDesc(file_bettercompute_agent_v1_inventory, 14);
 
 /**
  * @generated from message bettercompute.agent.v1.Nic
@@ -638,7 +724,7 @@ export type Nic = Message<"bettercompute.agent.v1.Nic"> & {
  * Use `create(NicSchema)` to create a new message.
  */
 export const NicSchema: GenMessage<Nic> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 13);
+  messageDesc(file_bettercompute_agent_v1_inventory, 15);
 
 /**
  * @generated from message bettercompute.agent.v1.GpusSection
@@ -676,7 +762,7 @@ export type GpusSection = Message<"bettercompute.agent.v1.GpusSection"> & {
  * Use `create(GpusSectionSchema)` to create a new message.
  */
 export const GpusSectionSchema: GenMessage<GpusSection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 14);
+  messageDesc(file_bettercompute_agent_v1_inventory, 16);
 
 /**
  * @generated from message bettercompute.agent.v1.Gpu
@@ -811,7 +897,7 @@ export type Gpu = Message<"bettercompute.agent.v1.Gpu"> & {
  * Use `create(GpuSchema)` to create a new message.
  */
 export const GpuSchema: GenMessage<Gpu> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 15);
+  messageDesc(file_bettercompute_agent_v1_inventory, 17);
 
 /**
  * @generated from message bettercompute.agent.v1.GpuMig
@@ -854,7 +940,7 @@ export type GpuMig = Message<"bettercompute.agent.v1.GpuMig"> & {
  * Use `create(GpuMigSchema)` to create a new message.
  */
 export const GpuMigSchema: GenMessage<GpuMig> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 16);
+  messageDesc(file_bettercompute_agent_v1_inventory, 18);
 
 /**
  * @generated from message bettercompute.agent.v1.MigProfile
@@ -890,7 +976,7 @@ export type MigProfile = Message<"bettercompute.agent.v1.MigProfile"> & {
  * Use `create(MigProfileSchema)` to create a new message.
  */
 export const MigProfileSchema: GenMessage<MigProfile> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 17);
+  messageDesc(file_bettercompute_agent_v1_inventory, 19);
 
 /**
  * @generated from message bettercompute.agent.v1.MigInstance
@@ -924,7 +1010,7 @@ export type MigInstance = Message<"bettercompute.agent.v1.MigInstance"> & {
  * Use `create(MigInstanceSchema)` to create a new message.
  */
 export const MigInstanceSchema: GenMessage<MigInstance> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 18);
+  messageDesc(file_bettercompute_agent_v1_inventory, 20);
 
 /**
  * @generated from message bettercompute.agent.v1.NvlinkLink
@@ -958,7 +1044,7 @@ export type NvlinkLink = Message<"bettercompute.agent.v1.NvlinkLink"> & {
  * Use `create(NvlinkLinkSchema)` to create a new message.
  */
 export const NvlinkLinkSchema: GenMessage<NvlinkLink> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 19);
+  messageDesc(file_bettercompute_agent_v1_inventory, 21);
 
 /**
  * One cell of the nvidia-smi topo -m matrix.
@@ -989,7 +1075,7 @@ export type GpuPeerLink = Message<"bettercompute.agent.v1.GpuPeerLink"> & {
  * Use `create(GpuPeerLinkSchema)` to create a new message.
  */
 export const GpuPeerLinkSchema: GenMessage<GpuPeerLink> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 20);
+  messageDesc(file_bettercompute_agent_v1_inventory, 22);
 
 /**
  * MNNVL / IMEX domain membership.
@@ -1013,7 +1099,7 @@ export type GpuFabric = Message<"bettercompute.agent.v1.GpuFabric"> & {
  * Use `create(GpuFabricSchema)` to create a new message.
  */
 export const GpuFabricSchema: GenMessage<GpuFabric> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 21);
+  messageDesc(file_bettercompute_agent_v1_inventory, 23);
 
 /**
  * @generated from message bettercompute.agent.v1.GpuEcc
@@ -1051,7 +1137,7 @@ export type GpuEcc = Message<"bettercompute.agent.v1.GpuEcc"> & {
  * Use `create(GpuEccSchema)` to create a new message.
  */
 export const GpuEccSchema: GenMessage<GpuEcc> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 22);
+  messageDesc(file_bettercompute_agent_v1_inventory, 24);
 
 /**
  * @generated from message bettercompute.agent.v1.EccCounts
@@ -1077,7 +1163,7 @@ export type EccCounts = Message<"bettercompute.agent.v1.EccCounts"> & {
  * Use `create(EccCountsSchema)` to create a new message.
  */
 export const EccCountsSchema: GenMessage<EccCounts> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 23);
+  messageDesc(file_bettercompute_agent_v1_inventory, 25);
 
 /**
  * @generated from message bettercompute.agent.v1.GpuRowRemap
@@ -1113,7 +1199,7 @@ export type GpuRowRemap = Message<"bettercompute.agent.v1.GpuRowRemap"> & {
  * Use `create(GpuRowRemapSchema)` to create a new message.
  */
 export const GpuRowRemapSchema: GenMessage<GpuRowRemap> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 24);
+  messageDesc(file_bettercompute_agent_v1_inventory, 26);
 
 /**
  * @generated from message bettercompute.agent.v1.BmcSection
@@ -1155,7 +1241,7 @@ export type BmcSection = Message<"bettercompute.agent.v1.BmcSection"> & {
  * Use `create(BmcSectionSchema)` to create a new message.
  */
 export const BmcSectionSchema: GenMessage<BmcSection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 25);
+  messageDesc(file_bettercompute_agent_v1_inventory, 27);
 
 /**
  * @generated from message bettercompute.agent.v1.OsSection
@@ -1215,7 +1301,38 @@ export type OsSection = Message<"bettercompute.agent.v1.OsSection"> & {
  * Use `create(OsSectionSchema)` to create a new message.
  */
 export const OsSectionSchema: GenMessage<OsSection> = /*@__PURE__*/
-  messageDesc(file_bettercompute_agent_v1_inventory, 26);
+  messageDesc(file_bettercompute_agent_v1_inventory, 28);
+
+/**
+ * @generated from enum bettercompute.agent.v1.CachedImageState
+ */
+export enum CachedImageState {
+  /**
+   * @generated from enum value: CACHED_IMAGE_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: CACHED_IMAGE_STATE_READY = 1;
+   */
+  READY = 1,
+
+  /**
+   * @generated from enum value: CACHED_IMAGE_STATE_PULLING = 2;
+   */
+  PULLING = 2,
+
+  /**
+   * @generated from enum value: CACHED_IMAGE_STATE_EVICTING = 3;
+   */
+  EVICTING = 3,
+}
+
+/**
+ * Describes the enum bettercompute.agent.v1.CachedImageState.
+ */
+export const CachedImageStateSchema: GenEnum<CachedImageState> = /*@__PURE__*/
+  enumDesc(file_bettercompute_agent_v1_inventory, 0);
 
 /**
  * @generated from enum bettercompute.agent.v1.BootMode
@@ -1241,7 +1358,7 @@ export enum BootMode {
  * Describes the enum bettercompute.agent.v1.BootMode.
  */
 export const BootModeSchema: GenEnum<BootMode> = /*@__PURE__*/
-  enumDesc(file_bettercompute_agent_v1_inventory, 0);
+  enumDesc(file_bettercompute_agent_v1_inventory, 1);
 
 /**
  * @generated from enum bettercompute.agent.v1.DiskTransport
@@ -1282,7 +1399,7 @@ export enum DiskTransport {
  * Describes the enum bettercompute.agent.v1.DiskTransport.
  */
 export const DiskTransportSchema: GenEnum<DiskTransport> = /*@__PURE__*/
-  enumDesc(file_bettercompute_agent_v1_inventory, 1);
+  enumDesc(file_bettercompute_agent_v1_inventory, 2);
 
 /**
  * @generated from enum bettercompute.agent.v1.RdmaType
@@ -1313,7 +1430,7 @@ export enum RdmaType {
  * Describes the enum bettercompute.agent.v1.RdmaType.
  */
 export const RdmaTypeSchema: GenEnum<RdmaType> = /*@__PURE__*/
-  enumDesc(file_bettercompute_agent_v1_inventory, 2);
+  enumDesc(file_bettercompute_agent_v1_inventory, 3);
 
 /**
  * @generated from enum bettercompute.agent.v1.LinkState
@@ -1339,7 +1456,7 @@ export enum LinkState {
  * Describes the enum bettercompute.agent.v1.LinkState.
  */
 export const LinkStateSchema: GenEnum<LinkState> = /*@__PURE__*/
-  enumDesc(file_bettercompute_agent_v1_inventory, 3);
+  enumDesc(file_bettercompute_agent_v1_inventory, 4);
 
 /**
  * @generated from enum bettercompute.agent.v1.MigMode
@@ -1365,7 +1482,7 @@ export enum MigMode {
  * Describes the enum bettercompute.agent.v1.MigMode.
  */
 export const MigModeSchema: GenEnum<MigMode> = /*@__PURE__*/
-  enumDesc(file_bettercompute_agent_v1_inventory, 4);
+  enumDesc(file_bettercompute_agent_v1_inventory, 5);
 
 /**
  * Best to worst: NV > PIX > PXB > PHB > NODE > SYS (PLAN.md §10.3 topology scorer).
@@ -1425,7 +1542,7 @@ export enum GpuLinkType {
  * Describes the enum bettercompute.agent.v1.GpuLinkType.
  */
 export const GpuLinkTypeSchema: GenEnum<GpuLinkType> = /*@__PURE__*/
-  enumDesc(file_bettercompute_agent_v1_inventory, 5);
+  enumDesc(file_bettercompute_agent_v1_inventory, 6);
 
 /**
  * @generated from enum bettercompute.agent.v1.CgroupVersion
@@ -1451,5 +1568,5 @@ export enum CgroupVersion {
  * Describes the enum bettercompute.agent.v1.CgroupVersion.
  */
 export const CgroupVersionSchema: GenEnum<CgroupVersion> = /*@__PURE__*/
-  enumDesc(file_bettercompute_agent_v1_inventory, 6);
+  enumDesc(file_bettercompute_agent_v1_inventory, 7);
 

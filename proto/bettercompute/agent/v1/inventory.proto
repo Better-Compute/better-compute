@@ -35,6 +35,39 @@ message NodeInventory {
   GpusSection gpus = 15;
   BmcSection bmc = 16;
   OsSection os = 17;
+  // (v0.3) Section "images".
+  ImagesSection images = 18;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "images" (v0.3): what the node's runtime holds in its local image cache (vps hosts, deploy
+// caches); the placer's image-cached scorer ranks by it (PLAN.md §10.3).
+
+message ImagesSection {
+  // Sorted by sha256; at most 1,000 entries (the most recently used).
+  repeated CachedImage images = 1;
+  // Cache capacity and use in bytes, when the runtime knows them (0 = unknown).
+  uint64 capacity_bytes = 2;
+  uint64 used_bytes = 3;
+}
+
+message CachedImage {
+  // The catalog image id (img_…) the node pulled it for, when it knows it; else empty.
+  string image_id = 1;
+  // The reference it was pulled by (https URL or OCI ref).
+  string ref = 2;
+  bytes sha256 = 3;
+  uint64 size_bytes = 4;
+  CachedImageState state = 5;
+  // Last use, truncated to the hour so the section hash does not churn on every use.
+  google.protobuf.Timestamp last_used = 6;
+}
+
+enum CachedImageState {
+  CACHED_IMAGE_STATE_UNSPECIFIED = 0;
+  CACHED_IMAGE_STATE_READY = 1;
+  CACHED_IMAGE_STATE_PULLING = 2;
+  CACHED_IMAGE_STATE_EVICTING = 3;
 }
 
 // ---------------------------------------------------------------------------------------------
