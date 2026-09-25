@@ -11,12 +11,14 @@ import {
 } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
-import { capacityMigrations, capacityModule, type CapacityApi } from '@better-compute/capacity';
 import {
   applyBudgetPolicy,
+  capacityMigrations,
+  capacityModule,
   reassignReservations,
   withdrawAgentReservations,
-} from '../packages/capacity/src/iam-reactions.js';
+  type CapacityApi,
+} from '@better-compute/capacity';
 
 // Reservations' reactions to IAM events (PLAN.md §12.7-12.8): an agent withdrawn cancels what it reserved and
 // has not started; an offboarded owner's reservations move to the successor (or the unstarted ones are

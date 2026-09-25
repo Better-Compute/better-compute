@@ -312,8 +312,13 @@ function pinned(db: SqlExecutor, now: () => number): SqlExecutor {
   const sync = async () => {
     const time = now();
     if (time > last) {
-      last = time;
-      await setSimClock(db, time);
+      try {
+        await setSimClock(db, time);
+        last = time;
+      } catch (error) {
+        // Before `useSimClock` (compute.initialize() starting its modules): nothing to move yet.
+        if ((error as { code?: unknown }).code !== 'INVALID_STATE') throw error;
+      }
     }
   };
   return {

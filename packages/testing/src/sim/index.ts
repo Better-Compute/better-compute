@@ -4,6 +4,8 @@ export type {
   ControlPlaneSim,
   ControlPlaneSimOptions,
 } from './control-plane.js';
+export { runColdStart } from './cold-start.js';
+export type { ColdStartOptions, ColdStartPhase, ColdStartReport } from './cold-start.js';
 export { runNightly } from './nightly.js';
 export type { NightlyChaos, NightlyOptions, NightlyReport } from './nightly.js';
 export { createFleetSim } from './fleet-sim.js';
