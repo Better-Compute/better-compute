@@ -216,6 +216,7 @@ describe('betterCompute()', () => {
     const { compute } = setupWith({ modules: [extras] });
     expect(compute.registry.modules).toEqual([
       'node-controllers',
+      'site-boot',
       'inventory',
       'capacity',
       // The default secret store's table, when no `secrets` are configured.

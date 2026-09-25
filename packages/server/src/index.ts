@@ -33,6 +33,7 @@ import {
   type Job,
 } from './runtime/index.js';
 import { createSelfCheck, type SelfCheckReport } from './self-check.js';
+import { createSiteBootModule } from './site-boot-module.js';
 import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
 
@@ -76,6 +77,9 @@ export type { ServerInfo, WellKnownJoinKeys } from './version.js';
 export * from './join/index.js';
 export * from './controllers/index.js';
 export * from './nodes-module.js';
+export * from './site-boot-module.js';
+export { siteBootLeaseName, siteBootTtlSeconds, tickSiteBoot } from './controllers/site-boot.js';
+export type { SiteBootState } from './controllers/site-boot.js';
 export * from './tunnels/index.js';
 
 /** One `authz_projection` row as the resolver reads it (PLAN.md §12.4). */
@@ -179,6 +183,7 @@ export function betterCompute<
       // A new spec generation wakes the node's gateway to push DesiredState (best effort).
       specChanged: (tx, nodeId) => runtime.pokes.pokeNodes(tx, [nodeId]),
     }),
+    createSiteBootModule(),
     inventoryModule,
     capacityModule(resolved.capacity),
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
