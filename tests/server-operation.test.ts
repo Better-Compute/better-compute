@@ -119,6 +119,7 @@ const serverPaths = [
   'projects/create',
   'projects/get',
   'projects/list',
+  'projects/archive',
   'sites/list',
   'sites/get',
   'sites/create',
@@ -141,7 +142,9 @@ const serverPaths = [
   'commands/run',
   'commands/get',
   'commands/list',
+  'commands/cancel',
   'usage/list',
+  'usage/export',
   'events/list',
   // v0.2 (tests/server-groups-*).
   'joinRequests/list',
