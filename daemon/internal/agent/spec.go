@@ -258,6 +258,7 @@ func (a *Agent) convergeOnce(ctx context.Context) bool {
 	}
 	status.ObservedGeneration = a.observed
 	status.Pressure = a.pressure
+	status.TrustVersion = a.state.TrustVersion
 	status.Conditions = append(status.Conditions, cloneConditions(a.faults)...)
 	if stored, ok, err := a.j.Spec(); err == nil && ok {
 		status.AppliedSpecHash = stored.Hash

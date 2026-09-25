@@ -14,6 +14,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 	"github.com/better-compute/better-compute/daemon/internal/session"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -136,6 +137,7 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 		AppliedGeneration: meta.AppliedGeneration,
 		LastEventSeq:      meta.EventSeq,
 		InventoryHashes:   a.inventoryHashes(),
+		TrustVersion:      a.state.TrustVersion,
 	}
 	if spec, ok, err := a.j.Spec(); err == nil && ok {
 		h.AppliedSpecHash = spec.Hash
@@ -271,6 +273,11 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 			} else {
 				a.state = &next
 				a.log.Info("trust bundle updated", "version", next.TrustVersion, "roots", len(next.TrustRoots))
+				// The ack of the new trust (?13 root switch) rides the next StatusReport.
+				if a.lastStatus != nil {
+					a.lastStatus = proto.Clone(a.lastStatus).(*agentv1.StatusReport)
+					a.lastStatus.TrustVersion = next.TrustVersion
+				}
 			}
 		}
 	}

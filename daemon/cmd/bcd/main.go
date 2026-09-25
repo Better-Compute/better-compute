@@ -182,8 +182,9 @@ func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
 		fmt.Fprintf(stdout, "%-4s  %-8s  %s\n", status, check, detail)
 	}
 
-	if cfg, err := config.Load(file); err != nil {
-		report("fail", "config", err.Error())
+	cfg, cfgErr := config.Load(file)
+	if cfgErr != nil {
+		report("fail", "config", cfgErr.Error())
 	} else {
 		report("ok", "config", fmt.Sprintf("%s: gateway %s, site %s", file, cfg.GatewayURL, cfg.Site))
 		if warning := permissionWarning(file); warning != "" {
@@ -211,7 +212,9 @@ func runDoctor(fs *flag.FlagSet, stdout, _ io.Writer) int {
 		report("ok", "hardware", fmt.Sprintf("%s: %d GPUs, %d inventory sections hashed", hardwareBackend, gpus, len(hashes)))
 	}
 
-	report("skip", "host", "IOMMU, KVM, clock and gateway reachability checks arrive in v0.1")
+	for _, c := range hostChecks(cfg) {
+		report(c.status, c.check, c.detail)
+	}
 	if failed {
 		return exitFailure
 	}

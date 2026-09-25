@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,14 +121,23 @@ func TestDoctor(t *testing.T) {
 		t.Fatalf("doctor without a config = %d, %q", code, stdout)
 	}
 
+	// The gateway check dials it: a local listener stands in.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
 	pin := "sha256/" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
-	text := "gateway_url = \"https://gw.example.com\"\nsite = \"lab\"\n" +
+	text := "gateway_url = \"https://" + ln.Addr().String() + "\"\nsite = \"lab\"\ndata_dir = \"" + filepath.ToSlash(dir) + "\"\n" +
 		"serving_ca_spki_pin = \"" + pin + "\"\njoin_signing_key_pin = \"" + pin + "\"\njoin_encryption_key_pin = \"" + pin + "\"\n"
 	file := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, stdout, _ = runBCD("doctor", "--config", file)
+	if !strings.Contains(stdout, "ok    gateway") || !strings.Contains(stdout, "has not joined") {
+		t.Fatalf("doctor host checks: %q", stdout)
+	}
 	// NVML is never built into the skeleton and host inventory arrives in v0.1: warnings, not failures.
 	if code != exitOK || !strings.Contains(stdout, "ok    config") || !strings.Contains(stdout, "warn  nvml") {
 		t.Fatalf("doctor = %d, %q", code, stdout)
