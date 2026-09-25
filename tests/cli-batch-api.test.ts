@@ -64,6 +64,17 @@ async function setup() {
     },
   } as never) as BetterCompute<any, any>;
   await compute.initialize();
+  // Batch subjects are the tenant's own nodes (the site agent for bmc:), checked at creation.
+  await db.query(`INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_b', $1, 'shared', 'eu', 1)`, [
+    ACME,
+  ]);
+  for (const id of ['node_a', 'node_b', 'node_site'])
+    await db.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+         trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($1, 'site_b', $2, 'host', 'ready', false, false, 'disconnected', 'platform', 0, 0, 1, 1, 0, 1)`,
+      [id, ACME],
+    );
   const quorum = quorumConfigOf({ approverKeys: approvers.map((approver) => approver.key), approverThreshold: 2 } as never);
   const created = await db.transaction((tx) =>
     createCommandBatch(

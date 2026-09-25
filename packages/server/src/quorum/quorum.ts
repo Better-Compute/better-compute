@@ -187,6 +187,8 @@ export type BatchLeaf = BatchScopeEntry & { payload?: { typeUrl: string; value: 
 
 /** The largest payload a leaf stores for approvers to read. */
 export const maxLeafPayloadBytes = 64 * 1024;
+/** All the leaf payloads one batch stores. */
+export const maxBatchPayloadBytes = 8 * 1024 * 1024;
 
 export interface CreateBatchInput {
   tenantId: string;
@@ -211,7 +213,16 @@ export interface CreateBatchInput {
 export async function createCommandBatch(
   tx: SqlTx,
   input: CreateBatchInput,
-  options: { now: number; quorum?: QuorumConfig | undefined },
+  options: {
+    now: number;
+    quorum?: QuorumConfig | undefined;
+    /**
+     * The payload type a kind's command carries (its spec's `payload.typeName`); a leaf payload
+     * labelled with any other type is refused, so an approver never decodes the bytes as a harmless
+     * message the daemon would run as another. Without it, leaves cannot carry payloads.
+     */
+    payloadTypeOf?: ((kind: string) => string | undefined) | undefined;
+  },
 ): Promise<{
   batchId: string;
   held: boolean;
@@ -233,18 +244,26 @@ export async function createCommandBatch(
     )
       throw new ComputeError('INVALID_INPUT', 'Batch scope entries are { subject, kind }');
   // A leaf given its payload is bound to it: the digest comes from the payload itself.
+  let payloadBytes = 0;
   const entries: BatchLeaf[] = input.scope.map((entry) => {
     if (entry.payload === undefined) return entry;
     const { typeUrl, value } = entry.payload;
-    if (
-      typeof typeUrl !== 'string' ||
-      !/^type\.googleapis\.com\/[A-Za-z][A-Za-z0-9_.]{0,200}$/.test(typeUrl) ||
-      !(value instanceof Uint8Array) ||
-      value.length > maxLeafPayloadBytes
-    )
+    if (typeof typeUrl !== 'string' || !(value instanceof Uint8Array) || value.length > maxLeafPayloadBytes)
       throw new ComputeError(
         'INVALID_INPUT',
         `A leaf payload is { typeUrl, value } of at most ${maxLeafPayloadBytes} bytes`,
+      );
+    const typeName = options.payloadTypeOf?.(entry.kind);
+    if (!typeName || typeUrl !== `type.googleapis.com/${typeName}`)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `A ${entry.kind} leaf payload is a ${typeName ?? '(no payload type)'} message, not ${typeUrl}`,
+      );
+    payloadBytes += value.length;
+    if (payloadBytes > maxBatchPayloadBytes)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `A batch stores at most ${maxBatchPayloadBytes} bytes of leaf payloads; bind the rest by payloadSha256`,
       );
     const digest = new Uint8Array(createHash('sha256').update(value).digest());
     if (entry.payloadSha256?.length && !Buffer.from(entry.payloadSha256).equals(Buffer.from(digest)))
@@ -258,6 +277,37 @@ export async function createCommandBatch(
   const notAfter = input.notAfterMs ?? options.now + defaultBatchTtlMs;
   if (!Number.isFinite(notAfter) || notAfter <= options.now)
     throw new ComputeError('INVALID_INPUT', 'A batch must end in the future');
+  // Every subject names a node of this tenant: the node itself, the site agent relaying to a BMC, or
+  // the proxied machine. Approvers sign a batch under its tenant's name, so it must never cover
+  // another tenant's machines (a compromised worker could otherwise sign commands for them with this
+  // approval; the daemon checks the leaf, not the tenant).
+  const nodeOf = (subject: string): string | undefined => {
+    if (subject.startsWith('bmc:')) {
+      const slash = subject.indexOf('/');
+      return slash > 4 && slash < subject.length - 1 ? subject.slice(4, slash) : undefined;
+    }
+    if (subject.startsWith('node:')) return subject.slice(5) || undefined;
+    return subject;
+  };
+  const nodes = new Set<string>();
+  for (const entry of entries) {
+    const node = nodeOf(entry.subject);
+    if (!node)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Batch subject ${entry.subject} is not a node id, bmc:<site agent>/<address> or node:<node id>`,
+      );
+    nodes.add(node);
+  }
+  const owned = await tx.query<{ id: string }>(
+    'SELECT id FROM nodes WHERE id = ANY($1::text[]) AND owner_tenant_id = $2',
+    [[...nodes], input.tenantId],
+  );
+  if (owned.rows.length !== nodes.size) {
+    const found = new Set(owned.rows.map((row) => row.id));
+    const missing = [...nodes].find((node) => !found.has(node))!;
+    throw new ComputeError('NOT_FOUND', `Node ${missing} not found`);
+  }
   const quorum = options.quorum;
   const required = quorum?.approverKeys.length
     ? requiredApprovals(scope.size, quorum.threshold, quorum.tiers)
@@ -688,6 +738,8 @@ export type CommandBatchesApi = {
 /** The group (`commandBatches`) the quorum module serves (§9.2, v1.0). */
 export function commandBatchesApi(options: {
   quorum?: QuorumConfig | undefined;
+  /** A kind's payload type (the registry's); leaf payloads must be of it. */
+  payloadTypeOf?: ((kind: string) => string | undefined) | undefined;
 }): CommandBatchesApi {
   const quorum = options.quorum;
   const trustDomain = quorum?.trustDomain;
@@ -747,7 +799,7 @@ export function commandBatchesApi(options: {
               batchId: await derivedId('batch', input.tenantId, context, input.idempotencyKey),
               requestSha256: new Uint8Array(requestSha256),
             },
-            { now: context.clock.now(), quorum },
+            { now: context.clock.now(), quorum, payloadTypeOf: options.payloadTypeOf },
           );
           if (!created.replayed)
             await context.events.publish(tx, {
@@ -992,6 +1044,7 @@ function expiryReconciler(): Reconciler {
 /** The built-in quorum module: batch tables, `commandBatches`, and the expiry sweep. */
 export function createQuorumModule(options: {
   quorum?: QuorumConfig | undefined;
+  payloadTypeOf?: ((kind: string) => string | undefined) | undefined;
 }): ComputeModule<typeof quorumModuleName, CommandBatchesApi> {
   return Object.freeze(
     defineModule<typeof quorumModuleName, CommandBatchesApi>({

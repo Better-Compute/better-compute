@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { fromBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { afterEach, describe, expect, it } from 'vitest';
 import { manualClock, type SqlExecutor } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
@@ -15,7 +15,12 @@ import {
   verifyBatchApproval,
   verifyBatchProof,
 } from '@better-compute/pki';
-import { BatchApprovalSchema, BatchProofSchema } from '@better-compute/protocol';
+import {
+  BatchApprovalSchema,
+  BatchProofSchema,
+  NodeRebootRequestSchema,
+  commandKinds,
+} from '@better-compute/protocol';
 import { betterCompute, createCommandBatch, pkiJoinCrypto, quorumConfigOf } from '@better-compute/server';
 import { fakeIam } from '@better-compute/testing';
 import { ACME, options } from './support/server.js';
@@ -34,6 +39,21 @@ afterEach(async () => {
   await db?.close();
   db = undefined;
 });
+
+/** The tenant's machines the batches name: batch subjects must be its own nodes. */
+async function seedNodes(sql: SqlExecutor) {
+  await sql.query(
+    `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_q1', $1, 'shared', 'eu', 1)`,
+    [ACME],
+  );
+  for (const id of ['node_a', 'node_b', 'node_agent'])
+    await sql.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+         trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($1, 'site_q1', $2, 'host', 'ready', false, false, 'disconnected', 'platform', 0, 0, 1, 1, 0, 1)`,
+      [id, ACME],
+    );
+}
 
 async function setup() {
   db = pglite();
@@ -65,6 +85,7 @@ async function setup() {
   await compute.initialize();
   // compute_now() follows the same clock (the batch's end is compared in SQL).
   await useSimClock(db, T0);
+  await seedNodes(db);
   const quorum = quorumConfigOf({
     approverKeys: approvers.map((approver) => approver.key),
     approverThreshold: 2,
@@ -339,19 +360,21 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
 
   it('stores a leaf payload for approvers and binds the leaf to its digest (review 7 #3)', async () => {
     const s = await setup();
-    const value = Buffer.from('reimage with ubuntu-24.04 sha256:abc');
-    const typeUrl = 'type.googleapis.com/bettercompute.agent.v1.DeployImageRequest';
+    const value = Buffer.from(
+      toBinary(NodeRebootRequestSchema, create(NodeRebootRequestSchema, { reason: 'kernel 6.9' })),
+    );
+    const typeUrl = `type.googleapis.com/${commandKinds['node.reboot'].payload.typeName}`;
     const created = await s.api.create(s.cred, {
       tenantId: ACME,
-      reason: 'reimage one node',
-      idempotencyKey: 'reimage-1',
+      reason: 'reboot one node',
+      idempotencyKey: 'reboot-1',
       scope: [
-        { subject: 'node_a', kind: 'deploy.image', payload: { typeUrl, value: value.toString('base64') } },
+        { subject: 'node_a', kind: 'node.reboot', payload: { typeUrl, value: value.toString('base64') } },
         { subject: 'node_b', kind: 'disk.wipe' },
       ],
     });
     const { items } = await s.api.scope(s.cred, { tenantId: ACME, batchId: created.batchId });
-    const bound = items.find((item: { kind: string }) => item.kind === 'deploy.image');
+    const bound = items.find((item: { kind: string }) => item.kind === 'node.reboot');
     // The digest is derived from the payload; the payload is there for the approver to decode.
     expect(bound).toMatchObject({
       subject: 'node_a',
@@ -370,23 +393,63 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
       s.api.create(s.cred, {
         tenantId: ACME,
         reason: 'mismatch',
-        idempotencyKey: 'reimage-2',
+        idempotencyKey: 'reboot-2',
         scope: [
           {
             subject: 'node_a',
-            kind: 'deploy.image',
+            kind: 'node.reboot',
             payloadSha256: '00'.repeat(32),
             payload: { typeUrl, value: value.toString('base64') },
           },
         ],
       }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    // Review 8 #2: the payload's type is its kind's, never a label the creator picks (an approver
+    // decoding the bytes as a harmless message the daemon would run as another).
+    await expect(
+      s.api.create(s.cred, {
+        tenantId: ACME,
+        reason: 'mislabelled',
+        idempotencyKey: 'reboot-3',
+        scope: [
+          {
+            subject: 'node_a',
+            kind: 'node.reboot',
+            payload: { typeUrl: 'type.googleapis.com/google.protobuf.Empty', value: value.toString('base64') },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it("refuses leaves that name another tenant's machines, or no machine (review 8 #1)", async () => {
+    const s = await setup();
+    await db!.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity,
+         trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ('node_other', 'site_q1', 'org_other', 'host', 'ready', false, false, 'disconnected', 'platform',
+         0, 0, 1, 1, 0, 1)`,
+    );
+    const create = (subject: string, key: string) =>
+      s.api.create(s.cred, {
+        tenantId: ACME,
+        reason: 'reboot',
+        idempotencyKey: key,
+        scope: [{ subject, kind: 'node.reboot' }],
+      });
+    await expect(create('node_other', 'k1')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(create('node_missing', 'k2')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(create('bmc:node_other/10.0.0.5', 'k3')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(create('node:node_other', 'k4')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(create('bmc:10.0.0.5', 'k5')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect((await create('bmc:node_agent/10.0.0.5', 'k6')).scopeSize).toBe(1);
   });
 
   it('needs no approvals where the deployment publishes no approver keys', async () => {
     db = pglite();
     const compute = betterCompute({ ...options(db, fakeIam({ allow: [{}] })) } as never) as any;
     await compute.initialize();
+    await seedNodes(db);
     const created = await db.transaction((tx) =>
       createCommandBatch(
         tx,

@@ -92,6 +92,12 @@ export function commandKindSpec(registry: RegistryView, kind: string): CommandKi
   return spec;
 }
 
+/** A registered kind's payload message type, or undefined (unknown kind, or no payload). */
+export function payloadTypeOf(registry: RegistryView, kind: string): string | undefined {
+  const spec = registry.commandKind(kind) ?? builtinByKind.get(kind);
+  return spec?.payload?.typeName;
+}
+
 type Descriptor = Parameters<typeof encodeMessage>[0];
 type AnyMessage = NonNullable<CommandBody['payload']>;
 type Timestamp = NonNullable<CommandBody['notAfter']>;
@@ -493,6 +499,7 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       return createCommandBatch(tx, batch, {
         now: (input.now ?? Date.now)(),
         ...(input.quorum ? { quorum: input.quorum } : {}),
+        payloadTypeOf: (kind) => payloadTypeOf(registry, kind),
       });
     },
 

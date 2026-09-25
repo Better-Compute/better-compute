@@ -42,6 +42,7 @@ import {
 } from './tenancy/tenancy.js';
 import { createAuditSinksModule } from './audit-sinks-module.js';
 import { createQuorumModule, quorumConfigOf } from './quorum/quorum.js';
+import { payloadTypeOf } from './runtime/commands.js';
 import { trustVersionSettler } from './quorum/trust-version.js';
 import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
@@ -285,6 +286,8 @@ export function betterCompute<
     // the command queue can batch; approvals are needed only with `pki.approvers`).
     createQuorumModule({
       quorum: quorumConfigOf(resolved.trustBundle, resolved.join?.trustDomain),
+      // Called per request, after the registry below exists.
+      payloadTypeOf: (kind) => payloadTypeOf(registry, kind),
     }),
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
     ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
