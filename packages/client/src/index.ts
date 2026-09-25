@@ -101,6 +101,31 @@ type ClientPlugins<Api> = Api extends { plugins: infer Plugins }
   ? { plugins: { [Id in keyof Plugins]: ClientGroups<Plugins[Id]> } }
   : {};
 
+/** A compute event from `$watch` (CloudEvents-style, §9.3). */
+export interface ComputeWatchEvent {
+  id: string;
+  type: string;
+  tenantId: string;
+  subject: string;
+  time?: string;
+  /** The outbox cursor; pass it back as `lastEventId` to resume after this event. */
+  sequence?: string;
+  data?: unknown;
+}
+
+export interface ComputeWatchOptions {
+  /** Event type patterns (`reservation.*`, `node.connected`); every type when absent. */
+  types?: readonly string[];
+  /** Resume after this cursor (an event's `sequence`, the SSE `id`). */
+  lastEventId?: string;
+  /** Ends the iteration; so does `break` or `return()` on it. */
+  signal?: AbortSignal;
+  /** The watch route below the origin (default `{basePath}/watch`). */
+  path?: string;
+  /** Longest wait between reconnects after failures (default 30 s). */
+  maxBackoffMs?: number;
+}
+
 export interface ClientTransport {
   /** Calls any route below the base path (`system/version`, `plugins/acme/widgets/poke`). */
   $request<Output = unknown>(
@@ -108,6 +133,13 @@ export interface ClientTransport {
     input?: unknown,
     options?: ComputeCallOptions,
   ): Promise<Output>;
+  /**
+   * Follows the SSE watch stream (`GET {basePath}/watch`, the events module's `handleWatch`) as
+   * the caller: events in commit order, resumed with `Last-Event-ID` after every reconnect (the
+   * server's `retry:`, or capped back-off after failures). `UNAUTHENTICATED` and `ACCESS_DENIED`
+   * end it with a `ComputeClientError`.
+   */
+  $watch(options?: ComputeWatchOptions): AsyncIterable<ComputeWatchEvent>;
 }
 
 /** The client of a `betterCompute()` instance: its groups, `plugins[id]` and `$request`. */
@@ -388,12 +420,140 @@ export function createComputeClient<T extends { api: unknown }>(
     },
   });
 
-  const transport: ClientTransport = { $request: request };
+  async function* watch(
+    watchOptions: ComputeWatchOptions = {},
+  ): AsyncGenerator<ComputeWatchEvent, void, undefined> {
+    const path = watchOptions.path ?? `${basePath}/watch`;
+    if (!/^(?:\/[A-Za-z0-9_.-]+)+$/.test(path))
+      throw new ComputeClientError('INVALID_PATH', 'The watch path must be an absolute path', 0);
+    const controller = new AbortController();
+    const outer = watchOptions.signal;
+    const stop = () => controller.abort();
+    if (outer?.aborted) return;
+    outer?.addEventListener('abort', stop, { once: true });
+    let lastEventId = watchOptions.lastEventId;
+    let retryMs = 2000;
+    let failures = 0;
+    const pause = async (ms: number) => {
+      try {
+        await sleep(ms, controller.signal);
+      } catch {
+        // Aborted: the loop ends.
+      }
+    };
+    try {
+      while (!controller.signal.aborted) {
+        const url = new URL(path, base.origin);
+        if (watchOptions.types?.length) url.searchParams.set('types', watchOptions.types.join(','));
+        const configured =
+          typeof options.headers === 'function' ? await options.headers() : options.headers;
+        const headers = new Headers(configured);
+        headers.set('accept', 'text/event-stream');
+        if (lastEventId) headers.set('last-event-id', lastEventId);
+        const token = typeof options.token === 'function' ? await options.token() : options.token;
+        if (token !== undefined) {
+          if (typeof token !== 'string' || !bearerToken(token))
+            throw new ComputeClientError('INVALID_TOKEN', 'Invalid bearer token format', 0);
+          headers.set('authorization', `Bearer ${token}`);
+        }
+        let response: Response;
+        try {
+          response = await fetcher(url, {
+            headers,
+            credentials,
+            redirect: 'error',
+            cache: 'no-store',
+            signal: controller.signal,
+          });
+        } catch {
+          if (controller.signal.aborted) return;
+          failures += 1;
+          await pause(Math.min(retryMs * 2 ** (failures - 1), watchOptions.maxBackoffMs ?? 30_000));
+          continue;
+        }
+        if (response.status === 401 || response.status === 403) {
+          const code = response.status === 401 ? 'UNAUTHENTICATED' : 'ACCESS_DENIED';
+          const error = new ComputeClientError(
+            code,
+            `The watch stream answered ${code}`,
+            response.status,
+          );
+          if (code === 'UNAUTHENTICATED') options.onUnauthenticated?.(error);
+          throw error;
+        }
+        if (!response.ok || !response.body) {
+          failures += 1;
+          await pause(Math.min(retryMs * 2 ** (failures - 1), watchOptions.maxBackoffMs ?? 30_000));
+          continue;
+        }
+        failures = 0;
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        try {
+          let buffer = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += value;
+            let end: number;
+            while ((end = buffer.search(/\r?\n\r?\n/)) >= 0) {
+              const block = buffer.slice(0, end);
+              buffer = buffer.slice(end).replace(/^\r?\n\r?\n/, '');
+              let id: string | undefined;
+              let event: string | undefined;
+              const data: string[] = [];
+              for (const line of block.split(/\r?\n/)) {
+                if (!line || line.startsWith(':')) continue;
+                const colon = line.indexOf(':');
+                const field = colon < 0 ? line : line.slice(0, colon);
+                const text = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, '');
+                if (field === 'data') data.push(text);
+                else if (field === 'id') id = text;
+                else if (field === 'event') event = text;
+                else if (field === 'retry' && /^\d+$/.test(text)) retryMs = Number(text);
+              }
+              if (event === 'error' || data.length === 0) continue;
+              let parsed: unknown;
+              try {
+                parsed = JSON.parse(data.join('\n'));
+              } catch {
+                continue;
+              }
+              if (!isRecord(parsed) || typeof parsed.type !== 'string') continue;
+              if (id) lastEventId = id;
+              yield {
+                ...(parsed as unknown as ComputeWatchEvent),
+                ...(id ? { sequence: id } : {}),
+              };
+            }
+          }
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (error instanceof ComputeClientError) throw error;
+          failures += 1;
+        } finally {
+          void reader.cancel().catch(() => undefined);
+        }
+        // The server ended the stream (its maximum duration) or it broke: reconnect.
+        if (!controller.signal.aborted)
+          await pause(
+            failures
+              ? Math.min(retryMs * 2 ** (failures - 1), watchOptions.maxBackoffMs ?? 30_000)
+              : retryMs,
+          );
+      }
+    } finally {
+      outer?.removeEventListener('abort', stop);
+      controller.abort();
+    }
+  }
+
+  const transport: ClientTransport = { $request: request, $watch: watch };
   return new Proxy(transport, {
     get(target, key: string | symbol) {
       if (key === Symbol.toStringTag) return 'BetterComputeClient';
       if (typeof key !== 'string' || reserved.has(key)) return undefined;
       if (key === '$request') return target.$request;
+      if (key === '$watch') return target.$watch;
       if (key === 'plugins') return plugins;
       if (!routeSegment(key)) return undefined;
       return group(key);
