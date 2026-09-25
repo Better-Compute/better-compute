@@ -3,7 +3,8 @@ import { defineDriver, manifest, type SecretStore } from '@better-compute/core';
 import { localSealedSecretStore, sealedSecretsMigration } from '@better-compute/pki';
 import type { DriverInfo } from '../packages/server/src/api/drivers.js';
 import type { SecretInfo } from '../packages/server/src/api/secrets.js';
-import { ACME, ROOT } from './support/server.js';
+import { secretsApi } from '../packages/server/src/api/secrets.js';
+import { ACME, ROOT, SECRET } from './support/server.js';
 import { ADMIN, OUTSIDER, START, USER, type Harness } from './support/server-api.js';
 import { v02Harness } from './support/server-v02.js';
 
@@ -32,10 +33,10 @@ const ipmi = defineDriver({
 });
 
 beforeAll(async () => {
-  let sealed: SecretStore | undefined;
-  h = await v02Harness({ secrets: () => sealed, drivers: () => [redfish, ipmi] });
+  h = await v02Harness({ drivers: () => [redfish, ipmi] });
   await h.store.migrate([sealedSecretsMigration]);
-  sealed = store = localSealedSecretStore({ sql: h.store, keys: 'k'.repeat(32) });
+  // The server's default store seals under the deployment secret; this handle opens the same rows.
+  store = localSealedSecretStore({ sql: h.store, keys: SECRET });
   h.iam.allow({ token: USER });
   h.iam.allow({ token: ADMIN });
 });
@@ -128,16 +129,12 @@ describe('secrets.delete', () => {
     expect(await h.call('secrets/delete', USER, { tenantId: ACME, name: 'doomed' })).toEqual({ deleted: false });
   });
 
-  it('answers UNAVAILABLE without a configured store', async () => {
-    const bare = await v02Harness();
-    try {
-      bare.iam.allow({ token: USER });
-      expect((await bare.failure('secrets/put', USER, { tenantId: ACME, name: 'n', value: 'v', idempotencyKey: 'k' })).code).toBe(
-        'UNAVAILABLE',
-      );
-    } finally {
-      await bare.close();
-    }
+  it('answers UNAVAILABLE without a store (a host that configured none)', async () => {
+    // The server always resolves one (the sealed default); the group itself fails closed without.
+    const put = secretsApi().secrets.put as unknown as { handler(context: unknown, input: unknown): Promise<unknown> };
+    await expect(put.handler({ sql: h.store }, { tenantId: ACME, name: 'n', value: 'v', idempotencyKey: 'k' })).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
   });
 });
 

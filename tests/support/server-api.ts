@@ -6,6 +6,7 @@ import {
   type CommandQueue,
   type ComputeEvent,
   type ComputeModule,
+  type DriverDefinition,
   type ComputePlugin,
   type Credential,
   type EnqueueCommand,
@@ -196,6 +197,8 @@ export interface HarnessOptions {
   modules?: readonly ComputeModule[];
   iam?: FakeIam;
   joinTokens?: JoinTokenMinter;
+  /** The registered drivers `drivers.list` shows (default none). */
+  drivers?: () => readonly DriverDefinition[];
 }
 
 export type Harness = Awaited<ReturnType<typeof serverHarness>>;
@@ -249,6 +252,7 @@ export async function serverHarness(options: HarnessOptions = {}) {
           protocol: { min: 1, max: 1 },
         }),
         selfCheck: () => Promise.resolve({ ok: true, findings: [] }),
+        ...(options.drivers ? { drivers: options.drivers } : {}),
       },
       { listRetryDelayMs: 0, ...(options.joinTokens ? { joinTokens: options.joinTokens } : {}) },
     ),

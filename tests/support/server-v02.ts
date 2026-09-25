@@ -1,15 +1,13 @@
 import { createHash } from 'node:crypto';
-import { defineModule, newId, type SqlTx } from '@better-compute/core';
-import { serverV02Groups, type ServerV02Options } from '../../packages/server/src/api/v02.js';
+import { newId, type DriverDefinition, type SqlTx } from '@better-compute/core';
+import type { JoinTokenMinter } from '../../packages/server/src/api/join-tokens.js';
 import { serverHarness } from './server-api.js';
 
-// The v0.2 server groups registered as a module next to the core groups, until [37c0ab] adds them
-// to `coreGroups` (packages/server/src/api/index.ts).
+// The server harness for the v0.2 groups (registered in `coreGroups`). Secrets go to the default
+// sealed store under the harness secret; `drivers` are what `drivers.list` shows.
 
-export function v02Harness(options: ServerV02Options = {}) {
-  return serverHarness({
-    modules: [defineModule({ name: 'serverv02', api: () => serverV02Groups(options) })],
-  });
+export function v02Harness(options: { joinTokens?: JoinTokenMinter; drivers?: () => readonly DriverDefinition[] } = {}) {
+  return serverHarness(options);
 }
 
 export const sha256 = (text: string) => new Uint8Array(createHash('sha256').update(text).digest());
