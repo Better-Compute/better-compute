@@ -76,7 +76,7 @@ are built, and ends with a hardening checklist.
 | Compromised node | `nodeId` only from the certificate's SAN; 24 h certificates with pushed revocation; secrets bound to current work; reports only about its own allocations; its attested results speak only for itself | Built |
 | Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
 | Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
-| Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited; fleet-wide destructive batches need k-of-n operator approval checked on the machine (the [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | Built except the quorum, which is v1.0: its chain is built (bcd and the FakeDaemon enforce it, the server stores, approves and holds batches, the gateway attaches approvals and proofs, the CLI reviews and signs), but no built-in workflow creates batches yet |
+| Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited; fleet-wide destructive batches need k-of-n operator approval checked on the machine (the [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | Built, the quorum included (v1.0): bcd and the FakeDaemon enforce it, the server stores, approves and holds batches, the gateway attaches approvals and proofs, the CLI reviews and signs, and the built-in workflows create their batches (f66e236, e594a4f). Open: metal's leaves do not bind payloads yet |
 | Compromised driver plugin | Pinned by SHA-256 and executed from the file that was hashed; run under its own unprivileged uid with `no_new_privs`, a seccomp filter (no namespaces, mounts or `io_uring`) and optional cgroup limits; only plugins named `privileged` run as root | Built in bcd (Linux) |
 | Replay | Command-id journal, `not_after`, epoch fencing, a server time mark against rewound `Welcome`s, ticket `jti` sets, a Renew replay cache | Built in the control plane, the FakeDaemon and `bcd` (bcd keeps its ticket `jti` set in its journal, so a restart does not forget a spent ticket) |
 | Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
@@ -94,8 +94,8 @@ are built, and ends with a hardening checklist.
   key (the site agent sends them for BMC credentials and discovery tokens, the ramdisk and VPS hosts for user data,
   the metadata service for workload tokens). The site
   agent's boot server answers PXE only for prepared machines while it holds the boot lease. Driver plugins run
-  sandboxed (below), and each `bmc.*` kind admits only its own BMC operations, so an unsigned `bmc.query` cannot carry
-  a power or RAID change. With approver keys in its trust bundle it enforces the destructive-batch quorum. Its node key is a 0600
+  sandboxed (below), and each `bmc.*` kind admits only its own BMC operations, so a `bmc.query`, which needs no batch,
+  cannot carry a power or RAID change, and `site.httpProxy` never reaches a BMC. With approver keys in its trust bundle it enforces the destructive-batch quorum. Its node key is a 0600
   file, not a TPM key, and it has no privilege-separated helper yet. See
   [the daemon](/docs/daemon#what-bcd-does-today).
 </Callout>
@@ -150,12 +150,18 @@ new token. A session that already went quiet is superseded without counting. See
 With `pki.commandSigning`, every command is signed by a 24 h worker key that the command-signing root certifies,
 and so is every NodeSpec generation (v0.4): the NodeSpec controller signs the exact `DesiredStateBody` bytes of each
 new generation (purpose `desired-state`) and stores them in `nodes.spec_body` and `nodes.spec_signature`. The gateway
-relays those signatures verbatim; it cannot produce them. A daemon checks any signature that is present; bcd with
-command-signing roots requires one on every command, whatever its kind, and the FakeDaemon on the kinds its own table
-marks destructive (0d42de8). bcd also treats `site.httpProxy` as destructive (signed, and under the batch quorum like
+relays those signatures verbatim; it cannot produce them. A daemon checks any signature that is present, and both
+bcd (0d42de8) and the FakeDaemon (12ccfa1) with command-signing roots require a valid one on every command, whatever
+its kind: a kind table that exempts "harmless" kinds let a compromised gateway inject an unsigned `site.httpProxy`
+that could reset a BMC or insert media around the quorum. bcd and metal also treat `site.httpProxy` as destructive (signed, and under the batch quorum like
 `bmc.*`) and never proxies to a BMC: its site agent remembers the BMC hosts it drives (`data_dir/bmc-hosts.json`)
-and refuses them by name and resolved address, and refuses any `/redfish` path, so a BMC is reached only through the
-`bmc.*` kinds and their quorum. For desired state, the FakeDaemon with command-signing roots
+and refuses them by name and resolved address, and refuses any `/redfish` path and any address in its own
+`[site] bmc_networks` (local configuration the control plane cannot loosen; doctor warns about site agents without
+it, a019c85), so a BMC is reached only through the `bmc.*` kinds and their quorum. A request other than a `GET`
+runs only under a batch leaf bound to its exact payload. A request about one machine also cannot reach another (a2a853d, 8391d74): metal lists
+the site's agentless machines and their inspected addresses in the site agent's spec (`SiteSpec.proxy_targets`,
+never a BMC host), and bcd refuses a URL host that is not one of the target node's listed addresses or names
+(`forbidden-target`) once the list names any target. For desired state, the FakeDaemon with command-signing roots
 requires a signature on every spec by default (`signedSpecs: 'always'`, v0.4), and so does bcd, since an unsigned
 spec with a high generation would freeze all later ones; `signedSpecs: 'access'` requires one only on a spec that
 changes the `access` section (v0.2). Because `Welcome.server_time` is unsigned, both daemons also refuse a `Welcome`
@@ -171,11 +177,24 @@ are refused by default. The chain is built end to end: bcd and the FakeDaemon en
 module stores batches and collects approvals (`commandBatches.approve`), the command queue holds batched commands
 until approval, the gateway sends each with its approval and inclusion proof, and the `better-compute batch`
 commands let approvers review a batch against its root and sign it. A change of the approver set itself needs the
-current approvers' signatures (`batch sign-approvers`), so the join key alone cannot lift or replace the quorum. What
-is missing is the producer side: the built-in workflows (metal's wipe and deploy, `bmc.*`) do not create batches
-yet, so with `pki.approvers` set and no break-glass allowance their destructive commands fail at enqueue
-(`INVALID_STATE`, reason `batch-required`). See
+current approvers' signatures (`batch sign-approvers`), so the join key alone cannot lift or replace the quorum. The
+built-in workflows produce their batches: metal puts each workflow under a one-node batch of its own, or under the
+batch `metal.bulk` creates for one verb on many nodes (f66e236), and the health reconciler's reboots and GPU resets
+run under a node-scoped batch (e594a4f). Metal's leaves leave the payload unbound (a leaf admits any payload of its
+kind for its subject), which approvers see flagged; binding metal's payloads is open. See
 [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10).
+
+### Writing into deployed images
+
+`deploy.image` writes the NoCloud seed and bcd's join files into the image it just streamed, and that image may be a
+tenant's: a crafted filesystem attacks whatever kernel mounts it. For an ext2, ext3 or ext4 root filesystem, the
+ramdisk never mounts it (1ae1789): e2fsprogs' `debugfs` writes the files in userspace, unlinking whatever the image
+has at each path (a symlink, a device node) without following it, writing root-owned 0600 regular files, and reading
+each back. Ignition's config goes onto the `boot` partition the same way (`debugfs` for ext, `mtools` for FAT), and
+`boot.kexec` copies the installed kernel and initrd out of an ext root with `debugfs`, resolving symlinks inside the
+image, instead of mounting it (d9a900f). Only xfs and btrfs, or a ramdisk without the tools, still fall back to a
+`nodev,nosuid` mount (read-only for kexec) with every write confined by `os.Root`. See
+[what the ramdisk does](/docs/guides/bare-metal/deploying#what-the-ramdisk-does).
 
 ### Driver plugins on the host
 
@@ -348,6 +367,12 @@ See [sandboxes](/docs/guides/vps/sandboxes#run-code-inside).
   soft deleted, its image signers revoked, its bare-metal machines retired (deployed ones wiped first) and its VPS
   instances deleted. The subtree is read from IAM by the `tenancy` reconciler, outside the inbox transaction; while
   IAM is down the read is retried, so a suspension is delayed, never dropped.
+- **Revocations before reactions.** When an identity departs or an agent is suspended, `serve`'s host revokes the
+  identity's SSH certificates, closes its tunnels and drops cached authentications first, and only then runs module
+  reactions (such as withdrawing an agent's sandboxes), each under its own savepoint (b3f7a81, review 7 M3). A
+  reaction that throws is undone alone, so it can never roll the revocation back; failures of identity reactions go
+  to `host.iam.onError` and the `IamReconcile` sweep re-runs them, and a failing agent reaction retries its event
+  (a3be14c). See [SSH](/docs/guides/access/ssh).
 
 See [tenancy](/docs/guides/iam/tenancy).
 

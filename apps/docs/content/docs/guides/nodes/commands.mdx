@@ -101,8 +101,16 @@ await client.commands.run({ tenantId, nodeId, kind: 'node.reboot', idempotencyKe
 `commandBatches.create` needs `compute:batches:create` on the tenant and is idempotent per caller and key. The
 command's `(subject, kind)` must be in the batch's scope (for a node's own kinds the subject is the node id), or
 `commands.run` is `INVALID_INPUT`. The command stays `pending`, held, until the batch has its approvals; then it is
-sent with the approval and its inclusion proof, and the node checks both itself. Without approver keys a batch is
+sent with the approval and its inclusion proof, and the node checks both itself. `commands.run`, `get` and `list` say
+so (a299e96): a batched command carries its `batchId`, and while it waits for approvals `awaitingApproval: true` and
+no `notBefore`; once the batch is approved, `awaitingApproval` is gone and `notBefore` is set. Without approver keys a batch is
 recorded for audit only and its commands go out at once.
+
+The platform's own destructive work creates its batches itself: metal's workflows, `metal.bulk` and `metal.power`
+(f66e236, 478025a), and the health reconciler's reboots and GPU resets, each under a batch whose leaves name the node
+(e594a4f). An agent on the [MCP server](/docs/guides/clients/mcp) can propose a reboot batch with
+`propose_command_batch` and pass its `batchId` to `exec_command`, but has no tool to approve one: people approve with
+their approver keys (171ad2f). See [who creates batches](/docs/operations/pki#who-creates-batches).
 
 Modules queue any registered kind through the command queue, `ctx.commands.enqueue(tx, command)`, in their own
 transaction. See [modules](/docs/extending/modules).
@@ -134,7 +142,7 @@ metal module the BMC, boot, disk, deploy, `site.httpProxy` and `diag.dcgm` kinds
 | `retrySafe` | May run again when the daemon crashed after accepting it but before it started. Kinds such as `gpu.reset`, `disk.wipe`, `deploy.image` and `bmc.power` are not. |
 | `selfTerminating` | The side effect ends the daemon (`node.reboot`, `boot.kexec`, `daemon.upgrade`). The command completes when the node rejoins with a new boot, and is never replayed. |
 | `attested` | The result is signed by the node's key, for example `diag.nvml`, `diag.dcgm`, `disk.wipe` and `gpu.reset`. |
-| `destructive` | Must carry a valid signature from v0.2, for example `node.reboot`, `gpu.reset`, `disk.wipe`, `deploy.image` and `bmc.power`. |
+| `destructive` | Under the v1.0 quorum it runs only as part of an approved batch; for example `node.reboot`, `gpu.reset`, `disk.wipe`, `deploy.image`, `bmc.power` and, since 0d42de8, `site.httpProxy`. (Signatures no longer depend on it: with command-signing roots every command must be signed.) |
 | `timeout` | How long an in-flight command may run past `not_after` before the sweeper fails it. |
 | `roles` | Agent roles that may run it (`node`, `site`, `ramdisk`); any other role rejects it. |
 
@@ -177,11 +185,14 @@ Before accepting a command, the daemon checks, in this order:
 2. `STALE_GENERATION`: `min_generation` is ahead of the spec it applied; it asks for the spec, waits until
    `not_after`, then rejects;
 3. `EXPIRED`: past `not_after`, in server time (the daemon keeps the offset from `Welcome.server_time`);
-4. `BUSY`: no credits; the gateway puts the command back to `pending` with a backoff from 1 to 30 seconds;
-5. `BAD_SIGNATURE`: an unsigned destructive kind (v0.2).
+4. `BAD_SIGNATURE`: once the node's trust bundle holds command-signing roots, a command of any kind without a valid
+   signature (0d42de8 in bcd, 12ccfa1 in the FakeDaemon; before, only destructive kinds needed one);
+5. `BATCH_UNAPPROVED` or `UNBATCHED_LIMIT`: with approver keys, a destructive command outside an approved batch
+   (see [below](#destructive-commands-under-the-quorum));
+6. `BUSY`: no credits; the gateway puts the command back to `pending` with a backoff from 1 to 30 seconds.
 
-The four refusals other than `BUSY` make the command `rejected`, and the daemon journals them, so a duplicate
-delivery gets the same answer.
+The refusals other than `BUSY` make the command `rejected`, and the daemon journals them, so a duplicate delivery
+gets the same answer. See [acceptance checks](/docs/daemon/delivery#acceptance-checks).
 
 ## Timing
 
@@ -237,7 +248,9 @@ never forge intent or results:
 - **Signed commands (v0.2).** `Command.signature` carries a signature by a worker key that chains to the
   command-signing root in the node's trust bundle. `@better-compute/pki` provides the pieces
   (`createCommandSigningAuthority`, 24-hour worker keys from `issueWorkerKey`, `signCommand` and
-  `verifyCommand`), and the daemon rejects unsigned destructive kinds with `BAD_SIGNATURE`. When the server is
+  `verifyCommand`). Once the daemon's trust bundle holds command-signing roots, it rejects every command without a
+  valid signature with `BAD_SIGNATURE`, whatever its kind: exempting "harmless" kinds let a compromised gateway
+  inject an unsigned `site.httpProxy` that could reach a BMC (0d42de8, 12ccfa1). When the server is
   given `pki.commandSigning` (the root from `createCommandSigningAuthority`, or the PKI bundle's `commandSigning`),
   every command is signed by a 24-hour worker key that root certifies, and JoinResponse and Welcome carry the
   trust bundle (the roots, plus `pki.commandSigningRoots` during a rotation, at a version that follows the bundle's

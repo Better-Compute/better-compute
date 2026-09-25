@@ -95,9 +95,32 @@ A WebSocket session is marked signed-only: the gateway sends it only commands an
 signature, and unsigned ones stay pending. The proxy can still see frame metadata (kinds, sizes, timing) and can
 delay or drop frames, but it cannot forge intent. PLAN.md allows this mode only once all commands and specs are
 signed: with `pki.commandSigning` both are (the gateway relays each generation's stored signed spec), so a
-WebSocket daemon receives its desired state. There is no long-poll or unary path before v1. The gateway side (`attachGatewayWs`, `serveGatewayWs`)
-and a daemon-side dialer (`connectGatewayWs`, used by the FakeDaemon) exist; bcd does not implement it yet: it dials
-gRPC only.
+WebSocket daemon receives its desired state. There is no long-poll or unary path before v1. The gateway side is
+`attachGatewayWs` and `serveGatewayWs`, and `connectGatewayWs` is the FakeDaemon's dialer.
+
+**Renewal without a client certificate** (06cb334, PLAN.md §7.1). Behind such a proxy the mTLS `Renew` cannot work,
+and a node would lose its identity after 24 hours, so the WebSocket listener also takes `POST /v1/renew`: the
+`RenewRequest` bytes as `application/x-protobuf`, answered with the `RenewResponse` bytes, errors mapped as for gRPC
+(status, `grpc-status`, `x-bc-reason`, `retry-after`). No TLS identity is used: the request carries the current chain
+and a proof of possession by the current key, so the peer is the node the chain's leaf names, and JoinService checks
+chain, revocation, generation and the proof (with its replay cache). A node gets 6 renewals an hour, and a body is at
+most 64 KiB. `gatewayRenewHandler` serves it for hosts that attach the WebSocket listener to their own server.
+
+**In bcd** (6cd48be). A `[websocket] url` in `config.toml` moves `bcd node` and `bcd site` to this transport: a
+dependency-free RFC 6455 client dials `wss://.../v1/session` (through the environment's HTTP CONNECT proxy when one
+is set), with masked binary messages of at most 16 MiB, answered pings and the close handshake. TLS is verified
+against the pinned serving CA, or against `[websocket] proxy_ca_file` for the transport only; either way the 101's
+`x-bc-gateway-proof` must chain to the pinned serving CA for server authentication, be signed by that leaf, and name
+this node and nonce with an `iat` within 60 s, or bcd never talks to the gateway. The identity is re-read at every
+dial, so a renewal applies at the next one, and renewals go to `POST /v1/renew` on the same origin, honouring the
+gateway's pushback. Refusals' `x-bc-reason` and pushback (`grpc-retry-pushback-ms`, `retry-after`) steer the redial.
+In WebSocket mode bcd refuses tunnels (they need the gRPC transport) and refuses to dial without command-signing
+roots, since the session receives signed intent only. Go tests cover the session, unproven gateways and the renewal
+against an in-process gateway, and `tests/e2e/bcd.test.ts` runs it end to end (4b2d5aa): beside a
+`createDevStack({ signedIntent: true })` stack, the TypeScript `serveGatewayWs` with a serving certificate from the
+CA the node pins; the node restarts with `[websocket] url`, runs a signed `inventory.refresh` over the WebSocket
+session and renews over `POST /v1/renew`. `daemon install-script --websocket-url` writes the section (see
+[installing bcd](/docs/daemon/install#generate-the-script)).
 
 ## Proto packages
 
@@ -261,14 +284,19 @@ part  = uint32_be(len(bytes)) || bytes
 | `x509pop` | node key of a possibly expired certificate | `[sha256(csr), node_id, client_time]` |
 | `discovery-assertion` | site agent node key (`bcd site`, one per iPXE script it serves) | `[SignedDiscoveryAssertion.body]` |
 | `batch-approval` | operator approver key (v1.0 [quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)) | `[batch_id, scope_root, uint32_be(scope_size), timestamp(not_after), trust_domain]`; each verifier supplies the trust domain from its own configuration |
-| `approver-set` | a current operator approver key | `[uint64_be(version), sha256(approverSetInput)]`: a change of the trust bundle's quorum fields |
+| `approver-set` | a current operator approver key | `[uint64_be(approver_set_epoch), sha256(approverSetInput), trust_domain]` (4835f4f, c6214dc): a change of the trust bundle's quorum fields |
 
 Worker keys chain to the command-signing roots of the `TrustBundle` the daemon received in `JoinResponse`, and a
 newer bundle arrives in `Welcome.trust`, signed by the pinned JoinService key. The bundle also carries the v1.0
 quorum's `approver_keys`, `approver_threshold`, `quorum_tiers` and `unbatched_destructive_per_hour`, empty unless
-`pki.approvers` is set, and `approver_set_signatures`, by which the current approvers sign a change of those fields
-(purpose `approver-set`, parts `[uint64_be(version), sha256(approverSetInput)]`); a daemon that holds approver keys
-refuses a bundle that changes them without enough of those signatures (see
+`pki.approvers` is set, `approver_set_epoch` (field 8, c6214dc), the set's own epoch, separate from `version` and
+raised with every change of the set, and `approver_set_signatures`, by which the current approvers sign a change of
+those fields for that epoch (purpose `approver-set`, parts `[uint64_be(approver_set_epoch),
+sha256(approverSetInput), trust_domain]`), published on every version while the set is current. A daemon holding set
+`H` at epoch `e` takes `(N, e')` only when `e' > e` and its current threshold of `H`'s keys signed it, `N == H`
+included; otherwise it keeps its quorum and applies the rest of the bundle. Both daemons report the set they enforce,
+`approver_set_epoch` and `approver_set_sha256`, in `Hello` (fields 18 and 19) and beside `trust_version` in
+`StatusReport` (10 and 11), since a bundle's version can be taken while its quorum part is refused (see
 [changing the approver set](/docs/operations/pki#changing-the-approver-set)). The daemon accepts a bundle only
 when its version is greater than the one it holds, and the control plane raises the version whenever the bundle's
 content changes, so a change always reaches the fleet. The envelopes exist from v0.1 with optional signatures, so
@@ -298,9 +326,9 @@ can refuse what an old daemon cannot do safely: `tunnels.open` opens an instance
 node advertises `tunnel.instance-dial` (see [sessions](/docs/daemon/sessions#hello)). Today both sides speak exactly version 1 (`PROTOCOL_VERSION = { min: 1, max: 1 }`
 in TypeScript, `ProtoMin` and `ProtoMax` in Go). When the ranges do not overlap, the daemon is below the server's
 minimum: `Welcome.upgrade_required` is set, `Welcome.protocol_version` is the gateway's minimum, no desired state or
-command other than `daemon.upgrade` is sent, and the FakeDaemon and bcd reject anything else `UNSUPPORTED`. bcd has
-no `daemon.upgrade` kind yet, so an upgrade-only bcd session refuses every command until the binary is replaced by
-hand.
+command other than `daemon.upgrade` is sent, and the FakeDaemon and bcd reject anything else `UNSUPPORTED`. bcd
+runs `daemon.upgrade` (de9f380) when its `[update]` section pins release keys; without pins it refuses the update,
+and the binary must be replaced by hand.
 
 **The gateway's range.** `createGateway({ protocol: { min, max } })` sets the versions a gateway speaks; the default
 is `PROTOCOL_VERSION`. Negotiation and the `Welcome` use it, so a gateway at `{ min: 1, max: 3 }` welcomes a daemon
@@ -347,7 +375,7 @@ ramdisk's `diag.dcgm`, `disk.wipe`, `deploy.image` and `boot.kexec` in `betterco
 `bmc.*`, `site.httpProxy`, `boot.prepareRamdisk` and `boot.cleanUp` in `bettercompute.site.v1` (their flags are
 `metalCommandKinds` in `@better-compute/metal`, and bcd implements them), then `driver.invoke`, which bcd runs in the
 bcx plugins it hosts (see [drivers](/docs/extending/drivers#driver-plugins-in-bcd)), and `daemon.upgrade`, which bcd
-does not implement yet.
+runs as its [self-update](/docs/daemon/install#self-update) (de9f380).
 
 | Kind | Lane | Retry-safe | Self-terminating | Attested | Destructive | Roles |
 | --- | --- | --- | --- | --- | --- | --- |

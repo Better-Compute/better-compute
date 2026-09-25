@@ -177,7 +177,8 @@ variants of these profiles; see [Talos on an agentless pool](/docs/guides/bare-m
 ## The metal API group
 
 Every method is a mutation decided as `compute:nodes:provision` on the node, except `enroll`
-(decided on the pool, since the node does not exist yet) and `power` (`compute:nodes:power`).
+(decided on the pool, since the node does not exist yet), `bulk` (decided on the pool, and each node on its own as
+the verb it applies) and `power` (`compute:nodes:power`).
 
 | Method | Verb | Legal from | Moves to |
 | --- | --- | --- | --- |
@@ -193,6 +194,14 @@ Every method is a mutation decided as `compute:nodes:provision` on the node, exc
 | [`recover`](/docs/reference/api/metal#recover) | `recover` | `failed` | the recover target below |
 | [`retire`](/docs/reference/api/metal#retire) | `retire` | `adopting`, `adopted`, `enrolling`, `ready`, `failed` | `retiring` |
 | [`power`](/docs/reference/api/metal#power) | none (power axis only) | any state but `inspecting`, `commissioning`, `deploying`, `releasing` | unchanged |
+| [`bulk`](/docs/reference/api/metal#bulk) (v1.0) | `manage`, `inspect`, `provide`, `undeploy`, `rescue` or `retire` on many nodes | as that verb | as that verb |
+
+Under the v1.0 [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10), every workflow's
+destructive commands (wipes, deploys, `bmc.*`, `site.httpProxy`) run in a batch approvers signed, and metal creates
+those batches itself (f66e236): a workflow gets a one-node batch of its own, `metal.power` a one-leaf batch
+(478025a), and `metal.bulk({ tenantId, poolId, verb, nodeIds, wipe?, reason })` applies one verb to up to 10,000
+nodes of one pool under a single batch that covers the verb's whole chain, so approvers sign once for the lot. The
+`reason` is what approvers read. See [who creates batches](/docs/operations/pki#who-creates-batches).
 
 Because the reconciler chains finished workflows, `manage`, `inspect` and `provide` each run the
 rest of the chain back to `ready`: `manage` re-verifies the BMC, re-inspects and re-commissions,

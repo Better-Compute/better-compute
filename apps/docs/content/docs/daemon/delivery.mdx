@@ -36,7 +36,10 @@ sources:
   - daemon/internal/agent/cache.go
   - daemon/internal/agent/instances.go
   - daemon/internal/runtime/runtime.go
+  - daemon/internal/runtime/libvirt.go
   - packages/metal/src/commands.ts
+  - packages/metal/src/reconcile.ts
+  - packages/provision/src/batch.ts
   - tests/e2e/bcd.test.ts
   - .claude/coordination.md
   - PLAN.md
@@ -213,11 +216,35 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   hosts with a runtime, which the gateway writes as the node label `bc.dev/cap.instance.network-policy=1`; vps
   places `private` and `none` instances only there.
 
-Only fakehw builds have a built-in runtime: a file-backed stand-in named `libvirt-kvm` whose domains outlive the
-process and honor vCPU and memory limits. On `bcd node`, a bcx plugin whose driver lists the kind `runtime` is also a
-runtime (`list`, `apply`, `remove` over `Invoke`; no snapshots). A host build has no built-in runtime yet
-(`libvirt-kvm` and `cloud-hypervisor` are not written) and no runtime plugin exists, so without one a non-empty
-section fails with `this host runs no instance runtime` and no VM boots on real hardware.
+#### The runtimes
+
+A host build with `virsh` on its `PATH` runs the built-in `libvirt-kvm` runtime (`runtime.Libvirt`, 362317c), which
+drives `virsh -c qemu:///system` and `qemu-img` and keeps its files under `data_dir/libvirt`:
+
+| Concern | What `libvirt-kvm` does |
+| --- | --- |
+| Disk | A qcow2 overlay (`instances/<id>/disk.qcow2`) on a base image downloaded once over https only, verified against the image's SHA-256 before it becomes visible, and kept as `images/<sha256>.<format>` (`qcow2`, `raw` or `iso`). An `iso` image boots from a cdrom onto a blank qcow2 disk. A disk only grows: `qemu-img resize` while stopped, `virsh blockresize` while running; a smaller size fails the instance |
+| User data | A NoCloud seed ISO (volume `cidata`, `user-data` and `meta-data` with the instance id as `instance-id` and `local-hostname`), built with `genisoimage`, else `xorriso`, attached as a read-only cdrom |
+| NICs | virtio NICs on the named bridges, on taps named `runtime.TapName`, so bcd's nftables rules exist before the tap does |
+| GPUs | VFIO passthrough (`<hostdev>` PCI, managed), the PCI address taken from the inventory's GPU bus id; a GPU without one fails the instance |
+| CPU | `host-passthrough`, so a memory snapshot restores only on the same CPU model |
+| Ownership | bcd marks each domain it defines in its metadata (namespace `https://better-compute.dev/libvirt/1`: allocation, image digest, addresses, the snapshot it was restored from). Any other domain of the connection is listed as unmanaged, the leak the control plane reports, and is never defined over, stopped or destroyed |
+| States | `start` (or `start --paused`), `suspend` and `resume`; a stop is `virsh shutdown`, then `virsh destroy` after 60 seconds; a start that fails with "Cannot allocate memory" is a capacity failure. Delete destroys and undefines the domain and removes its directory |
+| Snapshots | A tar of `meta.json` (runtime, CPU model, `includeMemory`), the overlay flattened onto its base (`qemu-img convert`), the seed and, with memory, `virsh save`'s state, after which the domain carries on from that state; a disk-only snapshot of a running domain pauses it for the copy |
+| Restores | Unpacks the tar into the new instance's directory, refusing one taken by another runtime or, with memory, on another CPU model; a memory restore's first start is `virsh restore` with the new domain's XML |
+| Console | The pty libvirt gave the domain's serial port, for [instance console tunnels](/docs/guides/access/tunnels#the-node-half) |
+
+<Callout type="warn" title="Tested against fakes only">
+`libvirt-kvm`'s tests (`daemon/internal/runtime/libvirt_test.go`) run it against a fake `virsh` and `qemu-img`:
+the domain XML, metadata, states, grow and shrink, snapshot and clone with memory, a CPU mismatch, destroy, and a
+mismatched image digest. It has not run on a real KVM host yet. `cloud-hypervisor` is not written.
+</Callout>
+
+fakehw builds run a file-backed runtime under the same name, whose domains outlive the process and honor vCPU and
+memory limits; `tests/e2e/bcd-vps.test.ts` drives that one through the control plane. On `bcd node`, a bcx plugin
+whose driver lists the kind `runtime` is also a runtime (`list`, `apply`, `remove` over `Invoke`; no snapshots). A
+host without `virsh` and without a runtime plugin runs no instances: a non-empty section fails with `this host runs
+no instance runtime`, and `bcd doctor` warns about it.
 
 ## Commands
 
@@ -277,8 +304,8 @@ crash interrupted, then passes these checks in order:
    spec re-runs the checks; still behind at `not_after`, the command is `STALE_GENERATION`.
 3. **`EXPIRED`**: past `not_after`, in server time through the `Welcome` offset. A command without `not_after` is
    `EXPIRED`, so the control plane always sets one.
-4. **`BAD_SIGNATURE`**: a missing, unknown-key or invalid signature on a kind that requires one, or an invalid
-   signature on any kind.
+4. **`BAD_SIGNATURE`**: once the trust bundle holds command-signing roots, a missing, unknown-key or invalid
+   signature on any command, whatever its kind (0d42de8).
 5. **`BATCH_UNAPPROVED`**, **`UNBATCHED_LIMIT`** (v1.0): with approver keys in the trust bundle, a
    destructive command whose batch approval or scope proof does not admit it, or an unbatched one beyond the hourly
    allowance. See [the quorum](#signed-commands-and-attested-results).
@@ -320,7 +347,7 @@ outside the agent's role is `UNSUPPORTED`.
 | `control` | `bmc.boot` | site | retry-safe, destructive |
 | `control` | `bmc.power`, `bmc.firmware`, `bmc.storage` | site | destructive |
 | `control` | `bmc.rotate` | site | attested, destructive |
-| `control` | `site.httpProxy` | site | |
+| `control` | `site.httpProxy` | site | destructive (since 0d42de8; never to a BMC) |
 | `control` | `boot.prepareRamdisk`, `boot.cleanUp` | site | retry-safe |
 | `control` | `boot.kexec` | ramdisk | self-terminating |
 | `provision` | `disk.wipe` | ramdisk | attested, destructive |
@@ -388,12 +415,24 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
 - **Signed intent.** `Command.signature` is a worker key's signature under purpose `command`; the key chains to the
   command-signing roots of the daemon's trust bundle. The server signs every command when `pki.commandSigning` is
   configured, and sends the matching trust bundle in `JoinResponse` and `Welcome`; without it commands go unsigned,
-  as v0.1 allows. The daemon's own kind table decides which kinds require a signature, never a flag the body could
-  carry: destructive kinds from v0.2, all kinds from v0.4. bcd enforces nothing until its trust bundle holds
-  command-signing roots; from then on a present signature is always checked and its destructive kinds
-  (`gpu.reset`, `node.reboot`, `bmc.power`, `bmc.firmware`, `bmc.storage`, `disk.wipe`, `deploy.image`, and since
-  3ff8131 `bmc.boot`, which decides what a machine boots, and `bmc.rotate`, which replaces its BMC credentials)
-  require one. Metal's `metalCommandKinds` marks `bmc.boot` and `bmc.rotate` destructive too (9c14146).
+  as v0.1 allows. Whether a signature is required never depends on a flag the body could carry. bcd enforces
+  nothing until its trust bundle holds command-signing roots; from then on every command, whatever its kind, must
+  carry a valid signature, or it is `BAD_SIGNATURE` (0d42de8). PLAN.md staged this (destructive kinds from v0.2,
+  all kinds from v0.4), but a kind table that exempts non-destructive kinds lets a compromised gateway inject an
+  unsigned "harmless" kind that still acts: `site.httpProxy` could POST a Redfish reset or `InsertMedia` to any BMC
+  of a site around the quorum. The FakeDaemon verifies every command with `required: true` too (12ccfa1). The
+  destructive flag still matters for the quorum below: `gpu.reset`, `node.reboot`, `bmc.power`, `bmc.firmware`,
+  `bmc.storage`, `disk.wipe`, `deploy.image`, since 3ff8131 `bmc.boot` (it decides what a machine boots) and
+  `bmc.rotate` (it replaces the BMC credentials), and since 0d42de8 `site.httpProxy`. `metalCommandKinds` marks
+  the same metal kinds destructive (9c14146, f66e236). `site.httpProxy` also never reaches a BMC: the site agent
+  remembers every BMC host it drives through a `bmc.*` command (`data_dir/bmc-hosts.json`) and refuses those hosts,
+  by name and by resolved address, any `/redfish` path, and any address in its local `[site] bmc_networks`, with
+  `forbidden-target`; a `site.httpProxy` other than a `GET` needs a batch leaf bound to its payload under the
+  quorum. And the URL's host must belong
+  to the command's `target_node_id` (a2a853d): once the site spec lists proxy targets (`SiteSpec.proxy_targets`,
+  which metal fills with the site's agentless machines and their inspected addresses, never a BMC host; 8391d74), an
+  IP literal must be one of the node's listed addresses and a name must match a listed name or resolve only to
+  listed addresses, else `forbidden-target`.
 - **Signed desired state.** Specs have the same envelope under purpose `desired-state`. With
   `pki.commandSigning`, the NodeSpec controller signs each new generation's `DesiredStateBody` with the worker key
   (`CommandSigner.signDesiredState`) in the transaction that bumps the generation, and every bump rewrites both
@@ -419,7 +458,9 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   batch leaf runs at most once. bcd (e7ddb38, 8b0f50c) and the FakeDaemon enforce it after the signature check. On
   the server, the `quorum` module stores batches and collects approvals, the command queue holds batched commands
   until their batch is approved, and the gateway sends each one with its batch's `batch_approval` and its own leaf's
-  `batch_proof` (40be696). No built-in workflow creates batches yet. See
+  `batch_proof` (40be696). The built-in workflows create their batches: metal gives each workflow one of its own
+  or runs it under a `metal.bulk` batch (f66e236), and the health reconciler's reboots and GPU resets get a
+  node-scoped one (e594a4f). See
   [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10).
 
 ## Events

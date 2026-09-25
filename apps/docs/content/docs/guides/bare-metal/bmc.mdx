@@ -112,15 +112,18 @@ are all on the `control` lane and accepted only by agents with role `site`:
 | `bmc.storage` | applying or clearing a RAID layout (a v0.5 draft) | no | destructive | 1h |
 | `boot.prepareRamdisk` | boot entries for a PXE boot | yes | none | 2m |
 | `boot.cleanUp` | removing a node's boot entries | yes | none | 2m |
-| `site.httpProxy` | one HTTP request to an agentless machine | no | none | 1m |
+| `site.httpProxy` | one HTTP request to an agentless machine | no | destructive (0d42de8) | 1m |
 
-A power cycle is not idempotent, so `bmc.power` is never retried blindly. From v0.2 agents refuse
-destructive kinds that lack a worker signature over the command body, so a compromised gateway
-cannot forge one. bcd does so once its trust bundle holds command-signing roots. `bmc.boot` is destructive because
-the boot device, virtual media and BIOS settings decide what a machine boots (with any later power cycle, that is a
-reimage), and `bmc.rotate` because a changed password locks the platform out; both are therefore signed and fall
-under the v1.0 batch quorum (9c14146, 3ff8131). See
-[security](/docs/operations/security).
+A power cycle is not idempotent, so `bmc.power` is never retried blindly. Once its trust bundle holds
+command-signing roots, an agent refuses every command that lacks a valid worker signature over the command body,
+whatever its kind, so a compromised gateway cannot forge one (0d42de8; before, only destructive kinds needed one).
+The destructive flag decides what falls under the v1.0 batch quorum. `bmc.boot` is destructive because the boot
+device, virtual media and BIOS settings decide what a machine boots (with any later power cycle, that is a reimage),
+and `bmc.rotate` because a changed password locks the platform out (9c14146, 3ff8131). `site.httpProxy` is
+destructive because a request can change the machine it reaches, and bcd never lets it reach a BMC: the site agent
+remembers every BMC host it has driven with a `bmc.*` command (`data_dir/bmc-hosts.json`) and refuses those hosts,
+by name and by resolved address, and any `/redfish` path (`forbidden-target`), so a BMC is reached only through the
+`bmc.*` kinds and their quorum. See [security](/docs/operations/security).
 
 ## Redfish in bcd site
 
@@ -163,13 +166,13 @@ fallback fills a JSON without a username), and runs the operation:
   `errorCode`, as the FakeDaemon's fake site answers. The codes are `unreachable` (including a pin mismatch),
   `auth-failed` (401 or 403), `unsupported` (404, 405, or an operation the client does not have), `bmc-error`,
   `invalid-args`, `invalid-address`, `credentials-unavailable` and `unsupported-driver`.
-- **Each kind carries only its own operations.** The kind decides the lane, retry safety and whether a worker
-  signature is required, so bcd runs an operation only under the kind metal assigns it: `bmc.query` (`power.getPower`,
+- **Each kind carries only its own operations.** The kind decides the lane, retry safety and whether the batch
+  quorum applies, so bcd runs an operation only under the kind metal assigns it: `bmc.query` (`power.getPower`,
   `inspect.inspect`, `firmware.components`, `bios.getSettings`, `raid.getLayout`), `bmc.boot`
   (`management.setBootDevice`, `virtual-media.insert` and `eject`, `bios.applySettings`), `bmc.power`
   (`power.setPower`), `bmc.rotate` (`management.rotateCredential`), `bmc.firmware` (`firmware.update`) and
-  `bmc.storage` (`raid.applyLayout`, `raid.clear`). Anything else fails `invalid-payload`, so an unsigned `bmc.query`
-  cannot power a machine off or rebuild its RAID.
+  `bmc.storage` (`raid.applyLayout`, `raid.clear`). Anything else fails `invalid-payload`, so a `bmc.query`, which
+  needs no batch, cannot power a machine off or rebuild its RAID.
 - **Firmware comes from the site cache.** The BMC fetches the image itself and cannot check its digest, so the site
   agent first pulls it into its SHA-256-verified image cache (the step's `url` and `sha256`) and hands the BMC the
   boot server's `/cache/<sha256>` URL. An agent without a boot server has no cache to serve from and refuses the
@@ -272,7 +275,11 @@ minutes, so the gateway relays only ciphertext.
 ## Power
 
 [`metal.power`](/docs/reference/api/metal#power) sends one `bmc.power` command to the site agent and
-returns `{ commandId }` without waiting for the BMC. It is decided as `compute:nodes:power`.
+returns `{ commandId }` without waiting for the BMC. It is decided as `compute:nodes:power`. `bmc.power` is
+destructive, so when the deployment keeps batches it first creates a batch of one leaf (subject
+`bmc:<site agent>/<BMC address>`, kind `bmc.power`, reason `power <action> <node>`) and enqueues the command in it
+(478025a); the answer then carries `batchId` and `held`. With approver keys configured the command stays held until
+approvers sign that batch (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
 
 | `action` | Redfish `ResetType` |
 | --- | --- |

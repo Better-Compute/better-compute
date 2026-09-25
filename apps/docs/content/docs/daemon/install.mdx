@@ -100,10 +100,16 @@ better-compute daemon install-script \
 | `--bcd-version VERSION` | yes | `BETTER_COMPUTE_BCD_VERSION` | The release to install, e.g. `0.1.0` (a leading `v` is dropped) |
 | `--sha256 ARCH=HEX,...` | one of two | | SHA-256 of each architecture's bare binary |
 | `--release-manifest PATH` | one of two | | A signed release manifest; its verified digests are pinned instead |
-| `--release-pins PINS` | with a manifest | `BCD_RELEASE_PINS` | Comma-separated `sha256/...` pins of the release keys |
-| `--release-threshold N` | no | | How many release keys must have signed (1 to 16, default 1) |
+| `--release-pins PINS` | with a manifest | `BCD_RELEASE_PINS` | Comma-separated `sha256/...` pins of the release keys; also written to `config.toml` as `[update] release_pins`, which [self-update](#self-update) needs |
+| `--release-threshold N` | no | | How many release keys must have signed (1 to 16, default 1); `[update] release_threshold` |
+| `--release-sequence N` | no | | The node's release floor, `[update] release_sequence`: bcd never installs an older release; needs `--release-pins` |
+| `--websocket-url URL` | no | | For networks whose TLS-inspecting proxies break mTLS: a `wss://.../v1/session` URL, written as the `[websocket]` section so bcd runs its session and renewals over the [WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04) (0ea4ab4). A configuration that already has a `[websocket]` section is left alone, and the script says so |
+| `--websocket-audience HOST` | no | | `[websocket] audience`, the gateway's public host the node's proof names; needs `--websocket-url` |
+| `--proxy-ca-file PATH` | no | | The TLS-inspecting proxy's CA, read from the local file and embedded only when it holds PEM certificates and nothing else; the script writes it to `/etc/bcd/websocket-proxy-ca.pem` and sets `[websocket] proxy_ca_file`. It is trusted for the WebSocket's TLS only: the daemon still proves its identity inside the session, and the gateway's proof must chain to the pinned serving CA. Needs `--websocket-url` |
+| `--bmc-networks CIDRS` | no | | A site agent's BMC networks (comma-separated), written as `[site] bmc_networks`: `site.httpProxy` never reaches into them |
 | `--plugins` | no | | Prepare the node for bcx driver plugins: a `[plugins]` section and the systemd drop-in; see [the plugin drop-in](#the-plugin-drop-in) |
 | `--privileged-plugins NAMES` | no | | Comma-separated plugins that run as root without the seccomp filter, such as a Kata runtime; implies `--plugins` |
+| `--approver-set-sha256 HEX` | no | | Writes `approver_set_sha256` (64 lower-case hex digits, the `approverSetSha256` that `pki trust-version` prints) into `config.toml`, pinning the node's first approver set (9b7a199): a keyless bcd takes only that set, and runs nothing destructive until it has it; see [pinning the first set](/docs/operations/pki#pinning-the-first-set). An upgrade run without the flag keeps the node's existing pin (b6d401f) |
 | `--pki PATH` | no | | The PKI bundle to read the pins from |
 | `--out PATH` | no | | Write a new file with mode 0755 instead of printing; refuses to overwrite (`FILE_EXISTS`) |
 
@@ -231,7 +237,12 @@ the (empty) plugin directory. The other paths belong to the daemon: `bcd join` w
 writes CDI specs for `hold` bindings (with env files under `/run/bcd/allocations`). A renewal writes the next key as
 `node.key.next` and promotes it only once the new certificate is stored. A journal that does not open is moved aside
 as `journal.db.corrupt-<unix time>` and a new one starts. The token is consumed by the join and never written
-anywhere.
+anywhere. With `--proxy-ca-file` the script also writes `/etc/bcd/websocket-proxy-ca.pem`. After its first
+[self-update](#self-update) bcd owns `<data_dir>/bin/bcd-a`, `bcd-b`, `current`, `previous` and `slots.json`,
+`upgrade.json` while an update awaits its `Welcome`, `update.json` (the release floor and failed versions), and,
+under systemd, `bcd-rollback.service` and `bcd.service.d/50-bcd-rollback.conf`; `/usr/local/bin/bcd` then links to
+`current`. A quorum node keeps `batch-leaves.json` and `unbatched-destructive.json`, and a site agent
+`bmc-hosts.json`, under `data_dir`.
 
 ### config.toml
 
@@ -264,6 +275,15 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[log] json` | no | `true` | JSON lines |
 | `gateway_server_name` | no | | The name the gateway certificate must carry when `gateway_url` names an IP address (an L4 balancer, a dev stack reached from WSL) |
 | `dev_insecure_h2c` | no | `false` | Allows an `http://` `gateway_url` (cleartext HTTP/2 to a dev gateway). Only fakehw builds accept it; the host build refuses to start |
+| `approver_set_sha256` | no | | 64 lower-case hex digits: the only approver set a daemon without approver keys takes first (see [pinning the first set](/docs/operations/pki#pinning-the-first-set)); `--approver-set-sha256` writes it |
+| `[update] release_pins` | no | none | Comma-separated `sha256/...` pins of the release keys. Without them bcd refuses every self-update; see [self-update](#self-update) |
+| `[update] release_threshold` | no | `1` | How many distinct pinned keys must have signed a release |
+| `[update] release_sequence` | no | `0` | The release the node was installed at: no release manifest with a lower sequence is taken (0: unknown) |
+| `[update] entrypoint` | no | `/usr/local/bin/bcd` | The path `bcd.service` starts; the first update makes it a symlink to `<data_dir>/bin/current` |
+| `[site] bmc_networks` | no | | A site agent's BMC networks, comma-separated CIDRs: `site.httpProxy` never reaches into them, whatever the control plane asks. A site agent with it advertises the capability `site.bmc-networks`, and `better-compute doctor` warns about connected site agents without it (a019c85) |
+| `[websocket] url` | no | | A `wss://` URL (`ws://` only with `dev_insecure_h2c`), without credentials, of the gateway's WebSocket endpoint, `.../v1/session`: `bcd node` and `bcd site` then run the session and renewals over the [WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04) |
+| `[websocket] proxy_ca_file` | no | | An absolute path to a PEM file of a TLS-inspecting proxy's CA, trusted for the TLS connection only, never for the gateway's proof |
+| `[websocket] audience` | no | `gateway_server_name`, else the URL's host | The gateway's public host the node's proof names |
 | `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
 | `[boot] ...` | no | | A site agent's boot server; see [site agents](#a-site-agent) |
 | `[plugins] dir` | no | | A directory of bcx driver plugins and their `pins` file (sha256sum format); only pinned plugins run. Empty runs none. See [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd) |
@@ -409,8 +429,11 @@ CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
 Delegate=yes
 DelegateSubgroup=main
 ProtectControlGroups=no
-# plugins.privileged in /etc/bcd/config.toml: runtime plugins that make namespaces (Kata).
+# plugins.privileged in /etc/bcd/config.toml: runtime plugins that run VMs as root (Kata).
+CapabilityBoundingSet=CAP_MKNOD CAP_SYS_RESOURCE CAP_IPC_LOCK CAP_SYS_NICE CAP_NET_RAW CAP_SYS_CHROOT CAP_FSETID CAP_SETPCAP CAP_SYS_PTRACE
 RestrictNamespaces=no
+RestrictAddressFamilies=AF_VSOCK AF_PACKET
+ProtectKernelModules=no
 ```
 
 | Setting | Why |
@@ -418,7 +441,20 @@ RestrictNamespaces=no
 | `CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL` | Added to the unit's set: switch each plugin to its own uid and gid, and stop it. Nothing else is loosened |
 | `Delegate=yes`, `DelegateSubgroup=main` | systemd hands bcd its cgroup, `system.slice/bcd.service`, and runs bcd itself in the `main` child, so the plugins' cgroup can sit beside it |
 | `ProtectControlGroups=no` | bcd can create the plugins' cgroups and write their `memory.max` and `pids.max` |
-| `RestrictNamespaces=no` | Only when `[plugins] privileged` names a plugin: a runtime plugin such as Kata makes namespaces and mounts |
+
+The last four lines are added only when `[plugins] privileged` names a plugin (3b7ae79, following d902063): a runtime
+plugin such as Kata runs VMs as root, so it needs close to root's capabilities (locking VM memory, device nodes,
+virtiofsd's ptrace), namespaces and mounts, vsock and packet sockets, and the vhost and vsock kernel modules:
+
+| Setting | Why |
+| --- | --- |
+| `CapabilityBoundingSet=CAP_MKNOD CAP_SYS_RESOURCE CAP_IPC_LOCK CAP_SYS_NICE CAP_NET_RAW CAP_SYS_CHROOT CAP_FSETID CAP_SETPCAP CAP_SYS_PTRACE` | Added to the bounding set for the privileged plugin, which runs as root |
+| `RestrictNamespaces=no` | The plugin makes namespaces and mounts |
+| `RestrictAddressFamilies=AF_VSOCK AF_PACKET` | Added to the allowed socket families: vsock to its guests, packet sockets |
+| `ProtectKernelModules=no` | The vhost and vsock modules |
+
+Confined plugins are unchanged: each drops every capability when bcd switches it to its own uid, with
+`no_new_privs` and the seccomp filter. A node without privileged plugins gets none of these four lines.
 
 `--plugins` makes a node a plugin node. The script then creates `/usr/local/lib/bcd/plugins` (root-owned, 0755, so
 each plugin's uid can reach its binary) and, unless the configuration already has a `[plugins]` section, appends
@@ -543,7 +579,8 @@ kernel command line the site agent rendered into the machine's iPXE script, so i
 A missing parameter exits 2. The ramdisk joins with the `discovery` attestor as role `ramdisk` (see
 [attestation](/docs/guides/nodes/attestation#discovery)), logs JSON, then runs the agent until the machine kexecs
 into its installed OS or powers off. Its image needs `bcd` plus the tools its kinds call: `nvme-cli`, `hdparm`,
-util-linux (`blkdiscard`, `blockdev`, `lsblk`, `mount`), `udevadm`, `kexec-tools` and, for `diag.dcgm`, `dcgmi`.
+util-linux (`blkdiscard`, `blockdev`, `lsblk`, `mount`), e2fsprogs' `debugfs` and `mtools` (to write into and read
+from a deployed image's ext and FAT filesystems without mounting them; 1ae1789, d9a900f), `udevadm`, `kexec-tools` and, for `diag.dcgm`, `dcgmi`.
 
 ## Upgrades
 
@@ -571,28 +608,49 @@ The node keeps its identity and journal across the restart. On reconnect its `He
 ### From v0.4: rollouts and self-update
 
 The v0.4 design moves upgrades into desired state. A [rollout](/docs/guides/rollouts) sets
-`NodeSpec.daemon = { version, url, sha256 }` on nodes wave by wave (1%, 10%, 50%, 100% by default) within each
-pool's disruption budget, and a node succeeds when it rejoins reporting that version. On the node, PLAN.md §6
-designs:
+`NodeSpec.daemon = { version, url, sha256, signature }` on nodes wave by wave (1%, 10%, 50%, 100% by default) within
+each pool's disruption budget, and a node succeeds when it rejoins reporting that version. A daemon too old to speak
+the server's minimum protocol version gets `Welcome.upgrade_required`, and its session accepts only the
+`daemon.upgrade` command kind, which carries the same `DaemonSection`; the rollout controller sends it to such nodes.
 
-- two binary slots with a `current` symlink: verify the download, write `upgrade.json` with a deadline of now plus
-  120 seconds, swap, and `exec` the new binary;
-- no `Welcome` by the deadline: swap back;
-- a crash loop trips `StartLimitBurst`, and `OnFailure=bcd-rollback.service` restores the old slot;
-- running workloads are not touched.
+### Self-update
 
-A daemon too old to speak the server's minimum protocol version gets `Welcome.upgrade_required`, and its session
-accepts only the `daemon.upgrade` command kind, which carries the same `DaemonSection`. The rollout controller sends
-it to such nodes. `daemon.upgrade` is self-terminating, like `node.reboot`: see
-[delivery](/docs/daemon/delivery).
+bcd updates itself in place (de9f380, `daemon/internal/agent/update.go`, `daemon/internal/selfupdate`), for both the
+`daemon` section and `daemon.upgrade` (node and site roles):
 
-<Callout type="warn" title="Self-update is control-plane only today">
-`@better-compute/rollout` ships the releases, the rollout controller, `NodeSpec.daemon` and `daemon.upgrade`. The
-node half is not written: bcd has no slot swap and no `daemon.upgrade` kind yet (it answers that kind
-`UNSUPPORTED` and reports a non-empty `daemon` section as `SectionUnsupported`), and the unit the script installs has
-no `OnFailure` rollback service. Only the FakeDaemon's opt-in `selfUpdate` plays the node half, in tests. Rerun the
-install script to upgrade.
-</Callout>
+1. **Only a signed release.** `DaemonSection.signature` is the release's signed manifest (`manifest.json` from
+   `better-compute release sign`). At least `[update] release_threshold` distinct keys pinned in `[update]
+   release_pins` must have signed it (purpose `release-manifest`), and it must be for product `bcd` and the section's
+   version, have a sequence not below the release this node ran or was installed at (`[update] release_sequence`; no
+   rollback), be unexpired on both the host clock and server time, and list the bare binary
+   `bcd_<version>_<os>_<arch>` with the section's SHA-256. Without release pins bcd takes no binary at all: the
+   control plane alone can never hand a node one. The URL must be `https://`.
+2. **Two slots.** The binaries live in `<data_dir>/bin/bcd-a` and `bcd-b`, with `current` and `previous` symlinks
+   and `slots.json`. The first update adopts the binary the install script put at the entrypoint (`[update]
+   entrypoint`, default `/usr/local/bin/bcd`) into slot `a` and makes the entrypoint a symlink to `current`; an
+   entrypoint that is a symlink somewhere else is refused. The download goes into the other slot, at most 512 MiB,
+   checked against the manifest's size and digest as it streams, with an idle watchdog.
+3. **Swap and confirm.** bcd writes `upgrade.json` with a deadline of now plus 120 seconds (fsynced), points
+   `current` at the new slot and execs the entrypoint once everything is closed. The new binary confirms itself on
+   its first `Welcome`: the release floor moves up (`update.json`) and `upgrade.json` goes. Without a `Welcome` by
+   the deadline it swaps back and restarts; the old binary then records the version as failed ("bcd X did not
+   start"), reports the `daemon` section `FAILED` with reason `UpdateFailed`, and never tries that version again
+   until `bcd update --clear-failed`.
+4. **Crash loops.** Under systemd the first update writes `bcd-rollback.service` and a `bcd.service` drop-in
+   (`50-bcd-rollback.conf`: `StartLimitIntervalSec=600`, `StartLimitBurst=5`, `OnFailure=bcd-rollback.service`),
+   which restores `previous`, only while `upgrade.json` exists. fakehw builds never write them.
+5. **Going back.** A rollout rolled back to the version in the other slot needs no manifest: that binary ran here,
+   and its digest must still match the section.
+
+`daemon.upgrade` is self-terminating, like `node.reboot`: it reports `RUNNING` before the swap and `SUCCEEDED` from the
+new binary once it is welcomed, or `FAILED` with `update-failed` after a swap back; a restart without a reboot is
+decided by `upgrade.json`, not the boot id. Running workloads are not touched. `bcd sim` and `bcd ramdisk` run
+without self-update: the `daemon` section stays `SectionUnsupported` and the kind `UNSUPPORTED`. `bcd update` shows
+the slots, the release floor, a pending update and failed versions, and `bcd doctor` warns without release pins,
+fails when the slots are in use but the entrypoint does not link to `current`, and warns about a pending update or a
+failed version (2845f41). `tests/e2e/bcd.test.ts` updates a real bcd to a second signed build through
+`daemon.upgrade`, a real exec and its `Welcome` (fc0ca6a); no release has been cut, so no real host has
+self-updated yet. See [delivery](/docs/daemon/delivery).
 
 The fleet-wide order for any upgrade is: expand migrations, then workers and api, then gateways one at a time
 with `Drain`, then daemons in waves, and contract migrations in the next release. See

@@ -202,7 +202,8 @@ framework.
 | `delete_sandbox_snapshot` | `sandboxSnapshots.delete` | any authenticated caller | destructive, idempotent |
 | `list_command_batches` | `commandBatches.list` (v1.0): filter `state`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
 | `get_command_batch` | `commandBatches.get` with a `batchId` (`batch_…`) | any authenticated caller | read-only |
-| `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot` | `compute:nodes:read` on the node | destructive |
+| `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot`, optionally with a `batchId` | `compute:nodes:read` on the node | destructive |
+| `propose_command_batch` (with `execCommand: true`) | `commandBatches.create` (v1.0): a `node.reboot` batch over the given nodes | any authenticated caller | idempotent |
 | `fleet_export` (with `fleet: true`) | `fleet.export` | `compute:fleet:admin` on the fleet | read-only |
 | `fleet_plan` (with `fleet: true`) | `fleet.plan` | `compute:fleet:admin` on the fleet | read-only |
 
@@ -238,10 +239,17 @@ Every argument is checked against the tool's JSON Schema before anything is call
 (`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`, `batch_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
 with the path of the first problem.
 
-**Batch tools only read.** `list_command_batches` and `get_command_batch` show the tenant's
+**Batch tools read and propose, never approve.** `list_command_batches` and `get_command_batch` show the tenant's
 [destructive-batch](/docs/operations/pki#the-destructive-batch-quorum-v10) quorum: a batch's reason, size, the
-approvals it has and needs, and its commands by state. There is no approve tool: approving is a person's signature
-with an approver key held off the control plane.
+approvals it has and needs, and its commands by state. With `execCommand: true`, `propose_command_batch` (171ad2f)
+creates a batch for operators to approve: `nodeIds` (1 to 1,000 distinct `node_…` ids), `reason` (1 to 500
+characters, what the approvers read), optionally `kind` (only `node.reboot`, the default), `notAfterSeconds` (60 to
+259,200, how long approvals and commands are accepted; default 24 h) and an `idempotencyKey`. Every leaf's subject is
+a node. Nothing runs until people approve it with their approver keys (`better-compute batch approve`); the agent then
+passes the `batchId` to `exec_command` for each node, and the command waits, held, until the batch is approved. With
+approver keys configured, `exec_command` with `node.reboot` and no `batchId` is refused `INVALID_STATE`, reason
+`batch-required`. There is no approve tool: approving is a person's signature with an approver key held off the
+control plane.
 
 **Fleet tools plan but never apply.** `fleet_plan` returns the changes and the `planHash`, with the list of calls
 replaced by `callCount`. There is deliberately no apply tool: a person reviews the plan and runs
@@ -261,7 +269,8 @@ deliberately light:
   a delegation's confirm list).
 - The fleet tools need `compute:fleet:admin` on `compute-fleet/global`, which only resolves in the root tenant.
 - `list_command_batches` and `get_command_batch` are open to any authenticated caller; compute decides
-  `compute:batches:read` on the tenant.
+  `compute:batches:read` on the tenant. So is `propose_command_batch`, where compute decides
+  `compute:batches:create` on the tenant, and the batch then needs people's approver keys.
 - `create_sandbox` is visible to a caller with `compute:sandboxes:read` on `compute-sandbox-template/{templateId}`:
   creating a sandbox starts with seeing its template. The other sandbox tools (`list_sandbox_templates`,
   `list_sandboxes`, `get_sandbox`, `extend_sandbox`, `delete_sandbox`, `list_sandbox_snapshots`,
@@ -333,7 +342,8 @@ to `expired`. Without a bearer token or a tenant it returns nothing and the tool
 ## Limits worth knowing
 
 - `exec_command` is off unless you pass `execCommand: true`, and even then it only runs `inventory.refresh`,
-  `logs.collect` and `node.reboot`. `node.reboot` restarts the machine.
+  `logs.collect` and `node.reboot`. `node.reboot` restarts the machine; under the quorum it needs a batch from
+  `propose_command_batch` that people approved.
 - `run_diagnostic` runs `diag.nvml` only. It returns the queued command; the result arrives when the node finishes,
   and `node_status` or the command's own methods show it.
 - `reserve_gpus` always books with `binding: 'hold'`; whole-node leases, spot, gangs and calendar starts are not

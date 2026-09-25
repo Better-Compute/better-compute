@@ -148,18 +148,24 @@ agreement. A third form, `mayBeSchedulableSql` (schedulable for some tenant: no 
 drives the node controller's wake edge, so a node that becomes schedulable only for its dedicated tenant still
 wakes that tenant's pending reservations.
 
-Scalar room is `floor(allocatable × ratio) − allocated` from the node's `node_resources` row.
+Scalar room is `floor(allocatable × ratio) − allocated` from the node's `node_resources` row. TypeScript's floor matches the SQL
+guards' numeric one (`scalarCapacity()`, a44b886, adds an epsilon that absorbs float rounding), so `100 × 0.29` is
+29 in the pipeline, the pool index and the rollup, not 28, and the last unit places; the guarded commit still
+decides. A queued reservation is not placed into a pool archived after it
+was queued: the batch placer reads the locked pool row, and such a reservation stays pending with `the pool is
+archived`, as inline placement answers.
 
 `nodeLabels` (v0.2) is checked on every path: the pipeline filter above, the SQL shortlist (a `node_labels` check
 added only when the request names labels, so other requests pay nothing) and the pool-lease index, which memoizes
 its rankings per label set. The labels a request usually needs are the ones the gateway writes at every `Hello`:
 each driver the daemon advertises becomes the system label `bc.dev/driver.<id>=<version>` (see
-[inventory and health](/docs/guides/nodes/inventory-and-health)). Labels are read at planning time, not locked at
-commit, so a `Hello` that drops a driver at that moment races like any inventory change, and the daemon refuses a
-runtime it does not have. A value of `'*'` (`anyLabelValue`) asks only for the label to exist, whatever its value,
+[inventory and health](/docs/guides/nodes/inventory-and-health)). Plans read labels without locks, and the commit
+reads the locked nodes' labels again (bb6da07, in `commitPlan` and `commitPlansBulk`), so a label that went away in
+between, such as a capability a downgraded daemon no longer advertises, makes that commit a lost race, and the placer
+replans without the node. A value of `'*'` (`anyLabelValue`) asks only for the label to exist, whatever its value,
 on every path. The capacity API does not take `nodeLabels` from callers; a module sets it on the requests it builds
 through the capacity port. The vps module does (PLAN.md's walkthrough 4): a hosted instance whose runtime `bcd` does
-not build in (anything but `libvirt-kvm` and `cloud-hypervisor`) asks for `bc.dev/driver.<runtime>: '*'`
+not build in (anything but `libvirt-kvm`, which host builds with `virsh` run, and the planned `cloud-hypervisor`) asks for `bc.dev/driver.<runtime>: '*'`
 (`runtimeNodeLabels`), so a plugin runtime such as `firecracker` lands only on hosts whose daemon advertised that
 driver, in any version.
 

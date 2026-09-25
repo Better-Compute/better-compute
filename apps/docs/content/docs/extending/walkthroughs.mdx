@@ -111,7 +111,10 @@ the `provisioned` attestor only if it carries `expect: { productUuid }` or the h
 
 Talos manages itself through its own API and never runs `bcd`. The plugin is one step and one profile:
 
-- `wait.talosReady` is a control-plane step with `relays: ['site']`. It reads the machine's address from
+- `wait.talosReady` is a control-plane step with `relays: ['site']` and `sends: ['site.httpProxy']`, the kind it
+  relays. `site.httpProxy` is destructive (0d42de8), so the declaration is what puts it in the workflow's quorum
+  batch: without it, a deployment with `pki.approvers` set refuses the step's commands at enqueue (see
+  [relaying under the quorum](/docs/extending/steps-and-profiles#relaying-under-the-quorum)). It reads the machine's address from
   `metal_nodes.addresses` (recorded by Redfish inspection), and calls `httpViaSite(ctx, { url, tlsSpkiSha256, poll: true })`
   on `https://<address>:50000/machine/version`. Until Talos answers 200, it throws `stepNotReady`.
 - `talos-1.8` mounts the Talos ISO with `media.insert`, sets boot to `cd`, power-cycles, and waits in
@@ -141,7 +144,8 @@ settled answer and sends the next request, which is what a readiness loop needs.
 
 `tests/metal-fakedaemon.test.ts` runs the same Talos plugin on the dev stack: the real control plane with provision
 and metal, the real gateway, JoinService, and a site agent that is a FakeDaemon of role `site`, joined with a site
-token (`tests/metal-dev-site.test.ts`), in front of simulated BMCs. Every command crosses the gateway and back.
+token (`tests/metal-dev-site.test.ts`), in front of simulated BMCs. Every command crosses the gateway and back, and
+the real server's batch check runs (f66e236). Both tests declare `sends` on the Talos step.
 
 ```bash
 pnpm vitest run tests/extensions/talos.test.ts tests/metal-fakedaemon.test.ts

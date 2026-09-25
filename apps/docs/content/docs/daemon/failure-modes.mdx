@@ -133,6 +133,12 @@ it `SUCCEEDED` with `rebooted`, and the server's `Hello` transaction completes a
 the same way when it sees the new `boot_id` or role. Neither side ever replays it. Files under `/run` are gone after a
 reboot; the devices converger rewrites missing env files for assignments it still holds.
 
+**Self-update.** A `daemon.upgrade` restarts bcd without a reboot, so the boot id does not change; bcd decides it from
+`upgrade.json` instead (de9f380). The new binary reports `SUCCEEDED` once its first `Welcome` arrives. A binary that
+crashes or never gets a `Welcome` within 120 seconds is swapped back (under systemd a crash loop also triggers
+`bcd-rollback.service`), and the old binary reports `FAILED` with `update-failed` and never tries that version again.
+See [self-update](/docs/daemon/install#self-update).
+
 ## Network partition and half-open links
 
 When a node's link is cut, both ends notice through silence. The gateway closes the session after three missed

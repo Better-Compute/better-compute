@@ -264,6 +264,14 @@ Revocation also happens without a call, the same way (the serial joins the node'
 | The identity's sessions are revoked (`auth:session:revoke`, `auth:session:revoke-others`, `identity:revoke-sessions`) | Every certificate it holds, since the event does not say which session ended; issue a new one from a live session | `serve`'s default `sessions` handler |
 | A re-decision says no | That certificate, with reason `access-withdrawn` | The `tunnels.ssh-certificates-reauthorize` reconciler |
 
+On a departure, `serve`'s host runs these revocations first (b3f7a81, review 7 M3): the identity handler revokes the
+SSH certificates and closes the tunnels, and the agent handler drops its cached authentications, before any module
+reaction (the vps sandbox reactions) runs in the same inbox transaction. Each module reaction then runs under its own
+savepoint (`host_iam_reaction`), so one that throws is undone alone and cannot roll the revocation back. The identity
+handler reports such a failure through `host.iam.onError` and the `IamReconcile` sweep re-runs departed identities;
+the agent handler rethrows after undoing the reaction, so the inbox retries the event without undoing the
+revocations (a3be14c), since an agent stays active in IAM and the sweep would never re-run it.
+
 The reconciler runs every minute and re-decides the 500 longest-unchecked live certificates: each one as
 `compute:nodes:ssh-root` on its node for the session that issued it (`ssh_certificates.session_id`), through
 `IamPort.authorizeSession`. An allow stamps `reauthorized_at`. This catches what Better IAM does not announce as an

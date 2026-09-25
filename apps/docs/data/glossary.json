@@ -50,7 +50,7 @@
   {
     "id": "bcd",
     "term": "bcd",
-    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. None of it is released. Its v0.1 node agent (`bcd join`, `bcd node`, `bcd status`) is tested end to end; `bcd site` and `bcd ramdisk` are written and covered by Go unit tests only; `bcd sim` runs many real node agents in one process on fake-hardware builds only; real VM runtimes are not written, and the TypeScript `FakeDaemon` stands in where bcd is missing.",
+    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. None of it is released. Its v0.1 node agent (`bcd join`, `bcd node`, `bcd status`) is tested end to end; `bcd site` and `bcd ramdisk` are written and covered by Go unit tests only; `bcd sim` runs many real node agents in one process on fake-hardware builds only; a host build with `virsh` runs VPS instances on the `libvirt-kvm` runtime, tested against a fake `virsh` only; self-update with A/B slots and the WebSocket fallback are written; and the TypeScript `FakeDaemon` stands in where bcd is missing.",
     "href": "/docs/daemon"
   },
   {
@@ -128,7 +128,7 @@
   {
     "id": "destructive-batch-quorum",
     "term": "Destructive-batch quorum",
-    "definition": "The v1.0 control against a compromised api or worker: destructive commands carry a `batch_id` and run only when enough operator approver keys, pinned in the trust bundle and held off the control plane, signed a `BatchApproval` over the Merkle root of the batch's (subject, kind) scope, which the machine checks with the command's inclusion proof. bcd and the FakeDaemon enforce it and the server stores, approves and holds batches (`commandBatches`, `enqueue({ batchId })`), but the gateway does not attach approvals to batched commands yet.",
+    "definition": "The v1.0 control against a compromised api or worker: destructive commands carry a `batch_id` and run only when enough operator approver keys, pinned in the trust bundle and held off the control plane, signed a `BatchApproval` over the Merkle root of the batch's (subject, kind) scope, which the machine checks with the command's inclusion proof. bcd and the FakeDaemon enforce it, the server stores, approves and holds batches (`commandBatches`, `enqueue({ batchId })`), the gateway attaches each batched command's approval and proof, and the built-in workflows, `metal.bulk` and `metal.power` create their own batches.",
     "href": "/docs/operations/pki#the-destructive-batch-quorum-v10"
   },
   {

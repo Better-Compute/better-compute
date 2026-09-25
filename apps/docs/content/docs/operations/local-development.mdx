@@ -228,7 +228,9 @@ A `DevFleet` has `createPool({ gpuModel?, key?, expectGpuCount? })`, `join({ poo
 (1 to 10,000 machines on one token), `joinSite({ siteId, count?, kinds?, seed? })` for site agents (1 to 16, through
 `siteTokens.create`), `waitFor(nodeIds, { provisionState?, timeoutMs? })` (default `adopted`, 30 s), the running
 `daemons`, the `gatewayUrl`, and `close()`. `createDevStack()` takes `database`, `iam`, `modules`, `baseURL`,
-`secret`, `trustDomain`, `worker` (default `pollMs` 100), `region`, `gateway` and `daemon` options.
+`secret`, `trustDomain`, `worker` (default `pollMs` 100), `region`, `gateway` and `daemon` options, and
+`signedIntent: true` (5071dbc), which gives the stack a fresh command-signing root (`pki.commandSigning`), so every
+command and spec is signed and joining daemons receive the roots in `JoinResponse.trust`.
 
 ### A real bcd
 

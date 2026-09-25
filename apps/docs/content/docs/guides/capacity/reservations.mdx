@@ -6,6 +6,7 @@ icon: Ticket
 packages: ['@better-compute/capacity']
 sources:
   - packages/capacity/src/reservations.ts
+  - packages/capacity/src/migrations.ts
   - packages/server/src/join/allocation-binding.ts
   - packages/server/src/join/gateway-reports.ts
   - tests/e2e/attested-bindings.test.ts
@@ -476,6 +477,20 @@ the pending change; so does a handler that throws after an allow (the reservatio
 transactions), through the admission's `abandoned` hook in a transaction of its own, so a refused
 lifetime is never merged into later decisions on the reservation (a2288ec). A retry with the same key
 decides again.
+
+One extend at a time stages the pending change (f36248d, review 7), since the authorization projection keeps one
+pending value per resource: two concurrent extends could otherwise interleave, one decided on the other's shorter
+duration and then applying its own longer one past `BoundedExtend`, and one's refusal could clear the other's
+change. `capacity_extend_holds` (migration `capacity/0005_extend_holds`: the reservation, the hold and when it was
+taken; deleted with the reservation) gives the slot to one request. The hold is a nonce the server mints for each
+extend (`newId('hold')`, kept on the parsed input, which callers cannot set), not the caller's `x-request-id`, which
+two concurrent extends could share (d6f7ddc); its age is measured with `compute_now()`, since replicas' clocks may
+disagree. While another extend holds the slot, an extend is `CONFLICT` with `details.reason: 'extend-in-flight'`
+and `retryAfterSeconds: 60`; a hold older than 60 seconds is taken over. Transaction 2 applies the change only while
+its hold still owns the slot, and a refusal, an abandon or a budget refusal clears the pending change only when the
+hold is its own. The completing transaction
+takes the pool lock first (bb6da07), so an extend of a gang and a batch commit cannot deadlock on each other's
+bookings. Sandboxes do the same with their own hold (see [sandboxes](/docs/guides/vps/sandboxes)).
 
 **Release and cancel.** [`reservations.release`](/docs/reference/api/reservations#release) ends a
 reservation at `compute_now()`: the current booking is truncated, future ones are deleted, quota is

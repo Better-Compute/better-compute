@@ -11,6 +11,13 @@ sources:
   - packages/pki/src/spiffe.ts
   - packages/pki/src/intent.ts
   - packages/pki/src/quorum.ts
+  - packages/server/src/quorum/quorum.ts
+  - packages/metal/src/batch.ts
+  - packages/metal/src/api.ts
+  - packages/metal/src/reconcile.ts
+  - packages/provision/src/batch.ts
+  - packages/provision/src/remediation.ts
+  - packages/mcp/src/tools.ts
   - packages/testing/src/daemon/fake-daemon.ts
   - tests/pki-quorum.test.ts
   - packages/pki/src/tickets.ts
@@ -239,9 +246,13 @@ It reads the trust bundle the deployment last published (`trust_bundle_state`; i
 [follows its content](#signed-intent)) through the deployment's configuration and compares it with this
 configuration and PKI bundle (03bdbc9). It prints `version` (the published one), `configurationMatches` (whether
 this bundle's roots and the configured quorum publish the same bundle), `nextVersion` (what this configuration would
-publish: the same version, or the next one), `quorumChanged` and, when it did, `signQuorumFor` (the version to sign
-the change for with [`batch sign-approvers`](#changing-the-approver-set)), and how many connected daemons there are
-and how many are behind that version. Before any process has published a bundle it is `NOT_FOUND`. `--pki PATH`
+publish: the same version, or the next one), `approverSetEpoch` (the published approver set's epoch),
+`approverSetSha256` (this configuration's set digest, for [pinning the first set](#pinning-the-first-set), with
+`publishedApproverSetSha256` while they differ), `approverSetBehind` and `approverSetSample` (connected nodes
+enforcing another set; 6612496), `quorumChanged`
+and, when it did, `signQuorumForEpoch` (the epoch to sign the change for with
+[`batch sign-approvers`](#changing-the-approver-set), one above the published one; c6214dc), and how many connected
+daemons there are and how many are behind that version. Before any process has published a bundle it is `NOT_FOUND`. `--pki PATH`
 names the bundle.
 
 ### Reloading gateway certificates
@@ -328,10 +339,11 @@ open with this deployment's secret, `pki.ca-expired` for an expired CA, `pki.ca-
 within 30 days, and `pki.rotation` (info) while a command-signing root rotation is half done: a new root published
 but not signing yet (run `--stage switch` once every daemon has the trust version), or a former root still trusted
 (run `--stage drop` at least 24 hours after the switch). Doctor (and the support bundle) also compares the
-configured approver quorum with the published one (03bdbc9): `pki.quorum-unsigned` (warning) when it differs and no current
-approvers signed it for the next version, since daemons holding approver keys would refuse it (the fix names the
-exact `batch sign-approvers --version`), and `pki.quorum-change` (info) when the change is signed for that version
-or introduces the first set.
+configured approver quorum with the published one (03bdbc9): `pki.quorum-unsigned` (warning) when it differs and its
+current approvers have not signed it for a higher epoch, since daemons holding approver keys would keep the old
+quorum (the fix names the exact `batch sign-approvers --epoch`, the published epoch plus 1, and
+`pki.approvers.epoch`; c6214dc), and `pki.quorum-change` (info) when the change is signed for a higher epoch or
+introduces the first set.
 
 ## Trust domain and SPIFFE IDs
 
@@ -394,10 +406,10 @@ command-signing root certifies for at most 24 h, with role `worker` (`OU=bc-role
 a `worker` certificate chaining to a command-signing root; there is no command-signing extended key usage. Each
 process replaces its worker key after 60% of its lifetime.
 Daemons receive the roots in their trust bundle, first in `JoinResponse` and then in `Welcome`, signed by the
-JoinService key so a gateway can relay it but not change it. A daemon checks any signature that is present. bcd,
-once it holds command-signing roots, requires a valid signature on every command whatever its kind, since an
-unsigned non-destructive kind could still act (0d42de8, review 7); before, as the FakeDaemon still does, its own kind
-table decided, requiring one only for destructive kinds.
+JoinService key so a gateway can relay it but not change it. A daemon checks any signature that is present. Once it
+holds command-signing roots, a daemon requires a valid signature on every command whatever its kind, since an
+unsigned non-destructive kind could still act: bcd since 0d42de8 and the FakeDaemon since 12ccfa1 (review 7; pki's
+`VerifyIntentOptions.required`). Before, each daemon's kind table decided, requiring one only for destructive kinds.
 
 The same worker key signs desired state (v0.4). When the NodeSpec controller writes a new generation, it encodes the
 `DesiredStateBody` with pki's shared encoder (`storedDesiredState`, spec hash = SHA-256 of the encoded NodeSpec),
@@ -431,9 +443,10 @@ newer (0a31734, review 7): `trust_bundle_history` (migration `quorum/0006_trust_
 digest with its version, so a stale replica that restarts on an old configuration serves that bundle at its old
 version, which daemons ignore, and logs a warning, rather than publishing it as the next version and making daemons
 trust again, say, a command-signing root the new configuration removed. It does not change the record. Only an
-explicit `pki.trustVersion` above the recorded version publishes such a bundle again. `pki.trustVersion` is now a floor, not something you must bump: the published version
-is never below it. You set it explicitly only to publish [approver-set signatures](#changing-the-approver-set), which
-name the version they were signed for.
+explicit `pki.trustVersion` above the recorded version publishes such a bundle again. `pki.trustVersion` is now a
+floor, not something you must bump: the published version is never below it. [Approver-set
+signatures](#changing-the-approver-set) no longer name a version: since c6214dc they sign the set's own epoch
+(`pki.approvers.epoch`), so they stay valid on every later version.
 
 `better-compute pki rotate-command-root --stage add|switch|drop` runs one step on the bundle and writes it back
 (sealed when `BETTER_COMPUTE_SECRET` is set), printing the roots and the bundle's trust version (with the content
@@ -480,17 +493,18 @@ the machine: destructive commands carry a `batch_id` in the worker-signed body, 
 Merkle root of the batch's scope. Each command ships with its inclusion proof, so the executing agent checks
 membership itself and neither the control plane nor a gateway can widen the batch.
 
-<Callout type="warn" title="The chain is built; the built-in workflows do not batch yet">
+<Callout type="info" title="Built end to end; workflow leaves are unbound">
 Built and tested end to end: the protocol seams, the `better-compute/pki` primitives, `pki.approvers` in the signed
 trust bundle with approver-set signatures for quorum changes, the server's `quorum` module (batches, their stored
-scopes and proofs, `commandBatches` approvals), the command queue's `createBatch` and `enqueue({ batchId })`, the
-gateway attaching each batched command's approval and inclusion proof (40be696), `commandBatches.create` and
-`commands.run({ batchId })` for batches over the API (46afe75), the approvers' `better-compute batch` commands, and
-enforcement in both bcd and the FakeDaemon. The remaining gap is the producer side: the
-built-in workflows (metal's wipe and deploy, the `bmc.*` kinds) do not create batches yet, which is in progress
-(`WorkflowEngine.start({ batchId })` and `StepContext.batchId` exist for it, 3275a33). So with `pki.approvers` set
-(or `BETTER_COMPUTE_APPROVER_KEYS` in the examples) and no break-glass allowance, their destructive commands fail
-at enqueue with `INVALID_STATE`, reason `batch-required`, unless `unbatchedDestructivePerHour` allows them.
+scopes, payloads and proofs, `commandBatches` approvals), the command queue's `createBatch` and
+`enqueue({ batchId })`, the gateway attaching each batched command's approval and inclusion proof (40be696),
+`commandBatches.create` and `commands.run({ batchId })` for batches over the API (46afe75), the approvers'
+`better-compute batch` commands, enforcement in both bcd and the FakeDaemon, and the producers: metal's workflows,
+`metal.bulk` and `metal.power`, the health reconciler's remediations and the MCP server's `propose_command_batch`
+all create their batches (see [who creates batches](#who-creates-batches)). What stays open: the batches built-in
+workflows create leave every leaf's payload unbound (any payload of its kind for its subject), because the bytes
+are only known later, and approvers see those leaves flagged; binding a leaf to the operation instead of its bytes
+is a post-v1.0 option in PLAN.md §13 (see the [roadmap](/docs/reference/roadmap)).
 </Callout>
 
 **The scope.** A batch's scope is a tree with one leaf per distinct `(subject, kind, payload)`:
@@ -499,6 +513,16 @@ at enqueue with `INVALID_STATE`, reason `batch-required`, unless `unbatchedDestr
 `packages/protocol/golden/batch-scope.json`). `payload_sha256` binds a leaf to exactly one operation, or is left
 empty to allow any payload of that kind for that subject; the agent accepts a proof from either the bound or the
 unbound leaf (77cdf4f; `command_batch_scope` and `command_batch_members` carry it, migration `quorum/0002_payload_digest`).
+A leaf may also carry its payload itself, `{ typeUrl, value }` (at most 64 KiB a leaf, and 8 MiB for all of a
+batch's leaves): its digest is then derived from those bytes (a `payloadSha256` given as well must match), and the
+payload is stored (migration `quorum/0007_leaf_payload`) so approvers can decode the image, firmware or power action
+they sign, not only a hex digest (2ca0ba4). The `typeUrl` must be `type.googleapis.com/` plus the kind's own payload
+type from the registry (fc2df7d, review 8), so a creator cannot label bytes as a harmless message.
+
+Every subject must name a machine of the batch's own tenant (fc2df7d): the node itself, the site agent in
+`bmc:<agent>/<address>`, or the target in `node:<id>`. A subject naming another tenant's node is `NOT_FOUND` and a
+malformed one `INVALID_INPUT`, since approvers sign under the batch's tenant while the daemon checks only the leaf:
+otherwise a compromised worker could spend tenant A's approval on tenant B's machines.
 The subject is what the command acts on, computed by the executing agent from the signed body:
 
 | Kinds | Subject |
@@ -520,7 +544,8 @@ it, since approvers sign the approval themselves. The `TrustBundle` gains `appro
 a set change (`approverSetInput`: a u32 key count, then each key's length-prefixed `kid` and SPKI in `kid` order, the
 u32 threshold, the u32 tier count and each tier's pair, the u32 unbatched cap; all big-endian) have a golden vector
 beside `batch-scope.json`, `packages/protocol/golden/approver-set.json`, with the set digest and the signing input
-for a version, so bcd pins its encoding to the same bytes (26ab0fc). Approvals are signed under the purpose
+for an epoch, so bcd pins its encoding to the same bytes (26ab0fc). `approver_set_epoch` (field 8, c6214dc) numbers
+the quorum fields separately from the bundle's `version`. Approvals are signed under the purpose
 `batch-approval`, and the signed parts end with the deployment's trust domain, which every verifier takes from its
 own configuration: an approval signed for staging never admits a command in production. The server therefore needs
 `pki.join` (the trust domain) to accept approvals, and refuses the quorum with `INVALID_CONFIG` without it.
@@ -539,8 +564,8 @@ own configuration: an approval signed for staging never admits a command in prod
 | `verifyBatchCommand(command, approval, proof, options)` | The agent's check: its own batch, an approval that holds, and its `(subject, kind)` in scope; `ACCESS_DENIED` with `details.reason` (`no-approval`, `other-batch`, `expired`, `too-few-approvals`, `not-in-scope`, ...) |
 | `approverSetOf(bundle)` | A `TrustBundle`'s quorum fields as an `ApproverSet` (`approverKeys`, `approverThreshold`, `quorumTiers`, `unbatchedDestructivePerHour`) |
 | `approverSetDigest(set)`, `sameApproverSet(a, b)` | SHA-256 of the canonical set bytes (`approverSetInput`), and whether two sets are the same quorum (keys in any order) |
-| `signApproverSet({ version, set }, privateKey)` | One current approver's `Signature` over a new set for one trust bundle version: purpose `approver-set`, parts `[uint64_be(version), approverSetDigest(set)]` |
-| `verifyApproverSetChange(current, next)` | Whether a holder of `current` may take `next` (`next` carries `version` and `approverSetSignatures`): nothing is needed without current approver keys or with an unchanged set; otherwise the current threshold of distinct current keys must have signed. Returns the approving kids; `ACCESS_DENIED` with reason `approver-set-unsigned`, or `no-threshold` when the current threshold is 0, which admits no change |
+| `signApproverSet({ epoch, set, trustDomain }, privateKey)` | One current approver's `Signature` over a new set at one approver-set epoch of one deployment: purpose `approver-set`, parts `[uint64_be(epoch), approverSetDigest(set), trust_domain]` (4835f4f, c6214dc); an empty trust domain or an epoch below 1 is `INVALID_INPUT` |
+| `verifyApproverSetChange(current, next)` | Whether a holder of `current` (with its `epoch`) may take `next` (`next` carries `epoch`, `approverSetSignatures` and the verifier's own `trustDomain`, never the bundle's word for it): nothing is needed without current approver keys or with an unchanged set; otherwise `next.epoch` must be higher and the current threshold of distinct current keys must have signed. Returns the approving kids; `ACCESS_DENIED` with reason `stale-epoch`, `approver-set-unsigned`, `no-threshold` when the current threshold is 0, which admits no change, or `no-trust-domain`. On a refusal a daemon keeps its quorum and still applies the rest of the bundle |
 
 `TrustBundleInput` (for `signJoinResponse` and `signTrustBundle`) takes `approverSetSignatures` (`{ kid, sig }`)
 beside the quorum fields (6a7f1b7).
@@ -588,7 +613,9 @@ with the trust bundle's quorum and answers `{ batchId, held, required, size }`, 
 ..., batchId })` puts a command into it. The batch must belong to the node's owner and be pending or approved and
 unexpired, and the command's `(subject, kind)` (pki's `batchSubject`) must be in its scope (`INVALID_INPUT`
 otherwise); `batch_id` goes into the signed body, a `command_batch_members` row is written, and while a quorum that
-needs approvals has not approved the batch the command is held (`not_before` infinity, no poke). `enqueue` records
+needs approvals has not approved the batch the command is held (`not_before` infinity, no poke). The commands API
+shows it (a299e96): a batched command's `CommandInfo` carries its `batchId`, and a held one `awaitingApproval: true`
+without `notBefore`, until the batch is approved. `enqueue` records
 which leaf the command uses: the one bound to its payload's SHA-256 when the scope has it, else the unbound leaf.
 Without approver keys a batch is recorded for audit and its commands go out at once.
 
@@ -602,14 +629,35 @@ destructive commands are enqueued as before.
 The gateway sends a batched command only once it can prove it (40be696): when the batch needs approvals, dispatch
 selects a member only after the batch is approved, joining the member to its scope leaf and the batch in SQL (so
 held rows never crowd the dispatch limit), and sends it with `Command.batch_approval` and the member's own leaf's
-`batch_proof`, decoded from the stored bytes. A `Hello` replay attaches them again. `metalBatchScope(tx, registry,
-nodeIds, kinds)` in `better-compute/metal` builds the scope for metal nodes over the destructive kinds a profile can
-send (`profileCommandKinds(profile, steps)` in provision, which relies on each control-plane step declaring its
-`sends`).
+`batch_proof`, decoded from the stored bytes. A `Hello` replay attaches them again.
+
+#### Who creates batches
+
+With approver keys set, every built-in producer of destructive commands puts them in a batch before it sends
+anything, so none of them trips `batch-required`:
+
+| Producer | Batch |
+| --- | --- |
+| Metal workflows (f66e236) | A workflow the reconciler starts outside a bulk batch gets one of its own: one node, the destructive leaves of the kinds it can send. `startWorkflow` records those kinds in `workflows.command_kinds` (every agent step's command, and every control-plane step's `sends`), and `workflows.batch_id` holds the batch (migration `provision/0006_workflow_batch`); the engine puts the batch id on the workflow's destructive commands only |
+| `metal.bulk` (f66e236) | One verb (`manage`, `inspect`, `provide`, `undeploy`, `rescue`, `retire`) on up to 10,000 nodes of one pool as one batch, whose scope covers the verb's whole chain of state profiles (inspect then commissioning, for example). Decided on the pool and on every node as `metal/<verb>`; the batch is parked on each node (`metal_nodes.batch_id`, migration `metal/0005_batch`) until the node rests. See [the metal API](/docs/reference/api/metal) |
+| `metal.power` (478025a) | A one-leaf batch, `bmc:<site agent>/<address>` and `bmc.power`; the answer carries `batchId` and `held` |
+| Health remediation (e594a4f) | A reboot or GPU reset workflow gets a batch whose every leaf's subject is the node (`batchNodeWorkflow`); a workflow that relays `bmc.*` or `site.httpProxy` is refused there, since its owner must scope it |
+| MCP (171ad2f) | `propose_command_batch` creates a `node.reboot` batch over up to 1,000 nodes; `exec_command` takes its `batchId`. There is no approve tool: an agent only proposes, and people approve with their approver keys |
+| Your own code | `commandBatches.create` and `commands.run({ batchId })` over the API, or `ctx.commands.createBatch` and `enqueue({ batchId })` in a module |
+
+`metalBatchScope(tx, registry, nodeIds, kinds)` builds metal's scopes: the destructive kinds only, one leaf per node,
+and for a `bmc.*` kind one leaf per site agent of the node's site, since a site agent failover reroutes the command.
+The kinds come from `profileCommandKinds(profile, steps)` in provision, which relies on each control-plane step
+declaring what it `sends`: a plugin step that relays commands (Talos's `httpViaSite`) must declare
+`sends: ['site.httpProxy']`, or its commands fall outside the workflow's batch and are refused at enqueue
+(`INVALID_INPUT`, or `batch-required` when the workflow has no batch at all; see
+[steps and profiles](/docs/extending/steps-and-profiles)). Metal's leaves leave the payload unbound: the workflow
+builds its payloads later (a BMC credential rotated mid-workflow, user data rendered by an earlier step).
 
 Over the API, a caller creates a batch with `commandBatches.create` and runs commands in it with
 `commands.run({ ..., batchId })` (46afe75). `create` takes `tenantId`, a `reason` shown to approvers (at most 500
-characters), the `scope` leaves (`{ subject, kind, payloadSha256? }`, `payloadSha256` as hex; 1 to 50,000 of them),
+characters), the `scope` leaves (`{ subject, kind, payloadSha256?, payload? }`, `payloadSha256` as hex, `payload` as
+`{ typeUrl, value }` with `value` in base64; 1 to 50,000 of them),
 `notAfterSeconds` (60 s to 72 h, default 24 h) and an `idempotencyKey`. The batch id derives from the tenant, the
 caller's identity and the key, and migration `quorum/0005_batch_request` stores the request's digest, so a retry
 returns the same batch and approvers never sign two, while the same key reused for another request is `CONFLICT`. A
@@ -623,7 +671,8 @@ The `commandBatches` group (phase v1.0), decided on the tenant:
 | --- | --- | --- |
 | `create` | `compute:batches:create` | A batch over the given scope, answered like `get`; idempotent per caller and key |
 | `get`, `list` | `compute:batches:read` | A batch's state (`pending`, `approved`, `expired`, `cancelled`), root, size, required approvals, the approvals so far and its commands by state; `list` pages by `state`, `limit`, `cursor` |
-| `scope` | `compute:batches:read` | The leaves (`leafIndex`, `subject`, `kind`), up to 5,000 a page, for approvers to review |
+| `scope` | `compute:batches:read` | The leaves (`leafIndex`, `subject`, `kind`, `payloadSha256`, empty for any payload, and the stored `payload` with `value` in base64 when its creator gave one), up to 5,000 a page, for approvers to review; check a payload against its digest before trusting it |
+| `members` | `compute:batches:read` | The batch's commands, each with its node, subject, kind, state, `reason` and `awaitingApproval` while held; filter `state`, paged by `limit` and `cursor` (`better-compute batch members`, the console's batch view) |
 | `approve` | `compute:batches:approve` | Takes one `signature` (`kid`, `sig`): it must verify alone for a known approver key over exactly this batch, is stored, and once the stored signatures meet the threshold the batch turns `approved`, its encoded `BatchApproval` is stored, its held commands become due and `command.batch.approved` is published |
 | `cancel` | `compute:batches:approve` | Ends a pending batch and cancels its held commands |
 
@@ -642,8 +691,10 @@ tenant's pending batches are cancelled.
 | `batch approve --tenant ID --batch ID --key PATH` | Review, then sign and submit (below) |
 | `batch approve ... --signature FILE` | Submits a signature made offline by `batch sign`, after checking it signs this batch's id, root, size, expiry and trust domain (`SCOPE_MISMATCH` otherwise) |
 | `batch sign --key PATH --scope FILE` | Signs offline from a `--scope-out` file (or a `{ subject, kind }` list): the same review, then prints `{ kid, sig }` with the signed fields. `--not-after` and `--trust-domain` default to the file's. Signing a bare `--root` and `--size`, which it cannot check, needs `--unchecked` |
+| `batch create --tenant ID --reason TEXT --scope FILE [--hours N] [--key KEY]` | `commandBatches.create` from a JSON array of `{ subject, kind, payload }` leaves (def72c8): a `payload` given as `{ json }` is encoded as the kind's own payload message, or given as `{ typeUrl, value }`, so the leaf binds exactly that operation and approvers see it; leaves without one are warned about. `--hours` is 1 to 72 (default 24); the idempotency key is printed, and repeating it retries the same creation |
+| `batch members --tenant ID --batch ID [--state S] [--limit N] [--cursor ID]` | `commandBatches.members`: the batch's commands with node, subject, kind, state and `awaitingApproval` (45d217e) |
 | `batch cancel --tenant ID --batch ID` | `commandBatches.cancel` |
-| `batch sign-approvers --key PATH --version N ...` | Signs a change of the approver set (see [changing the approver set](#changing-the-approver-set)) |
+| `batch sign-approvers --key PATH --epoch N ...` | Signs a change of the approver set for its epoch (see [changing the approver set](#changing-the-approver-set)) |
 
 `batch approve` refuses a batch that is not `pending`, pages the scope (up to 5,000 leaves a page) and recomputes the
 root from the listed `(subject, kind, payload digest)` leaves. Leaves that do not give the root and size the server
@@ -659,6 +710,12 @@ The review is enforced, not only shown:
   a batch that holds exactly those; `SCOPE_UNEXPECTED` names what is missing or not expected.
 - Leaves that admit any payload are marked "any payload" and refused as `UNBOUND_SCOPE`, naming them, unless
   `--allow-unbound`.
+- Bound leaves' operations are shown decoded, grouped by the payload's digest (each line shows its first 12 hex
+  digits), with long strings shortened in the middle so every field shows; `--operations-out FILE` writes every
+  distinct operation in full with its subjects (`batch sign` and `batch approve`; b118616). A payload with fields
+  this build cannot decode, or whose re-encoding does not give the bytes back, is refused
+  (`payload-unknown-fields`), and a kind whose payload type the CLI does not know is opaque and needs
+  `--allow-opaque`; it is never decoded as the type the server labels it.
 - A window that has closed, or that stays open longer than `--max-hours` (default 72, at most 720), is refused
   `INVALID_STATE`, since an approval admits its commands until then.
 - An approver key readable by others is refused (POSIX; `INVALID_STATE`), as ssh does; an encrypted one needs
@@ -686,13 +743,15 @@ after the signature check. bcd keeps the whole trust bundle in `identity.json`.
 
 Both daemons also hold these lines (3ff8131 and 8b0f50c in bcd, 6a7f1b7 in the FakeDaemon):
 
-- **A quorum change needs the current approvers.** Once a daemon holds approver keys, it refuses a newer trust
-  bundle that changes any quorum field (keys, threshold, tiers or the unbatched cap; removal included) unless the
-  current threshold of distinct current approvers signed the new fields for that bundle's version, since the
-  JoinService key alone could otherwise drop the approvers or swap in its own. A current threshold of 0 admits no
-  change. The whole bundle is ignored and the daemon keeps the one it holds (bcd logs `trust bundle refused`, the
-  FakeDaemon `trust.ignored` with reason `approver-set-unsigned`); bundles that leave the quorum as it is still
-  rotate roots as before. A daemon without approver keys takes the first set as it comes.
+- **A quorum change needs the current approvers.** Once a daemon holds approver keys, it refuses a change of any
+  quorum field (keys, threshold, tiers or the unbatched cap; removal included) unless the current threshold of
+  distinct current approvers signed the new fields, since the JoinService key alone could otherwise drop the
+  approvers or swap in its own. A current threshold of 0 admits no change. Both apply one
+  [epoch rule](#changing-the-approver-set) (c6214dc, 5fe7cbf, e171f0d): a refused set keeps the held quorum while
+  the rest of the bundle (roots, version) applies; the FakeDaemon logs `trust.quorum-refused` with the reason. A
+  daemon without approver keys takes the first set as it comes, or only its [pinned](#pinning-the-first-set) set,
+  and its epoch never goes back. Both report the set they hold in `Hello` and `StatusReport` (`approver_set_epoch`,
+  `approver_set_sha256`).
 - **The unbatched window counts on the local clock**, so a `Welcome` that moves server time forward cannot age the
   count out. Approvals still expire in server time.
 - **Nothing is used before admission.** A batch leaf or an unbatched slot is recorded only once the command is
@@ -701,6 +760,9 @@ Both daemons also hold these lines (3ff8131 and 8b0f50c in bcd, 6a7f1b7 in the F
   command's approval again when it is finally admitted.
 
 bcd alone refuses destructive commands when its stored bundle cannot be read, rather than switching the quorum off.
+bcd also treats a `site.httpProxy` other than a `GET` as a write (review 9): under a quorum it runs only under a leaf
+bound to its exact payload, never an unbound one, and never unbatched, whatever the hourly allowance; readiness
+polls, which are `GET`s, are unaffected.
 Both count `bmc.boot` and `bmc.rotate` as destructive, as metal's kind table does, so they are signed and batched
 like power actions. See [signed commands](/docs/daemon/delivery#signed-commands-and-attested-results).
 
@@ -708,77 +770,164 @@ like power actions. See [signed commands](/docs/daemon/delivery#signed-commands-
 
 The trust bundle is signed by the JoinService key, which the control plane holds, so on its own it must not be what
 changes the quorum. Adding or removing an approver, changing a threshold, a tier or the unbatched cap, or removing
-the quorum altogether therefore needs the **current** approvers' signatures over the new set for one bundle version
-(`approver_set_signatures`, purpose `approver-set`, parts `[uint64_be(version), SHA-256(approverSetInput)]`; 77cdf4f,
-6a7f1b7, edbd63f). The first set needs none. On a fleet whose daemons already hold approver keys:
+the quorum altogether therefore needs the **current** approvers' signatures over the new set (77cdf4f, 6a7f1b7,
+edbd63f). Since c6214dc (review 7 M1) they sign the set's own **epoch**, not the trust bundle version:
+`TrustBundle.approver_set_epoch` numbers the quorum fields, goes up with every change of the set, and stays put when
+roots rotate. `approver_set_signatures` are purpose `approver-set` over `[uint64_be(epoch),
+SHA-256(approverSetInput), trust_domain]`. Signing the version instead meant signatures were published only while
+that version was current, so a daemon offline during a set change met the next bundle (a root rotation, say) with
+the new set and no valid signatures, refused the whole bundle for good, and kept trusting rotated-out roots. The
+trust domain is the verifier's own (4835f4f, review 7): a staging set's published signatures would otherwise be
+replayable into production when the two share approver keys.
+
+One rule governs every change (5fe7cbf and e171f0d, review 10 M3; the rule in `common.proto`): a daemon holding set
+`H` at epoch `e` takes `(N, e')` only when `e' > e` and at least `H`'s threshold of `H`'s keys signed `(e', N, its
+own trust domain)`. That holds for `N == H` too: an unchanged set moves to a higher epoch only with its own
+signatures, and is otherwise kept silently at `e`. So a daemon that held `S@1` and missed `S -> T@2` and `T -> S@3`
+cannot later be moved to `T@2` by replaying that epoch's genuine signatures. The same set at the same epoch needs
+nothing; anything else is `stale-epoch` or `approver-set-unsigned`. `approver_set_signatures` may mix the previous
+set's signatures (the change) with the new set's own (which move daemons that already hold the new set to the new
+epoch); only held keys count. A daemon without keys takes the first set as it comes, or only its pinned one (below),
+never at or below an epoch it held, and keeps its epoch through a signed removal. When the quorum part is refused,
+the daemon keeps its quorum and still applies the rest of the bundle (roots, version). A daemon that missed two set
+changes whose keys do not overlap cannot verify the newer set with the keys it holds and needs re-provisioning (or
+re-pinning). The first set needs no signatures. On a fleet whose daemons already hold approver keys:
 
 <Steps>
 <Step>
 
-##### Pick the version
+##### Pick the epoch
 
-The new set is published as the next trust bundle version, N = the version the deployment publishes now plus 1.
-With the new quorum in the configuration, [`better-compute pki trust-version`](#pki-trust-version) prints it as
-`signQuorumFor`, and doctor's `pki.quorum-unsigned` finding names it too. A higher N works as well, as long as
-nothing else changes the bundle before it is published.
+The new set's epoch is the published one plus 1. With the new quorum in the configuration,
+[`better-compute pki trust-version`](#pki-trust-version) prints it as `signQuorumForEpoch`, and doctor's
+`pki.quorum-unsigned` finding names it too. Any higher epoch works as well; an older one is never taken back.
 
 </Step>
 <Step>
 
 ##### Each current approver signs
 
-At least the current threshold of current approvers each run, with their own current key and the whole new set:
+At least the current threshold of current approvers each run, with their own current key and the whole new set.
+Members of the new set may sign too: their signatures move daemons that already hold the new set to its epoch, and
+the command says when a key counts only as a current approver:
 
 ```bash
-better-compute batch sign-approvers --key alice.pem --version 4 \
+better-compute batch sign-approvers --key alice.pem --epoch 2 \
   --approvers alice.pem.pub,bob.pem.pub,dave.pem.pub --threshold 2 --tiers 5:1 --unbatched 0
 ```
 
 It validates the set (P-256 public keys from `batch keygen`, no key twice, a threshold from 1 to the key count, tiers
 ascending by size with thresholds that never decrease), says what it signs (a quorum of k of n with
 their kids, or, with no `--approvers` and `--threshold 0`, the REMOVAL of the quorum), notes when your own key is
-not in the new set, and prints `{ version, setSha256, set, signature: { kid, sig } }`.
+not in the new set, and prints `{ epoch, trustDomain, setSha256, set, signature: { kid, sig } }`. The trust domain
+is `--trust-domain`, else the PKI bundle's (`--pki`); without either it is a usage error. The examples refuse
+signature files made for another trust domain.
 
 </Step>
 <Step>
 
 ##### Publish the set with its signatures
 
-Set the new quorum, `pki.trustVersion` to N, and the collected signatures as `pki.approvers.setSignatures`:
+Set the new quorum, its `epoch`, and the collected signatures as `pki.approvers.setSignatures`:
 
 ```ts title="better-compute.config.ts"
 pki: {
   commandSigning: bundle.commandSigning,
-  trustVersion: 4, // required with setSignatures: the version they sign
   approvers: {
     keys: [aliceSpkiDer, bobSpkiDer, daveSpkiDer],
     threshold: 2,
     tiers: [{ maxScopeSize: 5, threshold: 1 }],
+    epoch: 2, // default 1; required with setSignatures: the epoch they sign
     setSignatures: [aliceSig, bobSig], // the { kid, sig } of sign-approvers (sig base64url or bytes)
   },
 },
 ```
 
-`setSignatures` without an explicit `pki.trustVersion` is `INVALID_CONFIG`, and each must be `{ kid, sig }` with a
-64-byte P-256 signature. `JoinResponse.trust` and `Welcome.trust` carry them as `approver_set_signatures` only when
-the settled version is exactly N. If the quorum changed and the deployment would publish another version (N is not
-above the recorded one), the process refuses to start (`INVALID_CONFIG`, naming the version to sign, with nothing
-recorded). A later root rotation with the quorum unchanged takes the next version and drops the stale signatures,
-which are no longer needed.
+`pki.approvers.epoch` is a whole number of at least 1 (default 1), `setSignatures` without it is `INVALID_CONFIG`,
+and each signature must be `{ kid, sig }` with a 64-byte P-256 signature. The bundle's version still follows its
+content; `JoinResponse.trust` and `Welcome.trust` carry `approver_set_epoch` and the set's signatures on every
+version while the set is current, so a later root rotation keeps them and a daemon that missed a version still
+verifies the set. `trust_bundle_state` records the published set with its epoch.
 
 </Step>
 </Steps>
 
-A quorum change without enough signatures is still published, since daemons without approver keys take it, but each
-process logs a warning naming the version to sign, and daemons that hold keys keep their old quorum until a signed
-bundle reaches them. To fix it, sign that version and set `pki.trustVersion` and `setSignatures`: the content is
-unchanged, so the same version is published again, now signed.
+A quorum change without valid signatures for a higher epoch is still published, since daemons without approver keys
+take it, but each process logs a warning naming `batch sign-approvers --epoch <published + 1>`, and daemons that
+hold keys keep their old quorum until a signed set reaches them. To fix it, have the current approvers sign that
+epoch and set `pki.approvers.epoch` and `setSignatures`. `better-compute doctor` verifies `setSignatures` as a
+daemon does (the published set's threshold, the epoch, the deployment's trust domain), so signatures that do not
+verify are `pki.quorum-unsigned` with the reason (b118616).
+
+**Nodes that hold another set.** A daemon can take a bundle's version while refusing its quorum part, so the trust
+version alone does not show which approvers a node enforces. The gateway records what each daemon reports in
+`node_sessions.approver_set_epoch` and `approver_set_sha256` (migration `core/0026_session_approver_set`), and
+doctor warns `pki.quorum-lag` with a sample of connected nodes whose epoch or digest differs from the published set
+(6612496); `pki trust-version` prints the same as `approverSetBehind` and `approverSetSample`. The fix is to check the
+set's signatures, or to re-pin nodes that missed several changes.
 
 The examples read the signatures from `BETTER_COMPUTE_APPROVER_SET_SIGNATURES`: the JSON files `batch sign-approvers`
-printed, comma-separated. They must all sign one version and exactly the quorum `BETTER_COMPUTE_APPROVER_KEYS`,
+printed, comma-separated. They must all sign one epoch and exactly the quorum `BETTER_COMPUTE_APPROVER_KEYS`,
 `BETTER_COMPUTE_APPROVER_THRESHOLD` and `BETTER_COMPUTE_UNBATCHED_PER_HOUR` configure (the examples set no tiers), or
-the example refuses to start; that version becomes `pki.trustVersion`. `BETTER_COMPUTE_TRUST_VERSION` sets the floor
-by itself, and must equal the signatures' version when both are given (03bdbc9).
+the example refuses to start; that epoch becomes `pki.approvers.epoch`. `BETTER_COMPUTE_TRUST_VERSION` sets the
+trust bundle version's floor, independently.
+
+#### Pinning the first set
+
+A daemon without approver keys (every new or reimaged node) takes the first set its join-key-signed bundle carries,
+so a compromised api could hand it an empty set or its own key at k = 1, after which the operators' real set would
+need the attacker's signature. The first set can be pinned outside the api (9b7a199, review 7 M2):
+`better-compute pki trust-version` prints `approverSetSha256` (SHA-256 of `approverSetInput`), computed from this
+configuration's approver keys rather than from the database the api writes, with `publishedApproverSetSha256` beside
+it while the two differ (b118616, review 10 M4), and `daemon install-script --approver-set-sha256 HEX` writes it into
+the node's `config.toml` as `approver_set_sha256` (an upgrade run without the flag keeps an existing pin, b6d401f).
+A daemon with that pin and no keys takes only a matching set (`pin-mismatch` otherwise, while the rest of the bundle
+still applies) and refuses destructive commands `BATCH_UNAPPROVED` (the FakeDaemon's reason is
+`awaiting-pinned-set`) until it holds one, so it fails closed. bcd (`daemon/internal/pki/batch.go`,
+`agent/quorum.go`) and the FakeDaemon (`intent.approverSetSha256`) both implement it.
+
+#### Turning the quorum on
+
+PLAN.md §13 records what happens when a deployment upgraded from v0.5 sets `pki.approvers` for the first time, and
+`tests/sim/upgrade.test.ts` proves it (80195df): no allocation moves, no VM reboots, and reservations stay active.
+
+<Steps>
+<Step>
+
+##### Upgrade first, then set the approvers
+
+Run the v1.0 upgrade as usual (the quorum migrations as expand migrations, then workers, gateways and daemons), then
+set `pki.approvers` and restart the workers and roll the gateways again. Setting approvers moves no NodeSpec
+generation.
+
+</Step>
+<Step>
+
+##### Cancel pending destructive commands
+
+A destructive command queued before the switch is still sent afterwards, but a daemon that holds the quorum by then
+rejects it `UNBATCHED_LIMIT`, so it never runs. To have nothing destructive in flight at the switch, cancel pending
+destructive commands first (`commands.cancel`).
+
+</Step>
+<Step>
+
+##### Let the bundle roll out
+
+The trust bundle's version goes up exactly once when approvers are set. Daemons take the first set without
+signatures, or only the set they were pinned to; check with `pki trust-version` that none is behind.
+
+</Step>
+<Step>
+
+##### Batch destructive work from now on
+
+A new unbatched destructive command is refused at enqueue (`INVALID_STATE`, reason `batch-required`) unless
+`unbatchedDestructivePerHour` allows it. The built-in producers batch their own work (see
+[who creates batches](#who-creates-batches)).
+
+</Step>
+</Steps>
 
 ## Exec tickets and the SSH CA
 
@@ -849,8 +998,9 @@ The host asks for a token over its session with a `WorkloadTokenRequest` signed 
 the instance and the expiry). `createWorkloadTokenRequest` and `openWorkloadTokenResponse` are the host's half,
 `openWorkloadTokenRequest`, `sealWorkloadTokenResponse` and `refuseWorkloadTokenRequest` the broker's. bcd carries
 the host's half in Go (`NewWorkloadTokenRequest` and `OpenWorkloadTokenResponse` in `daemon/internal/pki`, checked
-against fixtures the TypeScript side produces), and its metadata service (`daemon/internal/imds`) calls it; only
-fakehw builds of bcd run instances to serve so far. What the broker checks is in
+against fixtures the TypeScript side produces), and its metadata service (`daemon/internal/imds`) calls it for the
+instances of whichever runtime bcd runs; the `libvirt-kvm` runtime of host builds has not run on real hardware yet,
+so only fakehw builds' instances have been served end to end. What the broker checks is in
 [VPS instances](/docs/guides/vps/instances#workload-identity).
 
 ## Rotation and expiry

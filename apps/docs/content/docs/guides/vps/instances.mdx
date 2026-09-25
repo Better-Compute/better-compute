@@ -362,13 +362,16 @@ From the reports, the reconciler moves the instance:
 - A reported `error` moves it to `error` with a `RuntimeError` condition and publishes `instance.failed`.
 - While the report and `desiredState` disagree, it waits and looks again in 10 seconds.
 
-<Callout type="warn" title="The host side is not written yet">
+<Callout type="warn" title="The host side is written, not yet run on real hardware">
 bcd's node agent is built and tested but not released. It has the `instances` converger (the FakeHypervisor's
 rules, user data fetched with a `SecretRequest` bound to the allocation, every domain in its status reports, the
-instance network policy as host nftables rules), but a real host build has no built-in runtime yet. It can run
-instances through a runtime a bcx plugin serves, and no such plugin is written, so without one a non-empty
-`instances` section fails with `this host runs no instance runtime` and no VM boots on real hardware. fakehw builds
-run instances on a file-backed stand-in runtime named `libvirt-kvm`; see [delivery](/docs/daemon/delivery#instances). The TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
+instance network policy as host nftables rules), and a host build with `virsh` runs instances on the built-in
+`libvirt-kvm` runtime (362317c): qcow2 overlays on sha256-verified base images, NoCloud seeds, taps, VFIO GPUs. That
+runtime has been tested only against a fake `virsh` and `qemu-img`; no VM has booted through it on a real KVM host
+yet. A host without `virsh` and without a bcx runtime plugin fails a non-empty `instances` section with `this host
+runs no instance runtime`. fakehw builds run instances on a file-backed runtime of the same name, which
+`tests/e2e/bcd-vps.test.ts` drives through the control plane; see [delivery](/docs/daemon/delivery#the-runtimes). The
+TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
 user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway
 with it.
 </Callout>
@@ -487,9 +490,13 @@ them sets `pause: true` in its `RuntimeTraits`, and `builtinRuntimeTraits` does 
 implements `snapshot` sets `snapshot: true` in its `RuntimeTraits` (the three built-in VM runtimes do); on any other,
 `sandboxes.snapshot` is `UNSUPPORTED` up front. No `instances.*` method snapshots a plain instance.
 
-`libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet:
-bcd's `instances` converger drives them through its `Runtime` interface, and today only fakehw builds provide one, a
-file-backed stand-in named `libvirt-kvm`.
+`libvirt-kvm` and `cloud-hypervisor` are the runtimes built into bcd (v0.3), which its `instances` converger drives
+through its `Runtime` interface. `libvirt-kvm` is written (362317c): a host build with `virsh` on its `PATH` runs it
+over `virsh -c qemu:///system` and `qemu-img`, with a host-passthrough CPU, domains marked as bcd's in their metadata
+(others are reported as unmanaged and never touched), a 60-second graceful shutdown, and snapshots and restores that
+refuse another runtime or CPU model; see [the runtimes](/docs/daemon/delivery#the-runtimes). It has been tested only
+against a fake `virsh` and `qemu-img`, not on real hardware. `cloud-hypervisor` is not written. fakehw builds run a
+file-backed runtime named `libvirt-kvm` instead.
 Out-of-process runtimes are served too: on `bcd node`, a bcx plugin whose driver lists the kind `runtime` becomes a
 runtime (`list`, `apply(spec)`, `remove(id)` over `Invoke`; no snapshots), selected by pools like any other. No such
 plugin (a Kata runtime is PLAN.md's walkthrough 4) is written yet; see
@@ -539,7 +546,8 @@ the FakeDaemon (`tests/e2e/imds.test.ts`). `bcd node` has both host halves: the 
 a node-signed `WorkloadTokenRequest` with a one-time key, the sealed answer opened and checked against the instance
 and request id) and the metadata service, served on `[imds] listen` in its `config.toml` (for example
 `169.254.169.254:80` on the instances' bridge). It resolves the caller as the running instance whose address is the
-request's source. Since only fakehw builds of bcd run instances yet, no real VM reaches it; its Go tests cover it.
+request's source. It serves the instances of whichever runtime bcd runs; since `libvirt-kvm` has not run on real
+hardware yet, no real VM has reached it, and its Go tests and fakehw builds cover it.
 
 ```mermaid
 sequenceDiagram

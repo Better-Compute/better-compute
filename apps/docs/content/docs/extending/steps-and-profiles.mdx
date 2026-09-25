@@ -104,7 +104,7 @@ the step frozen with `extension: 'step'`; every refusal is `INVALID_CONFIG` with
     input: { type: 'Manifest<I> | StandardSchema', description: "Validates the profile step's with when the profile is expanded, and again before run.", required: true },
     run: { type: '(input, ctx) => Promise<Json | void>', description: 'Control-plane steps only (required there). The result is stored as the step result.' },
     relays: { type: "('site' | 'node' | 'ramdisk')[]", description: 'Control-plane steps only: the places a profile may name with on:.' },
-    sends: { type: 'string[]', description: "Control-plane steps only: every dotted command kind run may enqueue. The workflow engine then refuses any other kind with INVALID_CONFIG, and provision's profileCommandKinds(profile, steps) can list a profile's whole command set before it runs, for a v1.0 destructive-batch scope. A step without it is not checked, and in a batch whatever it sends falls outside the scope. Every relaying metal step and health.resetGpus declare theirs." },
+    sends: { type: 'string[]', description: "Control-plane steps only: every dotted command kind run may enqueue. The workflow engine then refuses any other kind with INVALID_CONFIG, and records the kinds of every step when the workflow starts (workflows.command_kinds), so the owner can scope the workflow's v1.0 destructive-batch before anything is sent. A step without it is not checked, and in a batch whatever it sends falls outside the scope and is refused. Required in practice for any relaying plugin step: see relaying under the quorum below. Every relaying metal step and health.resetGpus declare theirs." },
     command: { type: 'string', description: 'Agent steps only (required there): the dotted command kind sent.' },
     await: { type: "'rejoin'", description: 'Agent steps only: complete when the agent comes back with a new boot or role, for self-terminating kinds.' },
     cleanup: { type: 'ProfileStep[]', description: "Steps that run, last in first out, in the cleanup phase if this step started." },
@@ -126,6 +126,7 @@ A control-plane step's `run` receives a `StepContext`: the whole `ModuleContext`
     stepId: { type: 'string', description: "The step's id within the workflow: main.3, main.3.on-failure, cleanup.1." },
     attempt: { type: 'number', description: '0 on the first attempt, then 1, 2, ... on retries.' },
     idempotencyKey: { type: 'string', description: 'wf:<workflowId>:<stepId>, the same on every run of the step.' },
+    batchId: { type: 'string', description: "(v1.0) The destructive-command batch the workflow runs under, when it has one. awaitCommand puts it on the step's destructive commands only." },
     node: { type: '{ id, siteId, poolId? }', description: 'The target node, for node workflows.' },
     signal: { type: 'AbortSignal', description: "Aborted at the step's deadline and when the worker stops." },
     emit: { type: '(progress) => void', description: 'Accepted but discarded for control-plane steps today.' },
@@ -210,6 +211,38 @@ helper built the same way: one HTTP request from the site agent to the machine's
 A command's result is not trusted just because it arrived. A result that decides a transition, like a wipe, should be
 node-signed and verified: metal's steps check the stored signature against the node's certificates before they
 accept `attested`.
+
+### Relaying under the quorum
+
+With the v1.0 [destructive-batch quorum](/docs/operations/pki#the-destructive-batch-quorum-v10) on, a destructive
+command runs only in a batch its approvers signed, and the batch's scope is fixed before the workflow sends
+anything. The engine records every kind a workflow can send when it starts (`workflows.command_kinds`: each agent
+step's `command`, and each control-plane step's `sends`), metal creates the workflow's batch from those kinds
+(f66e236), and `awaitCommand` and the engine's agent steps put `ctx.batchId` on the destructive commands only. So a
+relaying step must declare what it sends, or the kind is missing from the scope:
+
+```ts title="acme-talos.ts"
+const talosReady = defineStep({
+  id: 'wait.talosReady',
+  runsOn: 'control-plane',
+  relays: ['site'],
+  sends: ['site.httpProxy'], // httpViaSite enqueues site.httpProxy, a destructive kind
+  timeout: '20m',
+  retrySafe: true,
+  input: manifest({ port: field.int({ min: 1, max: 65535 }).default(50000) }),
+  async run(input, ctx) {
+    const response = await httpViaSite(ctx, { url: `https://${address}:${input.port}/machine/version`, poll: true });
+    // ...
+  },
+});
+```
+
+Without `sends`, the step's `site.httpProxy` carries the workflow's batch but is not in its scope, and with approver
+keys set the queue refuses it at enqueue (`INVALID_INPUT`; or `INVALID_STATE`, reason `batch-required`, when the
+workflow sends nothing else destructive and so got no batch). With `sends`, enqueueing any undeclared kind is
+`INVALID_CONFIG`. `defineStep` refuses `sends` on an agent step, whose `command` already names its kind. See
+[who creates batches](/docs/operations/pki#who-creates-batches) and, for batches over many nodes,
+[`metal.bulk`](/docs/reference/api/metal).
 
 ### What wakes a workflow
 

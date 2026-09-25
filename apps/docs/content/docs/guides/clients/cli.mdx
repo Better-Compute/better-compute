@@ -45,7 +45,7 @@ Every command declares a target, and the target decides what it needs:
 
 | Target | Needs | Commands |
 | --- | --- | --- |
-| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox create/list/get/extend/snapshot/delete/exec/templates`, `sandbox-template create/update/delete`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `batch list/show/approve/cancel`, `auth login` |
+| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox create/list/get/extend/snapshot/delete/exec/templates`, `sandbox-template create/update/delete`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `batch list/show/approve/create/members/cancel`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
 | `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `batch keygen/sign/sign-approvers`, `audit check-proof` |
 
@@ -377,8 +377,10 @@ Merkle root before anything is signed.
 | `batch approve --batch ID --key PATH` | a credential, `compute:batches:approve` | reviews the batch, then signs and submits your approval |
 | `batch approve --batch ID --signature FILE` | a credential, `compute:batches:approve` | submits an approval made offline, after checking it is for this batch |
 | `batch sign --key PATH --scope FILE` | nothing | the same review and signature on an offline machine |
+| `batch create --reason TEXT --scope FILE [--hours N] [--key KEY]` | a credential, `compute:batches:create` | `commandBatches.create` from `{ subject, kind, payload }` leaves, each payload encoded as its kind's message so the leaf binds that operation (def72c8) |
+| `batch members --batch ID [--state S]` | a credential, `compute:batches:read` | the batch's commands, with `awaitingApproval` while held (45d217e) |
 | `batch cancel --batch ID` | a credential, `compute:batches:approve` | ends a pending batch; its held commands are cancelled |
-| `batch sign-approvers --key PATH --version N ...` | nothing | a current approver's signature over a new approver set (see [changing the approver set](/docs/operations/pki#changing-the-approver-set)) |
+| `batch sign-approvers --key PATH --epoch N ...` | nothing | a current approver's signature over a new approver set at its epoch, `N` one above the published set's (c6214dc; see [changing the approver set](/docs/operations/pki#changing-the-approver-set)) |
 
 ```bash
 better-compute batch approve --tenant acme --batch batch_01k5w… --key ~/.better-compute/approver.pem

@@ -32,14 +32,16 @@ Nodes learn their target version through their <Term id="nodespec">NodeSpec</Ter
 state rather than a command: a node that was offline during the rollout converges on the right version when it
 returns.
 
-<Callout type="warn" title="The daemon half of self-update is not written yet">
+<Callout type="warn" title="Both halves written; bcd is not released">
   The control plane is shipped in `@better-compute/rollout`: releases, rollouts, the controller, `NodeSpec.daemon`
-  and the `daemon.upgrade` command kind. The node side that PLAN.md §6 designs for v0.4 (verify the binary, swap A/B
-  slots, write `upgrade.json` with a deadline, swap back when no `Welcome` arrives) is not implemented in `bcd`: it
-  reports a non-empty `daemon` section as `SectionUnsupported` and answers `daemon.upgrade` `UNSUPPORTED`. Only the
-  FakeDaemon's opt-in `selfUpdate` plays it, in tests. No real node reports a new version on its own today, so
-  upgrades time out and the failure gate pauses the rollout. Until then, upgrade by rerunning the
-  install script, as PLAN.md prescribes before v0.4.
+  and the `daemon.upgrade` command kind. bcd implements the node side (de9f380): it takes only a release manifest
+  signed by the release keys pinned in its `[update] release_pins` (and refuses every update without pins), checks
+  the sequence against its release floor, the expiry and the binary's SHA-256, stages it in the other of two slots,
+  swaps with `upgrade.json` and a 120-second deadline, confirms on the new binary's first `Welcome`, and swaps back
+  when none comes. `tests/e2e/bcd.test.ts` runs a real `daemon.upgrade` to a second signed build. No bcd release has
+  been cut, so no fleet has self-updated yet. Install nodes with `--release-pins` so they can; see
+  [self-update](/docs/daemon/install#self-update). The FakeDaemon's opt-in `selfUpdate` plays the node side in the
+  simulator.
 </Callout>
 
 ```mermaid

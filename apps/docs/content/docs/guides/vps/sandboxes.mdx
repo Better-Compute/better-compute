@@ -32,6 +32,7 @@ sources:
   - packages/testing/src/daemon/instances.ts
   - proto/bettercompute/agent/v1/session.proto
   - daemon/internal/agent/snapshot.go
+  - daemon/internal/runtime/libvirt.go
   - tests/vps-sandboxes.test.ts
   - tests/server-sandbox-exec.test.ts
   - tests/cli-sandbox-exec.test.ts
@@ -56,16 +57,16 @@ its boot data sealed through the secret broker.
 [sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Migrations `vps/0004_sandboxes` to `vps/0012_host_cert_validity` add their tables, columns and indexes, and the
 `vps.sandboxes` reconciler expires sandboxes, keeps warm pools filled and settles snapshots.
 
-<Callout type="warn" title="The control plane is done; the host runtime is not">
+<Callout type="warn" title="The control plane is done; the host runtime is untested on real hardware">
 Sandboxes run only on hosted (`vps-host`) pools, and a hosted instance is booted by a runtime inside `bcd` on its
-host. bcd has the `instances` converger, `instance.snapshot`, `restore_from` and the template `network` rules, but no
-built-in runtime for a real host yet (`libvirt-kvm` and `cloud-hypervisor` are not written). A host build runs
-instances only through a runtime served by a bcx plugin, and no such plugin is written; without one, a non-empty
-`instances` section fails with `this host runs no instance runtime`, so on real hardware a sandbox's instance is placed
-and holds its allocation and IP lease, but never boots, and the sandbox stays `starting`. Only fakehw builds of bcd
-run instances out of the box, on a file-backed stand-in. The TypeScript FakeDaemon's `FakeHypervisor` implements
-pause, resume, snapshots and restores for the end-to-end suites. See
-[where sandboxes run today](#where-sandboxes-run-today).
+host. bcd has the `instances` converger, `instance.snapshot`, `restore_from` and the template `network` rules, and a
+host build with `virsh` runs the built-in `libvirt-kvm` runtime (362317c), with pause and resume, snapshots with
+memory, and restores. It has been tested only against a fake `virsh` and `qemu-img`: no sandbox has booted through
+it on a real KVM host yet. `cloud-hypervisor` is not written. A host without `virsh` and without a bcx runtime plugin
+fails a non-empty `instances` section with `this host runs no instance runtime`, so there a sandbox's instance is
+placed and holds its allocation and IP lease, but never boots, and the sandbox stays `starting`. fakehw builds of bcd
+run instances on a file-backed runtime, and the TypeScript FakeDaemon's `FakeHypervisor` implements pause, resume,
+snapshots and restores for the end-to-end suites. See [where sandboxes run today](#where-sandboxes-run-today).
 </Callout>
 
 ## Templates
@@ -344,10 +345,13 @@ like any other and the sandbox goes back to `starting`.
   the transactions), the admission's `abandoned` hook clears the pending lifetime in a transaction of its own, so it
   is not merged into later decisions; a retry with the same key decides again (a2288ec). Only one extend at a time
   stages a pending lifetime, since the authorization projection keeps one pending value per resource (f2faa81,
-  migration `vps/0014_sandbox_extending`): while another request holds the sandbox (`extending_request`), an extend
-  is `CONFLICT` with `details.reason: 'extend-in-flight'` and `retryAfterSeconds`, a hold older than 60 seconds is
-  taken over, the handler applies only while its request still holds it, and a refusal, an abandon or a budget
-  refusal clears the pending lifetime only when the hold is its own. The extended sandbox's
+  migration `vps/0014_sandbox_extending`): while another extend holds the sandbox (`extending_request`), an extend
+  is `CONFLICT` with `details.reason: 'extend-in-flight'` and `retryAfterSeconds`, a hold older than 60 seconds
+  (measured with `compute_now()`) is taken over, the handler applies only while its hold still owns the sandbox, and
+  a refusal, an abandon or a budget refusal clears the pending lifetime only when the hold is its own. The hold is a
+  nonce the server mints per extend (`newId('hold')`, on the parsed input, which callers cannot set), never the
+  caller's `x-request-id`: two concurrent extends sharing one request id would otherwise share the hold and reopen
+  the `BoundedExtend` bypass (e68182d). The extended sandbox's
   authorization attributes come from its instance's own shape, not from its template's current flavor, which may
   have changed or gone (7fb1e01). It publishes `sandbox.extended`.
 - [delete](/docs/reference/api/sandboxes#delete) marks the sandbox `deleting`, sets its instance's `desiredState` to
@@ -879,18 +883,19 @@ are not configured and hides the button for the session. See [the console](/docs
 | Layer | State |
 | --- | --- |
 | API, admission, TTL, warm pools, `env`, `network`, snapshots, exec trust, guard, teardown | Built and tested against PGlite with emulated host reports (`tests/vps-sandboxes.test.ts`, 33 tests; `tests/server-sandbox-exec.test.ts`) |
-| End to end | `tests/e2e/sandboxes.test.ts` runs the real server runtime and gateway with three FakeDaemon VPS hosts whose fake `cloud-hypervisor` pauses: a warm claim reaches `ready` without a placement (the paused instance resumes on the same node and allocation, booted once) and the pool refills to `warm.min`; 500 sandboxes (`E2E_SANDBOXES`) with a 60 s TTL expire on their own, each publishing `sandbox.expired` then `sandbox.deleted` once, with no leaks on hosts or in the database (domains, overlays, taps, IP leases, bookings, scalar claims) and the readiness and expiry series counted; a memory snapshot taken on one sandbox restores its guest memory into a new one (and the stored object goes with the sandbox); deleting a warm template drains its pool until the hosts are empty |
+| End to end | `tests/e2e/sandboxes.test.ts` runs the real server runtime and gateway with three FakeDaemon VPS hosts whose fake `cloud-hypervisor` pauses: a warm claim reaches `ready` without a placement (the paused instance resumes on the same node and allocation, booted once) and the pool refills to `warm.min`; 500 sandboxes (`E2E_SANDBOXES`) with a 60 s TTL expire on their own, each publishing `sandbox.expired` then `sandbox.deleted` once, with no leaks on hosts or in the database (domains, overlays, taps, IP leases, bookings, scalar claims) and the readiness and expiry series counted; a memory snapshot taken on one sandbox restores its guest memory into a new one (and the stored object goes with the sandbox); deleting a warm template drains its pool until the hosts are empty; `instances.stop`, `start` and `delete` on a sandbox's instance are refused `INVALID_STATE` naming the sandbox, and another tenant gets `NOT_FOUND` restoring from or reading the snapshot (bfb1d45) |
 | Upgrade | `tests/sim/upgrade.test.ts` runs a sandbox on a VPS host through the v1.0 upgrade in place: it stays running with the same boot count and keeps its expiry |
 | FakeDaemon `FakeHypervisor` | Boots then pauses on a desired `PAUSED`, resumes without a reboot, runs `instance.snapshot` and carries guest memory to a restored domain, records the network policy without enforcing it |
-| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, instance `ssh` tunnels, and the `network` policy as host nftables rules (Go unit tests). Instances run on fakehw builds over a file-backed stand-in runtime, or through a runtime a bcx plugin serves (no such plugin is written; plugin runtimes take no snapshots). A real host build has no built-in runtime |
+| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, instance `ssh` tunnels, and the `network` policy as host nftables rules (Go unit tests). A host build with `virsh` runs `libvirt-kvm` (362317c): paused warm instances (`virsh suspend`), snapshots as a tar of the flattened disk, the seed and `virsh save`'s memory state, restores that refuse another runtime or CPU model; tested against a fake `virsh` and `qemu-img` only. fakehw builds run a file-backed runtime, and a bcx plugin can serve one (none is written; plugin runtimes take no snapshots) |
 | Provider pools | Not allowed for sandboxes |
 
-On a real host running today's bcd without a runtime plugin, a sandbox's instance is placed but never reported, so
-it stays `provisioning` and the sandbox `starting`. Expiry and `delete` still set it to `deleting`, but a hosted
-instance finishes deleting only when a complete host report no longer lists it or the host is declared `lost`.
+On a host whose bcd runs no instance runtime (no `virsh`, no runtime plugin), a sandbox's instance is placed but
+never reported, so it stays `provisioning` and the sandbox `starting`. Expiry and `delete` still set it to
+`deleting`, but a hosted instance finishes deleting only when a complete host report no longer lists it or the host
+is declared `lost`.
 
-Not built yet: the `libvirt-kvm` and `cloud-hypervisor` runtimes in bcd, and MCP tools that take a snapshot or run
-code. Exec is the CLI's `sandbox exec` over your own OpenSSH client. The SDK helpers for
+Not built yet: a run of `libvirt-kvm` on a real KVM host, the `cloud-hypervisor` runtime in bcd, and MCP tools that
+take a snapshot or run code. Exec is the CLI's `sandbox exec` over your own OpenSSH client. The SDK helpers for
 commands and files over the SSH session (`sandbox.exec(cmd)`, `files.put`, `files.get`) are deferred: PLAN.md
 section 3.7 leaves them for later because they need an SSH client in the SDK, a new dependency decision. See the
 [roadmap](/docs/reference/roadmap#sandboxes).

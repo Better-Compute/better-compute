@@ -218,14 +218,16 @@ See [the daemon](/docs/daemon).
 - **Kinds.** `diag.nvml`, `inventory.refresh`, `logs.collect` and `node.reboot`, plus the opt-in `fakeGpuReset`
   (not retry-safe). `knobs` make them fail: `diag.nvmlInitFails`, `diag.failGpus`, `diag.error`,
   `logs.uploadFails`, `cdiWriteFailures`.
-- **Beyond v0.1.** With `intent`, it verifies signed commands (`BAD_SIGNATURE`) and signed NodeSpecs:
+- **Beyond v0.1.** With `intent`, it verifies signed commands (`BAD_SIGNATURE`; with command-signing roots every
+  command must carry a valid signature, whatever its kind, 12ccfa1, which `tests/testing-daemon-intent.test.ts`
+  checks with an unsigned non-destructive command) and signed NodeSpecs:
   `intent.signedSpecs` is `'always'` (the default: with command-signing roots every spec must be signed, since an
   unsigned spec with a high generation would freeze all later ones) or `'access'` (only a spec that changes `access`
   must be signed, for a control plane that signs nothing else), and refused specs are listed in `specRejections`.
   `intent.quorum` (a `FakeQuorumTrust`: approver keys, threshold, tiers, `unbatchedPerHour`), or the quorum of a
   newer signed trust bundle, enforces the v1.0 destructive-batch quorum: destructive commands are rejected
   `BATCH_UNAPPROVED` or `UNBATCHED_LIMIT`, and a newer trust bundle that changes the quorum without the current
-  approvers' signatures is ignored (logged `trust.ignored`; 6a7f1b7) (see
+  approvers' signatures for the FakeDaemon's own trust domain is ignored (logged `trust.ignored`; 6a7f1b7, 4835f4f) (see
   [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
   A refused session whose close carries `retryAfterMs` (the gateway's retry pushback) reconnects after exactly that
   long. `setPressure(pressure)` puts a `HostPressure` into every status report. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
@@ -302,7 +304,10 @@ session (`newHarness`), answering its `SecretRequest`s with sealed JWEs:
 | `TestBootServerRendersARamdiskScript` | 503 without the lease, 404 for an unknown MAC, then a script whose kernel line `bootparams.Parse` reads back, with the discovery token fetched once and an assertion signed by the agent's key at the lease epoch; 503 again once the gateway has been silent past the lease TTL |
 | `TestDiskWipeQuickVerifies`, `TestDeployImageStreamsAndChecksTheDigest`, `TestPickRootDiskAndDCGM`, `TestPartitionsAndBootFiles` | Quick wipes zero and verify both ends of sparse fake disks and are node-signed; a gzip image lands byte for byte with its user data; a wrong digest fails `checksum-mismatch` and leaves the disk's ends zeroed; root-disk choice, DCGM parsing, `lsblk` parsing and kernel lookup |
 | `TestSiteCacheWarmsAndServes`, `TestDeployImageFromTheSiteCache` | The image cache pulls `cache_images`, verifies them by digest and serves `/cache/<sha256>`; `deploy.image` takes the image from the cache |
+| `TestExtWriteInUserspace` (Linux, skipped without `mkfs.ext4` and `debugfs`) | On a real ext4 image with a planted `/etc/bcd/config.toml -> /dev/sdb` symlink: the ramdisk's `debugfs` writes replace the symlink, never follow it, and read back as root-owned 0600 regular files; relative paths, `..` and shell metacharacters are refused (1ae1789) |
 | `TestInstancesConverger` | The `instances` converger over the fake runtime |
+| `internal/runtime` `TestLibvirtRuntime` | The `libvirt-kvm` runtime against a fake `virsh` and `qemu-img`: the domain XML and metadata, states, grow and shrink, snapshot and clone with memory, a CPU model mismatch, destroy, a mismatched image digest (362317c). No test runs it on a real KVM host |
+| `cmd/bcd` `TestPCIAddress`, `TestDoctorToolChecks` | NVML bus ids normalized to libvirt's PCI addresses for VFIO; `bcd doctor`'s VPS host tool checks (4a0165f) |
 | `internal/redfish` `TestRedfishOperations` | Every operation against a fake Redfish service over TLS pinned by SPKI; after a rotation the old password is `auth-failed`; an unknown operation is `unsupported`; a wrong pin and a plain-http BMC are refused |
 | `internal/pxe` `TestProxyDHCPAnswersPreparedMachines`, `TestTFTPServesFilesUnderItsRoot` | On real loopback UDP sockets: PXE firmware of a prepared MAC gets `ipxe.efi` with the client's UUID and architecture read, iPXE gets the chain URL, an unprepared MAC gets no answer; TFTP serves a file from its root |
 | `internal/bootparams` `TestRenderParseRoundTrip`, `cmd/bcd` `TestRamdiskNeedsBootParameters` | The kernel command line round-trips; `bcd ramdisk` without its parameters exits 2 |
@@ -327,11 +332,25 @@ under `/tmp`. It checks that:
   succeeds again on a re-run without a token, and `bcd node` connects on the written configuration alone (472a424);
 - `bcd sim --nodes 5 --seed 100`, given one five-use join token on standard input, joins five simulated machines that
   connect as five distinct nodes (five distinct hardware keys), and never prints the token (aa7501c; see
-  [bcd sim](/docs/daemon#bcd-sim)).
+  [bcd sim](/docs/daemon#bcd-sim));
+- self-update (fc0ca6a): a second fakehw build reporting 0.9.0 is released under a key pinned in the node's
+  `[update]` section; the node restarts from an entrypoint it may replace, gets a `daemon.upgrade` enqueued as the
+  rollout controller does, downloads and verifies the release, swaps to slot `b`, execs, and is confirmed by its
+  `Welcome`: `node_sessions.daemon_version` is 0.9.0, `current` is `bcd-b`, and `upgrade.json` is gone.
+
+- the WebSocket fallback (4b2d5aa): the TypeScript `serveGatewayWs` runs beside the stack's gateway with a serving
+  certificate from the CA the node pins and audience `gw.dev.local`; the node restarts with `[websocket] url`, runs
+  a signed `inventory.refresh` over the WebSocket session, and renews over `POST /v1/renew`, which the fakehw knob
+  `BCD_RENEW_AFTER=3s` brings forward.
+
+The whole file runs on `createDevStack({ signedIntent: true })` (5071dbc), which puts the stack under a
+command-signing root: joined daemons receive the roots in `JoinResponse.trust` and every command and spec bcd takes
+is signed and verified. With `bcd-vps.test.ts` that is 9 of 9 bcd end-to-end tests.
 
 `tests/e2e/bcd-vps.test.ts` runs the same fakehw binary as a VPS host: bcd joins a `vps-host` pool over the dev
 stack's mTLS listener, `instances.create` places an instance on it, the `instances` converger defines and starts it
-on the file-backed `libvirt-kvm` stand-in, `StatusReport.instances` carries it and the vps module moves it to
+on the fakehw build's file-backed `libvirt-kvm` runtime (not the libvirt runtime of host builds),
+`StatusReport.instances` carries it and the vps module moves it to
 `running`, and `instances.delete` removes the domain from the host. It has the same gating.
 
 On Linux the suites run in `pnpm test` whenever Go is installed; they build the binary first. On Windows they are

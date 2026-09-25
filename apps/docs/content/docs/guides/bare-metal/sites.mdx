@@ -86,7 +86,11 @@ the control plane it is a node like any other: a `nodes` row with `role = 'site'
 The command kinds it accepts are role-restricted to `site`: `bmc.query`, `bmc.boot`, `bmc.power`,
 `bmc.rotate`, `bmc.firmware`, `bmc.storage`, `boot.prepareRamdisk`, `boot.cleanUp` and `site.httpProxy`, plus
 the shared `inventory.refresh`, `logs.collect` and `node.reboot`. Their payloads are messages of
-`bettercompute.site.v1`, which stays a draft package until v0.2 closes. See
+`bettercompute.site.v1`, which stays a draft package until v0.2 closes. Every `bmc.*` kind but `bmc.query`, and
+`site.httpProxy` since 0d42de8, is destructive, so under the v1.0 quorum it runs only in an approved batch;
+`site.httpProxy` also never reaches a BMC (the agent refuses the BMC hosts it drives, any `/redfish` path and its
+local `[site] bmc_networks`), and reaches only the addresses of the agentless machine it names (`SiteSpec.proxy_targets`,
+which metal fills from inspection; a2a853d, 8391d74). See
 [BMC drivers and credentials](/docs/guides/bare-metal/bmc) and the
 [command kinds reference](/docs/reference/command-kinds).
 

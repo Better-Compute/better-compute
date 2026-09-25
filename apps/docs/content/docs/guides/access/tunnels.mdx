@@ -74,12 +74,13 @@ sequenceDiagram
 <Callout type="warn" title="Node consoles work in bcd; instance tunnels need a VM runtime">
   Every half is implemented and tested, including the daemon's (steps 8 and 9) in the Go `bcd`, which is built but
   not released. `tests/e2e/bcd.test.ts` opens a node console through the api's relay, the gateway and a real bcd, and
-  the shell's exit status comes back. bcd dials instance `ssh` and `tcp` tunnels to the instance's own address, but
-  only a host that runs an instance runtime advertises `tunnel.instance-dial`, and today only fakehw builds have a
-  built-in one (a bcx runtime plugin would count, but none is written); on a real host build without one
-  `tunnels.open` refuses instance `ssh` and `tcp` tunnels outright, and `exec` into an instance
-  closes at once with exit status 127. See [the node half](#the-node-half). The TypeScript FakeDaemon answers every
-  op with an echo shell, so tunnels also open end to end in the tests and in `better-compute dev --sim N`.
+  the shell's exit status comes back. bcd dials instance `ssh` and `tcp` tunnels to the instance's own address, and
+  only a host that runs an instance runtime advertises `tunnel.instance-dial`: a host build with `virsh` (the
+  `libvirt-kvm` runtime, 362317c, so far tested against a fake `virsh` only, never on a real KVM host), a fakehw
+  build, or a host with a bcx runtime plugin (none is written). On a host without one, `tunnels.open` refuses
+  instance `ssh` and `tcp` tunnels outright, and `exec` into an instance closes at once with exit status 127. See
+  [the node half](#the-node-half). The TypeScript FakeDaemon answers every op with an echo shell, so tunnels also
+  open end to end in the tests and in `better-compute dev --sim N`.
 </Callout>
 
 ## Turn tunnels on
@@ -435,6 +436,10 @@ at once (`POST /v1/tunnels/reauthorize`) instead of at their next check. The 60-
 `tests/e2e/access.test.ts` holds the v0.3 exit: on a real embedded Better IAM, `delegations.revoke` closes the agent's
 tunnel in under 5 seconds with the revocation's reason, and the administrator's own console stays open.
 
+In `serve`'s host these closes, and the SSH-certificate revocation of a departed identity, run before any module's IAM
+reaction (b3f7a81): each module reaction runs under its own savepoint, so a reaction that fails is undone alone and
+never takes the revocation with it (see [SSH](/docs/guides/access/ssh)).
+
 `better-compute serve` wires this for you with `host.iam`:
 
 ```ts title="better-compute.config.ts"
@@ -524,9 +529,11 @@ never reaches the host.
 `tunnels.open` issues `ssh`, `tcp` and `exec` only for instances and `console` only for nodes. The API guards instance
 `ssh` and `tcp` with a capability: the node's current session must advertise `tunnel.instance-dial` in its `Hello`
 (stored in `node_sessions.capabilities`; see [sessions](/docs/daemon/sessions#hello)), or `tunnels.open` answers
-`UNSUPPORTED` before any ticket is minted. bcd advertises it only when it runs an instance runtime, which today means
-a fakehw build; on a real host build `console` is the only op that runs. An instance `exec` needs no capability, and
-bcd refuses it as above.
+`UNSUPPORTED` before any ticket is minted. bcd advertises it only when it runs an instance runtime: `libvirt-kvm` on
+a host build with `virsh`, the file-backed runtime of a fakehw build, or a bcx runtime plugin; on a host without one
+`console` is the only op that runs. An instance `exec` needs no capability, and bcd refuses it as above. bcd answers
+an instance ticket with op `console` (f8273ef), but `tunnels.open` does not issue one yet: it still refuses `console`
+for an instance with `INVALID_INPUT`, so no API path reaches an instance's serial console yet.
 
 ## The web terminal
 

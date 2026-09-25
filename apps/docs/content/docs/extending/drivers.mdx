@@ -90,7 +90,7 @@ where the package that declares it is imported:
 | `bios` | metal | `getSettings()`, `applySettings(settings)` | draft until v0.5 |
 | `raid` | metal | `applyLayout(layout)`, `clear()` | draft until v0.5 |
 | `firmware` | metal | `components()`, `update(component, image)` | draft until v0.5 |
-| `runtime` | vps | `traits`, `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, optional `console(id)` | v0.3 (libvirt-kvm, cloud-hypervisor in bcd, not written); bcd also serves a bcx plugin of this kind as a runtime (`list`, `apply`, `remove`) |
+| `runtime` | vps | `traits`, `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, optional `console(id)` | v0.3 (in bcd: `libvirt-kvm` written, 362317c, tested against a fake `virsh` only; `cloud-hypervisor` not written); bcd also serves a bcx plugin of this kind as a runtime (`list`, `apply`, `remove`) |
 
 Importing only `@better-compute/core` leaves `power` and `runtime` unusable, and `tests/stubs-driver-kinds.test.ts`
 checks exactly that. [BMC drivers and credentials](/docs/guides/bare-metal/bmc) describes what each metal kind is for.

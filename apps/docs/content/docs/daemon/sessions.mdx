@@ -103,6 +103,7 @@ itself (see `bench/gateway-streams`).
 | `last_event_seq` | The highest event sequence written in this journal |
 | `inventory_hashes` | Inventory section name to the SHA-256 of its content |
 | `trust_version` | The version of the command-signing trust bundle the daemon holds and verifies with (0 for none) |
+| `approver_set_epoch`, `approver_set_sha256` | The approver set the daemon enforces: its epoch and the SHA-256 of its canonical fields, empty without approver keys (fields 18 and 19; 856c00c). A daemon can take a bundle's version while refusing its quorum part, so `trust_version` alone does not say which approvers it enforces |
 
 bcd builds it from the journal (the rules of `session.NewHello`): done results not yet acked, and entries of the
 current daemon process that are not done. After a daemon restart the process is new, so `running_command_ids` is
@@ -118,11 +119,11 @@ at its next session. The API reads the column to refuse what the connected daemo
 | `tunnel.instance-dial` | `tunnels.open` | The daemon dials an instance's own address for instance `ssh` and `tcp` tunnels. Without it those tunnels are `UNSUPPORTED` with details `{ reason: 'daemon-capability', capability }`; `exec` and node consoles are not affected |
 
 On a node with GPUs, bcd advertises the capabilities `cdi` and `nvml` and the driver `nvidia`, and a node agent
-lists each built-in instance runtime it runs as a driver of kind `runtime` (only `libvirt-kvm`, the file-backed
-stand-in of fakehw builds, today); a runtime a bcx plugin serves is listed once, through its plugin's manifest. A node
-agent that runs an instance runtime also advertises `tunnel.instance-dial`, because it then dials an instance ticket
-to the instance's own address, never the host's (see [tunnels](/docs/guides/access/tunnels#the-node-half)); a host
-build without a runtime does not. The FakeDaemon
+lists each built-in instance runtime it runs as a driver of kind `runtime` (`libvirt-kvm`: on a host build with
+`virsh`, the libvirt runtime of 362317c, and on a fakehw build its file-backed runtime); a runtime a bcx plugin serves
+is listed once, through its plugin's manifest. A node agent that runs an instance runtime also advertises
+`tunnel.instance-dial`, because it then dials an instance ticket to the instance's own address, never the host's (see
+[tunnels](/docs/guides/access/tunnels#the-node-half)); a host without a runtime does not. The FakeDaemon
 advertises it when its tunnels are configured.
 
 ### The Hello transaction
@@ -185,7 +186,10 @@ upgrade-only, a full `DesiredState` when the node's generation is above `applied
 spec and the daemon reported no spec hash), then the replay. Commands the certificate may not run are cancelled
 `kind-not-allowed` instead of replayed. A WebSocket session skips unsigned commands and withholds unsigned specs; with
 `pki.commandSigning` the NodeSpec controller signs every generation, and the gateway relays the stored signed bytes
-(`nodes.spec_body`, `nodes.spec_signature`) verbatim, so WebSocket daemons receive their specs.
+(`nodes.spec_body`, `nodes.spec_signature`) verbatim, so WebSocket daemons receive their specs. bcd refuses to dial a
+WebSocket session at all without command-signing roots, renews its certificate over `POST /v1/renew` on the same
+listener instead of the mTLS `Renew`, and opens no tunnels in that mode (see
+[the WebSocket fallback](/docs/daemon/protocol#websocket-fallback-v04)).
 
 The daemon applies `Welcome` (`session.ApplyWelcome`): it records the epoch as `last_epoch`, forgets events up to
 `acked_event_seq`, keeps the clock offset, sets its lane credits, and sends the requested inventory sections, its
@@ -208,7 +212,9 @@ before (a restored disk), and a status report only ever raises it; `pki rotate-c
 until every connected node holds the new version (see [PKI](/docs/operations/pki)). Both daemons send the version in
 `Hello`. The FakeDaemon repeats it in every status report; bcd sets it only in the first report it sends after
 applying a newer bundle and leaves it 0 (unchanged) otherwise, which spares the gateway a `node_sessions` update per
-report.
+report. Whenever a report carries `trust_version`, it also carries the held approver set (`StatusReport` fields 10
+and 11; e171f0d, 5fe7cbf), and the gateway writes both to `node_sessions.approver_set_epoch` and
+`approver_set_sha256` (NULL for an empty digest), which doctor's `pki.quorum-lag` reads.
 
 ## Epochs and fencing
 
@@ -236,6 +242,7 @@ On top of the per-node epoch, every routing transaction first re-checks the gate
 | --- | --- | --- |
 | `boot_id`, or the role | In-flight self-terminating commands (`node.reboot`, `boot.kexec`, `daemon.upgrade`) completed by the reboot or exec they caused | `succeeded`, reason `rebooted`; never replayed |
 | `journal_id` (a previous one was recorded) | In-flight commands that are not retry-safe cannot be deduplicated any more | `failed`, reason `journal-lost`; never replayed |
+| nothing, after a bcd self-update | A `daemon.upgrade` restarts the process without a reboot, so the daemon itself settles it from `upgrade.json` (de9f380) | `succeeded` from the new binary once welcomed, or `failed` with `update-failed` after a swap back |
 | nothing | `unacked_results` are applied, then the rest is replayed | the journal deduplicates |
 
 Both rules wake the owning controllers, which decide what to do next; a workflow step whose command failed
@@ -367,6 +374,7 @@ One row per node, inserted by JoinService with epoch 0 and owned by the gateways
 | `daemon_version`, `proto_max` | From `Hello`; read by rollouts (migration `core/0008_session_versions`) |
 | `duplicate_hellos`, `duplicate_since` | Duplicate-`Hello` count in the current window, for the quarantine (migration `core/0016_duplicate_identity`) |
 | `trust_version` | The trust bundle version the daemon reported in `Hello` or a later `StatusReport`; read by the command-root switch (migration `core/0023_session_trust_version`) |
+| `approver_set_epoch`, `approver_set_sha256` | The approver set the daemon reported enforcing (migration `core/0026_session_approver_set`: `numeric(20, 0)` with a check of at least 0, and `bytea`; both NULL until a daemon reports them); read by doctor's `pki.quorum-lag` and `pki trust-version` |
 
 Routing is always this join at dispatch time, never a column copied onto commands, so a reconnect needs no rewrite
 and a command enqueued during a reconnect cannot be stranded. See [delivery](/docs/daemon/delivery).
