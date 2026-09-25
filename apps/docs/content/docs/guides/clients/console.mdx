@@ -19,6 +19,8 @@ sources:
   - apps/console/src/app/(console)/sandboxes/page.tsx
   - apps/console/src/components/ssh-cert-panel.tsx
   - packages/console-kit/src/sandboxes.ts
+  - packages/console-kit/src/batches.ts
+  - apps/console/src/app/(console)/batches/page.tsx
   - packages/console-kit/src/ssh-access.ts
   - apps/console/src/app/api/compute/[...path]/route.ts
   - apps/console/src/app/api/compute/watch/route.ts
@@ -155,6 +157,7 @@ console-kit, for the tenant the session acts in. Platform pages appear only for 
 | Instances | `/instances`, `/instances/[id]`, `/instances/[id]/terminal` | the form with sizes per pool; list, detail and a browser terminal |
 | Sandboxes | `/sandboxes` | a create form over the tenant's templates (each with its flavor and warm pool size) and a lifetime in minutes, capped at the template's maximum; the person's own sandboxes, or everyone's, with state, a countdown to expiry (a warning in the last 5 minutes), **+30 min**, **Snapshot** and **Delete**, and the `better-compute sandbox exec` line for a shell |
 | Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, recent commands, the node console, and the break-glass SSH panel (below) |
+| Batches | `/batches` | destructive batches held for the approver quorum: pending by default (or approved, expired, cancelled, all), each with its reason, command count, approvals of required, state and the window left; a batch's scope by kind, who approved, the `better-compute batch approve` line, and **Cancel** (below) |
 | Pools & capacity | `/pools`, `/pools/[id]` | pools owned or offered, a 7-day booking calendar, join tokens and join requests |
 | Quotas | `/quotas` | used of max per pool and resource |
 | Usage & spend | `/usage` | usage per meter, day, project and person, with a CSV export |
@@ -193,6 +196,24 @@ section hidden). It lists the tenant's templates with pool, flavor, image, lifet
 image, warm minimum and longest lifetime in hours. console-kit's `SandboxesView` exposes the same as
 `createTemplate`, `updateTemplate` and `deleteTemplate`. Templates can also come from
 `better-compute sandbox-template create` or a FleetConfig document.
+
+### Destructive batches
+
+The **Batches** page (`createBatchesView` in console-kit, b24d043) shows the tenant's
+[destructive batches](/docs/operations/pki#the-destructive-batch-quorum-v10): fleet-wide reimages, wipes and power
+actions held until enough approvers sign their scope. It lists pending batches by default, with a filter for
+`approved`, `expired`, `cancelled` or all, and counts down each pending batch's window from `notAfter`.
+
+**Details** loads the batch (`commandBatches.get`) and its whole scope (`commandBatches.scope`, paged 5,000 at a time
+and capped at 20,000 entries, with a warning when cut short), grouped by command kind. Subjects read as a person
+would: a node id, `BMC 10.0.0.7 (via node_site)` for a BMC reached through a site agent, or `HTTP to node_…`. The
+panel also shows the scope root, the approvals so far (key id, approver and time) and the member commands by state.
+**Cancel** asks for confirmation and calls `commandBatches.cancel`, so none of the batch's commands run.
+
+The page cannot approve. A browser never holds an approver key, so for a pending batch it shows the command for the
+approver's terminal, `better-compute batch approve --batch <id> --key <approver key>`, where the CLI lists the scope,
+recomputes the root from it and signs. Reading needs `compute:batches:read` and cancelling `compute:batches:approve`,
+both decided when called.
 
 ### Break-glass SSH
 
@@ -239,6 +260,7 @@ live.connection.subscribe(() => showBadge(live.connection.get().status));
 | Views | `capacityChart`, `quotaView`, `createQuotaView`, `timelineView`, `earliestFit`, `usageView`, `usageCsv` | stacked capacity bars, quota meters (warning from 80 %), the booking calendar and earliest free window, usage and estimated spend |
 | Admin | `createRolloutView`, `rolloutProgress`, `createFleetDriftView`, `nodeTable` | rollout waves, fleet drift by kind, a filterable, stably sorted node table |
 | Sandboxes | `createSandboxesView`, `timeLeft`, `sandboxExecCommand` | a tenant's sandboxes (`scope` mine or all) and templates, `detail`, `create`, `extend`, `snapshot` and `remove`, each refreshing the list; the remaining lifetime as `12m 03s` or `1h 05m`, urgent in the last 5 minutes; the CLI line that opens a shell |
+| Batches | `createBatchesView`, `scopeByKind`, `describeSubject`, `batchApproveCommand` | a tenant's destructive batches over `commandBatches` (`filter(state or 'all')`, default `pending`), `detail`, `scope(batchId, max?)` (every leaf, paged, at most 20,000 by default, stopping on a page that does not advance; `truncated` when capped) and `cancel`; the scope grouped by kind with sorted subjects; a subject as text; the approver's CLI line |
 | SSH access | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's break-glass certificates: `issue` (held in `view.issued` until dismissed), `revoke`, `showExpired`; a public key check that refuses private keys; the commands to use a certificate |
 | Webhooks | `createWebhooksView`, `deliverySummary` | a tenant's webhooks over the `webhooks` group (list, create, pause, rotate, delete, ping, deliveries, redeliver, event types); the secret from create or rotate sits in `view.secret` until `dismissSecret()` and is never stored or re-read; delivery counts by state and the latest failure |
 | Break-glass SSH | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's certificates over `nodes.listSshCerts` (expired ones with `showExpired(true)`), `issue({ publicKey, account?, minutes? })` (1 to 60 minutes, 15 by default) and `revoke(serial, reason?)`; a pasted private key, a multi-line paste or a key type other than Ed25519 or ECDSA P-256 is refused before anything is sent; the issued certificate sits in `issued` until `dismissIssued()`, and `sshUsage` gives the commands to use it. The console's node page uses it |

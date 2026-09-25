@@ -195,7 +195,8 @@ API admission. See [policies](/docs/guides/iam/policies).
 
 `FakeDaemon` is the daemon side of the protocol in TypeScript, rule for rule with the Go packages in
 `daemon/internal/{journal,dispatch,session,converge,agent,fakehw}`. The real bcd has its own tests (see
-[the Go daemon](#the-go-daemon)); the FakeDaemon is what runs where many daemons, or features bcd lacks, are needed.
+[the Go daemon](#the-go-daemon)); the FakeDaemon is what runs where features bcd lacks, or many daemons on simulated
+time, are needed. `bcd sim` runs many real agents too, but in real time against a real gateway.
 See [the daemon](/docs/daemon).
 
 - **Journal.** `accepted` before any side effect; `running{boot_id}` right before a self-terminating one; done
@@ -303,6 +304,7 @@ session (`newHarness`), answering its `SecretRequest`s with sealed JWEs:
 | `internal/redfish` `TestRedfishOperations` | Every operation against a fake Redfish service over TLS pinned by SPKI; after a rotation the old password is `auth-failed`; an unknown operation is `unsupported`; a wrong pin and a plain-http BMC are refused |
 | `internal/pxe` `TestProxyDHCPAnswersPreparedMachines`, `TestTFTPServesFilesUnderItsRoot` | On real loopback UDP sockets: PXE firmware of a prepared MAC gets `ipxe.efi` with the client's UUID and architecture read, iPXE gets the chain URL, an unprepared MAC gets no answer; TFTP serves a file from its root |
 | `internal/bootparams` `TestRenderParseRoundTrip`, `cmd/bcd` `TestRamdiskNeedsBootParameters` | The kernel command line round-trips; `bcd ramdisk` without its parameters exits 2 |
+| `cmd/bcd` `TestSimNeedsNodesAndAConfiguration` | `bcd sim --nodes 0` exits 2; `bcd sim` with a missing configuration file exits 1 |
 
 **End to end.** `tests/e2e/bcd.test.ts` runs the real binary (linux/amd64, fakehw, `BCD_FAKEHW_SEED=41`) against
 `createDevStack({ externalTls })`: the dev stack's mTLS listener with a dev serving CA, which the test pins in a
@@ -320,7 +322,10 @@ under `/tmp`. It checks that:
 - a provisioned OS bootstraps with nothing but a token file, the control plane URL and the three pins (what
   provision's user data and the Robot bootstrap run): `bcd join --server` reads the real server's well-known document,
   joins through the real gateway and JoinService, removes the token, writes `config.toml` and `join-encryption.jwk`,
-  succeeds again on a re-run without a token, and `bcd node` connects on the written configuration alone (472a424).
+  succeeds again on a re-run without a token, and `bcd node` connects on the written configuration alone (472a424);
+- `bcd sim --nodes 5 --seed 100`, given one five-use join token on standard input, joins five simulated machines that
+  connect as five distinct nodes (five distinct hardware keys), and never prints the token (aa7501c; see
+  [bcd sim](/docs/daemon#bcd-sim)).
 
 `tests/e2e/bcd-vps.test.ts` runs the same fakehw binary as a VPS host: bcd joins a `vps-host` pool over the dev
 stack's mTLS listener, `instances.create` places an instance on it, the `instances` converger defines and starts it

@@ -222,8 +222,10 @@ gateway's report handlers also ignore reports about allocations placed on anothe
   `instances.create` accepts only a secret the tenant wrote with `secrets.put` (a `secret_refs` row; never a
   platform-minted one such as a join token, a BMC credential or another instance's sealed user data) and also
   decides `compute:secrets:manage` on the tenant with the caller's own credential (and on the fleet in the root
-  tenant), so `compute:instances:create` alone cannot read a write-only secret. Sandbox templates follow the same
-  rule.
+  tenant), so `compute:instances:create` alone cannot read a write-only secret. A fleet secret (`secret_refs.scope`
+  `fleet`, such as a shared site's BMC credentials in the root tenant) is never user data: `instances.create` refuses
+  it with `INVALID_INPUT` even for a holder of fleet `compute:secrets:manage` (aac73a1). Sandbox templates follow the
+  same rule.
 - `secrets.put` records the scope it was decided on (`secret_refs.scope`, `tenant` or `fleet`), and a tenant-scoped
   put or delete never changes a fleet secret (`INVALID_STATE`).
 - Nothing is released for a tenant that is suspended or deleted: after the signature and binding checks, a reference

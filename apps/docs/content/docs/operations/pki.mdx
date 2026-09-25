@@ -449,26 +449,33 @@ setting `pki.approvers` (or `BETTER_COMPUTE_APPROVER_KEYS` in the examples) toda
 destructive command `UNBATCHED_LIMIT`, unless `unbatchedDestructivePerHour` allows them.
 </Callout>
 
-**The scope.** A batch's scope is a tree with one leaf per distinct `(subject, kind)`:
-`H(0x00 ‖ lp(batch_id) ‖ lp(subject) ‖ lp(kind))`, leaves ordered by hash, inner nodes `H(0x01 ‖ left ‖ right)` and an
-odd node promoted (RFC 6962 style; golden vectors in `packages/protocol/golden/batch-scope.json`). The subject is what
-the command acts on, computed by the executing agent from the signed body:
+**The scope.** A batch's scope is a tree with one leaf per distinct `(subject, kind, payload)`:
+`H(0x00 ‖ lp(batch_id) ‖ lp(subject) ‖ lp(kind) ‖ lp(payload_sha256))`, leaves ordered by hash, inner nodes
+`H(0x01 ‖ left ‖ right)` and an odd node promoted (RFC 6962 style; golden vectors in
+`packages/protocol/golden/batch-scope.json`). `payload_sha256` binds a leaf to exactly one operation, or is left
+empty to allow any payload of that kind for that subject; the agent accepts a proof from either the bound or the
+unbound leaf (77cdf4f; `command_batch_scope` and `command_batch_members` carry it, migration `quorum/0002_payload_digest`).
+The subject is what the command acts on, computed by the executing agent from the signed body:
 
 | Kinds | Subject |
 | --- | --- |
 | Kinds a node runs on itself | its `node_id` |
-| `bmc.*`, which a site agent runs against a machine's BMC | `bmc:` + `BmcOperationRequest.address` |
+| `bmc.*`, which a site agent runs against a machine's BMC | `bmc:` + the site agent's `node_id` + `/` + `BmcOperationRequest.address` |
 | `site.httpProxy` | `node:` + `HttpProxyRequest.target_node_id` |
 
 Without the BMC subject, "power-cycle 412 machines" would collapse into one `(site agent, bmc.power)` leaf, and
-approving it would let a compromised control plane power any machine behind that agent.
+approving it would let a compromised control plane power any machine behind that agent. BMC addresses are
+site-local, so the subject names the site agent too: an approval for a BMC at site A never admits a command at site B.
 
 **The wire.** `CommandBody.batch_id` is inside the worker signature; `Command.batch_approval` (`batch_id`,
 `scope_root`, `scope_size`, `not_after`, `signatures`) and `Command.batch_proof` (`index`, `siblings`) travel outside
 it, since approvers sign the approval themselves. The `TrustBundle` gains `approver_keys` (`kid`, `spki_der`),
-`approver_threshold`, `quorum_tiers` (`max_scope_size`, `threshold`) and `unbatched_destructive_per_hour`, and
+`approver_threshold`, `quorum_tiers` (`max_scope_size`, `threshold`), `unbatched_destructive_per_hour` and
+`approver_set_signatures`, and
 `CommandRejectReason` gains `BATCH_UNAPPROVED` and `UNBATCHED_LIMIT`. Approvals are signed under the purpose
-`batch-approval`.
+`batch-approval`, and the signed parts end with the deployment's trust domain, which every verifier takes from its
+own configuration: an approval signed for staging never admits a command in production. The server therefore needs
+`pki.join` (the trust domain) to accept approvals, and refuses the quorum with `INVALID_CONFIG` without it.
 
 **The primitives** in `better-compute/pki` (`packages/pki/src/quorum.ts`):
 
@@ -476,9 +483,9 @@ it, since approvers sign the approval themselves. The `TrustBundle` gains `appro
 | --- | --- |
 | `createApproverKey()`, `approverKeyOf(publicKey)` | A P-256 approver key pair, and its trust-bundle entry `{ kid, spkiDer }` with `kid` = base64url SHA-256 of the SPKI |
 | `batchSubject(body)`, `isBmcKind(kind)` | The subject above, from a command body; `INVALID_INPUT` when a relayed kind's payload is not its request or names no target |
-| `batchScope(batchId, entries)` | The tree over `{ subject, kind }` entries: `root`, `size` and `proofOf(subject, kind)` |
-| `verifyBatchProof({ batchId, subject, kind, proof, root, size })` | Walks a proof to the root; the size comes from the signed approval, never the command |
-| `signBatchApproval(approval, privateKey)` | One approver's `Signature` over `{ batchId, scopeRoot, scopeSize, notAfter }` |
+| `batchScope(batchId, entries)` | The tree over `{ subject, kind, payloadSha256? }` entries: `root`, `size` and `proofOf(subject, kind, payloadSha256?)` |
+| `verifyBatchProof({ batchId, subject, kind, payloadSha256?, proof, root, size })` | Walks a proof to the root; the size comes from the signed approval, never the command |
+| `signBatchApproval(approval, privateKey)` | One approver's `Signature` over `{ batchId, scopeRoot, scopeSize, notAfter, trustDomain }` |
 | `requiredApprovals(size, threshold, tiers)` | The first tier whose `maxScopeSize` covers the batch, else the threshold |
 | `verifyBatchApproval(approval, options)` | Unexpired, a 32-byte root, and enough valid signatures by distinct keys of the set (unknown kids, duplicates and a key listed under another's kid count for nothing); returns the approving kids |
 | `verifyBatchCommand(command, approval, proof, options)` | The agent's check: its own batch, an approval that holds, and its `(subject, kind)` in scope; `ACCESS_DENIED` with `details.reason` (`no-approval`, `other-batch`, `expired`, `too-few-approvals`, `not-in-scope`, ...) |
@@ -503,7 +510,9 @@ export default defineConfig(() => ({
 ```
 
 The options are validated at start (`INVALID_CONFIG`): `commandSigning` must be set, keys must be distinct P-256
-public keys, thresholds whole numbers from 1 to the key count, tiers' `maxScopeSize` at least 1. A daemon cannot count
+public keys, thresholds whole numbers from 1 to the key count, tiers' `maxScopeSize` at least 1. Tiers must ascend
+strictly by `maxScopeSize`, their thresholds must never decrease, and none may exceed `threshold` (which applies to
+batches above every tier), so padding a scope with extra leaves never makes it cheaper to approve (d566cbe). A daemon cannot count
 fleet-wide, so per-daemon allowances for unbatched commands would let a compromised worker hit every node once;
 fleet-wide limits come from the approvers instead, for example a tier whose single signature comes from a
 rate-limited auto-approver service outside the api and workers.
@@ -554,15 +563,20 @@ the same way. With approver keys in the trust bundle, only kinds the daemon's ow
 checked: one with a `batch_id` runs only with a `batch_approval` of enough distinct approver signatures (the tier for
 its scope size, else the threshold, never fewer than one; a `kid` must be the SHA-256 of its key; duplicates count
 once), not past its `not_after` in server time, and a `batch_proof` that proves the command's own `(subject, kind)`
-leaf, the subject taken from the signed body; else it is `BATCH_UNAPPROVED`. One without a `batch_id` counts against
+leaf, the subject taken from the signed body; else it is `BATCH_UNAPPROVED`. Each leaf (the `batch_id` and the
+proof's leaf index) runs at most once, since an approval for N machines is N operations, not N kinds of operation to
+repeat: another command on a used leaf is `BATCH_UNAPPROVED` with reason `leaf-used`, while a redelivery of the same
+command keeps its leaf. The FakeDaemon enforces this (d566cbe); bcd does not yet. One without a `batch_id` counts against
 a rolling-hour allowance (`unbatched_destructive_per_hour`, default 0), beyond which it is `UNBATCHED_LIMIT`;
 redeliveries do not count twice, and bcd keeps the count in `data_dir/unbatched-destructive.json` so a restart does
 not reset it. The verdicts apply after the signature check. bcd keeps the whole trust bundle in `identity.json`.
 
 bcd is stricter than the FakeDaemon in four ways (3ff8131). Once it holds approver keys it refuses a newer trust
-bundle that changes the quorum (keys, threshold, tiers or the unbatched cap), since the JoinService key alone could
-otherwise drop the approvers or swap in its own; roots and other fields still rotate. A quorum change would need the approvers' own
-signatures, which a trust bundle cannot carry yet. It counts the unbatched window on its own clock, so a
+bundle that changes the quorum (keys, threshold, tiers or the unbatched cap) unless the current approver set signs the
+change, since the JoinService key alone could otherwise drop the approvers or swap in its own; roots and other fields
+still rotate. The trust bundle carries those signatures in `approver_set_signatures` (field 7, purpose
+`approver-set`, over `approverSetSigningInput`), and a daemon holding approver keys accepts new quorum fields only
+when its current set signs them at its current threshold (77cdf4f). It counts the unbatched window on its own clock, so a
 `Welcome` that moves server time forward cannot age the count out. It checks a deferred command's approval again when
 the command is finally admitted. And an unreadable stored bundle refuses destructive commands rather than switching
 the quorum off. The FakeDaemon lets a newer bundle without approver keys lift its quorum. Both count `bmc.boot` and

@@ -87,7 +87,7 @@ flowchart LR
 | `node` | every server | session, inventory, NVML health, CDI device holds, commands |
 | `site` | one or two per datacenter | proxy DHCP, iPXE, image cache, BMC access |
 | `ramdisk` | a machine during PXE commissioning | inspection, diagnostics, wipe, image streaming |
-| `sim` | test hosts | many daemons on fake hardware |
+| `sim` | test hosts | many real node agents on fake hardware in one process, against a gateway |
 
 It only ever dials out, over gRPC on mutual TLS to a <Term id="gateway">gateway</Term> on port 443. See
 [the daemon](/docs/daemon).
@@ -190,7 +190,8 @@ command kinds (including `gpu.reset`), tunnels, XID and host-pressure reporting,
 requests. `tests/e2e/bcd.test.ts` runs it against a real control plane and gateway. It is not released (no
 binaries have been published), and NVML is still a stub. `bcd site` (Redfish BMC operations, proxy DHCP, TFTP, iPXE
 and the image cache) and `bcd ramdisk` (wipes, image streaming, kexec, DCGM) are written and covered by Go unit tests
-only; the `instances` converger runs only on fake-hardware builds; `bcd sim` exits 2 with `NOT_IMPLEMENTED`. The
+only; the `instances` converger runs only on fake-hardware builds, and so does `bcd sim`, which runs many real node
+agents in one process against a gateway. The
 TypeScript `FakeDaemon` in `@better-compute/testing` covers the rest, and it is what joins in
 `better-compute dev --sim N`, the simulator and most test suites. See [what bcd does today](/docs/daemon#what-bcd-does-today)
 and the [roadmap](/docs/reference/roadmap) for each phase's exit tests.

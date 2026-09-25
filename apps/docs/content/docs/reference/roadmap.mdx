@@ -79,8 +79,9 @@ yet. This page tracks each item as:
   build in WSL), including a node console tunnel, and the node agent also converges break-glass SSH (`access`).
   `bcd site` and `bcd ramdisk` are written and covered by Go unit tests only, and the `instances` converger, instance
   tunnels and the IMDS run only on fakehw builds (`tests/e2e/bcd-vps.test.ts`). The release pipeline exists but no
-  release has been cut, no real server has run bcd, NVML is a stub, and `bcd sim`, real VM runtimes and self-update
-  are not written. Those are exercised through the TypeScript `FakeDaemon`.
+  release has been cut, no real server has run bcd, NVML is a stub, and real VM runtimes and self-update are not
+  written. Those are exercised through the TypeScript `FakeDaemon`. `bcd sim` runs many real node agents in one
+  process (fakehw builds only).
   See [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No PostgreSQL server has run the suites.** Local runs use PGlite (PostgreSQL 18 in WebAssembly). Suites that need
   real concurrency skip unless `BETTER_COMPUTE_POSTGRES_URL` is set, and every benchmark number below is from PGlite
@@ -239,7 +240,7 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | Scheduler worker role | Done | `Reconciler.role` in core, the runtime's scheduler role with its own shard membership, and the pool-lease placer `capacity.placer` running in it |
 | Partitioned history | Done | `audit_events`, `inventory_snapshots` and `usage_windows` by UTC month (`core/0018_partitioned_history`); `retentionModule()` keeps months created ahead, prunes and drops emptied months; audit months are archived by hand. See [retention](/docs/operations/retention#history-partitions) |
 | Merkle audit checkpoints | Done | `@better-compute/audit`, with `better-compute audit verify` |
-| `bcd sim` | In progress | `better-compute sim` runs the FakeDaemon fleet simulator; the Go mode is not written (`bcd sim` exits 2) |
+| `bcd sim` | In progress | Written (aa7501c): `bcd sim --nodes N --seed S` runs N real node agents on fakehw in one process against a gateway, each with its own identity, journal and session; `tests/e2e/bcd.test.ts` joins five with one five-use token. Open: the nightly `bcd sim --nodes 10000` against real gateways and PostgreSQL through Toxiproxy. `better-compute sim` remains the FakeDaemon fleet simulator; see [bcd sim](/docs/daemon#bcd-sim) |
 | R1, if the IAM-lane benchmark demands it | Not started | Waits for the v0.1 IAM-lane gate |
 
 The v0.4 acceptance is set at 10,000 nodes and 100,000 GPUs on the reference PostgreSQL. What exists is simulation:

@@ -250,6 +250,10 @@ well-known document: a host build also needs `--serving-ca-pin`, `--join-signing
 the document on trust (and accepts an `http://` server); see
 [joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document).
 
+For many real daemons at once, a fakehw build runs `bcd sim --config <that config.toml> --nodes N` with one join token
+allowing N uses on standard input: N node agents in one process, each a distinct fakehw machine with its own
+identity under `data_dir/sim/<i>` (see [bcd sim](/docs/daemon#bcd-sim)).
+
 ## The example
 
 `examples/dev` is the whole deployment every example shares (`examples/shared/compose.ts`: provision and metal,
@@ -313,7 +317,9 @@ with the same `--seed` to reproduce it, and add `--log` to get the event log. `s
 <Callout title="The stub is not the server">
 `better-compute sim` exercises the daemon side and the protocol against `GatewayStub`, a minimal in-memory control
 plane. The runs against the real control plane and real gateways are `createControlPlaneSim` and the nightly
-matrix; see [testing](/docs/operations/testing#the-control-plane-simulator).
+matrix; see [testing](/docs/operations/testing#the-control-plane-simulator). `bcd sim` is unrelated despite the
+name: it runs real Go daemons in real time against a real gateway, with no chaos or invariant checks (see
+[bcd sim](/docs/daemon#bcd-sim)).
 </Callout>
 
 ## Working on the repository

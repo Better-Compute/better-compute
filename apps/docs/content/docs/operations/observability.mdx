@@ -315,6 +315,7 @@ better-compute doctor --strict --query "findings[].check"
 | `vps.sandboxes.expiry` | error | Sandboxes more than two reconciler passes (30 s) past `expiresAt` and not deleting: no worker runs the `vps.sandboxes` reconciler, or it is failing |
 | `vps.sandboxes.deleting` | warning | Sandboxes deleting for more than 10 minutes: their instance is stuck (its host must report it gone, or be declared lost) |
 | `vps.sandboxes.warm` | warning | Templates below `warm.min` settled warm instances for over 10 minutes with no refill in that time (quota, capacity, a vanished flavor or image), and warm instances not settled within 10 minutes |
+| `vps.sandboxes.network` | error | Open sandboxes with a `private` or `none` network on a host without the `bc.dev/cap.instance.network-policy` label (placed before the capability constraint, or its bcd since downgraded): their guests have full egress. Upgrade bcd there, or delete the sandboxes |
 | `workflows-stuck` | warning | `provision`: active workflows with an in-flight step more than 5 minutes past its deadline. The engine fails an overdue step whenever it looks, so nobody runs their `workflow` reconciler |
 | `workflows-failed` | info | `provision`: workflows that failed in the last day; inspect with `workflows.get`, retry with `workflows.retry` |
 | `metal-failed` | warning | `metal`: machines `failed` with maintenance on, waiting for `metal.recover` or `metal.retire`, listed with their failure codes |

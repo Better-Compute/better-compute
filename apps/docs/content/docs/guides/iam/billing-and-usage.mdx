@@ -258,8 +258,9 @@ PLAN.md stops spending in three layers, and all three work today:
    [sandboxes](/docs/guides/vps/sandboxes) and sandbox extensions stop too.
 2. **Per pool, before admission.** [`reservations.create`](/docs/reference/api/reservations#create),
    [`reservations.extend`](/docs/reference/api/reservations#extend),
-   [`instances.create`](/docs/reference/api/instances#create) and
-   [`sandboxes.create`](/docs/reference/api/sandboxes#create) (on the template's pool) run capacity's `budgetAdmissionCheck` as their
+   [`instances.create`](/docs/reference/api/instances#create),
+   [`sandboxes.create`](/docs/reference/api/sandboxes#create) (on the template's pool) and
+   [`sandboxes.extend`](/docs/reference/api/sandboxes#extend) (on the sandbox's pool; f3b7f9e) run capacity's `budgetAdmissionCheck` as their
    [`MethodAdmission.check`](/docs/extending/methods#admission-the-request-as-a-resource), after the IAM decision
    with no transaction open. It calls Better IAM's `billing.check` through
    `IamPort.billingCheck({ tenantId, identityId }, credential)` when the pool's policy sets

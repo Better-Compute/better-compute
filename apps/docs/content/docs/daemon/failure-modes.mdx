@@ -304,7 +304,8 @@ better-compute sim --nodes 100 --chaos heavy --seed 7
 
 The real Go daemon is tested at a smaller scale. Its unit tests cover the journal rules, crash recovery, the server
 time mark and the session handling against scripted streams, and `tests/e2e/bcd.test.ts` runs the fakehw build
-against a real gateway through a join, commands, a GPU binding and a reboot (see
-[testing](/docs/operations/testing#the-go-daemon)). It does not run under chaos yet: PLAN.md's protocol and skew suite
-over lossy links and `bcd sim --nodes 10000` against real gateways and PostgreSQL through Toxiproxy (v0.4) are not
-built, and `bcd sim` exits 2.
+against a real gateway through a join, commands, a GPU binding and a reboot, plus five simulated machines joining
+through [`bcd sim`](/docs/daemon#bcd-sim) (see [testing](/docs/operations/testing#the-go-daemon)). It does not run
+under chaos yet: `bcd sim` exists (fakehw builds, many real agents in one process), but PLAN.md's protocol and skew
+suite over lossy links and the nightly `bcd sim --nodes 10000` against real gateways and PostgreSQL through
+Toxiproxy (v0.4) are not built.

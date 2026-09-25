@@ -14,6 +14,7 @@ sources:
   - daemon/cmd/bcd/doctor.go
   - daemon/cmd/bcd/site.go
   - daemon/cmd/bcd/ramdisk.go
+  - daemon/cmd/bcd/sim.go
   - daemon/internal/bootparams/bootparams.go
   - daemon/internal/agent/site.go
   - daemon/internal/agent/bootserver.go
@@ -91,10 +92,10 @@ and the metadata service, and `tests/e2e/bcd-vps.test.ts` creates, starts and de
 control plane, but only fakehw builds
 have a built-in runtime (a file-backed stand-in), and no bcx runtime plugin is written, so no VM boots on a real
 host yet. bcd is not released: the release
-pipeline exists but no tag has been cut, so the install script has nothing to download yet. `bcd sim` still exits 2
-with `NOT_IMPLEMENTED`; real VM runtimes, NVML, self-update and the WebSocket fallback are missing (see
-[what bcd does today](#what-bcd-does-today)). The TypeScript `FakeDaemon` covers those in tests, the simulator and
-`better-compute dev --sim N`.
+pipeline exists but no tag has been cut, so the install script has nothing to download yet. `bcd sim` runs many
+real node agents on fake hardware in one process (fakehw builds only; see [bcd sim](#bcd-sim)); real VM runtimes,
+NVML, self-update and the WebSocket fallback are missing (see [what bcd does today](#what-bcd-does-today)). The
+TypeScript `FakeDaemon` covers those in tests, the simulator and `better-compute dev --sim N`.
 </Callout>
 
 ## Where bcd sits
@@ -135,7 +136,7 @@ certificate carries.
 | `node` | every server | the session, the journal, inventory, health (NVML events, kernel XIDs, EDAC, SMART, from v0.2), NodeSpec convergence (CDI holds, MIG layout, host config, runtimes), commands, tunnels (v0.3), OTLP telemetry, self-update (v0.4) | `node`, 24 h | v0.1 | works for the v0.1 scope; see below |
 | `site` | one or two per site, as a node with role `site` | proxy DHCP, TFTP and iPXE over HTTPS, and discovery vouching while it holds the site boot lease; the image cache and BMC access at all times | `site`, 24 h | v0.2 | works, without IPMI or vendor BMCs: BMC operations over Redfish, `site.httpProxy`, boot entries, and the boot server (proxy DHCP, TFTP, iPXE scripts with signed discovery assertions under the boot lease, the image cache) |
 | `ramdisk` | the PXE initramfs | inspection, DCGM diagnostics, wipes (`quick`, `secure-erase`, `crypto-erase`), image streaming, `boot.kexec` | `ramdisk`, at most 2 h | v0.2 | works: joins with the `discovery` attestor from its kernel command line, then runs `disk.wipe`, `deploy.image`, `boot.kexec`, `diag.dcgm` and the shared kinds. No ramdisk image is built in the repository |
-| `sim` | test hosts | N daemons on fake hardware with real TLS and gRPC | a test CA | v0.4 | exits 2 `NOT_IMPLEMENTED` |
+| `sim` | test hosts | N daemons on fake hardware with real TLS and gRPC | a test CA | v0.4 | works in fakehw builds: N real node agents in one process against the configured gateway, each with its own identity (a `node` certificate from a normal join); see [bcd sim](#bcd-sim) |
 | `helper` | beside `node`, as root | typed privileged operations over a local socket | none | v0.4 | not a command yet |
 
 A <Term id="site-agent">site agent</Term> and the <Term id="ramdisk">ramdisk</Term> speak the same session protocol
@@ -160,7 +161,7 @@ Beside the modes, bcd has four local commands, all of which work:
 | `bcd doctor` | Checks the configuration file, NVML, the hardware backend, `/dev/kvm`, IOMMU units, a TCP connection to the gateway and the node's identity |
 | `bcd version` | Prints the version, platform, Go version and build tags |
 
-Exit codes are 0 for success, 1 for a failure and 2 for a usage error or a command that is not implemented yet. bcd
+Exit codes are 0 for success, 1 for a failure and 2 for a usage error. bcd
 never echoes a positional argument, so a join token pasted into the command line does not end up in logs:
 
 ```bash
@@ -187,6 +188,44 @@ is a node that has not joined. A gateway that does not accept a TCP connection w
 certificate, is a failure. It also warns when `config.toml` is readable by anyone but its owner, and exits 1 when any
 check fails. There is no clock check yet.
 
+## bcd sim
+
+`bcd sim` (aa7501c) runs many real node agents in one process against the gateway of a configuration file, so the
+load a gateway sees is the real daemon's, not a model of it. It exists only in fakehw builds (`go build -tags
+fakehw`); a host build exits 2 with `bcd sim: needs a fakehw build`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--config` | `/etc/bcd/config.toml` | The gateway URL, `gateway_server_name`, pins, journal limits and logging, as for `bcd node`. The simulated nodes live under its `data_dir/sim` |
+| `--nodes` | `1` | How many daemons to run; below 1 is a usage error (exit 2) |
+| `--seed` | `1` | The fakehw seed of the first daemon; daemon `i` uses `seed + i`, so each is a distinct machine with its own hardware key |
+
+Each simulated machine `i` gets its own data directory `<data_dir>/sim/<i>` holding its `node.key`, `identity.json`,
+bbolt journal, fakehw boot id and the file-backed `libvirt-kvm` instance runtime, and runs the same agent as
+`bcd node` over its own session. A machine that has not joined yet joins as role `node` (claims hostname
+`sim-<i>`) with the one token `bcd sim` reads at start from `BCD_JOIN_TOKEN` or standard input; the token must
+allow as many uses as there are unjoined machines, and at most 16 joins are in flight at once. The token is only
+read when some machine still needs it, and `join-encryption.jwk` must sit next to the configuration file (there is
+no `--server` fallback). Machines that joined before simply reconnect on the next run.
+
+A `node.reboot` writes a new boot id and restarts only that machine's agent, not the process; a machine whose agent
+fails is restarted after a back-off of one second per consecutive failure, capped at a minute. The process runs
+until SIGINT or SIGTERM, then prints how many machines joined and how many reboots it saw:
+
+```bash
+printf '%s\n' "$SIM_TOKEN" | bcd sim --config ./sim.toml --nodes 5 --seed 100
+# bcd sim: 5 nodes (fakehw seeds 100-104) against <gateway_url>
+# ... one "simulated node joined" log line per machine ...
+# bcd sim: stopped; 5 joined, 0 reboots
+```
+
+`tests/e2e/bcd.test.ts` runs five of them with one five-use join token and checks that five distinct machines
+(five distinct hardware keys) connect and that the token appears nowhere in the output. `better-compute sim` is a
+different tool: the deterministic, single-process fleet simulator built on the TypeScript
+[FakeDaemon](#the-fakedaemon), with chaos and invariant checks and no real gateway. `bcd sim` is the one to point at
+a real gateway and PostgreSQL. PLAN.md's nightly run of `bcd sim --nodes 10000` through Toxiproxy (v0.4) is not
+wired up.
+
 ## What bcd does today
 
 `bcd node` is the v0.1 node agent (`daemon/internal/agent`); `bcd site` and `bcd ramdisk` run the same agent with
@@ -208,7 +247,7 @@ their own kinds. What it implements and what is still missing, as of commit 2782
 | Inventory | `inventory.Collector` from procfs and sysfs without cgo: DMI, UEFI and Secure Boot, TPM presence, CPU and NUMA, memory, disks, NICs with SR-IOV and RDMA, NVIDIA GPUs from `/proc/driver/nvidia`, OS, cgroups, KVM, IOMMU; on a site agent an `images` section listing its image cache (digest, source URL, size, `READY` or `PULLING`), re-sent when a pull starts or ends | NVML (`internal/nvml` returns `ErrNotBuilt`), so no ECC or row-remap data on a real host; netlink |
 | Site agent | Redfish BMC operations (power, boot device, CD virtual media, inspection, firmware inventory, credential rotation, BIOS settings, RAID layouts, and firmware updates served to the BMC from the verified image cache; 944221c), each only under its own `bmc.*` kind, pinned to the enrolled SPKI, on the system a BMC address names (`/redfish/v1/Systems/<id>`) or else the first, with every resource path kept under `/redfish/v1` on that BMC; `site.httpProxy` to site-internal addresses only; boot entries persisted in `data_dir/boot-entries.json`; the boot server: proxy DHCP (UDP 67 and 4011) and read-only TFTP for the iPXE builds, `GET /boot/ipxe` scripts with a signed discovery assertion each, all answering only prepared machines while the agent holds the boot lease and hears from the gateway; the image cache (`data_dir/cache/<sha256>`, served at `GET /cache/<sha256>`, trimmed least recently used first to `[boot] cache_max_bytes` without evicting an image `cache_images` still names) | IPMI and vendor BMCs; matching `site.httpProxy` targets to the node's own addresses; the iPXE builds and the ramdisk itself, which you supply |
 | Ramdisk | Boot parameters from `/proc/cmdline`, the `discovery` join as role `ramdisk`, state in tmpfs; quick wipes read back, secure and crypto erase with `nvme format`, `hdparm` or `blkdiscard --secure`; image streaming (from the site cache by digest, else the source) through SHA-256 and gzip or zstd; cloud-init or Ignition user data; kexec into the installed kernel; `dcgmi diag` | A ramdisk image (kernel and initramfs with bcd and its tools) built in the repository; qcow2 images; a run on a real machine |
-| Local | `bcd status` over the unix socket; `bcd doctor`'s host checks (KVM, IOMMU, gateway reachability, identity) | `doctor` and `support-bundle` against the running agent; a clock check |
+| Local | `bcd status` over the unix socket; `bcd doctor`'s host checks (KVM, IOMMU, gateway reachability, identity); `bcd sim`, many fakehw node agents in one process (aa7501c) | `doctor` and `support-bundle` against the running agent; a clock check |
 
 ## Outbound only
 
@@ -258,7 +297,7 @@ go-nvml is not added yet.
 
 | Package | What | State |
 | --- | --- | --- |
-| `cmd/bcd` | subcommands and flags | `join`, `node`, `site`, `ramdisk`, `status`, `doctor`, `version` work; `sim` exits 2 |
+| `cmd/bcd` | subcommands and flags | every subcommand works; `sim` only in fakehw builds (aa7501c) |
 | `internal/agent` | the agent of every mode: join, session, dispatcher, the `devices`, `access`, `instances` and `site` convergers, the kinds, tunnels, secret and workload-token requests, the health watch, renewal, status; the site agent's kinds and boot server; the ramdisk's kinds and their host operations | done for v0.1; the v0.2 site and ramdisk parts in progress |
 | `internal/bootparams` | the `bc.*` kernel command line between `bcd site` and `bcd ramdisk` (`Render`, `Parse`) | done |
 | `internal/redfish` | the site agent's Redfish client | done for the operations listed above |
@@ -309,7 +348,7 @@ the same converger order, the same server time mark. Its fake hardware produces 
 Go's `fakehw` for the same seed. It runs over any frame transport: an in-memory link with fault injection, real
 HTTP/2 to a real gateway, or the WebSocket fallback.
 
-It is what runs wherever many daemons, or features bcd lacks, are needed:
+It is what runs wherever features bcd lacks, or many daemons without a real gateway, are needed:
 
 - `better-compute dev --sim N` joins N simulated machines through a loopback gateway, the way bcd does: a join token
   sealed to JoinService's key, the `Join` RPC, a session, `diag.nvml` acceptance and adoption. See

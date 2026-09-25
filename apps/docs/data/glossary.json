@@ -50,7 +50,7 @@
   {
     "id": "bcd",
     "term": "bcd",
-    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. None of it is released. Its v0.1 node agent (`bcd join`, `bcd node`, `bcd status`) is tested end to end; `bcd site` and `bcd ramdisk` are written and covered by Go unit tests only; `bcd sim` and real VM runtimes are not written, and the TypeScript `FakeDaemon` stands in where bcd is missing.",
+    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. None of it is released. Its v0.1 node agent (`bcd join`, `bcd node`, `bcd status`) is tested end to end; `bcd site` and `bcd ramdisk` are written and covered by Go unit tests only; `bcd sim` runs many real node agents in one process on fake-hardware builds only; real VM runtimes are not written, and the TypeScript `FakeDaemon` stands in where bcd is missing.",
     "href": "/docs/daemon"
   },
   {

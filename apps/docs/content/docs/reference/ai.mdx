@@ -126,7 +126,8 @@ Two things to tell an assistant:
   route; the HTTP endpoint answers `NOT_FOUND` for them. Check the status before generating code against a method.
 - **The daemon is not released.** `bcd` is a Go binary whose v0.1 node agent (with tunnels) is built and tested end to
   end, and whose site and ramdisk modes are written with Go unit tests, but no binary is published, its VPS host runs
-  instances only on fake-hardware builds, and its sim mode, real VM runtimes and self-update are not written. The
+  instances only on fake-hardware builds, its sim mode (many node agents in one process) runs only on fake-hardware
+  builds, and real VM runtimes and self-update are not written. The
   TypeScript `FakeDaemon` in `@better-compute/testing` runs those paths. See
   [what bcd does today](/docs/daemon#what-bcd-does-today).
 

@@ -82,7 +82,7 @@ better-compute api instances.create tenantId=acme poolId=pool_01jz… flavor=g1.
     flavor: { type: 'string', description: 'A flavor name of that pool, such as g1.small.', required: true },
     imageId: { type: 'string', description: 'Up to 200 characters of letters, digits and . _ @ : / -, starting with a letter or digit. Hosted pools resolve it with vps({ images }); provider pools pass it to the provider as is.', required: true },
     sshKeys: { type: 'string[]', description: 'Up to 32 OpenSSH public key lines: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256/384/521 or sk-ssh-ed25519@openssh.com.', default: '[]' },
-    userData: { type: 'string', description: 'Your own cloud-init, at most 32 KiB, or a reference to it. When given it is used as is, and sshKeys are not added to it. A reference must be secret://<tenantId>/<id>, a secret this tenant wrote with secrets.put (a secret_refs row), since the guest reads it; a platform-minted secret, the sealed user data of another instance, or any other secret://, vault:// or env:// value is INVALID_INPUT. A reference also needs compute:secrets:manage (see the decision below).' },
+    userData: { type: 'string', description: 'Your own cloud-init, at most 32 KiB, or a reference to it. When given it is used as is, and sshKeys are not added to it. A reference must be secret://<tenantId>/<id>, a secret this tenant wrote with secrets.put (a secret_refs row), since the guest reads it; a platform-minted secret, a fleet secret (secrets.put with scope fleet), the sealed user data of another instance, or any other secret://, vault:// or env:// value is INVALID_INPUT. A reference also needs compute:secrets:manage (see the decision below).' },
     desiredState: { type: "'running' | 'stopped'", description: 'Where the instance should end up.', default: "'running'" },
     projectId: { type: 'string', description: 'A prj_ id, for usage tags and policies.' },
     idempotencyKey: { type: 'string', description: '1 to 128 of letters, digits and . _ : -. Retrying with the same key returns the same instance.', required: true },
@@ -170,7 +170,7 @@ A policy can bound what tenants create, for example only small VMs from signed i
 
 | Code                    | When                                                                                                                                 |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `INVALID_INPUT`         | A field fails validation, the pool is not of class `vps-host` or `provider`, or `userData` names a secret the tenant did not put with `secrets.put`. |
+| `INVALID_INPUT`         | A field fails validation, the pool is not of class `vps-host` or `provider`, or `userData` names a secret the tenant did not put with `secrets.put`, or a fleet secret (`scope: 'fleet'`, aac73a1). |
 | `NOT_FOUND`             | The pool is not owned by or offered to the tenant, or is archived; the flavor is missing or archived; a hosted pool's image does not resolve. |
 | `CONFLICT`              | The idempotency key was used for a different request.                                                                                |
 | `ACCESS_DENIED`         | Better IAM refused. The draft is gone. Also a `secret://` user data without `compute:secrets:manage`, or without a caller credential. |
@@ -348,7 +348,8 @@ form. NIC order is the guest's interface order and is kept. An instance being de
 User data never travels in the spec. At admission in a hosted pool, vps renders the cloud-config (the hostname from
 the instance id and `sshKeys`, unless you passed `userData`), seals it through the secret broker and keeps only its
 `secret://` reference (`instances.user_data_sealed`, migration `vps/0002_sealed_user_data`); a tenant's own reference
-(one it wrote with `secrets.put`, checked in the create transaction) is kept as it is, and only a sealed one is
+(one it wrote with `secrets.put` with the default `tenant` scope, checked in the create transaction; a fleet secret
+is refused) is kept as it is, and only a sealed one is
 deleted with the instance. The host fetches the value with a node-signed
 `SecretRequest` naming the instance's allocation, and the broker releases it only when the secret belongs to the
 instance's own tenant. The guest gets no join token, no `bcd` and no IAM key.

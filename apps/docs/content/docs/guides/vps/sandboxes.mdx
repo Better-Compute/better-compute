@@ -331,7 +331,11 @@ like any other and the sandbox goes back to `starting`.
   certificate is refused before the pending lifetime is written, so a refused extend leaves nothing behind for later
   decisions (the handler checks again in case the template changed in between). The handler applies the absolute expiry that was decided, not "current plus `by`" again, so two concurrent
   `by` extends cannot add up to a lifetime no decision covered. An `until` not later than the current expiry returns
-  the sandbox unchanged without a decision; a repeated `by` extends again. A sandbox being deleted is `INVALID_STATE`. It publishes `sandbox.extended`.
+  the sandbox unchanged without a decision; a repeated `by` extends again. A sandbox being deleted is `INVALID_STATE`.
+  After an allow, the sandbox pool's budget check runs as for `create` and `reservations.extend` (f3b7f9e): where the
+  pool's policy sets `admission.budgetCheck: 'meter'` or the tenant's offer stops new work on a spent budget (`stop-new`, `drain`), a
+  spent budget is `SPEND_LIMIT_REACHED` and clears the pending lifetime, so a tenant over budget cannot keep a
+  sandbox alive by extending it. It publishes `sandbox.extended`.
 - [delete](/docs/reference/api/sandboxes#delete) marks the sandbox `deleting`, sets its instance's `desiredState` to
   `deleted` (publishing `instance.deleting` with `sandboxId`) and wakes the reconciler. It is idempotent. The
   `vps.instances` reconciler releases the allocation, IP lease, quota and sealed user data as for any instance.
@@ -628,13 +632,14 @@ snapshot commands wake it. Each pass does five things:
    expiry ended it. Deleted snapshots are purged once their upload settled and no live instance restores from them.
 5. **Warm pools**, below.
 
-`vps().selfCheck` adds three sandbox findings to [`doctor`](/docs/operations/observability#doctor):
+`vps().selfCheck` adds four sandbox findings to [`doctor`](/docs/operations/observability#doctor):
 
 | Check | Severity | Means |
 | --- | --- | --- |
 | `vps.sandboxes.expiry` | error | Sandboxes more than two passes (30 s) past `expiresAt` and not deleting: the reconciler is not running, or failing |
 | `vps.sandboxes.deleting` | warning | Sandboxes deleting for over 10 minutes: their instance is stuck (its host must report it gone, or be declared lost) |
 | `vps.sandboxes.warm` | warning | Templates below `warm.min` settled instances with no refill for 10 minutes (quota, capacity, a vanished flavor or image), or warm instances not settled within 10 minutes |
+| `vps.sandboxes.network` | error | Open sandboxes with a `private` or `none` network whose host lacks the `bc.dev/cap.instance.network-policy` label (placed before the capability constraint, or its bcd since downgraded), so their guests have full egress. Upgrade bcd on those hosts, or delete the sandboxes (bd18e35) |
 
 The [metrics](/docs/reference/metrics) include `better_compute_sandbox_ready_seconds` by source (warm or
 cold), `better_compute_sandbox_expiry_lag_seconds` and the warm-pool gauges.
@@ -646,7 +651,9 @@ For each live template with `warm.min > 0`, the reconciler keeps `warm.min` warm
 author (`instances.warm_template_id` set). Each is placed and charged to the tenant's quota when it is created, like
 any instance, and publishes `instance.created` with `warmTemplateId`. Refills are best effort: a quota refusal, a
 flavor or image that is gone, or no fitting host stops that template's refill for the pass, logs `vps: warm sandbox
-instance not created`, and the next pass tries again. Each refill re-reads its template in its own transaction (`FOR
+instance not created`, and the next pass tries again. Refills run no budget check: a spent budget refuses the
+`sandboxes.create` that would claim a warm instance, but an offer's `onBudgetExceeded: 'drain'` does not drain the
+warm pool yet. Each refill re-reads its template in its own transaction (`FOR
 SHARE`: not deleted, same `instance_version`), so a template deleted or reshaped since the pass began, such as by a
 tenant teardown, is skipped rather than refilled. Warm instances in `error` or `lost` do not count toward
 `warm.min`: they are drained and replaced.
