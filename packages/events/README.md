@@ -22,7 +22,21 @@ const compute = betterCompute({ ..., modules: [eventsModule({ secret: process.en
 const watch = (request: Request) => handleWatch(request, { sql, authorize: authorizeWatch });
 ```
 
-The module owns the tables `webhooks`, `webhook_deliveries` and `event_cursors` (migration `events/0001_webhooks`). It runs the reconcilers `events.fanout` (every 1 s: outbox → deliveries, with no history replay) and `events.deliver` (every 2 s).
+The module owns the tables `webhooks`, `webhook_deliveries` and `event_cursors` (migration `events/0001_webhooks`). It runs two reconcilers:
+
+- `events.fanout`, every 1 s, turns outbox events into deliveries. Its cursor is anchored when the control plane starts, so nothing committed before the first pass is missed and history is never replayed.
+- `events.deliver`, every 2 s, sends them. A webhook's deliveries go out one at a time in commit order, while different webhooks are served in parallel.
+
+## Event catalog
+
+`eventCatalog` lists the event families the control plane and its modules publish: `site.*`, `pool.*`, `reservation.*`, `node.*` (with the inventory and metal families), `command.settled`, `instance.*`, `workflow.*`, `rollout.*`, `tunnel.*`, `security.*` and more. Each family names its subject and the module that publishes it.
+
+- `webhooks.create` and `update` refuse a pattern that no family can match, such as `nodes.*`, instead of letting it silently match nothing.
+- `eventsModule({ extraEvents })` adds a plugin's families; `extraEvents: false` accepts any pattern.
+- `webhooks.eventTypes` lists the catalog.
+- `eventsModule({ countEvent })` is called once per event the fan-out reads, with its family. Pass `eventCounter(registry)` from `@better-compute/observability` to get `better_compute_events_total{family,module}`.
+
+A test runs the control-plane simulator and checks that every outbox topic belongs to the catalog, so the catalog can't drift from the code unnoticed.
 
 ## Webhook methods
 
@@ -36,6 +50,7 @@ Every method decides `compute:webhooks:manage` on `compute-tenant/{t}`:
 - `ping` (queues a `webhook.ping` delivery)
 - `deliveries` (history, filterable by state)
 - `redeliver`
+- `eventTypes` (the event catalog)
 
 ## License
 

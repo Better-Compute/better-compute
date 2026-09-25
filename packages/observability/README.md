@@ -20,6 +20,12 @@ Observability for better-compute (PLAN.md §14), modelled on better-iam's `metri
   - It fans each span out to hooks that can never affect the work.
   - It feeds `spans_total{kind,name,outcome,code}` and `span_duration_seconds{kind}`.
   - Names the caller controls, such as an unknown route or invalid input, collapse to `(invalid)` or `(unknown)`.
+- **Host-side instrumentation**, so modules need no metrics code of their own. Labels are bounded: ids, method names, error codes, catalog families.
+  - `meteredAttestor(attestor, registry)` counts verifications as `admitted`, `deferred-<kind>`, `refused` or an error code, and times them.
+  - `meteredGatewayServices(compute.gatewayServices, registry)` covers Join, Renew and Secret by outcome.
+  - `meteredProvider(provider, registry)` covers every ProviderImpl call by provider, method and outcome.
+  - `gatewayCollector(registry, () => gateways)` samples sessions by role, stream headroom, draining, lease held and commands in flight at every scrape, through `registry.collect(fn)`.
+  - `eventCounter(registry)` counts outbox events by family, through `eventsModule({ countEvent })`.
 - **`parseTraceparent` / `formatTraceparent` / `childTraceparent`** handle W3C Trace Context, stored on commands and steps.
 
 ## License

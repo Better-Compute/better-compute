@@ -72,6 +72,29 @@ In remote mode `billingCheck(input, credential)` runs as the caller, because HTT
 
 Peer dependencies: `@better-iam/core` (required), `@better-iam/server` and `@better-iam/client` (optional). Remote mode (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) arrives in v0.4.
 
+## Re-deciding for a session (tunnels, §7.6)
+
+Long-lived streams re-check their caller every 60 s, but a WebSocket client can't send its credential again. `IamPort.authorizeSession({ identityId, sessionId }, decision)` re-decides for the session that the stream recorded.
+
+- **Embedded:** `bridge.embedded(iam, { sessionReviewer })`.
+- **Remote:** `bridge.remote({ ..., authorizeSessions: true })` makes the same calls over HTTP with the service token.
+
+Either way, it uses only better-iam's public administrator API with compute's service account, which needs `iam:identities:read` and `iam:policies:simulate`:
+
+1. `identities.listSessions`: revoked and expired sessions are gone.
+2. `identities.get`: the identity must be active.
+3. `policies.simulate`: MFA as the session had it.
+
+Simulation is identity-level: it can't see what a delegation, an assumed role or an agent narrows. Such sessions answer false, so the stream closes and the client reopens it with a fresh credential.
+
+`tunnels.authorize = tunnelAuthorizer(iamPort)` wires it for the tunnels module:
+
+- With the upgrade request's credential, it makes the ordinary decision.
+- Without one, it calls `authorizeSession` with the ticket's `sub` and `ses`.
+- It re-decides the ticket's own action (`act`): `compute:instances:exec` on an instance, `compute:nodes:console` on a node.
+- An unknown or mismatched action, or a ticket without a session or tenant, answers false.
+- A port without `authorizeSession` throws `INVALID_CONFIG`.
+
 ## License
 
 [Apache License 2.0](LICENSE)
