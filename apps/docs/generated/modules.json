@@ -47,7 +47,8 @@
         "provision/0001_workflows",
         "provision/0002_images",
         "provision/0003_workflow_owner",
-        "provision/0004_gated_mig_layout"
+        "provision/0004_gated_mig_layout",
+        "provision/0005_image_pins"
       ]
     },
     {

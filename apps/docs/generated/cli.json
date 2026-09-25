@@ -1221,6 +1221,523 @@
       ]
     },
     {
+      "name": "sandbox create",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Create a sandbox from a template (sandboxes.create)",
+      "description": "sandbox create starts a sandbox from --template (sbxt_…), claimed from the template's warm pool when it keeps one, decided by better-iam as compute:sandboxes:create. It lives --ttl (default: the template's default, at most its maximum) and is deleted then unless extended. --from-snapshot restores a snapshot of yours instead of booting the image. It waits up to --wait seconds (default 30) for the sandbox to leave `starting` and prints it. Every run sends a new idempotency key unless --key is given: repeat with the same --key to retry safely.",
+      "usage": "better-compute sandbox create --tenant ID --template ID [--ttl DURATION] [--from-snapshot ID] [--wait SECONDS] [--key KEY] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--template",
+          "value": "ID",
+          "optional": false,
+          "description": "The template (sbxt_…)"
+        },
+        {
+          "flag": "--ttl",
+          "value": "DURATION",
+          "optional": true,
+          "description": "How long it lives: 15m, 2h"
+        },
+        {
+          "flag": "--from-snapshot",
+          "value": "ID",
+          "optional": true,
+          "description": "Restore this snapshot (snap_…)"
+        },
+        {
+          "flag": "--wait",
+          "value": "SECONDS",
+          "optional": true,
+          "description": "Wait this long for it to start",
+          "default": 30
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key, to retry the same request"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute sandbox create --template sbxt_01k5w… --ttl 30m",
+        "better-compute sandbox create --template sbxt_01k5w… --from-snapshot snap_01k5w…"
+      ]
+    },
+    {
+      "name": "sandbox list",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "List sandboxes: yours, or the tenant’s with --all (sandboxes.list)",
+      "description": "List sandboxes: yours, or the tenant’s with --all (sandboxes.list)",
+      "usage": "better-compute sandbox list --tenant ID [--all] [--deleted] [--template ID] [--limit N] [--cursor CURSOR] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--all",
+          "optional": true,
+          "description": "Every sandbox of the tenant, not only yours"
+        },
+        {
+          "flag": "--deleted",
+          "optional": true,
+          "description": "Include deleted sandboxes"
+        },
+        {
+          "flag": "--template",
+          "value": "ID",
+          "optional": true,
+          "description": "Only this template’s (sbxt_…)"
+        },
+        {
+          "flag": "--limit",
+          "value": "N",
+          "optional": true,
+          "description": "Page size"
+        },
+        {
+          "flag": "--cursor",
+          "value": "CURSOR",
+          "optional": true,
+          "description": "The cursor of the previous page"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute sandbox list",
+        "better-compute sandbox list --all --query \"items[*].id\""
+      ]
+    },
+    {
+      "name": "sandbox get",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Show a sandbox, its expiry and its snapshots (sandboxes.get)",
+      "description": "Show a sandbox, its expiry and its snapshots (sandboxes.get)",
+      "usage": "better-compute sandbox get SANDBOX --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "sandbox",
+          "description": "The sandbox id (sbx_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox get sbx_01k5w…"]
+    },
+    {
+      "name": "sandbox extend",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Move a sandbox’s expiry (sandboxes.extend)",
+      "description": "sandbox extend adds --by to the current expiry, or sets it to --until (ISO 8601, epoch ms or +DURATION from now), within the template's maximum lifetime. Decided as compute:sandboxes:update on the sandbox.",
+      "usage": "better-compute sandbox extend SANDBOX --tenant ID [--by DURATION] [--until TIME] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "sandbox",
+          "description": "The sandbox id (sbx_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--by",
+          "value": "DURATION",
+          "optional": true,
+          "description": "Add this to the expiry: 30m, 2h"
+        },
+        {
+          "flag": "--until",
+          "value": "TIME",
+          "optional": true,
+          "description": "The new expiry"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute sandbox extend sbx_01k5w… --by 30m",
+        "better-compute sandbox extend sbx_01k5w… --until +2h"
+      ]
+    },
+    {
+      "name": "sandbox snapshot",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Snapshot a sandbox, memory included unless --no-memory (sandboxes.snapshot)",
+      "description": "sandbox snapshot asks the sandbox's host for its instance's state; the snapshot is pending until the host reports it. Snapshots go with the sandbox unless --keep. Restore one with sandbox create --from-snapshot.",
+      "usage": "better-compute sandbox snapshot SANDBOX --tenant ID [--no-memory] [--keep] [--key KEY] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "sandbox",
+          "description": "The sandbox id (sbx_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--no-memory",
+          "optional": true,
+          "description": "Disk only (not a running state)"
+        },
+        {
+          "flag": "--keep",
+          "optional": true,
+          "description": "Keep it after the sandbox is deleted"
+        },
+        {
+          "flag": "--key",
+          "value": "KEY",
+          "optional": true,
+          "description": "Idempotency key, to retry the same request"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox snapshot sbx_01k5w… --keep"]
+    },
+    {
+      "name": "sandbox delete",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Delete a sandbox now (sandboxes.delete)",
+      "description": "Delete a sandbox now (sandboxes.delete)",
+      "usage": "better-compute sandbox delete SANDBOX --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "sandbox",
+          "description": "The sandbox id (sbx_…)",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox delete sbx_01k5w…"]
+    },
+    {
+      "name": "sandbox exec",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "Run a command (or a shell) in a sandbox over SSH through a tunnel (sandboxes.exec)",
+      "description": "sandbox exec asks sandboxes.exec for a short-lived SSH certificate for your own key (--key, default ~/.ssh/id_ed25519; its .pub is sent, the private key never leaves this machine) and a single-use tunnel ticket to the sandbox's instance, then runs your OpenSSH client (--ssh, default ssh) through that tunnel: the command after --, or a login shell. There is no agent in the guest; its sshd trusts the sandbox CA for <account>@<instance>. The certificate and a known_hosts file for this one connection live in a temporary directory that is removed afterwards. It exits with ssh's status. Needs --url (tunnels run over the server's WebSocket) and a signed-in session.",
+      "usage": "better-compute sandbox exec SANDBOX [COMMAND...] --tenant ID [--key PATH] [--minutes N] [--ssh PROGRAM] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [
+        {
+          "name": "sandbox",
+          "description": "The sandbox id (sbx_…)",
+          "required": true
+        },
+        {
+          "name": "command",
+          "variadic": true,
+          "description": "The command to run, after -- (default: a login shell)"
+        }
+      ],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--key",
+          "value": "PATH",
+          "optional": true,
+          "description": "Your private key (its .pub beside it is sent)"
+        },
+        {
+          "flag": "--minutes",
+          "value": "N",
+          "optional": true,
+          "description": "Certificate lifetime in minutes",
+          "default": 10
+        },
+        {
+          "flag": "--ssh",
+          "value": "PROGRAM",
+          "optional": true,
+          "description": "The OpenSSH client to run",
+          "default": "ssh"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        }
+      ],
+      "examples": [
+        "better-compute sandbox exec sbx_01k5w… -- uname -a",
+        "better-compute sandbox exec sbx_01k5w…"
+      ]
+    },
+    {
+      "name": "sandbox templates",
+      "aliases": [],
+      "group": "Sandboxes",
+      "summary": "List the tenant’s sandbox templates and their warm pools (sandboxTemplates.list)",
+      "description": "List the tenant’s sandbox templates and their warm pools (sandboxTemplates.list)",
+      "usage": "better-compute sandbox templates --tenant ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute sandbox templates --format table"]
+    },
+    {
       "name": "fleet export",
       "aliases": [],
       "group": "Fleet",

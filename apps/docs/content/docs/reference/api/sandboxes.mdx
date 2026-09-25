@@ -7,7 +7,7 @@ description: "A sandbox is a hosted VPS instance with a template and a lifetime:
 
 A sandbox is a hosted VPS instance with a template and a lifetime: `create` admits it after one IAM decision, then claims a warm instance of its template or creates one through the instance lifecycle, and the `vps.sandboxes` reconciler, which runs every 15 seconds, deletes it once `expiresAt` passes. A sandbox's `state` follows its instance: `starting`, `ready` while the instance runs, `failed` when it is in `error` or `lost`, `deleting` once deletion was asked, and `deleted` when the instance is gone. The instance belongs to the sandbox: `instances.start`, `stop`, `resize` and `delete` refuse it with `INVALID_STATE`, and `instances.get` still returns it. See [Sandboxes](/docs/guides/vps/sandboxes).
 
-6 of 7 methods are served by this release; the others are planned for the phase shown.
+All 7 methods are served by this release.
 
 | Method                  | Kind     | Authorization                                       | Phase | Status     |
 | ----------------------- | -------- | --------------------------------------------------- | ----- | ---------- |
@@ -16,7 +16,7 @@ A sandbox is a hosted VPS instance with a template and a lifetime: `create` admi
 | [`get`](#get)           | read     | `compute:sandboxes:read` @ `compute-sandbox`        | v0.5  | registered |
 | [`extend`](#extend)     | mutation | `compute:sandboxes:update` @ `compute-sandbox`      | v0.5  | registered |
 | [`snapshot`](#snapshot) | mutation | `compute:sandboxes:update` @ `compute-sandbox`      | v0.5  | registered |
-| [`exec`](#exec)         | mutation | `compute:sandboxes:exec` @ `compute-sandbox`        | v0.5  | planned    |
+| [`exec`](#exec)         | mutation | `compute:sandboxes:exec` @ `compute-sandbox`        | v0.5  | registered |
 | [`delete`](#delete)     | mutation | `compute:sandboxes:delete` @ `compute-sandbox`      | v0.5  | registered |
 
 ## create
@@ -152,14 +152,27 @@ Saves a running or paused sandbox's state (disk, and memory unless `includeMemor
 
 `POST /api/compute/sandboxes/exec`
 
-Planned for v0.5 and not served by this release.
+Opens SSH into a running sandbox: returns a single-use `ssh` tunnel ticket for its instance and a short OpenSSH user certificate from the deployment's sandbox SSH CA for the principal `<account>@<instanceId>`.
 
-The catalog reserves it, decided as `compute:sandboxes:exec` on `compute-sandbox`, but no handler is registered. PLAN.md §3.7 plans it to return a tunnel ticket and a short-lived SSH certificate signed by the tenant's sandbox CA.
+- **How.** A sandbox has no in-guest agent: the node's daemon dials the instance's own address, and the instance's sshd trusts the sandbox CA and accepts only its own principal, so a certificate for one sandbox opens no other. Open `GET` on the returned `path` with the ticket before `expiresAt`, then speak SSH over it. `better-compute sandbox exec` does both.
+- **Certificate.** `publicKey` must be an Ed25519 or ECDSA P-256 key. `ttlSeconds` is 60 to 900 (default 600) and never past the caller's session. Guests receive no revocation list, so the short lifetime is the revocation control, and tunnel re-authorization closes the transport.
+- **Errors.** `UNSUPPORTED` when the deployment has no sandbox SSH CA (`tunnels.sandboxSsh`). `ACCESS_DENIED` for an API key (reason `session-required`) or a session ending within a minute. `INVALID_STATE` when the sandbox is not running or is being deleted. The node must be connected and advertise `tunnel.instance-dial`. Exec shares the per-identity tunnel rate limit with `tunnels.open` (`RATE_LIMITED`).
+
+Hosted by the tunnels module. Publishes `tunnel.issued`.
 
 - **Kind:** mutation
 - **Authorization:** `compute:sandboxes:exec` @ `compute-sandbox`
 - **Module:** `tunnels`
-- **Phase:** v0.5 (planned)
+- **Phase:** v0.5 (registered)
+
+**Input**
+
+| Field        | Type    | Required | Constraints                                                |
+| ------------ | ------- | -------- | ---------------------------------------------------------- |
+| `tenantId`   | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `sandboxId`  | string  | yes      | at most 56 characters; matches `^sbx_[0-9a-z]{26,52}$`     |
+| `publicKey`  | string  | yes      | at most 4096 characters                                    |
+| `ttlSeconds` | integer |          | 60-900; default `600`                                      |
 
 ## delete
 
