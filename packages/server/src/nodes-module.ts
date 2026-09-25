@@ -8,7 +8,7 @@ import {
 } from '@better-compute/core';
 import { mayBeSchedulableSql, wakePendingForNode, wakeStartedOnNode } from '@better-compute/capacity';
 import { reconcileDrain } from './controllers/drain.js';
-import { lifecycleIn } from './controllers/lifecycle.js';
+import { lifecycleIn, type LifecyclePass } from './controllers/lifecycle.js';
 import {
   createLivenessState,
   createLivenessSweep,
@@ -72,9 +72,12 @@ export async function reconcileNode(
   // One fenced transaction for the whole pass: a join storm runs this ~4 times per node, and each
   // transaction costs a fence and a round trip on top of its statements.
   const { lifecycle, now } = await context.sql.transaction(async (tx) => {
-    const lifecycle = await lifecycleIn(context, tx, nodeId);
-    await livenessIn(context, tx, nodeId, { timeouts: false });
-    await refreshNodeAuthz(tx, context.authz, nodeId);
+    const report: LifecyclePass = {};
+    const lifecycle = await lifecycleIn(context, tx, nodeId, report);
+    const liveness = await livenessIn(context, tx, nodeId, { timeouts: false });
+    // An adoption already refreshed the row in this transaction; refresh again only when Liveness
+    // changed the node after it.
+    if (!report.authzRefreshed || liveness?.applied.length) await refreshNodeAuthz(tx, context.authz, nodeId);
     if (!schedulable && !connectivity) return { lifecycle, now: undefined };
     const now = await nodeEdges(tx, nodeId);
     if (!now) return { lifecycle, now: undefined };

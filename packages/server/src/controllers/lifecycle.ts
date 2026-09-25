@@ -151,7 +151,13 @@ async function checkPayload(
 const knownKind = (context: ModuleContext, kind: string) =>
   context.registry.commandKind(kind) !== undefined || isCommandKind(kind);
 
-async function pass(context: ModuleContext, tx: SqlTx, node: LifecycleRow, reason: string) {
+/** What one lifecycle pass did, for the caller's own steps in the same transaction. */
+export interface LifecyclePass {
+  /** The node's authz projection row was refreshed (the caller need not refresh it again). */
+  authzRefreshed?: boolean;
+}
+
+async function pass(context: ModuleContext, tx: SqlTx, node: LifecycleRow, reason: string, report?: LifecyclePass) {
   const next = transition(provisionStateTable, node.provision_state, 'complete');
   const reasons = mergeReasons(node.no_schedule_reasons, [], [acceptanceCondition]);
   const updated = await tx.query(
@@ -164,6 +170,7 @@ async function pass(context: ModuleContext, tx: SqlTx, node: LifecycleRow, reaso
   await setCondition(tx, node.id, { type: acceptanceCondition, status: 'false', reason });
   // IAM sees the new lifecycle in the same transaction (§12.4).
   await refreshNodeAuthz(tx, context.authz, node.id);
+  if (report) report.authzRefreshed = true;
   // NodeSpec writes generation 1 now that desired state applies (§3.3 step 7).
   await context.work.enqueue(tx, nodeSpecWorkKind, node.id);
   await context.events.publish(tx, {
@@ -220,6 +227,7 @@ export async function lifecycleIn(
   context: ModuleContext,
   tx: SqlTx,
   nodeId: string,
+  report?: LifecyclePass,
 ): Promise<'DONE' | 'SYNC_AGAIN'> {
   {
     const { rows } = await tx.query<LifecycleRow>(
@@ -235,7 +243,7 @@ export async function lifecycleIn(
 
     const checks = acceptanceChecks(node);
     if (checks.length === 0) {
-      await pass(context, tx, node, 'NoChecks');
+      await pass(context, tx, node, 'NoChecks', report);
       return 'DONE';
     }
     const condition = await getCondition(tx, nodeId, acceptanceCondition);
@@ -255,7 +263,7 @@ export async function lifecycleIn(
           return 'DONE';
         }
       }
-      await pass(context, tx, node, 'Passed');
+      await pass(context, tx, node, 'Passed', report);
       return 'DONE';
     }
 
