@@ -66,6 +66,18 @@ const templateUserData: InputSchema = {
   description:
     'User data for every sandbox (at most 32 KiB), or secret://<tenantId>/<id> naming a secret of this tenant',
 };
+const templateEnv: InputSchema = {
+  type: 'object',
+  maxProperties: 64,
+  propertyNames: { pattern: '^[A-Z_][A-Z0-9_]{0,63}$' },
+  additionalProperties: {
+    type: 'string',
+    pattern: '^secret://[^/]+/[^/]+$',
+    description: 'secret://<tenantId>/<id>, a secret of this tenant',
+  },
+  description:
+    'Variables written to /etc/sandbox/env (root, 0600) in every sandbox, from secrets of this tenant; needs the secret broker',
+};
 const warmPool = strictObject(
   {
     min: integer(0, 64, 'Warm instances kept ready (stopped) for fast creates'),
@@ -251,6 +263,7 @@ export const schemas = {
         default: 86_400,
       },
       warm: warmPool,
+      env: templateEnv,
     },
     ['tenantId', 'name', 'poolId', 'flavor', 'imageId'],
   ),
@@ -268,6 +281,7 @@ export const schemas = {
       defaultTtlSeconds: ttlSeconds('A sandbox’s lifetime unless it asks for one'),
       maxTtlSeconds: ttlSeconds('The longest lifetime a sandbox may have, extensions included'),
       warm: warmPool,
+      env: templateEnv,
     },
     ['tenantId', 'templateId'],
   ),

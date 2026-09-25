@@ -142,6 +142,12 @@ CREATE INDEX sandboxes_open ON sandboxes (tenant_id, created_at) WHERE NOT draft
 `,
 };
 
+/** Template environment (§3.7): variable name → `secret://` ref of the template's tenant. */
+export const vpsTemplateEnvMigration: Migration = {
+  name: 'vps/0007_template_env',
+  sql: `ALTER TABLE sandbox_templates ADD COLUMN env jsonb NOT NULL DEFAULT '{}';`,
+};
+
 /** When a sandbox claimed a warm instance: its warm capacity metering ends there (`vps.sandbox.warm`). */
 export const vpsWarmClaimsMigration: Migration = {
   name: 'vps/0006_warm_claims',
@@ -162,6 +168,8 @@ export interface SandboxTemplate {
   defaultTtlSeconds: number;
   maxTtlSeconds: number;
   warm: { min: number; max: number };
+  /** Environment for every sandbox: variable name → `secret://<tenantId>/<id>` of this tenant. */
+  env: Record<string, string>;
   version: number;
 }
 
@@ -177,6 +185,7 @@ export interface TemplateInput {
   defaultTtlSeconds?: number;
   maxTtlSeconds?: number;
   warm?: { min: number; max?: number };
+  env?: Record<string, string>;
 }
 
 export interface TemplateUpdate {
@@ -189,6 +198,8 @@ export interface TemplateUpdate {
   defaultTtlSeconds?: number;
   maxTtlSeconds?: number;
   warm?: { min: number; max?: number };
+  /** Replaces the whole map (`{}` removes every variable). */
+  env?: Record<string, string>;
 }
 
 export type TemplateRef = { tenantId: string; templateId: string };
@@ -211,6 +222,26 @@ function userData(value: unknown, tenantId: string): string {
 
 const ttl = (value: unknown, what: string) => int(value, what, minTtlSeconds, maxTtlSeconds);
 
+/** Variables a template may set, and how many. */
+export const maxTemplateEnv = 64;
+const envNamePattern = /^[A-Z_][A-Z0-9_]{0,63}$/;
+
+function env(value: unknown, tenantId: string): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    fail('env must map variable names to secret references');
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > maxTemplateEnv) fail(`env takes at most ${maxTemplateEnv} variables`);
+  const result: Record<string, string> = {};
+  for (const [name, ref] of entries) {
+    if (!envNamePattern.test(name)) fail(`env: ${name} is not a variable name (A-Z, 0-9, _)`);
+    // Values are always references: the secret broker resolves them for this tenant only.
+    if (typeof ref !== 'string' || !isSecretRef(ref) || !ref.startsWith(`secret://${tenantId}/`))
+      fail(`env.${name} must be secret://${tenantId}/<id>, a secret of this tenant`);
+    result[name] = ref;
+  }
+  return result;
+}
+
 function warm(value: unknown): { min: number; max: number } {
   const input = object(value, ['min', 'max']);
   const min = int(input.min, 'warm.min', 0, maxWarm);
@@ -231,6 +262,7 @@ export function parseTemplateInput(raw: unknown): TemplateInput {
     'defaultTtlSeconds',
     'maxTtlSeconds',
     'warm',
+    'env',
   ]);
   const tenantId = tenant(input.tenantId);
   const result: TemplateInput = {
@@ -251,6 +283,7 @@ export function parseTemplateInput(raw: unknown): TemplateInput {
   const maxTtl = optional(input.maxTtlSeconds, (value) => ttl(value, 'maxTtlSeconds'));
   if (maxTtl !== undefined) result.maxTtlSeconds = maxTtl;
   if (input.warm !== undefined) result.warm = warm(input.warm);
+  if (input.env !== undefined) result.env = env(input.env, tenantId);
   return result;
 }
 
@@ -264,6 +297,7 @@ export function parseTemplateUpdate(raw: unknown): TemplateUpdate {
     'defaultTtlSeconds',
     'maxTtlSeconds',
     'warm',
+    'env',
   ]);
   const tenantId = tenant(input.tenantId);
   const result: TemplateUpdate = {
@@ -279,6 +313,7 @@ export function parseTemplateUpdate(raw: unknown): TemplateUpdate {
   const maxTtl = optional(input.maxTtlSeconds, (value) => ttl(value, 'maxTtlSeconds'));
   if (maxTtl !== undefined) result.maxTtlSeconds = maxTtl;
   if (input.warm !== undefined) result.warm = warm(input.warm);
+  if (input.env !== undefined) result.env = env(input.env, tenantId);
   return result;
 }
 
@@ -303,6 +338,7 @@ interface RawTemplate {
   max_ttl_seconds: number;
   warm_min: number;
   warm_max: number;
+  env: Record<string, string> | string;
   created_by: string;
   deleted: boolean;
   version: string | number;
@@ -322,6 +358,7 @@ const templateColumnsOf = (alias: string) =>
     'max_ttl_seconds',
     'warm_min',
     'warm_max',
+    'env',
     'created_by',
     'deleted',
     'version',
@@ -344,6 +381,7 @@ function toTemplate(raw: RawTemplate): TemplateRow {
     defaultTtlSeconds: Number(raw.default_ttl_seconds),
     maxTtlSeconds: Number(raw.max_ttl_seconds),
     warm: { min: Number(raw.warm_min), max: Number(raw.warm_max) },
+    env: typeof raw.env === 'string' ? JSON.parse(raw.env) : { ...(raw.env ?? {}) },
     version: Number(raw.version),
     createdBy: raw.created_by,
     deleted: raw.deleted,
@@ -355,7 +393,7 @@ function toTemplate(raw: RawTemplate): TemplateRow {
 /** The public view of a template. */
 export function templateView(row: TemplateRow): SandboxTemplate {
   const { createdBy: _by, deleted: _deleted, ...view } = row;
-  return { ...view, warm: { ...view.warm } };
+  return { ...view, warm: { ...view.warm }, env: { ...view.env } };
 }
 
 async function readTemplate(
@@ -433,14 +471,27 @@ function ttlBounds(
 }
 
 /** `sandboxTemplates.create`: checks the pool, flavor, image and runtime once, then stores the template. */
+/** Template env reaches the guest inside sealed user data only (§6 "Secrets"). */
+function assertEnvDeliverable(
+  deps: Pick<InstanceDeps, 'broker'>,
+  env: Readonly<Record<string, string>> | undefined,
+): void {
+  if (env && Object.keys(env).length > 0 && !deps.broker)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'Template env needs the secret broker, which seals sandbox user data',
+    );
+}
+
 export async function createTemplate(
-  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'authz'>,
+  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'authz' | 'broker'>,
   context: MethodContext,
   input: TemplateInput,
 ): Promise<SandboxTemplate> {
   const tx = context.sql;
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
+  assertEnvDeliverable(deps, input.env);
   const { runtime } = await resolveTemplate(deps, tx, input);
   const { defaultTtl, maxTtl } = ttlBounds(input.defaultTtlSeconds, input.maxTtlSeconds);
   const taken = await tx.query(
@@ -452,8 +503,8 @@ export async function createTemplate(
   const templateId = newId('sbxt');
   const { rows } = await tx.query<RawTemplate>(
     `INSERT INTO sandbox_templates (id, tenant_id, name, pool_id, flavor, image_id, runtime, user_data,
-                                    default_ttl_seconds, max_ttl_seconds, warm_min, warm_max, created_by, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1)
+                                    default_ttl_seconds, max_ttl_seconds, warm_min, warm_max, created_by, env, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, 1)
      RETURNING ${templateColumns}`,
     [
       templateId,
@@ -469,6 +520,7 @@ export async function createTemplate(
       input.warm?.min ?? 0,
       input.warm?.max ?? input.warm?.min ?? 0,
       caller.identityId,
+      JSON.stringify(input.env ?? {}),
     ],
   );
   await deps.authz.upsert(tx, {
@@ -483,10 +535,11 @@ export async function createTemplate(
 
 /** `sandboxTemplates.update`: a new flavor or image is checked against the pool as on create. */
 export async function updateTemplate(
-  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes'>,
+  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'broker'>,
   tx: SqlTx,
   input: TemplateUpdate,
 ): Promise<SandboxTemplate> {
+  assertEnvDeliverable(deps, input.env);
   const current = await readTemplate(tx, input.tenantId, input.templateId, { lock: true });
   if (!current)
     throw new ComputeError('NOT_FOUND', `Sandbox template ${input.templateId} not found`);
@@ -510,7 +563,8 @@ export async function updateTemplate(
   const { rows } = await tx.query<RawTemplate>(
     `UPDATE sandbox_templates
         SET flavor = $2, image_id = $3, runtime = $4, user_data = $5, default_ttl_seconds = $6,
-            max_ttl_seconds = $7, warm_min = $8, warm_max = $9, version = version + 1
+            max_ttl_seconds = $7, warm_min = $8, warm_max = $9, env = $10::jsonb,
+            version = version + 1
       WHERE id = $1
       RETURNING ${templateColumns}`,
     [
@@ -523,6 +577,7 @@ export async function updateTemplate(
       maxTtl,
       warmPool.min,
       warmPool.max,
+      JSON.stringify(input.env ?? current.env),
     ],
   );
   return templateView(toTemplate(rows[0]!));
@@ -994,15 +1049,7 @@ async function createManagedInstance(
       JSON.stringify(shape),
       template.imageId,
       JSON.stringify(image),
-      deps.sandboxExec
-        ? sandboxUserData(
-            isSecretRef(template.userData)
-              ? await deps.secrets.resolve(template.userData)
-              : template.userData,
-            deps.sandboxExec,
-            spec.instanceId,
-          )
-        : (template.userData ?? null),
+      await instanceUserData(deps, template, spec.instanceId),
       runtime,
       desiredState,
       spec.ownerIdentityId,
@@ -1047,48 +1094,105 @@ const cloudConfigTypes: readonly [string, string][] = [
 ];
 
 /**
- * A sandbox instance's user data (§3.7, exec without an in-guest agent): a MIME multipart whose
- * first part is vps's cloud-config and whose second is the template's own user data, if any. The
- * cloud-config creates `account`, makes sshd trust the sandbox CA and accept only the instance's
- * own principal (`<account>@<instanceId>`), so a certificate for one sandbox opens no other.
+ * A sandbox instance's user data (§3.7): a MIME multipart whose first part is vps's cloud-config and
+ * whose second is the template's own user data, if any. vps's part:
+ * - with `exec`: creates `account` and makes sshd trust the sandbox CA for the instance's own
+ *   principal only (`<account>@<instanceId>`), so a certificate for one sandbox opens no other;
+ * - with `env`: writes the resolved variables to `/etc/sandbox/env` (root, 0600) as shell
+ *   assignments.
  */
 export function sandboxUserData(
   own: string | undefined,
-  exec: { caPublicKey: string; account: string },
   instanceId: string,
+  parts: {
+    exec?: { caPublicKey: string; account: string };
+    env?: Readonly<Record<string, string>>;
+  },
 ): string {
   const text = (value: string) => JSON.stringify(value);
-  const config = [
-    '#cloud-config',
-    'users:',
-    '  - default',
-    `  - name: ${text(exec.account)}`,
-    '    shell: "/bin/bash"',
-    '    lock_passwd: true',
-    'write_files:',
-    '  - path: "/etc/ssh/bc_sandbox_ca.pub"',
-    '    permissions: "0644"',
-    `    content: ${text(`${exec.caPublicKey}\n`)}`,
-    `  - path: ${text(`/etc/ssh/bc_sandbox_principals/${exec.account}`)}`,
-    '    permissions: "0644"',
-    `    content: ${text(`${sandboxPrincipal(exec.account, instanceId)}\n`)}`,
-    '  - path: "/etc/ssh/sshd_config.d/10-bc-sandbox.conf"',
-    '    permissions: "0644"',
-    `    content: ${text('TrustedUserCAKeys /etc/ssh/bc_sandbox_ca.pub\nAuthorizedPrincipalsFile /etc/ssh/bc_sandbox_principals/%u\n')}`,
-    'runcmd:',
-    '  - ["sh", "-c", "systemctl reload-or-restart ssh || systemctl reload-or-restart sshd"]',
-    '',
-  ].join('\n');
+  const exec = parts.exec;
+  const env = Object.entries(parts.env ?? {});
+  const lines = ['#cloud-config'];
+  if (exec)
+    lines.push(
+      'users:',
+      '  - default',
+      `  - name: ${text(exec.account)}`,
+      '    shell: "/bin/bash"',
+      '    lock_passwd: true',
+    );
+  lines.push('write_files:');
+  if (exec)
+    lines.push(
+      '  - path: "/etc/ssh/bc_sandbox_ca.pub"',
+      '    permissions: "0644"',
+      `    content: ${text(`${exec.caPublicKey}\n`)}`,
+      `  - path: ${text(`/etc/ssh/bc_sandbox_principals/${exec.account}`)}`,
+      '    permissions: "0644"',
+      `    content: ${text(`${sandboxPrincipal(exec.account, instanceId)}\n`)}`,
+      '  - path: "/etc/ssh/sshd_config.d/10-bc-sandbox.conf"',
+      '    permissions: "0644"',
+      `    content: ${text('TrustedUserCAKeys /etc/ssh/bc_sandbox_ca.pub\nAuthorizedPrincipalsFile /etc/ssh/bc_sandbox_principals/%u\n')}`,
+    );
+  if (env.length > 0)
+    lines.push(
+      `  - path: ${text(sandboxEnvPath)}`,
+      '    permissions: "0600"',
+      '    owner: "root:root"',
+      `    content: ${text(env.map(([name, value]) => `${name}=${shellQuote(value)}\n`).join(''))}`,
+    );
+  if (exec)
+    lines.push(
+      'runcmd:',
+      '  - ["sh", "-c", "systemctl reload-or-restart ssh || systemctl reload-or-restart sshd"]',
+    );
+  lines.push('');
   const boundary = `bc-sandbox-${instanceId}`;
   const part = (type: string, body: string) =>
     `--${boundary}\nContent-Type: ${type}; charset="utf-8"\nMIME-Version: 1.0\n\n${body}${body.endsWith('\n') ? '' : '\n'}`;
-  const parts = [part('text/cloud-config', config)];
+  const all = [part('text/cloud-config', lines.join('\n'))];
   if (own !== undefined && own.length > 0) {
     const type = cloudConfigTypes.find(([prefix]) => own.startsWith(prefix))?.[1] ?? 'text/plain';
-    parts.push(part(type, own));
+    all.push(part(type, own));
   }
-  return `Content-Type: multipart/mixed; boundary="${boundary}"\nMIME-Version: 1.0\n\n${parts.join('')}--${boundary}--\n`;
+  return `Content-Type: multipart/mixed; boundary="${boundary}"\nMIME-Version: 1.0\n\n${all.join('')}--${boundary}--\n`;
 }
+
+/**
+ * A sandbox instance's user data: the template's own as it is, unless vps has something to add (the
+ * exec CA trust, the env file). Then it is a multipart whose vps part comes first. Env values are
+ * resolved here, for the template's tenant, and reach the host sealed by the broker only.
+ */
+async function instanceUserData(
+  deps: InstanceDeps,
+  template: TemplateRow,
+  instanceId: string,
+): Promise<string | null> {
+  const names = Object.keys(template.env);
+  if (!deps.sandboxExec && names.length === 0) return template.userData ?? null;
+  assertEnvDeliverable(deps, template.env);
+  const env: Record<string, string> = {};
+  for (const name of names.sort()) {
+    const ref = template.env[name]!;
+    // Checked to be this tenant's own when the template was written.
+    if (!isSecretRef(ref))
+      throw new ComputeError('INVALID_STATE', `env.${name} is not a secret ref`);
+    env[name] = await deps.secrets.resolve(ref);
+  }
+  const own = isSecretRef(template.userData)
+    ? await deps.secrets.resolve(template.userData)
+    : template.userData;
+  return sandboxUserData(own, instanceId, {
+    ...(deps.sandboxExec ? { exec: deps.sandboxExec } : {}),
+    env,
+  });
+}
+
+/** Where a sandbox's template env lands in the guest (root-only). */
+export const sandboxEnvPath = '/etc/sandbox/env';
+
+/** A POSIX shell single-quoted word. */
+const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 /** Warm instance states a claim takes: settled and not on their way out. */
 const claimable = ['stopped', 'paused'];

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   apiMethod,
   ComputeError,
@@ -56,6 +56,14 @@ interface Recorded {
   }[];
 }
 let recorded: Recorded;
+/** The secret broker, for the tests that need one (sealed user data, template env). */
+let broker:
+  | {
+      resolve(ref: string): Promise<string>;
+      put(tenantId: string, value: string): Promise<string>;
+      delete(ref: string): Promise<void>;
+    }
+  | undefined;
 const fresh = (): Recorded => ({ authz: [], removed: [], pending: [], events: [], commands: [] });
 
 const alice: Caller = {
@@ -86,7 +94,7 @@ function moduleContext(sql: SqlExecutor): ModuleContext {
     sql,
     clock,
     log: { debug() {}, info() {}, warn() {}, error() {} },
-    secrets: { resolve: async (ref: string) => `resolved:${ref}` },
+    secrets: broker ?? { resolve: async (ref: string) => `resolved:${ref}` },
     capacity: createCapacityPort({ clock }, { random: () => 0, topN: 1 }),
     authz: {
       async upsert(_tx, row) {
@@ -425,8 +433,15 @@ describe('sandbox templates', () => {
       ),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     await expect(
-      call('sandboxTemplates', 'create', { ...templateInput({ name: 'h' }), env: {} }),
+      call('sandboxTemplates', 'create', { ...templateInput({ name: 'h' }), env: { A: 'plain' } }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    // Env values reach guests sealed by the broker only; this host has none.
+    await expect(
+      call('sandboxTemplates', 'create', {
+        ...templateInput({ name: 'i' }),
+        env: { TOKEN: 'secret://acme/api-token' },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
 
     const updated = (await call('sandboxTemplates', 'update', {
       tenantId: 'acme',
@@ -1053,6 +1068,55 @@ describe('snapshots', () => {
     // The tenant's teardown takes kept ones too.
     await withStore.tenantDeleted!(moduleContext(db), 'acme');
     expect(deletedObjects).toEqual([dropped.id, kept.id]);
+  });
+});
+
+describe('template env', () => {
+  afterEach(() => {
+    broker = undefined;
+  });
+
+  it("resolves the tenant's secrets into /etc/sandbox/env, sealed by the broker, never inline", async () => {
+    const sealed: { tenantId: string; value: string }[] = [];
+    broker = {
+      resolve: async (ref) =>
+        ref === 'secret://acme/api-token' ? "it's-a-secret" : `value:${ref}`,
+      put: async (tenantId, value) => {
+        sealed.push({ tenantId, value });
+        return `secret://${tenantId}/sealed-${sealed.length}`;
+      },
+      delete: async () => {},
+    };
+    const template = await createTemplate({
+      env: { API_TOKEN: 'secret://acme/api-token', DB_URL: 'secret://acme/db' },
+    });
+    expect(template).toMatchObject({
+      env: { API_TOKEN: 'secret://acme/api-token', DB_URL: 'secret://acme/db' },
+    });
+    const sandbox = await createSandbox(template.id);
+    const { rows } = await db.query<{ user_data: string; user_data_sealed: boolean }>(
+      `SELECT user_data, user_data_sealed FROM instances WHERE id = $1`,
+      [sandbox.instanceId],
+    );
+    // The row keeps the broker's ref; the values went only into the sealed content.
+    expect(rows[0]).toEqual({ user_data: 'secret://acme/sealed-1', user_data_sealed: true });
+    expect(sealed).toHaveLength(1);
+    const content = sealed[0]!.value;
+    expect(content).toContain('"/etc/sandbox/env"');
+    expect(content).toContain('permissions: "0600"');
+    expect(content).toContain(
+      JSON.stringify(`API_TOKEN='it'\\''s-a-secret'\nDB_URL='value:secret://acme/db'\n`),
+    );
+    // No exec CA configured: no sshd changes.
+    expect(content).not.toContain('TrustedUserCAKeys');
+
+    // Update replaces the whole map; `{}` removes every variable.
+    const updated = (await call('sandboxTemplates', 'update', {
+      tenantId: 'acme',
+      templateId: template.id,
+      env: {},
+    })) as { env: Record<string, string> };
+    expect(updated.env).toEqual({});
   });
 });
 
