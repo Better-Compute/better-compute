@@ -26,6 +26,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 )
 
 // Version is the node ↔ helper protocol version.
@@ -55,6 +58,12 @@ type Request struct {
 	// firewall.apply / firewall.check
 	Ruleset string `json:"ruleset,omitempty"`
 	Rules   int    `json:"rules,omitempty"`
+	// update.prepare / update.swap
+	Target *selfupdate.Target `json:"target,omitempty"`
+	// update.confirm / update.rollback
+	Version string `json:"version,omitempty"`
+	// update.settle
+	Running string `json:"running,omitempty"`
 }
 
 // Response is the helper's answer.
@@ -62,6 +71,10 @@ type Response struct {
 	V     int    `json:"v"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	// Refused marks a terminal refusal (selfupdate.Refusal): the same request cannot succeed.
+	Refused bool `json:"refused,omitempty"`
+	// Result is the operation's answer (update.*), JSON.
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 // fileKind is one kind of file bcd node owns: its directory, how an id names a file in it (or the
@@ -171,6 +184,10 @@ type Server struct {
 	KnownGPU func(uuid string) bool
 	// Log records every operation and refusal.
 	Log func(msg string, args ...any)
+	// Update is self-update's privileged half (update.*); nil refuses them.
+	Update *selfupdate.Manager
+	// OnSwap runs after a swap (the helper arms its own deadline watchdog).
+	OnSwap func(p *selfupdate.Pending)
 }
 
 // Serve accepts connections on l until ctx is done.
@@ -200,10 +217,14 @@ func (s *Server) logf(msg string, args ...any) {
 func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
-	answer := func(err error) {
+	answer := func(result any, err error) {
 		resp := Response{V: Version, OK: err == nil}
 		if err != nil {
 			resp.Error = err.Error()
+			var r *selfupdate.Refusal
+			resp.Refused = errors.As(err, &r)
+		} else if result != nil {
+			resp.Result, _ = json.Marshal(result)
 		}
 		_ = json.NewEncoder(conn).Encode(resp)
 	}
@@ -217,7 +238,7 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	}
 	if err != nil {
 		s.logf("helper: connection refused", "pid", peer.PID, "uid", peer.UID, "reason", err.Error())
-		answer(errors.New("not allowed"))
+		answer(nil, errors.New("not allowed"))
 		return
 	}
 	dec := json.NewDecoder(io.LimitReader(conn, MaxRequest))
@@ -225,24 +246,65 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	var req Request
 	if err := dec.Decode(&req); err != nil {
 		s.logf("helper: malformed request", "pid", peer.PID, "error", err.Error())
-		answer(errors.New("malformed request"))
+		answer(nil, errors.New("malformed request"))
 		return
 	}
 	if req.V != Version {
 		s.logf("helper: request of another protocol version", "pid", peer.PID, "v", req.V)
-		answer(fmt.Errorf("protocol version %d; this helper speaks %d", req.V, Version))
+		answer(nil, fmt.Errorf("protocol version %d; this helper speaks %d", req.V, Version))
 		return
 	}
-	err = s.do(ctx, req)
+	result, err := s.do(ctx, req)
 	outcome := "ok"
 	if err != nil {
 		outcome = err.Error()
 	}
-	s.logf("helper: operation", "pid", peer.PID, "op", req.Op, "kind", req.Kind, "name", req.Name, "gpu", req.GPU, "outcome", outcome)
-	answer(err)
+	s.logf("helper: operation", "pid", peer.PID, "op", req.Op, "kind", req.Kind, "name", req.Name, "gpu", req.GPU, "version", req.Version, "outcome", outcome)
+	answer(result, err)
 }
 
-func (s *Server) do(ctx context.Context, req Request) error {
+func (s *Server) do(ctx context.Context, req Request) (any, error) {
+	if strings.HasPrefix(req.Op, "update.") {
+		return s.update(req)
+	}
+	return nil, s.op(ctx, req)
+}
+
+// update serves self-update: every check (manifest, floor, digest) is the manager's, never the
+// node's; the node names a version and hands the signed manifest.
+func (s *Server) update(req Request) (any, error) {
+	m := s.Update
+	if m == nil {
+		return nil, errors.New("self-update is not configured on this helper")
+	}
+	switch req.Op {
+	case "update.status":
+		return m.Status()
+	case "update.prepare":
+		if req.Target == nil {
+			return nil, errors.New("no target")
+		}
+		return m.Prepare(*req.Target)
+	case "update.swap":
+		if req.Target == nil {
+			return nil, errors.New("no target")
+		}
+		p, err := m.Swap(*req.Target)
+		if err == nil && s.OnSwap != nil {
+			s.OnSwap(p)
+		}
+		return p, err
+	case "update.confirm":
+		return nil, m.Confirm(req.Version)
+	case "update.rollback":
+		return m.RollBack(req.Version, req.Reason)
+	case "update.settle":
+		return m.Settle(req.Running)
+	}
+	return nil, fmt.Errorf("unknown operation %q", req.Op)
+}
+
+func (s *Server) op(ctx context.Context, req Request) error {
 	switch req.Op {
 	case "file.write", "file.remove":
 		fk, ok := FileKinds[req.Kind]
@@ -373,6 +435,12 @@ type Client struct {
 
 // Do sends one request and waits for its answer.
 func (c Client) Do(ctx context.Context, req Request) error {
+	_, err := c.Call(ctx, req)
+	return err
+}
+
+// Call sends one request and returns its result.
+func (c Client) Call(ctx context.Context, req Request) (json.RawMessage, error) {
 	req.V = Version
 	timeout := c.Timeout
 	if timeout == 0 {
@@ -383,28 +451,80 @@ func (c Client) Do(ctx context.Context, req Request) error {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", c.Socket)
 	if err != nil {
-		return fmt.Errorf("helper: %w", err)
+		return nil, fmt.Errorf("helper: %w", err)
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return fmt.Errorf("helper: %w", err)
+		return nil, fmt.Errorf("helper: %w", err)
 	}
-	dec := json.NewDecoder(io.LimitReader(conn, 1<<16))
+	dec := json.NewDecoder(io.LimitReader(conn, 1<<20))
 	dec.DisallowUnknownFields()
 	var resp Response
 	if err := dec.Decode(&resp); err != nil {
-		return fmt.Errorf("helper: %w", err)
+		return nil, fmt.Errorf("helper: %w", err)
 	}
 	if resp.V != Version {
-		return fmt.Errorf("helper: protocol version %d, not %d", resp.V, Version)
+		return nil, fmt.Errorf("helper: protocol version %d, not %d", resp.V, Version)
 	}
 	if !resp.OK {
-		return fmt.Errorf("helper: %s", resp.Error)
+		if resp.Refused {
+			return nil, &selfupdate.Refusal{Msg: resp.Error}
+		}
+		return nil, fmt.Errorf("helper: %s", resp.Error)
 	}
-	return nil
+	return resp.Result, nil
+}
+
+// UpdateClient is self-update through the helper (agent.UpdateBackend): the node downloads into
+// StagingDir, the helper verifies and swaps.
+type UpdateClient struct {
+	Client
+	StagingDir string
+}
+
+func (u UpdateClient) call(req Request, out any) error {
+	raw, err := u.Call(context.Background(), req)
+	if err != nil || out == nil || len(raw) == 0 || string(raw) == "null" {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+// StagedPath is where the node downloads version (the helper reads the same path itself).
+func (u UpdateClient) StagedPath(version string) string {
+	return filepath.Join(u.StagingDir, "bcd-"+selfupdate.Bare(version))
+}
+
+// Prepare asks the helper to check a target before the download.
+func (u UpdateClient) Prepare(t selfupdate.Target) (*pki.ReleaseArtifact, error) {
+	var art *pki.ReleaseArtifact
+	return art, u.call(Request{Op: "update.prepare", Target: &t}, &art)
+}
+
+// Swap asks the helper to verify the staged release and swap to it.
+func (u UpdateClient) Swap(t selfupdate.Target) (*selfupdate.Pending, error) {
+	var p *selfupdate.Pending
+	return p, u.call(Request{Op: "update.swap", Target: &t}, &p)
+}
+
+// Confirm reports the new binary welcomed.
+func (u UpdateClient) Confirm(version string) error {
+	return u.call(Request{Op: "update.confirm", Version: version}, nil)
+}
+
+// RollBack swaps back from version.
+func (u UpdateClient) RollBack(version, reason string) (*selfupdate.Pending, error) {
+	var p *selfupdate.Pending
+	return p, u.call(Request{Op: "update.rollback", Version: version, Reason: reason}, &p)
+}
+
+// Settle reports the process start.
+func (u UpdateClient) Settle(running string) (selfupdate.Settlement, error) {
+	var s selfupdate.Settlement
+	return s, u.call(Request{Op: "update.settle", Running: running}, &s)
 }
 
 // WriteFile writes a file bcd node owns, named by its path (classified into kind and id).

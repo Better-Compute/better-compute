@@ -177,7 +177,7 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
   afterAll(async () => {
     if (config) sh(`pkill -f '${toLinux(config)}' ; true`);
     node?.kill();
-    if (dataDir) sh(`rm -rf '${dataDir}'`);
+    if (dataDir) sh(`rm -rf '${dataDir}' '${dataDir}'-helper-*`);
     if (configDir) rmSync(configDir, { recursive: true, force: true });
     await dev?.close();
   }, 60_000);
@@ -607,4 +607,88 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       writeFileSync(config, original);
     }
   }, 240_000);
+
+  it('self-updates under bcd helper: the node downloads, the helper verifies and swaps root-owned slots', async () => {
+    // A 0.9.1 build released under the pinned key (sequence 2).
+    const built = spawnSync(goBinary, ['build', '-tags', 'nonvml,fakehw', '-ldflags', '-X main.version=0.9.1', '-o', 'bin/bcd-linux-amd64-next2', './cmd/bcd'], {
+      cwd: daemonDir,
+      env: { ...process.env, GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' },
+      encoding: 'utf8',
+    });
+    expect(built.status, built.stderr).toBe(0);
+    const bytes = readFileSync(join(daemonDir, 'bin', 'bcd-linux-amd64-next2'));
+    const signed = signReleaseManifest(
+      buildReleaseManifest({
+        product: 'bcd',
+        version: '0.9.1',
+        sequence: 2,
+        artifacts: [releaseArtifact('bcd_0.9.1_linux_amd64', bytes, 'linux-amd64')],
+        signers: [releaseKey],
+      }),
+      [releaseKey],
+    );
+    const served = createServer((_req, res) => res.end(bytes));
+    await new Promise<void>((resolve) => served.listen(0, '0.0.0.0', resolve));
+    const socket = `${dataDir}/helper.sock`;
+    const slots = `${dataDir}-helper-slots`; // outside the node's data directory
+    const entry = `${dataDir}-helper-entry/bcd`;
+    const running = sh(`readlink -f '${dataDir}/entry/bcd' 2>/dev/null || true`) || toLinux(binary);
+    sh(`pkill -f '[n]ode --config ${toLinux(config)}' ; true`);
+    await until('the node to stop', async () => sh(`pgrep -f '[n]ode --config ${toLinux(config)}' || echo gone`) === 'gone', 30_000);
+    sh(`mkdir -p '${dataDir}-helper-entry' && cp '${running}' '${entry}' && chmod 0755 '${entry}'`);
+    const version = sh(`'${entry}' version | awk '{print $2}'`);
+    const original = readFileSync(config, 'utf8');
+    const withHelper = original.includes('[update]')
+      ? original.replace(/entrypoint = "[^"]*"/, `entrypoint = "${entry}"\nslots_dir = "${slots}"`)
+      : `${original}\n[update]\nrelease_pins = "${spkiPin(releaseKey.publicKey)}"\nentrypoint = "${entry}"\nslots_dir = "${slots}"\n`;
+    writeFileSync(config, `${withHelper}\n[helper]\nsocket = "${socket}"\nuser = "${sh('id -un')}"\n`);
+    let helperLog = '';
+    const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=41', entry, 'helper', '--config', toLinux(config)]);
+    const helperProcess = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    helperProcess.stderr!.on('data', (chunk: Buffer) => (helperLog += chunk.toString()));
+    try {
+      await until('the helper socket', async () => sh(`test -S '${socket}' && echo up`) === 'up', 30_000);
+      const restarted = new Date();
+      startNode(entry);
+      const sessionVersion = async (since = new Date(0)) =>
+        (
+          await dev.database.query<{ daemon_version: string }>(
+            'SELECT daemon_version FROM node_sessions WHERE node_id = $1 AND connected_at > $2',
+            [nodeId, since],
+          )
+        ).rows[0]?.daemon_version;
+      await until('the node to reconnect under the helper', async () => (await sessionVersion(restarted)) === version, 90_000);
+      const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
+      const upgrade = await dev.database.transaction((tx: any) =>
+        dev.compute.context.commands.enqueue(tx, {
+          nodeId,
+          kind: 'daemon.upgrade',
+          payload: {
+            version: '0.9.1',
+            url: `http://${host}:${(served.address() as AddressInfo).port}/downloads/bcd/0.9.1/linux-amd64`,
+            sha256: createHash('sha256').update(bytes).digest('base64'),
+            signature: Buffer.from(JSON.stringify(signed)).toString('base64'),
+          },
+          idempotencyKey: 'bcd-e2e-helper-upgrade',
+          notAfter: Date.now() + 600_000,
+        }),
+      );
+      await until('daemon.upgrade under the helper to succeed', async () => (await commandState(upgrade.id)) === 'succeeded', 120_000).catch(
+        (error) => {
+          throw new Error(`${error}\n--- helper log ---\n${helperLog.slice(-3000)}\n--- bcd log ---\n${nodeLog.slice(-3000)}`);
+        },
+      );
+      expect(await sessionVersion()).toBe('0.9.1');
+      expect(sh(`readlink '${slots}/current'`)).toBe('bcd-b');
+      expect(sh(`readlink '${entry}'`)).toBe(`${slots}/current`);
+      expect(helperLog).toContain('op=update.swap');
+      await until('the helper to record the confirmation', async () => helperLog.includes('op=update.confirm'), 10_000);
+      expect(sh(`ls '${dataDir}/staging' 2>/dev/null | wc -l`)).toBe('0');
+    } finally {
+      served.close();
+      sh(`pkill -f '[h]elper --config ${toLinux(config)}' ; true`);
+      helperProcess.kill();
+      writeFileSync(config, original);
+    }
+  }, 300_000);
 });

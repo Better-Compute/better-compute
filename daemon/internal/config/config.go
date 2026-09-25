@@ -221,8 +221,24 @@ type Update struct {
 	// --release-sequence): no release manifest below it is taken (0: unknown).
 	ReleaseSequence int64
 	// Entrypoint is the path bcd.service starts (default /usr/local/bin/bcd); the first update makes
-	// it a symlink to <data_dir>/bin/current.
+	// it a symlink to the slots' current.
 	Entrypoint string
+	// SlotsDir holds the binary slots and the update records (default <data_dir>/bin, or under
+	// bcd helper /usr/local/lib/bcd: root's, outside anything the unprivileged node can write).
+	SlotsDir string
+}
+
+// UpdateDirs are where the slots, and the upgrade and release records, live.
+func (c *Config) UpdateDirs() (slots, state string) {
+	switch {
+	case c.Update.SlotsDir != "":
+		slots = c.Update.SlotsDir
+	case c.Helper.Socket != "":
+		slots = "/usr/local/lib/bcd"
+	default:
+		return path.Join(c.DataDir, "bin"), c.DataDir
+	}
+	return slots, slots
 }
 
 // Pins decodes ReleasePins, each distinct pin once (a pin listed twice is still one key).
@@ -421,6 +437,13 @@ func (c *Config) Validate() error {
 	if c.Update.ReleaseSequence < 0 {
 		return fmt.Errorf("update.release_sequence may not be negative, got %d", c.Update.ReleaseSequence)
 	}
+	if c.Update.SlotsDir != "" && !path.IsAbs(c.Update.SlotsDir) {
+		return fmt.Errorf("update.slots_dir must be an absolute path, got %q", c.Update.SlotsDir)
+	}
+	if slots, _ := c.UpdateDirs(); c.Helper.Socket != "" && (slots == c.DataDir || strings.HasPrefix(slots, strings.TrimSuffix(c.DataDir, "/")+"/")) {
+		// The node owns its data directory: slots there would let it plant the binary root trusts.
+		return fmt.Errorf("under bcd helper, update.slots_dir may not be inside data_dir (%s)", c.DataDir)
+	}
 	if !path.IsAbs(c.Update.Entrypoint) {
 		return fmt.Errorf("update.entrypoint must be an absolute path, got %q", c.Update.Entrypoint)
 	}
@@ -505,6 +528,7 @@ var fields = []field{
 	{section: "update", key: "release_pins", kind: kindString, set: func(c *Config, v value) { c.Update.ReleasePins = v.str }},
 	{section: "update", key: "release_threshold", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseThreshold = v.num }},
 	{section: "update", key: "release_sequence", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseSequence = v.num }},
+	{section: "update", key: "slots_dir", kind: kindString, set: func(c *Config, v value) { c.Update.SlotsDir = v.str }},
 	{section: "update", key: "entrypoint", kind: kindString, set: func(c *Config, v value) { c.Update.Entrypoint = v.str }},
 	{section: "helper", key: "socket", kind: kindString, set: func(c *Config, v value) { c.Helper.Socket = v.str }},
 	{section: "helper", key: "user", kind: kindString, set: func(c *Config, v value) { c.Helper.User = v.str }},

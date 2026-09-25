@@ -5,15 +5,19 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/better-compute/better-compute/daemon/internal/agent"
 	"github.com/better-compute/better-compute/daemon/internal/config"
 	"github.com/better-compute/better-compute/daemon/internal/helper"
+	"github.com/better-compute/better-compute/daemon/internal/selfupdate"
 )
 
 // runHelper is `bcd helper` (PLAN.md §6, v0.4): as root beside an unprivileged `bcd node`, it serves
@@ -74,6 +78,18 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 		},
 		Log: func(msg string, args ...any) { log.Info(msg, args...) },
 	}
+	// Self-update: root's slots and records; the node downloads, the helper verifies and swaps, and
+	// its own watchdog swaps back an update no gateway welcomed, whatever the node does.
+	manager, err := updateManager(cfg, func(msg string, args ...any) { log.Info(msg, args...) })
+	if err != nil {
+		fmt.Fprintf(stderr, "bcd helper: %v\n", err)
+		return exitFailure
+	}
+	srv.Update = manager
+	srv.OnSwap = func(p *selfupdate.Pending) { watchUpdate(manager, p, log) }
+	if st, err := manager.Status(); err == nil && st.Pending != nil && st.Pending.State == selfupdate.StateSwapped {
+		watchUpdate(manager, st.Pending, log)
+	}
 	ln, err := listenHelper(cfg.Helper.Socket, int(gid))
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd helper: %v\n", err)
@@ -90,30 +106,66 @@ func runHelper(fs *flag.FlagSet, _, stderr io.Writer) int {
 	return exitOK
 }
 
-// listenHelper opens the socket: 0660, group the node's, in a 0755 directory.
+// listenHelper opens the socket: 0660, group the node's. Root never changes a path the node could
+// swap for a symlink: the socket's directory must be root's and closed to others, and the socket
+// is bound, chmod'ed and chown'ed inside a private 0700 directory, then renamed into place.
 func listenHelper(socket string, gid int) (*net.UnixListener, error) {
-	if err := os.MkdirAll(filepath.Dir(socket), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
-	if err != nil {
-		return nil, err
-	}
-	ln.SetUnlinkOnClose(true)
-	if err := os.Chmod(socket, 0o660); err != nil {
-		ln.Close()
+	dir := filepath.Dir(socket)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
 	if os.Geteuid() == 0 {
-		if err := os.Chown(socket, 0, gid); err != nil {
-			ln.Close()
+		if err := rootOnlyDir(dir); err != nil {
 			return nil, err
 		}
 	}
+	private, err := os.MkdirTemp(dir, ".bcd-helper-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(private)
+	bound := filepath.Join(private, "helper.sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: bound, Net: "unix"})
+	if err != nil {
+		return nil, err
+	}
+	ln.SetUnlinkOnClose(false)
+	fail := func(err error) (*net.UnixListener, error) {
+		ln.Close()
+		return nil, err
+	}
+	if err := os.Chmod(bound, 0o660); err != nil {
+		return fail(err)
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Chown(bound, 0, gid); err != nil {
+			return fail(err)
+		}
+	}
+	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fail(err)
+	}
+	if err := os.Rename(bound, socket); err != nil {
+		return fail(err)
+	}
 	return ln, nil
+}
+
+// watchUpdate swaps back an update that is still unconfirmed shortly after its deadline, and
+// restarts bcd.service into the old binary (the node's own watchdog normally does this first).
+func watchUpdate(m *selfupdate.Manager, p *selfupdate.Pending, log *slog.Logger) {
+	time.AfterFunc(time.Until(p.Deadline)+30*time.Second, func() {
+		rolled, ok := m.Expire()
+		if !ok {
+			return
+		}
+		log.Warn("self-update: no Welcome confirmed the new binary; swapped back", "version", rolled.Version, "to", rolled.FromVersion)
+		if !devBuild {
+			if out, err := exec.Command("systemctl", "restart", "bcd.service").CombinedOutput(); err != nil {
+				log.Error("self-update: restart bcd.service", "error", err.Error(), "output", string(out))
+			}
+		}
+	})
 }
 
 // installedBinary reports whether a process runs an installed bcd: the entrypoint's target, a
@@ -123,7 +175,8 @@ func installedBinary(cfg *config.Config, pid int32) error {
 	if err != nil {
 		return fmt.Errorf("the peer's executable: %w", err)
 	}
-	candidates := []string{cfg.Update.Entrypoint, filepath.Join(cfg.DataDir, "bin", "bcd-a"), filepath.Join(cfg.DataDir, "bin", "bcd-b")}
+	slots, _ := cfg.UpdateDirs()
+	candidates := []string{cfg.Update.Entrypoint, filepath.Join(slots, "bcd-a"), filepath.Join(slots, "bcd-b")}
 	if self, err := os.Executable(); err == nil {
 		candidates = append(candidates, self)
 	}

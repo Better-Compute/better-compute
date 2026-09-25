@@ -1,12 +1,16 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
-	"strings"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -35,10 +39,24 @@ import (
 // the caller closes everything and execs UpdateOptions.Slots.Entrypoint with the same arguments.
 var ErrRestart = errors.New("agent: restart into the current binary slot")
 
+// UpdateBackend is self-update's privileged half: a selfupdate.Manager in process, or bcd helper's
+// (helper.UpdateClient), which takes every decision that matters itself.
+type UpdateBackend interface {
+	Prepare(t selfupdate.Target) (*pki.ReleaseArtifact, error)
+	Swap(t selfupdate.Target) (*selfupdate.Pending, error)
+	Confirm(version string) error
+	RollBack(version, reason string) (*selfupdate.Pending, error)
+	Settle(running string) (selfupdate.Settlement, error)
+	StagedPath(version string) string
+}
+
 // UpdateOptions enable self-update. Without them the daemon section is reported SectionUnsupported
 // and daemon.upgrade UNSUPPORTED.
 type UpdateOptions struct {
-	Slots selfupdate.Slots
+	// Backend, when set, does the privileged half (bcd helper); otherwise a selfupdate.Manager over
+	// the fields below runs in process, with its records in the data directory.
+	Backend UpdateBackend
+	Slots   selfupdate.Slots
 	// Executable is the running binary: the first update adopts it into slot a.
 	Executable string
 	// Pins are the release keys' SPKI SHA-256 digests; Threshold how many must have signed (>= 1).
@@ -59,12 +77,32 @@ type UpdateOptions struct {
 	Deadline time.Duration
 }
 
+// backend is the configured backend, or the in-process manager over the options.
+func (a *Agent) backend() UpdateBackend {
+	u := a.o.Update
+	if u.Backend != nil {
+		return u.Backend
+	}
+	a.upd.mu.Lock()
+	defer a.upd.mu.Unlock()
+	if a.upd.local == nil {
+		a.upd.local = &selfupdate.Manager{
+			Slots: u.Slots, StateDir: a.o.DataDir, StagingDir: filepath.Join(a.o.DataDir, "staging"),
+			Executable: u.Executable, Pins: u.Pins, Threshold: u.Threshold, Platform: u.Platform,
+			Sequence: u.Sequence, InstallUnits: u.InstallUnits, Deadline: u.Deadline,
+			Log: func(msg string, args ...any) { a.log.Info(msg, args...) },
+		}
+	}
+	return a.upd.local
+}
+
 // updater is the self-update state of this process.
 type updater struct {
 	// stage serializes staging and swapping (the converger and daemon.upgrade).
 	stage sync.Mutex
 
-	mu sync.Mutex
+	mu    sync.Mutex
+	local *selfupdate.Manager
 	// awaiting is the update this binary was started by, until a Welcome confirms it.
 	awaiting *selfupdate.Pending
 	timer    *time.Timer
@@ -72,33 +110,25 @@ type updater struct {
 	failed *selfupdate.Pending
 }
 
-// checkUpgrade reads upgrade.json at start: a new binary waits for its Welcome (and swaps back
-// when none comes by the deadline); the old binary back in its slot records the version as failed.
+// checkUpgrade settles a pending update at start: a new binary waits for its Welcome (and swaps
+// back when none comes by the deadline); the old binary back in its slot has the version recorded
+// as failed.
 func (a *Agent) checkUpgrade() {
 	u := a.o.Update
 	if u == nil {
 		return
 	}
-	p, err := selfupdate.LoadPending(a.o.DataDir)
+	s, err := a.backend().Settle(a.o.Version)
 	if err != nil {
-		a.log.Error("self-update: unreadable upgrade record", "error", err.Error())
-		_ = selfupdate.ClearPending(a.o.DataDir)
-		return
+		a.log.Error("self-update: settle the upgrade record", "error", err.Error())
 	}
-	if p == nil {
-		return
-	}
-	running := selfupdate.Bare(a.o.Version)
-	switch {
-	case p.State == selfupdate.StateSwapped && running == p.Version:
+	p := s.Pending
+	switch s.Action {
+	case "await":
 		wait := time.Until(p.Deadline)
-		if wait <= 0 {
-			a.rollBack(p, fmt.Sprintf("bcd %s was not welcomed by a gateway before its deadline", p.Version))
-			return
-		}
 		a.upd.mu.Lock()
 		a.upd.awaiting = p
-		a.upd.timer = time.AfterFunc(wait, func() {
+		a.upd.timer = time.AfterFunc(max(wait, 0), func() {
 			a.upd.mu.Lock()
 			current := a.upd.awaiting == p
 			a.upd.awaiting = nil
@@ -109,30 +139,14 @@ func (a *Agent) checkUpgrade() {
 		})
 		a.upd.mu.Unlock()
 		a.log.Info("self-update: waiting for a Welcome", "version", p.Version, "from", p.FromVersion, "deadline", p.Deadline.Format(time.RFC3339))
-	case running == p.FromVersion:
-		// Back on the old binary: swapped back by the new one, by bcd-rollback.service or by hand.
-		reason := p.Reason
-		if p.State != selfupdate.StateRolledBack || reason == "" {
-			reason = fmt.Sprintf("bcd %s did not start", p.Version)
-		}
-		rec := selfupdate.LoadRecord(a.o.DataDir)
-		if rec.Failed == nil {
-			rec.Failed = map[string]string{}
-		}
-		rec.Failed[p.Version] = reason
-		if err := selfupdate.SaveRecord(a.o.DataDir, rec); err != nil {
-			a.log.Error("self-update: record the failed version", "error", err.Error())
-		}
-		p.Reason = reason
+	case "failed":
 		a.upd.mu.Lock()
 		a.upd.failed = p
 		a.upd.mu.Unlock()
-		_ = selfupdate.ClearPending(a.o.DataDir)
-		a.log.Warn("self-update failed; running the previous version", "version", p.Version, "running", running, "reason", reason)
-	default:
-		a.log.Warn("self-update: the upgrade record names neither this version nor the previous one; dropped",
-			"version", p.Version, "from", p.FromVersion, "running", running)
-		_ = selfupdate.ClearPending(a.o.DataDir)
+		a.log.Warn("self-update failed; running the previous version", "version", p.Version, "running", a.o.Version, "reason", p.Reason)
+	case "restart":
+		a.log.Warn("self-update: not welcomed before the deadline; swapped back", "version", p.Version)
+		a.requestRestart()
 	}
 }
 
@@ -156,15 +170,8 @@ func (a *Agent) confirmUpgrade() {
 	if p == nil {
 		return
 	}
-	rec := selfupdate.LoadRecord(a.o.DataDir)
-	if p.Sequence > rec.Sequence {
-		rec.Sequence = p.Sequence
-	}
-	if err := selfupdate.SaveRecord(a.o.DataDir, rec); err != nil {
-		a.log.Error("self-update: record the release", "error", err.Error())
-	}
-	if err := selfupdate.ClearPending(a.o.DataDir); err != nil {
-		a.log.Error("self-update: clear the upgrade record", "error", err.Error())
+	if err := a.backend().Confirm(p.Version); err != nil {
+		a.log.Error("self-update: confirm", "error", err.Error())
 	}
 	a.log.Info("self-update confirmed", "version", p.Version, "from", p.FromVersion)
 	if p.CommandID == "" {
@@ -199,18 +206,11 @@ func (a *Agent) restartedResult(c journal.Command) (*journal.Result, bool) {
 	return nil, false
 }
 
-// rollBack points current back at the old slot and restarts into it.
+// rollBack swaps back to the old slot and restarts into it.
 func (a *Agent) rollBack(p *selfupdate.Pending, reason string) {
-	u := a.o.Update
 	a.upd.stage.Lock()
 	defer a.upd.stage.Unlock()
-	p.State = selfupdate.StateRolledBack
-	p.Reason = reason
-	if err := selfupdate.SavePending(a.o.DataDir, p); err != nil {
-		a.log.Error("self-update: record the rollback", "error", err.Error())
-	}
-	// Back to the old slot, and no previous: a later crash loop must not reinstate the failed binary.
-	if err := u.Slots.Revert(p.From); err != nil {
+	if _, err := a.backend().RollBack(p.Version, reason); err != nil {
 		a.log.Error("self-update: swap back", "error", err.Error())
 		return
 	}
@@ -226,94 +226,54 @@ func (a *Agent) requestRestart() {
 	}
 }
 
-// updateError is a self-update refusal; terminal ones are not retried.
-type updateError struct {
-	msg      string
-	terminal bool
+// terminal reports a refusal no retry can fix.
+func terminal(err error) bool {
+	var r *selfupdate.Refusal
+	return errors.As(err, &r)
 }
 
-func (e *updateError) Error() string { return e.msg }
-
-func refuse(format string, args ...any) error {
-	return &updateError{msg: fmt.Sprintf(format, args...), terminal: true}
-}
-
-// prepareUpgrade verifies the target and stages it in the other slot. The caller holds upd.stage.
-func (a *Agent) prepareUpgrade(ctx context.Context, sec *agentv1.DaemonSection) (*selfupdate.Pending, error) {
+// upgradeTo verifies and stages sec's release and swaps to it (then restarts). The node downloads;
+// the backend checks the manifest, the floor and the digest itself and swaps. beforeSwap runs just
+// before the swap (daemon.upgrade marks itself running). The caller holds upd.stage.
+func (a *Agent) upgradeTo(ctx context.Context, sec *agentv1.DaemonSection, commandID string, beforeSwap func() error) error {
 	u := a.o.Update
-	target := selfupdate.Bare(sec.GetVersion())
-	running := selfupdate.Bare(a.o.Version)
-	rec := selfupdate.LoadRecord(a.o.DataDir)
-	if why, failed := rec.Failed[target]; failed {
-		return nil, refuse("bcd %s did not start; running %s (%s)", target, running, why)
+	b := a.backend()
+	t := selfupdate.Target{
+		Version: selfupdate.Bare(sec.GetVersion()), Sha256: sec.GetSha256(), Manifest: sec.GetSignature(),
+		Running: selfupdate.Bare(a.o.Version), CommandID: commandID, ServerTime: a.serverNow(),
 	}
-	if len(sec.GetSha256()) != 32 {
-		return nil, refuse("the daemon section's sha256 must be 32 bytes")
-	}
-	if err := u.Slots.Adopt(u.Executable, running); err != nil {
-		return nil, &updateError{msg: "adopt the running binary: " + err.Error()}
-	}
-	if u.InstallUnits != nil {
-		units, err := selfupdate.RollbackUnits(a.o.DataDir, u.Slots)
-		if err == nil {
-			err = u.InstallUnits(units)
-		}
-		if err != nil {
-			a.log.Warn("self-update: no crash-loop rollback unit", "error", err.Error())
-		}
-	}
-	cur, err := u.Slots.Current()
+	art, err := b.Prepare(t)
 	if err != nil {
-		return nil, &updateError{msg: err.Error()}
+		return err
 	}
-	next := selfupdate.Other(cur)
-	p := &selfupdate.Pending{Version: target, FromVersion: running, From: cur, To: next}
-	if selfupdate.Bare(u.Slots.Versions()[next]) == target && u.Slots.Holds(next, sec.GetSha256()) {
-		return p, nil // the binary that ran here before (a rollout rolled back)
+	if art != nil {
+		src, err := url.Parse(sec.GetUrl())
+		if err != nil || src.Host == "" || src.User != nil || !(src.Scheme == "https" || (u.AllowHTTP && src.Scheme == "http")) {
+			return &selfupdate.Refusal{Msg: "the daemon section's url must be https://"}
+		}
+		staged := b.StagedPath(t.Version)
+		defer os.Remove(staged)
+		if err := a.download(ctx, src.String(), *art, sec.GetSha256(), staged, u); err != nil {
+			return fmt.Errorf("download bcd %s: %w", t.Version, err)
+		}
 	}
-	if len(u.Pins) == 0 {
-		return nil, refuse("no release keys are pinned ([update] release_pins): bcd takes no binary on the control plane's word")
+	if beforeSwap != nil {
+		if err := beforeSwap(); err != nil {
+			return err
+		}
 	}
-	if len(sec.GetSignature()) == 0 {
-		return nil, refuse("the daemon section carries no signed release manifest")
-	}
-	m, err := pki.VerifyReleaseManifest(sec.GetSignature(), u.Pins, max(u.Threshold, 1))
+	p, err := b.Swap(t)
 	if err != nil {
-		return nil, refuse("%v", err)
+		return err
 	}
-	switch {
-	case m.Product != "bcd":
-		return nil, refuse("the manifest releases %s, not bcd", m.Product)
-	case selfupdate.Bare(m.Version) != target:
-		return nil, refuse("the manifest releases bcd %s, not %s", m.Version, target)
-	case m.Sequence < max(rec.Sequence, u.Sequence):
-		return nil, refuse("release sequence %d is older than %d, which this node ran or was installed at (rollback)", m.Sequence, max(rec.Sequence, u.Sequence))
-	case max(rec.Sequence, u.Sequence) == 0 && selfupdate.Older(target, running):
-		// Without a known floor (a build without an embedded sequence), never below its own version.
-		return nil, refuse("bcd %s is older than the running %s (rollback)", target, running)
-	case !time.Now().Before(m.Expires()) || !a.serverNow().Before(m.Expires()):
-		// Either clock past the expiry: neither the gateway nor the host clock alone can revive it.
-		return nil, refuse("the release manifest expired at %s", m.Expires().UTC().Format(time.RFC3339))
-	}
-	art, ok := m.Artifact(u.Platform, sec.GetSha256())
-	// The bare binary only (goreleaser's bcd_<version>_<os>_<arch>): pointed at an archive or an SBOM
-	// the swap could only fail, and the version would be blocked.
-	if want := "bcd_" + target + "_" + strings.ReplaceAll(u.Platform, "-", "_"); !ok || art.Name != want {
-		return nil, refuse("the manifest lists no %s with the section's sha256", want)
-	}
-	src, err := url.Parse(sec.GetUrl())
-	if err != nil || src.Host == "" || src.User != nil || !(src.Scheme == "https" || (u.AllowHTTP && src.Scheme == "http")) {
-		return nil, refuse("the daemon section's url must be https://")
-	}
-	if err := a.download(ctx, src.String(), art, sec.GetSha256(), target, u); err != nil {
-		return nil, &updateError{msg: "download bcd " + target + ": " + err.Error()}
-	}
-	p.Sequence = m.Sequence
-	return p, nil
+	a.log.Warn("self-update: restarting into the new binary", "version", p.Version, "from", p.FromVersion, "slot", p.To)
+	a.requestRestart()
+	return nil
 }
 
-// download writes the binary into the other slot, checked against the manifest's size and digest.
-func (a *Agent) download(ctx context.Context, rawURL string, art pki.ReleaseArtifact, sum []byte, version string, u *UpdateOptions) error {
+// download writes the binary to staged (the node's staging directory), checked against the
+// manifest's size and digest; the backend checks it again as it copies it into a slot.
+func (a *Agent) download(ctx context.Context, rawURL string, art pki.ReleaseArtifact, sum []byte, staged string, u *UpdateOptions) error {
 	ctx, watch, stop := withProgress(ctx, transferIdle, transferMinBytes, transferMax)
 	defer stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -332,28 +292,28 @@ func (a *Agent) download(ctx context.Context, rawURL string, art pki.ReleaseArti
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET returned %s", resp.Status)
 	}
-	if art.Size > selfupdate.MaxBinaryBytes {
-		return fmt.Errorf("the binary is %d bytes; at most %d are taken", art.Size, selfupdate.MaxBinaryBytes)
-	}
-	_, err = u.Slots.Stage(progressReader{resp.Body, watch}, art.Size, sum, version)
-	return err
-}
-
-// swapTo records the update and swaps: upgrade.json first (fsynced), then current, then a restart.
-func (a *Agent) swapTo(p *selfupdate.Pending) error {
-	u := a.o.Update
-	p.State = selfupdate.StateSwapped
-	p.Deadline = time.Now().Add(u.deadline())
-	if err := selfupdate.SavePending(a.o.DataDir, p); err != nil {
+	if err := os.MkdirAll(filepath.Dir(staged), 0o755); err != nil {
 		return err
 	}
-	if err := u.Slots.Swap(p.To); err != nil {
-		_ = selfupdate.ClearPending(a.o.DataDir)
+	tmp := staged + ".part"
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
 		return err
 	}
-	a.log.Warn("self-update: restarting into the new binary", "version", p.Version, "from", p.FromVersion, "slot", p.To)
-	a.requestRestart()
-	return nil
+	defer os.Remove(tmp)
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(progressReader{resp.Body, watch}, art.Size+1))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if n != art.Size || !bytes.Equal(h.Sum(nil), sum) {
+		return fmt.Errorf("the download is not the release (%d bytes, sha256 %x)", n, h.Sum(nil))
+	}
+	return os.Rename(tmp, staged)
 }
 
 // runDaemonUpgrade is daemon.upgrade: self-terminating, it completes once the new binary is
@@ -371,16 +331,14 @@ func (a *Agent) runDaemonUpgrade(ctx context.Context, cmd dispatch.Command) (jou
 	}
 	a.upd.stage.Lock()
 	defer a.upd.stage.Unlock()
-	p, err := a.prepareUpgrade(ctx, sec)
+	err := a.upgradeTo(ctx, sec, cmd.ID, func() error {
+		if err := a.markRunning(cmd.ID); err != nil {
+			return err
+		}
+		a.flush(2 * time.Second)
+		return nil
+	})
 	if err != nil {
-		return journal.Result{}, &KindError{Code: "update-failed", Message: err.Error()}
-	}
-	p.CommandID = cmd.ID
-	if err := a.markRunning(cmd.ID); err != nil {
-		return journal.Result{}, err
-	}
-	a.flush(2 * time.Second)
-	if err := a.swapTo(p); err != nil {
 		return journal.Result{}, &KindError{Code: "update-failed", Message: err.Error()}
 	}
 	<-ctx.Done()
@@ -409,15 +367,10 @@ func (c daemonConverger) Plan(_ context.Context, desired []byte) ([]converge.Act
 				return errors.New("an update is already in progress")
 			}
 			defer a.upd.stage.Unlock()
-			p, err := a.prepareUpgrade(ctx, sec)
-			if err != nil {
-				var ue *updateError
-				if errors.As(err, &ue) && ue.terminal {
+			if err := a.upgradeTo(ctx, sec, "", nil); err != nil {
+				if terminal(err) {
 					return converge.Terminal(err)
 				}
-				return err
-			}
-			if err := a.swapTo(p); err != nil {
 				return err
 			}
 			return fmt.Errorf("restarting into bcd %s", target)

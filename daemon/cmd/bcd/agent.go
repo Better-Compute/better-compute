@@ -374,10 +374,8 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	approverSetPin, _ := cfg.ApproverSetPin() // validated when the file was loaded
 	bmcNetworks, _ := cfg.BMCNets()
 	var update *agent.UpdateOptions
-	if underHelper {
-		log.Warn("self-update is off under bcd helper: swapping the installed binary needs root")
-	} else if mode == "node" || mode == "site" {
-		if update, err = updateOptions(cfg); err != nil {
+	if mode == "node" || mode == "site" {
+		if update, err = updateOptions(cfg, log); err != nil {
 			fmt.Fprintf(stderr, "bcd %s: %v\n", mode, err)
 			return exitFailure
 		}
