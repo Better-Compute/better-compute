@@ -5,12 +5,13 @@ import { createDetail } from '@better-compute/console-kit';
 import { useDetail } from '@better-compute/console-kit/react';
 import { useConsole, useDetailEvents } from '@/components/console-provider';
 import { DetailActions } from '@/components/detail-actions';
+import { SshCertPanel } from '@/components/ssh-cert-panel';
 import { Loading } from '@/components/ui';
 
 /** One node: its state, conditions and labels, and the node actions its state allows. */
 export default function NodePage({ params }: { params: Promise<{ nodeId: string }> }) {
   const { nodeId } = use(params);
-  const { api, tenantId } = useConsole();
+  const { api, tenantId, root } = useConsole();
   const detail = useMemo(
     () => createDetail(api, { tenantId, kind: 'node', id: nodeId }),
     [api, tenantId, nodeId],
@@ -75,6 +76,8 @@ export default function NodePage({ params }: { params: Promise<{ nodeId: string 
                 only={['nodes/cordon', 'nodes/uncordon', 'nodes/drain']}
               />
             </section>
+            {/* Break-glass shells are a platform operation (compute:nodes:ssh-root; IAM still decides). */}
+            {root && <SshCertPanel nodeId={nodeId} />}
           </>
         )}
       </Loading>

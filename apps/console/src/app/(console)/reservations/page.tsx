@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useMemo } from 'react';
 import { createReservationForm } from '@better-compute/console-kit';
 import { useList, useStore } from '@better-compute/console-kit/react';
@@ -138,7 +139,11 @@ export default function ReservationsPage() {
             <tbody>
               {list.items.map((reservation) => (
                 <tr key={reservation.id}>
-                  <td>{reservation.id}</td>
+                  <td>
+                    <Link href={`/reservations/${encodeURIComponent(reservation.id)}`}>
+                      {reservation.id}
+                    </Link>
+                  </td>
                   <td>{String(reservation.poolId ?? '')}</td>
                   <td>{String(reservation.state ?? '')}</td>
                   <td>
