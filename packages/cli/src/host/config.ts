@@ -4,6 +4,7 @@ import type { MetricsRegistry } from '@better-compute/observability';
 import type { RevocationSet } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from '../config.js';
 import type { HostRoute, HostUpgradeHandler } from './http.js';
+import type { HostTunnelsConfig } from './tunnels.js';
 
 // The named `host` export of `better-compute.config.ts`: what `serve` runs around the control plane that the
 // default export describes. It is a factory of the built control plane, so routes and hooks close over the
@@ -78,6 +79,11 @@ export interface HostMetricsConfig {
 
 export interface HostConfig {
   metrics?: HostMetricsConfig;
+  /**
+   * Interactive tunnels on the api role, mounted when the deployment sets `tunnels: { issuer }`:
+   * the re-authorizer (default `tunnelAuthorizer(iam)`) and the TLS to gateways' control APIs.
+   */
+  tunnels?: HostTunnelsConfig;
   http?: {
     routes?: readonly HostRoute[];
     upgrade?: readonly HostUpgradeHandler[];

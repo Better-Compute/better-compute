@@ -3,6 +3,7 @@ import type { AnyCompute, AnyComputeOptions } from '../config.js';
 import type { HostConfig } from './config.js';
 import { gatewayIdentity } from './gateway.js';
 import { checkHostRoutes } from './http.js';
+import { mountTunnels } from './tunnels.js';
 
 /**
  * What `better-compute doctor` reports about the configuration's `host` export (only reads): whether the
@@ -24,6 +25,16 @@ export function hostFindings(
       severity: 'error',
       message: (error as Error).message,
       fix: 'Give host.http.routes absolute paths outside the API base path and the built-ins',
+    });
+  }
+  try {
+    mountTunnels(compute, options, host.tunnels)?.close();
+  } catch (error) {
+    findings.push({
+      check: 'host.tunnels',
+      severity: 'error',
+      message: (error as Error).message,
+      fix: 'bridge.embedded(iam, { sessionReviewer }) (or remote authorizeSessions), or host.tunnels.authorize',
     });
   }
   const gateway = host.gateway;

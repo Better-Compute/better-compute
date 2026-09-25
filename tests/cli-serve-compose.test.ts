@@ -1,4 +1,5 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
 import { connect, type ClientHttp2Session } from 'node:http2';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,7 @@ import {
   gatewayIdentity,
   gatewayOptions,
   hostFindings,
+  mountTunnels,
   type CliIO,
 } from '@better-compute/cli';
 import { AGENT_GATEWAY_SERVICE, frameMessage, MessageDecoder } from '@better-compute/gateway';
@@ -89,6 +91,30 @@ function grpc(
     });
     if (options.endStream) stream.end(frameMessage(body));
     else stream.write(frameMessage(body));
+  });
+}
+
+/** The HTTP status an upgrade (WebSocket handshake) to `path` is answered with, or 101. */
+function upgradeStatus(origin: string, path: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(`${origin}${path}`, {
+      headers: {
+        connection: 'Upgrade',
+        upgrade: 'websocket',
+        'sec-websocket-version': '13',
+        'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      },
+    });
+    req.on('response', (response) => {
+      response.resume();
+      resolve(response.statusCode ?? 0);
+    });
+    req.on('upgrade', (_response, socket) => {
+      socket.destroy();
+      resolve(101);
+    });
+    req.on('error', reject);
+    req.end();
   });
 }
 
@@ -293,6 +319,21 @@ describe('serve composition audit', () => {
     ).toMatchObject({ revocations });
   });
 
+  it('mounts tunnels only with an issuer, and never without a re-authorizer', () => {
+    const compute = { endpoint: { basePath: '/api/compute' } } as any;
+    const issuer = { jwksJson: () => ({ keys: [] }) };
+    expect(mountTunnels(compute, { iam: {} } as any)).toBeUndefined();
+    // An IamPort without authorizeSession and no host.tunnels.authorize: refuse to mount.
+    expect(() =>
+      mountTunnels(compute, { iam: { authorize: async () => true }, tunnels: { issuer } } as any),
+    ).toThrow(/re-authorizer/);
+    const mount = mountTunnels(compute, { iam: {}, tunnels: { issuer }, database: {} } as any, {
+      authorize: async () => false,
+    });
+    expect(typeof mount?.upgrade).toBe('function');
+    mount?.close();
+  });
+
   it('doctor reports host wiring problems', () => {
     const compute = { endpoint: { basePath: '/api/compute' } } as any;
     const checks = (options: any, host: any) =>
@@ -313,7 +354,9 @@ describe('serve composition audit', () => {
       join: { trustDomain: 'td.test' },
     };
     // No revocation set is fine: the role makes one and its feed fills it from node_certs.
+    // Tunnels without a re-authorizer (no authorizeSession, no host.tunnels.authorize) are refused.
     expect(checks({ pki, tunnels: { issuer: {} } }, { gateway: { ...gateway } })).toEqual([
+      'error host.tunnels',
       'warning host.gateway.internal',
       'error host.gateway.tunnels',
     ]);
@@ -410,6 +453,15 @@ export const host = composed.host;
         // The gateway role's own series, sampled at scrape.
         expect(scraped).toContain('better_compute_gateway_stream_headroom');
         expect((await fetch(`${origin}/metrics`, { method: 'POST' })).status).toBe(405);
+
+        // Tunnels are mounted on the api's upgrade event: a forged ticket is refused by handleTunnel
+        // (not a 404), and other upgrade paths are left alone.
+        expect(notes.join('\n')).toContain('Tunnels: /api/compute/tunnels/{ticket}');
+        expect(
+          await upgradeStatus(origin, '/api/compute/tunnels/not.a.ticket'),
+        ).toBeGreaterThanOrEqual(400);
+        expect(await upgradeStatus(origin, '/api/compute/tunnels/not.a.ticket')).not.toBe(404);
+        expect(await upgradeStatus(origin, '/elsewhere')).toBe(404);
 
         // The events module's SSE watch, as the root administrator.
         const watch = await fetch(`${origin}/watch?types=node.*`, {

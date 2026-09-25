@@ -18,6 +18,7 @@ import { defineCommand, type FlagSpec } from '../framework.js';
 import { resolveHost, type HostConfig } from '../host/config.js';
 import { startGateway, type RunningGateway } from '../host/gateway.js';
 import { hostListener } from '../host/http.js';
+import { mountTunnels, type TunnelMount } from '../host/tunnels.js';
 
 // `serve` and `dev` (PLAN.md §9.3): one process runs the HTTP API (`compute.nodeHandler`) and the
 // worker roles, after migrating, until SIGINT/SIGTERM (or `CliIO.signal`). `dev` needs no setup:
@@ -85,6 +86,7 @@ export async function runServer(
   const running: RunningServer = { roles: options.roles };
   let server: Server | undefined;
   let gateway: RunningGateway | undefined;
+  let tunnels: TunnelMount | undefined;
   let stopping = false;
   try {
     if (options.roles.length) await compute.start({ roles: [...options.roles] });
@@ -110,7 +112,16 @@ export async function runServer(
       };
     }
     if (options.api !== false) {
-      const listener = hostListener(compute, withMetricsRoute(options.hostConfig));
+      // Tunnels (§7.6) when the deployment issues exec tickets: GET {basePath}/tunnels/{ticket}.
+      tunnels = options.computeOptions
+        ? mountTunnels(compute, options.computeOptions, options.hostConfig?.tunnels)
+        : undefined;
+      const http = withMetricsRoute(options.hostConfig);
+      const listener = hostListener(compute, {
+        ...http,
+        upgrade: [...(tunnels ? [tunnels.upgrade] : []), ...(http?.upgrade ?? [])],
+      });
+      if (tunnels) options.note(`Tunnels: ${compute.endpoint.basePath}/tunnels/{ticket}`);
       server = createServer(listener.request);
       server.on('upgrade', listener.upgrade);
       const port = await listen(server, options.host, options.port);
@@ -134,6 +145,7 @@ export async function runServer(
     // Daemons first (they reconnect to another gateway), then HTTP, then the workers' leases.
     await gateway?.stop().catch(() => undefined);
     if (server) await closeServer(server);
+    tunnels?.close();
     await compute.stop();
   }
 }

@@ -9,6 +9,7 @@ import { createMetrics, standardMetrics } from '@better-compute/observability';
 import {
   createPkiBundle,
   createSigningKey,
+  execTicketIssuer,
   generateP256KeyPair,
   privateKeyPem,
   spkiPin,
@@ -90,6 +91,8 @@ export async function composedConfig() {
         encryptionKey: bundle.joinEncryption.privateKey,
       }),
     },
+    // Tunnels (§7.6): serve mounts {basePath}/tunnels/{ticket} and the gateway verifies the same JWKS.
+    tunnels: { issuer: execTicketIssuer(bundle, { issuer: 'http://127.0.0.1:3000' }) },
   });
 
   const host = defineHost(({ compute }) => {
@@ -118,6 +121,8 @@ export async function composedConfig() {
     },
     // serve mounts GET /metrics and adds the gateway role's series to the same registry.
     metrics: { registry: metrics, bearerToken: METRICS_TOKEN },
+    // The test IAM has no sessionReviewer (so no authorizeSession): tunnels re-authorize explicitly.
+    tunnels: { authorize: async () => false },
     gateway: {
       region: 'eu-1',
       listen: { host: '127.0.0.1', port: 0 },
