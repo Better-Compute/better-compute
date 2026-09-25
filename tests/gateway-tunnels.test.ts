@@ -8,6 +8,7 @@ import {
   gatewayTunnelRelay,
   GrpcCode,
   MessageDecoder,
+  narrowsTunnels,
   serveGateway,
   serveInternal,
   type GatewayControlClient,
@@ -87,11 +88,25 @@ describe('tunnel core', () => {
 
   /** Opens a tunnel with a node session that answers OpenTunnel from `answer` (default: itself). */
   async function open(
-    options: { answerAs?: string; ticketFor?: string; op?: 'exec' | 'console'; agentId?: string; delegationId?: string } = {},
+    options: {
+      answerAs?: string;
+      ticketFor?: string;
+      op?: 'exec' | 'console';
+      agentId?: string;
+      delegationId?: string;
+      tenantId?: string;
+    } = {},
   ) {
     const node = await f.addNode();
     const { stream } = await f.connect(node);
-    const ticket = issuer.issue({ nodeId: options.ticketFor ?? node, sid: `tun_${node.slice(-6)}`, op: options.op ?? 'console', subject: 'user_1', ...(options.agentId ? { agentId: options.agentId, delegationId: options.delegationId } : {}) });
+    const ticket = issuer.issue({
+      nodeId: options.ticketFor ?? node,
+      sid: `tun_${node.slice(-6)}`,
+      op: options.op ?? 'console',
+      subject: 'user_1',
+      ...(options.agentId ? { agentId: options.agentId, delegationId: options.delegationId } : {}),
+      ...(options.tenantId ? { tenantId: options.tenantId } : {}),
+    });
     const caller = new Side();
     const opening = f.gateway.openTunnel({ ticket: ticket.token, nodeId: node, caller });
     const nodeSide = new Side();
@@ -226,6 +241,49 @@ describe('tunnel core', () => {
     expect(f.gateway.closeTunnels({ agentId: 'agent_7' }, 'agent-disabled')).toBe(1);
     expect(other.caller.closed).toBeDefined();
     expect(f.gateway.tunnels()).toHaveLength(1);
+  });
+
+  it("agent:suspend-all closes every agent tunnel of one tenant, never a person's own or another tenant's", async () => {
+    const own = await open({ tenantId: 'tnt_a' });
+    const agentA = await open({ tenantId: 'tnt_a', agentId: 'agent_1', delegationId: 'dlg_1' });
+    const agentA2 = await open({ tenantId: 'tnt_a', agentId: 'agent_2', delegationId: 'dlg_2' });
+    const agentB = await open({ tenantId: 'tnt_b', agentId: 'agent_3', delegationId: 'dlg_3' });
+    await Promise.all([own.opening, agentA.opening, agentA2.opening, agentB.opening]);
+    expect(f.gateway.closeTunnels({ tenantId: 'tnt_a', anyAgent: true }, 'agents-suspended')).toBe(2);
+    expect(agentA.caller.closed).toBeDefined();
+    expect(agentA2.caller.closed).toBeDefined();
+    expect(own.caller.closed).toBeUndefined();
+    expect(agentB.caller.closed).toBeUndefined();
+  });
+
+  it('re-authorizes matching tunnels on demand and closes the ones IAM now refuses', async () => {
+    const handoff = await open({ tenantId: 'tnt_a', agentId: 'agent_1', delegationId: 'dlg_child' });
+    const sibling = await open({ tenantId: 'tnt_a', agentId: 'agent_2', delegationId: 'dlg_other' });
+    const own = await open({ tenantId: 'tnt_a' });
+    await Promise.all([handoff.opening, sibling.opening, own.opening]);
+    const asked: string[] = [];
+    // The parent delegation was revoked: its hand-off (dlg_child) is gone, the rest still hold.
+    reauthorize = async (tunnel) => {
+      asked.push(tunnel.delegationId ?? 'none');
+      return tunnel.delegationId !== 'dlg_child';
+    };
+    expect(await f.gateway.reauthorizeTunnels({ tenantId: 'tnt_a', anyAgent: true })).toBe(2);
+    expect(asked.sort()).toEqual(['dlg_child', 'dlg_other']);
+    expect(handoff.caller.closed?.code).toBe(GrpcCode.PERMISSION_DENIED);
+    expect(sibling.caller.closed).toBeUndefined();
+    expect(own.caller.closed).toBeUndefined();
+    expect(f.gateway.tunnels()).toHaveLength(2);
+  });
+});
+
+describe('narrowsTunnels', () => {
+  it('needs an id key, or a tenant together with anyAgent', () => {
+    expect(narrowsTunnels({})).toBe(false);
+    expect(narrowsTunnels({ tenantId: 'tnt_a' })).toBe(false);
+    expect(narrowsTunnels({ anyAgent: true })).toBe(false);
+    expect(narrowsTunnels({ tenantId: 'tnt_a', anyAgent: true })).toBe(true);
+    expect(narrowsTunnels({ delegationId: 'dlg_1' })).toBe(true);
+    expect(narrowsTunnels({ tenantId: 'tnt_a', nodeId: 'node_1' })).toBe(true);
   });
 });
 
@@ -393,6 +451,35 @@ describe('tunnels end to end over HTTP/2', () => {
     const closed = (await frames.next()).value as TunnelFrame;
     expect(closed.body).toMatchObject({ case: 'closed', value: { reason: 'delegation-revoked' } });
     expect((await frames.next()).done).toBe(true);
+  });
+
+  it('takes tenant + anyAgent over the control API, refuses a tenant alone, and re-authorizes on demand', async () => {
+    const node = await f.addNode();
+    await daemon(node);
+    const ticket = issuer.issue({
+      nodeId: node,
+      sid: 'tun_agent',
+      op: 'exec',
+      subject: 'user_1',
+      tenantId: 'tnt_a',
+      agentId: 'agent_7',
+      delegationId: 'dlg_1',
+    });
+    const tunnel = await control.openTunnel({ ticket: ticket.token, nodeId: node });
+    // This gateway has no `reauthorize`: nothing to check, nothing closed.
+    expect(await control.reauthorizeTunnels({ tenantId: 'tnt_a', anyAgent: true })).toBe(0);
+    await expect(control.closeTunnels({ tenantId: 'tnt_a' }, 'too broad')).rejects.toMatchObject({
+      details: { body: { error: { code: 'INVALID_INPUT' } } },
+    });
+    await expect(control.reauthorizeTunnels({ tenantId: 'tnt_a' })).rejects.toBeDefined();
+    expect(f.gateway.tunnels()).toHaveLength(1);
+    expect(await control.closeTunnels({ tenantId: 'tnt_b', anyAgent: true }, 'agents-suspended')).toBe(0);
+    const frames = tunnel.frames[Symbol.asyncIterator]();
+    expect(await control.closeTunnels({ tenantId: 'tnt_a', anyAgent: true }, 'agents-suspended')).toBe(1);
+    expect(((await frames.next()).value as TunnelFrame).body).toMatchObject({
+      case: 'closed',
+      value: { reason: 'agents-suspended' },
+    });
   });
 
   it('refuses a Tunnel stream nobody asked for', async () => {

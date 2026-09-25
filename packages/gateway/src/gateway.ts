@@ -257,6 +257,11 @@ export interface Gateway {
   acceptTunnel(peer: PeerIdentity, node: TunnelEndpoint): TunnelStreamHandle;
   /** Closes matching tunnels (e.g. `delegation:revoke` by delegationId); returns how many. */
   closeTunnels(filter: TunnelFilter, reason: string): number;
+  /**
+   * Re-authorizes matching tunnels now, closing those IAM refuses (hand-offs revoked with their
+   * parent delegation); returns how many it checked (0 without `tunnels.reauthorize`).
+   */
+  reauthorizeTunnels(filter: TunnelFilter): Promise<number>;
   tunnels(): (TunnelInfo & { state: string })[];
   readonly jobs: Readonly<{
     dispatch: GatewayJob;
@@ -1066,6 +1071,8 @@ export function createGateway(options: GatewayOptions): Gateway {
     },
 
     closeTunnels: (filter, reason) => tunnelRegistry.closeWhere(filter, reason),
+
+    reauthorizeTunnels: (filter) => tunnelRegistry.reauthorizeWhere(filter),
 
     tunnels: () => tunnelRegistry.list(),
 

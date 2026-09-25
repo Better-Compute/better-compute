@@ -18,7 +18,7 @@ import { ComputeError, isComputeError, type Notifier, type SqlTx } from '@better
 import { MAX_FRAME_BYTES, TunnelFrameSchema, type TunnelFrame } from '@better-compute/protocol';
 import type { Gateway, GatewayStatus } from './gateway.js';
 import { frameMessage, MessageDecoder } from './grpc.js';
-import type { TunnelFilter, TunnelHandle, TunnelInfo } from './tunnels.js';
+import { narrowsTunnels, type TunnelFilter, type TunnelHandle, type TunnelInfo } from './tunnels.js';
 
 // The gateway's internal control API on `gateways.internal_url` (PLAN.md §8.1), HTTP/2 only, called
 // by api and worker processes over the internal CA's mTLS. Every call but tunnels is an
@@ -44,7 +44,27 @@ async function body(request: Request): Promise<Record<string, unknown> | undefin
 const stringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === 'string');
 
-const routes = ['/v1/health', '/v1/poke', '/v1/revoke', '/v1/drain', '/v1/tunnels/close'];
+const routes = ['/v1/health', '/v1/poke', '/v1/revoke', '/v1/drain', '/v1/tunnels/close', '/v1/tunnels/reauthorize'];
+
+const filterUsage =
+  '{ tunnelId? nodeId? subject? agentId? delegationId? tenantId? anyAgent?: true } (an id key, or tenantId with anyAgent)';
+
+/** The tunnel filter in a control-API body, or undefined when it does not narrow (`narrowsTunnels`). */
+function tunnelFilter(input: Record<string, unknown> | undefined): TunnelFilter | undefined {
+  if (!input) return undefined;
+  const filter: TunnelFilter = {};
+  for (const key of ['tunnelId', 'nodeId', 'subject', 'agentId', 'delegationId', 'tenantId'] as const) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'string') return undefined;
+    filter[key] = value;
+  }
+  if (input.anyAgent !== undefined) {
+    if (input.anyAgent !== true) return undefined;
+    filter.anyAgent = true;
+  }
+  return narrowsTunnels(filter) ? filter : undefined;
+}
 
 /**
  * The control API as a fetch handler (everything but the tunnel stream):
@@ -52,8 +72,11 @@ const routes = ['/v1/health', '/v1/poke', '/v1/revoke', '/v1/drain', '/v1/tunnel
  * - `POST /v1/poke {nodeIds?}` → 202 (dispatch + spec check now);
  * - `POST /v1/revoke {nodeId, reason, serials?: hex[]}` → `{ revoked }`;
  * - `POST /v1/drain {reason?}` → 202;
- * - `POST /v1/tunnels/close {tunnelId? nodeId? subject? agentId? delegationId?, reason}` → `{ closed }`
- *   (e.g. `delegation:revoke` by `delegationId`).
+ * - `POST /v1/tunnels/close {tunnelId? nodeId? subject? agentId? delegationId? tenantId? anyAgent?, reason}`
+ *   → `{ closed }` (e.g. `delegation:revoke` by `delegationId`, `agent:suspend-all` by `tenantId` +
+ *   `anyAgent`); a tenant alone is refused;
+ * - `POST /v1/tunnels/reauthorize {same filter}` → `{ checked }`: re-authorizes the matching tunnels
+ *   now (hand-offs revoked with their parent delegation, which the event does not name).
  */
 export function internalHandler(gateway: Gateway): (request: Request) => Promise<Response> {
   return async (request) => {
@@ -92,14 +115,15 @@ export function internalHandler(gateway: Gateway): (request: Request) => Promise
       }
       case 'POST /v1/tunnels/close': {
         const input = await body(request);
-        const filter: TunnelFilter = {};
-        for (const key of ['tunnelId', 'nodeId', 'subject', 'agentId', 'delegationId'] as const)
-          if (typeof input?.[key] === 'string') filter[key] = input[key] as string;
-        if (!input || typeof input.reason !== 'string' || !Object.keys(filter).length)
-          return invalid(
-            'tunnels/close takes { tunnelId? nodeId? subject? agentId? delegationId? (at least one), reason }',
-          );
+        const filter = tunnelFilter(input);
+        if (!input || !filter || typeof input.reason !== 'string')
+          return invalid(`tunnels/close takes ${filterUsage} and a reason`);
         return json(200, { closed: gateway.closeTunnels(filter, input.reason) });
+      }
+      case 'POST /v1/tunnels/reauthorize': {
+        const filter = tunnelFilter(await body(request));
+        if (!filter) return invalid(`tunnels/reauthorize takes ${filterUsage}`);
+        return json(200, { checked: await gateway.reauthorizeTunnels(filter) });
       }
       default:
         return routes.includes(path) || path === '/v1/tunnels'
@@ -322,6 +346,8 @@ export interface GatewayControlClient {
   /** Opens a tunnel through this gateway (§7.6); rejects with the refusal the gateway sent. */
   openTunnel(request: { ticket: string; nodeId: string }): Promise<ClientTunnel>;
   closeTunnels(filter: TunnelFilter, reason: string): Promise<number>;
+  /** Re-authorizes matching tunnels now; returns how many the gateway checked. */
+  reauthorizeTunnels(filter: TunnelFilter): Promise<number>;
   close(): void;
 }
 
@@ -392,6 +418,7 @@ export function gatewayControlClient(options: ControlClientOptions): GatewayCont
     revoke: async (nodeId, notice) => Boolean((await ok('POST', '/v1/revoke', { nodeId, ...notice })).revoked),
     drain: async (reason) => void (await ok('POST', '/v1/drain', reason ? { reason } : {})),
     closeTunnels: async (filter, reason) => Number((await ok('POST', '/v1/tunnels/close', { ...filter, reason })).closed),
+    reauthorizeTunnels: async (filter) => Number((await ok('POST', '/v1/tunnels/reauthorize', filter)).checked),
     close: () => session?.close(),
 
     openTunnel(request) {

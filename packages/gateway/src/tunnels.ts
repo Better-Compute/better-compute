@@ -41,13 +41,47 @@ export interface TunnelInfo {
   openedAt: number;
 }
 
-/** Which tunnels `closeWhere` closes: every given field must match (at least one is given by callers). */
+/**
+ * Which tunnels `closeWhere`/`reauthorizeWhere` act on: every given field must match. Remote callers
+ * must narrow (see `narrowsTunnels`).
+ */
 export interface TunnelFilter {
   tunnelId?: string;
   nodeId?: string;
   subject?: string;
   agentId?: string;
   delegationId?: string;
+  /** The ticket's tenant. Alone it does not narrow: pair it with `anyAgent` or another key. */
+  tenantId?: string;
+  /** Only tunnels an agent opened (the ticket has `agt`), e.g. `agent:suspend-all` with `tenantId`. */
+  anyAgent?: true;
+}
+
+/**
+ * Whether a filter names something narrower than "every tunnel" or "every tunnel of a tenant": one
+ * of the id keys, or `tenantId` with `anyAgent`. The control API refuses filters that do not.
+ */
+export function narrowsTunnels(filter: TunnelFilter): boolean {
+  return (
+    filter.tunnelId !== undefined ||
+    filter.nodeId !== undefined ||
+    filter.subject !== undefined ||
+    filter.agentId !== undefined ||
+    filter.delegationId !== undefined ||
+    (filter.tenantId !== undefined && filter.anyAgent === true)
+  );
+}
+
+function matches(info: TunnelInfo, filter: TunnelFilter): boolean {
+  return (
+    (filter.tunnelId === undefined || info.id === filter.tunnelId) &&
+    (filter.nodeId === undefined || info.nodeId === filter.nodeId) &&
+    (filter.subject === undefined || info.subject === filter.subject) &&
+    (filter.agentId === undefined || info.agentId === filter.agentId) &&
+    (filter.delegationId === undefined || info.delegationId === filter.delegationId) &&
+    (filter.tenantId === undefined || info.tenantId === filter.tenantId) &&
+    (filter.anyAgent !== true || info.agentId !== undefined)
+  );
 }
 
 export interface TunnelOptions {
@@ -138,6 +172,32 @@ export function createTunnelRegistry(deps: TunnelRegistryDeps) {
         }
       }
     log.info('gateway: tunnel closed', { tunnelId: tunnel.info.id, nodeId: tunnel.info.nodeId, reason });
+  }
+
+  /**
+   * One re-authorization of an open tunnel: false closes it; a throw counts as IAM unreachable and
+   * closes it after `iamOutageMs` without a success. Returns whether it closed the tunnel.
+   */
+  async function authorize(tunnel: Tunnel, now: number): Promise<boolean> {
+    tunnel.authorizing = true;
+    tunnel.nextAuthMs = now + reauthorizeMs;
+    try {
+      if (await options!.reauthorize!(tunnel.info)) {
+        tunnel.lastAuthOkMs = Math.max(tunnel.lastAuthOkMs, now);
+        return false;
+      }
+      close(tunnel, 'unauthorized', new GrpcError(GrpcCode.PERMISSION_DENIED, 'access revoked'));
+      return true;
+    } catch (error) {
+      log.warn('gateway: tunnel re-authorization failed', { tunnelId: tunnel.info.id, cause: String(error) });
+      if (now - tunnel.lastAuthOkMs > iamOutageMs) {
+        close(tunnel, 'iam-unreachable');
+        return true;
+      }
+      return false;
+    } finally {
+      tunnel.authorizing = false;
+    }
   }
 
   /** Forwards `frame` to `to`; pauses `from` while `to` is full. */
@@ -278,17 +338,25 @@ export function createTunnelRegistry(deps: TunnelRegistryDeps) {
     closeWhere(filter: TunnelFilter, reason: string): number {
       let closed = 0;
       for (const tunnel of [...tunnels.values()])
-        if (
-          (filter.tunnelId === undefined || tunnel.info.id === filter.tunnelId) &&
-          (filter.nodeId === undefined || tunnel.info.nodeId === filter.nodeId) &&
-          (filter.subject === undefined || tunnel.info.subject === filter.subject) &&
-          (filter.agentId === undefined || tunnel.info.agentId === filter.agentId) &&
-          (filter.delegationId === undefined || tunnel.info.delegationId === filter.delegationId)
-        ) {
+        if (matches(tunnel.info, filter)) {
           close(tunnel, reason, new GrpcError(GrpcCode.PERMISSION_DENIED, reason));
           closed++;
         }
       return closed;
+    },
+
+    /**
+     * Runs the re-authorization of matching open tunnels now instead of at their next 60 s check,
+     * closing those IAM refuses (e.g. hand-offs revoked with their parent delegation, which the
+     * revocation event does not name). Returns how many were checked; 0 without `reauthorize`.
+     */
+    async reauthorizeWhere(filter: TunnelFilter): Promise<number> {
+      if (!options?.reauthorize) return 0;
+      const now = clock.now();
+      const due = [...tunnels.values()].filter((tunnel) => tunnel.state === 'open' && matches(tunnel.info, filter));
+      // A check already in flight may have started before the revocation: run another one anyway.
+      await Promise.all(due.map((tunnel) => authorize(tunnel, now)));
+      return due.length;
     },
 
     /** Lifetime and re-authorization checks; run from the gateway's liveness loop. */
@@ -303,23 +371,7 @@ export function createTunnelRegistry(deps: TunnelRegistryDeps) {
           continue;
         }
         if (!options?.reauthorize || tunnel.authorizing || now < tunnel.nextAuthMs) continue;
-        tunnel.authorizing = true;
-        tunnel.nextAuthMs = now + reauthorizeMs;
-        try {
-          if (await options.reauthorize(tunnel.info)) tunnel.lastAuthOkMs = now;
-          else {
-            close(tunnel, 'unauthorized', new GrpcError(GrpcCode.PERMISSION_DENIED, 'access revoked'));
-            handled++;
-          }
-        } catch (error) {
-          log.warn('gateway: tunnel re-authorization failed', { tunnelId: tunnel.info.id, cause: String(error) });
-          if (now - tunnel.lastAuthOkMs > iamOutageMs) {
-            close(tunnel, 'iam-unreachable');
-            handled++;
-          }
-        } finally {
-          tunnel.authorizing = false;
-        }
+        if (await authorize(tunnel, now)) handled++;
       }
       return handled;
     },
