@@ -516,6 +516,32 @@ describe('status, inventory and specs', () => {
     expect(await f.outbox('node.status')).toHaveLength(2);
   });
 
+  it('records heartbeat hash reports of many nodes in one group commit, a bad report failing only itself', async () => {
+    const nodes = [await f.addNode(), await f.addNode(), await f.addNode()];
+    const sessions = [];
+    for (const node of nodes) sessions.push(await f.connect(node));
+    const hash = (byte: number) => new Uint8Array(32).fill(byte);
+    // Same I/O turn: the three reports share one inventory batch. The last one is malformed.
+    await Promise.all([
+      sessions[0]!.handle.receive(agentFrame({ case: 'heartbeat', value: { inventoryHashes: { gpus: hash(1) } } })),
+      sessions[1]!.handle.receive(agentFrame({ case: 'heartbeat', value: { inventoryHashes: { gpus: hash(2) } } })),
+      sessions[2]!.handle.receive(agentFrame({ case: 'heartbeat', value: { inventoryHashes: { gpus: new Uint8Array(3) } } })),
+    ]);
+    await expect
+      .poll(async () =>
+        (
+          await f.db.query<{ node_id: string }>(
+            `SELECT node_id FROM node_inventory WHERE node_id = ANY($1::text[]) AND reported_hashes ? 'gpus'`,
+            [nodes.slice(0, 2)],
+          )
+        ).rows.length,
+      )
+      .toBe(2);
+    // The malformed report fails its own session only (as any bad frame does); the others stay up.
+    expect(sessions[0]!.stream.closed).toBeUndefined();
+    expect(sessions[1]!.stream.closed).toBeUndefined();
+  });
+
   it('ingests verified inventory sections and ignores corrupt ones', async () => {
     const node = await f.addNode();
     const { stream, handle } = await f.connect(node);

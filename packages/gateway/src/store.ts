@@ -13,7 +13,12 @@ import {
   type SqlTx,
   type WorkQueue,
 } from '@better-compute/core';
-import { ingestInventorySection, ingestInventorySections, recordInventoryHashes } from '@better-compute/inventory';
+import {
+  ingestInventorySection,
+  ingestInventorySections,
+  recordInventoryHashes,
+  recordInventoryHashesMany,
+} from '@better-compute/inventory';
 import { desiredStateBodyFromJson, desiredStateFromStored } from '@better-compute/pki';
 import {
   AttestedReportBodySchema,
@@ -194,6 +199,15 @@ export interface InventoryIngest {
     work: WorkQueue,
     entries: readonly { nodeId: string; section: { section: string; content: Uint8Array; sha256: Uint8Array } }[],
   ): Promise<(Error | undefined)[]>;
+  /**
+   * Many nodes' hash reports set-wise; each slot holds the sections to pull, or its error. Optional:
+   * without it the gateway calls `recordHashes` once per report.
+   */
+  recordHashesMany?(
+    tx: SqlTx,
+    work: WorkQueue,
+    entries: readonly { nodeId: string; hashes: Readonly<Record<string, Uint8Array>>; bootId?: string }[],
+  ): Promise<(readonly string[] | Error)[]>;
 }
 
 /** Where a node's report came from, for the handlers below. */
@@ -248,6 +262,7 @@ export const inventoryStore: InventoryIngest = {
     recordInventoryHashes(tx, work, nodeId, hashes, options),
   ingestSection: (tx, work, nodeId, section) => ingestInventorySection(tx, work, nodeId, section),
   ingestSections: (tx, work, entries) => ingestInventorySections(tx, work, entries),
+  recordHashesMany: (tx, work, entries) => recordInventoryHashesMany(tx, work, entries),
 };
 
 /** Raised inside a fenced transaction when this process no longer holds its gateway lease. */
@@ -1279,8 +1294,31 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             for (const { index } of sections) results[index] = error instanceof Error ? error : new Error(String(error));
           }
         }
+        // Heartbeat hash reports: one statement for the batch (the pull list itself is not needed
+        // here; a changed set is requested at the next Hello).
+        const reports = entries.flatMap((entry, index) => (entry.kind === 'hashes' ? [{ entry, index }] : []));
+        const hashesSetWise = inventory.recordHashesMany && reports.length > 1;
+        if (hashesSetWise) {
+          await tx.query('SAVEPOINT gateway_inventory');
+          try {
+            const outcomes = await inventory.recordHashesMany!(
+              tx,
+              work,
+              reports.map(({ entry }) => ({ nodeId: entry.nodeId, hashes: entry.hashes, bootId: entry.bootId })),
+            );
+            reports.forEach(({ index }, position) => {
+              const outcome = outcomes[position];
+              results[index] = outcome instanceof Error ? outcome : undefined;
+            });
+            await tx.query('RELEASE SAVEPOINT gateway_inventory');
+          } catch (error) {
+            await tx.query('ROLLBACK TO SAVEPOINT gateway_inventory');
+            for (const { index } of reports) results[index] = error instanceof Error ? error : new Error(String(error));
+          }
+        }
         for (const [index, entry] of entries.entries()) {
           if (setWise && entry.kind === 'section') continue;
+          if (hashesSetWise && entry.kind === 'hashes') continue;
           await tx.query('SAVEPOINT gateway_inventory');
           try {
             if (entry.kind === 'section')
