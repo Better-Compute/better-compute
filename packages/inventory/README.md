@@ -19,17 +19,33 @@ the always-on built-in module that the server registers before any injected modu
 - v0.5 fractional atoms: `gpu.slot` atoms `<uuid>/s<k>` for `timeslice`/`mps` pools (from
   `policy.sharing.replicas`); MIG `gpu.mig` atoms; `partitionPending` freezes a GPU during a MIG
   mode change; `gpuAtomFamily` feeds the capacity atom rule.
+- The **hygiene sweep** (`inventory.hygiene`, a periodic singleton in `inventoryModule`, every 5
+  minutes): `DriverMismatch` (a converged node whose GPU driver branch differs from its
+  `nvidia-driver` unit), `CertExpiring` (the newest identity certificate has under a tenth of its
+  life left, at least an hour: renewal is failing) and `DaemonOutdated` (an older protocol, or
+  `minDaemonVersion`). Each is NoSchedule plus a `node.condition.changed` event, cleared with its
+  cause.
+- **Host pressure** from `StatusReport.pressure` (Linux PSI and CPU steal): `CpuPressure`,
+  `MemoryPressure`, `DiskPressure` with hysteresis, NoSchedule on `vps-host` pools and alert-only
+  elsewhere (`recordHostPressure`; the gateway's `xidStatusHandler` calls it).
+- **Image caches**: a node's `images` section keeps `node_image_cache` in step for the
+  `image-cached` scorer (`imageCacheNodes`).
+- Atom health edges wake the node's started reservations (`wakeStartedReservations`, work kind
+  `capacity.reservations`), so capacity's Degraded conditions follow at once.
 
 ## From Hello to devices (PLAN.md §10.1)
 
 1. **Report.** In the Hello transaction, and on every heartbeat that carries hashes, the gateway
    calls `recordInventoryHashes(tx, work, nodeId, hashes)`. It stores the hashes in
    `node_inventory` and returns the sections to pull (`Welcome.request_sections`): those whose
-   stored bytes have a different hash.
+   stored bytes have a different hash. `recordInventoryHashesMany` does a whole batch of reports
+   in one statement (the gateway's group commit), one result slot per report.
 2. **Pull.** For each `InventorySection` frame the gateway calls
    `ingestInventorySection(tx, work, nodeId, section)`. The section is checked against its own
    SHA-256 over the received bytes (`INVALID_INPUT` otherwise) and never re-encoded. It is stored in
    `node_inventory_sections`, and work kind `inventory` is queued for the node.
+   `ingestInventorySections(tx, work, entries)` stores a batch of many nodes' sections in one
+   statement, with one result slot per entry.
 3. **Apply.** `inventoryReconciler` runs `applyInventory(sql, nodeId, { events })` in one
    transaction with the node row locked. Once every reported section's bytes are present and the
    digest differs from the last applied one, it:

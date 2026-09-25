@@ -38,11 +38,23 @@ const compute = betterCompute({ modules: [provisionModule({ modules: [bareMetal]
 | releasing     | `metal-release`           | ensure ramdisk, `disk.wipe{undeploy's mode}`, power off; cleanup        |
 | retiring      | `metal-retire`            | crypto-erase, power off, `metal.revokeIdentity`; cleanup                |
 | rescue        | `metal-rescue`            | ensure ramdisk                                                          |
+| rescue → deployed | `metal-unrescue` (`metal.unrescue`) | boot device disk, power cycle, wait for the OS as `node`; cleanup |
 
 - **Steps.** Control-plane steps build the command only the control plane can build (BMC address
   and credential reference, catalog image, boot entry) and relay it with `awaitCommand`: BMC and
   boot work goes to the site agent (the boot-lease holder first), and disk and diagnostics work to
   the machine's ramdisk. Profiles may still write them as `{ use: 'power.setPower', on: 'site' }`.
+- **Site agent failover.** BMC commands are re-routable across the site's agents (`awaitCommand`
+  `reroutable`). What the old agent ran stands, so a power cycle is never sent twice, and commands
+  it never received move to the new agent. Boot entries go to the new boot-lease holder, which
+  serves the machine still waiting in PXE once the old lease expires (the §16 v0.2 exit: within
+  30 s).
+- **Images.** `deploy.deploy` writes only catalog images whose signature still verifies (unsigned,
+  revoked-signer or tampered images are refused); `metal({ images })` passes the verifier.
+- **Unrescue.** The node stays in `rescue` while `metal-unrescue` runs, and becomes `deployed` only
+  once the installed OS rejoined; a failure fails the node with maintenance on.
+- **Doctor findings** (`selfCheck`): failed machines waiting in maintenance, with their codes; and
+  machines in a workflow-driven state without an active workflow.
 - **Verified wipe.** `releasing` completes only when the wipe step's result is attested: the node
   signed it (`CommandUpdate.node_sig`, stored as `commands.result_sig*`), and every disk's read-back
   passed. Otherwise the node fails with `UNVERIFIED_WIPE`, and `recover` releases it again. The

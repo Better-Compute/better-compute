@@ -23,7 +23,14 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
     `sysctl`, each validated by a manifest. `when:` is checked against the node's labels, and
     `mig-layout` can take `from: 'pool'`. They are served as the NodeSpec `host` section from the
     last succeeded workflow's `hostConfig`, and the engine invalidates desired state when such a
-    workflow succeeds.
+    workflow succeeds. A pool's layout reaches a node only once capacity granted the change
+    (`provision_gated_mig_layout`, reading `capacity_mig_layouts` when capacity is installed), so
+    booked MIG instances are never repartitioned under a reservation.
+  - **`driver.invoke`**, the command kind of profile steps that name a driver operation
+    (destructive, so always signed; `driverInvokeCommandKind`).
+  - **Workflows** can be aborted, retried from a step, paused and resumed (`workflows.*`).
+  - **Doctor findings** (`selfCheck`): steps past their deadline that no worker advances
+    (`workflows-stuck`), and workflows that failed in the last day.
 
 ## Image catalog (PLAN.md §11.5)
 
@@ -40,10 +47,17 @@ profile into persisted steps for one node or instance (PLAN.md §11.2). It depen
   authz row.
 - **`images.get` / `images.list`** return the tenant's own images and public ones.
   `resolveImageRef(tx, tenantId, ref)` prefers the tenant's own image.
+- **At use.** `verifyImageForUse` re-verifies the stored signature against the signer allowlist it
+  was verified with. metal's `deploy.deploy` calls it, so an unsigned image, one whose signer was
+  revoked, or a tampered catalog row is never written to a disk. `allowUnsigned` is for development
+  only.
 - **Site caches.**
+  - Pre-warm: a pool names refs in `policy.prewarmImages`, and the site agents of its site get the
+    verified ones as desired state (`site.cacheImages`, `siteCacheImagesFor`). Registering or
+    promoting an image invalidates the affected site agents.
   - `recordImageLocation` and `touchImageLocation` (which can also pin an image while a deploy
     streams it) track what each site holds.
-  - `imagesCachedAt(siteId)` feeds the `image-cached` scorer.
+  - `imagesCachedAt(siteId)` lists the ready images at a site.
   - `evictionCandidates(siteId, bytes, inUse)` picks least-recently-used ready images, never
     pinned or in-use ones.
 
