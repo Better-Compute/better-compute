@@ -310,7 +310,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
 
   // The agent's Join loop (deferrals included), with a sealed-token join.
   const joinOne = async (token: string, hardware: ReturnType<typeof fakeHardware>) => {
-    const { body } = await runAgentJoin({
+    const { body, privateKey } = await runAgentJoin({
       send,
       signer: keys.agent.signer,
       nodeCaRoots: keys.agent.nodeCaRoots,
@@ -329,7 +329,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         'INTERNAL_ERROR',
         `Join issued a certificate without a site: ${spiffe}`,
       );
-    return { nodeId: body.nodeId, siteId, serial: normalizeSerial(leaf.serial) };
+    return { nodeId: body.nodeId, siteId, serial: normalizeSerial(leaf.serial), privateKey };
   };
 
   return {
@@ -378,13 +378,15 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       const ids: string[] = [];
       for (let index = 0; index < count; index++) {
         const hardware = fakeHardware({ seed: `${seed}-${index}`, variant });
-        const { nodeId, siteId, serial } = await joinOne(minted.token, hardware);
+        const { nodeId, siteId, serial, privateKey } = await joinOne(minted.token, hardware);
         joined.set(nodeId, { siteId, serial });
         const daemon = new FakeDaemon({
           backoff: { minMs: 100, maxMs: 5_000 },
           ...options.daemon,
           nodeId,
           hardware,
+          // The key its certificate certifies: attested results (wipes, diagnostics) are node-signed.
+          nodeKey: privateKey,
           scheduler,
           dial: () => h2c.session(nodeId),
         });
