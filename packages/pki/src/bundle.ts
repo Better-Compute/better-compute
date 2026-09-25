@@ -1,6 +1,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   hkdfSync,
   type JsonWebKey,
   type KeyObject,
@@ -13,6 +14,7 @@ import {
   createServingCa,
   type LocalCertificateAuthority,
 } from './ca.js';
+import { createCommandSigningAuthority, type CommandSigningAuthority } from './intent.js';
 import { publicJwk } from './jwe.js';
 import {
   base64url,
@@ -58,6 +60,12 @@ export interface PkiBundle {
   execTicketKey?: KeyObject;
   /** The compute SSH CA for break-glass certificates (v0.3). Absent in older bundles. */
   sshCa?: SshCertificateAuthority;
+  /**
+   * The command-signing root (v0.2 signed intent, `TrustBundle.command_signing_roots`): certifies the
+   * workers' 24 h signing keys. Production keeps this root in KMS / Vault; the bundle form serves
+   * development and small deployments, as for the CAs. Absent in older bundles.
+   */
+  commandSigning?: CommandSigningAuthority;
   /** Shared by the three CAs. */
   revocations: RevocationSet;
 }
@@ -76,6 +84,8 @@ export interface PkiPins {
   execTicketKeyId?: string;
   /** The SSH CA's OpenSSH public key (`TrustedUserCAKeys`, NodeSpec `access.sshCaPublicKeys`). */
   sshCaPublicKey?: string;
+  /** Hex SHA-256 of the command-signing root certificate (DER), as trust bundles list it. */
+  commandSigningRootSha256?: string;
 }
 
 export interface CreatePkiBundleOptions {
@@ -129,9 +139,15 @@ export function createPkiBundle(options: CreatePkiBundleOptions): PkiBundle {
     auditSigning: createSigningKey({ clock, commonName: `${organization} audit signing` }),
     execTicketKey: generateP256KeyPair().privateKey,
     sshCa: createSshCertificateAuthority({ clock, comment: `${organization} ssh ca` }),
+    commandSigning: createCommandSigningAuthority({
+      clock,
+      commonName: `${organization} command signing root`,
+    }),
     revocations,
   };
 }
+
+const sha256Hex = (der: Uint8Array) => createHash('sha256').update(der).digest('hex');
 
 /** The exec ticket issuer of a bundle (throws `INVALID_CONFIG` for a bundle made before v0.3). */
 export function execTicketIssuer(
@@ -161,6 +177,9 @@ export function pkiPins(bundle: PkiBundle): PkiPins {
     ...(bundle.auditSigning ? { auditSigningKeyPin: spkiPin(bundle.auditSigning.publicKey) } : {}),
     ...(bundle.execTicketKey ? { execTicketKeyId: execTicketKeyIdOf(bundle.execTicketKey) } : {}),
     ...(bundle.sshCa ? { sshCaPublicKey: bundle.sshCa.publicKey } : {}),
+    ...(bundle.commandSigning
+      ? { commandSigningRootSha256: sha256Hex(bundle.commandSigning.certificate) }
+      : {}),
   };
 }
 
@@ -188,6 +207,9 @@ export function readPkiPins(text: string): PkiPins & { expires: Record<string, n
   const node = first(stored.nodeCa, 'node CA');
   const internal = first(stored.internalCa, 'internal CA');
   const signing = first(stored.joinSigningCertificate, 'join signing');
+  const commandSigning = stored.commandSigningCertificate
+    ? first(stored.commandSigningCertificate, 'command signing root')
+    : undefined;
   return {
     trustDomain: stored.trustDomain,
     servingCaSpkiPin: spkiPin(serving.publicKey),
@@ -205,11 +227,15 @@ export function readPkiPins(text: string): PkiPins & { expires: Record<string, n
       ? { execTicketKeyId: execTicketKeyIdOf(toPublicKey(stored.execTicketPublicKey)) }
       : {}),
     ...(stored.sshCaPublicKey ? { sshCaPublicKey: stored.sshCaPublicKey } : {}),
+    ...(commandSigning
+      ? { commandSigningRootSha256: sha256Hex(fromPem(stored.commandSigningCertificate!)[0]!) }
+      : {}),
     expires: {
       root: root.notAfter,
       nodeCa: node.notAfter,
       servingCa: serving.notAfter,
       internalCa: internal.notAfter,
+      ...(commandSigning ? { commandSigningRoot: commandSigning.notAfter } : {}),
     },
   };
 }
@@ -232,6 +258,8 @@ interface StoredBundle {
   execTicketPublicKey?: string;
   /** OpenSSH public key line of the SSH CA. */
   sshCaPublicKey?: string;
+  /** PEM of the command-signing root certificate. */
+  commandSigningCertificate?: string;
   /** PEM private keys by name, or `sealed` instead. */
   keys?: Record<KeyName, string>;
   sealed?: { alg: 'HKDF-SHA256+A256GCM'; salt: string; iv: string; data: string };
@@ -245,7 +273,8 @@ type KeyName =
   | 'joinEncryption'
   | 'auditSigning'
   | 'execTickets'
-  | 'sshCa';
+  | 'sshCa'
+  | 'commandSigning';
 
 const minSecretLength = 32;
 
@@ -282,6 +311,8 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
   if (bundle.auditSigning) keys.auditSigning = bundle.auditSigning.export().privateKeyPem;
   if (bundle.execTicketKey) keys.execTickets = privateKeyPem(bundle.execTicketKey);
   if (bundle.sshCa) keys.sshCa = bundle.sshCa.export().privateKeyPem;
+  const commandSigning = bundle.commandSigning?.export();
+  if (commandSigning) keys.commandSigning = commandSigning.privateKeyPem;
   const stored: StoredBundle = {
     format: 'better-compute-pki',
     version: 1,
@@ -305,6 +336,7 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
         }
       : {}),
     ...(bundle.sshCa ? { sshCaPublicKey: bundle.sshCa.publicKey } : {}),
+    ...(commandSigning ? { commandSigningCertificate: commandSigning.certificatePem } : {}),
   };
   if (options.secret !== undefined) {
     const salt = randomBytesArray(16);
@@ -455,6 +487,15 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
     if (bundle.sshCa.publicKey.split(' ')[1] !== stored.sshCaPublicKey.split(' ')[1])
       throw new ComputeError('INVALID_CONFIG', 'The SSH CA key does not match its public key');
   }
+  if (stored.commandSigningCertificate)
+    // `existing` checks the key against the certificate (INVALID_CONFIG on a mismatch).
+    bundle.commandSigning = createCommandSigningAuthority({
+      clock,
+      existing: {
+        privateKey: need('commandSigning'),
+        certificate: stored.commandSigningCertificate,
+      },
+    });
   if (rootKey)
     bundle.root = createRootCa({
       clock,
