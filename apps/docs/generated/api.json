@@ -5281,7 +5281,7 @@
             "rollback": {
               "type": "boolean",
               "default": false,
-              "description": "Also roll upgraded nodes back to the version they ran before"
+              "description": "Also return nodes whose upgrade is not confirmed yet to the version they ran before. Nodes that confirmed the release keep it (bcd refuses older binaries once confirmed): undo a bad release with a newer one"
             }
           },
           "required": ["tenantId", "rolloutId"],

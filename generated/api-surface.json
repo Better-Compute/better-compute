@@ -4988,7 +4988,7 @@
           "rollback": {
             "type": "boolean",
             "default": false,
-            "description": "Also roll upgraded nodes back to the version they ran before"
+            "description": "Also return nodes whose upgrade is not confirmed yet to the version they ran before. Nodes that confirmed the release keep it (bcd refuses older binaries once confirmed): undo a bad release with a newer one"
           }
         },
         "required": [
@@ -6421,7 +6421,7 @@
             "type": "string",
             "pattern": "^inst_[0-9a-z]{26,52}$",
             "maxLength": 57,
-            "description": "Exec, ssh or tcp into this instance; give exactly one of instanceId or nodeId"
+            "description": "Exec, ssh, tcp or the serial console of this instance; give exactly one of instanceId or nodeId"
           },
           "nodeId": {
             "type": "string",
@@ -6436,7 +6436,7 @@
               "ssh",
               "tcp"
             ],
-            "description": "console for a node; exec, ssh or tcp for an instance"
+            "description": "console for a node (a host shell); exec, ssh, tcp or console (its serial console) for an instance"
           },
           "port": {
             "type": "integer",
