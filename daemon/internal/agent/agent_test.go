@@ -142,6 +142,19 @@ type fakeHost struct {
 	sshReloads int
 	kmsg       io.ReadCloser
 	resets     []string
+	// firewalls are the rulesets loaded; firewallErr fails the next loads.
+	firewalls   []string
+	firewallErr error
+}
+
+func (h *fakeHost) ApplyFirewall(_ context.Context, ruleset string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.firewallErr != nil {
+		return h.firewallErr
+	}
+	h.firewalls = append(h.firewalls, ruleset)
+	return nil
 }
 
 func (h *fakeHost) BootID() (string, error) { return h.boot, nil }

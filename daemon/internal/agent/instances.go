@@ -29,6 +29,37 @@ type instancesConverger struct {
 	// specs and specErrors are the last pass's instances and those that failed.
 	specs      []*agentv1.InstanceSpec
 	specErrors map[string]string
+	// firewall is the network-policy ruleset last loaded (netpolicy.go); "" before the first pass.
+	firewall string
+}
+
+// enforceNetworkPolicies loads the instances' network-policy rules when they changed. It returns
+// the instances that must not run: a policy that cannot be expressed, or rules that failed to load
+// (fail closed). A host without nft and without enforced policies is fine.
+func (c *instancesConverger) enforceNetworkPolicies(ctx context.Context, specs []*agentv1.InstanceSpec) map[string]string {
+	ruleset, failed := firewallRuleset(specs)
+	if ruleset == c.firewall {
+		return failed
+	}
+	err := c.a.host.ApplyFirewall(ctx, ruleset)
+	if err == nil {
+		c.firewall = ruleset
+		return failed
+	}
+	enforced := false
+	for _, s := range specs {
+		if policyEnforced(s.GetNetworkPolicy()) && s.GetDesiredState() != agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
+			enforced = true
+			if _, already := failed[s.GetInstanceId()]; !already {
+				failed[s.GetInstanceId()] = "network policy: " + err.Error()
+			}
+		}
+	}
+	if !enforced {
+		c.a.log.Debug("no instance network policy to enforce; nft unavailable", "error", err.Error())
+		c.firewall = ruleset
+	}
+	return failed
 }
 
 func (c *instancesConverger) Section() converge.Section { return converge.SectionInstances }
@@ -104,6 +135,9 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 	}
 	specErrors := map[string]string{}
+	// The rules go in before any domain starts: taps are matched by name, so they apply from the
+	// first frame.
+	unenforceable := c.enforceNetworkPolicies(ctx, section.GetInstances())
 	var waiting []string
 	for _, spec := range section.GetInstances() {
 		id := spec.GetInstanceId()
@@ -123,6 +157,16 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		r := c.runtime(spec.GetRuntime())
 		if r == nil {
 			specErrors[id] = "runtime " + spec.GetRuntime() + " is not installed on this host"
+			continue
+		}
+		if msg, bad := unenforceable[id]; bad {
+			// Never running without its policy: a running domain stops.
+			specErrors[id] = msg
+			if exists && existing.State != runtime.StateStopped {
+				if err := r.SetState(ctx, id, runtime.StateStopped); err != nil {
+					specErrors[id] = msg + "; stopping it failed: " + err.Error()
+				}
+			}
 			continue
 		}
 		restoreFrom := spec.GetRestoreFrom()

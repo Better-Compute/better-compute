@@ -5,6 +5,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,14 @@ const (
 	StatePaused  = "paused"
 	StateError   = "error"
 )
+
+// TapName is the host interface of an instance's nic-th NIC. Every runtime names its taps this way,
+// so bcd's network-policy rules (nftables matches interface names as strings) are in place before
+// the tap exists. It fits IFNAMSIZ: "bc" + 10 hex digits of the instance id's SHA-256 + "n" + index.
+func TapName(instanceID string, nic int) string {
+	sum := sha256.Sum256([]byte(instanceID))
+	return fmt.Sprintf("bc%xn%d", sum[:5], nic)
+}
 
 // Domain is one VM (or container) a runtime holds.
 type Domain struct {

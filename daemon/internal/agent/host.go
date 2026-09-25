@@ -38,6 +38,8 @@ type Host interface {
 	Kmsg() (io.ReadCloser, error)
 	// ResetGPU resets one GPU (gpu.reset).
 	ResetGPU(ctx context.Context, uuid string) error
+	// ApplyFirewall loads an nftables ruleset (one transaction; the instances' network policies).
+	ApplyFirewall(ctx context.Context, ruleset string) error
 
 	// The ramdisk's operations (ramdisk.go, ramdisk_host.go).
 	SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (method string, verified bool, err error)
@@ -65,6 +67,32 @@ type RealHost struct {
 	ResetGPUFunc func(ctx context.Context, uuid string) error
 	// LogsFunc overrides journalctl.
 	LogsFunc func(ctx context.Context, unit string, since time.Duration) ([]byte, error)
+	// FirewallFunc overrides nft -f.
+	FirewallFunc func(ctx context.Context, ruleset string) error
+}
+
+// FirewallFile is where a host under a fake root keeps the ruleset it was asked to load.
+const FirewallFile = "/run/bcd/instances.nft"
+
+// ApplyFirewall runs nft -f with the ruleset on its standard input. A host under a fake root (fakehw)
+// writes it to FirewallFile instead.
+func (h *RealHost) ApplyFirewall(ctx context.Context, ruleset string) error {
+	if h.FirewallFunc != nil {
+		return h.FirewallFunc(ctx, ruleset)
+	}
+	if h.Root != "" && h.Root != "/" {
+		file := h.Path(FirewallFile)
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(file, []byte(ruleset), 0o644)
+	}
+	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(ruleset)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (h *RealHost) BootID() (string, error) {
