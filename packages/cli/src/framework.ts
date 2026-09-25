@@ -803,7 +803,10 @@ async function execute(
     })());
   const token = async () => {
     // BETTER_COMPUTE_TOKEN, else better-iam's saved session, else `better-compute auth login`'s (§9.3).
-    const found = await resolveToken(io.env);
+    // A saved compute profile only goes to the deployment it was saved for (--url origin, or in process).
+    const found = await resolveToken(io.env, {
+      target: has('url') ? { url: values.url as string } : {},
+    });
     if (found) return found.token;
     throw new CliError(
       'MISSING_ENV',

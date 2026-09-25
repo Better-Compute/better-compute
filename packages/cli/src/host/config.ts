@@ -236,6 +236,13 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
     if (gateway.internal !== undefined) {
       if (!isRecord(gateway.internal) || typeof gateway.internal.url !== 'string')
         throw new ComputeError('INVALID_CONFIG', 'host.gateway.internal needs a url');
+      // Mutual TLS against the internal CA only: without `ca`, Node would accept any client certificate
+      // from its public root store, and anyone holding one could revoke, drain or close tunnels.
+      if (isRecord(gateway.internal.tls) && !gateway.internal.tls.ca && !gateway.internal.tlsFiles?.ca)
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          'host.gateway.internal needs ca (the internal CA) in tls or tlsFiles: clients must present internal-CA certificates',
+        );
       if (!isRecord(gateway.internal.tls))
         throw new ComputeError(
           'INVALID_CONFIG',

@@ -19,6 +19,7 @@ import {
   type CliIO,
 } from '@better-compute/cli';
 import { AGENT_GATEWAY_SERVICE, frameMessage, MessageDecoder } from '@better-compute/gateway';
+import { createMetrics } from '@better-compute/observability';
 import { createEmbeddedTestIam, type EmbeddedTestIam } from '@better-compute/iam/testing';
 import {
   createCsr,
@@ -293,6 +294,48 @@ describe('serve composition audit', () => {
     expect(composed).not.toHaveProperty('tunnels');
   });
 
+  it('re-checks tunnels at the gateway for the ticket’s session, and counts handshakes', async () => {
+    const decided: unknown[] = [];
+    const iamPort = {
+      authorize: async () => true,
+      authorizeSession: async (session: unknown, decision: unknown) => {
+        decided.push([session, decision]);
+        return true;
+      },
+    };
+    const fake = { endpoint: { origin: 'http://x' }, gatewayServices: {}, context: {} } as any;
+    const registry = createMetrics();
+    const composed = gatewayOptions(
+      { xidStatusHandler: undefined },
+      fake,
+      { database: {}, iam: iamPort, tunnels: { issuer: { jwksJson: () => '{}' } } } as any,
+      { region: 'eu-1', tls: {} },
+      undefined,
+      registry,
+    ) as {
+      tunnels: { reauthorize(info: object): Promise<boolean> };
+      observe: { onHandshake(outcome: string): void };
+    };
+    const tunnel = { subject: 'idn_1', nodeId: 'node_1', op: 'console', tenantId: 'ten_a' };
+    expect(
+      await composed.tunnels.reauthorize({ ...tunnel, sessionId: 'ses_1', action: 'compute:nodes:console' }),
+    ).toBe(true);
+    expect(decided).toEqual([
+      [
+        { identityId: 'idn_1', sessionId: 'ses_1' },
+        { tenantId: 'ten_a', action: 'compute:nodes:console', resource: { type: 'compute-node', id: 'node_1' } },
+      ],
+    ]);
+    // Fail closed: no session, or an action the ticket could not have been issued for.
+    expect(await composed.tunnels.reauthorize(tunnel)).toBe(false);
+    expect(
+      await composed.tunnels.reauthorize({ ...tunnel, sessionId: 'ses_1', action: 'compute:nodes:ssh-root' }),
+    ).toBe(false);
+    expect(decided).toHaveLength(1);
+    composed.observe.onHandshake('welcomed');
+    expect(registry.expose()).toContain('better_compute_gateway_handshakes_total{outcome="welcomed"} 1');
+  });
+
   it('authenticates daemons by node certificate or refuses to start the gateway role', () => {
     const gateway = { region: 'eu-1', tls: {} };
     // Never by name alone: no node CA and trust domain, no gateway.
@@ -397,9 +440,16 @@ describe('serve composition audit', () => {
     expect(
       checks(
         { pki: { ...pki, nodeCa: { ...pki.nodeCa, revocations } } },
-        { gateway: { ...gateway, internal: { url: 'https://gw', tls: {} } } },
+        { gateway: { ...gateway, internal: { url: 'https://gw', tls: { ca: 'internal-ca' } } } },
       ),
     ).toEqual(['warning host.gateway.notifier']);
+    // A control API without its client CA would trust the public root store.
+    expect(
+      checks(
+        { pki: { ...pki, nodeCa: { ...pki.nodeCa, revocations } } },
+        { gateway: { ...gateway, internal: { url: 'https://gw', tls: {} } } },
+      ),
+    ).toContain('error host.gateway.internal.ca');
   });
 
   it(

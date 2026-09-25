@@ -5,9 +5,11 @@ import { ComputeError } from '@better-compute/core';
 import {
   gatewayCollector,
   meteredGatewayServices,
+  standardMetrics,
   type MetricsRegistry,
   type SampledGateway,
 } from '@better-compute/observability';
+import { tunnelAuthorizer } from '@better-compute/iam';
 import { gatewayReportHandlers } from '@better-compute/server';
 import * as gatewayPackage from '@better-compute/gateway';
 import {
@@ -137,6 +139,37 @@ export function gatewayOptions(
 ): Record<string, unknown> {
   const extra = config.options ?? {};
   const issuer = ticketIssuer(options);
+  // The gateway re-checks every open tunnel (every 60 s, and at once on reauthorizeTunnels after a session
+  // revocation) with the same decision the api's tunnel handler uses: the ticket's action on its instance or
+  // node, for the ticket's identity and session (IamPort.authorizeSession). A tunnel without a session fails
+  // closed. Without authorizeSession the gateway leaves re-checks to the api side.
+  const iam = (options.iam ?? {}) as Partial<Parameters<typeof tunnelAuthorizer>[0]>;
+  const authorize =
+    typeof iam.authorizeSession === 'function' && typeof iam.authorize === 'function'
+      ? tunnelAuthorizer(iam as Parameters<typeof tunnelAuthorizer>[0])
+      : undefined;
+  const reauthorize = authorize
+    ? (info: {
+        subject: string;
+        nodeId: string;
+        op: string;
+        tenantId?: string;
+        instanceId?: string;
+        sessionId?: string;
+        action?: string;
+      }) =>
+        authorize({
+          claims: {
+            sub: info.subject,
+            aud: `node:${info.nodeId}`,
+            op: info.op,
+            ...(info.sessionId ? { ses: info.sessionId } : {}),
+            ...(info.tenantId ? { tnt: info.tenantId } : {}),
+            ...(info.instanceId ? { inst: info.instanceId } : {}),
+            ...(info.action ? { act: info.action } : {}),
+          },
+        })
+    : undefined;
   // Status handlers compose (the gateway runs each): XID health always, then the configuration's, such
   // as vps's `instanceStatusHandler({ events, log })` when it registers `vps()`.
   const { status, ...reports } = (extra.reports ?? {}) as Record<string, unknown>;
@@ -150,11 +183,21 @@ export function gatewayOptions(
           tunnels: {
             jwks: () => issuer.jwksJson(),
             issuer: compute.endpoint.origin,
+            ...(reauthorize ? { reauthorize } : {}),
           },
         }
       : {}),
     ...(config.internal ? { internalUrl: config.internal.url } : {}),
     ...(options.log ? { log: options.log } : {}),
+    // gateway_handshakes_total{outcome}: welcomed, upgrade-required, busy, refused, unavailable, error.
+    ...(metrics
+      ? {
+          observe: {
+            onHandshake: (outcome: string) =>
+              standardMetrics(metrics).gatewayHandshakes.inc({ outcome }),
+          },
+        }
+      : {}),
     // Live sessions whose certificate is revoked get a RevocationNotice and are closed (§16: ≤ 5 s).
     ...(identity ? { revocations: identity.revocations } : {}),
     ...extra,
@@ -267,6 +310,12 @@ export async function startGateway(
       note(`Gateway WS fallback on port ${ws.port} (wss://${config.ws.publicHost}/v1/session)`);
     }
     if (config.internal) {
+      // Never the public root store: clients of the control API are internal-CA certificates only.
+      if (!config.internal.tls.ca)
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          'host.gateway.internal needs ca (the internal CA) in tls or tlsFiles',
+        );
       const internal = await pkg.serveInternal(gateway, {
         host: config.internal.listen?.host ?? '0.0.0.0',
         port: config.internal.listen?.port ?? 8444,

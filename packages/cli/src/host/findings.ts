@@ -68,6 +68,14 @@ export function hostFindings(
       fix: 'better-compute pki init, then pki: { nodeCa: bundle.nodeCa, join: pkiJoinCrypto({ … }) } in the configuration',
     });
   }
+  if (gateway.internal && !gateway.internal.tls?.ca && !gateway.internal.tlsFiles?.ca)
+    findings.push({
+      check: 'host.gateway.internal.ca',
+      severity: 'error',
+      message:
+        'The gateway control API has no client CA: it would accept client certificates from the public root store',
+      fix: 'Set host.gateway.internal.tls.ca (or tlsFiles.ca) to the internal CA',
+    });
   if (!gateway.internal)
     findings.push({
       check: 'host.gateway.internal',

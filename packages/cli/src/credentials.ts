@@ -152,9 +152,31 @@ interface IamProfiles {
  * The token for token commands, in PLAN §9.3's order, or undefined when there is none. Expired saved sessions
  * are skipped. `profile` picks a saved profile by name in both stores.
  */
+/** Whether a saved compute profile belongs to the deployment a command is about to call. */
+function profileFits(profile: ComputeProfile, target: { url?: string }): boolean {
+  // Saved in process (through a configuration): never sent to a remote server.
+  if (profile.url === undefined) return target.url === undefined;
+  if (target.url === undefined) return false;
+  try {
+    return new URL(profile.url).origin === new URL(target.url).origin;
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveToken(
   env: NodeJS.ProcessEnv,
-  options: { profile?: string; now?: number; betterIam?: IamProfiles | null } = {},
+  options: {
+    profile?: string;
+    now?: number;
+    betterIam?: IamProfiles | null;
+    /**
+     * Where the token will go: `--url` for a remote server, nothing for in process. A saved compute profile is
+     * used only for the deployment it was saved for (its URL's origin, or in process), so a token for one
+     * deployment is never sent to another.
+     */
+    target?: { url?: string };
+  } = {},
 ): Promise<{ token: string; source: TokenSource } | undefined> {
   if (env.BETTER_COMPUTE_TOKEN) return { token: env.BETTER_COMPUTE_TOKEN, source: { kind: 'env' } };
   const now = options.now ?? Date.now();
@@ -183,5 +205,6 @@ export async function resolveToken(
   if (!own.path) return undefined;
   const name = await own.currentName(options.profile);
   const saved = live(await own.get(name));
+  if (saved && options.target && !profileFits(saved as ComputeProfile, options.target)) return undefined;
   return saved ? { token: saved.token, source: { kind: 'profile', profile: name, path: own.path } } : undefined;
 }

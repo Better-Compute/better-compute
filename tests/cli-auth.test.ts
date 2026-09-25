@@ -74,6 +74,24 @@ describe('credentials', () => {
     expect(await store.remove('default')).toBe(false);
   });
 
+  it('sends a saved compute profile only to the deployment it was saved for', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'bc-auth-'));
+    const env = { BETTER_COMPUTE_CREDENTIALS: join(dir, 'credentials.json') };
+    const store = createComputeProfileStore(env);
+    await store.save('prod', { token: 'biam_ses_prod', url: 'https://compute.example.com', savedAt: T });
+    await store.save('local', { token: 'biam_ses_local', savedAt: T }, false);
+    const as = (profile: string, target: { url?: string }) =>
+      resolveToken({ ...env, BETTER_COMPUTE_PROFILE: profile }, { ...noIam, target });
+    expect((await as('prod', { url: 'https://compute.example.com/api/compute' }))?.token).toBe('biam_ses_prod');
+    // Another origin (a repo's env file, a CI variable) or in process: not this token.
+    expect(await as('prod', { url: 'https://compute.attacker.example' })).toBeUndefined();
+    expect(await as('prod', { url: 'http://compute.example.com' })).toBeUndefined();
+    expect(await as('prod', {})).toBeUndefined();
+    // Saved in process: never sent to a remote server.
+    expect((await as('local', {}))?.token).toBe('biam_ses_local');
+    expect(await as('local', { url: 'https://compute.example.com' })).toBeUndefined();
+  });
+
   it('refuses a file that is not a credentials file, and bad profile names', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'bc-auth-'));
     const path = join(dir, 'credentials.json');
