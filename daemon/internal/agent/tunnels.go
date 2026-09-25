@@ -147,7 +147,12 @@ func (a *Agent) runTunnel(id string, claims pki.ExecTicketClaims) {
 	send(&agentv1.TunnelFrame{Body: &agentv1.TunnelFrame_Opened{Opened: &agentv1.TunnelOpened{}}})
 	factory := a.o.TunnelProgram
 	if factory == nil {
-		factory = DefaultTunnelProgram
+		factory = func(claims pki.ExecTicketClaims, tio TunnelIO) (TunnelProgram, error) {
+			if claims.Inst != "" {
+				return a.instanceTunnelProgram(ctx, claims, tio)
+			}
+			return DefaultTunnelProgram(claims, tio)
+		}
 	}
 	program, err := factory(claims, tio)
 	if err != nil {
@@ -213,6 +218,72 @@ func DefaultTunnelProgram(claims pki.ExecTicketClaims, tio TunnelIO) (TunnelProg
 	return nil, fmt.Errorf("op %q", claims.Op)
 }
 
+// InstanceDialCapability tells the control plane this daemon dials an instance's own address for
+// instance ssh/tcp tickets (never the host), so it may issue them ([402c97]'s server-side gate).
+const InstanceDialCapability = "tunnel.instance-dial"
+
+// instanceTunnelProgram serves an instance ticket: ssh and tcp are dialed to the instance's own
+// address (its running, managed domain, as the runtime reports it); never the host. exec and
+// console into a guest need its guest agent and are refused.
+func (a *Agent) instanceTunnelProgram(ctx context.Context, claims pki.ExecTicketClaims, tio TunnelIO) (TunnelProgram, error) {
+	port := 22
+	switch claims.Op {
+	case "ssh":
+	case "tcp":
+		if claims.Port < 1 || claims.Port > 65535 {
+			return nil, fmt.Errorf("tcp ticket without a port")
+		}
+		port = claims.Port
+	default:
+		return nil, fmt.Errorf("%s into instance %s needs its guest agent", claims.Op, claims.Inst)
+	}
+	ip, err := a.instanceAddress(ctx, claims.Inst)
+	if err != nil {
+		return nil, err
+	}
+	return dialAddress(ip, port, tio)
+}
+
+// instanceAddress is the first usable address of a running instance of this host. An address the
+// host itself holds, or a loopback, link-local, multicast or unspecified one, is refused: an instance
+// ticket never reaches the host.
+func (a *Agent) instanceAddress(ctx context.Context, id string) (net.IP, error) {
+	own := map[string]bool{}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, ad := range addrs {
+			if ipn, ok := ad.(*net.IPNet); ok {
+				own[ipn.IP.String()] = true
+			}
+		}
+	}
+	for _, rt := range a.o.Runtimes {
+		domains, err := rt.List(ctx)
+		if err != nil {
+			continue
+		}
+		for _, d := range domains {
+			if d.ID != id {
+				continue
+			}
+			if !d.Managed || d.State != "running" {
+				return nil, fmt.Errorf("instance %s is not running on this host", id)
+			}
+			for _, cidr := range d.Addresses {
+				ip, _, err := net.ParseCIDR(cidr)
+				if err != nil {
+					ip = net.ParseIP(cidr)
+				}
+				if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() || own[ip.String()] {
+					continue
+				}
+				return ip, nil
+			}
+			return nil, fmt.Errorf("instance %s has no address the host may dial", id)
+		}
+	}
+	return nil, fmt.Errorf("instance %s is not on this host", id)
+}
+
 // ---- tcp ---------------------------------------------------------------------------------------
 
 type tcpProgram struct {
@@ -221,7 +292,14 @@ type tcpProgram struct {
 }
 
 func dialLoopback(port int, tio TunnelIO) (TunnelProgram, error) {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 5*time.Second)
+	return dialAddress(net.IPv4(127, 0, 0, 1), port, tio)
+}
+
+// dialTCP opens tunnel connections (tests redirect it).
+var dialTCP = func(addr string) (net.Conn, error) { return net.DialTimeout("tcp", addr, 5*time.Second) }
+
+func dialAddress(ip net.IP, port int, tio TunnelIO) (TunnelProgram, error) {
+	conn, err := dialTCP(net.JoinHostPort(ip.String(), strconv.Itoa(port)))
 	if err != nil {
 		return nil, err
 	}

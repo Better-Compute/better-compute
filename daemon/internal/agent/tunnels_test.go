@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"net"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
+	bcruntime "github.com/better-compute/better-compute/daemon/internal/runtime"
 )
 
 type ticketIssuer struct {
@@ -145,5 +148,62 @@ replay:
 	// The jti is journaled: a restart does not forget it.
 	if fresh, _ := h.j.RememberTicket("jti_1", time.Now().Add(time.Minute), time.Now()); fresh {
 		t.Fatal("the ticket's jti was not journaled")
+	}
+}
+
+func TestInstanceTicketsDialTheInstanceOnly(t *testing.T) {
+	var fake *bcruntime.Fake
+	h := newHarness(t, func(o *Options) {
+		fake = &bcruntime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(t.TempDir(), "runtime.json"), BootID: "boot-1"}
+		o.Runtimes = []bcruntime.Runtime{fake}
+	})
+	s, hello := h.open()
+	caps := strings.Join(hello.GetCapabilities(), ",")
+	if !strings.Contains(caps, InstanceDialCapability) {
+		t.Fatalf("capabilities = %s", caps)
+	}
+	web := vm("inst_web", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
+	web.Nics[0].Addresses = []string{"10.77.0.5/24"}
+	lo := vm("inst_lo", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
+	lo.Nics[0].Addresses = []string{"127.0.0.1/8"}
+	off := vm("inst_off", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_STOPPED)
+	s.push(desired(1, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web, lo, off}}}))
+	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return len(f.GetStatus().GetInstances()) == 3 })
+
+	// The dial goes to the instance's own address and port; the test answers it with an echo.
+	var dialed []string
+	prev := dialTCP
+	defer func() { dialTCP = prev }()
+	dialTCP = func(addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		server, client := net.Pipe()
+		go func() { _, _ = io.Copy(server, server) }()
+		return client, nil
+	}
+	tio := TunnelIO{Write: func(uint32, []byte) {}, Exit: func(int32, string) {}}
+	ctx := context.Background()
+	if _, err := h.agent.instanceTunnelProgram(ctx, pki.ExecTicketClaims{Op: "ssh", Inst: "inst_web"}, tio); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.agent.instanceTunnelProgram(ctx, pki.ExecTicketClaims{Op: "tcp", Inst: "inst_web", Port: 8443}, tio); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(dialed, ",") != "10.77.0.5:22,10.77.0.5:8443" {
+		t.Fatalf("dialed %v", dialed)
+	}
+	for name, claims := range map[string]pki.ExecTicketClaims{
+		"loopback address": {Op: "ssh", Inst: "inst_lo"},
+		"stopped":          {Op: "ssh", Inst: "inst_off"},
+		"elsewhere":        {Op: "ssh", Inst: "inst_elsewhere"},
+		"exec":             {Op: "exec", Inst: "inst_web"},
+		"console":          {Op: "console", Inst: "inst_web"},
+		"tcp without port": {Op: "tcp", Inst: "inst_web"},
+	} {
+		if _, err := h.agent.instanceTunnelProgram(ctx, claims, tio); err == nil {
+			t.Errorf("%s: allowed", name)
+		}
+	}
+	if len(dialed) != 2 {
+		t.Fatalf("a refused ticket dialed: %v", dialed)
 	}
 }
