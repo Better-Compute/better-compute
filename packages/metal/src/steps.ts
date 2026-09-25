@@ -16,8 +16,10 @@ import {
   siteAgentFor,
   stepCommandKey,
   stepNotReady,
+  verifyImageForUse,
   workflowProfile,
   type CommandOutcome,
+  type ImageUseOptions,
 } from '@better-compute/provision';
 import { isIP } from 'node:net';
 import { nodeSignedResults, pkiNodeSignatureCheck } from './attestation.js';
@@ -57,6 +59,12 @@ export interface MetalStepOptions {
   verifySiteAttestation?: AttestationVerifier;
   /** The hardware profiles nodes name (`metal_nodes.hardware_profile`): BIOS settings, RAID layout. */
   hardwareProfiles?: Readonly<Record<string, HardwareProfile>>;
+  /**
+   * Image signatures are re-verified before `deploy.deploy` writes an image (§11.5): the verifier of
+   * `provisionModule({ imageVerifier })`, default the signer allowlist. `allowUnsigned` is for
+   * development only.
+   */
+  images?: ImageUseOptions;
 }
 
 function requireNode(context: StepContext): string {
@@ -459,8 +467,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
       const pinned = await workflowProfile(context.sql, context.workflowId);
       const ref = input.image ?? pinned?.profile.image?.ref;
       if (!ref) throw new ComputeError('INVALID_INPUT', 'deploy.deploy needs an image: with.image or the profile image');
-      const image = await resolveImageRef(context.sql, node.tenant_id, ref);
-      if (!image) throw new ComputeError('NOT_FOUND', `Image ${ref} is not in the catalog`);
+      const resolved = await resolveImageRef(context.sql, node.tenant_id, ref);
+      if (!resolved) throw new ComputeError('NOT_FOUND', `Image ${ref} is not in the catalog`);
+      // Unsigned images, and images whose signer was revoked since, are never written (v0.2 exit).
+      const image = await verifyImageForUse(context.sql, resolved, options.images);
       const format = imageFormatNames[pinned?.profile.image?.format ?? image.format];
       if (!format) throw new ComputeError('INVALID_INPUT', `deploy.deploy cannot write a ${image.format} image to disk`);
       // A `userdata.render` step earlier in the workflow stored the user data as a secret.

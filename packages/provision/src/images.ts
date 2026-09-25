@@ -290,6 +290,50 @@ export async function promoteImage(tx: SqlTx, authz: AuthzWriter | undefined, te
   return toImage(updated.rows[0]!);
 }
 
+export interface ImageUseOptions {
+  /** The verifier `images.register` used (default: the `image_signers` allowlist). */
+  verifier?: ImageSignatureVerifier;
+  /**
+   * FOR DEVELOPMENT ONLY: let a tenant-private unsigned image through. A signed image whose signature
+   * no longer verifies is refused even then.
+   */
+  allowUnsigned?: boolean;
+}
+
+/**
+ * Checks an image at the moment it is written to a machine or booted (§11.5, v0.2 exit "unsigned
+ * images are rejected"): its stored signature must still verify against the signer allowlist it was
+ * verified against at registration, so a revoked signer or an unsigned image stops deploys, not
+ * only promotion. `INVALID_STATE` otherwise (details.reason `unsigned` or `signature`); returns the image.
+ */
+export async function verifyImageForUse(tx: SqlTx, image: Pick<CatalogImage, 'id'>, options: ImageUseOptions = {}): Promise<CatalogImage> {
+  const { rows } = await tx.query<ImageRow & { signature: Uint8Array | null; signer_tenant_id: string | null }>(
+    `SELECT ${columns}, signature, signer_tenant_id FROM images WHERE id = $1 AND deleted_at IS NULL`,
+    [image.id],
+  );
+  const row = rows[0];
+  if (!row) throw new ComputeError('NOT_FOUND', `Image ${image.id} does not exist`);
+  if (!row.verified || !row.signature || !row.signer_id || !row.signer_tenant_id) {
+    if (options.allowUnsigned && row.kind !== 'ramdisk' && row.visibility === 'private') return toImage(row);
+    throw new ComputeError('INVALID_STATE', `Image ${row.ref} is not signed; only signed images are deployed`, undefined, {
+      imageId: row.id,
+      reason: 'unsigned',
+    });
+  }
+  const signer = await (options.verifier ?? allowlistImageVerifier)(tx, {
+    tenants: [row.signer_tenant_id],
+    signerId: row.signer_id,
+    data: imageSigningInput(row),
+    signature: row.signature,
+  });
+  if (!signer)
+    throw new ComputeError('INVALID_STATE', `The signature of image ${row.ref} no longer verifies (signer ${row.signer_id} revoked?)`, undefined, {
+      imageId: row.id,
+      reason: 'signature',
+    });
+  return toImage(row);
+}
+
 // --- Site caches -------------------------------------------------------------------------------------
 
 export type ImageLocationState = 'pulling' | 'ready' | 'failed' | 'evicting';

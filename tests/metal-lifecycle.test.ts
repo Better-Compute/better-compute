@@ -21,11 +21,15 @@ import {
   site,
 } from '@better-compute/protocol';
 import {
+  addImageSigner,
   defineProfile,
+  imageSigningInput,
   provisionMigrations,
   provisionModule,
   registerImage,
+  revokeImageSigner,
 } from '@better-compute/provision';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import {
   acceptIngestedAttestation,
   metal,
@@ -125,9 +129,16 @@ const gpuHost = defineProfile({
     { use: 'boot.kexec', on: 'ramdisk', await: 'rejoin', timeout: '15m' },
   ],
 });
+// The same deploy with images that must never be written (§11.5, v0.2 exit "unsigned images are rejected").
+const withImage = (id: string, ref: string) => defineProfile({ ...gpuHost, id, image: { ref, format: 'raw', compression: 'zstd' } });
+const unsignedHost = withImage('unsigned-host', 'scratch-os@1');
+const revokedHost = withImage('revoked-host', 'old-signer-os@1');
+const platformSigner = generateKeyPairSync('ed25519');
+const retiredSigner = generateKeyPairSync('ed25519');
+const signerPem = (key: typeof platformSigner) => key.publicKey.export({ type: 'spki', format: 'pem' }).toString();
 const provision = provisionModule({
   modules: [bareMetal],
-  profiles: [gpuHost],
+  profiles: [gpuHost, unsignedHost, revokedHost],
   userData: { controlPlaneUrl: 'https://gw.example.com', bcdUrl: 'https://dl.example.com/bcd', bcdSha256: 'cd'.repeat(32) },
 });
 const issuedTokens: { role: string; maxUses?: number }[] = [];
@@ -269,15 +280,21 @@ beforeAll(async () => {
   const base = { sql: db, work, events: eventLog, commands, secrets, pki, requestId: 'req_metal', iam: { rootTenantId: 'root' } };
   context = { ...base, workflows: provision.workflowEngine(base as never) } as unknown as ModuleContext & MethodContext;
   api = bareMetal.api!(context);
-  await db.transaction((tx) =>
-    registerImage(tx, undefined, 'root', 'root', {
-      ref: 'ubuntu-24.04-server@2026.09',
-      format: 'raw',
-      compression: 'zstd',
-      sha256: 'ab'.repeat(32),
-      source: 'https://images.example.com/ubuntu.raw.zst',
-    }),
-  );
+  await db.transaction(async (tx) => {
+    await addImageSigner(tx, { tenantId: 'root', id: 'platform', algorithm: 'ed25519', publicKey: signerPem(platformSigner) });
+    await addImageSigner(tx, { tenantId: 'root', id: 'retired', algorithm: 'ed25519', publicKey: signerPem(retiredSigner) });
+    const register = (ref: string, sha256: string, signer?: { id: string; key: typeof platformSigner }) => {
+      const input = { ref, format: 'raw' as const, compression: 'zstd' as const, sha256, source: 'https://images.example.com/ubuntu.raw.zst' };
+      if (!signer) return registerImage(tx, undefined, 'root', 'root', input);
+      const signature = sign(null, imageSigningInput(input), signer.key.privateKey).toString('base64');
+      return registerImage(tx, undefined, 'root', 'root', { ...input, signature, signerId: signer.id });
+    };
+    await register('ubuntu-24.04-server@2026.09', 'ab'.repeat(32), { id: 'platform', key: platformSigner });
+    await register('scratch-os@1', 'cd'.repeat(32));
+    // Signed by a key that was on the allowlist at registration and has been revoked since.
+    await register('old-signer-os@1', 'ef'.repeat(32), { id: 'retired', key: retiredSigner });
+    await revokeImageSigner(tx, 'root', 'retired');
+  });
 });
 afterAll(() => db.close());
 beforeEach(() => {
@@ -407,6 +424,22 @@ describe('deploy, release, retire', () => {
     expect(issuedTokens.filter((token) => token.role === 'discovery').at(-1)).toMatchObject({ maxUses: 1, expect: { mac: 'b8:ce:f6:00:00:01' } });
     const session = await db.query<{ role: string }>('SELECT role FROM node_sessions WHERE node_id = $1', [id]);
     expect(session.rows[0]!.role).toBe('node');
+  });
+
+  it('never writes an unsigned image, or one whose signer was revoked since registration', async () => {
+    for (const [profileId, reason] of [
+      ['unsigned-host', /not signed/],
+      ['revoked-host', /no longer verifies/],
+    ] as const) {
+      const id = await enrollReady();
+      seen.length = 0;
+      await call('deploy', { tenantId: 'root', nodeId: id, profileId, profileVersion: 1 });
+      await settle();
+      expect(await node(id)).toMatchObject({ provision_state: 'failed', failed_from: 'deploying', maintenance: true });
+      expect(seen.some((c) => c.kind === 'deploy.image')).toBe(false);
+      const view = await db.query<{ last_error: { code: string; message: string } }>('SELECT last_error FROM metal_nodes WHERE node_id = $1', [id]);
+      expect(view.rows[0]!.last_error.message).toMatch(reason);
+    }
   });
 
   it('releases with the chosen wipe, and returns to ready only after an attested wipe', async () => {

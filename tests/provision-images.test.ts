@@ -13,6 +13,7 @@ import {
   resolveImageRef,
   revokeImageSigner,
   touchImageLocation,
+  verifyImageForUse,
   type ProvisionApi,
   type RegisterImageInput,
 } from '@better-compute/provision';
@@ -183,6 +184,27 @@ describe('get, list, promote', () => {
     expect(refs).toEqual([...refs].sort());
     expect(new Set(refs).size).toBe(refs.length);
     expect((await call('list', { tenantId: 'ten_a', kind: 'ramdisk' })).items).toEqual([]);
+  });
+});
+
+describe('verifyImageForUse (deploy time, v0.2 exit)', () => {
+  it('passes a signed image, and refuses unsigned ones and revoked signers', async () => {
+    const good = await call('register', { tenantId: 'ten_a', ...signed(image('use-ok@1'), tenantKey, 'team') });
+    expect((await verifyImageForUse(db, good)).ref).toBe('use-ok@1');
+    const unsigned = await call('register', { tenantId: 'ten_a', ...image('use-unsigned@1') });
+    await expect(verifyImageForUse(db, unsigned)).rejects.toMatchObject({ code: 'INVALID_STATE', details: { reason: 'unsigned' } });
+    // Development escape hatch: private unsigned images only.
+    expect((await verifyImageForUse(db, unsigned, { allowUnsigned: true })).id).toBe(unsigned.id);
+    await db.transaction((tx) => addImageSigner(tx, { tenantId: 'ten_a', id: 'short-lived', algorithm: 'ed25519', publicKey: pem(strangerKey) }));
+    const later = await call('register', { tenantId: 'ten_a', ...signed(image('use-later@1'), strangerKey, 'short-lived') });
+    expect(later.verified).toBe(true);
+    await db.transaction((tx) => revokeImageSigner(tx, 'ten_a', 'short-lived'));
+    for (const options of [{}, { allowUnsigned: true }])
+      await expect(verifyImageForUse(db, later, options)).rejects.toMatchObject({ code: 'INVALID_STATE', details: { reason: 'signature' } });
+    // A tampered row (digest swapped after registration) no longer matches its signature.
+    await db.query(`UPDATE images SET sha256 = $2 WHERE id = $1`, [good.id, digest(4242)]);
+    await expect(verifyImageForUse(db, good)).rejects.toMatchObject({ details: { reason: 'signature' } });
+    await expect(verifyImageForUse(db, { id: 'img_missing' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });
 

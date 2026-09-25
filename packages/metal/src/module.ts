@@ -1,4 +1,5 @@
 import { defineModule, type ComputeModule, type ReconcileContext, type Reconciler } from '@better-compute/core';
+import type { ImageUseOptions } from '@better-compute/provision';
 import { metalApi, type MetalApi } from './api.js';
 import { metalCommandKinds } from './commands.js';
 import { metalMigrations } from './migrations.js';
@@ -15,6 +16,11 @@ export interface MetalOptions {
   hardwareProfiles?: Record<string, HardwareProfile>;
   /** Verifies node-signed results (wipe, diagnostics); pki's verifier plugs in here (§13). */
   verifyAttestation?: AttestationVerifier;
+  /**
+   * Deploy-time image checks (§11.5): pass the verifier given to `provisionModule({ imageVerifier })`
+   * when it is not the default allowlist. `allowUnsigned: true` is for development only.
+   */
+  images?: ImageUseOptions;
 }
 
 /**
@@ -43,7 +49,11 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
       name: 'metal',
       requires: ['provision'],
       migrations: [...metalMigrations],
-      extensions: metalSteps({ hardwareProfiles, ...(options.verifyAttestation ? { verifyAttestation: options.verifyAttestation } : {}) }),
+      extensions: metalSteps({
+        hardwareProfiles,
+        ...(options.verifyAttestation ? { verifyAttestation: options.verifyAttestation } : {}),
+        ...(options.images ? { images: options.images } : {}),
+      }),
       profiles: [...metalProfiles],
       commandKinds: [...metalCommandKinds],
       reconcilers: [reconciler],
