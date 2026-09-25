@@ -17,6 +17,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import prettier from 'prettier';
+import { checkDescriptions, firstParagraph, sections } from './descriptions.mjs';
 
 const docs = join(dirname(fileURLToPath(import.meta.url)), '..');
 const root = join(docs, '..', '..');
@@ -100,31 +101,6 @@ const compute = server.betterCompute({
 });
 const { registry, endpoint } = compute;
 
-// ---- Hand-written descriptions --------------------------------------------------------------------
-
-/** `## heading` sections of a Markdown file: the text before the first heading is `''`. */
-async function sections(path) {
-  if (!existsSync(path)) return new Map();
-  const text = (await readFile(path, 'utf8')).replace(/\r\n/g, '\n');
-  const out = new Map();
-  let current = '';
-  let buffer = [];
-  const flush = () => {
-    const body = buffer.join('\n').trim();
-    if (body) out.set(current, body);
-  };
-  for (const line of text.split('\n')) {
-    const heading = /^## (.+)$/.exec(line);
-    if (heading) {
-      flush();
-      current = heading[1].trim();
-      buffer = [];
-    } else buffer.push(line);
-  }
-  flush();
-  return out;
-}
-const firstParagraph = (text) => (text ?? '').split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim();
 
 // ---- Data -----------------------------------------------------------------------------------------
 
@@ -479,6 +455,14 @@ async function stale() {
     }
   }
   return out;
+}
+
+// A heading that names no method (a typo, a renamed method) would silently drop its text.
+const descriptionProblems = await checkDescriptions(docs, { api, errorCodes: core.errorCodes });
+if (descriptionProblems.length) {
+  for (const line of descriptionProblems) console.error(`apps/docs/${line}`);
+  console.error(`${descriptionProblems.length} problem(s) in apps/docs/descriptions.`);
+  process.exit(1);
 }
 
 const drift = [];
