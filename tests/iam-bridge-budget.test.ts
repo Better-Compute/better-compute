@@ -4,6 +4,7 @@ import {
   budgetAlertHandler,
   budgetAlertOf,
   drainIamInbox,
+  identityEndOf,
   sqlInbox,
   successorsMigration,
   type BudgetAlert,
@@ -63,6 +64,67 @@ describe('budgetAlertOf', () => {
     expect(budgetAlertOf(event({ kind: 'actual' }))).toBeUndefined();
     expect(budgetAlertOf(event({ kind: 'actual', threshold: 100 }, 'elsewhere'))).toBeUndefined();
     expect(budgetAlertOf({ ...event({}), action: 'agent:suspend' })).toBeUndefined();
+  });
+});
+
+describe('identityEndOf', () => {
+  const ended = (
+    action: string,
+    metadata: IamInboxEvent['metadata'] = {},
+    subjectId = 'idn_bob',
+  ) => ({
+    tenantId: 'ten_a',
+    action,
+    subjectId,
+    metadata,
+  });
+  const successors = async (_tenant: string, identity: string) =>
+    identity === 'idn_bob' ? 'idn_alice' : undefined;
+
+  it('reports owners gone for good, with their successor, from events and from IamReconcile', async () => {
+    expect(
+      await identityEndOf(ended('identity:offboard', { successorId: 'idn_carol' }), successors),
+    ).toEqual({
+      tenantId: 'ten_a',
+      identityId: 'idn_bob',
+      successorId: 'idn_carol',
+    });
+    expect(await identityEndOf(ended('iam:identities:delete'), successors)).toEqual({
+      tenantId: 'ten_a',
+      identityId: 'idn_bob',
+      successorId: 'idn_alice',
+    });
+    expect(await identityEndOf(ended('identity:expire', {}, 'idn_dora'), successors)).toEqual({
+      tenantId: 'ten_a',
+      identityId: 'idn_dora',
+    });
+    // IamReconcile: deleted or missing is final; disabled only with a remembered successor.
+    expect(
+      await identityEndOf(ended('compute:iam:reconcile', { status: 'missing' }, 'idn_dora')),
+    ).toEqual({
+      tenantId: 'ten_a',
+      identityId: 'idn_dora',
+    });
+    expect(
+      await identityEndOf(ended('compute:iam:reconcile', { status: 'disabled' }), successors),
+    ).toMatchObject({
+      successorId: 'idn_alice',
+    });
+    expect(
+      await identityEndOf(
+        ended('compute:iam:reconcile', { status: 'disabled' }, 'idn_dora'),
+        successors,
+      ),
+    ).toBeUndefined();
+    // Not an end: an update, a session revocation, or no subject.
+    expect(await identityEndOf(ended('iam:identities:update'), successors)).toBeUndefined();
+    expect(await identityEndOf(ended('auth:session:revoke'), successors)).toBeUndefined();
+    expect(await identityEndOf(ended('identity:delete', {}, ''), successors)).toBeUndefined();
+    // A successor that is the identity itself is none.
+    expect(await identityEndOf(ended('identity:offboard', { successorId: 'idn_bob' }))).toEqual({
+      tenantId: 'ten_a',
+      identityId: 'idn_bob',
+    });
   });
 });
 
