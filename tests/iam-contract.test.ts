@@ -110,6 +110,8 @@ const gpuUserStatements: PolicyStatement[] = [
       'compute:reservations:create',
       'compute:reservations:extend',
       'compute:instances:create',
+      'compute:sandboxes:create',
+      'compute:sandboxes:update',
     ],
     resources: ['*'],
     conditions: { Bool: { 'principal.spendExceeded': true } },
