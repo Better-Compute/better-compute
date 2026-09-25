@@ -296,6 +296,38 @@ describe('tunnels.open', () => {
     expect(ownClaims).not.toHaveProperty('dlg');
   });
 
+  it('rate-limits tunnels per identity', async () => {
+    const limited = tunnelsModule({ issuer, limits: { tunnelsPerMinute: 2 } });
+    const definition = (
+      limited.api!({} as ModuleContext) as unknown as { tunnels: { open: Definition } }
+    ).tunnels.open;
+    let now = T0;
+    const openAs = (caller: Caller) =>
+      db.transaction(async (tx) =>
+        definition.handler(
+          {
+            sql: within(tx),
+            clock: { now: () => now },
+            caller,
+            requestId: 'r',
+            events: { publish: async () => undefined },
+          } as unknown as MethodContext,
+          definition.validate({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' }),
+        ),
+      );
+    await openAs(alice);
+    now += 10_000;
+    await openAs(alice);
+    await expect(openAs(alice)).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      retryAfterMs: 50_000,
+    });
+    // Another person has their own budget, and the window slides.
+    await openAs({ ...alice, identityId: 'usr_bob' });
+    now = T0 + 60_001;
+    await openAs(alice);
+  });
+
   it('puts the issuer’s JWKS into every node’s access section', async () => {
     const spec = await module.nodeSpec!({} as ModuleContext, {} as NodeRecord);
     expect(spec.access?.execTicketJwks).toEqual(JSON.parse(issuer.jwksJson()));
