@@ -3,7 +3,7 @@ import type { FleetState, NamedKind } from './state.js';
 
 /** One planned change, for people. */
 export interface FleetChange {
-  kind: 'site' | 'providerAccount' | 'pool' | 'ownerQuota' | 'offer' | 'flavor';
+  kind: 'site' | 'providerAccount' | 'pool' | 'ownerQuota' | 'offer' | 'flavor' | 'sandboxTemplate';
   /** The item's name; offers are `<pool> -> <tenant>`, quotas `<pool>:<resource>`, flavors `<pool>/<name>`. */
   name: string;
   action: 'create' | 'update' | 'delete' | 'unchanged';
@@ -360,8 +360,113 @@ export async function planFleet(
     } else add({ kind: 'flavor', name, action: 'unchanged' });
   }
 
+  // Sandbox templates (vps, v0.5): after flavors (a template names one), before flavor deletes.
+  const templateCalls: FleetCall[] = [];
+  const templateDeletes: FleetCall[] = [];
+  const wantedTemplates = new Set<string>();
+  const sandboxesMissing = state.missing.includes('sandbox_templates');
+  for (const template of desired.sandboxTemplates ?? []) {
+    wantedTemplates.add(template.name);
+    const current = state.sandboxTemplates.find((item) => item.name === template.name);
+    if (sandboxesMissing) {
+      add({
+        kind: 'sandboxTemplate',
+        name: template.name,
+        action: 'create',
+        blocked: 'this deployment does not run sandboxes (vps v0.5)',
+      });
+      continue;
+    }
+    // A pool of this document by name, or an offered pool by id.
+    const poolId =
+      poolIds.get(template.pool) ?? (template.pool.startsWith('pool_') ? template.pool : undefined);
+    if (!poolId) {
+      add({
+        kind: 'sandboxTemplate',
+        name: template.name,
+        action: current ? 'update' : 'create',
+        blocked: `unknown pool ${template.pool}`,
+      });
+      continue;
+    }
+    if (!current) {
+      add({ kind: 'sandboxTemplate', name: template.name, action: 'create' });
+      templateCalls.push({
+        path: 'sandboxTemplates/create',
+        input: {
+          tenantId,
+          name: template.name,
+          poolId,
+          flavor: template.flavor,
+          imageId: template.imageId,
+          ...(template.runtime !== undefined ? { runtime: template.runtime } : {}),
+          ...(template.userData !== undefined ? { userData: template.userData } : {}),
+          ...(template.defaultTtlSeconds !== undefined
+            ? { defaultTtlSeconds: template.defaultTtlSeconds }
+            : {}),
+          ...(template.maxTtlSeconds !== undefined
+            ? { maxTtlSeconds: template.maxTtlSeconds }
+            : {}),
+          ...(template.warm !== undefined ? { warm: template.warm } : {}),
+        },
+      });
+      continue;
+    }
+    const immutable: string[] = [];
+    if (current.poolId !== poolId) immutable.push('pool');
+    if (template.runtime !== undefined && current.runtime !== template.runtime)
+      immutable.push('runtime');
+    // Only the listed fields are compared (the server fills in TTL bounds and warm sizes).
+    const update: Record<string, unknown> = { tenantId, templateId: current.id };
+    const mutable: string[] = [];
+    for (const field of [
+      'flavor',
+      'imageId',
+      'userData',
+      'defaultTtlSeconds',
+      'maxTtlSeconds',
+    ] as const)
+      if (template[field] !== undefined && current[field] !== template[field]) {
+        mutable.push(field);
+        update[field] = template[field];
+      }
+    if (template.warm !== undefined) {
+      const warm = { min: template.warm.min, max: template.warm.max ?? template.warm.min };
+      if (!same(current.warm, warm)) {
+        mutable.push('warm');
+        update.warm = template.warm;
+      }
+    }
+    if (immutable.length)
+      add({
+        kind: 'sandboxTemplate',
+        name: template.name,
+        action: 'update',
+        fields: [...immutable, ...mutable],
+        blocked: `${immutable.join(', ')} cannot change; create a new template`,
+      });
+    else if (mutable.length) {
+      add({ kind: 'sandboxTemplate', name: template.name, action: 'update', fields: mutable });
+      templateCalls.push({ path: 'sandboxTemplates/update', input: update });
+    } else add({ kind: 'sandboxTemplate', name: template.name, action: 'unchanged' });
+  }
+
   // Deletes (prune), children first.
   if (options.prune) {
+    if (!sandboxesMissing)
+      for (const template of state.sandboxTemplates)
+        if (!wantedTemplates.has(template.name)) {
+          add({
+            kind: 'sandboxTemplate',
+            name: template.name,
+            action: 'delete',
+            note: 'its warm instances are deleted; running sandboxes keep their TTL',
+          });
+          templateDeletes.push({
+            path: 'sandboxTemplates/delete',
+            input: { tenantId, templateId: template.id },
+          });
+        }
     for (const flavor of state.flavors)
       if (!wantedFlavors.has(`${flavor.pool}/${flavor.name}`) && !vpsMissing) {
         add({ kind: 'flavor', name: `${flavor.pool}/${flavor.name}`, action: 'delete' });
@@ -416,6 +521,8 @@ export async function planFleet(
     ...updates.filter((call) => call.path === 'pools/update' || call.path === 'quotas/set'),
     ...offerCalls,
     ...flavorCalls,
+    ...templateCalls,
+    ...templateDeletes,
     ...flavorDeletes,
     ...unoffers,
     ...deletes.filter((call) => call.path === 'pools/archive'),

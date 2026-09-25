@@ -146,9 +146,19 @@ const sitesCreate: Definition = {
 const capacityApi = capacityModule({ random: () => 0, topN: 1 }).api!(
   moduleContext(db!),
 ) as unknown as Record<string, Record<string, Definition>>;
-const vpsApi = vps({ runtimes: ['libvirt-kvm'], providers: [fakeCloud] }).api!(
-  moduleContext(db!),
-) as unknown as Record<string, Record<string, Definition>>;
+const image = {
+  url: 'https://images.example/u.qcow2',
+  sha256: 'ab'.repeat(32),
+  format: 'qcow2' as const,
+  verified: true,
+};
+const vpsApi = vps({
+  runtimes: ['libvirt-kvm'],
+  providers: [fakeCloud],
+  images: {
+    resolve: async (_tx, _tenant, imageId) => (imageId.startsWith('ubuntu') ? image : undefined),
+  },
+}).api!(moduleContext(db!)) as unknown as Record<string, Record<string, Definition>>;
 const fleetApi = fleetModule().api!(moduleContext(db!)) as unknown as {
   fleet: Record<'export' | 'plan' | 'apply' | 'status', Definition>;
 };
@@ -169,6 +179,12 @@ const routes: Record<string, Definition> = {
     ['create', 'update', 'delete'].map((verb) => [
       `providerAccounts/${verb}`,
       vpsApi.providerAccounts![verb]!,
+    ]),
+  ),
+  ...Object.fromEntries(
+    ['create', 'update', 'delete'].map((verb) => [
+      `sandboxTemplates/${verb}`,
+      vpsApi.sandboxTemplates![verb]!,
     ]),
   ),
 };
@@ -273,6 +289,7 @@ beforeEach(async () => {
   for (const table of [
     'fleet_names',
     'fleet_applied',
+    'sandbox_templates',
     'flavors',
     'quota_usage',
     'pool_offers',
@@ -339,6 +356,108 @@ describe('drift against the applied document', () => {
     await reconciler.run(context, 'all');
     expect(enqueued).toEqual(['fleet.drift:tenant:root']);
     await expect(reconciler.run(context, 'tenant:root')).resolves.toBe('DONE');
+  });
+});
+
+describe('sandbox templates (v0.5, PLAN §3.7)', () => {
+  const withTemplate = (): FleetConfig => ({
+    ...clone(),
+    sandboxTemplates: [
+      {
+        name: 'ci',
+        pool: 'vps-fra',
+        flavor: 'g1.small',
+        imageId: 'ubuntu-24.04',
+        maxTtlSeconds: 7200,
+        warm: { min: 0, max: 2 },
+      },
+    ],
+  });
+
+  it('creates a template after the flavor it names, round-trips export, and updates in place', async () => {
+    const created = await apply(withTemplate());
+    expect(composite.invokes.slice(-2)).toEqual(['flavors/create', 'sandboxTemplates/create']);
+    expect(created.applied).toBe(7);
+    const exported = await fleet<{ config: FleetConfig }>('export', { tenantId: 'root' });
+    expect(exported.config.sandboxTemplates).toEqual([
+      {
+        name: 'ci',
+        pool: 'vps-fra',
+        flavor: 'g1.small',
+        imageId: 'ubuntu-24.04',
+        runtime: 'libvirt-kvm',
+        defaultTtlSeconds: 3600,
+        maxTtlSeconds: 7200,
+        warm: { min: 0, max: 2 },
+      },
+    ]);
+    // Server-filled fields (runtime, the default TTL) are not drift; the export plans to nothing.
+    expect((await plan(withTemplate())).calls).toEqual([]);
+    expect((await plan(validateFleetConfig(exported.config))).calls).toEqual([]);
+
+    const next = withTemplate();
+    next.sandboxTemplates![0]!.warm = { min: 1, max: 3 };
+    next.sandboxTemplates![0]!.imageId = 'ubuntu-26.04';
+    const planned = await plan(next);
+    expect(planned.changes.find((change) => change.kind === 'sandboxTemplate')).toMatchObject({
+      action: 'update',
+      fields: ['imageId', 'warm'],
+    });
+    expect(planned.calls).toEqual([
+      {
+        path: 'sandboxTemplates/update',
+        input: {
+          tenantId: 'root',
+          templateId: expect.stringMatching(/^sbxt_/),
+          imageId: 'ubuntu-26.04',
+          warm: { min: 1, max: 3 },
+        },
+      },
+    ]);
+    await apply(next, { planHash: planned.planHash });
+    expect((await plan(next)).calls).toEqual([]);
+  });
+
+  it('blocks a pool or runtime change and an unknown pool; prunes templates before flavors', async () => {
+    await apply(withTemplate());
+    const moved = withTemplate();
+    moved.sandboxTemplates![0]!.runtime = 'cloud-hypervisor';
+    expect(
+      (await plan(moved)).changes.find((change) => change.kind === 'sandboxTemplate'),
+    ).toMatchObject({
+      blocked: 'runtime cannot change; create a new template',
+    });
+    const ghost = withTemplate();
+    ghost.sandboxTemplates![0]!.pool = 'ghost';
+    expect((await plan(ghost)).blocked).toBe(true);
+
+    const pruned = await plan({ ...clone(), flavors: [] }, true);
+    expect(pruned.calls.map((call) => call.path).slice(0, 2)).toEqual([
+      'sandboxTemplates/delete',
+      'flavors/delete',
+    ]);
+    await apply({ ...clone(), flavors: [] }, { prune: true });
+    const exported = await fleet<{ config: FleetConfig }>('export', { tenantId: 'root' });
+    expect(exported.config.sandboxTemplates).toBeUndefined();
+  });
+
+  it('validates templates', () => {
+    const bad = (template: Record<string, unknown>) => () =>
+      validateFleetConfig({ version: 1, sandboxTemplates: [template] });
+    const ok = { name: 'ci', pool: 'vps-fra', flavor: 'g1.small', imageId: 'ubuntu-24.04' };
+    expect(bad({ ...ok, extra: 1 })).toThrow(/sandboxTemplates\[0\]\.extra is not a known field/);
+    expect(bad({ ...ok, maxTtlSeconds: 10 })).toThrow(/maxTtlSeconds must be an integer/);
+    expect(bad({ ...ok, warm: { min: 65 } })).toThrow(/warm\.min/);
+    expect(bad({ ...ok, pool: 'Bad Pool' })).toThrow(/pool is not in the expected form/);
+    expect(() => validateFleetConfig({ version: 1, sandboxTemplates: [ok, ok] })).toThrow(
+      /repeats "ci"/,
+    );
+    expect(
+      validateFleetConfig({
+        version: 1,
+        sandboxTemplates: [{ ...ok, pool: `pool_${'a'.repeat(26)}` }],
+      }).sandboxTemplates?.[0]?.pool,
+    ).toBe(`pool_${'a'.repeat(26)}`);
   });
 });
 

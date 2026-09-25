@@ -12,6 +12,29 @@ export interface FleetConfig {
   providerAccounts?: FleetProviderAccount[];
   pools?: FleetPool[];
   flavors?: FleetFlavor[];
+  /** (v0.5, PLAN §3.7) The tenant's sandbox templates, by name. */
+  sandboxTemplates?: FleetSandboxTemplate[];
+}
+
+/**
+ * A sandbox template. `pool` and `runtime` are fixed once created (a change is blocked: create a
+ * new template); the rest updates in place. Only the fields listed are compared, so defaults the
+ * server filled in (TTL bounds) are not drift.
+ */
+export interface FleetSandboxTemplate {
+  name: string;
+  /** A pool name in this document, or the id (`pool_…`) of a pool offered to the tenant. */
+  pool: string;
+  /** A flavor name of that pool. */
+  flavor: string;
+  imageId: string;
+  /** Must be the pool's runtime (default: the pool's). */
+  runtime?: string;
+  /** Cloud-init user data, or a `secret://<tenant>/<id>` ref to it. */
+  userData?: string;
+  defaultTtlSeconds?: number;
+  maxTtlSeconds?: number;
+  warm?: { min: number; max?: number };
 }
 
 export interface FleetSite {
@@ -129,7 +152,11 @@ function list<T>(
 /** Validates a FleetConfig document; rejects unknown fields, duplicates and dangling references. */
 export function validateFleetConfig(value: unknown): FleetConfig {
   const input = record(value, 'config');
-  only(input, ['version', 'sites', 'providerAccounts', 'pools', 'flavors'], 'config');
+  only(
+    input,
+    ['version', 'sites', 'providerAccounts', 'pools', 'flavors', 'sandboxTemplates'],
+    'config',
+  );
   if (input.version !== 1) fail('config.version', 'must be 1');
   const sites = list(
     input.sites,
@@ -252,10 +279,65 @@ export function validateFleetConfig(value: unknown): FleetConfig {
     },
     (flavor) => `${flavor.pool}/${flavor.name}`,
   );
+  const sandboxTemplates = list(
+    input.sandboxTemplates,
+    'sandboxTemplates',
+    (raw, path) => {
+      const template = record(raw, path);
+      only(
+        template,
+        [
+          'name',
+          'pool',
+          'flavor',
+          'imageId',
+          'runtime',
+          'userData',
+          'defaultTtlSeconds',
+          'maxTtlSeconds',
+          'warm',
+        ],
+        path,
+      );
+      const result: FleetSandboxTemplate = {
+        name: string(template.name, `${path}.name`, namePattern),
+        pool: string(
+          template.pool,
+          `${path}.pool`,
+          /^(pool_[0-9a-z]{26,52}|[a-z0-9][a-z0-9._-]{0,62})$/,
+        ),
+        flavor: string(template.flavor, `${path}.flavor`, namePattern),
+        imageId: string(
+          template.imageId,
+          `${path}.imageId`,
+          /^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$/,
+        ),
+      };
+      if (template.runtime !== undefined)
+        result.runtime = string(template.runtime, `${path}.runtime`, /^[a-z][a-z0-9-]{0,63}$/);
+      if (template.userData !== undefined) {
+        if (typeof template.userData !== 'string' || template.userData.length > 32_768)
+          fail(`${path}.userData`, 'must be a string of at most 32 KiB');
+        result.userData = template.userData;
+      }
+      for (const field of ['defaultTtlSeconds', 'maxTtlSeconds'] as const)
+        if (template[field] !== undefined)
+          result[field] = int(template[field], `${path}.${field}`, 60, 30 * 24 * 3600);
+      if (template.warm !== undefined) {
+        const warm = record(template.warm, `${path}.warm`);
+        only(warm, ['min', 'max'], `${path}.warm`);
+        result.warm = { min: int(warm.min, `${path}.warm.min`, 0, 64) };
+        if (warm.max !== undefined) result.warm.max = int(warm.max, `${path}.warm.max`, 0, 64);
+      }
+      return result;
+    },
+    (template) => template.name,
+  );
   const config: FleetConfig = { version: 1 };
   if (sites.length) config.sites = sites;
   if (providerAccounts.length) config.providerAccounts = providerAccounts;
   if (pools.length) config.pools = pools;
   if (flavors.length) config.flavors = flavors;
+  if (sandboxTemplates.length) config.sandboxTemplates = sandboxTemplates;
   return config;
 }

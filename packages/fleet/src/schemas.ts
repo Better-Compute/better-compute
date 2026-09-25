@@ -18,7 +18,7 @@ const tenantId: InputSchema = {
 const config: InputSchema = {
   type: 'object',
   description:
-    'The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors }, as fleet.export writes it',
+    'The FleetConfig document: { version: 1, sites, providerAccounts, pools, flavors, sandboxTemplates }, as fleet.export writes it',
 };
 const prune: InputSchema = {
   type: 'boolean',

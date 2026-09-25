@@ -118,7 +118,7 @@ async function recordNames(
 
 /**
  * The fleet module (PLAN.md §9.2 `fleet`): FleetConfig as code. `export` writes the tenant's sites,
- * provider accounts, pools, owner quotas, offers and flavors as a document; `plan` diffs a document
+ * provider accounts, pools, owner quotas, offers, flavors and sandbox templates as a document; `plan` diffs a document
  * against them; `apply` runs the plan through the owning modules' own methods, each decided for the
  * caller (`ctx.check`, no transaction open) and then run in one transaction (`ctx.invoke`), after
  * re-planning inside it: if the state moved in between, nothing is applied (`CONFIG_DRIFT`).

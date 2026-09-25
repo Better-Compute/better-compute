@@ -4,6 +4,7 @@ import type {
   FleetFlavor,
   FleetPool,
   FleetProviderAccount,
+  FleetSandboxTemplate,
   FleetSite,
 } from './config.js';
 
@@ -33,7 +34,14 @@ export interface FleetState {
   pools: (Required<Pick<FleetPool, 'ownerQuota' | 'policy' | 'offers'>> &
     FleetPool & { id: string; siteId: string; providerAccountId?: string })[];
   flavors: (FleetFlavor & { poolId: string })[];
-  /** Tables of modules this deployment does not run (vps: flavors, provider accounts). */
+  /** Every field filled in (runtime, TTL bounds, warm); `userData` only when set. */
+  sandboxTemplates: (Required<Omit<FleetSandboxTemplate, 'userData'>> &
+    Pick<FleetSandboxTemplate, 'userData'> & {
+      id: string;
+      poolId: string;
+      warm: { min: number; max: number };
+    })[];
+  /** Tables of modules this deployment does not run (vps: flavors, provider accounts, sandbox templates). */
   missing: string[];
 }
 
@@ -200,7 +208,44 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
     }));
   else missing.push('flavors');
 
-  return { tenantId, sites, providerAccounts, pools, flavors, missing };
+  let sandboxTemplates: FleetState['sandboxTemplates'] = [];
+  if (await tableExists(tx, 'sandbox_templates'))
+    sandboxTemplates = (
+      await tx.query<{
+        id: string;
+        name: string;
+        pool_id: string;
+        flavor: string;
+        image_id: string;
+        runtime: string;
+        user_data: string | null;
+        default_ttl_seconds: number;
+        max_ttl_seconds: number;
+        warm_min: number;
+        warm_max: number;
+      }>(
+        `SELECT id, name, pool_id, flavor, image_id, runtime, user_data, default_ttl_seconds,
+                max_ttl_seconds, warm_min, warm_max
+           FROM sandbox_templates WHERE tenant_id = $1 AND NOT deleted ORDER BY name`,
+        [tenantId],
+      )
+    ).rows.map((row) => ({
+      id: row.id,
+      poolId: row.pool_id,
+      name: row.name,
+      // Offered pools are not the tenant's, so they are named by id.
+      pool: poolName.get(row.pool_id) ?? row.pool_id,
+      flavor: row.flavor,
+      imageId: row.image_id,
+      runtime: row.runtime,
+      ...(row.user_data !== null ? { userData: row.user_data } : {}),
+      defaultTtlSeconds: Number(row.default_ttl_seconds),
+      maxTtlSeconds: Number(row.max_ttl_seconds),
+      warm: { min: Number(row.warm_min), max: Number(row.warm_max) },
+    }));
+  else missing.push('sandbox_templates');
+
+  return { tenantId, sites, providerAccounts, pools, flavors, sandboxTemplates, missing };
 }
 
 /** The current state as a FleetConfig document (`fleet.export`). */
@@ -218,5 +263,9 @@ export function exportFleetConfig(state: FleetState): FleetConfig {
     );
   if (state.flavors.length)
     config.flavors = state.flavors.map(({ poolId: _pool, ...flavor }) => flavor);
+  if (state.sandboxTemplates.length)
+    config.sandboxTemplates = state.sandboxTemplates.map(
+      ({ id: _id, poolId: _pool, ...template }) => template,
+    );
   return config;
 }

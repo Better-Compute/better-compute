@@ -707,7 +707,7 @@ export function computeTools(
         name: 'fleet_export',
         title: 'Export the fleet configuration',
         description:
-          "Returns the tenant's platform configuration as a FleetConfig document: sites, provider accounts, pools with owner quotas and offers to other tenants, and VPS flavors, keyed by name. Start here before proposing a change.",
+          "Returns the tenant's platform configuration as a FleetConfig document: sites, provider accounts, pools with owner quotas and offers to other tenants, VPS flavors and sandbox templates, keyed by name. Start here before proposing a change.",
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
         annotations: { readOnlyHint: true, openWorldHint: false },
         run: (_args, context) =>
