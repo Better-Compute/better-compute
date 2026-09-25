@@ -2,6 +2,7 @@ import {
   ComputeError,
   defineMethod,
   defineModule,
+  describedBy,
   draftId,
   newId,
   type ComputeModule,
@@ -81,6 +82,7 @@ import {
   type HostReserve,
 } from './hosts.js';
 import { meterInstances } from './usage.js';
+import { schemas } from './schemas.js';
 
 /** Options of `vps()`. */
 export interface VpsOptions {
@@ -298,7 +300,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         kind: 'mutation',
         // The envelope decides on the draft `prepare` returns.
         resource: (input) => ({ type: 'instance', id: `draft:${input.idempotencyKey}` }),
-        validate: parseCreateInstance,
+        validate: describedBy(schemas.createInstance, parseCreateInstance),
         admission: {
           prepare: (context, input, tx) =>
             prepareCreateInstance(depsOf(context), context, input, tx),
@@ -322,14 +324,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:instances:read',
         kind: 'read',
         resource: tenantResource,
-        validate: parseListInstances,
+        validate: describedBy(schemas.listInstances, parseListInstances),
         handler: (context, input) => listInstances(context.sql, input, context.caller?.identityId),
       }),
       get: defineMethod({
         action: 'compute:instances:read',
         kind: 'read',
         resource: instanceResource,
-        validate: parseInstanceRef,
+        validate: describedBy(schemas.instance, parseInstanceRef),
         handler: async (context, input) => {
           const row = await readInstance(context.sql, input.instanceId, {
             tenantId: input.tenantId,
@@ -343,28 +345,28 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:instances:update',
         kind: 'mutation',
         resource: instanceResource,
-        validate: parseInstanceRef,
+        validate: describedBy(schemas.instance, parseInstanceRef),
         handler: (context, input) => setPower(depsOf(context), context.sql, input, 'running'),
       }),
       stop: defineMethod({
         action: 'compute:instances:update',
         kind: 'mutation',
         resource: instanceResource,
-        validate: parseInstanceRef,
+        validate: describedBy(schemas.instance, parseInstanceRef),
         handler: (context, input) => setPower(depsOf(context), context.sql, input, 'stopped'),
       }),
       resize: defineMethod({
         action: 'compute:instances:update',
         kind: 'mutation',
         resource: instanceResource,
-        validate: parseResize,
+        validate: describedBy(schemas.resizeInstance, parseResize),
         handler: (context, input) => resizeInstance(depsOf(context), context.sql, input),
       }),
       delete: defineMethod({
         action: 'compute:instances:delete',
         kind: 'mutation',
         resource: instanceResource,
-        validate: parseInstanceRef,
+        validate: describedBy(schemas.instance, parseInstanceRef),
         handler: (context, input) => deleteInstance(depsOf(context), context.sql, input),
       }),
     },
@@ -373,7 +375,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:flavors:read',
         kind: 'read',
         resource: poolResource,
-        validate: parsePool,
+        validate: describedBy(schemas.pool, parsePool),
         handler: async (context, input) => {
           const visible = await context.sql.query(
             `SELECT 1 FROM pools p WHERE p.id = $1 AND (p.owner_tenant_id = $2
@@ -389,28 +391,28 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:flavors:manage',
         kind: 'mutation',
         resource: poolResource,
-        validate: parseFlavorInput,
+        validate: describedBy(schemas.flavor, parseFlavorInput),
         handler: (context, input) => createFlavor(context.sql, input),
       }),
       update: defineMethod({
         action: 'compute:flavors:manage',
         kind: 'mutation',
         resource: poolResource,
-        validate: parseFlavorInput,
+        validate: describedBy(schemas.flavor, parseFlavorInput),
         handler: (context, input) => updateFlavor(context.sql, input),
       }),
       delete: defineMethod({
         action: 'compute:flavors:manage',
         kind: 'mutation',
         resource: poolResource,
-        validate: (raw) => {
+        validate: describedBy(schemas.deleteFlavor, (raw) => {
           const input = object(raw, ['tenantId', 'poolId', 'name']);
           return {
             tenantId: tenant(input.tenantId),
             poolId: id(input.poolId, 'pool', 'poolId'),
             name: name(input.name),
           };
-        },
+        }),
         handler: (context, input) => deleteFlavor(context.sql, input),
       }),
     },
@@ -419,7 +421,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:providers:manage',
         kind: 'mutation',
         resource: tenantResource,
-        validate: parseCreateAccount,
+        validate: describedBy(schemas.createAccount, parseCreateAccount),
         // With an idempotency key, a finished request replays without a second decision.
         admission: {
           async prepare(context, input, tx) {
@@ -459,7 +461,9 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:providers:read',
         kind: 'read',
         resource: tenantResource,
-        validate: (raw) => ({ tenantId: tenant(object(raw, ['tenantId']).tenantId) }),
+        validate: describedBy(schemas.tenant, (raw) => ({
+          tenantId: tenant(object(raw, ['tenantId']).tenantId),
+        })),
         handler: async (context, input) => ({
           items: await listAccounts(context.sql, input.tenantId),
         }),
@@ -468,7 +472,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:providers:read',
         kind: 'read',
         resource: accountResource,
-        validate: (raw) => parseAccountRef(raw) as AccountRef,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
         handler: async (context, input) => {
           const account = await readAccount(context.sql, input.accountId, input.tenantId);
           if (!account)
@@ -480,14 +484,14 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:providers:read',
         kind: 'read',
         resource: accountResource,
-        validate: (raw) => {
+        validate: describedBy(schemas.accountOffers, (raw) => {
           const input = parseAccountRef(raw, ['query']);
           return {
             tenantId: input.tenantId,
             accountId: input.accountId,
             query: parseOfferQuery(input.query),
           };
-        },
+        }),
         handler: async (context, input) => {
           const account = await readAccount(context.sql, input.accountId, input.tenantId);
           if (!account)
@@ -500,17 +504,17 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:providers:manage',
         kind: 'mutation',
         resource: accountResource,
-        validate: (raw) => {
+        validate: describedBy(schemas.updateAccount, (raw) => {
           const input = parseAccountRef(raw, ['config']);
           return { tenantId: input.tenantId, accountId: input.accountId, config: input.config };
-        },
+        }),
         handler: (context, input) => updateAccount(context.sql, providers, input),
       }),
       delete: defineMethod({
         action: 'compute:providers:manage',
         kind: 'mutation',
         resource: accountResource,
-        validate: (raw) => parseAccountRef(raw) as AccountRef,
+        validate: describedBy(schemas.account, (raw) => parseAccountRef(raw) as AccountRef),
         handler: async (context, input) => {
           await deleteAccount(context.sql, input);
           await context.authz.remove(context.sql, {
@@ -524,7 +528,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         action: 'compute:providers:manage',
         kind: 'mutation',
         resource: accountResource,
-        validate: parseBootstrap,
+        validate: describedBy(schemas.bootstrap, parseBootstrap),
         handler: (context, input) => startBootstrap(bootstrapDeps(context), context, input),
       }),
     },
