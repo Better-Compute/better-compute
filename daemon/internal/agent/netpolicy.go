@@ -65,7 +65,7 @@ func eui64(mac net.HardwareAddr) string {
 // on the instances' bridges: no tap may send from them or claim them.
 func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset string, failed map[string]string, guarded map[string]string) {
 	failed, guarded = map[string]string{}, map[string]string{}
-	var claims, guard, input, forward, output []string
+	var claims, guard, input, forward, output, sshForward, sshOutput []string
 	anyNIC := false
 	sorted := append([]*agentv1.InstanceSpec(nil), specs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].GetInstanceId() < sorted[j].GetInstanceId() })
@@ -154,6 +154,16 @@ func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset stri
 			failed[spec.GetInstanceId()] = problem
 			continue
 		}
+		// ssh_from_host_only (sandboxes, review 13 L5): tcp/22 into the guest only from the host's own
+		// bridge addresses (bcd's tunnel dial), whatever the policy: an exec certificate is usable only
+		// through a tunnel, which the control plane closes on revocation.
+		if spec.GetSshFromHostOnly() && !deleted {
+			for i := range spec.GetNics() {
+				out := fmt.Sprintf("oifname %q", runtime.TapName(spec.GetInstanceId(), i))
+				sshForward = append(sshForward, out+" tcp dport 22 drop")
+				sshOutput = append(sshOutput, hostOnlySSH(out, host)...)
+			}
+		}
 		if !enforced {
 			continue
 		}
@@ -223,7 +233,9 @@ func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset stri
 	}
 	// Spoofed frames are dropped before any policy accepts them.
 	first := append(append(append([]string{}, taps...), claims...), guard...)
-	input, forward = append(append([]string{}, first...), input...), append(append([]string{}, first...), forward...)
+	input = append(append([]string{}, first...), input...)
+	forward = append(append(append([]string{}, first...), sshForward...), forward...)
+	output = append(append([]string{}, sshOutput...), output...)
 	if len(input)+len(forward)+len(output) > 0 {
 		fmt.Fprintf(&b, "table bridge %s {\n", firewallTable)
 		chain := func(name string, rules []string) {
@@ -257,6 +269,25 @@ func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset stri
 		b.WriteString("}\n")
 	}
 	return b.String(), failed, guarded
+}
+
+// hostOnlySSH drops tcp/22 out of the bridge into a tap unless the host's own address sent it.
+func hostOnlySSH(out string, host []string) []string {
+	var v4, v6 []string
+	for _, a := range host {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+			v4 = append(v4, a)
+		} else if ip != nil {
+			v6 = append(v6, a)
+		}
+	}
+	rule := func(family, saddr string, addrs []string) string {
+		if len(addrs) == 0 {
+			return out + " ether type " + family + " tcp dport 22 drop"
+		}
+		return out + " ether type " + family + " tcp dport 22 " + saddr + " != " + set(addrs) + " drop"
+	}
+	return []string{rule("ip", "ip saddr", v4), rule("ip6", "ip6 saddr", v6)}
 }
 
 func set(items []string) string { return "{ " + strings.Join(items, ", ") + " }" }

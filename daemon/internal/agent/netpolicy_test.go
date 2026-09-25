@@ -155,6 +155,43 @@ func TestFirewallRuleset(t *testing.T) {
 	nftSyntax(t, ruleset)
 }
 
+// Review 13 L5: a sandbox's sshd is reachable only from the host (bcd's tunnel dial), whatever its
+// policy, and before any rule accepts.
+func TestSSHFromHostOnly(t *testing.T) {
+	running := agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING
+	tap := func(id string) string { return `"` + runtime.TapName(id, 0) + `"` }
+	sbx := vm("inst_sbx", running) // EGRESS
+	sbx.SshFromHostOnly = true
+	plain := vm("inst_vps", running)
+	ruleset, failed, _ := firewallRuleset([]*agentv1.InstanceSpec{sbx, plain}, []string{"10.0.0.1", "fe80::1"})
+	if len(failed) != 0 {
+		t.Fatal(failed)
+	}
+	out := "oifname " + tap("inst_sbx")
+	for _, want := range []string{
+		out + " tcp dport 22 drop",
+		out + " ether type ip tcp dport 22 ip saddr != { 10.0.0.1 } drop",
+		out + " ether type ip6 tcp dport 22 ip6 saddr != { fe80::1 } drop",
+	} {
+		if !strings.Contains(ruleset, want) {
+			t.Fatalf("ruleset lacks %q:\n%s", want, ruleset)
+		}
+	}
+	output := ruleset[strings.Index(ruleset, "chain output"):]
+	output = output[strings.Index(output, "policy accept;")+len("policy accept;"):]
+	if strings.Contains(output[:strings.Index(output, "tcp dport 22")], "accept") {
+		t.Fatalf("an accept precedes the ssh rules:\n%s", output)
+	}
+	if strings.Contains(ruleset, "oifname "+tap("inst_vps")+" tcp dport 22") {
+		t.Fatal("an ordinary instance's ssh was restricted")
+	}
+	// Without a host address of a family, that family's ssh into the sandbox is dropped outright.
+	if rs, _, _ := firewallRuleset([]*agentv1.InstanceSpec{sbx}, nil); !strings.Contains(rs, out+" ether type ip tcp dport 22 drop") {
+		t.Fatalf("no host address:\n%s", rs)
+	}
+	nftSyntax(t, ruleset)
+}
+
 // nftSyntax parses a ruleset with nft in a throwaway network namespace when it can. Kernels without
 // bridge nf_tables (WSL) refuse to load it, which is not a syntax error.
 func nftSyntax(t *testing.T, ruleset string) {
