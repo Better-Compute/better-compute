@@ -7,7 +7,7 @@ import {
   type MetricsRegistry,
 } from '@better-compute/observability';
 import { instanceStatusHandler, setIpPool, vps } from '@better-compute/vps';
-import { createDevStack, type DevStack } from '@better-compute/testing';
+import { DEV_ROOT_TOKEN, createDevStack, fakeIam, type DevStack } from '@better-compute/testing';
 import { checkNoLeaks, instancesSettled, liveInstances } from './support/vps-leaks.js';
 
 // PLAN.md §16 v0.5 exit, tests/e2e/sandboxes.test.ts (§3.7, D24), through the whole stack: the real server runtime
@@ -19,7 +19,8 @@ import { checkNoLeaks, instancesSettled, liveInstances } from './support/vps-lea
 //   same zero-leak diff as v0.3 (domains, overlays, taps, IP leases, bookings);
 // - the §14 sandbox series (observability's databaseCollector) saw it: readiness by source and expiry lag;
 // - a memory snapshot round trip: guest memory captured on one sandbox comes back in one created fromSnapshot, and
-//   the stored object goes with the sandbox.
+//   the stored object goes with the sandbox; instance methods on a sandbox's instance are refused, and another
+//   tenant can neither read nor restore the snapshot (NOT_FOUND).
 
 const SANDBOXES = Number(process.env.E2E_SANDBOXES ?? 500);
 const IMAGE = {
@@ -29,6 +30,9 @@ const IMAGE = {
   verified: true,
 };
 const orphanLogs: string[] = [];
+/** A user of another tenant, for the cross-tenant refusals (§3.7: another tenant's snapshot is NOT_FOUND). */
+const OTHER_TENANT = 'tenant-other';
+const OTHER = { token: 'bc_dev_other_user' };
 /** The hosts' shared object store (a snapshot taken on one host restores on another), and what vps deleted. */
 const snapshotObjects = new Map<string, Uint8Array>();
 const deletedSnapshots: string[] = [];
@@ -108,6 +112,31 @@ beforeAll(async () => {
     ],
     reports: { status: instanceStatusHandler({ log: (message) => orphanLogs.push(message) }) },
     daemon: { instances: { runtimes: ['cloud-hypervisor'], snapshotStore: snapshotObjects } },
+    iam: {
+      port: fakeIam({
+        callers: {
+          [DEV_ROOT_TOKEN]: {
+            identityId: 'identity-dev-root',
+            identityKind: 'user',
+            tenantId: 'tenant-root',
+            sessionId: 'session-dev-root',
+            sessionKind: 'user',
+            mfa: true,
+          },
+          [OTHER.token]: {
+            identityId: 'identity-other',
+            identityKind: 'user',
+            tenantId: OTHER_TENANT,
+            sessionId: 'session-other',
+            sessionKind: 'user',
+            mfa: false,
+          },
+        },
+        allow: [{}],
+      }),
+      rootTenantId: 'tenant-root',
+      root: { token: DEV_ROOT_TOKEN },
+    },
   });
   api = dev.compute.api;
   tenantId = dev.rootTenantId;
@@ -272,7 +301,7 @@ describe('sandboxes end to end (§16 v0.5)', () => {
     expect(registry.value('sandbox_warm_deficit')).toBe(0);
   }, 900_000);
 
-  it('a memory snapshot round trip restores guest memory into a new sandbox', async () => {
+  it("a memory snapshot round trip restores guest memory; the instance and the snapshot stay the sandbox tenant's", async () => {
     const template = await createTemplate('snap', { defaultTtlSeconds: 600 });
     const readyView = (sandboxId: string, what: string) =>
       until(
@@ -306,6 +335,48 @@ describe('sandboxes end to end (§16 v0.5)', () => {
       90_000,
     );
     expect(stored.sizeBytes).toBeGreaterThan(0);
+
+    // The sandbox's instance is driven by the sandbox: instance methods on it are refused (reads stay allowed).
+    for (const method of ['stop', 'start', 'delete'] as const)
+      await expect(
+        api.instances[method](dev.root, { tenantId, instanceId: source.instanceId }),
+        method,
+      ).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message: expect.stringContaining(source.id),
+      });
+    expect(
+      await api.instances.get(dev.root, { tenantId, instanceId: source.instanceId }),
+    ).toMatchObject({
+      id: source.instanceId,
+    });
+
+    // Another tenant cannot see or restore it, even with a template of its own on the same pool.
+    await api.pools.offer(dev.root, {
+      tenantId,
+      poolId,
+      toTenantId: OTHER_TENANT,
+      quota: { vcpu: 8, memoryGiB: 16, diskGiB: 100 },
+    });
+    const theirs = await api.sandboxTemplates.create(OTHER, {
+      tenantId: OTHER_TENANT,
+      name: 'theirs',
+      poolId,
+      flavor: 'xs',
+      imageId: 'ubuntu-24.04',
+    });
+    await expect(
+      api.sandboxes.create(OTHER, {
+        tenantId: OTHER_TENANT,
+        templateId: theirs.id,
+        fromSnapshot: snapshot.id,
+        idempotencyKey: 'e2e-cross-tenant-restore',
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(
+      api.sandboxSnapshots.get(OTHER, { tenantId: OTHER_TENANT, snapshotId: snapshot.id }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await api.sandboxTemplates.delete(OTHER, { tenantId: OTHER_TENANT, templateId: theirs.id });
 
     const restored = await createSandbox(template.id, { fromSnapshot: snapshot.id });
     expect(restored).toMatchObject({ fromSnapshot: snapshot.id, warm: false });
