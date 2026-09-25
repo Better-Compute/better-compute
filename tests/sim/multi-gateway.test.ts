@@ -146,4 +146,19 @@ describe('three gateways under the fleet simulator', () => {
     expect(await states(rig, commands)).toEqual(commands.map(() => 'succeeded'));
     assertInvariants(await rig.invariants());
   }, 600_000);
+  it('closes a revoked node’s session within a tick and refuses its dials on every gateway', async () => {
+    rig = await createControlPlaneSim({ seed: 'multi-gateway-revoke', nodes: 4, gateways: 2 });
+    await rig.run(3 * MIN);
+    const [revoked, ...others] = rig.nodes.map((node) => node.nodeId);
+    expect(rig.serialOf(revoked!)).toMatch(/^[0-9a-f]+$/);
+    expect(rig.homeOf(revoked!)).toBeDefined();
+    await rig.revokeNode(revoked!, 'compromised');
+    await rig.run(2_000);
+    expect(rig.homeOf(revoked!)).toBeUndefined();
+    // The daemon keeps redialing; no gateway admits its certificate again.
+    await rig.run(MIN);
+    expect(rig.homeOf(revoked!)).toBeUndefined();
+    for (const nodeId of others) expect(rig.homeOf(nodeId)).toBeDefined();
+    assertInvariants(await rig.invariants());
+  }, 600_000);
 });

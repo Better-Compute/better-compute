@@ -18,6 +18,9 @@ import { createMetrics, type MetricsRegistry } from '@better-compute/observabili
 import {
   createCsr,
   createNodeCa,
+  createRevocationFeed,
+  createRevocationSet,
+  parseCertificate,
   createSigningKey,
   generateP256KeyPair,
   sealJoinToken,
@@ -191,6 +194,9 @@ export async function createRealtimeFleet(
   const signingKey = createSigningKey({ clock: systemClock });
   const encryption = generateP256KeyPair();
   let gateway: Gateway | undefined;
+  // Revoked certificates close live sessions within ~1 s (pki's feed polls node_certs.revoked_at).
+  const revocations = createRevocationSet();
+  const serials = new Map<string, string>();
   const compute = betterCompute({
     database,
     iam,
@@ -219,12 +225,15 @@ export async function createRealtimeFleet(
     work: compute.context.work,
     events: compute.context.events,
     reports: gatewayReportHandlers,
+    revocations,
     handshakesPerSecond: 2_000,
     maxStreams: 10_000,
     ...options.gateway,
   });
   await gateway.start();
   await compute.start();
+  const revocationFeed = createRevocationFeed({ sql: database, revocations });
+  revocationFeed.start();
 
   // The deployment an operator sets up: a site, an H100 pool with diag.nvml acceptance offered to acme,
   // and one join token for the whole fleet.
@@ -254,7 +263,9 @@ export async function createRealtimeFleet(
     insecure: true,
     authenticate: (peer) => {
       const nodeId = peer.headers[TEST_NODE_HEADER];
-      return typeof nodeId === 'string' && nodeId ? { nodeId, siteId: site.id } : undefined;
+      if (typeof nodeId !== 'string' || !nodeId) return undefined;
+      const serial = serials.get(nodeId);
+      return { nodeId, siteId: site.id, ...(serial ? { serial } : {}) };
     },
   });
   const client = createH2cClient({ url: `http://127.0.0.1:${served.port}` });
@@ -342,13 +353,14 @@ export async function createRealtimeFleet(
         );
         joinMs.push(Date.now() - at);
         histograms.join.observe(undefined, (Date.now() - at) / 1000);
-        const { nodeId } = verifyJoinResponse(response, {
+        const { nodeId, certChain } = verifyJoinResponse(response, {
           signer: { publicKey: signingKey.publicKey },
           csr,
           nodeCaRoots: [nodeCa.certificate],
           now: Date.now(),
         });
         calledAt.set(nodeId, at);
+        serials.set(nodeId, parseCertificate(certChain[0]!).serial);
         joined.push(nodeId);
         const daemon = new FakeDaemon({
           backoff: { minMs: 50, maxMs: 2_000 },
@@ -490,6 +502,7 @@ export async function createRealtimeFleet(
       };
     },
     async close() {
+      revocationFeed.stop();
       for (const daemon of daemons.values())
         if (daemon.state !== 'stopped') daemon.crash('fleet-close');
       await client.close();

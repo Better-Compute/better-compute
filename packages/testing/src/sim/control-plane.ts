@@ -16,6 +16,9 @@ import {
 import {
   createCsr,
   createNodeCa,
+  createRevocationFeed,
+  createRevocationSet,
+  parseCertificate,
   createSigningKey,
   generateP256KeyPair,
   sealJoinToken,
@@ -249,6 +252,15 @@ export interface ControlPlaneSim {
   reviveGateway(index: number): void;
   /** Pauses (or resumes) slot `index`'s jobs while its connections stay open: a stalled process. */
   stallGateway(index: number, stalled: boolean): void;
+  /** Stops (or restarts) the control plane's reconcilers and sweepers: every worker process down. */
+  pauseWorkers(paused: boolean): void;
+  /** The serial of the node certificate it joined with. */
+  serialOf(nodeId: string): string | undefined;
+  /**
+   * Revokes the node's certificates through the operator API (`nodes.revokeIdentity`): the gateways learn it on the
+   * next tick, close its session and refuse its dials.
+   */
+  revokeNode(nodeId: string, reason?: string): Promise<void>;
   facts: ControlPlaneFacts;
   /** Runs an operator or tenant call (traced as `api`). */
   api<T>(fn: () => Promise<T>): Promise<T>;
@@ -400,6 +412,7 @@ export async function createControlPlaneSim(
     );
 
     const nodes: { nodeId: string; hardware: FakeHardware }[] = [];
+    const serials = new Map<string, string>();
     await trace('join', async () => {
       for (let index = 0; index < count; index++) {
         const hardware = fakeHardware({
@@ -420,13 +433,14 @@ export async function createControlPlaneSim(
             role: AgentRole.NODE,
           }),
         );
-        const { nodeId } = verifyJoinResponse(response, {
+        const { nodeId, certChain } = verifyJoinResponse(response, {
           signer: { publicKey: signingKey.publicKey },
           csr,
           nodeCaRoots: [nodeCa.certificate],
           now: now(),
         });
         nodes.push({ nodeId, hardware });
+        serials.set(nodeId, parseCertificate(certChain[0]!).serial);
       }
     });
 
@@ -452,6 +466,7 @@ export async function createControlPlaneSim(
           work: compute.context.work,
           events: compute.context.events,
           reports: gatewayReportHandlers,
+          revocations,
           ...options.gateway,
         });
         await created.start();
@@ -462,6 +477,10 @@ export async function createControlPlaneSim(
       return slot.starting;
     };
     let cursor = 0;
+    let workersDown = false;
+    // Revoked certificates reach every gateway through one set, fed from node_certs on each tick (sim time).
+    const revocations = createRevocationSet();
+    const revocationFeed = createRevocationFeed({ sql: database, revocations, clock });
     const facts = controlPlaneFacts(raw);
     const {
       nodes: _nodes,
@@ -486,13 +505,16 @@ export async function createControlPlaneSim(
             return;
           }
           const slot = live[cursor++ % live.length]!;
+          // The certificate serial the node joined with: revocations close and refuse it.
+          const serial = serials.get(peer.nodeId);
           attachFrameConn(
             await slotGateway(slot),
-            { nodeId: peer.nodeId, role: 'node' },
+            { nodeId: peer.nodeId, role: 'node', ...(serial ? { serial } : {}) },
             conn as never,
           );
         },
         async tick() {
+          await revocationFeed.poll().catch(() => 0);
           await trace('gateway', async () => {
             for (const slot of slots) {
               if (slot.down || slot.stalled) continue;
@@ -501,9 +523,11 @@ export async function createControlPlaneSim(
                 await current.jobs[job].tick();
             }
           });
-          await trace('reconcilers', async () => {
-            for (const job of Object.values(compute.jobs)) await job.tick();
-          });
+          // A dead worker runs nothing: its keys wait in the work queue until one runs again.
+          if (!workersDown)
+            await trace('reconcilers', async () => {
+              for (const job of Object.values(compute.jobs)) await job.tick();
+            });
         },
         kill() {
           // The simulator's gateway kill takes down every process; fresh ones take the next dials.
@@ -556,6 +580,19 @@ export async function createControlPlaneSim(
       },
       stallGateway(index, stalled) {
         slots[index]!.stalled = stalled;
+      },
+      pauseWorkers(paused) {
+        workersDown = paused;
+      },
+      serialOf: (nodeId) => serials.get(nodeId),
+      async revokeNode(nodeId, reason = 'sim revocation') {
+        await api(() =>
+          compute.api.nodes.revokeIdentity(root, {
+            tenantId: tenants.root.id,
+            nodeId,
+            reason,
+          } as never),
+        );
       },
       facts,
       api,

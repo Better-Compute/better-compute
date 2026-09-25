@@ -4,6 +4,8 @@ export type {
   ControlPlaneSim,
   ControlPlaneSimOptions,
 } from './control-plane.js';
+export { runNightly } from './nightly.js';
+export type { NightlyChaos, NightlyOptions, NightlyReport } from './nightly.js';
 export { createFleetSim } from './fleet-sim.js';
 export type {
   ChaosOptions,
