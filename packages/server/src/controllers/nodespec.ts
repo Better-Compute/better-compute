@@ -231,6 +231,9 @@ function wireInstance(instance: InstanceSpec): Json {
   // Egress is the wire default (UNSPECIFIED), so specs without a policy hash as before.
   if (instance.networkPolicy && instance.networkPolicy !== 'egress')
     wire.networkPolicy = `INSTANCE_NETWORK_POLICY_${instance.networkPolicy.toUpperCase()}`;
+  // Set only when used, so other specs hash as before.
+  if (instance.identityRebindRef) wire.identityRebindRef = instance.identityRebindRef;
+  if (instance.sshFromHostOnly) wire.sshFromHostOnly = true;
   return wire;
 }
 

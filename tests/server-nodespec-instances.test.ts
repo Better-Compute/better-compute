@@ -51,6 +51,20 @@ describe('NodeSpec instances section (v0.5)', () => {
       InstanceNetworkPolicy.UNSPECIFIED,
     );
   });
+
+  it('carries the post-restore identity rebind and host-only SSH, only when set (review 13)', async () => {
+    const wire = await wireNodeSpec(tx, {
+      instances: [instance({ identityRebindRef: 'secret://vps/rebind/inst_a/1', sshFromHostOnly: true })],
+    });
+    expect(fromJson(NodeSpecSchema, wire as never).instances!.instances[0]).toMatchObject({
+      identityRebindRef: 'secret://vps/rebind/inst_a/1',
+      sshFromHostOnly: true,
+    });
+    const plain = await wireNodeSpec(tx, { instances: [instance()] });
+    expect(specHash(await wireNodeSpec(tx, { instances: [instance({ sshFromHostOnly: false })] }))).toBe(
+      specHash(plain),
+    );
+  });
 });
 
 describe('NodeSpec site section: proxy targets (review 7 HIGH-1)', () => {

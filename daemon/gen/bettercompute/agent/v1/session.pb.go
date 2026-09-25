@@ -3421,8 +3421,17 @@ type InstanceSpec struct {
 	// (v0.5, sandboxes) What the instance's NICs may reach, enforced by bcd as host nftables rules on
 	// its taps, whatever the runtime. bcd's own tunnel dial from the host always works.
 	NetworkPolicy InstanceNetworkPolicy `protobuf:"varint,13,opt,name=network_policy,json=networkPolicy,proto3,enum=bettercompute.agent.v1.InstanceNetworkPolicy" json:"network_policy,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// (v0.5, review 13 H2) After a restore, the guest's per-instance identity (SSH host keys, machine
+	// id, workload credentials) must not stay the snapshot's. A secret ref (fetched with
+	// SecretRequest) of the new identity material; bcd delivers it to the running guest (a hotplugged
+	// raw disk read by a vps-installed guest unit) and reports the ref back in
+	// InstanceStatus.identity_rebound_ref once the guest acked it. Changing it asks for a new rebind.
+	IdentityRebindRef string `protobuf:"bytes,14,opt,name=identity_rebind_ref,json=identityRebindRef,proto3" json:"identity_rebind_ref,omitempty"`
+	// (review 13 L5) Port 22 of the guest is reachable only from the host (bcd's tunnel dial), never
+	// from other guests or the network, whatever network_policy allows.
+	SshFromHostOnly bool `protobuf:"varint,15,opt,name=ssh_from_host_only,json=sshFromHostOnly,proto3" json:"ssh_from_host_only,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InstanceSpec) Reset() {
@@ -3544,6 +3553,20 @@ func (x *InstanceSpec) GetNetworkPolicy() InstanceNetworkPolicy {
 		return x.NetworkPolicy
 	}
 	return InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_UNSPECIFIED
+}
+
+func (x *InstanceSpec) GetIdentityRebindRef() string {
+	if x != nil {
+		return x.IdentityRebindRef
+	}
+	return ""
+}
+
+func (x *InstanceSpec) GetSshFromHostOnly() bool {
+	if x != nil {
+		return x.SshFromHostOnly
+	}
+	return false
 }
 
 // A content-addressed image the daemon may fetch and cache.
@@ -4175,9 +4198,13 @@ type InstanceStatus struct {
 	Addresses []string `protobuf:"bytes,3,rep,name=addresses,proto3" json:"addresses,omitempty"`
 	Message   string   `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
 	// Runtime driver id, e.g. "libvirt-kvm".
-	Runtime       string `protobuf:"bytes,5,opt,name=runtime,proto3" json:"runtime,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Runtime string `protobuf:"bytes,5,opt,name=runtime,proto3" json:"runtime,omitempty"`
+	// (review 13 H2) The InstanceSpec.identity_rebind_ref the guest acknowledged (its nonce written
+	// back); empty until then. The control plane treats a restored instance as not ready until it
+	// matches the spec's.
+	IdentityReboundRef string `protobuf:"bytes,6,opt,name=identity_rebound_ref,json=identityReboundRef,proto3" json:"identity_rebound_ref,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *InstanceStatus) Reset() {
@@ -4241,6 +4268,13 @@ func (x *InstanceStatus) GetMessage() string {
 func (x *InstanceStatus) GetRuntime() string {
 	if x != nil {
 		return x.Runtime
+	}
+	return ""
+}
+
+func (x *InstanceStatus) GetIdentityReboundRef() string {
+	if x != nil {
+		return x.IdentityReboundRef
 	}
 	return ""
 }
@@ -6103,7 +6137,7 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fdevice_class\x18\x02 \x01(\tR\vdeviceClass\"V\n" +
 	"\x10InstancesSection\x12B\n" +
-	"\tinstances\x18\x01 \x03(\v2$.bettercompute.agent.v1.InstanceSpecR\tinstances\"\xed\x04\n" +
+	"\tinstances\x18\x01 \x03(\v2$.bettercompute.agent.v1.InstanceSpecR\tinstances\"\xca\x05\n" +
 	"\fInstanceSpec\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12Q\n" +
@@ -6120,7 +6154,9 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	" \x03(\tR\fgpuDeviceIds\x127\n" +
 	"\x04nics\x18\v \x03(\v2#.bettercompute.agent.v1.InstanceNicR\x04nics\x12C\n" +
 	"\frestore_from\x18\f \x01(\v2 .bettercompute.agent.v1.ImageRefR\vrestoreFrom\x12T\n" +
-	"\x0enetwork_policy\x18\r \x01(\x0e2-.bettercompute.agent.v1.InstanceNetworkPolicyR\rnetworkPolicy\"\x80\x01\n" +
+	"\x0enetwork_policy\x18\r \x01(\x0e2-.bettercompute.agent.v1.InstanceNetworkPolicyR\rnetworkPolicy\x12.\n" +
+	"\x13identity_rebind_ref\x18\x0e \x01(\tR\x11identityRebindRef\x12+\n" +
+	"\x12ssh_from_host_only\x18\x0f \x01(\bR\x0fsshFromHostOnly\"\x80\x01\n" +
 	"\bImageRef\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12\x16\n" +
@@ -6169,14 +6205,15 @@ const file_bettercompute_agent_v1_session_proto_rawDesc = "" +
 	"\x0ecpu_some_avg10\x18\x01 \x01(\x02R\fcpuSomeAvg10\x12*\n" +
 	"\x11memory_some_avg10\x18\x02 \x01(\x02R\x0fmemorySomeAvg10\x12\"\n" +
 	"\rio_some_avg10\x18\x03 \x01(\x02R\vioSomeAvg10\x12\x1b\n" +
-	"\tsteal_pct\x18\x04 \x01(\x02R\bstealPct\"\xc8\x01\n" +
+	"\tsteal_pct\x18\x04 \x01(\x02R\bstealPct\"\xfa\x01\n" +
 	"\x0eInstanceStatus\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12C\n" +
 	"\x05state\x18\x02 \x01(\x0e2-.bettercompute.agent.v1.InstanceObservedStateR\x05state\x12\x1c\n" +
 	"\taddresses\x18\x03 \x03(\tR\taddresses\x12\x18\n" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12\x18\n" +
-	"\aruntime\x18\x05 \x01(\tR\aruntime\"\xb7\x01\n" +
+	"\aruntime\x18\x05 \x01(\tR\aruntime\x120\n" +
+	"\x14identity_rebound_ref\x18\x06 \x01(\tR\x12identityReboundRef\"\xb7\x01\n" +
 	"\rSectionStatus\x12\x18\n" +
 	"\asection\x18\x01 \x01(\tR\asection\x12:\n" +
 	"\x05state\x18\x02 \x01(\x0e2$.bettercompute.agent.v1.SectionStateR\x05state\x12\x1e\n" +

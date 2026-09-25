@@ -594,6 +594,13 @@ export interface InstanceSpec {
    * and the host) or `none` (the host only; tunnels still work).
    */
   networkPolicy?: 'egress' | 'private' | 'none';
+  /**
+   * (review 13 H2) After a restore: a secret ref of the guest's new identity material (SSH host keys,
+   * machine id, workload credentials), delivered by bcd; it reports the ref back once the guest acked.
+   */
+  identityRebindRef?: string;
+  /** (review 13 L5) The guest's port 22 is reachable from the host only (bcd's tunnel dial). */
+  sshFromHostOnly?: boolean;
 }
 /** One instance NIC: the host bridge or network, its MAC and its IPAM addresses. */
 export interface InstanceNicSpec {
