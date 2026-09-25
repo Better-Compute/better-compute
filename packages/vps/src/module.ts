@@ -45,6 +45,7 @@ import {
   denyCreateInstance,
   instanceSettled,
   instanceView,
+  isSecretRef,
   instanceWork,
   listInstances,
   parseCreateInstance,
@@ -434,6 +435,32 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       });
   };
   /**
+   * User data given as a secret ref hands that secret to the guest, which reads it: the caller must
+   * also hold `compute:secrets:manage` on the tenant (and on the fleet in the root tenant, whose
+   * store also holds fleet secrets). Decided outside any transaction, on the caller's credential.
+   */
+  const userDataSecretCheck = async (context: MethodContext, tenantId: string): Promise<void> => {
+    if (!context.credential)
+      throw new ComputeError(
+        'ACCESS_DENIED',
+        'An instance whose user data is a secret is decided on the caller’s own credential',
+        undefined,
+        { reason: 'credential-required' },
+      );
+    const prefix = context.typePrefix ?? typePrefix;
+    await context.iam.require(context.credential, {
+      tenantId,
+      action: 'compute:secrets:manage',
+      resource: { type: `${prefix}tenant`, id: tenantId },
+    });
+    if (context.iam.rootTenantId !== undefined && tenantId === context.iam.rootTenantId)
+      await context.iam.require(context.credential, {
+        tenantId,
+        action: 'compute:secrets:manage',
+        resource: { type: `${prefix}fleet`, id: fleetResourceId },
+      });
+  };
+  /**
    * An update that changes what the guest runs (image, flavor, user data, env, network) hands the
    * template's secrets to new code, even when it names none itself: decided on the resulting
    * template's secrets. Read outside any transaction (this is the admission `check`).
@@ -526,7 +553,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           denied: (context, input, tx) => denyCreateInstance(context, input, tx),
           // A pool's budget policy (stop-new/drain offers, `budgetCheck: 'meter'`) covers
           // instances as it covers reservations: SPEND_LIMIT_REACHED, with the draft kept.
-          check: (context, input) => budgetAdmissionCheck(context, input.tenantId, input.poolId),
+          check: async (context, input) => {
+            if (isSecretRef(input.userData)) await userDataSecretCheck(context, input.tenantId);
+            await budgetAdmissionCheck(context, input.tenantId, input.poolId);
+          },
         },
         handler: (context, input) => completeCreateInstance(depsOf(context), context, input),
         // §9.1 async-with-wait: `wait` holds the answer until the instance is placed and started

@@ -249,6 +249,23 @@ describe('hosted user data (§6 Secrets)', () => {
 
   it("keeps a tenant's own ref and never deletes it", async () => {
     const own = await broker.put('acme', '#cloud-config\nhostname: mine\n');
+    // Only a secret the tenant put through secrets.put (a secret_refs row) may be user data.
+    await expect(
+      call('instances', 'create', {
+        tenantId: 'acme',
+        poolId,
+        flavor: 's',
+        imageId: 'base',
+        userData: own,
+        idempotencyKey: 'own-0',
+      }),
+    ).rejects.toThrow(/not a secret this tenant put/);
+    // What the server's secrets.put records (core/0010); vps's own sealing never writes it.
+    await db.query(
+      `INSERT INTO secret_refs (ref, tenant_id, name, version, store, last_idempotency_key)
+       VALUES ($1, 'acme', 'cloud-init', 1, 'local', 'put-1')`,
+      [own],
+    );
     const instance = (await call('instances', 'create', {
       tenantId: 'acme',
       poolId,
@@ -270,6 +287,60 @@ describe('hosted user data (§6 Secrets)', () => {
     );
     expect(rows[0]!.state).toBe('deleted');
     expect(sealed.has(own)).toBe(true);
+  });
+
+  it('never hands a guest a secret without a secrets:manage decision, nor another instance its sealed user data', async () => {
+    const first = (await call('instances', 'create', {
+      tenantId: 'acme',
+      poolId,
+      flavor: 's',
+      imageId: 'base',
+      idempotencyKey: 'victim-1',
+    })) as { id: string };
+    const { user_data: victims } = await stored(first.id);
+    await expect(
+      call('instances', 'create', {
+        tenantId: 'acme',
+        poolId,
+        flavor: 's',
+        imageId: 'base',
+        userData: victims,
+        idempotencyKey: 'thief-1',
+      }),
+    ).rejects.toThrow(/not a secret this tenant put/);
+    // The admission check decides compute:secrets:manage on the caller's own credential.
+    const check = (
+      api.instances.create as unknown as {
+        admission: { check(context: MethodContext, input: unknown): Promise<void> };
+      }
+    ).admission.check;
+    const decided: unknown[] = [];
+    const input = api.instances.create.validate!({
+      tenantId: 'acme',
+      poolId,
+      flavor: 's',
+      imageId: 'base',
+      userData: 'secret://acme/s1',
+      idempotencyKey: 'k',
+    });
+    const iamContext = (credential: unknown) =>
+      ({
+        ...moduleContext(db),
+        caller: alice,
+        credential,
+        iam: {
+          async require(_credential: unknown, request: unknown) {
+            decided.push(request);
+          },
+        },
+      }) as unknown as MethodContext;
+    await expect(check(iamContext(undefined), input)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    await check(iamContext({ token: 't' }), input).catch(() => {});
+    expect(decided[0]).toMatchObject({
+      tenantId: 'acme',
+      action: 'compute:secrets:manage',
+      resource: { type: 'compute-tenant', id: 'acme' },
+    });
   });
 
   it('deletes the sealed user data with the instance', async () => {

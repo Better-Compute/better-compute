@@ -834,6 +834,27 @@ export function instanceAttributes(
  * `instances.create` transaction 1: the idempotency lookup, image and flavor checks, the draft row
  * and its authz row. A finished request under the same key replays; a different one is CONFLICT.
  */
+/**
+ * User data given as a secret ref must be a secret the tenant wrote through `secrets.put`
+ * (`secret_refs`), never a platform-minted one (join tokens, BMC credentials, another instance's
+ * sealed user data) that lives in the same store. The guest reads its user data, and secrets are
+ * write-only (§6), so the caller also needs `compute:secrets:manage` (the admission check).
+ */
+async function assertTenantPutSecret(tx: SqlTx, tenantId: string, ref: string): Promise<void> {
+  const present = await tx.query<{ found: string | null }>(
+    `SELECT to_regclass('secret_refs')::text AS found`,
+  );
+  const known =
+    present.rows[0]?.found &&
+    (await tx.query(`SELECT 1 FROM secret_refs WHERE tenant_id = $1 AND ref = $2`, [tenantId, ref]))
+      .rows.length > 0;
+  if (!known)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `${ref} is not a secret this tenant put (secrets.put); user data refs name only those`,
+    );
+}
+
 export async function prepareCreateInstance(
   deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes'>,
   context: MethodContext,
@@ -857,6 +878,7 @@ export async function prepareCreateInstance(
     );
   if (existing && !existing.draft) return { status: 'replay', result: instanceView(existing) };
 
+  if (isSecretRef(input.userData)) await assertTenantPutSecret(tx, input.tenantId, input.userData);
   const pool = await visibleVpsPool(tx, input.tenantId, input.poolId);
   const flavor = await readFlavorByName(tx, input.poolId, input.flavor);
   if (!flavor || flavor.archived)
