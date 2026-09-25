@@ -5,11 +5,13 @@ import {
   summarize,
   type ControlPlaneSim,
 } from '@better-compute/testing';
+import { provisionModule } from '@better-compute/provision';
 
 // PLAN.md §15 v0.4 sim scenarios on the real control plane and three real gateways under the fleet simulator:
 // - kill 1 of 3 gateways → reconnect in <60 s with 0 unreachable marks and 0 duplicate executions;
 // - a zombie gateway (partitioned from the database) self-fences in <20 s;
-// - a database failover and a 10-minute site partition release nothing.
+// - a database failover and a 10-minute site partition release nothing;
+// - an XID storm trips the remediation circuit breaker (one faulty node is rebooted; a storm is left alone).
 // Times are simulated. The invariants (I1 bookings, I2 executions, I5 no release on disconnect, I8 billing) are
 // checked at the end of each.
 
@@ -203,6 +205,57 @@ describe('§15 v0.4 scenarios', () => {
     console.log(
       `database failover: ${rig.outageErrors} loop failures, ${(await unreachableMarks(rig, downAt)).length} unreachable marks`,
     );
+  }, 600_000);
+
+  it('an XID storm trips the breaker: one faulty node is remediated, a storm is not', async () => {
+    rig = await createControlPlaneSim({
+      seed: 'v04-xid-storm',
+      nodes: 20,
+      gateways: 3,
+      modules: [provisionModule()],
+    });
+    await rig.run(3 * MIN);
+    const ids = nodeIds(rig);
+    const xid = (index: number) =>
+      rig!.sim.daemon(ids[index]!).injectXid(rig!.nodes[index]!.hardware.gpuUuids[0]!, 79);
+    const workflows = async (nodes: readonly string[]) => {
+      const { rows } = await rig!.database.query<{ node_id: string; state: string }>(
+        `SELECT node_id, state FROM workflows WHERE owner = 'health' AND node_id = ANY($1::text[])`,
+        [nodes],
+      );
+      return rows;
+    };
+    const events = async (type: string) => {
+      const { rows } = await rig!.database.query<{ node_id: string }>(
+        `SELECT payload->'data'->>'nodeId' AS node_id FROM outbox WHERE topic = $1`,
+        [type],
+      );
+      return rows.map((row) => row.node_id);
+    };
+
+    // One node (5% of the pool) faults: it is fenced from scheduling and rebooted, which clears the fault.
+    xid(0);
+    await rig.run(2 * MIN);
+    expect(await events('node.remediation.started')).toEqual([ids[0]]);
+    await rig.run(5 * MIN);
+    expect((await workflows([ids[0]!])).map((row) => row.state)).toEqual(['succeeded']);
+    expect(await events('node.remediation.succeeded')).toEqual([ids[0]]);
+
+    // A storm: 6 more nodes (30%) report XID 79 at once. Rebooting them all would take out a third of the pool
+    // for what is more likely a shared cause, so the breaker holds remediation for the pool.
+    const storm = ids.slice(1, 7);
+    for (let index = 1; index < 7; index++) xid(index);
+    await rig.run(5 * MIN);
+    expect(await workflows(storm)).toEqual([]);
+    expect(new Set(await events('pool.remediation.paused')).size).toBeGreaterThan(0);
+    const { rows: fenced } = await rig.database.query<{ id: string }>(
+      `SELECT DISTINCT node_id AS id FROM node_conditions WHERE type = 'Xid79' AND status = 'true'`,
+    );
+    expect(fenced.map((row) => row.id).sort()).toEqual([...storm].sort());
+    // Held back, not escalated: no node was put into maintenance.
+    const { rows: maintenance } = await rig.database.query('SELECT 1 FROM nodes WHERE maintenance');
+    expect(maintenance).toHaveLength(0);
+    assertInvariants(await rig.invariants());
   }, 600_000);
 
   it('a 10-minute site partition releases nothing; the nodes come back', async () => {

@@ -17,6 +17,7 @@ import {
 import {
   attachFrameConn,
   createGateway,
+  xidStatusHandler,
   type Gateway,
   type GatewayOptions,
 } from '@better-compute/gateway';
@@ -588,7 +589,8 @@ export async function createControlPlaneSim(
           services: compute.gatewayServices,
           work: compute.context.work,
           events: compute.context.events,
-          reports: gatewayReportHandlers,
+          // As `serve` composes them: node XIDs feed §10.1 health (conditions, NoSchedule, the health reconciler).
+          reports: { ...gatewayReportHandlers, status: xidStatusHandler },
           revocations,
           ...options.gateway,
         });
