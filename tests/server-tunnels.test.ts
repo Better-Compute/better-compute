@@ -469,7 +469,11 @@ interface Recorded {
 }
 
 /** A relay whose "node" echoes data frames back and ends when the caller sends `closed`. */
-function echoRelay(recorded: Recorded, openDelayMs = 0): TunnelRelay {
+/**
+ * A relay that echoes data. Like the real gateway relay it does not pass the node's `opened` on
+ * (the gateway consumes it) unless `forwardOpened` is set.
+ */
+function echoRelay(recorded: Recorded, openDelayMs = 0, forwardOpened = false): TunnelRelay {
   return {
     async open(input) {
       if (openDelayMs) await new Promise((resolve) => setTimeout(resolve, openDelayMs));
@@ -491,12 +495,13 @@ function echoRelay(recorded: Recorded, openDelayMs = 0): TunnelRelay {
         if (waiter) waiter({ value: frame, done: false });
         else queue.push(frame);
       };
-      push(
-        create(TunnelFrameSchema, {
-          tunnelId: input.tunnelId,
-          body: { case: 'opened', value: {} },
-        }),
-      );
+      if (forwardOpened)
+        push(
+          create(TunnelFrameSchema, {
+            tunnelId: input.tunnelId,
+            body: { case: 'opened', value: {} },
+          }),
+        );
       const tunnel: RelayedTunnel = {
         frames: {
           [Symbol.asyncIterator]: () => ({
@@ -641,6 +646,30 @@ describe('client tunnel frames', () => {
 });
 
 describe('GET /tunnels/{ticket}', () => {
+  it('announces `opened` to the caller exactly once, whatever the relay forwards', async () => {
+    for (const forwardOpened of [false, true]) {
+      const recorded: Recorded = { opened: [], received: [], closed: 0 };
+      const { server, base } = await listen({ relay: echoRelay(recorded, 0, forwardOpened) });
+      try {
+        const ticket = await open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' });
+        const client = connect(`${base}/${ticket.path}`);
+        expect(await client.opened).toBe(true);
+        client.send(
+          create(TunnelFrameSchema, {
+            tunnelId: '',
+            body: { case: 'data', value: Buffer.from('x') },
+          }),
+        );
+        await until(() => client.frames.length >= 2);
+        expect(client.frames.map((frame) => frame.body.case)).toEqual(['opened', 'data']);
+        expect(client.frames[0]!.tunnelId).toBe(ticket.tunnelId);
+        client.ws.close();
+      } finally {
+        server.close();
+      }
+    }
+  });
+
   it('works with the client’s connectTunnel', async () => {
     const recorded: Recorded = { opened: [], received: [], closed: 0 };
     const { server, base } = await listen({ relay: echoRelay(recorded) });

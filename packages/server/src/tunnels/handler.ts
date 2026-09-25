@@ -11,6 +11,7 @@ import {
 import {
   decodeMessage,
   encodeMessage,
+  encodeMessageJson,
   TunnelFrameSchema,
   type TunnelFrame,
 } from '@better-compute/protocol';
@@ -263,11 +264,19 @@ async function open(
     options.onClose?.({ tunnelId: claims.sid, nodeId, subject: claims.sub, reason });
   };
 
+  // `relay.open` resolving means the node opened its end (the gateway consumes the node's own
+  // `opened`): tell the caller, exactly once, before any output.
+  ws.sendBinary(
+    encodeMessageJson(TunnelFrameSchema.typeName, { tunnelId: claims.sid, opened: {} }),
+  );
+
   // Node → caller, with backpressure from the caller's socket.
   void (async () => {
     try {
       for await (const frame of tunnel.frames) {
         if (ended) break;
+        // Already announced above; a relay that forwards the node's own is not repeated.
+        if (frame.body.case === 'opened') continue;
         if (!ws.sendBinary(encodeMessage(TunnelFrameSchema, frame)))
           await new Promise<void>((resolve) => ws.onDrain(resolve));
       }
