@@ -49,6 +49,24 @@ serve composition audit), then docs site. [0b2be8] (= former [9ec62d]) → tunne
 `cloud-iid` (seams in bb7106b). [18810e] → gateway. [90a507] is a better-iam session: never assign it better-compute
 work. console-kit + `apps/console` still unassigned.
 
+Round 3 status ([37c0ab], evening 2026-09-24). DONE: the whole Round 2 table above (server follow-ups be0048e;
+per-input actions + tunnels hosted f1bf979; module-context ports + v0.2 groups 11a798b; SiteBoot 650116f), console-kit +
+apps/console ([0b2be8]), driver-sdk (145ce12), examples/ ([7fe4f7]), secret broker + revocation feed ([df4a91]),
+multi-gateway 10k + nightly sim ([3afca2]), spot/node leases/pool-lease placer ([13084d]), BMC rotation + tenant-root
+([9e83b6]). Current owners:
+- [18810e]: server runtime work-queue/reconcilers/leases/workers (join-storm perf, lease renewal timer, shard takeover)
+  + gateway; docs generator (`apps/docs/scripts`).
+- [ebe83b]: `apps/docs` shell + hand-written content.
+- [df4a91]: worker command signing + trust bundle (v0.2 exit); security reviews.
+- [9e83b6]: protocol `encodeMessageJson` + runtime `encodePayload` (proto3 JSON payloads), postgres `retentionModule()`,
+  metal on FakeDaemon, firmware reflash.
+- [0b2be8]: SSH principal binding (node-bound certs), agt/dlg ticket claims, console review fixes, console.
+- [13084d]: set-based batch commits in the pool-lease worker, image-cached scorer, VPS on pool-lease.
+- [3afca2]: FakeDaemon vps-host profile, instances + allowed_kinds in the nightly, v0.3 no-leak acceptance in sim.
+- [7fe4f7]: CLI (serve/dev/examples wiring: retentionModule, pool-lease, tunnels relay).
+- Orchestrator [37c0ab]: installs/lockfile, core/protocol additive changes, server index/options/api/context.
+Open, unassigned: W1 Go daemon (needs Go installed), real-Postgres runs (no Postgres here), D15 hardware gates.
+
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
 P0 is committed (3a70aa0, `pnpm check` green). v0.1 = PLAN.md §16 "Adopt & reserve". One owner per unit; message the
@@ -320,6 +338,7 @@ Rules for v0.1:
   additive `gang?: { size; topologyKey? }` on `ReservationRequest`/`PlacementRequest`.
   Next (asked by [37c0ab]): shrink the inline placer's pool-lock critical section; new suite
   `tests/bench/placements.bench.ts` + `bench/placements/**` (PLAN §16 placements/s). Then spot preemption.
+  Done: 744e233 (shortlist, 35.7/s), ef9d32c+03d8e10 (spot), c7c7c4d (binding 'node' leases, with [9e83b6]).
 - (Feature expansion [9ec62d], v0.2 FleetConfig, 2026-09-24, asked by [56cfd7]) new package `packages/fleet/**`
   (`fleetModule()`: fleet.export/plan/apply, composite apply via check/invoke, `fleet/0001_names`), CLI
   `packages/cli/src/commands/fleet.ts`, `tests/{fleet-config,cli-fleet}.test.ts`. Committed 9ccff66, 05e6265.
@@ -335,7 +354,13 @@ Rules for v0.1:
   server groups as NEW files packages/server/src/api/{join-requests,site-tokens,secrets,drivers,sites-manage,
   nodes-delete,v02}.ts + controllers/site-boot.ts (ef279fa, tests eb82f90; registration lines sent to [37c0ab]).
   Also own `tests/server-groups-{join-requests,site-tokens,secrets-drivers,sites-nodes-delete}.test.ts`,
-  `tests/support/server-v02.ts`.
+  `tests/support/server-v02.ts`. Then: node-signed results fail-closed + core/0012_v02_evidence (result_sig,
+  node_bindings) 88780ec/338e895, provision join resolvers 3db0a56, v0.5 dedicated-root metal (metal/0003,
+  contract with [13084d]) b36fe7e, BMC rotation (metal/0004) 516064c, discovery tokens as refs b1e82ec, firmware
+  reflash fb05a3c, capacity+metal lease E2E 5f2f289, FakeDaemon attest 6979115 + dev fleet `joinSite()` 7bdcaef
+  (delegated edits in packages/testing), `tests/support/metal-fake-site.ts`. Waiting on: [37c0ab]'s runtime
+  encodePayload accepting proto3 JSON (metal on the real server; `tests/metal-fakedaemon.test.ts`), [df4a91]'s
+  broker (ramdisk joins on the dev stack).
 - (Feature expansion [3afca2] = former [1f44fd], resumed) owns again `packages/{iam,events,audit,observability,
   provider-proxmox}/**`, `packages/testing/src/realtime/**`, `tests/{realtime/**,bench/realtime-fleet*,iam-bridge-*,
   events-*,audit-*,observability-*,provider-proxmox*}`. Now: `createRealtimeFleet` (join-to-adopted, place-to-active)
@@ -378,6 +403,14 @@ Rules for v0.1:
 - (Feature expansion [0b2be8], v0.5 console-kit, assigned by [37c0ab]) NEW package `packages/console-kit/**`
   (framework-free stores over @better-compute/client, SSE watch, permission-aware actions; outside the umbrella),
   `tests/console-kit*.test.ts`, root tsconfig + vitest inserts.
+- (Feature expansion [0b2be8], v0.5 apps/console, assigned by [37c0ab]) NEW `apps/console/**` (private Next 16 app:
+  better-compute + better-iam on one origin, console-kit/react hooks, @better-iam/react; dev config on PGlite +
+  embedded IAM). `typecheck` script only; `next build` stays out of `pnpm check`. DONE 694f3b7 (Next 15.5; IAM on
+  libSQL; stack starts in instrumentation.ts). server.mjs (tunnels) c758efd, /api/compute/watch 93ac1c8 DONE.
+- (Feature expansion [0b2be8], v0.3 tunnels in the testing kit, 2026-09-24; the tunnels exception above) FakeDaemon
+  answers `OpenTunnel`: NEW `packages/testing/src/daemon/tunnels.ts` (ticket check against the spec's pinned JWKS +
+  own jti set, `opened`, an echo shell program) + an additive `openTunnel` case and a `tunnels` option in
+  fake-daemon.ts + one export line; `tests/testing-daemon-tunnels.test.ts`. Journal untouched.
 - (Feature expansion [9ec62d], v0.4 audit primitives, 2026-09-24; split with [1f44fd] per [56cfd7]) pure crypto only in `packages/pki/src/audit.ts`: RFC 6962 hashing, inclusion + consistency proofs, `signCheckpoint`/`verifyCheckpoint` ('audit-checkpoint'), the bundle's audit signing key; CLI `audit verify|prove|checkpoint` calling `@better-compute/audit`. No table in pki (`packages/audit` owns it).
 
 - ([7fe4f7], dev stack, 2026-09-24) NEW files only: `packages/testing/src/dev/stack.ts` (`createDevStack()`: PGlite +
@@ -388,9 +421,10 @@ Rules for v0.1:
 - ([7fe4f7], owns `packages/cli/**` + `tests/cli-*.test.ts` since 2026-09-24, from [9ec62d]) `dev --sim N` landed
   c084bb2 (`packages/cli/src/dev-sim.ts`; runServer hooks afterMigrate/started/stopping). Now: `serve` composition
   audit — `--roles gateway` (mTLS gateway via `spiffeAuthenticate`, report handlers, gatewayNotifier) and config-module
-  wiring of every module; new files `packages/cli/src/host/**` (landed 268d0be, 18432ca). Now `apps/docs/**` (NEW:
-  phase 1 = `apps/docs/scripts/{generate,check-content}.mjs` from the live registry with every module, generated
-  `apps/docs/{generated,content/docs/reference}/**`, hand-written guides; no package.json/deps until phase 2).
+  wiring of every module; new files `packages/cli/src/host/**` (landed 268d0be, 18432ca; gateway auth fail-closed
+  e35e4a5; doctor host findings 77e077c; root /.well-known = server's document 710cec1). apps/docs generator phase 1
+  landed aaeb817 and moved to [18810e]. examples/ landed 560f295; revocation feed + host.metrics 43019d9; tunnels
+  auto-mount dcadb48 (host/tunnels.ts; swap in [0b2be8]'s gatewayTunnelRelay when it lands). Free for the next unit.
 - ([18810e], continuing [17cfb9]'s W2b gateway, 2026-09-24) `packages/gateway/**`, `tests/gateway-*.test.ts`,
   `tests/bench/gateway-streams.bench.ts`: Hello writes `node_sessions.daemon_version/proto_max` (core/0008); a
   `reports.status(tx, ctx, StatusReport)` hook for health (XID conditions → inventory `recordXid`); dispatch/cancel
@@ -401,3 +435,12 @@ Rules for v0.1:
   ([18810e], assigned by [37c0ab]) (1) join-storm throughput: `packages/server/src/join/service.ts` (JoinService.join)
   + gateway forwarding, target 1k joins < 30 s on PGlite; (2) then docs site phase 1: `apps/docs/**`,
   `tests/docs-generate.test.ts`.
+- ([ebe83b] "Docs app with better-iam styling", approved by [37c0ab] 2026-09-24, at the user's request) docs site
+  phase 2: the Next 16 + Fumadocs app mirroring ../better-iam/apps/docs with its BoardUI styling. Owns
+  `apps/docs/{package.json,tsconfig.json,next.config.mjs,postcss.config.mjs,source.config.ts,proxy.ts,Dockerfile,
+  README.md,THIRD-PARTY-NOTICES.md,.gitignore}`, `apps/docs/{app,components,lib,styles,utils,public}/**`,
+  `apps/docs/scripts/generate-icons.mjs` and the hand-written pages under `apps/docs/content/docs/**` (everything
+  except the generated reference pages). [18810e] keeps `scripts/{generate,check-content}.mjs`, `generated/*.json`,
+  the `descriptions/**` format (the prose in `descriptions/api/*.md` and `errors.md` is [ebe83b]'s, agreed), the
+  generated reference pages and `tests/docs-generate.test.ts`. Installs by [37c0ab] (done 2026-09-24);
+  `next build` stays out of `pnpm check`.

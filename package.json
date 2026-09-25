@@ -19,6 +19,7 @@
     "check:packed-types": "node scripts/check-packed-types.mjs",
     "test:packed": "node scripts/packed-smoke.mjs",
     "bench:scale": "vitest run --config vitest.bench.config.ts",
+    "sim:nightly": "vitest run --config vitest.nightly.config.ts",
     "umbrella": "node scripts/umbrella.mjs",
     "proto:gen": "node scripts/proto-gen.mjs",
     "proto:check": "node scripts/proto-gen.mjs --check",
