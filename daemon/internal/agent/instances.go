@@ -125,7 +125,15 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			specErrors[id] = "runtime " + spec.GetRuntime() + " is not installed on this host"
 			continue
 		}
-		if img := spec.GetImage(); !exists && (img == nil || !imageFormats[img.GetFormat()] || img.GetUrl() == "" || len(img.GetSha256()) == 0) {
+		restoreFrom := spec.GetRestoreFrom()
+		if restoreFrom.GetUrl() == "" {
+			restoreFrom = nil
+		}
+		if restoreFrom != nil && len(restoreFrom.GetSha256()) != 32 {
+			specErrors[id] = fmt.Sprintf("snapshot %s has no sha256 to verify", firstNonEmpty(restoreFrom.GetRef(), restoreFrom.GetUrl()))
+			continue
+		}
+		if img := spec.GetImage(); !exists && restoreFrom == nil && (img == nil || !imageFormats[img.GetFormat()] || img.GetUrl() == "" || len(img.GetSha256()) == 0) {
 			specErrors[id] = fmt.Sprintf("image %s is not a raw, qcow2 or iso image", img.GetRef())
 			continue
 		}
@@ -142,7 +150,16 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 			}
 			userData = v
 		}
-		if err := r.Ensure(ctx, spec, userData); err != nil {
+		var restore *runtime.Restore
+		if restoreFrom != nil && !exists {
+			path, err := c.a.downloadVerified(ctx, restoreFrom.GetUrl(), restoreFrom.GetSha256())
+			if err != nil {
+				specErrors[id] = "snapshot: " + err.Error()
+				continue
+			}
+			restore = &runtime.Restore{Path: path, Sha256: fmt.Sprintf("%x", restoreFrom.GetSha256()), CPUModel: c.a.cpuModel()}
+		}
+		if err := r.Ensure(ctx, spec, userData, restore); err != nil {
 			specErrors[id] = err.Error()
 			continue
 		}

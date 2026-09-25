@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,6 +45,18 @@ type Domain struct {
 	UserData string `json:"userData,omitempty"`
 	// Boots counts starts (a resume from paused is not a boot).
 	Boots int `json:"boots"`
+	// RestoredFrom is the hex sha256 of the snapshot it was restored from.
+	RestoredFrom string `json:"restoredFrom,omitempty"`
+	// Snapshots counts snapshots taken of it.
+	Snapshots int `json:"snapshots,omitempty"`
+}
+
+// fakeSnapshot is the fake runtime's snapshot format.
+type fakeSnapshot struct {
+	Runtime       string `json:"runtime"`
+	CPUModel      string `json:"cpuModel,omitempty"`
+	IncludeMemory bool   `json:"includeMemory"`
+	Domain        Domain `json:"domain"`
 }
 
 // Runtime drives one hypervisor or container runtime.
@@ -53,12 +66,26 @@ type Runtime interface {
 	// List returns every domain the runtime holds, managed or not.
 	List(ctx context.Context) ([]Domain, error)
 	// Ensure defines the domain for spec, or updates an existing one (resources, NICs, GPUs); it
-	// never starts it. userData is the NoCloud user data for a new domain.
-	Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userData []byte) error
+	// never starts it. userData is the NoCloud user data for a new domain; restore, when set, is a
+	// verified snapshot a new domain is restored from.
+	Ensure(ctx context.Context, spec *agentv1.InstanceSpec, userData []byte, restore *Restore) error
+	// Snapshot writes a snapshot of a managed domain (its disk, and with includeMemory its memory
+	// state) to w, and returns the CPU model the memory state depends on (empty for disk only).
+	Snapshot(ctx context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (string, error)
 	// SetState starts, stops, pauses or resumes a managed domain.
 	SetState(ctx context.Context, id, state string) error
 	// Destroy removes a managed domain and its disks and taps.
 	Destroy(ctx context.Context, id string) error
+}
+
+// Restore is a snapshot a new domain boots from.
+type Restore struct {
+	// Path is the downloaded snapshot, its sha256 already verified.
+	Path string
+	// Sha256 is its hex digest.
+	Sha256 string
+	// CPUModel is this host's CPU model: a memory snapshot restores only on the same model.
+	CPUModel string
 }
 
 // ErrNoCapacity reports a start beyond the host's free vCPU or memory.
@@ -141,7 +168,7 @@ func (f *Fake) List(context.Context) ([]Domain, error) {
 	return out, nil
 }
 
-func (f *Fake) Ensure(_ context.Context, spec *agentv1.InstanceSpec, userData []byte) error {
+func (f *Fake) Ensure(_ context.Context, spec *agentv1.InstanceSpec, userData []byte, restore *Restore) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	st, err := f.load()
@@ -163,6 +190,24 @@ func (f *Fake) Ensure(_ context.Context, spec *agentv1.InstanceSpec, userData []
 		if img := spec.GetImage(); img != nil {
 			d.Image = fmt.Sprintf("%x", img.GetSha256())
 		}
+		if restore != nil {
+			raw, err := os.ReadFile(restore.Path)
+			if err != nil {
+				return err
+			}
+			var snap fakeSnapshot
+			if err := json.Unmarshal(raw, &snap); err != nil {
+				return fmt.Errorf("not a %s snapshot", f.RuntimeName)
+			}
+			if snap.Runtime != f.RuntimeName {
+				return fmt.Errorf("the snapshot was taken by %s, not %s", snap.Runtime, f.RuntimeName)
+			}
+			if snap.IncludeMemory && snap.CPUModel != restore.CPUModel {
+				return fmt.Errorf("the snapshot's memory state needs CPU %q, this host has %q", snap.CPUModel, restore.CPUModel)
+			}
+			d.Image, d.UserData = snap.Domain.Image, snap.Domain.UserData
+			d.RestoredFrom = restore.Sha256
+		}
 	} else if spec.GetDiskBytes() < d.DiskBytes {
 		return errors.New("a disk cannot shrink")
 	}
@@ -170,6 +215,29 @@ func (f *Fake) Ensure(_ context.Context, spec *agentv1.InstanceSpec, userData []
 	d.GPUs, d.MACs, d.Addresses = append([]string(nil), spec.GetGpuDeviceIds()...), macs, addrs
 	st.Domains[d.ID] = d
 	return f.save(st)
+}
+
+func (f *Fake) Snapshot(_ context.Context, id string, includeMemory bool, cpuModel string, w io.Writer) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, err := f.load()
+	if err != nil {
+		return "", err
+	}
+	d, ok := st.Domains[id]
+	if !ok || !d.Managed {
+		return "", fmt.Errorf("no managed domain %s", id)
+	}
+	snap := fakeSnapshot{Runtime: f.RuntimeName, IncludeMemory: includeMemory, Domain: d}
+	if includeMemory {
+		snap.CPUModel = cpuModel
+	}
+	if err := json.NewEncoder(w).Encode(snap); err != nil {
+		return "", err
+	}
+	d.Snapshots++
+	st.Domains[id] = d
+	return snap.CPUModel, f.save(st)
 }
 
 func (f *Fake) SetState(_ context.Context, id, state string) error {
