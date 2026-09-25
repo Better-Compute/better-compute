@@ -17,6 +17,7 @@ import {
   type IamPort,
 } from '@better-compute/core';
 import { confirmationValidSeconds } from './confirmation.js';
+import { sessionAuthorization, type ListedSession } from './sessions.js';
 import { authorizeManyLimit, fromIamError } from './embedded.js';
 import { createFlagCache, type FlagCache } from './flags.js';
 import { recordUsageIsolated, type UsageBilling, type UsageInputLike } from './usage.js';
@@ -93,6 +94,29 @@ export interface RemoteIamClient {
       options?: CallOptions,
     ): Promise<{ receipts: { duplicate: boolean }[] }>;
   };
+  /** Administrator reads for `authorizeSession` (with `authorizeSessions`). */
+  identities?: {
+    listSessions(
+      input: { tenantId: string; identityId: string },
+      options?: CallOptions,
+    ): Promise<ListedSession[]>;
+    get(
+      input: { tenantId: string; identityId: string },
+      options?: CallOptions,
+    ): Promise<{ status?: string }>;
+  };
+  policies?: {
+    simulate(
+      input: {
+        tenantId: string;
+        identityId: string;
+        action: string;
+        resource: { type: string; id: string };
+        assumeMfa?: boolean;
+      },
+      options?: CallOptions,
+    ): Promise<{ allowed: boolean }>;
+  };
   features: {
     evaluate(
       input: { tenantId: string; keys?: string[] },
@@ -121,6 +145,12 @@ export interface RemoteIamOptions {
   /** Events per HTTP `recordMany`; default and maximum 100. */
   usageBatchSize?: number;
   successorOf?(tenantId: string, identityId: string): Promise<string | undefined>;
+  /**
+   * Offer `authorizeSession` (§7.6 tunnel re-authorization) through HTTP `identities.listSessions`,
+   * `identities.get` and `policies.simulate` with the service credential, which then also needs
+   * `iam:identities:read` and `iam:policies:simulate`. Default false: the port has no `authorizeSession`.
+   */
+  authorizeSessions?: boolean;
 }
 
 export interface RemoteIam extends IamPort {
@@ -250,7 +280,7 @@ export function remoteIam(options: RemoteIamOptions): RemoteIam {
     resource: { type: decision.resource.type, id: decision.resource.id },
   });
 
-  return {
+  const port: RemoteIam = {
     rootTenantId: options.rootTenantId,
     flags,
     authenticate: (credential) =>
@@ -398,4 +428,27 @@ export function remoteIam(options: RemoteIamOptions): RemoteIam {
       readOnlyDecisions: false,
     }),
   };
+  if (options.authorizeSessions) {
+    // better-iam's HTTP API exposes the same administrator reads as embedded mode: with the service credential.
+    const reads = async () => {
+      const iam = await client();
+      if (!iam.identities || !iam.policies)
+        throw new ComputeError(
+          'INVALID_CONFIG',
+          'This better-iam client has no identities.listSessions or policies.simulate',
+        );
+      return { identities: iam.identities, policies: iam.policies };
+    };
+    const decide = sessionAuthorization({
+      now: () => (options.clock ?? systemClock).now(),
+      listSessions: async (input) =>
+        (await reads()).identities.listSessions(input, await service()),
+      identityStatus: async (input) =>
+        (await (await reads()).identities.get(input, await service())).status,
+      simulate: async (input) =>
+        (await (await reads()).policies.simulate(input, await service())).allowed === true,
+    });
+    port.authorizeSession = (session, decision) => mapped(() => decide(session, decision));
+  }
+  return port;
 }

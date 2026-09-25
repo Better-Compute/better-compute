@@ -20,6 +20,7 @@ import {
   type UsageResult,
 } from '@better-compute/core';
 import { confirmationValidSeconds } from './confirmation.js';
+import { sessionAuthorization, type ListedSession } from './sessions.js';
 import { createFlagCache, type FlagCache } from './flags.js';
 import { recordUsageIsolated, type UsageBilling } from './usage.js';
 
@@ -68,6 +69,29 @@ export interface EmbeddedIamHost {
   };
   features: { isEnabled(tenantId: string, key: string): Promise<boolean> };
   api: {
+    /** Administrator reads for `authorizeSession` (with `sessionReviewer`). */
+    identities?: {
+      listSessions(
+        credential: CredentialInput,
+        input: { tenantId: string; identityId: string },
+      ): Promise<ListedSession[]>;
+      get(
+        credential: CredentialInput,
+        input: { tenantId: string; identityId: string },
+      ): Promise<{ status?: string }>;
+    };
+    policies?: {
+      simulate(
+        credential: CredentialInput,
+        input: {
+          tenantId: string;
+          identityId: string;
+          action: string;
+          resource: { type: string; id: string };
+          assumeMfa?: boolean;
+        },
+      ): Promise<{ allowed: boolean }>;
+    };
     delegations: {
       requestConfirmation(
         credential: CredentialInput,
@@ -109,6 +133,12 @@ export interface EmbeddedIamOptions {
   usageBatchSize?: number;
   /** Successor lookup for offboarded identities (the IAM module's `iam_successors`). */
   successorOf?(tenantId: string, identityId: string): Promise<string | undefined>;
+  /**
+   * A credential of compute's service account for `authorizeSession` (§7.6 tunnel re-authorization): it needs
+   * `iam:identities:read` and `iam:policies:simulate` in the tenants it re-decides for (root: every tenant).
+   * Without it the port has no `authorizeSession`.
+   */
+  sessionReviewer?: Credential | (() => Credential | Promise<Credential>);
 }
 
 /** The embedded port, with its flag cache exposed for invalidation. */
@@ -315,5 +345,19 @@ export function embeddedIam(iam: EmbeddedIamHost, options: EmbeddedIamOptions = 
     featureEnabled: (tenantId, key) => mapped(() => flags.get(tenantId, key)),
     capabilities: () => capabilities,
   };
+  const { identities, policies } = iam.api;
+  const reviewer = options.sessionReviewer;
+  if (reviewer && identities && policies) {
+    const credential = async () =>
+      credentialInput(typeof reviewer === 'function' ? await reviewer() : reviewer);
+    const decide = sessionAuthorization({
+      now: () => clock.now(),
+      listSessions: async (input) => identities.listSessions(await credential(), input),
+      identityStatus: async (input) => (await identities.get(await credential(), input)).status,
+      simulate: async (input) =>
+        (await policies.simulate(await credential(), input)).allowed === true,
+    });
+    port.authorizeSession = (session, decision) => mapped(() => decide(session, decision));
+  }
   return port;
 }
