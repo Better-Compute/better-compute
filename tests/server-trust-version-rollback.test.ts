@@ -57,17 +57,18 @@ describe('trust bundle version: stale replicas (review 7 #4)', () => {
     expect(old.commandSigningRoots).toHaveLength(2);
     // The new config removes the root: version 2.
     expect((await published({})).version).toBe(2n);
-    // A replica still on the old config restarts: it keeps version 1, which daemons holding 2
-    // ignore, and says so.
-    expect((await published({ commandSigningRoots: [revoked] })).version).toBe(1n);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/replaced by version 2/);
+    // A replica still on the old config restarts: it refuses to start (review 8 #4) rather than
+    // hand the removed root to nodes joining through it.
+    await expect(published({ commandSigningRoots: [revoked] })).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+      message: expect.stringMatching(/replaced by version 2/),
+    });
     // The record is untouched: the new config still publishes 2.
     expect((await published({})).version).toBe(2n);
     // Republishing the old bundle on purpose takes a version above the record.
     expect((await published({ commandSigningRoots: [revoked], trustVersion: 3 })).version).toBe(3n);
     // Now the root-less bundle is the stale one.
-    expect((await published({})).version).toBe(2n);
-    expect(warnings).toHaveLength(2);
+    await expect(published({})).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+    expect(warnings).toEqual([]);
   });
 });

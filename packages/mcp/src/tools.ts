@@ -27,6 +27,12 @@ export interface JsonSchema {
   uniqueItems?: boolean;
 }
 
+const sha256Hex = async (text: string): Promise<string> =>
+  Array.from(
+    new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
+    (byte) => byte.toString(16).padStart(2, '0'),
+  ).join('');
+
 export interface ToolAnnotations {
   title?: string;
   readOnlyHint?: boolean;
@@ -825,17 +831,21 @@ export function computeTools(
         idempotentHint: true,
         openWorldHint: false,
       },
-      run: (args, context) =>
-        context.api.$request('commandBatches/create', {
+      run: async (args, context) => {
+        const kind = (args.kind as string | undefined) ?? 'node.reboot';
+        const nodeIds = [...(args.nodeIds as string[])].sort();
+        // The same proposal again (an agent retrying) is the same batch: approvers never see two.
+        const key =
+          (args.idempotencyKey as string | undefined) ??
+          `propose:${await sha256Hex(JSON.stringify([nodeIds, kind, args.reason, args.notAfterSeconds ?? null]))}`;
+        return context.api.$request('commandBatches/create', {
           tenantId: context.tenantId,
           reason: args.reason,
-          scope: (args.nodeIds as string[]).map((nodeId) => ({
-            subject: nodeId,
-            kind: (args.kind as string | undefined) ?? 'node.reboot',
-          })),
+          scope: nodeIds.map((nodeId) => ({ subject: nodeId, kind })),
           ...(args.notAfterSeconds !== undefined ? { notAfterSeconds: args.notAfterSeconds } : {}),
-          idempotencyKey: args.idempotencyKey ?? context.newKey(),
-        }),
+          idempotencyKey: key,
+        });
+      },
     });
   if (options.fleet)
     tools.push(

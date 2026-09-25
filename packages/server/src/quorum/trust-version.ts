@@ -33,7 +33,11 @@ export const trustBundleApproverSetMigration: Migration = {
   sql: `ALTER TABLE trust_bundle_state ADD COLUMN approver_set jsonb;`,
 };
 
-/** Every bundle digest published, with its (latest) version: a stale replica never bumps one again. */
+/**
+ * Every bundle digest published, with its (latest) version: a stale replica never bumps one again,
+ * and refuses to start. (A bundle replaced before this history existed is not in it: the first stale
+ * restart after the migration still takes a new version, once.)
+ */
 export const trustBundleHistoryMigration: Migration = {
   name: 'quorum/0006_trust_bundle_history',
   sql: `
@@ -178,14 +182,16 @@ export function trustVersionSettler(
       );
       return { version, stale: undefined, previous, previousEpoch, quorumChanged };
     });
-    bundle.version = outcome.version;
-    if (outcome.stale !== undefined) {
-      options.log?.warn(
-        `This process's trust bundle is the one published as version ${outcome.version}, since replaced by version ${outcome.stale}: it serves version ${outcome.version}, which daemons ignore. Update its configuration, or set pki.trustVersion above ${outcome.stale} to publish this bundle again on purpose.`,
+    // Refuse rather than serve it: daemons that hold the newer bundle would ignore it, but a node
+    // joining through this process would take the old roots (e.g. one removed as compromised).
+    if (outcome.stale !== undefined)
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        `This process's trust bundle is the one published as version ${outcome.version}, since replaced by version ${outcome.stale}: update its configuration, or set pki.trustVersion above ${outcome.stale} to publish this bundle again on purpose`,
+        undefined,
         { version: outcome.version.toString(), current: outcome.stale.toString() },
       );
-      return;
-    }
+    bundle.version = outcome.version;
     if (!outcome.quorumChanged || !outcome.previous?.approverKeys.length) return;
     // A quorum change that daemons holding keys will refuse: say so loudly, once per process.
     try {

@@ -136,6 +136,15 @@ describe('command batches (v1.0 quorum, §13)', () => {
       arguments: { nodeIds: NODES, reason: 'kernel update on rack 7' },
     });
     expect(proposed.body.result.isError).toBeUndefined();
+    // Retried (nodes in another order): the same key, so the same batch.
+    await rpc(mcp, 'tools/call', {
+      name: 'propose_command_batch',
+      arguments: { nodeIds: [...NODES].reverse(), reason: 'kernel update on rack 7' },
+    });
+    const [first, again] = calls.splice(0, 2) as { input: { idempotencyKey: string } }[];
+    expect(again!.input.idempotencyKey).toBe(first!.input.idempotencyKey);
+    expect(first!.input.idempotencyKey).toMatch(/^propose:[0-9a-f]{64}$/);
+    calls.unshift(first as never);
     await rpc(mcp, 'tools/call', {
       name: 'exec_command',
       arguments: { nodeId: NODES[0], kind: 'node.reboot', batchId: BATCH },

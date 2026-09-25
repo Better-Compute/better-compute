@@ -66,9 +66,9 @@ describe('trust bundle version (review #6 M5)', () => {
     // pki.trustVersion is a floor: above the record it wins; below it, the record stands.
     expect(await published({ approvers: { keys, threshold: 1 }, trustVersion: 10 })).toBe(10n);
     expect(await published({ approvers: { keys, threshold: 1 }, trustVersion: 2 })).toBe(10n);
-    // Removing the approvers brings back the bundle published as version 1: a stale config keeps
-    // its old version (review 7 #4); only an explicit trustVersion publishes it again.
-    expect(await published({})).toBe(1n);
+    // Removing the approvers brings back the bundle published as version 1: a stale config refuses
+    // to start (review 7 #4, review 8 #4); only an explicit trustVersion publishes it again.
+    await expect(published({})).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
     expect(await published({ trustVersion: 11 })).toBe(11n);
   });
 
