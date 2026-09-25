@@ -8,11 +8,11 @@ import {
 } from '@better-compute/core';
 import { schedulableSql, wakePendingForNode } from '@better-compute/capacity';
 import { reconcileDrain } from './controllers/drain.js';
-import { reconcileLifecycle } from './controllers/lifecycle.js';
+import { lifecycleIn } from './controllers/lifecycle.js';
 import {
   createLivenessState,
   createLivenessSweep,
-  reconcileLiveness,
+  livenessIn,
   sweepLiveness,
   type LivenessOptions,
   type LivenessSweep,
@@ -64,31 +64,32 @@ export async function reconcileNode(
   nodeId: string,
   schedulable?: Set<string>,
 ): Promise<'DONE' | 'SYNC_AGAIN'> {
-  const lifecycle = await reconcileLifecycle(context, nodeId);
-  await reconcileLiveness(context, nodeId, { timeouts: false });
-  await context.sql.transaction((tx) => refreshNodeAuthz(tx, context.authz, nodeId));
-  if (schedulable) await wakeWhenSchedulable(context, nodeId, schedulable);
+  // One fenced transaction for the whole pass: a join storm runs this ~4 times per node, and each
+  // transaction costs a fence and a round trip on top of its statements.
+  const { lifecycle, nowSchedulable } = await context.sql.transaction(async (tx) => {
+    const lifecycle = await lifecycleIn(context, tx, nodeId);
+    await livenessIn(context, tx, nodeId, { timeouts: false });
+    await refreshNodeAuthz(tx, context.authz, nodeId);
+    if (!schedulable) return { lifecycle, nowSchedulable: undefined };
+    const ok = await isSchedulable(tx, nodeId);
+    // The wake commits with the pass; `schedulable` records the edge only once it has.
+    if (ok && !schedulable.has(nodeId)) await wakePendingForNode(tx, context.work, nodeId);
+    return { lifecycle, nowSchedulable: ok };
+  });
+  if (schedulable && nowSchedulable !== undefined) {
+    if (nowSchedulable) schedulable.add(nodeId);
+    else schedulable.delete(nodeId);
+  }
   return lifecycle;
 }
 
-/** Wakes the node's pool's pending reservations on the edge to schedulable (best effort). */
-async function wakeWhenSchedulable(
-  context: ModuleContext,
-  nodeId: string,
-  seen: Set<string>,
-): Promise<void> {
-  const { rows } = await context.sql.query<{ ok: boolean }>(
+/** Whether the node is schedulable now (capacity's definition), read in the pass's transaction. */
+async function isSchedulable(tx: SqlTx, nodeId: string): Promise<boolean> {
+  const { rows } = await tx.query<{ ok: boolean }>(
     `SELECT (${schedulableSql}) AS ok FROM nodes n JOIN pools p ON p.id = n.pool_id WHERE n.id = $1`,
     [nodeId],
   );
-  const now = rows[0]?.ok === true;
-  const before = seen.has(nodeId);
-  if (!now) {
-    seen.delete(nodeId);
-    return;
-  }
-  seen.add(nodeId);
-  if (!before) await context.sql.transaction((tx) => wakePendingForNode(tx, context.work, nodeId));
+  return rows[0]?.ok === true;
 }
 
 /** The built-in node controllers module. */

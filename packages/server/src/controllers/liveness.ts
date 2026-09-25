@@ -93,9 +93,19 @@ export async function reconcileLiveness(
   nodeId: string,
   options: LivenessOptions & { timeouts?: boolean; graceUntil?: number } = {},
 ): Promise<LivenessOutcome | undefined> {
+  return context.sql.transaction((tx) => livenessIn(context, tx, nodeId, options));
+}
+
+/** `reconcileLiveness` in the caller's transaction (the `node` reconciler's one transaction). */
+export async function livenessIn(
+  context: Pick<ModuleContext, 'clock' | 'events'>,
+  tx: SqlTx,
+  nodeId: string,
+  options: LivenessOptions & { timeouts?: boolean; graceUntil?: number } = {},
+): Promise<LivenessOutcome | undefined> {
   const leaseTtlMs = options.leaseTtlMs ?? defaults.leaseTtlMs;
   const gatewayLossGraceMs = options.gatewayLossGraceMs ?? defaults.gatewayLossGraceMs;
-  return context.sql.transaction(async (tx) => {
+  {
     const { rows } = await tx.query<LivenessRow>(
       `SELECT n.connectivity, n.no_schedule_reasons, n.owner_tenant_id,
               p.class AS pool_class, p.policy AS pool_policy,
@@ -210,7 +220,7 @@ export async function reconcileLiveness(
         data: event.data,
       });
     return { connectivity: state, applied, ...(nextCheckAt !== undefined ? { nextCheckAt } : {}) };
-  });
+  }
 }
 
 /** The heartbeat row that detects outages of this controller (or of the database under it). */

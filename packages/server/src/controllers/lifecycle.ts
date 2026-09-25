@@ -212,7 +212,16 @@ export async function reconcileLifecycle(
   context: ModuleContext,
   nodeId: string,
 ): Promise<'DONE' | 'SYNC_AGAIN'> {
-  return context.sql.transaction<'DONE' | 'SYNC_AGAIN'>(async (tx) => {
+  return context.sql.transaction((tx) => lifecycleIn(context, tx, nodeId));
+}
+
+/** One NodeLifecycle pass in the caller's transaction (the `node` reconciler's one transaction). */
+export async function lifecycleIn(
+  context: ModuleContext,
+  tx: SqlTx,
+  nodeId: string,
+): Promise<'DONE' | 'SYNC_AGAIN'> {
+  {
     const { rows } = await tx.query<LifecycleRow>(
       `SELECT n.id, n.provision_state, n.connectivity, n.role, n.pool_id, n.owner_tenant_id,
               n.no_schedule_reasons, n.version, p.policy
@@ -285,7 +294,7 @@ export async function reconcileLifecycle(
       data: { nodeId, attempt, commandIds: started, checks: checks.map((check) => check.kind) },
     });
     return 'DONE';
-  });
+  }
 }
 
 /**

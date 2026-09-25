@@ -67,6 +67,26 @@ multi-gateway 10k + nightly sim ([3afca2]), spot/node leases/pool-lease placer (
 - Orchestrator [37c0ab]: installs/lockfile, core/protocol additive changes, server index/options/api/context.
 Open, unassigned: W1 Go daemon (needs Go installed), real-Postgres runs (no Postgres here), D15 hardware gates.
 
+## Round 4 allocation (proposed by [f85da7], 2026-09-24 late; all round-3 sessions are gone)
+
+Six "Feature building continuation" sessions started at once. If two proposals collide, this one stands (it was written
+first); reply to [f85da7] to swap. The uncommitted WIP in the tree when round 4 started is ORPHANED work of round-3
+owners: each area's new owner finishes (or discards) the orphan files in its area and commits them via a private index.
+
+| Area (round-3 owner) | Round 4 owner | Orphan WIP to finish first |
+|---|---|---|
+| orchestrator: installs, lockfile, umbrella, core/protocol, server index/options/api/context, `nodes-module.ts`, `controllers/**` ([37c0ab]) | [f85da7] | `pnpm-lock.yaml` (docs installs), `packages/server/src/{nodes-module.ts,controllers/lifecycle.ts,controllers/liveness.ts}` |
+| capacity ([13084d]) | [097b34] | `packages/capacity/src/{placer,pool-index,reservations,shortlist}.ts`, `tests/bench/placements.bench.ts`, `bench/placements/results/*` |
+| vps, provider-hetzner, driver-sdk, cross-module e2e (`tests/e2e-*`) ([13084d], orchestrator) | [016b7b] | — |
+| inventory, postgres migrations (sole writer), provision, metal ([9e83b6]) | [f02367] | image cache: `packages/inventory/src/{image-cache.ts,index.ts,store.ts}`, `packages/postgres/src/migrations/{0015_inventory_images.ts,index.ts}`, `packages/protocol/src/sections.ts` (delegated), `tests/{inventory-image-cache,postgres-executor,postgres-schema}.test.ts`, `packages/testing/src/fake-hw.ts` |
+| gateway + server runtime (work queue/reconcilers/leases/workers) + docs generator ([18810e]) | [c321a3] | `packages/gateway/src/store.ts` |
+| iam, events, audit, observability, realtime/sim ([3afca2]) | [31c64a] | `packages/iam/src/{streams.ts,index.ts}`, `bench/realtime-*/results/*` |
+| CLI, examples, testing dev stack ([7fe4f7]) + pki, tunnels, console-kit, apps/console, security reviews ([df4a91], [0b2be8]) | [402c97] | `packages/cli/src/{config,index}.ts`, `examples/shared/compose.ts`, `tests/cli-serve-compose.test.ts`, `packages/testing/src/dev/stack.ts` |
+| apps/docs shell + hand-written pages ([ebe83b]) | "Docs app with better-iam styling" [731f14] | `apps/docs/**` untracked files |
+
+All earlier rules apply: private-index commits (the pre-commit hook enforces it), orchestrator-only installs/lockfile/
+umbrella files, the migration writer is the only one adding `core/00NN`, message the owner before touching their files.
+
 ## v0.1 allocation (set by the orchestrator, Better-compute architecture plan [56cfd7], 2026-09-24)
 
 P0 is committed (3a70aa0, `pnpm check` green). v0.1 = PLAN.md §16 "Adopt & reserve". One owner per unit; message the
