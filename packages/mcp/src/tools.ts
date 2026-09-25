@@ -22,7 +22,9 @@ export interface JsonSchema {
   minLength?: number;
   maxLength?: number;
   items?: JsonSchema;
+  minItems?: number;
   maxItems?: number;
+  uniqueItems?: boolean;
 }
 
 export interface ToolAnnotations {
@@ -763,6 +765,10 @@ export function computeTools(
         properties: {
           nodeId: id('node', 'The node'),
           kind: { type: 'string', enum: ['inventory.refresh', 'logs.collect', 'node.reboot'] },
+          batchId: id(
+            'batch',
+            'Where the deployment requires approvals for destructive commands (node.reboot): the approved or pending batch from propose_command_batch that covers this node. The command waits until people approve it.',
+          ),
           idempotencyKey,
         },
         additionalProperties: false,
@@ -778,6 +784,56 @@ export function computeTools(
           tenantId: context.tenantId,
           nodeId: args.nodeId,
           kind: args.kind,
+          ...(args.batchId ? { batchId: args.batchId } : {}),
+          idempotencyKey: args.idempotencyKey ?? context.newKey(),
+        }),
+    });
+  // Proposing is all an agent can do: the batch waits for people to sign it with approver keys held
+  // off the control plane (§13), so this tool never causes a reboot on its own.
+  if (options.execCommand)
+    tools.push({
+      name: 'propose_command_batch',
+      title: 'Propose a batch of node reboots',
+      description:
+        'Proposes rebooting a set of nodes as one batch for operators to approve with their approver keys (`better-compute batch approve`). Nothing runs until they do. Then pass the batchId to exec_command for each node. Give the reason operators will read.',
+      inputSchema: {
+        type: 'object',
+        required: ['nodeIds', 'reason'],
+        properties: {
+          nodeIds: {
+            type: 'array',
+            items: id('node', 'A node'),
+            minItems: 1,
+            maxItems: 1000,
+            uniqueItems: true,
+          },
+          kind: { type: 'string', enum: ['node.reboot'], description: 'Default node.reboot' },
+          reason: { type: 'string', minLength: 1, maxLength: 500 },
+          notAfterSeconds: {
+            type: 'integer',
+            minimum: 60,
+            maximum: 259_200,
+            description: 'How long approvals and commands are accepted (default 24 h)',
+          },
+          idempotencyKey,
+        },
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      run: (args, context) =>
+        context.api.$request('commandBatches/create', {
+          tenantId: context.tenantId,
+          reason: args.reason,
+          scope: (args.nodeIds as string[]).map((nodeId) => ({
+            subject: nodeId,
+            kind: (args.kind as string | undefined) ?? 'node.reboot',
+          })),
+          ...(args.notAfterSeconds !== undefined ? { notAfterSeconds: args.notAfterSeconds } : {}),
           idempotencyKey: args.idempotencyKey ?? context.newKey(),
         }),
     });

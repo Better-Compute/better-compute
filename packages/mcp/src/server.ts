@@ -312,7 +312,11 @@ export function gateTools(
     list_sandbox_snapshots: { public: true },
     delete_sandbox_snapshot: { public: true },
   };
-  if (options.execCommand) rules.exec_command = nodeRead;
+  if (options.execCommand) {
+    rules.exec_command = nodeRead;
+    // Compute decides batches:create on the tenant; the batch then needs people's approver keys.
+    rules.propose_command_batch = { public: true };
+  }
   if (options.fleet) {
     // The fleet scope resolves only in the root tenant, so other tenants never see these tools work.
     const fleetAdmin = {

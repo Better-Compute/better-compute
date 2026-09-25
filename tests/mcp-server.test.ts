@@ -122,6 +122,48 @@ describe('JSON-RPC over Streamable HTTP', () => {
   });
 });
 
+describe('command batches (v1.0 quorum, §13)', () => {
+  it('lets an agent propose a reboot batch and join it, never approve it', async () => {
+    const { api, calls } = recorder(() => ({ batchId: 'batch_1' }));
+    const mcp = mcpWith(api, { execCommand: true });
+    const names = mcp.tools.map((tool) => tool.name);
+    expect(names).toContain('propose_command_batch');
+    expect(names.some((name) => name.includes('approve'))).toBe(false);
+    const NODES = ['node_01k5w0000000000000000000n1', 'node_01k5w0000000000000000000n2'];
+    const BATCH = 'batch_01k5w0000000000000000000bb';
+    const proposed = await rpc(mcp, 'tools/call', {
+      name: 'propose_command_batch',
+      arguments: { nodeIds: NODES, reason: 'kernel update on rack 7' },
+    });
+    expect(proposed.body.result.isError).toBeUndefined();
+    await rpc(mcp, 'tools/call', {
+      name: 'exec_command',
+      arguments: { nodeId: NODES[0], kind: 'node.reboot', batchId: BATCH },
+    });
+    expect(calls).toEqual([
+      {
+        path: 'commandBatches/create',
+        input: {
+          tenantId: 'org_acme',
+          reason: 'kernel update on rack 7',
+          scope: NODES.map((subject) => ({ subject, kind: 'node.reboot' })),
+          idempotencyKey: expect.any(String),
+        },
+      },
+      {
+        path: 'commands/run',
+        input: {
+          tenantId: 'org_acme',
+          nodeId: NODES[0],
+          kind: 'node.reboot',
+          batchId: BATCH,
+          idempotencyKey: expect.any(String),
+        },
+      },
+    ]);
+  });
+});
+
 describe('sandbox tools (v0.5, §3.7)', () => {
   it('create waits and carries its key; list, extend, get and delete stay in the caller’s tenant', async () => {
     const { api, calls } = recorder(() => ({ id: 'sbx_1' }));
