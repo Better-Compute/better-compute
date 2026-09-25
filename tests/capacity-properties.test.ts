@@ -287,7 +287,8 @@ describe('capacity planning properties', () => {
       { numRuns: 1500 },
     );
     expect(answered).toBeGreaterThan(50);
-    // …including answers that left fitting nodes outside the shortlist.
-    expect(beyond).toBeGreaterThan(40);
+    // …including answers that left fitting nodes outside the shortlist (≈50 of 1,500 runs, 38–59
+    // seen over seeds: a coverage floor, well below the spread, not a target).
+    expect(beyond).toBeGreaterThan(15);
   });
 });
