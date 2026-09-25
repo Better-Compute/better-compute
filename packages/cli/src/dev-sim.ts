@@ -5,6 +5,7 @@ import type {
   Notifier,
   SqlExecutor,
 } from '@better-compute/core';
+import { iamTenantReader, type TenantReaderHost } from '@better-compute/iam';
 import { createExecTicketIssuer, type ExecTicketIssuer } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from './config.js';
 import type { HostIamConfig } from './host/iam.js';
@@ -61,6 +62,8 @@ interface TestingDev {
 }
 interface EmbeddedTestIam {
   port: IamPort & { rootTenantId?: string };
+  /** The better-iam instance (reads tenants for the tenancy reaction). */
+  iam: TenantReaderHost;
   bridge: { modules: readonly ComputeModule[] } & HostIamConfig['bridge'];
   root: { tenantId: string; credential: Credential };
   bind(sql: SqlExecutor): Promise<void>;
@@ -156,7 +159,15 @@ export async function prepareDevSim(
   return {
     options: simOptions,
     hostTunnels,
-    ...(embedded ? { hostIam: { bridge: embedded.bridge } } : {}),
+    // Suspending or deleting a tenant in the embedded IAM reaches its whole subtree in compute.
+    ...(embedded
+      ? {
+          hostIam: {
+            bridge: embedded.bridge,
+            readTenants: iamTenantReader(embedded.iam, { credential: embedded.root.credential }),
+          },
+        }
+      : {}),
     // The IAM bridge's module binds its projection to the runtime's store in `initialize()`.
     async afterMigrate() {},
     async started(compute) {

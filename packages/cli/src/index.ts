@@ -234,6 +234,12 @@ export function cliManifest(): CliManifest {
   return manifestOf(builtinCommands, version);
 }
 
+/** What to do next for API error codes whose message alone does not say it. */
+const codeHints: Readonly<Record<string, string>> = {
+  TENANT_SUSPENDED:
+    'The tenant is suspended or deleted in IAM; an administrator of a parent tenant can reactivate it.',
+};
+
 /** Terminal escapes and other control characters, which messages from a remote server may carry. */
 const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ');
 
@@ -274,6 +280,7 @@ export async function main(
         'better-compute command failed. Check the configuration and database connectivity (set BETTER_COMPUTE_DEBUG=1 for details).',
       );
     if (error instanceof CliError && error.hint) err(`Hint: ${error.hint}`);
+    else if (known && code !== undefined && codeHints[code]) err(`Hint: ${codeHints[code]}`);
     if (io.env.BETTER_COMPUTE_DEBUG && error instanceof Error && error.stack) err(error.stack);
     return code !== undefined && usageCodes.has(code) ? 2 : 1;
   }

@@ -95,6 +95,8 @@ const failing = defineCommand({
   run({ flags }) {
     if (flags.kind === 'compute')
       throw new ComputeError('CONFLICT', 'Pool changed\u001b[31m meanwhile\r\nreally');
+    if (flags.kind === 'suspended')
+      throw new ComputeError('TENANT_SUSPENDED', 'Tenant org_x is suspended');
     if (flags.kind === 'cli') throw new CliError('MISSING_ENV', 'Set X', 'Export X first.');
     if (flags.kind === 'usage') throw usageError('Bad combination', 'Pick one.');
     if (flags.kind === 'system')
@@ -291,6 +293,15 @@ describe('failures on stderr', () => {
     expect(usage.stderr.split('\n')).toEqual([
       'INVALID_ARGUMENT: Bad combination',
       'Hint: Pick one.',
+    ]);
+  });
+
+  it('adds a hint for API codes whose message does not say what to do', async () => {
+    const { status, stderr } = await run(['fail', '--kind', 'suspended'], { cli: testCli });
+    expect(status).toBe(1);
+    expect(stderr.split('\n')).toEqual([
+      'TENANT_SUSPENDED: Tenant org_x is suspended',
+      'Hint: The tenant is suspended or deleted in IAM; an administrator of a parent tenant can reactivate it.',
     ]);
   });
 
