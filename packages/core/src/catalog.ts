@@ -35,6 +35,8 @@ export const computeResourceKinds = [
   'image',
   'profile',
   'provider-account',
+  'sandbox',
+  'sandbox-template',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -86,6 +88,7 @@ const definitions = {
       ...a('profiles', 'read', 'manage'),
       ...a('images', 'read', 'publish'),
       ...a('providers', 'read', 'manage'),
+      ...a('sandboxes', 'read', 'manage'),
     ],
   },
   project: {
@@ -185,6 +188,25 @@ const definitions = {
   'provider-account': {
     description: 'An account with an external capacity provider',
     actions: a('providers', 'read', 'manage'),
+  },
+  sandbox: {
+    description:
+      'A sandbox: a VPS instance with a template and a lifetime (drafts are decided before they exist)',
+    parent: 'pool',
+    actions: a('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),
+    attributes: {
+      templateId: 'string',
+      vcpu: 'number',
+      memoryGiB: 'number',
+      gpus: 'number',
+      ttlSeconds: 'number',
+      fromSnapshot: 'string',
+      warm: 'boolean',
+    },
+  },
+  'sandbox-template': {
+    description: "A tenant's sandbox template: pool, flavor, image, runtime, TTL bounds, warm pool",
+    actions: a('sandboxes', 'read', 'manage'),
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
@@ -495,6 +517,22 @@ group('providerAccounts', 'vps', [
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['delete', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['bootstrap', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
+]);
+group('sandboxes', 'vps', [
+  ['create', 'mutation', 'sandboxes:create', 'sandbox', 'v0.5'],
+  ['list', 'read', 'sandboxes:read', 'tenant', 'v0.5', list],
+  ['get', 'read', 'sandboxes:read', 'sandbox', 'v0.5'],
+  ['extend', 'mutation', 'sandboxes:update', 'sandbox', 'v0.5'],
+  ['snapshot', 'mutation', 'sandboxes:update', 'sandbox', 'v0.5'],
+  ['exec', 'mutation', 'sandboxes:exec', 'sandbox', 'v0.5'],
+  ['delete', 'mutation', 'sandboxes:delete', 'sandbox', 'v0.5'],
+]);
+group('sandboxTemplates', 'vps', [
+  ['create', 'mutation', 'sandboxes:manage', 'tenant', 'v0.5'],
+  ['list', 'read', 'sandboxes:read', 'tenant', 'v0.5', list],
+  ['get', 'read', 'sandboxes:read', 'sandbox-template', 'v0.5'],
+  ['update', 'mutation', 'sandboxes:manage', 'sandbox-template', 'v0.5'],
+  ['delete', 'mutation', 'sandboxes:manage', 'sandbox-template', 'v0.5'],
 ]);
 group('tunnels', 'tunnels', [
   ['open', 'mutation', 'instances:exec', 'instance', 'v0.3', { or: [['nodes:console', 'node']] }],

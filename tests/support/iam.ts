@@ -70,6 +70,7 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('profiles', 'read', 'manage'),
         ...action('images', 'read', 'publish'),
         ...action('providers', 'read', 'manage'),
+        ...action('sandboxes', 'read', 'manage'),
       ],
     },
     [`${p}project`]: {
@@ -157,6 +158,20 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
     },
     [`${p}profile`]: { actions: action('profiles', 'read', 'manage') },
     [`${p}provider-account`]: { actions: action('providers', 'read', 'manage') },
+    [`${p}sandbox`]: {
+      parent: `${p}pool`,
+      actions: action('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),
+      attributes: {
+        templateId: 'string',
+        vcpu: 'number',
+        memoryGiB: 'number',
+        gpus: 'number',
+        ttlSeconds: 'number',
+        fromSnapshot: 'string',
+        warm: 'boolean',
+      },
+    },
+    [`${p}sandbox-template`]: { actions: action('sandboxes', 'read', 'manage') },
   };
 }
 

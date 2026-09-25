@@ -44,6 +44,7 @@ const planActions: Record<string, string[]> = {
     ...a('profiles', 'read', 'manage'),
     ...a('images', 'read', 'publish'),
     ...a('providers', 'read', 'manage'),
+    ...a('sandboxes', 'read', 'manage'),
   ],
   'compute-project': [...a('projects', 'read', 'manage'), ...a('usage', 'read')],
   'compute-site': a('sites', 'read', 'manage'),
@@ -76,6 +77,8 @@ const planActions: Record<string, string[]> = {
   'compute-image': a('images', 'read', 'publish'),
   'compute-profile': a('profiles', 'read', 'manage'),
   'compute-provider-account': a('providers', 'read', 'manage'),
+  'compute-sandbox': a('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),
+  'compute-sandbox-template': a('sandboxes', 'read', 'manage'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -92,6 +95,7 @@ describe('resource types (§12.3)', () => {
       'compute-node': 'compute-pool',
       'compute-reservation': 'compute-pool',
       'compute-instance': 'compute-pool',
+      'compute-sandbox': 'compute-pool',
     });
     expect(types['compute-project']?.relations).toEqual(['member', 'admin']);
     expect(types['compute-pool']?.relations).toEqual(['viewer', 'user', 'operator', 'admin']);
@@ -132,6 +136,15 @@ describe('resource types (§12.3)', () => {
       imageId: 'string',
       imageVerified: 'boolean',
       projectId: 'string',
+    });
+    expect(types['compute-sandbox']?.attributes).toEqual({
+      templateId: 'string',
+      vcpu: 'number',
+      memoryGiB: 'number',
+      gpus: 'number',
+      ttlSeconds: 'number',
+      fromSnapshot: 'string',
+      warm: 'boolean',
     });
     expect(types['compute-image']?.attributes).toEqual({
       visibility: 'string',
@@ -369,6 +382,8 @@ describe('apiSurface (§9.2)', () => {
         'images.list',
         'instances.list',
         'providerAccounts.list',
+        'sandboxes.list',
+        'sandboxTemplates.list',
       ],
     );
   });
