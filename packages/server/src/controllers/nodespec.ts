@@ -237,6 +237,11 @@ export async function wireNodeSpec(tx: SqlTx, spec: NodeSpec): Promise<JsonObjec
       access.sshCaPublicKeys = [...spec.access.sshCaPublicKeys].sort();
     if (spec.access.sshPrincipals?.length)
       access.sshPrincipals = [...spec.access.sshPrincipals].sort();
+    // uint64 in proto3 JSON is a decimal string; sorted numerically for a stable spec hash.
+    if (spec.access.sshRevokedSerials?.length)
+      access.sshRevokedSerials = [...new Set(spec.access.sshRevokedSerials)].sort((a, b) =>
+        BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0,
+      );
     wire.access = access;
   }
   if (spec.telemetry) {

@@ -15,6 +15,11 @@ export interface Caller {
   sessionId: string;
   sessionKind: 'user' | 'role' | 'api-key' | 'session-token' | 'delegated';
   mfa: boolean;
+  /**
+   * When the caller's session (or its MFA/break-glass activation) ends, epoch ms, when IAM says:
+   * credentials compute issues on its behalf (break-glass SSH certificates) never outlive it.
+   */
+  sessionExpiresAt?: number;
   /** Delegated sessions and agent keys: the agent acting. */
   agentId?: string;
   delegationId?: string;

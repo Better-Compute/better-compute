@@ -575,6 +575,8 @@ export interface AccessSpec {
   sshCaPublicKeys?: string[];
   /** Certificate principals this node accepts (`<account>@<nodeId>`), so a certificate is node-bound. */
   sshPrincipals?: string[];
+  /** Serials (decimal strings, uint64) of revoked, unexpired break-glass certificates: the node's KRL. */
+  sshRevokedSerials?: string[];
   execTicketJwks?: Json;
 }
 export interface TelemetrySpec {

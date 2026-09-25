@@ -523,6 +523,9 @@ message AccessSection {
   repeated string ssh_ca_public_keys = 2;
   // Principals such certificates may use.
   repeated string ssh_principals = 3;
+  // (v0.3) Serials of break-glass certificates revoked before they expired. The daemon writes them
+  // into an OpenSSH KRL (RevokedKeys), so a revoked certificate stops working at the next spec.
+  repeated uint64 ssh_revoked_serials = 4;
 }
 
 // Where bcd sends its own telemetry (OTLP). Never the session or Postgres (P8).

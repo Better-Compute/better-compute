@@ -202,6 +202,11 @@ Rules for v0.1:
   when nothing ran); results record the producing `boot_id`; terminal rejections journaled; journal-full → BUSY
   (never drop results); `Sweep` must also expire accepted/running entries never redelivered (TTL); `site` section
   reported only when set; Hello advertises drivers (e.g. `nvidia`).
+  v0.3 access ([0b2be8]): from `AccessSection.ssh_ca_public_keys` write sshd `TrustedUserCAKeys`, and from
+  `ssh_principals` (`<account>@<nodeId>`, only this node's) an `AuthorizedPrincipalsFile /etc/ssh/bc_principals/%u`
+  per account listing exactly those lines (never bare account names: a certificate names its node); on OpenTunnel
+  re-verify the exec ticket against `exec_ticket_jwks_json` + own jti set (fail closed when full), require
+  `sid` == tunnel_id, then open the Tunnel rpc with `opened` first (FakeDaemon 23dfe67 is the reference).
 - 25fcd9c: webhooks rows in core apiSurface are module 'events' (injected `@better-compute/events`, 812ed34:
   eventsModule, handleWatch SSE). W5a: server's `events.list` copies the outbox reader (txid_text alias, qualified
   ORDER BY), never imports events; mount `handleWatch` from the host (GET /watch), not from server.
