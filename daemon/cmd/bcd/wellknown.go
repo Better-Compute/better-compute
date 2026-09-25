@@ -15,9 +15,6 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/pki"
 )
 
-// bootstrapDataDir is the data directory of a bootstrapped configuration (tests replace it).
-var bootstrapDataDir = config.DefaultDataDir
-
 // wellKnownClient fetches the well-known document (system roots: the control plane's public TLS).
 var wellKnownClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -104,7 +101,7 @@ func pinned(name, install, published string) (string, error) {
 // only by the control plane's TLS certificate could otherwise hand the token to whoever serves it
 // (DNS plus a certificate for the name). Only a fakehw development build joins without them. The
 // site is not known until the join answers: the caller sets it before writing the file.
-func bootstrapConfig(server string, pins installPins) (*config.Config, []byte, error) {
+func bootstrapConfig(server string, pins installPins, dataDir string) (*config.Config, []byte, error) {
 	if (pins.ServingCA == "" || pins.JoinSigning == "" || pins.JoinEncryption == "") && !(devBuild && pins.empty()) {
 		return nil, nil, errors.New("joining without config.toml needs --serving-ca-pin, --join-signing-pin and --join-encryption-pin from the install")
 	}
@@ -116,7 +113,7 @@ func bootstrapConfig(server string, pins installPins) (*config.Config, []byte, e
 		return nil, nil, errors.New("the control plane does not publish its gateway (well-known gateway.url); install /etc/bcd/config.toml instead")
 	}
 	cfg := config.Defaults()
-	cfg.DataDir = bootstrapDataDir
+	cfg.DataDir = dataDir
 	cfg.GatewayURL = doc.Gateway.URL
 	cfg.GatewayServerName = doc.Gateway.ServerName
 	cfg.Site = "unknown" // replaced by the site the join answers with

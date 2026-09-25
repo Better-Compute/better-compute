@@ -112,7 +112,7 @@ func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	var bootstrapJWK []byte
 	bootstrapped := false
 	if err != nil && errors.Is(err, os.ErrNotExist) && server != "" {
-		cfg, bootstrapJWK, err = bootstrapConfig(server, pins)
+		cfg, bootstrapJWK, err = bootstrapConfig(server, pins, fs.Lookup("data-dir").Value.String())
 		bootstrapped = err == nil
 	} else if err == nil {
 		// An installed configuration wins; pins given as well must agree with it.

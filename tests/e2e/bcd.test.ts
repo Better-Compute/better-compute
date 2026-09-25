@@ -1,6 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createPublicKey, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -242,6 +244,81 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
     tunnel.close();
     await reading;
   }, 90_000);
+
+  it('bootstraps an OS provisioned with only a token, the control plane URL and the pins', async () => {
+    // What provision's user data and the Robot bootstrap run: no config.toml, no join key file. bcd
+    // reads the gateway from the control plane's well-known document (the server's own join keys,
+    // plus where its gateway is), checks it against the pins on its command line, joins and writes
+    // its configuration.
+    const host = new URL(config ? readFileSync(config, 'utf8').match(/gateway_url = "([^"]+)"/)![1]! : '').hostname;
+    const { basePath, origin } = dev.compute.endpoint;
+    const published = await (await dev.compute.handler(new Request(`${origin}${basePath}/.well-known/better-compute`))).json();
+    const pin = (der: Uint8Array) => spkiPin(parseCertificate(der).publicKey);
+    const gatewayUrl = new URL(dev.externalGatewayUrl!);
+    gatewayUrl.hostname = host;
+    const wellKnown = createServer((req, res) => {
+      if (req.url !== `${basePath}/.well-known/better-compute`) return void res.writeHead(404).end();
+      res.writeHead(200, { 'content-type': 'application/json' }).end(
+        JSON.stringify({ ...published, gateway: { url: gatewayUrl.origin, serverName: 'gw.dev.local', servingCaPin: pin(dev.servingCaCertificate!) } }),
+      );
+    });
+    await new Promise<void>((resolve) => wellKnown.listen(0, '0.0.0.0', resolve));
+    const port = (wellKnown.address() as AddressInfo).port;
+    const root = `/tmp/bcd-e2e-boot-${randomBytes(6).toString('hex')}`;
+    const provisioned = (
+      await api.joinTokens.create(dev.root, {
+        tenantId: dev.rootTenantId,
+        poolId,
+        ttlSeconds: 3600,
+        maxUses: 1,
+        idempotencyKey: `bcd-e2e-boot-${Date.now()}`,
+      })
+    ).token;
+    let second: ChildProcess | undefined;
+    try {
+      // The token arrives as a root-only file (user data, or the Robot post-install script).
+      const written = await runLinux(['sh', '-c', `mkdir -p ${root} && umask 077 && cat > ${root}/join-token`], provisioned);
+      expect(written.status, written.stderr).toBe(0);
+      const join = () =>
+        runLinux([
+          'env', 'BCD_FAKEHW_SEED=43', toLinux(binary), 'join',
+          '--config', `${root}/etc/bcd/config.toml`,
+          '--server', `http://${host}:${port}${basePath}`,
+          '--token-file', `${root}/join-token`,
+          '--serving-ca-pin', pin(dev.servingCaCertificate!),
+          '--join-signing-pin', spkiPin(createPublicKey({ key: dev.pins.joinSigningKey as any, format: 'jwk' })),
+          '--join-encryption-pin', spkiPin(createPublicKey({ key: dev.pins.joinEncryptionJwk as any, format: 'jwk' })),
+          '--data-dir', `${root}/data`,
+        ]);
+      const joined = await join();
+      expect(joined.status, joined.stderr).toBe(0);
+      const bootNode = /joined as (\S+)/.exec(joined.stdout)?.[1] ?? '';
+      expect(bootNode).toMatch(/^node_/);
+      expect(sh(`test -e ${root}/join-token && echo kept || echo gone`)).toBe('gone');
+      const installed = sh(`cat ${root}/etc/bcd/config.toml`);
+      expect(installed).toContain(`gateway_url = "${gatewayUrl.origin}"`);
+      expect(installed).toContain('gateway_server_name = "gw.dev.local"');
+      expect(sh(`cat ${root}/etc/bcd/join-encryption.jwk`)).toContain(dev.pins.joinEncryptionJwk.x as string);
+      // A re-run (the join unit on the next boot) succeeds without a token.
+      const again = await join();
+      expect(again.status, again.stderr).toBe(0);
+      expect(again.stdout).toContain(`already joined as ${bootNode}`);
+
+      // The node agent runs on the written configuration alone.
+      const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=43', toLinux(binary), 'node', '--config', `${root}/etc/bcd/config.toml`]);
+      let log = '';
+      second = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      second.stderr!.on('data', (chunk: Buffer) => (log += chunk.toString()));
+      await dev.waitFor([bootNode], { timeoutMs: 120_000 }).catch((error) => {
+        throw new Error(`${error}\n--- bcd log ---\n${log.slice(-4000)}`);
+      });
+    } finally {
+      sh(`pkill -f '${root}/etc/bcd/config.toml' ; true`);
+      second?.kill();
+      sh(`rm -rf '${root}'`);
+      wellKnown.close();
+    }
+  }, 240_000);
 
   it('reboots and reports SUCCEEDED{rebooted} from the next boot', async () => {
     const before = sh(`cat '${dataDir}/fakehw-boot-id'`);

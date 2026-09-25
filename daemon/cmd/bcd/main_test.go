@@ -246,16 +246,16 @@ func TestJoinBootstrapsItsConfigurationFromTheWellKnownDocument(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(doc)
 	}))
 	defer srv.Close()
-	prevClient, prevDir := wellKnownClient, bootstrapDataDir
+	prevClient := wellKnownClient
 	wellKnownClient = srv.Client()
-	bootstrapDataDir = t.TempDir()
-	defer func() { wellKnownClient, bootstrapDataDir = prevClient, prevDir }()
+	defer func() { wellKnownClient = prevClient }()
+	bootstrapDataDir := t.TempDir()
 
 	etc := filepath.Join(t.TempDir(), "etc", "bcd")
 	file := filepath.Join(etc, "config.toml")
 	tokenFile := filepath.Join(t.TempDir(), "join-token")
 	_ = os.WriteFile(tokenFile, []byte("bcjt_01k5w0000000000000000000000.secret\n"), 0o600)
-	pins := []string{"--serving-ca-pin", caPin, "--join-signing-pin", signPin, "--join-encryption-pin", pin(encPin)}
+	pins := []string{"--serving-ca-pin", caPin, "--join-signing-pin", signPin, "--join-encryption-pin", pin(encPin), "--data-dir", bootstrapDataDir}
 	join := func(nodeID string, extra ...string) (int, string, string) {
 		args := append([]string{"join", "--config", file, "--server", srv.URL, "--token-file", tokenFile, "--node-id", nodeID}, pins...)
 		return runBCD(append(args, extra...)...)
