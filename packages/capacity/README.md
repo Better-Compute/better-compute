@@ -200,7 +200,7 @@ to every attempt.
 | `reservations.create` answers                   | `placed` or `pending`             | `pending` with a `Queued` condition, then `placed` once the batch runs      |
 | Where placement runs                            | the admission transaction         | the `capacity.placer` worker that owns the pool's shard (`shardBy: 'pool'`) |
 | Pool lock                                       | only around the commit (a few ms) | never at admission; once per batch of ≤64                                   |
-| Throughput (bench/placements, PGlite, 1k nodes) | ~35 placements/s                  | ~690 placements/s (placeQueued; 10k nodes: ~1,000)                          |
+| Throughput (bench/placements, PGlite, 1k nodes) | ~35 placements/s                  | ~1,500 placements/s (placeQueued; 10k nodes: ~1,000)                        |
 
 ```ts
 capacityModule({ placer: 'pool-lease', maxBatch: 64 });
