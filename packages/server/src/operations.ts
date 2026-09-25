@@ -116,7 +116,13 @@ export function presentedCredential(
     headers?.has('authorization') === true ||
     headers?.has('cookie') === true;
   if (!present) return undefined;
-  return { ...(headers ? { headers } : {}), ...(token !== undefined ? { token } : {}) };
+  const sourceIp =
+    typeof credential.sourceIp === 'string' && credential.sourceIp ? credential.sourceIp : undefined;
+  return {
+    ...(headers ? { headers } : {}),
+    ...(token !== undefined ? { token } : {}),
+    ...(sourceIp ? { sourceIp } : {}),
+  };
 }
 
 /** The executor handlers see inside the envelope's transaction: statements run on `tx`. */

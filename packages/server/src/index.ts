@@ -20,7 +20,7 @@ import { inventoryModule } from '@better-compute/inventory';
 import { sealedSecretsMigration } from '@better-compute/pki';
 import { coreGroups, type ComputeApi, type ComputeCaches } from './api.js';
 import { createModuleContext } from './context.js';
-import { createHttp } from './http.js';
+import { createHttp, type HandlerInfo } from './http.js';
 import { createGatewayServices, type GatewayServices } from './join/index.js';
 import { createNodesModule } from './nodes-module.js';
 import { createOperations } from './operations.js';
@@ -51,7 +51,7 @@ import { serverInfo } from './version.js';
 export type * from './api.js';
 export { configOptions, defineConfig } from './define.js';
 export type { ComputeConfigContext, ComputeConfigFactory } from './define.js';
-export { maxBodyBytes } from './http.js';
+export { maxBodyBytes, type HandlerInfo } from './http.js';
 export { workerRoles } from './options.js';
 export type {
   ComputeOptions,
@@ -179,8 +179,12 @@ export interface BetterCompute<
 > {
   /** Every method, `(credential, input)`, through the same envelope as HTTP; drives client inference. */
   api: ComputeApi<M, P>;
-  /** The fetch transport: `app.all('/api/compute/*', (c) => compute.handler(c.req.raw))`. */
-  handler(request: Request): Promise<Response>;
+  /**
+   * The fetch transport: `app.all('/api/compute/*', (c) => compute.handler(c.req.raw))`. Pass
+   * `{ peer: { address } }` from the socket (or a trusted proxy's hop) so remote IAM sees the caller's
+   * address for `request.sourceIp` conditions; client forwarding headers are never trusted for it.
+   */
+  handler(request: Request, info?: HandlerInfo): Promise<Response>;
   /** The Node.js transport: `createServer(compute.nodeHandler)`. */
   nodeHandler(req: IncomingMessage, res: ServerResponse): Promise<void>;
   /**

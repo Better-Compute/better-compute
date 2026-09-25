@@ -117,6 +117,15 @@ function errorResponse(error: unknown): Response {
   return Response.json({ error: body }, { status, headers });
 }
 
+/**
+ * What the host knows about a request that the request itself cannot prove: the peer's address, from
+ * the socket (or, behind a proxy the host is configured to trust, the hop that proxy reported). It
+ * becomes `Credential.sourceIp`, which remote IAM sees for `request.sourceIp` conditions.
+ */
+export interface HandlerInfo {
+  peer?: { address?: string };
+}
+
 export interface HttpHost {
   options: ResolvedOptions;
   registry: Registry;
@@ -224,7 +233,7 @@ export function createHttp({ options, registry, operations }: HttpHost) {
     throw notFound();
   }
 
-  async function handler(request: Request): Promise<Response> {
+  async function handler(request: Request, info?: HandlerInfo): Promise<Response> {
     const requestId = requestIdOf(request.headers);
     const answer = (response: Response) => {
       response.headers.set('x-request-id', requestId);
@@ -264,7 +273,9 @@ export function createHttp({ options, registry, operations }: HttpHost) {
       const headers = new Headers(request.headers);
       headers.set('x-request-id', requestId);
       const traceparent = traceparentOf(request.headers);
-      const data = await operations.call(method, { headers }, body, {
+      // The caller's address as the host verified it, never a forwarding header the client sent.
+      const peer = info?.peer?.address;
+      const data = await operations.call(method, { headers, ...(peer ? { sourceIp: peer } : {}) }, body, {
         requestId,
         signal: request.signal,
         ...(traceparent ? { traceparent } : {}),
@@ -317,7 +328,15 @@ export function createHttp({ options, registry, operations }: HttpHost) {
         }
         body = new Uint8Array(Buffer.concat(chunks));
       }
-      await send(res, await handler(new Request(url, { method: req.method, headers, body })));
+      // The socket peer is the verified caller address (no proxy is trusted here).
+      const address = req.socket?.remoteAddress;
+      await send(
+        res,
+        await handler(
+          new Request(url, { method: req.method, headers, body }),
+          address ? { peer: { address } } : undefined,
+        ),
+      );
     } catch (error) {
       if (res.writableEnded || res.destroyed) return;
       if (res.headersSent) {
