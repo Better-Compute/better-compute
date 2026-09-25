@@ -7,13 +7,13 @@ description: 'The joinRequests API group (server): 3 methods.'
 
 Methods of the `joinRequests` group, contributed by `server`.
 
-0 of 3 methods are served by this release; the others are planned for the phase shown.
+3 of 3 methods are served by this release; the others are planned for the phase shown.
 
-| Method                | Kind     | Authorization                                 | Phase | Status  |
-| --------------------- | -------- | --------------------------------------------- | ----- | ------- |
-| [`list`](#list)       | read     | `compute:join-tokens:read` @ `compute-pool`   | v0.2  | planned |
-| [`approve`](#approve) | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | planned |
-| [`reject`](#reject)   | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | planned |
+| Method                | Kind     | Authorization                                 | Phase | Status     |
+| --------------------- | -------- | --------------------------------------------- | ----- | ---------- |
+| [`list`](#list)       | read     | `compute:join-tokens:read` @ `compute-pool`   | v0.2  | registered |
+| [`approve`](#approve) | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | registered |
+| [`reject`](#reject)   | mutation | `compute:join-tokens:create` @ `compute-pool` | v0.2  | registered |
 
 ## list
 
@@ -22,7 +22,7 @@ Methods of the `joinRequests` group, contributed by `server`.
 - **Kind:** read
 - **Authorization:** `compute:join-tokens:read` @ `compute-pool`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)
 
 ## approve
 
@@ -31,7 +31,7 @@ Methods of the `joinRequests` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:join-tokens:create` @ `compute-pool`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)
 
 ## reject
 
@@ -40,4 +40,4 @@ Methods of the `joinRequests` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:join-tokens:create` @ `compute-pool`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)

@@ -55,7 +55,7 @@ Check the database, schema, clock, method registry and IAM wiring
 better-compute doctor [--strict] [--pki PATH] [--config PATH]
 ```
 
-doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured. It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.
+doctor runs compute.selfCheck() (applied migrations, btree_gist, compute_now() against the database clock, the method → action registry, and each module's own checks) and adds the CLI's findings, such as a deployment with no IAM configured, the PKI bundle, and the configuration's host export (whether the gateway role can authenticate daemons by node certificate, reach the api's pokes, tunnels and revocations, and whether host routes fit beside the API). It only reads. --strict exits non-zero (DOCTOR_FINDINGS) when any error or warning is found.
 
 | Flag              | Description                                                                              | Default                    | Environment             |
 | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- | ----------------------- |
@@ -85,19 +85,18 @@ version prints the version of this command line (also --version or -v).
 Run the API and the workers in this process
 
 ```sh
-better-compute serve [--host HOST] [--port PORT] [--roles ROLES] [--no-migrate] [--pki PATH] [--config PATH]
+better-compute serve [--host HOST] [--port PORT] [--roles ROLES] [--no-migrate] [--config PATH]
 ```
 
-serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener; --roles gateway runs the daemon gateway over mTLS from the configuration's host.gateway (all includes it when configured), with the report hooks of the built-in modules and tunnels when the deployment issues exec tickets. Beside the API the listener answers /healthz, /readyz, /.well-known/better-compute (with --pki, the join keys bcd may fall back to) and the host export's own routes (for example GET /watch and GET /metrics). SIGINT or SIGTERM drains the gateway first, then stops the listener and the workers, releasing their leases.
+serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener; --roles gateway runs the daemon gateway over mTLS from the configuration's host.gateway (all includes it when configured), with the report hooks of the built-in modules and tunnels when the deployment issues exec tickets. Beside the API the listener answers /healthz, /readyz, /.well-known/better-compute (the server's document, with JoinService's public keys when pki.join publishes them: the fallback bcd checks against its pins) and the host export's own routes (for example GET /watch and GET /metrics). SIGINT or SIGTERM drains the gateway first, then stops the listener and the workers, releasing their leases.
 
-| Flag            | Description                                                                                            | Default                    | Environment             |
-| --------------- | ------------------------------------------------------------------------------------------------------ | -------------------------- | ----------------------- |
-| `--host HOST`   | The address to listen on                                                                               | `0.0.0.0`                  | `HOST`                  |
-| `--port PORT`   | The port to listen on (0 picks a free one)                                                             | `3000`                     | `PORT`                  |
-| `--roles ROLES` | all, or a comma list of api, gateway and controllers, scheduler, sinks, iam                            | `all`                      | `BETTER_COMPUTE_ROLES`  |
-| `--no-migrate`  | Do not run migrations first                                                                            |                            |                         |
-| `--pki PATH`    | Publish the join keys of this PKI bundle at /.well-known/better-compute (the bcd fallback to its pins) | `.better-compute/pki.json` | `BETTER_COMPUTE_PKI`    |
-| `--config PATH` | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}                       |                            | `BETTER_COMPUTE_CONFIG` |
+| Flag            | Description                                                                      | Default   | Environment             |
+| --------------- | -------------------------------------------------------------------------------- | --------- | ----------------------- |
+| `--host HOST`   | The address to listen on                                                         | `0.0.0.0` | `HOST`                  |
+| `--port PORT`   | The port to listen on (0 picks a free one)                                       | `3000`    | `PORT`                  |
+| `--roles ROLES` | all, or a comma list of api, gateway and controllers, scheduler, sinks, iam      | `all`     | `BETTER_COMPUTE_ROLES`  |
+| `--no-migrate`  | Do not run migrations first                                                      |           |                         |
+| `--config PATH` | Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts} |           | `BETTER_COMPUTE_CONFIG` |
 
 ```sh
 better-compute serve

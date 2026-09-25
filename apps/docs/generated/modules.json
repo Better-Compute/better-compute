@@ -13,7 +13,12 @@
     {
       "name": "capacity",
       "groups": ["capacity", "pools", "quotas", "reservations"],
-      "migrations": ["capacity/0001_device_links"]
+      "migrations": ["capacity/0001_device_links", "capacity/0002_lease_health"]
+    },
+    {
+      "name": "pki",
+      "groups": [],
+      "migrations": ["pki/0001_sealed_secrets"]
     },
     {
       "name": "provision",
@@ -27,7 +32,12 @@
     {
       "name": "metal",
       "groups": ["metal"],
-      "migrations": ["metal/0001_nodes", "metal/0002_addresses"]
+      "migrations": [
+        "metal/0001_nodes",
+        "metal/0002_addresses",
+        "metal/0003_tenant_root",
+        "metal/0004_bmc_credentials"
+      ]
     },
     {
       "name": "vps",

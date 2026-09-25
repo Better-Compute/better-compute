@@ -11,6 +11,17 @@
     "payload": "bettercompute.site.v1.BmcOperationRequest"
   },
   {
+    "kind": "bmc.firmware",
+    "lane": "control",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": true,
+    "timeout": "1h",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.BmcOperationRequest"
+  },
+  {
     "kind": "bmc.power",
     "lane": "control",
     "retrySafe": false,
@@ -29,6 +40,17 @@
     "attested": false,
     "destructive": false,
     "timeout": "2m",
+    "roles": ["site"],
+    "payload": "bettercompute.site.v1.BmcOperationRequest"
+  },
+  {
+    "kind": "bmc.rotate",
+    "lane": "control",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": true,
+    "destructive": false,
+    "timeout": "5m",
     "roles": ["site"],
     "payload": "bettercompute.site.v1.BmcOperationRequest"
   },

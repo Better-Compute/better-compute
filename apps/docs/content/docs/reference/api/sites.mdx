@@ -7,15 +7,15 @@ description: 'The sites API group (server): 5 methods.'
 
 Methods of the `sites` group, contributed by `server`.
 
-3 of 5 methods are served by this release; the others are planned for the phase shown.
+5 of 5 methods are served by this release; the others are planned for the phase shown.
 
 | Method              | Kind     | Authorization                                                                         | Phase | Status     |
 | ------------------- | -------- | ------------------------------------------------------------------------------------- | ----- | ---------- |
 | [`list`](#list)     | read     | `compute:sites:read` @ `compute-tenant` + items                                       | v0.1  | registered |
 | [`get`](#get)       | read     | `compute:sites:read` @ `compute-site`                                                 | v0.1  | registered |
 | [`create`](#create) | mutation | `compute:sites:manage` @ `compute-fleet` or `compute:sites:manage` @ `compute-tenant` | v0.1  | registered |
-| [`update`](#update) | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned    |
-| [`delete`](#delete) | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | planned    |
+| [`update`](#update) | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | registered |
+| [`delete`](#delete) | mutation | `compute:sites:manage` @ `compute-site`                                               | v0.2  | registered |
 
 ## list
 
@@ -51,7 +51,7 @@ Methods of the `sites` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:sites:manage` @ `compute-site`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)
 
 ## delete
 
@@ -60,4 +60,4 @@ Methods of the `sites` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:sites:manage` @ `compute-site`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)

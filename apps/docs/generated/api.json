@@ -143,7 +143,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       }
@@ -540,7 +540,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       },
@@ -554,7 +554,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       },
@@ -568,7 +568,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       }
@@ -942,7 +942,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       },
@@ -955,7 +955,7 @@
         "alternatives": [],
         "list": false,
         "phase": "v0.3",
-        "module": "server",
+        "module": "tunnels",
         "status": "planned",
         "summary": "",
         "description": ""
@@ -1645,7 +1645,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       },
@@ -1664,7 +1664,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       }
@@ -1686,7 +1686,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       },
@@ -1700,7 +1700,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       }
@@ -1769,7 +1769,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       },
@@ -1783,7 +1783,7 @@
         "list": false,
         "phase": "v0.2",
         "module": "server",
-        "status": "planned",
+        "status": "registered",
         "summary": "",
         "description": ""
       }
@@ -1842,7 +1842,7 @@
   {
     "group": "tunnels",
     "slug": "tunnels",
-    "module": "server",
+    "module": "tunnels",
     "overview": "",
     "methods": [
       {
@@ -1859,7 +1859,7 @@
         ],
         "list": false,
         "phase": "v0.3",
-        "module": "server",
+        "module": "tunnels",
         "status": "planned",
         "summary": "",
         "description": ""
@@ -2039,6 +2039,20 @@
         "alternatives": [],
         "list": false,
         "phase": "v0.3",
+        "module": "events",
+        "status": "registered",
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "eventTypes",
+        "route": "POST /api/compute/webhooks/eventTypes",
+        "kind": "read",
+        "action": "compute:webhooks:manage",
+        "resource": null,
+        "alternatives": [],
+        "list": false,
+        "phase": null,
         "module": "events",
         "status": "registered",
         "summary": "",

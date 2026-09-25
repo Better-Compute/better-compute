@@ -7,7 +7,7 @@ description: 'The nodes API group (server): 12 methods.'
 
 Methods of the `nodes` group, contributed by `server`.
 
-10 of 12 methods are served by this release; the others are planned for the phase shown.
+11 of 12 methods are served by this release; the others are planned for the phase shown.
 
 | Method                              | Kind     | Authorization                                    | Phase | Status     |
 | ----------------------------------- | -------- | ------------------------------------------------ | ----- | ---------- |
@@ -21,7 +21,7 @@ Methods of the `nodes` group, contributed by `server`.
 | [`taint`](#taint)                   | mutation | `compute:nodes:update` @ `compute-node`          | v0.1  | registered |
 | [`adopt`](#adopt)                   | mutation | `compute:nodes:provision` @ `compute-node`       | v0.1  | registered |
 | [`revokeIdentity`](#revokeidentity) | mutation | `compute:nodes:revoke-identity` @ `compute-node` | v0.1  | registered |
-| [`delete`](#delete)                 | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | planned    |
+| [`delete`](#delete)                 | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | registered |
 | [`issueSshCert`](#issuesshcert)     | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | planned    |
 
 ## list
@@ -121,7 +121,7 @@ Methods of the `nodes` group, contributed by `server`.
 - **Kind:** mutation
 - **Authorization:** `compute:nodes:delete` @ `compute-node`
 - **Module:** `server`
-- **Phase:** v0.2 (planned)
+- **Phase:** v0.2 (registered)
 
 ## issueSshCert
 
@@ -129,5 +129,5 @@ Methods of the `nodes` group, contributed by `server`.
 
 - **Kind:** mutation
 - **Authorization:** `compute:nodes:ssh-root` @ `compute-node`
-- **Module:** `server`
+- **Module:** `tunnels`
 - **Phase:** v0.3 (planned)
