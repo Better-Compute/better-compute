@@ -103,3 +103,40 @@ export function hostFindings(
     });
   return findings;
 }
+
+/**
+ * (Review 14 L6) Whether `host.mcp` is gated: a gated endpoint (`computeMcpEndpoint`) answers an unauthenticated
+ * `tools/list` with 401 and its OAuth challenge. Any 2xx means the handler serves MCP without a credential, e.g. a bare
+ * `createComputeMcp().handler`, or one with a fixed client that makes every caller act as one credential. Read-only:
+ * the probe lists tools and nothing else, and gives up after 5 s.
+ */
+export async function mcpFindings(host: HostConfig): Promise<Finding[]> {
+  const mcp = host.mcp;
+  if (!mcp) return [];
+  const path = mcp.path ?? '/mcp';
+  const probe = new Request(`http://localhost${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  let status: number;
+  try {
+    const answer = await Promise.race([
+      Promise.resolve(mcp.handler(probe)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000).unref?.()),
+    ]);
+    status = answer.status;
+    await answer.body?.cancel().catch(() => undefined);
+  } catch {
+    return [];
+  }
+  if (status < 200 || status > 299) return [];
+  return [
+    {
+      check: 'host.mcp.ungated',
+      severity: 'error',
+      message: `host.mcp answers MCP at ${path} without a credential (tools/list returned ${status}): agents reach compute through it without the gate`,
+      fix: 'Mount computeMcpEndpoint({ compute, gate: createMcpGate({ … }) }).handler, never a bare createComputeMcp() handler',
+    },
+  ];
+}

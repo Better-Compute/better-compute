@@ -4,7 +4,7 @@ import { CliError, usageError } from '../errors.js';
 import { completionScript } from '../completion.js';
 import { defineCommand, manifestOf } from '../framework.js';
 import { resolveHost } from '../host/config.js';
-import { hostFindings } from '../host/findings.js';
+import { hostFindings, mcpFindings } from '../host/findings.js';
 import { isUnconfiguredIam } from '../iam.js';
 import { defaultPkiPath, pkiFindings, quorumFindings, pkiFlag } from './pki.js';
 import { daemonFindings } from './daemon.js';
@@ -142,6 +142,7 @@ export const setupCommands = [
       }
       const host = await resolveHost((await configModule()).host, { compute, options, env, cwd });
       findings.push(...hostFindings(compute, options, host));
+      findings.push(...(await mcpFindings(host)));
       print({
         node: process.versions.node,
         config: source,
