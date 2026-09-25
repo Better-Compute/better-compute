@@ -13,6 +13,8 @@ import type { Credential, SqlExecutor } from '@better-compute/core';
 import { createComputeIamBridge, type ComputeIamBridge } from './bridge.js';
 import type { ComputeCatalogOptions } from './catalog.js';
 import type { EmbeddedIam } from './embedded.js';
+import { createRefreshHandler } from './host.js';
+import { iamJobReconcilers, type IamJobsHost } from './jobs.js';
 import type { ComputeIamPlugin } from './iam-plugin.js';
 import { memoryInbox, type MemoryInbox } from './inbox.js';
 
@@ -95,14 +97,22 @@ export interface EmbeddedTestIamOptions
   inbox?: 'store' | 'memory';
   /** Extra betterIam() options (merged last; `plugins` are appended after compute's). */
   iamOptions?: Partial<BetterIamOptions>;
+  /**
+   * How compute reaches IAM (PLAN.md §12.1): `embedded` (in process, `bridge.embedded`) or `remote`
+   * (`bridge.remote` over better-iam's HTTP API, with the admission refresh), both on the same better-iam, whose
+   * plugin, resolver and projection play the IAM host. Default: `BETTER_COMPUTE_IAM_MODE`, else `embedded`, so a
+   * suite runs in both modes unchanged (v0.4 "suites green in both IAM modes").
+   */
+  mode?: 'embedded' | 'remote';
 }
 
 export interface EmbeddedTestIam {
   iam: BetterIam;
   bridge: ComputeIamBridge;
   plugin: ComputeIamPlugin;
-  /** The IamPort compute uses (`betterCompute({ iam: port })`). */
+  /** The IamPort compute uses (`betterCompute({ iam: port })`): embedded or remote, per `mode`. */
   port: EmbeddedIam;
+  readonly mode: 'embedded' | 'remote';
   /** Set with `inbox: 'memory'`. */
   inbox: MemoryInbox | undefined;
   root: { tenantId: string; identityId: string; credential: Credential };
@@ -197,10 +207,34 @@ export async function createEmbeddedTestIam(
     identityId: bootstrapped.identity.id,
     credential: { token: rootSession.token } as Credential,
   };
-  const port = bridge.embedded(iam, {
-    rootTenantId,
-    ...(options.runIamJobs ? { runIamJobs: true } : {}),
-  });
+  const mode =
+    options.mode ?? (process.env.BETTER_COMPUTE_IAM_MODE === 'remote' ? 'remote' : 'embedded');
+  let port: EmbeddedIam;
+  if (mode === 'remote') {
+    // The IAM host is this better-iam: its HTTP handler, compute's plugin and resolver, and the bridge's
+    // projection (bound to compute's store, as `replicaProjection` would be) behind the admission refresh.
+    const refreshSecret = 'better-compute-test-iam-refresh-secret-0123456789';
+    const refresh = createRefreshHandler({ projection: bridge.projection, secret: refreshSecret });
+    port = bridge.remote({
+      baseURL: TEST_IAM_ORIGIN,
+      fetch: async (input, init) => iam.handler(new Request(input, init)),
+      serviceToken: () => root.credential.token!,
+      rootTenantId,
+      authorizeSessions: true,
+      refresh: {
+        url: `${TEST_IAM_ORIGIN}/compute/refresh`,
+        secret: refreshSecret,
+        fetch: async (input, init) => refresh(new Request(input, init)),
+      },
+    });
+    // The IAM host's own scheduler (audit hook dispatch, outbox, budgets), run here as the host would run it.
+    if (options.runIamJobs)
+      bridge.modules[0].reconcilers!.push(...iamJobReconcilers(iam as unknown as IamJobsHost));
+  } else
+    port = bridge.embedded(iam, {
+      rootTenantId,
+      ...(options.runIamJobs ? { runIamJobs: true } : {}),
+    });
 
   let names = 0;
   const tenant = async (name: string): Promise<TestTenant> => {
@@ -300,6 +334,7 @@ export async function createEmbeddedTestIam(
     bridge,
     plugin,
     port,
+    mode,
     inbox,
     root,
     acme,
