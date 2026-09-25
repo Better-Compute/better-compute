@@ -34,6 +34,13 @@ export interface TunnelInfo {
   op: ExecTicketClaims['op'];
   tenantId?: string;
   instanceId?: string;
+  /**
+   * The ticket's `ses` and `act`: the caller's IAM session and the action `tunnels.open` decided, so
+   * `reauthorize` can check the session is still live and re-decide the same action (§7.6). A
+   * re-authorizer should refuse a tunnel without a session id (fail closed).
+   */
+  sessionId?: string;
+  action?: string;
   /** The ticket's `agt`: the agent acting for `subject` in a delegated session. */
   agentId?: string;
   /** The ticket's `dlg`: that delegation, so revoking it closes exactly its tunnels. */
@@ -263,6 +270,8 @@ export function createTunnelRegistry(deps: TunnelRegistryDeps) {
         openedAt: now,
         ...(claims.tnt ? { tenantId: claims.tnt } : {}),
         ...(claims.inst ? { instanceId: claims.inst } : {}),
+        ...(claims.ses ? { sessionId: claims.ses } : {}),
+        ...(claims.act ? { action: claims.act } : {}),
         ...(claims.agt ? { agentId: claims.agt } : {}),
         ...(claims.dlg ? { delegationId: claims.dlg } : {}),
       };

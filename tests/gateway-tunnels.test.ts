@@ -194,6 +194,31 @@ describe('tunnel core', () => {
     expect(caller.closed?.code).toBe(GrpcCode.PERMISSION_DENIED);
   });
 
+  it("hands reauthorize the ticket's IAM session and decided action, so a revoked session closes its tunnel", async () => {
+    const node = await f.addNode();
+    const { stream } = await f.connect(node);
+    const ticket = issuer.issue({
+      nodeId: node,
+      sid: 'tun_ses',
+      op: 'console',
+      subject: 'user_1',
+      sessionId: 'ses_1',
+      action: 'compute:nodes:console',
+    });
+    const caller = new Side();
+    const opening = f.gateway.openTunnel({ ticket: ticket.token, nodeId: node, caller });
+    f.gateway
+      .acceptTunnel({ nodeId: node }, new Side())
+      .receive(create(TunnelFrameSchema, { tunnelId: stream.of('openTunnel')[0]!.tunnelId, body: { case: 'opened', value: {} } }));
+    const tunnel = await opening;
+    expect(tunnel.info).toMatchObject({ sessionId: 'ses_1', action: 'compute:nodes:console' });
+    const seen: unknown[] = [];
+    reauthorize = async (info) => (seen.push({ sessionId: info.sessionId, action: info.action }), false);
+    expect(await f.gateway.reauthorizeTunnels({ subject: 'user_1' })).toBe(1);
+    expect(seen).toEqual([{ sessionId: 'ses_1', action: 'compute:nodes:console' }]);
+    expect(caller.closed?.code).toBe(GrpcCode.PERMISSION_DENIED);
+  });
+
   it('closes after IAM is unreachable for more than 2 minutes, and at the 12 h cap', async () => {
     const first = await open();
     await first.opening;
