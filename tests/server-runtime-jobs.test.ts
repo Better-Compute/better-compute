@@ -317,7 +317,8 @@ describe('lifecycle', () => {
     });
     try {
       await compute.initialize();
-      await compute.start({ roles: ['controllers'] });
+      // The scheduler role with no placer registered: it must not join a shard membership.
+      await compute.start({ roles: ['controllers', 'scheduler'] });
       await database.transaction((tx) => compute.context.work.enqueue(tx, 'live', 'node_1'));
       const deadline = Date.now() + 10_000;
       while (!seen.length && Date.now() < deadline)
@@ -335,6 +336,8 @@ describe('lifecycle', () => {
       const held = await count();
       expect(held!.shards).toBe(256);
       expect(held!.singletons).toBeGreaterThanOrEqual(1);
+      const schedulerLeases = await database.query("SELECT 1 FROM leases WHERE name LIKE 'scheduler/%'");
+      expect(schedulerLeases.rowCount).toBe(0);
       const sweeper = await database.query(
         "SELECT 1 FROM leases WHERE name = 'singleton:command-sweeper' AND owner = 'wkr-live'",
       );

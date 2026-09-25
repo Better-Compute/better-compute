@@ -200,6 +200,8 @@ export function createRuntime(options: ResolvedOptions): Runtime {
   const loopRoles = new Set<WorkerRole>();
   /** Which worker role runs each reconciler (§8.1). */
   const runnerRoles = new Map<string, ShardedRole>();
+  /** Roles that run a sharded reconciler, so hold a shard membership. */
+  const membershipRoles = new Set<ShardedRole>();
   let eventsLoop = false;
 
   const requireBound = () => {
@@ -310,6 +312,7 @@ export function createRuntime(options: ResolvedOptions): Runtime {
       for (const { reconciler, periodic } of collected) {
         const role = reconcilerRole(reconciler);
         runnerRoles.set(reconciler.name, role);
+        if (reconciler.shardBy !== 'none') membershipRoles.add(role);
         const runner = createReconcilerRunner({
           reconciler,
           periodic,
@@ -375,7 +378,11 @@ export function createRuntime(options: ResolvedOptions): Runtime {
         loop(
           'lease-renewal',
           async () => {
-            const shards = shardedRoles.filter((role) => loopRoles.has(role)).map((role) => memberships[role]);
+            // Only roles with sharded reconcilers of their own join a membership: with no placer
+            // registered, a scheduler role holds no `scheduler/shard:<n>` leases at all.
+            const shards = shardedRoles
+              .filter((role) => loopRoles.has(role) && membershipRoles.has(role))
+              .map((role) => memberships[role]);
             await renewLeases(shards, leases, singletons, workerId, settings.leaseTtlMs);
             return 0;
           },
