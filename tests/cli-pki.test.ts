@@ -432,6 +432,11 @@ describe('daemon install-script', () => {
     expect(node.dropIn).toContain('Delegate=yes');
     expect(node.dropIn).not.toContain('RestrictNamespaces=no');
     expect(node.dropIn).not.toContain('CAP_IPC_LOCK');
+    // An operator's section written with spaces is the same table: no second [plugins], and its privileged plugin counts.
+    await writeFile(`${root}/etc/bcd/config.toml`, `${node.config.replace(/\[plugins\][^[]*/, '')}  [ plugins ]\n  privileged = "kata"\n`);
+    node = await apply(['--plugins']);
+    expect(node.config.match(/^\s*\[\s*plugins\s*\]/gm)).toHaveLength(1);
+    expect(node.dropIn).toContain('RestrictNamespaces=no');
     expect(await run([...base, '--privileged-plugins', 'kata;rm'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 

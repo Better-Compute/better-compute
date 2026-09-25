@@ -39,9 +39,10 @@ describe('batches view', () => {
     const scope = await view.scope(BATCH);
     expect(scope).toMatchObject({ truncated: false });
     expect(scopeByKind(scope.items)).toEqual([
-      { kind: 'disk.wipe', subjects: ['node_a', 'node_b'] },
-      { kind: 'bmc.power', subjects: ['bmc:node_site/10.0.0.7'] },
+      { kind: 'disk.wipe', subjects: ['node_a', 'node_b'], unbound: 0 },
+      { kind: 'bmc.power', subjects: ['bmc:node_site/10.0.0.7'], unbound: 0 },
     ]);
+    expect(scopeByKind([{ leafIndex: 0, subject: 'node_a', kind: 'disk.wipe', payloadSha256: '' }])[0]).toMatchObject({ unbound: 1 });
     await view.cancel(BATCH);
     expect(calls.map((call) => [call.path, call.input])).toEqual([
       ['commandBatches/list', { tenantId: 'org_acme', state: 'pending', limit: 100 }],
@@ -61,6 +62,8 @@ describe('batches view', () => {
     ]);
     const scope = await createBatchesView(api, { tenantId: 'org_acme' }).scope(BATCH);
     expect(scope.items).toHaveLength(2);
+    // Never shown as complete.
+    expect(scope.truncated).toBe(true);
     expect(calls.filter((call) => call.path === 'commandBatches/scope')).toHaveLength(2);
   });
 
@@ -69,5 +72,8 @@ describe('batches view', () => {
     expect(describeSubject('bmc:node_site/10.0.0.7')).toBe('BMC 10.0.0.7 (via node_site)');
     expect(describeSubject('node:node_b')).toBe('HTTP to node_b');
     expect(batchApproveCommand(BATCH)).toBe(`better-compute batch approve --batch ${BATCH} --key <approver key>`);
+    expect(batchApproveCommand(BATCH, 'org_acme')).toBe(
+      `better-compute batch approve --tenant org_acme --batch ${BATCH} --key <approver key>`,
+    );
   });
 });

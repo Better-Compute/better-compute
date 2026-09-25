@@ -144,6 +144,11 @@ describe('batch sign-approvers', () => {
     expect(h.err.join('\n')).toMatch(/REMOVAL of the quorum/);
     await expect(h.run([...argv('alice'), '--threshold', '4'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(h.run([...argv('alice'), '--tiers', '100:2,5:1'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    // A tier never needs more than the base threshold (the server refuses such a set).
+    await expect(h.run([...argv('alice'), '--tiers', '5:1,100:3'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    // keygen never writes the public key through a file already there.
+    await writeFile(join(h.cwd, 'dave.pem.pub'), 'planted');
+    await expect(h.run(['batch', 'keygen', '--out', 'dave.pem'])).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
   });
 });
 

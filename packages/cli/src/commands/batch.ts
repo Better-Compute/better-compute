@@ -38,12 +38,15 @@ export async function loadApproverKey(
 ): Promise<{ privateKey: KeyObject; kid: string }> {
   let text: string;
   let mode: number;
+  let uid: number;
   try {
     text = await readFile(path, 'utf8');
-    mode = (await stat(path)).mode;
+    ({ mode, uid } = await stat(path));
   } catch {
     throw new CliError('NOT_FOUND', `Cannot read the approver key ${path}`);
   }
+  if (process.platform !== 'win32' && typeof process.getuid === 'function' && uid !== process.getuid())
+    throw new CliError('INVALID_STATE', `${path} belongs to another user: an approver key is its operator's alone`);
   if (process.platform !== 'win32' && (mode & 0o077) !== 0)
     throw new CliError(
       'INVALID_STATE',
@@ -337,7 +340,8 @@ export function subjectLines(entries: readonly BatchScopeEntry[], perKind = 12):
  * `--expect FILE`: the subjects (one per line, or a JSON array of strings) or the { subject, kind } commands an
  * approver expects; the batch must hold exactly those, else SCOPE_UNEXPECTED names the differences.
  */
-export function checkExpected(entries: readonly BatchScopeEntry[], text: string, what: string): void {
+export function checkExpected(entries: readonly BatchScopeEntry[], text: string, what: string): string[] {
+  const warnings: string[] = [];
   let expected: string[] | BatchScopeEntry[];
   const trimmed = text.trim();
   if (trimmed.startsWith('[')) {
@@ -362,6 +366,18 @@ export function checkExpected(entries: readonly BatchScopeEntry[], text: string,
   const have = new Set(entries.map(keyOf));
   const missing = [...want].filter((key) => !have.has(key));
   const unexpected = [...have].filter((key) => !want.has(key));
+  if (!byEntry) {
+    const kinds = new Map<string, Set<string>>();
+    for (const entry of entries) kinds.set(entry.subject, (kinds.get(entry.subject) ?? new Set()).add(entry.kind));
+    const several = [...kinds].filter(([, set]) => set.size > 1);
+    if (several.length)
+      warnings.push(
+        `${several.length} subject(s) take several kinds (${several
+          .slice(0, 3)
+          .map(([subject, set]) => `${subject}: ${[...set].join(', ')}`)
+          .join('; ')}): a list of subjects does not check kinds; list { subject, kind } to`,
+      );
+  }
   if (missing.length || unexpected.length) {
     const sample = (list: string[]) => list.slice(0, 5).join(', ') + (list.length > 5 ? ` … (${list.length})` : '');
     throw new CliError(
@@ -374,6 +390,7 @@ export function checkExpected(entries: readonly BatchScopeEntry[], text: string,
       'Do not approve it until the difference is explained.',
     );
   }
+  return warnings;
 }
 
 const expectFlag: FlagSpec = {
@@ -515,7 +532,14 @@ export const batchCommands = [
           throw new CliError('ALREADY_EXISTS', `${target} exists: batch keygen never overwrites a key`);
         throw error;
       }
-      await writeFile(`${target}.pub`, publicKeyPem, { flag: 'w', mode: 0o644 });
+      // Never through a file (or link) already there.
+      try {
+        await writeFile(`${target}.pub`, publicKeyPem, { flag: 'wx', mode: 0o644 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+          throw new CliError('ALREADY_EXISTS', `${target}.pub exists: remove it (the private key was written)`);
+        throw error;
+      }
       note(`Add ${target}.pub to pki.approvers.keys; keep ${target} with its operator.`);
       if (!passphrase) note(`${target} is not encrypted: set ${approverPassphraseEnv} when creating keys to encrypt them.`);
       return { kid: key.kid, privateKey: target, publicKey: `${target}.pub`, spki: base64url(key.spkiDer) };
@@ -587,7 +611,8 @@ export const batchCommands = [
         for (const line of subjectLines(scope.entries)) note(line);
         if (flags.expect !== undefined) {
           const expected = path(flags.expect);
-          checkExpected(scope.entries, await readFile(expected, 'utf8'), expected);
+          for (const warning of checkExpected(scope.entries, await readFile(expected, 'utf8'), expected))
+            note(`Warning: ${warning}.`);
           note(`Every subject is one ${flags.expect} expects.`);
         }
         reviewOperations(scope.entries, flags, note);
@@ -674,6 +699,8 @@ export const batchCommands = [
           throw usageError('Each tier needs a size of at least 1 and a threshold from 1 to the number of approvers');
         if (previous && (tier.maxScopeSize <= previous.maxScopeSize || tier.threshold < previous.threshold))
           throw usageError('Tiers go by ascending size, with thresholds that never decrease');
+        if (tier.threshold > threshold)
+          throw usageError('A tier never needs more approvals than --threshold (batches above every tier)');
       }
       const set: ApproverSet = {
         approverKeys,
@@ -816,7 +843,8 @@ export const batchCommands = [
       for (const line of subjectLines(entries)) note(line);
       if (flags.expect !== undefined) {
         const expected = path(flags.expect);
-        checkExpected(entries, await readFile(expected, 'utf8'), expected);
+        for (const warning of checkExpected(entries, await readFile(expected, 'utf8'), expected))
+          note(`Warning: ${warning}.`);
         note(`Every subject is one ${flags.expect} expects.`);
       }
       reviewOperations(entries, flags, note);

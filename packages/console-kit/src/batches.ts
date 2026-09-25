@@ -31,17 +31,22 @@ export interface BatchScopeItem {
   leafIndex: number;
   subject: string;
   kind: string;
+  /** Hex; empty: the leaf admits any payload of its kind. */
+  payloadSha256?: string;
 }
 
-/** A batch's scope for display: subjects by kind, in order. */
-export function scopeByKind(items: readonly BatchScopeItem[]): { kind: string; subjects: string[] }[] {
-  const byKind = new Map<string, string[]>();
+/** A batch's scope for display: subjects by kind, in order; `unbound` counts leaves that admit any payload. */
+export function scopeByKind(
+  items: readonly BatchScopeItem[],
+): { kind: string; subjects: string[]; unbound: number }[] {
+  const byKind = new Map<string, { subjects: string[]; unbound: number }>();
   for (const item of items) {
-    const list = byKind.get(item.kind) ?? [];
-    list.push(item.subject);
-    byKind.set(item.kind, list);
+    const group = byKind.get(item.kind) ?? { subjects: [], unbound: 0 };
+    group.subjects.push(item.subject);
+    if (item.payloadSha256 === '') group.unbound += 1;
+    byKind.set(item.kind, group);
   }
-  return [...byKind].map(([kind, subjects]) => ({ kind, subjects: subjects.sort() }));
+  return [...byKind].map(([kind, group]) => ({ kind, subjects: group.subjects.sort(), unbound: group.unbound }));
 }
 
 /** How a subject reads to a person: `node_…`, `BMC 10.0.0.7 (via node_site)`, `HTTP to node_…`. */
@@ -56,14 +61,17 @@ export function describeSubject(subject: string): string {
 }
 
 /** The approver's command for a batch (the CLI shows the scope, recomputes the root and signs). */
-export const batchApproveCommand = (batchId: string): string =>
-  `better-compute batch approve --batch ${batchId} --key <approver key>`;
+export const batchApproveCommand = (batchId: string, tenantId?: string): string =>
+  `better-compute batch approve ${tenantId ? `--tenant ${tenantId} ` : ''}--batch ${batchId} --key <approver key>`;
 
 export interface BatchesView extends ValueResource<{ items: BatchRow[]; next?: string }> {
   /** Only batches in this state (default: pending), or every batch. */
   filter(state: BatchState | 'all'): Promise<void>;
   detail(batchId: string): Promise<BatchRow>;
-  /** Every (subject, kind) of the batch, paged from commandBatches.scope (at most `max`, default 20 000). */
+  /**
+   * Every (subject, kind) of the batch, paged from commandBatches.scope (at most `max`, default 20 000). `truncated`
+   * when the listing stopped early: over `max`, or a page that did not advance (never shown as complete).
+   */
   scope(batchId: string, max?: number): Promise<{ items: BatchScopeItem[]; truncated: boolean }>;
   /** Ends a pending batch: none of its commands run (compute:batches:approve). */
   cancel(batchId: string): Promise<BatchRow>;
@@ -103,9 +111,9 @@ export function createBatchesView(
           ...(cursor === undefined ? {} : { cursor }),
         });
         items.push(...page.items);
-        // A page that does not advance ends the listing (a server bug must not spin the page).
-        if (page.next === undefined || page.items.length === 0 || (cursor !== undefined && page.next <= cursor))
-          return { items, truncated: false };
+        if (page.next === undefined) return { items, truncated: false };
+        // A page that does not advance ends the listing, as incomplete (a server bug must not spin the page).
+        if (page.items.length === 0 || (cursor !== undefined && page.next <= cursor)) return { items, truncated: true };
         if (items.length >= max) return { items: items.slice(0, max), truncated: true };
         cursor = page.next;
       }

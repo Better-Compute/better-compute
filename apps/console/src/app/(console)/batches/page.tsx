@@ -151,7 +151,7 @@ export default function BatchesPage() {
           </p>
           {open.batch.state === 'pending' && (
             <p>
-              To approve: <code>{batchApproveCommand(open.batch.batchId)}</code>
+              To approve: <code>{batchApproveCommand(open.batch.batchId, tenantId)}</code>
             </p>
           )}
           <p className="muted">
@@ -161,17 +161,20 @@ export default function BatchesPage() {
             <details key={group.kind} open={group.subjects.length <= 20}>
               <summary>
                 {group.kind} × {group.subjects.length}
+                {group.unbound > 0 && <span className="warning"> ({group.unbound} with any payload)</span>}
               </summary>
               <ul>
-                {group.subjects.map((subject) => (
-                  <li key={subject}>
+                {group.subjects.map((subject, index) => (
+                  <li key={`${subject}#${index}`}>
                     <code>{describeSubject(subject)}</code>
                   </li>
                 ))}
               </ul>
             </details>
           ))}
-          {open.truncated && <p className="warning">Only the first 20 000 commands are listed.</p>}
+          {open.truncated && (
+            <p className="warning">The listing is incomplete: review this batch with better-compute batch show.</p>
+          )}
           {open.batch.approvals.length > 0 && (
             <>
               <h4>Approved by</h4>

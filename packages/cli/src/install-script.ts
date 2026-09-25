@@ -318,7 +318,7 @@ fi
 printf '%s  %s\\n' "$SHA256" "$TMP/bcd" | sha256sum -c - >/dev/null 2>&1 || fail 'the downloaded bcd does not match its pinned SHA-256'
 
 install -d -m 0700 /etc/bcd /var/lib/bcd
-install -d -m 0755 /etc/cdi${options.plugins ? ` ${bcdPluginsDir}` : ''}
+install -d -m 0755 /etc/cdi${options.plugins ? ` /usr/local/lib/bcd ${bcdPluginsDir}` : ''}
 # Copy beside the target, then rename: the swap is atomic even while bcd runs.
 cp "$TMP/bcd" /usr/local/bin/bcd.new
 chmod 0755 /usr/local/bin/bcd.new
@@ -333,7 +333,7 @@ fi
 ${
   options.update
     ? `# bcd self-update: an [update] section unless the operator's config already has one.
-if ! grep -q '^\\[update\\]' /etc/bcd/config.toml.new; then
+if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*update[[:space:]]*\\]' /etc/bcd/config.toml.new; then
   cat >> /etc/bcd/config.toml.new <<'BCD_UPDATE'
 ${renderBcdUpdateSection(options.update)}BCD_UPDATE
 fi
@@ -342,10 +342,16 @@ fi
 }${
   options.plugins
     ? `# This node runs bcx plugins: a [plugins] section unless the operator's config already has one.
-if ! grep -q '^\\[plugins\\]' /etc/bcd/config.toml.new; then
+if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*plugins[[:space:]]*\\]' /etc/bcd/config.toml.new; then
   cat >> /etc/bcd/config.toml.new <<'BCD_PLUGINS'
 ${renderBcdPluginsSection(options.plugins)}BCD_PLUGINS
-fi
+${
+  options.plugins.privileged?.length
+    ? `else
+  printf 'bcd install: note: config.toml already has a [plugins] section; --privileged-plugins was not applied to it\\n' >&2
+`
+    : ''
+}fi
 `
     : ''
 }chmod 0600 /etc/bcd/config.toml.new
@@ -363,10 +369,11 @@ chmod 0644 /etc/systemd/system/bcd.service.new
 mv -f /etc/systemd/system/bcd.service.new /etc/systemd/system/bcd.service
 # bcx plugins: the drop-in exactly when config.toml has a [plugins] section (others keep the tighter unit).
 install -d -m 0755 /etc/systemd/system/bcd.service.d
-if grep -q '^\\[plugins\\]' /etc/bcd/config.toml; then
+if grep -Eq '^[[:space:]]*\\[[[:space:]]*plugins[[:space:]]*\\]' /etc/bcd/config.toml; then
   cat > /etc/systemd/system/bcd.service.d/plugins.conf.new <<'BCD_DROPIN'
 ${bcdPluginsDropIn}BCD_DROPIN
-  if sed -n '/^\\[plugins\\]/,/^\\[[a-z]/p' /etc/bcd/config.toml | grep -Eq '^privileged *= *"[^"]'; then
+  if sed -n '/^[[:space:]]*\\[[[:space:]]*plugins[[:space:]]*\\]/,/^[[:space:]]*\\[[[:space:]]*[a-z]/p' /etc/bcd/config.toml |
+    grep -Eq '^[[:space:]]*privileged[[:space:]]*=[[:space:]]*"[^"[:space:]]'; then
     cat >> /etc/systemd/system/bcd.service.d/plugins.conf.new <<'BCD_DROPIN'
 ${bcdPrivilegedPluginsDropIn}BCD_DROPIN
   fi
