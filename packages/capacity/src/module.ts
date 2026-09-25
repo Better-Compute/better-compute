@@ -929,6 +929,17 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           before !== after
         )
           await freezeMigLayouts(tx, context.work, pool.id, before, after);
+        // The site agents' image caches prewarm from the pool policy (§11.5): recompute their specs
+        // now rather than at the level-triggered resync.
+        const prewarm = (policy: PoolPolicy) =>
+          JSON.stringify((policy as Record<string, unknown>).prewarmImages ?? null);
+        if (prewarm(pool.policy) !== prewarm(next.policy)) {
+          const { rows: agents } = await tx.query<{ id: string }>(
+            `SELECT id FROM nodes WHERE site_id = $1 AND role = 'site' AND deleted_at IS NULL ORDER BY id`,
+            [pool.siteId],
+          );
+          for (const agent of agents) await context.desired.invalidate(tx, agent.id);
+        }
         // Every tenant view of the pool carries the new attributes.
         const offers = await tx.query<{ tenant_id: string }>(
           `SELECT tenant_id FROM pool_offers WHERE pool_id = $1`,

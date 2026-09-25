@@ -854,6 +854,29 @@ describe('pools, capacity and quotas', () => {
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
+  it('invalidates the site agents’ specs when a pool’s prewarmImages change', async () => {
+    const { rows } = await db.query<{ site_id: string }>(
+      `SELECT site_id FROM pools WHERE id = $1`,
+      [poolId],
+    );
+    const siteId = rows[0]!.site_id;
+    await db.query(
+      `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
+                          connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ('node_01jz00000000000000000000st', $1, NULL, 'root', 'site', 'adopted', false, false,
+               'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
+      [siteId],
+    );
+    const update = (policy: Record<string, unknown>) =>
+      call('pools', 'update', { tenantId: 'root', poolId, policy }, { who: root });
+    recorded.invalidated = [];
+    await update({ prewarmImages: ['img_ubuntu'] });
+    expect(recorded.invalidated).toEqual(['node_01jz00000000000000000000st']);
+    recorded.invalidated = [];
+    await update({ prewarmImages: ['img_ubuntu'], maxPending: '1h' });
+    expect(recorded.invalidated).toEqual([]);
+  });
+
   it('offers a single-tenant pool to one tenant besides its owner, without descendants', async () => {
     const offer = (toTenantId: string, extra: Record<string, unknown> = {}) =>
       call(
