@@ -899,6 +899,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             });
           allowedKinds = row?.allowed_kinds ?? null;
         }
+        // The node row is locked too: this Hello rewrites its system labels (drivers, `bc.dev/cap.*`),
+        // and placement re-checks nodeLabels under the node's FOR SHARE lock, so a capability a
+        // downgraded daemon dropped can never be missed by a placement that commits after it.
         const previous = await tx.query<{
           boot_id: string | null;
           journal_id: string | null;
@@ -913,7 +916,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
              (s.gateway_id IS NOT NULL AND s.disconnected_at IS NULL
               AND s.last_seen > compute_now() - make_interval(secs => $2::float8)) AS live
            FROM node_sessions s JOIN nodes n ON n.id = s.node_id
-           WHERE s.node_id = $1 FOR UPDATE OF s`,
+           WHERE s.node_id = $1 FOR UPDATE OF s FOR NO KEY UPDATE OF n`,
           [input.nodeId, options.liveWindowMs / 1000],
         );
         const prior = previous.rows[0];
