@@ -150,6 +150,11 @@ export interface GatewayOptions {
    */
   maxPendingHellos?: number;
   /**
+   * Observers for metrics (§14 `gateway_handshakes_total{outcome}`): told how every session
+   * handshake ended. Never awaited; a throw is ignored.
+   */
+  observe?: { onHandshake?(outcome: HandshakeOutcome): void };
+  /**
    * Duplicate-identity quarantine (§7.2): more than `max` duplicate Hellos (a live session from
    * another boot) within `windowMs` revoke the presented certificate. Default 3 in 10 minutes.
    */
@@ -283,6 +288,19 @@ export interface Gateway {
 
 const noopLog: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
+/** How a session handshake ended, for `GatewayOptions.observe.onHandshake` (`gateway_handshakes_total{outcome}`). */
+export type HandshakeOutcome = 'welcomed' | 'upgrade-required' | 'busy' | 'refused' | 'unavailable' | 'error';
+
+/** The outcome of a refused handshake, from its status. */
+function handshakeOutcome(error: unknown): HandshakeOutcome {
+  const code = error instanceof GrpcError ? error.code : toGrpcError(error).code;
+  if (code === GrpcCode.RESOURCE_EXHAUSTED) return 'busy';
+  if (code === GrpcCode.UNAVAILABLE) return 'unavailable';
+  if (code === GrpcCode.UNAUTHENTICATED || code === GrpcCode.PERMISSION_DENIED || code === GrpcCode.INVALID_ARGUMENT)
+    return 'refused';
+  return 'error';
+}
+
 /** The one command kind a daemon below `proto_min` accepts (§7.6, UPGRADE_REQUIRED). */
 const upgradeKind = 'daemon.upgrade';
 
@@ -370,6 +388,13 @@ export function createGateway(options: GatewayOptions): Gateway {
   const dispatchBatch = options.dispatchBatch ?? 1_000;
   const specSweepMs = options.specSweepMs ?? 10_000;
   const maxStreams = options.maxStreams ?? 5_000;
+  const observeHandshake = (outcome: HandshakeOutcome) => {
+    try {
+      options.observe?.onHandshake?.(outcome);
+    } catch {
+      // Observers never affect the work.
+    }
+  };
   const busyInitialMs = options.busyBackoff?.initialMs ?? 1_000;
   const busyMaxMs = options.busyBackoff?.maxMs ?? 30_000;
   const credits: LaneCreditLimits = { control: 8, provision: 4, bulk: 2, ...options.credits };
@@ -1156,14 +1181,19 @@ export function createGateway(options: GatewayOptions): Gateway {
     tunnels: () => tunnelRegistry.list(),
 
     open(peer, sink) {
-      if (!started || stopping || !lease) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is not ready');
-      if (draining) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is draining');
-      if (sessions.size >= maxStreams && !sessions.has(peer.nodeId))
-        throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway is at its stream limit');
-      if (peer.serial && options.revocations?.has(peer.serial))
-        throw new GrpcError(GrpcCode.UNAUTHENTICATED, 'certificate revoked');
-      if (!handshakes.take())
-        throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'handshake rate exceeded; retry with jitter');
+      try {
+        if (!started || stopping || !lease) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is not ready');
+        if (draining) throw new GrpcError(GrpcCode.UNAVAILABLE, 'gateway is draining');
+        if (sessions.size >= maxStreams && !sessions.has(peer.nodeId))
+          throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'gateway is at its stream limit');
+        if (peer.serial && options.revocations?.has(peer.serial))
+          throw new GrpcError(GrpcCode.UNAUTHENTICATED, 'certificate revoked');
+        if (!handshakes.take())
+          throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'handshake rate exceeded; retry with jitter');
+      } catch (error) {
+        observeHandshake(handshakeOutcome(error));
+        throw error;
+      }
 
       let session: Session | undefined;
       let ended = false;
@@ -1180,9 +1210,12 @@ export function createGateway(options: GatewayOptions): Gateway {
           }
           try {
             session = await onHello(peer, sink, msg.value);
+            observeHandshake(session.upgradeRequired ? 'upgrade-required' : 'welcomed');
           } catch (error) {
             ended = true;
-            sink.close(toGrpcError(error));
+            const status = toGrpcError(error);
+            observeHandshake(handshakeOutcome(status));
+            sink.close(status);
           }
           return;
         }

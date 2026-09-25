@@ -15,6 +15,7 @@ export type {
   Gateway,
   GatewayJob,
   GatewayOptions,
+  HandshakeOutcome,
   GatewayLoopHealth,
   GatewaySessionInfo,
   GatewayStatus,

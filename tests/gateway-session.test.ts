@@ -189,6 +189,28 @@ describe('Hello', () => {
     ]);
   });
 
+  it('tells observe.onHandshake how every handshake ended (§14 gateway_handshakes_total)', async () => {
+    const outcomes: string[] = [];
+    const g = await f.another({
+      observe: {
+        onHandshake: (outcome) => {
+          outcomes.push(outcome);
+          throw new Error('a broken metrics hook never breaks a session');
+        },
+      },
+    });
+    const node = await f.addNode();
+    const ok = new FakeStream();
+    await g.open({ nodeId: node }, ok).receive(helloFrame(node));
+    expect(ok.of('welcome')).toHaveLength(1);
+    const old = new FakeStream();
+    await g.open({ nodeId: node }, old).receive(helloFrame(node, { protoMin: 0, protoMax: 0, bootId: 'boot-old' }));
+    const unknown = new FakeStream();
+    await g.open({ nodeId: 'node_01jz00000000000000000000zz' }, unknown).receive(helloFrame('node_01jz00000000000000000000zz'));
+    expect(outcomes).toEqual(['welcomed', 'upgrade-required', 'refused']);
+    await g.stop();
+  });
+
   it('supersedes an older session of the same node on this gateway', async () => {
     const node = await f.addNode();
     const first = await f.connect(node);
