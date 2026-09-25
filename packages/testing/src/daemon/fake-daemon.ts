@@ -9,9 +9,11 @@ import {
   openWorkloadTokenResponse,
   signAttestedReport,
   signCommandUpdate,
+  verifyBatchCommand,
   verifyCommand,
   verifyDesiredState,
   verifyTrustBundle,
+  type ApproverKey,
   type ReplayCache,
   type SignerTrust,
 } from '@better-compute/pki';
@@ -186,6 +188,13 @@ export interface FakeDaemonOptions {
      * `specRejections`).
      */
     signedSpecs?: 'access' | 'always';
+    /**
+     * (v1.0, §13) The destructive-batch quorum as the join's trust bundle sets it (a newer Welcome.trust replaces
+     * it): a destructive command with a batch_id runs only with a BatchApproval of enough distinct approver keys
+     * whose scope proves it (else BATCH_UNAPPROVED); destructive commands without one run at most
+     * `unbatchedPerHour` times per rolling hour (else UNBATCHED_LIMIT; default 0).
+     */
+    quorum?: FakeQuorumTrust;
   };
   /**
    * A VPS host (v0.3): the `instances` section is converged on a fake hypervisor (options, or one
@@ -281,6 +290,8 @@ const REJECT_REASONS: Record<string, CommandRejectReason> = {
   EXPIRED: CommandRejectReason.EXPIRED,
   STALE_GENERATION: CommandRejectReason.STALE_GENERATION,
   BUSY: CommandRejectReason.BUSY,
+  BATCH_UNAPPROVED: CommandRejectReason.BATCH_UNAPPROVED,
+  UNBATCHED_LIMIT: CommandRejectReason.UNBATCHED_LIMIT,
 };
 const OUTCOME_STATE = {
   succeeded: CommandState.SUCCEEDED,
@@ -301,6 +312,14 @@ export const envFilePath = (allocationId: string): string => `${ENV_DIR}${alloca
 
 /** The precheck verdict (Go: dispatch.Verdict). */
 export type Verdict = { reject: string } | { defer: true } | { accept: true };
+
+/** The quorum part of a TrustBundle, as the daemon enforces it. */
+export interface FakeQuorumTrust {
+  approverKeys: readonly ApproverKey[];
+  threshold: number;
+  tiers?: readonly { maxScopeSize: number; threshold: number }[];
+  unbatchedPerHour?: number;
+}
 
 const rejectionCode = (reason: string | undefined): CommandRejectReason =>
   REJECT_REASONS[reason ?? ''] ?? CommandRejectReason.UNSPECIFIED;
@@ -355,6 +374,11 @@ export class FakeDaemon {
   private intentVersion: bigint | undefined;
   /** Commands whose signature failed (precheck answers BAD_SIGNATURE in its place). */
   private readonly badSignatures = new Set<string>();
+  /** (v1.0) The destructive-batch quorum in force, and commands it refused (precheck answers in its place). */
+  private quorum: FakeQuorumTrust | undefined;
+  private readonly batchVerdicts = new Map<string, 'BATCH_UNAPPROVED' | 'UNBATCHED_LIMIT'>();
+  /** Unbatched destructive commands admitted: id → server time, for the rolling-hour cap. */
+  private readonly unbatched = new Map<string, number>();
   /** Desired states refused by signed intent, in arrival order. */
   private readonly specRejectionsValue: { generation: number; reason: string }[] = [];
   private readonly fs = new Map<string, string>();
@@ -384,6 +408,7 @@ export class FakeDaemon {
     if (options.intent) {
       this.intentRoots = [...options.intent.roots];
       this.intentVersion = options.intent.version;
+      this.quorum = options.intent.quorum;
     }
     this.role = options.role ?? AgentRole.NODE;
     this.daemonVersion = options.daemonVersion ?? options.profile?.daemonVersion ?? '0.1.0';
@@ -804,6 +829,9 @@ export class FakeDaemon {
           // Instance tcp/ssh tunnels reach the instance's own address (the tunnel program stands in for it), never
           // the host's loopback: tunnels.open requires this before opening one.
           ...(this.options.tunnels ? ['tunnel.instance-dial'] : []),
+          // A VPS host enforces InstanceSpec.network_policy (the fake hypervisor records it), as bcd does
+          // since 13f784f: vps places private/none sandboxes only on hosts that say so.
+          ...(this.hypervisor ? ['instance.network-policy'] : []),
         ]),
       ],
       drivers: [
@@ -866,6 +894,13 @@ export class FakeDaemon {
     if (!proc || proc.session !== session) return;
     proc.session = undefined;
     this.log('session.closed', { reason: info.reason, by: info.by });
+    // A refusal that says when to come back (gRPC retry pushback) is followed exactly, and the doubling restarts:
+    // the gateway spreads a herd over the time it needs, instead of every daemon backing off to the cap.
+    if (info.retryAfterMs !== undefined && session.reconnectAfterMs === undefined) {
+      proc.reconnectAttempt = 0;
+      this.scheduleReconnect(Math.max(0, info.retryAfterMs));
+      return;
+    }
     this.scheduleReconnect(session.reconnectAfterMs);
   }
 
@@ -1028,6 +1063,15 @@ export class FakeDaemon {
         const bundle = verifyTrustBundle(welcome.trust, this.options.intent.trustSigner, this.intentVersion);
         this.intentRoots = [...bundle.commandSigningRoots];
         this.intentVersion = bundle.version;
+        // The quorum travels in the same signed bundle: a newer one without approver keys lifts it.
+        this.quorum = bundle.approverKeys.length
+          ? {
+              approverKeys: bundle.approverKeys.map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
+              threshold: bundle.approverThreshold,
+              tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
+              unbatchedPerHour: bundle.unbatchedDestructivePerHour,
+            }
+          : undefined;
         this.log('trust.updated', { version: Number(bundle.version), roots: bundle.commandSigningRoots.length });
       } catch (error) {
         this.log('trust.ignored', {
@@ -1114,6 +1158,7 @@ export class FakeDaemon {
         });
       }
     }
+    this.checkQuorum(command, body);
     const delivery = this.deliveryOf(body);
     const decision = resolve(this.journalValue, delivery, this.runtime(), this.hooks);
     this.log('command.deliver', { id: body.id, kind: body.kind, attempt: command.attempt, action: decision.action });
@@ -1130,6 +1175,50 @@ export class FakeDaemon {
     }
   }
 
+  /**
+   * (v1.0, §13) The destructive-batch quorum, bcd's intent.CheckBatch: with approver keys in force, a destructive
+   * command with a batch_id needs a BatchApproval of enough distinct approver keys whose scope proves this
+   * (node_id, kind); one without a batch_id counts against the unbatched hourly cap. The verdict is applied by
+   * precheck, after the signature check.
+   */
+  private checkQuorum(command: Command, body: CommandBody): void {
+    const quorum = this.quorum;
+    if (!quorum) return;
+    const kind = this.kinds.get(body.kind);
+    const destructive = kind?.destructive ?? (isCommandKind(body.kind) && commandKinds[body.kind].destructive);
+    if (!destructive) return;
+    const now = this.serverNow();
+    if (body.batchId) {
+      try {
+        verifyBatchCommand({ batchId: body.batchId, nodeId: this.nodeId, kind: body.kind }, command.batchApproval, command.batchProof, {
+          approverKeys: quorum.approverKeys,
+          threshold: quorum.threshold,
+          ...(quorum.tiers ? { tiers: quorum.tiers } : {}),
+          now,
+        });
+        this.batchVerdicts.delete(body.id);
+      } catch (error) {
+        this.batchVerdicts.set(body.id, 'BATCH_UNAPPROVED');
+        this.log('command.batch-unapproved', {
+          id: body.id,
+          batch: body.batchId,
+          reason: isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error),
+        });
+      }
+      return;
+    }
+    // A redelivery of an admitted command does not count again.
+    if (this.unbatched.has(body.id)) return;
+    for (const [id, at] of this.unbatched) if (at <= now - 3_600_000) this.unbatched.delete(id);
+    if (this.unbatched.size >= (quorum.unbatchedPerHour ?? 0)) {
+      this.batchVerdicts.set(body.id, 'UNBATCHED_LIMIT');
+      this.log('command.unbatched-limit', { id: body.id, kind: body.kind });
+      return;
+    }
+    this.unbatched.set(body.id, now);
+    this.batchVerdicts.delete(body.id);
+  }
+
   /** Go: dispatch.Precheck, in its order. */
   precheck(body: CommandBody, deferred: boolean): Verdict {
     if (body.nodeId !== this.nodeId) return { reject: 'UNSUPPORTED' };
@@ -1144,6 +1233,8 @@ export class FakeDaemon {
     }
     if (pastDeadline) return { reject: 'EXPIRED' };
     if (this.badSignatures.has(body.id)) return { reject: 'BAD_SIGNATURE' };
+    const batch = this.batchVerdicts.get(body.id);
+    if (batch) return { reject: batch };
     return { accept: true };
   }
 

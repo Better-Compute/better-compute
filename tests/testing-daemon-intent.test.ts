@@ -1,17 +1,24 @@
-import { fromBinary, toBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { timestampFromMs } from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 import { manualClock } from '@better-compute/core';
 import {
+  batchScope,
+  createApproverKey,
   createCommandSigningAuthority,
   createSigningKey,
   desiredStateFromStored,
+  signBatchApproval,
   signTrustBundle,
   storedDesiredState,
 } from '@better-compute/pki';
 import {
+  BatchApprovalSchema,
+  BatchProofSchema,
+  AgentRole,
   CommandBodySchema,
   CommandRejectReason,
+  Lane,
   CommandState,
   SignatureSchema,
   wrapCommand,
@@ -284,6 +291,69 @@ describe('FakeDaemon signed intent', () => {
     h.server.send({ case: 'command', value: wrapCommand(late, { attempt: 1 }) });
     await h.advance(5);
     expect(states(h, late.id)).toEqual(['REJECTED:EXPIRED']);
+  });
+
+  it('enforces the destructive-batch quorum: approved scope only, and an unbatched hourly cap (v1.0)', async () => {
+    const approvers = [createApproverKey(), createApproverKey()];
+    const h = await daemon({
+      intent: {
+        roots: [authority.certificate],
+        version: 1n,
+        trustSigner: { publicKey: joinKey.publicKey },
+        quorum: { approverKeys: approvers.map((a) => a.key), threshold: 2, unbatchedPerHour: 1 },
+      },
+      // A destructive kind that does not reboot the node (node.reboot would end the session).
+      kinds: {
+        'test.destroy': { lane: Lane.CONTROL, roles: [AgentRole.NODE], destructive: true, run: () => ({ outcome: 'succeeded' }) },
+      },
+    });
+    const batchId = 'batch_01k5w00000000000000000000q';
+    const scope = batchScope(batchId, [
+      { nodeId: 'node_a', kind: 'test.destroy' },
+      { nodeId: 'node_other', kind: 'test.destroy' },
+    ]);
+    const approvalBy = (signers: number[]) => {
+      const input = { batchId, scopeRoot: scope.root, scopeSize: scope.size, notAfter: T0 + 3_600_000 };
+      return create(BatchApprovalSchema, {
+        ...input,
+        notAfter: timestampFromMs(input.notAfter),
+        signatures: signers.map((i) => signBatchApproval(input, approvers[i]!.privateKey)),
+      });
+    };
+    const sendBatched = (
+      kind: string,
+      approval: ReturnType<typeof approvalBy> | undefined,
+      proofFor = kind,
+    ) => {
+      const body = h.rawCommandBody(kind, { batchId });
+      const command = wrapCommand(body, { attempt: 1 });
+      command.signature = fromSignature(signer.sign(toBinary(CommandBodySchema, body)));
+      if (approval) command.batchApproval = approval;
+      const proof = scope.proofOf('node_a', proofFor);
+      if (proof) command.batchProof = create(BatchProofSchema, proof);
+      h.server.send({ case: 'command', value: command });
+      return body;
+    };
+    // Approved by both keys, in scope: runs.
+    const approved = sendBatched('test.destroy', approvalBy([0, 1]));
+    // One approval of two, or no approval at all: refused.
+    const short = sendBatched('test.destroy', approvalBy([0]));
+    const bare = sendBatched('test.destroy', undefined);
+    await h.advance(5);
+    accepted(h, approved.id);
+    expect(states(h, short.id)).toEqual(['REJECTED:BATCH_UNAPPROVED']);
+    expect(states(h, bare.id)).toEqual(['REJECTED:BATCH_UNAPPROVED']);
+    // Unbatched destructive commands: one per rolling hour here, then UNBATCHED_LIMIT.
+    const first = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+    await h.advance(5);
+    const second = send(h, h.rawCommandBody('test.destroy'), (bytes) => signer.sign(bytes));
+    await h.advance(5);
+    expect(states(h, first.id).filter((state) => state.startsWith('REJECTED'))).toEqual([]);
+    expect(states(h, second.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
+    // Non-destructive commands never need a batch.
+    const plain = send(h, h.commandBody('diag.nvml'));
+    await h.advance(5);
+    expect(states(h, plain.id).filter((state) => state.startsWith('REJECTED'))).toEqual([]);
   });
 
   it('without signed intent configured, behaves as v0.1 (nothing checked)', async () => {

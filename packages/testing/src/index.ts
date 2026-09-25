@@ -85,7 +85,7 @@ export type {
 } from './fake-hw.js';
 
 export { FakeDaemon, cdiSpecPath, envFilePath, mergeSpec } from './daemon/fake-daemon.js';
-export type { FakeDaemonOptions, FakeDaemonState, Verdict } from './daemon/fake-daemon.js';
+export type { FakeDaemonOptions, FakeDaemonState, FakeQuorumTrust, Verdict } from './daemon/fake-daemon.js';
 export {
   belowMinimumProfile,
   daemonSkewProfiles,
