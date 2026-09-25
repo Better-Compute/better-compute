@@ -988,7 +988,15 @@ async function createManagedInstance(
       JSON.stringify(shape),
       template.imageId,
       JSON.stringify(image),
-      template.userData ?? null,
+      deps.sandboxExec
+        ? sandboxUserData(
+            isSecretRef(template.userData)
+              ? await deps.secrets.resolve(template.userData)
+              : template.userData,
+            deps.sandboxExec,
+            spec.instanceId,
+          )
+        : (template.userData ?? null),
       runtime,
       desiredState,
       spec.ownerIdentityId,
@@ -1019,6 +1027,61 @@ async function createManagedInstance(
     ...(spec.warmTemplateId ? { warmTemplateId: spec.warmTemplateId } : {}),
   });
   return row;
+}
+
+/** The certificate principal `sandboxes.exec` signs for an instance: bound to it, never bare. */
+export const sandboxPrincipal = (account: string, instanceId: string): string =>
+  `${account}@${instanceId}`;
+
+const cloudConfigTypes: readonly [string, string][] = [
+  ['#cloud-config', 'text/cloud-config'],
+  ['#!', 'text/x-shellscript'],
+  ['#cloud-boothook', 'text/cloud-boothook'],
+  ['#include', 'text/x-include-url'],
+];
+
+/**
+ * A sandbox instance's user data (§3.7, exec without an in-guest agent): a MIME multipart whose
+ * first part is vps's cloud-config and whose second is the template's own user data, if any. The
+ * cloud-config creates `account`, makes sshd trust the sandbox CA and accept only the instance's
+ * own principal (`<account>@<instanceId>`), so a certificate for one sandbox opens no other.
+ */
+export function sandboxUserData(
+  own: string | undefined,
+  exec: { caPublicKey: string; account: string },
+  instanceId: string,
+): string {
+  const text = (value: string) => JSON.stringify(value);
+  const config = [
+    '#cloud-config',
+    'users:',
+    '  - default',
+    `  - name: ${text(exec.account)}`,
+    '    shell: "/bin/bash"',
+    '    lock_passwd: true',
+    'write_files:',
+    '  - path: "/etc/ssh/bc_sandbox_ca.pub"',
+    '    permissions: "0644"',
+    `    content: ${text(`${exec.caPublicKey}\n`)}`,
+    `  - path: ${text(`/etc/ssh/bc_sandbox_principals/${exec.account}`)}`,
+    '    permissions: "0644"',
+    `    content: ${text(`${sandboxPrincipal(exec.account, instanceId)}\n`)}`,
+    '  - path: "/etc/ssh/sshd_config.d/10-bc-sandbox.conf"',
+    '    permissions: "0644"',
+    `    content: ${text('TrustedUserCAKeys /etc/ssh/bc_sandbox_ca.pub\nAuthorizedPrincipalsFile /etc/ssh/bc_sandbox_principals/%u\n')}`,
+    'runcmd:',
+    '  - ["sh", "-c", "systemctl reload-or-restart ssh || systemctl reload-or-restart sshd"]',
+    '',
+  ].join('\n');
+  const boundary = `bc-sandbox-${instanceId}`;
+  const part = (type: string, body: string) =>
+    `--${boundary}\nContent-Type: ${type}; charset="utf-8"\nMIME-Version: 1.0\n\n${body}${body.endsWith('\n') ? '' : '\n'}`;
+  const parts = [part('text/cloud-config', config)];
+  if (own !== undefined && own.length > 0) {
+    const type = cloudConfigTypes.find(([prefix]) => own.startsWith(prefix))?.[1] ?? 'text/plain';
+    parts.push(part(type, own));
+  }
+  return `Content-Type: multipart/mixed; boundary="${boundary}"\nMIME-Version: 1.0\n\n${parts.join('')}--${boundary}--\n`;
 }
 
 /** Warm instance states a claim takes: settled and not on their way out. */

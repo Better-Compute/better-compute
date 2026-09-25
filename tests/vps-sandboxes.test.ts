@@ -991,6 +991,44 @@ describe('snapshots', () => {
   });
 });
 
+describe('exec trust', () => {
+  const caPublicKey =
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq3w8xQy9eYyB7y0YyBsandboxCA bc-sandbox-ca';
+  const execModule = vps({ runtimes: ['cloud-hypervisor'], images, sandboxExec: { caPublicKey } });
+  const execApi = execModule.api!(moduleContext(db)) as VpsApi;
+
+  it("puts the sandbox CA and the instance's own principal ahead of the template's user data", async () => {
+    const template = await createTemplate({ userData: '#!/bin/sh\necho hello\n' });
+    const sandbox = (await run(
+      (execApi.sandboxes as Record<string, Definition>).create!,
+      { tenantId: 'acme', templateId: template.id, idempotencyKey: 'exec-1' },
+      alice,
+    )) as SandboxView;
+    const { rows } = await db.query<{ user_data: string }>(
+      `SELECT user_data FROM instances WHERE id = $1`,
+      [sandbox.instanceId],
+    );
+    const userData = rows[0]!.user_data;
+    expect(userData).toMatch(/^Content-Type: multipart\/mixed; boundary="bc-sandbox-inst_/);
+    expect(userData).toContain('Content-Type: text/cloud-config');
+    expect(userData).toContain(JSON.stringify(`${caPublicKey}\n`));
+    expect(userData).toContain(JSON.stringify(`sandbox@${sandbox.instanceId}\n`));
+    expect(userData).toContain('AuthorizedPrincipalsFile /etc/ssh/bc_sandbox_principals/%u');
+    expect(userData).toContain('Content-Type: text/x-shellscript; charset="utf-8"');
+    expect(userData).toContain('echo hello');
+    expect(userData.trimEnd().endsWith(`--bc-sandbox-${sandbox.instanceId}--`)).toBe(true);
+  });
+
+  it('refuses a CA that is not one key line, and a bad account', () => {
+    expect(() =>
+      vps({ images, sandboxExec: { caPublicKey: `${caPublicKey}\nssh-ed25519 AAAA other` } }),
+    ).toThrow(/one OpenSSH/);
+    expect(() => vps({ images, sandboxExec: { caPublicKey, account: 'Root!' } })).toThrow(
+      /Unix account/,
+    );
+  });
+});
+
 describe('tenant teardown', () => {
   it('deletes every instance of the tenant, sandboxes and warm ones included, until none is left', async () => {
     const template = await createTemplate({ warm: { min: 1 } });

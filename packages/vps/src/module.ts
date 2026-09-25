@@ -162,6 +162,11 @@ export interface VpsOptions {
    * restores fetch. Without it `sandboxes.snapshot` is INVALID_CONFIG.
    */
   snapshots?: SnapshotStore;
+  /**
+   * `sandboxes.exec` without an in-guest agent (§3.7): sandbox instances trust this SSH user CA (the
+   * tunnels module's `sandboxSsh` CA) for `<account>@<instanceId>`, `account` default `sandbox`.
+   */
+  sandboxExec?: { caPublicKey: string; account?: string };
 }
 
 type PoolInput = { tenantId: string; poolId: string };
@@ -345,6 +350,25 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     providers.set(provider.id, provider);
   }
   const clients = new ProviderClients(providers);
+  let sandboxExec: { caPublicKey: string; account: string } | undefined;
+  if (options.sandboxExec) {
+    const { caPublicKey, account = 'sandbox' } = options.sandboxExec;
+    // Written into every sandbox's sshd config: one printable OpenSSH key line, nothing else.
+    if (
+      typeof caPublicKey !== 'string' ||
+      !/^(ssh-ed25519|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+( [\x21-\x7e]*)?$/.test(caPublicKey)
+    )
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'vps({ sandboxExec }).caPublicKey must be one OpenSSH ed25519 or ecdsa-p256 key line',
+      );
+    if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(account))
+      throw new ComputeError(
+        'INVALID_CONFIG',
+        'vps({ sandboxExec }).account must be a Unix account name',
+      );
+    sandboxExec = { caPublicKey, account };
+  }
 
   const depsOf = (context: ModuleContext): InstanceDeps => {
     const deps: InstanceDeps = {
@@ -362,6 +386,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     };
     if (typeof context.secrets?.put === 'function') deps.broker = context.secrets;
     if (options.images) deps.images = options.images;
+    if (sandboxExec) deps.sandboxExec = sandboxExec;
     return deps;
   };
 

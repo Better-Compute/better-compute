@@ -91,6 +91,11 @@ export interface InstanceDeps {
    * through the broker. Without it, hosted instances boot without their keys and user data.
    */
   broker?: SecretBroker;
+  /**
+   * (v0.5, §3.7) Sandbox instances trust this SSH user CA for `sandboxes.exec`: their user data gains
+   * a cloud-config part that creates `account` and accepts certificates for `<account>@<instanceId>`.
+   */
+  sandboxExec?: { caPublicKey: string; account: string };
 }
 
 // --- Input --------------------------------------------------------------------------------------
