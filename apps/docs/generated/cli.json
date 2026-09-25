@@ -1344,6 +1344,51 @@
       "examples": ["better-compute pki show", "better-compute pki show --query servingCaSpkiPin"]
     },
     {
+      "name": "pki rotate-command-root",
+      "aliases": [],
+      "group": "PKI",
+      "summary": "Rotate the command-signing root in three steps: add, switch, drop",
+      "description": "pki rotate-command-root performs one step of a command-signing root rotation (PLAN.md §13) on the bundle and writes it back (sealed with BETTER_COMPUTE_SECRET when set). --stage add creates a new root and publishes it beside the current one (the trust bundle's version goes up); workers keep signing under the current root. Roll the bundle out to every process: daemons receive the new version in Welcome.trust. --stage switch, once every daemon holds that version, makes workers sign under the new root while the old one stays trusted. --stage drop, at least 24 hours later (worker keys live at most 24 h), removes the old root (version up again). Each step prints the roots and version daemons will trust.",
+      "usage": "better-compute pki rotate-command-root --stage STAGE [--pki PATH]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--stage",
+          "value": "STAGE",
+          "optional": false,
+          "description": "add a new root, switch signing to it, or drop the old one",
+          "choices": ["add", "switch", "drop"]
+        },
+        {
+          "flag": "--pki",
+          "value": "PATH",
+          "optional": true,
+          "description": "The PKI bundle written by pki init",
+          "env": "BETTER_COMPUTE_PKI",
+          "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute pki rotate-command-root --stage add",
+        "better-compute pki rotate-command-root --stage switch",
+        "better-compute pki rotate-command-root --stage drop"
+      ]
+    },
+    {
       "name": "pki issue-gateway",
       "aliases": [],
       "group": "PKI",
