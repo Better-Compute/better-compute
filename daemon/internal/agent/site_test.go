@@ -164,8 +164,8 @@ func TestProxyTargetAllowed(t *testing.T) {
 			t.Errorf("%s %s %v: %v", c.node, c.host, c.ips, err)
 		}
 	}
-	if err := proxyTargetAllowed(nil, "node_9", "10.1.1.1", ip("10.1.1.1")); err != nil {
-		t.Fatalf("an empty list: %v", err)
+	if proxyTargetAllowed(nil, "node_9", "10.1.1.1", ip("10.1.1.1")) == nil {
+		t.Fatal("a spec without proxy targets allowed one")
 	}
 }
 

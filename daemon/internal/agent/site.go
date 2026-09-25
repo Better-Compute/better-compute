@@ -266,7 +266,7 @@ func siteAddress(ip net.IP) bool {
 //
 // The URL's host must also be one of target_node_id's own addresses (SiteSpec.proxy_targets): an IP
 // literal compares as an IP; a name matches a listed name, or else every address it resolves to must
-// be listed. Until every site's spec carries the targets, this is enforced once the list is non-empty.
+// be listed. A spec that lists no targets allows none.
 func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal.Result, error) {
 	req := &sitev1.HttpProxyRequest{}
 	if err := payloadOf(cmd, req); err != nil {
@@ -385,11 +385,8 @@ func (a *Agent) runHTTPProxy(ctx context.Context, cmd dispatch.Command) (journal
 }
 
 // proxyTargetAllowed checks host (resolved to ips) against target_node_id's addresses in the site
-// spec. An empty list checks nothing (the spec predates proxy_targets).
+// spec (metal lists each site's agentless machines with their inspected addresses, never a BMC).
 func proxyTargetAllowed(targets []*sitev1.ProxyTarget, nodeID, host string, ips []net.IP) error {
-	if len(targets) == 0 {
-		return nil
-	}
 	var listed *sitev1.ProxyTarget
 	for _, t := range targets {
 		if nodeID != "" && t.GetNodeId() == nodeID {
