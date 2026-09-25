@@ -24,6 +24,10 @@ sources:
   - daemon/internal/pxe/dhcp.go
   - daemon/internal/pxe/tftp.go
   - daemon/internal/bootparams/bootparams.go
+  - daemon/cmd/bcx-ipmi/main.go
+  - packages/cli/src/commands/admin.ts
+  - packages/cli/src/commands/catalog.ts
+  - packages/cli/src/install-script.ts
   - PLAN.md
 ---
 
@@ -81,7 +85,7 @@ the control plane it is a node like any other: a `nodes` row with `role = 'site'
 | TFTP and iPXE scripts, one per machine being booted | only while holding the boot lease | yes: read-only TFTP for the iPXE builds, scripts over plain HTTP |
 | Vouching for ramdisks that PXE-booted from it (signed discovery assertions) | only while holding the boot lease | yes |
 | An image cache that ramdisks stream from | always | yes, by digest (`GET /cache/<sha256>`) |
-| BMC access (Redfish, IPMI, vendor drivers) on the management network | always | Redfish only |
+| BMC access (Redfish, IPMI, vendor drivers) on the management network | always | Redfish built in; IPMI power and boot device through the hosted `bcx-ipmi` plugin (51806ab), which `daemon install-script --install-plugins bcx-ipmi` installs from the release (adf2ae9); no vendor driver |
 
 The command kinds it accepts are role-restricted to `site`: `bmc.query`, `bmc.boot`, `bmc.power`,
 `bmc.rotate`, `bmc.firmware`, `bmc.storage`, `boot.prepareRamdisk`, `boot.cleanUp` and `site.httpProxy`, plus
@@ -105,7 +109,9 @@ the section merges field by field (see [NodeSpec sections](/docs/extending/modul
 
 <Callout type="info" title="Status">
 `bcd site` exists, and its contracts are in `proto/bettercompute/site/v1`. It runs BMC operations over
-Redfish (other drivers answer `unsupported-driver`), `site.httpProxy` and boot entries. While it holds the boot lease,
+Redfish, or through a bcx plugin it hosts for any other driver (such as `bcx-ipmi` for `ipmi`; see
+[IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi); a driver it does not host answers
+`unsupported-driver`), `site.httpProxy` and boot entries. While it holds the boot lease,
 its boot server answers prepared machines only: proxy DHCP (boot server and file, never an address), TFTP for the iPXE
 builds, iPXE scripts and discovery assertions over plain HTTP (see [the boot server](#the-boot-server-in-bcd-site)).
 Its cache pre-warms `cacheImages`, serves them to the site's ramdisks by digest and reports them in its `images`
@@ -139,6 +145,17 @@ const minted = await compute.api.siteTokens.create(credential, {
 - [`siteTokens.revoke`](/docs/reference/api/site-tokens#revoke) takes `tenantId`, `siteId` and
   `tokenId`. It revokes only site tokens: a node join token is `NOT_FOUND` there.
 - Both publish security events: `security.site-token.created` and `security.site-token.revoked`.
+
+From the command line (573b0b0), where `--out` writes the one-time token to a new 0600 file instead of printing it
+and `revoke` refuses a pasted token (anything with a `.`), so the secret is never sent as an id:
+
+```bash
+better-compute sites create --tenant root --kind shared --region eu-central-1 --iam-region eu-central --key site-fsn1
+better-compute site-tokens create --tenant root --site site_01k5w… --ttl 3600 --max-uses 2 --out ./site-token
+better-compute site-tokens revoke jt_01k5w… --tenant root --site site_01k5w…
+```
+
+`site-tokens create --ttl` is in seconds (60 to 86,400).
 
 The agent joins through the same Join RPC as any daemon (see [joining nodes](/docs/guides/nodes/joining)),
 and JoinService issues it a 24-hour certificate with role `site`. With bcd that is

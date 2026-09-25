@@ -7,6 +7,9 @@ status: experimental
 packages: ['@better-compute/core', '@better-compute/metal', '@better-compute/vps', '@better-compute/driver-sdk', '@better-compute/server']
 sources:
   - daemon/internal/bcx/supervise.go
+  - daemon/cmd/bcx-ipmi/main.go
+  - daemon/internal/agent/site.go
+  - packages/server/src/downloads.ts
   - packages/core/src/extension.ts
   - packages/core/src/domain.ts
   - packages/metal/src/kinds.ts
@@ -63,8 +66,8 @@ each kind is data: a binding on the node, inherited from its pool's hardware pro
   implemented and tested.
 - **The built-in drivers run in bcd, partly.** They live inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
   modes, which are written but not released. Redfish (with BIOS settings, RAID layouts and firmware updates), PXE
-  and iPXE, image streaming and kexec are there; IPMI and the vendor BMCs through bmclib are not. See
-  [what bcd does today](/docs/daemon#what-bcd-does-today).
+  and iPXE, image streaming and kexec are there. IPMI power and boot device run in `bcx-ipmi`, a bcx plugin the site
+  agent hosts (51806ab); vendor BMCs are not there. See [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
   instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
 - **bcx works in TypeScript and in bcd.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to
@@ -91,7 +94,7 @@ where the package that declares it is imported:
 | `bios` | metal | `getSettings()`, `applySettings(settings)` | draft until v0.5 |
 | `raid` | metal | `applyLayout(layout)`, `clear()` | draft until v0.5 |
 | `firmware` | metal | `components()`, `update(component, image)` | draft until v0.5 |
-| `runtime` | vps | `traits`, `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, optional `console(id)` | v0.3 (in bcd: `libvirt-kvm` written, 362317c, tested against a fake `virsh` only; `cloud-hypervisor` not written); bcd also serves a bcx plugin of this kind as a runtime (`list`, `apply`, `remove`) |
+| `runtime` | vps | `traits`, `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, optional `console(id)` | v0.3 (in bcd: `libvirt-kvm`, 362317c, and `cloud-hypervisor`, 2598f0a, both written and tested against fake tools only); bcd also serves a bcx plugin of this kind as a runtime (`list`, `apply`, `remove`) |
 
 Importing only `@better-compute/core` leaves `power` and `runtime` unusable, and `tests/stubs-driver-kinds.test.ts`
 checks exactly that. [BMC drivers and credentials](/docs/guides/bare-metal/bmc) describes what each metal kind is for.
@@ -258,11 +261,56 @@ credential reference are, and send one `BmcOperationRequest` (`driver`, `address
 `argsJson`, optional `tlsSpkiSha256`) to the site's agent under a kind such as `bmc.query`, `bmc.boot`,
 `bmc.power`, `bmc.rotate` or `bmc.firmware`. The site agent fetches the credential by reference, runs `<concern>.<operation>` on the named driver,
 and answers a `BmcOperationResult`. PLAN.md drives BMCs through bmclib (Redfish, IPMI and vendor BMCs); `bcd site`
-today has its own Redfish client only and answers any other driver `unsupported-driver` (see
-[Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)). A new BMC family therefore means a
-driver the site agent can run: built into `bcd site`, or a bcx plugin that `bcd site` hosts. The `bmc.*` kinds do not
-reach plugins; a plugin's operations run through profile steps sent as `driver.invoke`. The command kinds and
-credential handling are on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
+has its own Redfish client built in (see [Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)),
+and since 51806ab it sends a `bmc.*` operation whose `driver` is anything else to a bcx plugin it hosts:
+
+- It picks the hosted driver whose id is the request's `driver` and whose manifest lists the operation's concern
+  among its kinds (`power.setPower`: concern `power`, operation `setPower`). No such driver answers
+  `unsupported-driver` ("no hosted driver ipmi implements power"), and nothing is invoked.
+- It calls `Invoke` with the concern as `kind`, the operation, the BMC `address` and `tlsSpkiSha256` (hex) as
+  `config_json`, the remaining arguments as `args_json`, the command id as the idempotency key, the command's
+  `traceparent` and its `not_after` as the deadline.
+- The credential is fetched by reference as for Redfish and sent only as secrets (`username`, `password`, and a
+  rotation's `newPassword`, which is taken out of the arguments), never in the arguments or the config.
+- The kind's operation allowlist, the destructive-batch quorum and the site agent's memory of BMC addresses (which
+  `site.httpProxy` refuses) apply exactly as for Redfish. A `DriverError` keeps its code; a result that is not JSON is
+  `bmc-error`.
+
+A new BMC family is therefore a bcx plugin on the site agent, whose driver id the node's BMC binding names. Its
+operations can also run through profile steps sent as `driver.invoke`. The command kinds and credential handling are
+on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
+
+### bcx-ipmi, the IPMI driver
+
+`daemon/cmd/bcx-ipmi` is the first Go plugin in the repository (51806ab): driver `ipmi`, kinds `power` and
+`management`, `runsOn: site`, over `ipmitool` with IPMI-over-LAN (`-I lanplus`).
+
+| Operation | `ipmitool` command | Answer |
+| --- | --- | --- |
+| `power.getPower` | `chassis power status` | `{"power":"on"}` or `{"power":"off"}` |
+| `power.setPower` (`action`) | `chassis power on`, `off`, `cycle`, `reset` or `soft` (`shutdown` is `soft`) | `{}` |
+| `management.setBootDevice` (`device`, `persistent`) | `chassis bootdev pxe`, `disk`, `cdrom` or `bios` (`hdd` is `disk`, `cd` is `cdrom`), plus `options=persistent` | `{}` |
+
+- **Config** is `{ "address": "10.0.0.5[:623]" }`: a host name or IP address with an optional port (a `scheme://`
+  prefix is stripped). Anything else is `invalid-address`.
+- **Credentials** come as the secrets `username` and `password`. The password reaches `ipmitool` only through its
+  environment (`IPMI_PASSWORD` with `-E`), never its arguments, so it never shows in a process listing; the child
+  gets only `PATH` besides. A username outside `[A-Za-z0-9._@-]{1,64}` or a missing password is
+  `credentials-unavailable`.
+- **Arguments** are checked against fixed sets before anything runs: an unknown action or device is `invalid-args`,
+  and any other operation is `unsupported-operation`.
+- **Failures.** Each call has 30 seconds (`unreachable`, retryable, on timeout); a failing `ipmitool` is `bmc-error`
+  (retryable) with the first line of its output. `Health` is `NOT_SERVING` when `ipmitool` is not installed.
+
+It covers power and boot device only: virtual media, inspection, firmware, BIOS, RAID and credential rotation stay
+Redfish's. goreleaser builds it without cgo and ships it as `bcx-ipmi_<version>_linux_{amd64,arm64}.tar.gz` (348ff56),
+and the api's downloads route serves that archive (97b2ac2; see
+[serving the binaries](/docs/daemon/install#serving-the-binaries)); `daemon install-script --install-plugins bcx-ipmi`
+installs it with its pin after checking the archive against the signed release manifest (adf2ae9; see
+[installing plugins from the release](/docs/daemon/install#installing-plugins-from-the-release)). To use it, have it
+in a site agent's `[plugins] dir` (below) and enroll the machine's BMC with driver `ipmi`; metal's stock enrollment runs an
+out-of-band inspection that IPMI does not serve here (see [IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)).
+Its tests run it against a fake `ipmitool` only.
 
 ## Out-of-process drivers: bcx
 
@@ -527,7 +575,8 @@ better-compute daemon install-script --pool pool_vps --site fsn1 \
    bounding set, `Delegate=yes` with `DelegateSubgroup=main`, `ProtectControlGroups=no`, and `RestrictNamespaces=no`
    only when `privileged` names a plugin.
 3. Copy the plugin binaries into the directory and list them in its `pins` file, both root-owned, then restart
-   `bcd.service`. The script installs no plugin.
+   `bcd.service`. The script installs only the plugins a release ships (`--install-plugins bcx-ipmi` with
+   `--release-manifest`, adf2ae9); any other plugin is yours to place.
 
 An upgrade keeps the `[plugins]` section, and with it the drop-in. See
 [the plugin drop-in](/docs/daemon/install#the-plugin-drop-in) for the unit settings.

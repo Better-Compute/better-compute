@@ -5,7 +5,7 @@ metaTitle: VPS flavors and instance shapes
 icon: SlidersHorizontal
 status: beta
 packages: ['@better-compute/vps', '@better-compute/capacity']
-sources: ['packages/vps/src/flavors.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/usage.ts', 'packages/vps/src/module.ts', 'packages/vps/src/hosts.ts', 'packages/capacity/src/bookings.ts', 'packages/capacity/src/placer.ts', 'packages/capacity/src/shortlist.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/provision/src/profile.ts', 'packages/fleet/README.md', 'tests/vps-instances.test.ts']
+sources: ['packages/vps/src/flavors.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/usage.ts', 'packages/vps/src/module.ts', 'packages/vps/src/hosts.ts', 'packages/capacity/src/bookings.ts', 'packages/capacity/src/placer.ts', 'packages/capacity/src/shortlist.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/provision/src/profile.ts', 'packages/fleet/README.md', 'packages/cli/src/commands/catalog.ts', 'packages/cli/src/commands/metal.ts', 'tests/vps-instances.test.ts']
 ---
 
 Tenants should not have to know how many vCPUs a host has or what a provider calls its server types. A
@@ -44,6 +44,19 @@ await compute.api.flavors.create(
 
 A second flavor with the same name in the pool is `CONFLICT`. A provider pool flavor without `offerId` is
 `INVALID_INPUT`.
+
+The CLI's `flavors` commands (d1e83ca) take the same fields as flags:
+
+```bash
+better-compute flavors create --tenant root --pool pool_01jz… --name gpu1.l40s \
+  --vcpu 8 --memory-gib 32 --disk-gib 200 --gpus 1
+better-compute flavors list --tenant root --pool pool_01jz…
+better-compute flavors update --tenant root --pool pool_01jz… --name gpu1.l40s --vcpu 8 --memory-gib 64 --disk-gib 200 --gpus 1
+better-compute flavors delete --tenant root --pool pool_01jz… --name gpu1.l40s
+```
+
+`--offer` is the provider offer of a provider pool's flavor. `flavors update` sends every flag again, as the method
+expects (see [update and delete](#update-and-delete)).
 
 You can also declare flavors in a [FleetConfig](/docs/guides/fleet-config) document, next to the pools they belong
 to, and let `fleet apply` call `flavors.*` for you:
@@ -112,6 +125,11 @@ await compute.api.flavors.create(
   { token },
   { tenantId: 'root', poolId: providerPool, name: 'cx22', vcpu: 2, memoryGiB: 4, diskGiB: 40, offerId: 'cx22' },
 );
+```
+
+```bash
+better-compute provider-accounts offers pacct_01jz… --tenant root --kind vps
+better-compute flavors create --tenant root --pool pool_01jz… --name cx22 --vcpu 2 --memory-gib 4 --disk-gib 40 --offer cx22
 ```
 
 Provider instances have no allocation and are not metered: the provider bills you. See

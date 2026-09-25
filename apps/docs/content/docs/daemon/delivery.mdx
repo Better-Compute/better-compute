@@ -40,6 +40,8 @@ sources:
   - daemon/internal/agent/instances.go
   - daemon/internal/runtime/runtime.go
   - daemon/internal/runtime/libvirt.go
+  - daemon/internal/runtime/cloudhypervisor.go
+  - daemon/cmd/bcd/hardware_host.go
   - packages/metal/src/commands.ts
   - packages/metal/src/reconcile.ts
   - packages/provision/src/batch.ts
@@ -234,33 +236,56 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
 
 #### The runtimes
 
-A host build with `virsh` on its `PATH` runs the built-in `libvirt-kvm` runtime (`runtime.Libvirt`, 362317c), which
-drives `virsh -c qemu:///system` and `qemu-img` and keeps its files under `data_dir/libvirt`:
+A host build has two built-in runtimes, and runs each one whose tools are on its `PATH`. There is no configuration
+key: `virsh` turns on `libvirt-kvm` (`runtime.Libvirt`, 362317c; files under `data_dir/libvirt`), and the
+`cloud-hypervisor` binary turns on `cloud-hypervisor` (`runtime.CloudHypervisor`, 2598f0a; files under
+`data_dir/cloud-hypervisor`). A host with both runs both. Each instance names its runtime in its spec
+(`InstanceSpec.runtime`, which the control plane takes from the pool), and an instance whose runtime this host lacks
+fails with `runtime <id> is not installed on this host`.
 
-| Concern | What `libvirt-kvm` does |
-| --- | --- |
-| Disk | A qcow2 overlay (`instances/<id>/disk.qcow2`) on a base image downloaded once over https only, verified against the image's SHA-256 before it becomes visible, and kept as `images/<sha256>.<format>` (`qcow2`, `raw` or `iso`). An `iso` image boots from a cdrom onto a blank qcow2 disk. A disk only grows: `qemu-img resize` while stopped, `virsh blockresize` while running; a smaller size fails the instance |
-| User data | A NoCloud seed ISO (volume `cidata`, `user-data` and `meta-data` with the instance id as `instance-id` and `local-hostname`), built with `genisoimage`, else `xorriso`, attached as a read-only cdrom |
-| NICs | virtio NICs on the named bridges, on taps named `runtime.TapName`, so bcd's nftables rules exist before the tap does |
-| GPUs | VFIO passthrough (`<hostdev>` PCI, managed), the PCI address taken from the inventory's GPU bus id; a GPU without one fails the instance |
-| CPU | `host-passthrough`, so a memory snapshot restores only on the same CPU model |
-| Ownership | bcd marks each domain it defines in its metadata (namespace `https://better-compute.dev/libvirt/1`: allocation, image digest, addresses, the snapshot it was restored from). Any other domain of the connection is listed as unmanaged, the leak the control plane reports, and is never defined over, stopped or destroyed |
-| States | `start` (or `start --paused`), `suspend` and `resume`; a stop is `virsh shutdown`, then `virsh destroy` after 60 seconds; a start that fails with "Cannot allocate memory" is a capacity failure. Delete destroys and undefines the domain and removes its directory |
-| Snapshots | A tar of `meta.json` (runtime, CPU model, `includeMemory`), the overlay flattened onto its base (`qemu-img convert`), the seed and, with memory, `virsh save`'s state, after which the domain carries on from that state; a disk-only snapshot of a running domain pauses it for the copy |
-| Restores | Unpacks the tar into the new instance's directory, refusing one taken by another runtime or, with memory, on another CPU model; a memory restore's first start is `virsh restore` with the new domain's XML |
-| Console | The pty libvirt gave the domain's serial port, for [instance console tunnels](/docs/guides/access/tunnels#the-node-half) |
+<Callout type="warn" title="cloud-hypervisor is not production-safe">
+Security review 12 found two open high-severity issues in the `cloud-hypervisor` runtime (2598f0a):
+
+- when a guest reboots, its tap interfaces are recreated off the policed bridge, so the instance firewall
+  (anti-spoofing and the network policy) no longer applies to them;
+- the VMM, which runs as root, follows the qcow2 backing file a tenant's image names, which could expose the host's
+  disk or another tenant's disk.
+
+Do not run tenant instances on it. `libvirt-kvm` is being checked for the backing-file issue; that check has not
+concluded.
+</Callout>
+
+| Concern | `libvirt-kvm` | `cloud-hypervisor` |
+| --- | --- | --- |
+| Driven through | `virsh -c qemu:///system` and `qemu-img` | One cloud-hypervisor VMM per instance, started as a systemd transient unit (`systemd-run --unit=bcd-ch-<id> --collect`, so the VM outlives bcd) and driven over its REST API on `instances/<id>/api.sock`; `qemu-img` for disks. It boots the firmware at `/usr/share/cloud-hypervisor/CLOUDHV.fd` |
+| Disk | A qcow2 overlay (`instances/<id>/disk.qcow2`) on a base image downloaded once over https only, verified against the image's SHA-256 before it becomes visible, and kept as `images/<sha256>.<format>` (`qcow2`, `raw` or `iso`). An `iso` image boots from a cdrom onto a blank qcow2 disk | The same overlay on the same verified base images (it reuses `libvirt-kvm`'s image code over its own directory). An `iso` image is refused ("cloud-hypervisor boots disk images, not an iso") |
+| Growing a disk | `qemu-img resize` while stopped, `virsh blockresize` while running; a smaller size fails the instance | `qemu-img resize` while stopped, `vm.resize-disk` while running; a smaller size fails the instance |
+| User data | A NoCloud seed ISO (volume `cidata`, `user-data` and `meta-data` with the instance id as `instance-id` and `local-hostname`), built with `genisoimage`, else `xorriso`, attached as a read-only cdrom | The same seed ISO, attached as a read-only disk |
+| NICs | virtio NICs on the named bridges, on taps named `runtime.TapName`, so bcd's nftables rules exist before the tap does | Taps named `runtime.TapName` with the NIC's MAC, attached to their bridge (`ip link set <tap> master <bridge>`) once the VM runs |
+| GPUs | VFIO passthrough (`<hostdev>` PCI, managed), the PCI address taken from the inventory's GPU bus id; a GPU without one fails the instance | VFIO passthrough of `/sys/bus/pci/devices/<address>/`, the address found the same way; a GPU without one fails the instance |
+| CPU | `host-passthrough`, so a memory snapshot restores only on the same CPU model | `boot_vcpus` and `max_vcpus` both the instance's vCPUs; a memory snapshot restores only on the same CPU model |
+| Ownership | bcd marks each domain it defines in its metadata (namespace `https://better-compute.dev/libvirt/1`: allocation, image digest, addresses, the snapshot it was restored from). Any other domain of the connection is listed as unmanaged, the leak the control plane reports, and is never defined over, stopped or destroyed | cloud-hypervisor keeps no registry, so bcd's record is `instances/<id>/vm.json` (allocation, image digest, addresses, MACs, bridges, GPUs and the VM configuration). `List` reports only directories with that record, with the state from `vm.info`; a directory without one is not bcd's and is never defined over or removed |
+| States | `start` (or `start --paused`), `suspend` and `resume`; a stop is `virsh shutdown`, then `virsh destroy` after 60 seconds; a start that fails with "Cannot allocate memory" is a capacity failure. Delete destroys and undefines the domain and removes its directory | `vm.create` and `vm.boot` (then `vm.pause` for a paused start), `vm.pause` and `vm.resume`; a stop is the ACPI power button for up to 60 seconds, then `vm.shutdown`, `vmm.shutdown` and `systemctl stop`; a boot that fails for lack of memory is a capacity failure. Delete stops the VM and removes its directory |
+| Snapshots | A tar of `meta.json` (runtime, CPU model, `includeMemory`), the overlay flattened onto its base (`qemu-img convert`), the seed and, with memory, `virsh save`'s state, after which the domain carries on from that state; a disk-only snapshot of a running domain pauses it for the copy | A tar of `meta.json`, the flattened overlay, the seed and, with memory, cloud-hypervisor's own snapshot of the paused VM under `ch/` (`config.json`, `state.json`, `memory-ranges`); a running VM is paused for it and resumed after |
+| Restores | Unpacks the tar into the new instance's directory, refusing one taken by another runtime or, with memory, on another CPU model; a memory restore's first start is `virsh restore` with the new domain's XML | The same refusals. A memory snapshot's `config.json` gets the new instance's disks, taps, serial socket and GPUs before its first start, which is `vm.restore` then `vm.resume` |
+| Console | The pty libvirt gave the domain's serial port, for [instance console tunnels](/docs/guides/access/tunnels#the-node-half) | The serial port's unix socket, `instances/<id>/serial.sock` |
+
+A snapshot is tied to the runtime that took it: `meta.json` names it, and the other runtime refuses the tar.
 
 <Callout type="warn" title="Tested against fakes only">
 `libvirt-kvm`'s tests (`daemon/internal/runtime/libvirt_test.go`) run it against a fake `virsh` and `qemu-img`:
 the domain XML, metadata, states, grow and shrink, snapshot and clone with memory, a CPU mismatch, destroy, and a
-mismatched image digest. It has not run on a real KVM host yet. `cloud-hypervisor` is not written.
+mismatched image digest. `cloud-hypervisor`'s tests (`cloudhypervisor_test.go`) run it against a fake VMM API and
+fake `systemd-run`, `qemu-img` and seed tools: define, the states, a memory snapshot, a restore into a clone with its
+paths rewritten, stop and destroy, and a directory that is not bcd's left alone. Neither has run on a real KVM host,
+and no end-to-end test drives either through the control plane.
 </Callout>
 
-fakehw builds run a file-backed runtime under the same name, whose domains outlive the process and honor vCPU and
-memory limits; `tests/e2e/bcd-vps.test.ts` drives that one through the control plane. On `bcd node`, a bcx plugin
+fakehw builds run a file-backed runtime named `libvirt-kvm` instead, whose domains outlive the process and honor vCPU
+and memory limits; `tests/e2e/bcd-vps.test.ts` drives that one through the control plane. On `bcd node`, a bcx plugin
 whose driver lists the kind `runtime` is also a runtime (`list`, `apply`, `remove` over `Invoke`; no snapshots). A
-host without `virsh` and without a runtime plugin runs no instances: a non-empty section fails with `this host runs
-no instance runtime`, and `bcd doctor` warns about it.
+host with neither tool and no runtime plugin runs no instances: a non-empty section fails with `this host runs no
+instance runtime`, and `bcd doctor` warns ("neither virsh nor cloud-hypervisor: this host runs no VPS instances").
 
 ## Commands
 

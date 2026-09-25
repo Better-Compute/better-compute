@@ -78,7 +78,8 @@ sequenceDiagram
   not released. `tests/e2e/bcd.test.ts` opens a node console through the api's relay, the gateway and a real bcd, and
   the shell's exit status comes back. bcd dials instance `ssh` and `tcp` tunnels to the instance's own address, and
   only a host that runs an instance runtime advertises `tunnel.instance-dial`: a host build with `virsh` (the
-  `libvirt-kvm` runtime, 362317c, so far tested against a fake `virsh` only, never on a real KVM host), a fakehw
+  `libvirt-kvm` runtime, 362317c) or with the `cloud-hypervisor` binary (2598f0a), both so far tested against fake
+  tools only, never on a real KVM host, a fakehw
   build, or a host with a bcx runtime plugin (none is written). On a host without one, `tunnels.open` refuses
   instance `ssh`, `tcp` and `console` tunnels outright. `exec` into an instance closes at once with exit status 127
   on every host until guests have an agent, so an instance's serial console (op `console`, 798e710) is the terminal
@@ -533,7 +534,7 @@ tickets. When a program cannot start, the tunnel opens and closes at once with e
 
 | Op | Node ticket | Instance ticket |
 | --- | --- | --- |
-| `console` | A login shell (`/bin/bash -l`, or `/bin/sh -l`) as root in `/`, on a pseudo-terminal opened through `/dev/ptmx` without cgo. `resize` sets the window size, a hang-up sends `SIGHUP` to the shell's process group, and `closed` carries the shell's exit status | The instance's serial console, from its runtime, for a running, managed instance on this host (`libvirt-kvm` opens the serial port's pty; f8273ef); never the host's shell |
+| `console` | A login shell (`/bin/bash -l`, or `/bin/sh -l`) as root in `/`, on a pseudo-terminal opened through `/dev/ptmx` without cgo. `resize` sets the window size, a hang-up sends `SIGHUP` to the shell's process group, and `closed` carries the shell's exit status | The instance's serial console, from its runtime, for a running, managed instance on this host (`libvirt-kvm` opens the serial port's pty, `cloud-hypervisor` dials the VM's serial socket; f8273ef); never the host's shell |
 | `exec` | Refused: `exec` is into an instance; a host shell is `console`, decided as `compute:nodes:console` | Refused: it needs a guest agent |
 | `ssh` | A TCP connection to the node's own sshd on `127.0.0.1:22` | A TCP connection to port 22 of the instance's own address |
 | `tcp` | A TCP connection to the ticket's `port` on `127.0.0.1` | A TCP connection to the ticket's `port` on the instance's own address |
@@ -547,7 +548,8 @@ never reaches the host.
 instance's serial console (798e710). The API guards instance `ssh`, `tcp` and `console` with a capability: the node's
 current session must advertise `tunnel.instance-dial` in its `Hello` (stored in `node_sessions.capabilities`; see
 [sessions](/docs/daemon/sessions#hello)), or `tunnels.open` answers `UNSUPPORTED` before any ticket is minted. bcd
-advertises it only when it runs an instance runtime: `libvirt-kvm` on a host build with `virsh`, the file-backed
+advertises it only when it runs an instance runtime: `libvirt-kvm` on a host build with `virsh`, `cloud-hypervisor`
+on one with the `cloud-hypervisor` binary, the file-backed
 runtime of a fakehw build, or a bcx runtime plugin; on a host without one a node `console` is the only op that runs.
 An instance `exec` needs no capability, and bcd refuses it as above, so the serial console is the way into an
 instance on a real host. Sandbox and warm sandbox instances are refused for every op, `console` included

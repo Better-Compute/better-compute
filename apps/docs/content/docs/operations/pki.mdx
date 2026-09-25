@@ -1016,7 +1016,7 @@ the instance and the expiry). `createWorkloadTokenRequest` and `openWorkloadToke
 `openWorkloadTokenRequest`, `sealWorkloadTokenResponse` and `refuseWorkloadTokenRequest` the broker's. bcd carries
 the host's half in Go (`NewWorkloadTokenRequest` and `OpenWorkloadTokenResponse` in `daemon/internal/pki`, checked
 against fixtures the TypeScript side produces), and its metadata service (`daemon/internal/imds`) calls it for the
-instances of whichever runtime bcd runs; the `libvirt-kvm` runtime of host builds has not run on real hardware yet,
+instances of whichever runtime bcd runs; neither runtime of host builds (`libvirt-kvm`, `cloud-hypervisor`) has run on real hardware yet,
 so only fakehw builds' instances have been served end to end. What the broker checks is in
 [VPS instances](/docs/guides/vps/instances#workload-identity).
 

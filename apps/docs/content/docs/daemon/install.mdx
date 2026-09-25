@@ -18,6 +18,9 @@ sources:
   - daemon/cmd/bcd/doctor.go
   - daemon/internal/helper/helper.go
   - daemon/internal/selfupdate/manager.go
+  - daemon/internal/selfupdate/selfupdate.go
+  - daemon/internal/selfupdate/nofollow_unix.go
+  - daemon/cmd/bcd/rootdir_unix.go
   - daemon/internal/agent/update.go
   - tests/cli-pki.test.ts
   - daemon/cmd/bcd/site.go
@@ -78,6 +81,12 @@ pattern (a semantic version with an optional leading `v`, `linux`, `amd64` or `a
 be reached; anything else, or a binary the deployment does not have, is 404. `downloads` needs `dir` or `blob`, or
 `betterCompute()` throws `INVALID_CONFIG`.
 
+The same route serves the `bcx-ipmi` plugin (97b2ac2): `GET {basePath}/downloads/bcx-ipmi/{version}/{os}-{arch}`
+answers goreleaser's archive `bcx-ipmi_{version}_{os}_{arch}.tar.gz`, from the blob key `bcx-ipmi/{version}/{file}`
+or `{dir}/{file}`. The products are a fixed list, `bcd` and `bcx-ipmi`; any other name is 404. The route stays public
+because the archive's digest is in the same signed release manifest, and the install script checks the download
+against it ([installing plugins from the release](#installing-plugins-from-the-release)).
+
 <Callout type="info" title="Where the binaries come from">
 The route only serves files you put there. Copy each release's bare binaries (from goreleaser's output) into the
 directory or blob store before you roll the version out.
@@ -116,7 +125,8 @@ better-compute daemon install-script \
 | `--bmc-networks CIDRS` | no | | A site agent's BMC networks (comma-separated), written as `[site] bmc_networks`: `site.httpProxy` never reaches into them |
 | `--plugins` | no | | Prepare the node for bcx driver plugins: a `[plugins]` section and the systemd drop-in; see [the plugin drop-in](#the-plugin-drop-in) |
 | `--privileged-plugins NAMES` | no | | Comma-separated plugins that run as root without the seccomp filter, such as a Kata runtime; implies `--plugins` |
-| `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins` or `--privileged-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25) |
+| `--install-plugins NAMES` | no | | Comma-separated bcx plugins to install from the release, each checked against its archive digest in the verified `--release-manifest` (adf2ae9). Only plugins a release ships are accepted: `bcx-ipmi`. Implies `--plugins` and needs `--release-manifest`; see [installing plugins from the release](#installing-plugins-from-the-release) |
+| `--unprivileged` | no | | Run `bcd node` as the unprivileged `bcd` user beside a root `bcd helper` (169c459): a `[helper]` section, the `bcd` account, `bcd-helper.service` and a `bcd.service` drop-in; see [running bcd node unprivileged](#running-bcd-node-unprivileged). Refused with `--plugins`, `--privileged-plugins` or `--install-plugins`. Self-update works in this mode: the helper does the privileged half (2d67b25) |
 | `--approver-set-sha256 HEX` | no | | Writes `approver_set_sha256` (64 lower-case hex digits, the `approverSetSha256` that `pki trust-version` prints) into `config.toml`, pinning the node's first approver set (9b7a199): a keyless bcd takes only that set, and runs nothing destructive until it has it; see [pinning the first set](/docs/operations/pki#pinning-the-first-set). An upgrade run without the flag keeps the node's existing pin (b6d401f) |
 | `--pki PATH` | no | | The PKI bundle to read the pins from |
 | `--out PATH` | no | | Write a new file with mode 0755 instead of printing; refuses to overwrite (`FILE_EXISTS`) |
@@ -297,8 +307,8 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[update] release_pins` | no | none | Comma-separated `sha256/...` pins of the release keys. Without them bcd refuses every self-update; see [self-update](#self-update) |
 | `[update] release_threshold` | no | `1` | How many distinct pinned keys must have signed a release |
 | `[update] release_sequence` | no | `0` | The release the node was installed at: no release manifest with a lower sequence is taken (0: unknown) |
-| `[update] entrypoint` | no | `/usr/local/bin/bcd` | The path `bcd.service` starts; the first update makes it a symlink to `current` in the slots directory |
-| `[update] slots_dir` | no | `<data_dir>/bin`; under `bcd helper` `/usr/local/lib/bcd` | An absolute path for the binary slots, and under the helper also `upgrade.json` and `update.json` (2d67b25). Under the helper it may not be inside `data_dir` ("under bcd helper, update.slots_dir may not be inside data_dir"), since the unprivileged node owns that directory; the helper creates it |
+| `[update] entrypoint` | no | `/usr/local/bin/bcd` | The path `bcd.service` starts; the first update makes it a symlink to `current` in the slots directory. Under the helper it may not be inside `data_dir` ("under bcd helper, update.entrypoint may not be inside data_dir"; 9e71b1f), since root adopts the binary found there into a slot |
+| `[update] slots_dir` | no | `<data_dir>/bin`; under `bcd helper` `/usr/local/lib/bcd` | An absolute path for the binary slots and, beside them, `upgrade.json` and `update.json` (without it and without the helper, the records stay in `data_dir`; 2d67b25). Under the helper it may neither be inside `data_dir` nor contain it ("under bcd helper, update.slots_dir may not be inside data_dir"; both paths cleaned first, c139b9c), since the unprivileged node owns that directory; the helper creates it |
 | `[helper] socket` | no | | An absolute path: `bcd node` then runs unprivileged and sends its privileged operations, self-update's included, to `bcd helper` on this unix socket (28dc2ae); `--unprivileged` writes `/run/bcd-helper/helper.sock`. The directory must be root's with no group or other write. See [running bcd node unprivileged](#running-bcd-node-unprivileged) |
 | `[helper] user` | with `socket` | | The unprivileged account `bcd node` runs as (`bcd` from `--unprivileged`); `root` is refused ("helper.socket needs an absolute path and helper.user, the unprivileged account bcd node runs as") |
 | `[site] bmc_networks` | no | | A site agent's BMC networks, comma-separated CIDRs: `site.httpProxy` never reaches into them, whatever the control plane asks. A site agent with it advertises the capability `site.bmc-networks`, and `better-compute doctor` warns about connected site agents without it (a019c85) |
@@ -495,9 +505,40 @@ controllers in it and in its parent; on systemd older than 254, which ignores `D
 moves itself into a `main` leaf, since cgroup v2 gives no controllers to the children of a cgroup that holds
 processes itself (d902063). If the cgroup cannot be prepared, no plugin runs and the log says why.
 `--privileged-plugins NAMES` implies `--plugins` and writes `privileged`; each name must be letters, digits, `.`,
-`_` and `-`. The script adds no plugins: put the binaries and their `pins` file in the directory yourself (see
-[driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd)). A section you wrote by hand works the same
-way: any `[plugins]` section gets the drop-in, and removing the section removes the drop-in on the next run.
+`_` and `-`. Other plugins you put in the directory yourself, the binaries and their lines in its `pins` file (see
+[driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd)); the plugins a release ships the script can
+install (below). A section you wrote by hand works the same way: any `[plugins]` section gets the drop-in, and
+removing the section removes the drop-in on the next run.
+
+#### Installing plugins from the release
+
+`--install-plugins NAMES` (adf2ae9) installs bcx plugins that a bcd release ships, today only `bcx-ipmi`, the IPMI
+BMC driver a site agent hosts (see [IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)). It
+implies `--plugins` and needs `--release-manifest`: the CLI takes each plugin's archive digests,
+`bcx-ipmi_<version>_linux_{amd64,arm64}.tar.gz`, from the verified, signed manifest (`RELEASE_INCOMPLETE` when it
+lists neither), and refuses any other name.
+
+```bash
+better-compute daemon install-script --pool pool_site --site fsn1 \
+  --gateway-url https://gw.eu.example.com --base-url https://compute.example.com \
+  --bcd-version 0.9.1 --release-manifest dist/manifest.json --release-pins sha256/... \
+  --install-plugins bcx-ipmi > install-bcd.sh
+```
+
+For each plugin the script:
+
+1. downloads `{base-url}{base-path}/downloads/<name>/<version>/linux-<arch>` over https (the same version as bcd)
+   and checks the archive against its pinned SHA-256;
+2. refuses an archive that names a path outside it (a leading `/` or a `..`), that has no member named after the
+   plugin, or whose member is not a regular file (a symlink or hard link), and extracts only that member;
+3. installs it with mode 0755 as `/usr/local/lib/bcd/plugins/<name>` (written as `<name>.new` and renamed);
+4. writes its binary's SHA-256 as its line in the directory's `pins` file (0644), replacing an older line for the
+   same plugin and keeping every other line.
+
+A rerun replaces the plugin and its pin without duplicating the line. Like `--plugins`, it is refused with
+`--unprivileged`. The script itself sets up a node (`bcd node`); a site agent that reads the same `config.toml` finds
+the plugin in its `[plugins] dir` (see [a site agent](#a-site-agent)). `tests/cli-pki.test.ts` runs the install
+function in a real `sh` against real archives, including a wrong digest, a symlinked member and a `../` member.
 
 ### Running bcd node unprivileged
 
@@ -528,7 +569,12 @@ user = "bcd"
 The socket is not in `/run/bcd`: the `bcd` user owns that directory, and a directory the node can write would let it
 redirect root's work on the socket path with a symlink. So it lives in the helper's own root-owned runtime directory.
 Since 2d67b25 the helper refuses to start unless the socket's directory is root's and closed to group and other
-writes, and it binds, chmods and chowns the socket in a private 0700 directory before renaming it into place.
+writes, and it binds, chmods and chowns the socket in a private 0700 directory before renaming it into place. Since
+c139b9c, a helper running as root also refuses to start unless every existing directory from `/` down to the slots
+directory, the socket's directory and (since 9e71b1f) the entrypoint's directory is root's and closed to group and
+other writes. It checks this before it touches its update records or arms a watchdog. A host whose `/usr/local/lib` is
+group-writable (`root:staff` 2775 on older Debian) fails it; `bcd doctor`, run as root on a helper node, reports each
+such directory as a failed `helper` check.
 
 The script decides the mode from the configuration, not the flag: it sets up helper mode exactly when `config.toml`
 has a `[helper]` section, so an upgrade run keeps the node's mode, and deleting the section returns the node to root
@@ -538,9 +584,14 @@ without the section, so disable that unit yourself). In helper mode it:
 1. creates the `bcd` system account if there is none (`useradd --system --no-create-home --home-dir /var/lib/bcd
    --shell /usr/sbin/nologin bcd`, or busybox `adduser -S -D -H` without `useradd`);
 2. installs `bcd-helper.service` and the `bcd.service` drop-in `unprivileged.conf`, both 0644;
-3. makes `/etc/bcd` (0750) and `config.toml` (0640) group-owned by `bcd`, so the node can read its configuration and
+3. creates `/usr/local/lib/bcd`, where the helper keeps the self-update slots, with mode 0755, and sets an existing
+   one to 0755 (27c9551). The helper's `UMask=0077` would otherwise leave it 0700, and `bcd node`, running as `bcd`,
+   could not execute the slot its entrypoint links to after the first update. The helper itself creates every
+   missing directory on the way to the slots with mode 0755 whatever its umask, and never changes the mode of one
+   that exists (c139b9c, 9e71b1f);
+4. makes `/etc/bcd` (0750) and `config.toml` (0640) group-owned by `bcd`, so the node can read its configuration and
    nothing else of `/etc/bcd` becomes readable to it;
-4. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
+5. after `bcd join` (which runs as root), gives `/var/lib/bcd` to `bcd:bcd` and starts `bcd-helper.service` before
    `bcd.service`; an upgrade run does the same with restarts.
 
 ```ini title="/etc/systemd/system/bcd-helper.service"
@@ -763,10 +814,13 @@ verify, swap, confirm, roll back) runs in process on a root node and inside `bcd
    `slots.json`. The first update adopts the binary the install script put at the entrypoint (`[update]
    entrypoint`, default `/usr/local/bin/bcd`) into slot `a` and makes the entrypoint a symlink to `current`; an
    entrypoint that is a symlink somewhere else is refused, and a plain file found there later (a rerun of the install
-   script) is copied into the current slot first (9006eee). The node downloads the release into
+   script) is copied into the current slot first (9006eee). Running as root, adoption takes only a root-owned regular
+   file that group and others cannot write (9e71b1f). The node downloads the release into
    `<data_dir>/staging/bcd-<version>`, at most 512 MiB, checked against the manifest's size and digest as it streams,
-   with an idle watchdog; the swap then copies it into the other slot, opening it with `O_NOFOLLOW` and checking the
-   size and digest again as it writes.
+   with an idle watchdog; the swap then copies it into the other slot, checking the size and digest again as it
+   writes. It opens the staged file beneath the staging directory's parent (`os.Root`), refuses a symlinked staging
+   directory, opens with `O_NOFOLLOW|O_NONBLOCK` (a FIFO cannot hang it), and takes only a regular file with one link;
+   under the helper the file must also be owned by the node's uid (c139b9c).
 3. **Swap and confirm.** bcd writes `upgrade.json` with a deadline of now plus 120 seconds (fsynced), points
    `current` at the new slot and execs the entrypoint once everything is closed. The new binary confirms itself on
    its first `Welcome`: the release floor moves up (`update.json`) and `upgrade.json` goes. Without a `Welcome` by
@@ -777,8 +831,13 @@ verify, swap, confirm, roll back) runs in process on a root node and inside `bcd
 4. **Crash loops.** Under systemd the first update writes `bcd-rollback.service` and a `bcd.service` drop-in
    (`50-bcd-rollback.conf`: `StartLimitIntervalSec=600`, `StartLimitBurst=5`, `OnFailure=bcd-rollback.service`),
    which restores `previous`, only while `upgrade.json` exists. fakehw builds never write them.
-5. **Going back.** A rollout rolled back to the version in the other slot needs no manifest: that binary ran here,
-   and its digest must still match the section.
+5. **No going back below the floor.** A confirmed update is never undone (c139b9c). `slots.json` records each
+   slot's version, manifest sequence and the SHA-256 of the bytes written into it. The binary already in the other
+   slot is taken without a manifest only when its recorded sequence is known and not below the release floor, so a
+   section that names the older version the node ran before is refused: without a manifest there is nothing to
+   verify, and that release's manifest is below the floor (the `daemon` section reports `FAILED`). An update that never confirmed is still swapped back by the deadline,
+   the crash-loop unit or the helper's watchdog. To undo a release that confirmed, roll forward: sign a newer release
+   with a higher sequence and roll it out ([rollouts](/docs/guides/rollouts#pause-resume-abort)).
 
 `daemon.upgrade` is self-terminating, like `node.reboot`: it reports `RUNNING` before the swap and `SUCCEEDED` from the
 new binary once it is welcomed, or `FAILED` with `update-failed` after a swap back; a restart without a reboot is
@@ -786,9 +845,9 @@ decided by `upgrade.json`, not the boot id. Running workloads are not touched. `
 without self-update: the `daemon` section stays `SectionUnsupported` and the kind `UNSUPPORTED`. `bcd update` shows
 the slots, the release floor, a pending update and failed versions from `[update] slots_dir` (run it as root on a
 helper node, whose records are root's), and `bcd doctor` warns without release pins, fails when the slots are in use
-but the entrypoint does not link to `current`, and warns about a pending update or a failed version (2845f41).
-Doctor's slot and record checks still read `<data_dir>/bin` and `data_dir`, not `[update] slots_dir`, so on a helper
-node only `bcd update` shows them. `tests/e2e/bcd.test.ts` updates a real bcd to a second signed build through
+but the entrypoint does not link to `current`, and warns about a pending update or a failed version (2845f41). Both
+find the slots and records the same way (8eca2b1): `[update] slots_dir`, else `/usr/local/lib/bcd` under the
+helper, else `<data_dir>/bin` with the records in `data_dir`. `tests/e2e/bcd.test.ts` updates a real bcd to a second signed build through
 `daemon.upgrade`, a real exec and its `Welcome` (fc0ca6a), and delivers a signed build to an unprivileged node
 through `bcd helper` (2d67b25); no release has been cut, so no real host has self-updated yet. See
 [delivery](/docs/daemon/delivery).
@@ -809,7 +868,9 @@ bcd is configured to build with goreleaser from `daemon/` (`.goreleaser.yaml`) f
 cgo and `zig cc` because go-nvml will load `libnvidia-ml`. A release produces
 `bcd_<version>_linux_{amd64,arm64}.tar.gz`, each with a `.sha256`, and the bare binaries
 `bcd_<version>_linux_{amd64,arm64}`. The bare binary is what the install script downloads, what a signed release
-manifest lists and what self-update verifies. goreleaser also writes an SPDX SBOM per archive (syft) and a keyless
+manifest lists and what self-update verifies. The same release builds `bcx-ipmi`, the site agent's IPMI BMC
+plugin, without cgo and ships it only as `bcx-ipmi_<version>_linux_{amd64,arm64}.tar.gz` (348ff56), so a release
+still has exactly one bare binary per platform, bcd's, which rollouts and self-update take. goreleaser also writes an SPDX SBOM per archive (syft) and a keyless
 cosign signature and certificate for every artifact. `.github/workflows/release.yml` runs it on a `v*` tag (or a
 dispatch naming one), appends everything to that tag's GitHub release, and adds SLSA level 3 provenance
 (`bcd.intoto.jsonl`) from the generic SLSA generator. No tag has been released yet; CI

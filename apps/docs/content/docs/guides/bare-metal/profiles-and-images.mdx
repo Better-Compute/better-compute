@@ -21,6 +21,8 @@ sources:
   - packages/metal/src/module-types.ts
   - tests/metal-lifecycle.test.ts
   - tests/provision-images.test.ts
+  - packages/cli/src/commands/metal.ts
+  - packages/cli/src/commands/catalog.ts
   - PLAN.md
 ---
 
@@ -107,9 +109,14 @@ Run `validate` before the first deploy: it reports every problem at once with it
 deploy would fail on the first.
 
 ```bash
-better-compute api profiles.create tenantId=root document:=@ubuntu-gpu-host.json
-better-compute api profiles.validate tenantId=root profileId=ubuntu-24.04-gpu-host profileVersion:=1
+better-compute profiles create ./ubuntu-gpu-host.json --tenant root            # --public for every tenant
+better-compute profiles validate ubuntu-24.04-gpu-host --tenant root --profile-version 1
+better-compute profiles render ubuntu-24.04-gpu-host --tenant root              # the latest version
 ```
+
+The `profiles` commands (171d9be) default `--profile-version` to the latest version where the method allows it;
+`profiles update` takes `--file` (a replacement document) or `--visibility`, and `--if-version` for the row's
+version.
 
 ## The profiles metal ships
 
@@ -351,6 +358,18 @@ await compute.api.images.register(credential, {
 
 `images.register` and `images.promote` are decided as `compute:images:publish`, `get` and `list` as
 `compute:images:read`.
+
+From the command line (d1e83ca), `images register` takes the format as `--disk-format` (`--format` is the CLI's
+output flag), and `--signature` and `--signer` only together:
+
+```bash
+better-compute images register --tenant root --ref ubuntu-24.04-server@2026.09 \
+  --source https://images.example.com/ubuntu-24.04-server-2026.09.raw.zst \
+  --disk-format raw --compression zstd --sha256 <64 hex digits> --size 3221225472 \
+  --signer platform-2026 --signature "$SIGNATURE"
+better-compute images list --tenant root --kind os
+better-compute images promote img_01k5w… --tenant root
+```
 
 ### Site caches
 

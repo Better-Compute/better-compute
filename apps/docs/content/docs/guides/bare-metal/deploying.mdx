@@ -21,6 +21,9 @@ sources:
   - daemon/internal/agent/ramdisk_ext.go
   - daemon/internal/agent/site.go
   - daemon/internal/redfish/redfish.go
+  - packages/cli/src/commands/metal.ts
+  - packages/cli/src/commands/admin.ts
+  - packages/cli/src/commands/catalog.ts
   - PLAN.md
 ---
 
@@ -113,11 +116,14 @@ The gateway role needs a serving certificate (`better-compute pki issue-gateway`
 ### Create a site, its agent and a pool
 
 ```bash
-better-compute api sites.create tenantId=root kind=shared region=lab-1 idempotencyKey=lab-1
-better-compute api siteTokens.create tenantId=root siteId=site_… ttlSeconds:=3600 idempotencyKey=lab-1-agents
-better-compute api pools.create tenantId=root siteId=site_… class=metal-host \
-  policy:='{"hardwareProfile":"emulated-redfish"}'
+export BETTER_COMPUTE_TENANT=root
+better-compute sites create --kind shared --region lab-1 --key lab-1
+better-compute site-tokens create --site site_… --ttl 3600 --key lab-1-agents --out ./site-token
+echo '{"hardwareProfile":"emulated-redfish"}' > policy.json
+better-compute pools create --site site_… --class metal-host --policy-file policy.json
 ```
+
+`site-tokens create --out` writes the one-time token to a new 0600 file instead of printing it.
 
 Join a site agent on the `bc-site` network with the site token (`BCD_JOIN_TOKEN=bcjt_… bcd join --role site`,
 then `bcd site --config /etc/bcd/config.toml`). Its `config.toml` needs a `[boot]` section with `proxy_dhcp`, `tftp`
@@ -136,9 +142,12 @@ system for both machines. See [Redfish in bcd site](/docs/guides/bare-metal/bmc#
 
 ```bash
 better-compute api images.register --data @image.json
-better-compute api profiles.create tenantId=root document:=@ubuntu-gpu-host.json
-better-compute api profiles.validate tenantId=root profileId=ubuntu-24.04-gpu-host profileVersion:=1
+better-compute profiles create ./ubuntu-gpu-host.json
+better-compute profiles validate ubuntu-24.04-gpu-host --profile-version 1
 ```
+
+`images register` (with `--ref`, `--source`, `--disk-format` and `--sha256`) is the CLI form of the first call when
+you would rather pass flags than a JSON body.
 
 The profile is the GPU host from [profiles and images](/docs/guides/bare-metal/profiles-and-images):
 render user data, boot the ramdisk, stream the image, set boot to disk, kexec.
@@ -161,7 +170,15 @@ render user data, boot the ramdisk, stream the image, set boot to disk, kexec.
 
 ```bash
 better-compute api metal.enroll --data @enroll-bm-1.json
-better-compute api workflows.list tenantId=root nodeId=node_… --query "items[].profileId"
+better-compute workflows list --node node_… --query "items[].profileId"
+```
+
+The same enrollment with flags, the password read from a file (see [from the command line](#from-the-command-line)):
+
+```bash
+better-compute metal enroll --site site_… --pool pool_… \
+  --bmc-address 'https://192.168.122.1:8000/redfish/v1/Systems/<libvirt domain uuid>' --bmc-driver redfish \
+  --bmc-username admin --bmc-password-file ./bmc-password
 ```
 
 The node is `enrolling`, and the reconciler carries it through `metal-enroll`, `metal-inspect` and
@@ -173,8 +190,8 @@ phases of a machine that is already `ready`.
 ### Deploy, then release
 
 ```bash
-better-compute api metal.deploy tenantId=root nodeId=node_… profileId=ubuntu-24.04-gpu-host profileVersion:=1
-better-compute api metal.undeploy tenantId=root nodeId=node_… wipe=quick
+better-compute metal deploy node_… --profile ubuntu-24.04-gpu-host --profile-version 1
+better-compute metal undeploy node_… --wipe quick
 ```
 
 The deploy ends when the installed OS has joined as the same node and the profile's acceptance
@@ -415,6 +432,36 @@ and when such a machine is retired (8391d74). bcd then requires an IP literal to
 addresses, and a name to match a listed name (case-insensitive, trailing dot ignored) or to resolve only to listed
 addresses; a target node the list does not name is refused too, all with `forbidden-target`. The check applies once
 the site's spec lists any target, which it does whenever the site has an agentless machine.
+
+## From the command line
+
+The `metal` commands (171d9be) are the metal methods with flags, each decided as the token's identity:
+
+```bash
+export BETTER_COMPUTE_TENANT=root
+better-compute metal enroll --site site_01k5w… --pool pool_01k5w… --bmc-address 10.20.0.14 \
+  --bmc-driver redfish --bmc-credentials secret://root/bmc-r12-14 --macs b8:ce:f6:00:00:01
+better-compute metal deploy node_01k5w… --profile ubuntu-24.04-gpu-host --profile-version 1
+better-compute metal power node_01k5w… --action cycle
+better-compute metal undeploy node_01k5w… --wipe secure-erase
+better-compute metal abort node_01k5w… --reason 'wrong profile'
+better-compute metal bulk --pool pool_01k5w… --verb retire --nodes-file retire.txt --reason 'EOL rack r12'
+```
+
+- **Credentials** are a `secret://`, `vault://` or `env://` reference (`--bmc-credentials`), or `--bmc-username` with
+  `--bmc-password-file`. There is no password flag. See [enrolling a machine](/docs/guides/bare-metal/bmc#enrolling-a-machine).
+- **One verb per node**: `manage`, `inspect`, `provide`, `rescue`, `unrescue`, `recover` and `retire` take only the
+  node; `deploy` takes `--profile` and `--profile-version`, `undeploy` takes `--wipe`, `abort` takes `--reason`, and
+  `power` takes `--action` (`on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi`).
+- **Many nodes at once**: `metal bulk` runs one `--verb` (`manage`, `inspect`, `provide`, `undeploy`, `rescue` or
+  `retire`) on the nodes of `--pool` listed in `--nodes` (comma-separated) or `--nodes-file` (one per line,
+  deduplicated) as one `metal.bulk` batch. `--reason` is required: it is what the quorum's approvers see when they
+  review the batch with [`batch approve`](/docs/guides/clients/cli#destructive-batches). `--wipe` is for
+  `--verb undeploy` only.
+
+`workflows list --node`, `workflows get`, `workflows retry --from-step` and `commands list --node` follow what a
+verb started. Provision profiles have their own commands (`profiles create` from a JSON document, `validate`,
+`render`, `update --visibility`, `delete`). See [command groups](/docs/guides/clients/cli#command-groups).
 
 ## Release and retire
 

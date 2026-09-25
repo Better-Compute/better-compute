@@ -21,6 +21,7 @@ sources:
   - apps/console/src/app/(console)/nodes/[nodeId]/page.tsx
   - apps/console/src/app/(console)/sandboxes/page.tsx
   - apps/console/src/components/ssh-cert-panel.tsx
+  - apps/console/src/components/node-labels.tsx
   - packages/console-kit/src/sandboxes.ts
   - packages/console-kit/src/batches.ts
   - apps/console/src/app/(console)/batches/page.tsx
@@ -159,7 +160,7 @@ console-kit, for the tenant the session acts in. Platform pages appear only for 
 | Reservations | `/reservations`, `/reservations/[id]` | the form with a capacity preview, the earliest start and approvals; the list and each reservation's actions |
 | Instances | `/instances`, `/instances/[id]`, `/instances/[id]/terminal`, `/instances/[id]/console` | the form with sizes per pool; list, detail, a browser terminal (op `exec`) and the instance's serial console (op `console`, 191898b), linked as **Open a terminal** and **Serial console**, both decided as `compute:instances:exec`. bcd refuses instance `exec` until guests have an agent, so the serial console is the terminal that works on real hosts |
 | Sandboxes | `/sandboxes` | a create form over the tenant's templates (each with its flavor and warm pool size) and a lifetime in minutes, capped at the template's maximum; the person's own sandboxes, or everyone's, with state, a countdown to expiry (a warning in the last 5 minutes), **+30 min**, **Snapshot** and **Delete**, and the `better-compute sandbox exec` line for a shell |
-| Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, recent commands, the node console, and the break-glass SSH panel (below) |
+| Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, the node's labels (key, value, source) and taints with forms to set or remove an operator label and add or remove a taint (`nodes.label`, `nodes.taint`, gated like the other node actions on `compute:nodes:update`; keys, values and taints are checked against the API's patterns before the button enables; 3ff9fb3), recent commands, the node console, and the break-glass SSH panel (below) |
 | Batches | `/batches` | destructive batches held for the approver quorum: pending by default (or approved, expired, cancelled, all), each with its reason, command count, approvals of required, state and the window left; a batch's scope by kind, who approved, the `better-compute batch approve` line, and **Cancel** (below) |
 | Pools & capacity | `/pools`, `/pools/[id]` | pools owned or offered, a 7-day booking calendar, join tokens and join requests |
 | Quotas | `/quotas` | used of max per pool and resource |

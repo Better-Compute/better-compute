@@ -24,6 +24,9 @@ sources:
   - daemon/internal/agent/site.go
   - daemon/internal/redfish/redfish.go
   - daemon/internal/redfish/redfish_test.go
+  - daemon/cmd/bcx-ipmi/main.go
+  - packages/metal/src/profiles.ts
+  - packages/cli/src/commands/metal.ts
   - PLAN.md
 ---
 
@@ -76,10 +79,11 @@ export const redfish = defineDriver({
 
 The built-in drivers (Redfish, IPMI and vendor BMCs through bmclib, PXE, iPXE and UEFI HTTP boot,
 image streaming and kexec) run inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2 modes.
-Today `bcd site` drives Redfish BMCs only, with the operations in [Redfish in bcd site](#redfish-in-bcd-site): IPMI
-and the vendor BMCs through bmclib are not built, and an operation for another driver answers `unsupported-driver`.
-Out-of-process drivers in any language arrive with bcx and `@better-compute/driver-sdk` in v0.5. See
-[drivers](/docs/extending/drivers).
+Today `bcd site` has Redfish built in, with the operations in [Redfish in bcd site](#redfish-in-bcd-site), and runs
+every other BMC driver as a bcx plugin it hosts (51806ab). The repository has one such plugin, `bcx-ipmi`, for
+[IPMI](#ipmi-through-bcx-ipmi); vendor BMCs through bmclib are not built. An operation for a driver the agent does not
+host answers `unsupported-driver`. Out-of-process drivers in other languages come with bcx and
+`@better-compute/driver-sdk` (v0.5). See [drivers](/docs/extending/drivers).
 
 ## How BMC operations run
 
@@ -180,6 +184,40 @@ fallback fills a JSON without a username), and runs the operation:
 - **Rotation.** `bmc.rotate` is attested: bcd signs its result with the site agent's node key, which is what the
   worker checks before promoting the new password.
 
+## IPMI through bcx-ipmi
+
+A machine whose BMC speaks IPMI rather than Redfish is enrolled with `bmc.driver: 'ipmi'`. `bcd site` hands its
+`bmc.*` operations to the hosted bcx driver `ipmi`, which `daemon/cmd/bcx-ipmi` serves over `ipmitool -I lanplus`
+(51806ab):
+
+| Operation | Kind | `ipmitool` |
+| --- | --- | --- |
+| `power.getPower` | `bmc.query` | `chassis power status`, answered `{ power: 'on' \| 'off' }` |
+| `power.setPower` | `bmc.power` | `chassis power on`, `off`, `cycle`, `reset` or `soft` |
+| `management.setBootDevice` | `bmc.boot` | `chassis bootdev pxe`, `disk`, `cdrom` or `bios`, with `options=persistent` when `persistent` |
+
+- The operation allowlist per kind, the batch quorum and the site agent's BMC memory apply exactly as for Redfish.
+- The site agent fetches the credential as for Redfish and hands the plugin the username and password only as
+  secrets; the plugin passes the password to `ipmitool` in its environment (`-E`), never on its command line.
+- The BMC address is a host or IP address with an optional port (`10.20.0.14`, `10.20.0.14:623`).
+- Everything else (virtual media, out-of-band inspection, firmware, BIOS, RAID, rotation) is Redfish only: for a
+  concern `ipmi` does not list (`inspect`, `virtual-media`, ...) the site agent answers `unsupported-driver`, and
+  for an unknown `power` or `management` operation the plugin answers `unsupported-operation`. Either fails the step
+  with `DRIVER_ERROR`.
+
+<Callout type="warn" title="Not the whole metal lifecycle">
+Metal's stock `metal-enroll` workflow runs `inspect.oob` (`inspect.inspect`) after `power.getPower`, and IPMI has no
+`inspect` concern here, so enrolling an `ipmi` machine with the built-in profiles fails in `enrolling`. `bcx-ipmi`
+serves power and boot-device operations (`metal.power`, and profile steps that use only those); a full lifecycle
+still needs Redfish.
+</Callout>
+
+The plugin is not built into bcd. A release ships it as `bcx-ipmi_<version>_linux_<arch>.tar.gz`, the api's
+downloads route serves it, and `daemon install-script --install-plugins bcx-ipmi --release-manifest …` installs it
+into `/usr/local/lib/bcd/plugins` with its pin, after checking the archive against the signed manifest (adf2ae9; see
+[installing plugins from the release](/docs/daemon/install#installing-plugins-from-the-release)). Install `ipmitool`
+on the agent's host; without it the plugin's health is `NOT_SERVING`. It has been tested against a fake `ipmitool` only. See [bcx-ipmi](/docs/extending/drivers#bcx-ipmi-the-ipmi-driver).
+
 ## Enrolling a machine
 
 `metal.enroll` creates the node in `enrolling`, owned by the pool's tenant, with role `unassigned`,
@@ -220,6 +258,22 @@ const node = await compute.api.metal.enroll(credential, {
   }}
 />
 
+From the command line, `metal enroll` (171d9be) takes the credentials as a reference, or as a username and a
+password file; there is no password flag, so a password never lands in shell history or the process list:
+
+```bash
+better-compute metal enroll --tenant root --site site_01k5w… --pool pool_01k5w… \
+  --bmc-address https://10.0.0.10 --bmc-driver redfish --bmc-credentials secret://root/bmc-bm-1 \
+  --bmc-tls-spki 9f3e… --macs b8:ce:f6:00:00:01
+better-compute metal enroll --tenant root --site site_01k5w… --pool pool_01k5w… \
+  --bmc-address 10.0.0.11 --bmc-driver redfish --bmc-username admin --bmc-password-file ./bmc-pass.txt
+```
+
+`--bmc-credentials` must be a `secret://`, `vault://` or `env://` reference; otherwise pass `--bmc-username` with
+`--bmc-password-file` (one trailing newline is dropped, and an empty file is refused), never both forms. `--legacy-bios`
+sends `uefi: false`, and `--arch`, `--product-uuid` and `--hardware-profile` map to the fields below. See
+[metal enroll](/docs/reference/cli#metal-enroll).
+
 `bmc.driver`, `bmc.tlsSpkiSha256` and every entry of `macs` must be JSON strings: a missing driver,
 `true`, or a number for the pin or a MAC is `INVALID_INPUT`, never coerced to text. The pin may use
 upper-case hex and a MAC `-` separators; both are stored lower case, MACs with `:`.
@@ -246,6 +300,17 @@ const { ref } = await compute.api.secrets.put(credential, {
   scope: 'fleet', // decided on compute-fleet/global; 'tenant' (default) on compute-tenant/{t}
   idempotencyKey: 'bmc-bm-1-v1',
 });
+```
+
+The CLI's `secrets put` (573b0b0) reads the value only from a file (`--value-file`) or standard input (`--stdin`),
+never from an argument, so it stays out of shell history and the process list. Exactly one of the two is required,
+one trailing newline is dropped, and an empty value is refused before anything is sent:
+
+```bash
+# bmc-bm-1.json holds {"username":"admin","password":"…"}, mode 0600
+better-compute secrets put --tenant root --name bmc-bm-1 --scope fleet --value-file ./bmc-bm-1.json
+vault read -field=bmc secret/site-fsn1 | better-compute secrets put --tenant root --name bmc-bm-1 --scope fleet --stdin
+better-compute secrets delete --tenant root --name bmc-bm-1 --scope fleet
 ```
 
 `secrets.put` and `secrets.delete` are decided as `compute:secrets:manage`. `secrets.put` records the scope it
@@ -280,6 +345,10 @@ destructive, so when the deployment keeps batches it first creates a batch of on
 `bmc:<site agent>/<BMC address>`, kind `bmc.power`, reason `power <action> <node>`) and enqueues the command in it
 (478025a); the answer then carries `batchId` and `held`. With approver keys configured the command stays held until
 approvers sign that batch (see [the quorum](/docs/operations/pki#the-destructive-batch-quorum-v10)).
+
+```bash
+better-compute metal power node_01k5w… --tenant root --action graceful-restart
+```
 
 | `action` | Redfish `ResetType` |
 | --- | --- |

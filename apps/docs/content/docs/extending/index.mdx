@@ -127,9 +127,10 @@ breaking. PLAN.md §5.1 keeps every `define*` helper **experimental until v1.0**
 Several extension points end in a command that a <Term id="bcd">bcd</Term> agent runs: driver operations on a site
 agent, steps on a ramdisk, NodeSpec sections on a node. The Go daemon's node agent is built and tested end to end,
 and its site-agent and ramdisk modes are written with Go unit tests; none of it is released. It converges the
-`devices`, `access`, `instances` (on `libvirt-kvm` with `virsh`, tested against a fake `virsh` only, or a fakehw
-build's file-backed runtime) and `site` sections and runs its built-in and
-metal kinds, and `driver.invoke` in the bcx plugins it hosts, but no `host` or `daemon` section. The TypeScript `FakeDaemon` in `@better-compute/testing`
+`devices`, `access`, `instances` (on `libvirt-kvm` with `virsh` or `cloud-hypervisor` with its binary, both tested
+against fake tools only, or a fakehw build's file-backed runtime), `site` and `daemon` sections and runs its built-in
+and metal kinds, `driver.invoke` in the bcx plugins it hosts, and on a site agent `bmc.*` operations through a hosted
+BMC driver such as `bcx-ipmi`, but no `host` section. The TypeScript `FakeDaemon` in `@better-compute/testing`
 speaks the real protocol and runs the other paths in tests and in `better-compute dev --sim N`. See
 [what bcd does today](/docs/daemon#what-bcd-does-today).
 </Callout>

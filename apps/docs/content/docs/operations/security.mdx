@@ -291,7 +291,10 @@ gateway's report handlers also ignore reports about allocations placed on anothe
 - PostgreSQL holds only `secret://` references. The default store seals values in `sealed_secrets` with
   AES-256-GCM; the authenticated data binds each ciphertext to its reference and tenant.
 - `secrets.put` is write-only: the API never reads a value back. Events and audit rows carry the reference and
-  version, never the value.
+  version, never the value. The CLI's `secrets put` takes the value only from `--value-file` or `--stdin`, never an
+  argument, and `metal enroll` takes a BMC password only from `--bmc-password-file`; tokens the CLI creates
+  (`join-tokens create`, `site-tokens create`, a webhook's signing secret) can go to a new 0600 file with `--out` or
+  `--secret-out` instead of the output.
 - The broker (`gatewayServices.secret`) releases a value only when the request is signed by the node's current,
   unrevoked, platform certificate, names the session's node, is bound to work that node is doing right now (a live
   command of the step that carries the reference, or a live allocation on it), and uses a fresh request id. The

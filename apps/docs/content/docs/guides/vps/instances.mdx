@@ -5,7 +5,7 @@ metaTitle: VPS instances and their lifecycle
 icon: Server
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'tests/vps-sandboxes.test.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go', 'daemon/internal/agent/tunnels.go', 'packages/cli/src/commands/tunnel.ts', 'tests/server-tunnels.test.ts']
+sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'tests/vps-sandboxes.test.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go', 'daemon/internal/agent/tunnels.go', 'packages/cli/src/commands/tunnel.ts', 'packages/cli/src/commands/nodes.ts', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/cmd/bcd/hardware_host.go', 'tests/server-tunnels.test.ts']
 ---
 
 An <Term id="instance">instance</Term> is a VM in a VPS <Term id="pool">pool</Term>. You ask for one with a
@@ -68,8 +68,8 @@ Content-Type: application/json
   <Tab value="CLI">
 
 ```bash
-better-compute api instances.create tenantId=acme poolId=pool_01jz… flavor=g1.small \
-  imageId=ubuntu-24.04 'sshKeys[]=ssh-ed25519 AAAAC3Nza… alice@laptop' idempotencyKey=build-agent-7
+better-compute instances create --tenant acme --pool pool_01jz… --flavor g1.small \
+  --image ubuntu-24.04 --ssh-key ~/.ssh/id_ed25519.pub --key build-agent-7
 ```
 
   </Tab>
@@ -250,6 +250,31 @@ A hosted instance is `deleted` only once its runtime has dropped it: the next co
 longer lists it. If the host is `lost`, or the instance was never placed, deletion finishes without waiting. A
 provider instance is `deleted` once the provider's `delete` succeeds or finds nothing to delete.
 
+### From the command line
+
+The `instances` commands (44915e5) wrap the same methods as the token's identity:
+
+```bash
+better-compute instances create --tenant acme --pool pool_01jz… --flavor g1.small --image ubuntu-24.04 \
+  --ssh-key ./keys/alice.pub,./keys/ci.pub --user-data ./cloud-init.yaml
+better-compute instances list --tenant acme --all --state running
+better-compute instances get inst_01k5w… --tenant acme --query state
+better-compute instances stop inst_01k5w… --tenant acme
+better-compute instances resize inst_01k5w… --tenant acme --flavor g1.large
+better-compute instances start inst_01k5w… --tenant acme
+better-compute instances delete inst_01k5w… --tenant acme
+```
+
+- `create` reads `--ssh-key` from files (comma-separated paths; every non-empty line that is not a comment is a key)
+  and refuses a file that holds a private key. `--user-data` is a cloud-init file, or a `secret://<tenant>/<id>`
+  reference passed as it is. `--stopped` creates it with `desiredState: 'stopped'`.
+- `create` waits up to `--wait` seconds (default 30, the API's maximum) for the instance to settle, and sends a new
+  idempotency key on every run unless you pass `--key`: repeat the command with the same `--key` to retry safely.
+- `list` shows your own instances; `--all` asks for the tenant's (`scope: 'all'`).
+- Instance ids that do not look like `inst_…` are usage errors (exit 2) before anything is sent.
+
+See [the instances commands](/docs/reference/cli#instances-create) for every flag.
+
 ## Resize
 
 [instances.resize](/docs/reference/api/instances#resize) moves a stopped hosted instance to another flavor of its pool,
@@ -365,10 +390,11 @@ From the reports, the reconciler moves the instance:
 <Callout type="warn" title="The host side is written, not yet run on real hardware">
 bcd's node agent is built and tested but not released. It has the `instances` converger (the FakeHypervisor's
 rules, user data fetched with a `SecretRequest` bound to the allocation, every domain in its status reports, the
-instance network policy as host nftables rules), and a host build with `virsh` runs instances on the built-in
-`libvirt-kvm` runtime (362317c): qcow2 overlays on sha256-verified base images, NoCloud seeds, taps, VFIO GPUs. That
-runtime has been tested only against a fake `virsh` and `qemu-img`; no VM has booted through it on a real KVM host
-yet. A host without `virsh` and without a bcx runtime plugin fails a non-empty `instances` section with `this host
+instance network policy as host nftables rules), and a host build runs instances on the built-in `libvirt-kvm`
+runtime when `virsh` is installed (362317c) and on `cloud-hypervisor` when the `cloud-hypervisor` binary is
+(2598f0a): qcow2 overlays on sha256-verified base images, NoCloud seeds, taps, VFIO GPUs. Both runtimes have been
+tested only against fake tools (a fake `virsh`, a fake cloud-hypervisor API, a fake `qemu-img`); no VM has booted
+through either on a real KVM host yet. A host with neither and without a bcx runtime plugin fails a non-empty `instances` section with `this host
 runs no instance runtime`. fakehw builds run instances on a file-backed runtime of the same name, which
 `tests/e2e/bcd-vps.test.ts` drives through the control plane; see [delivery](/docs/daemon/delivery#the-runtimes). The
 TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
@@ -491,12 +517,31 @@ implements `snapshot` sets `snapshot: true` in its `RuntimeTraits` (the three bu
 `sandboxes.snapshot` is `UNSUPPORTED` up front. No `instances.*` method snapshots a plain instance.
 
 `libvirt-kvm` and `cloud-hypervisor` are the runtimes built into bcd (v0.3), which its `instances` converger drives
-through its `Runtime` interface. `libvirt-kvm` is written (362317c): a host build with `virsh` on its `PATH` runs it
-over `virsh -c qemu:///system` and `qemu-img`, with a host-passthrough CPU, domains marked as bcd's in their metadata
-(others are reported as unmanaged and never touched), a 60-second graceful shutdown, and snapshots and restores that
-refuse another runtime or CPU model; see [the runtimes](/docs/daemon/delivery#the-runtimes). It has been tested only
-against a fake `virsh` and `qemu-img`, not on real hardware. `cloud-hypervisor` is not written. fakehw builds run a
-file-backed runtime named `libvirt-kvm` instead.
+through its `Runtime` interface. Both are written, and a host build runs each one whose tools are on its `PATH`
+(there is no configuration key):
+
+- `libvirt-kvm` (362317c), with `virsh`: `virsh -c qemu:///system` and `qemu-img`, a host-passthrough CPU, domains
+  marked as bcd's in their metadata (others are reported as unmanaged and never touched), and `iso` images booted
+  from a cdrom.
+- `cloud-hypervisor` (2598f0a), with the `cloud-hypervisor` binary: one VMM per instance, started as a systemd
+  transient unit `bcd-ch-<id>` so the VM outlives bcd, and driven over its REST API; bcd's own `vm.json` per
+  instance says what it owns, since cloud-hypervisor keeps no registry. It boots disk images only (`iso` is
+  refused), and needs `systemd-run` and the firmware at `/usr/share/cloud-hypervisor/CLOUDHV.fd`, which
+  `bcd doctor` checks.
+
+<Callout type="warn" title="cloud-hypervisor is not production-safe">
+Security review 12 found two open high-severity issues in bcd's `cloud-hypervisor` runtime: when a guest reboots,
+its tap interfaces are recreated off the policed bridge, so the instance firewall (anti-spoofing, the `private` and
+`none` network policies) no longer applies to them; and the VMM, which runs as root, follows the qcow2 backing file
+a tenant's image names, which could expose the host's disk or another tenant's disk. Do not give a pool of tenant
+instances the `cloud-hypervisor` runtime. `libvirt-kvm` is being checked for the backing-file issue; that check has
+not concluded.
+</Callout>
+
+Both give a 60-second graceful shutdown, VFIO GPUs, a serial console for instance console tunnels, and snapshots and
+restores that refuse another runtime or CPU model; see [the runtimes](/docs/daemon/delivery#the-runtimes). Both have
+been tested only against fakes, not on real hardware. fakehw builds run a file-backed runtime named `libvirt-kvm`
+instead.
 Out-of-process runtimes are served too: on `bcd node`, a bcx plugin whose driver lists the kind `runtime` becomes a
 runtime (`list`, `apply(spec)`, `remove(id)` over `Invoke`; no snapshots), selected by pools like any other. No such
 plugin (a Kata runtime is PLAN.md's walkthrough 4) is written yet; see
@@ -539,7 +584,7 @@ them. `console`, `ssh` and `tcp` also need the node's daemon to advertise `tunne
 configures tunnels. See [tunnels](/docs/guides/access/tunnels) and [SSH](/docs/guides/access/ssh).
 
 `console` (798e710) attaches to the instance's serial console, which bcd opens from its runtime (`libvirt-kvm` hands
-it the pty of the domain's serial port), never a host shell. bcd refuses `exec` into an instance until guests have an
+it the pty of the domain's serial port, `cloud-hypervisor` its serial socket), never a host shell. bcd refuses `exec` into an instance until guests have an
 agent, so the serial console is the terminal that works on a real host: `better-compute console --instance ID` from
 a terminal, or **Serial console** (`/instances/<id>/console`) on the instance's page in [the console](/docs/guides/clients/console).
 Sandbox and warm sandbox instances stay refused for every op (above).
@@ -553,8 +598,8 @@ the FakeDaemon (`tests/e2e/imds.test.ts`). `bcd node` has both host halves: the 
 a node-signed `WorkloadTokenRequest` with a one-time key, the sealed answer opened and checked against the instance
 and request id) and the metadata service, served on `[imds] listen` in its `config.toml` (for example
 `169.254.169.254:80` on the instances' bridge). It resolves the caller as the running instance whose address is the
-request's source. It serves the instances of whichever runtime bcd runs; since `libvirt-kvm` has not run on real
-hardware yet, no real VM has reached it, and its Go tests and fakehw builds cover it.
+request's source. It serves the instances of whichever runtime bcd runs; since neither built-in runtime has run on
+real hardware yet, no real VM has reached it, and its Go tests and fakehw builds cover it.
 
 ```mermaid
 sequenceDiagram

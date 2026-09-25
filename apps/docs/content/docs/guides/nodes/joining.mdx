@@ -17,6 +17,8 @@ sources:
   - packages/pki/src/attestors/join-requests.ts
   - packages/pki/README.md
   - packages/cli/src/install-script.ts
+  - packages/cli/src/commands/nodes.ts
+  - packages/cli/src/commands/admin.ts
   - proto/bettercompute/agent/v1/session.proto
   - tests/server-join.test.ts
 ---
@@ -71,12 +73,22 @@ const created = await compute.api.joinTokens.create(credential, {
 console.log(created.token);
 ```
 
-The same call from the CLI (`key:=value` sets JSON, `a.b=value` nests):
+The same call from the CLI's `join-tokens create` (44915e5), which writes the token to a new 0600 file with `--out`
+instead of printing it:
 
 ```bash
-better-compute api joinTokens.create tenantId=$TENANT poolId=$POOL ttlSeconds:=3600 \
-  expect.serial=SN-7701 idempotencyKey=adopt-rack-b7-u12 --query token
+better-compute join-tokens create --tenant $TENANT --pool $POOL --ttl 1h \
+  --expect-serial SN-7701 --key adopt-rack-b7-u12 --out ./join-token
+better-compute join-tokens list --tenant $TENANT --pool $POOL
+better-compute join-tokens revoke jt_01k5w… --tenant $TENANT --pool $POOL
 ```
+
+`--ttl` is a duration from `1m` to `24h` in whole seconds; `--max-uses`, `--allow-reclaim` and
+`--expect-product-uuid`, `--expect-serial`, `--expect-mac` and `--expect-gpu-uuid` map to the fields below. `--out`
+never writes over a file (`ALREADY_EXISTS`), and it refuses a replayed `--key`, whose answer carries no token
+(`INVALID_STATE`: revoke that token and create a new one). `join-tokens list` never shows a secret (`--all` adds
+revoked, expired and used-up tokens), and `join-tokens revoke` takes the token id and refuses a pasted token
+(anything with a `.`), so a secret is never sent as an id.
 
 <TypeTable
   type={{
@@ -249,8 +261,8 @@ better-compute pki issue-gateway --san gw.eu.example.com
 <Step>
 ### Create a join token
 
-Use `joinTokens.create` as above, one token per machine with an `expect` binding when you know its serial or
-MAC.
+Use `joinTokens.create` (or `better-compute join-tokens create --out`) as above, one token per machine with an
+`expect` binding when you know its serial or MAC.
 </Step>
 <Step>
 ### Generate the install script
@@ -440,6 +452,15 @@ await client.joinRequests.approve({
   ttlSeconds: 900,
   reason: 'rack B7 intake, ticket 4411',
 });
+```
+
+From the command line (573b0b0), where `approve --ttl` is in seconds (60 to 86,400):
+
+```bash
+better-compute join-requests list --tenant $TENANT --pool $POOL            # pending by default; --state all
+better-compute join-requests approve jreq_01k5w… --tenant $TENANT --pool $POOL --ttl 900 \
+  --reason 'rack B7 intake, ticket 4411'
+better-compute join-requests reject jreq_01k5w… --tenant $TENANT --pool $POOL --reason 'unknown serial'
 ```
 
 A request shows what the attestor saw: `attestor`, `claims`, `hardwareKey` (hex), `mac`, `ip`, `workflowId`,

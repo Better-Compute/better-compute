@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: Use the better-compute command line as a client - authenticate with a token, call any method, reserve GPUs, run sandboxes, plan the fleet and verify audit.
+description: Use the better-compute command line as a client - authenticate with a token, run a command for every API group, reserve GPUs, run sandboxes, plan the fleet.
 metaTitle: The better-compute CLI as a client
 icon: SquareTerminal
 packages: ['@better-compute/cli']
@@ -19,6 +19,13 @@ sources:
   - packages/cli/src/commands/ssh.ts
   - packages/cli/src/commands/sandbox.ts
   - packages/cli/src/commands/pki.ts
+  - packages/cli/src/commands/nodes.ts
+  - packages/cli/src/commands/events.ts
+  - packages/cli/src/commands/operations.ts
+  - packages/cli/src/commands/catalog.ts
+  - packages/cli/src/commands/admin.ts
+  - packages/cli/src/commands/metal.ts
+  - tests/cli-framework.test.ts
   - packages/cli/src/credentials.ts
   - packages/cli/src/embed.ts
   - packages/cli/src/output.ts
@@ -39,15 +46,27 @@ npx better-compute help reserve    # one command's flags and examples
 npx better-compute help --json     # the whole manifest, as the reference is generated
 ```
 
+With some 180 commands, load shell completion (581d1fb): `better-compute completion bash`, `zsh` (through
+`bashcompinit`) or `fish` prints a script, generated from the program's commands (a configuration's project commands
+included), that completes command words, the flags of the command on the line and the values of flags with choices.
+Only plainly shaped names are emitted, and every word list and description is single-quoted without control
+characters, so nothing a command defines runs in your shell.
+
+```bash
+source <(better-compute completion bash)     # bash: in ~/.bashrc
+source <(better-compute completion zsh)      # zsh: in ~/.zshrc
+better-compute completion fish | source      # fish: in ~/.config/fish/config.fish
+```
+
 ## Two kinds of command
 
 Every command declares a target, and the target decides what it needs:
 
 | Target | Needs | Commands |
 | --- | --- | --- |
-| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox create/list/get/extend/snapshot/delete/exec/templates`, `sandbox-template create/update/delete`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `batch list/show/approve/create/members/cancel`, `auth login` |
+| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, every command of the [command groups](#command-groups) below (`nodes`, `instances`, `rollouts`, `metal`, `webhooks`, ...), `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox …`, `sandbox-template …`, `sandbox-snapshot …`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `batch list/show/approve/create/members/cancel`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
-| `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `batch keygen/sign/sign-approvers`, `audit check-proof` |
+| `none` | neither | `init`, `version`, `completion`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `batch keygen/sign/sign-approvers`, `audit check-proof` |
 
 A `config` command talks to the database directly. It is an operator tool: whoever can run it can already read the
 database, so it is not decided by IAM. A `token` command never reads the database itself.
@@ -118,6 +137,9 @@ Commands that print a result share two flags:
 | `--format table` | a table, for lists |
 | `--query PATH` | prints part of the result, like `binding`, `items[].id` or `findings[].check`; strings print raw |
 
+A page of a list method (`{ items, nextCursor }`) printed as a table ends with `(more rows: --cursor …)` when there
+is a next page (5df9455).
+
 Output is terminal-safe, since results carry the server's words (names, reasons, messages): a string result, or a
 `--query` that selects one, prints with its control characters turned into spaces (line breaks and tabs stay); table
 cells are one line without control characters; JSON also escapes DEL and the C1 controls (U+007F to U+009F).
@@ -151,6 +173,98 @@ better-compute api reservations.get tenantId=acme reservationId=rsv_… --query 
 
 `api --list` reads the deployment's route table, so it shows plugin routes and marks the public ones. Anything
 `api` can reach, the [API reference](/docs/reference/api) documents.
+
+## Command groups
+
+PLAN.md section 9.3 has the commands mirror the API groups, and since 171d9be every API group has commands or an
+existing equivalent (44915e5, e2fe6f8, bb89083, d1e83ca, 573b0b0, 171d9be). Each one is the API call as the token's
+identity, with typed flags in place of `key=value` items; `api` stays
+the way to any method a group's commands leave out (a raw `commands.run`, for one) and to plugin methods.
+
+| Commands | What they do | API group |
+| --- | --- | --- |
+| [`nodes`](/docs/reference/cli#nodes-list) `list`, `get`, `events`, `cordon`, `uncordon`, `drain`, `label`, `taint` | Read nodes and their events; cordon, drain, label and taint them (`--if-version` for optimistic concurrency) | [nodes](/docs/reference/api/nodes) |
+| [`join-tokens`](/docs/reference/cli#join-tokens-create) `create`, `list`, `revoke` | Mint the tokens `bcd join` presents | [joinTokens](/docs/reference/api/join-tokens) |
+| [`join-requests`](/docs/reference/cli#join-requests-list) `list`, `approve`, `reject` | Admit or turn down machines that asked to join | [joinRequests](/docs/reference/api/join-requests) |
+| [`inventory`](/docs/reference/cli#inventory-get) `get`, `history`, `diff` | A node's hardware inventory and what changed | [inventory](/docs/reference/api/inventory) |
+| [`site-tokens`](/docs/reference/cli#site-tokens-create) `create`, `revoke` | The tokens a site agent joins with | [siteTokens](/docs/reference/api/site-tokens) |
+| [`instances`](/docs/reference/cli#instances-list) `list`, `get`, `create`, `start`, `stop`, `delete`, `resize` | VPS instances; see [instances](/docs/guides/vps/instances#from-the-command-line) | [instances](/docs/reference/api/instances) |
+| [`events`](/docs/reference/cli#events-list) `list`, `watch` | Page through events, or follow them live (below) | [events](/docs/reference/api/events) |
+| [`releases`](/docs/reference/cli#releases-register) `register`, `list` | Signed bcd release manifests | [releases](/docs/reference/api/releases) |
+| [`rollouts`](/docs/reference/cli#rollouts-create) `create`, `list`, `get`, `pause`, `resume`, `abort` | Wave rollouts of a bcd release; see [rollouts](/docs/guides/rollouts) | [rollouts](/docs/reference/api/rollouts) |
+| [`workflows`](/docs/reference/cli#workflows-list) `list`, `get`, `abort`, `pause`, `resume`, `retry` | A node's workflows (`--node`) | [workflows](/docs/reference/api/workflows) |
+| [`commands`](/docs/reference/cli#commands-list) `list`, `get`, `cancel` | A node's queued commands (`--node`); there is no `commands run` | [commands](/docs/reference/api/commands) |
+| [`sites`](/docs/reference/cli#sites-list) `list`, `get`, `create`, `update`, `delete` | Sites | [sites](/docs/reference/api/sites) |
+| [`projects`](/docs/reference/cli#projects-list) `list`, `get`, `create`, `archive` | Projects | [projects](/docs/reference/api/projects) |
+| [`images`](/docs/reference/cli#images-list) `list`, `get`, `register`, `promote` | The image catalog (`register` takes `--disk-format`) | [images](/docs/reference/api/images) |
+| [`flavors`](/docs/reference/cli#flavors-list) `list`, `create`, `update`, `delete` | VPS flavors of a pool | [flavors](/docs/reference/api/flavors) |
+| [`quotas`](/docs/reference/cli#quotas-get) `get`, `set` | Quotas per pool and resource | [quotas](/docs/reference/api/quotas) |
+| [`usage`](/docs/reference/cli#usage-list) `list`, `export` | Usage windows, and a billing export (`--export-format csv` or `jsonl`) | [usage](/docs/reference/api/usage) |
+| [`webhooks`](/docs/reference/cli#webhooks-list) `list`, `get`, `create`, `update`, `delete`, `ping`, `rotate-secret`, `deliveries`, `redeliver`, `event-types` | Webhook subscriptions (`--endpoint` is the receiver's URL) | [webhooks](/docs/reference/api/webhooks) |
+| [`pools`](/docs/reference/cli#pools-get) `get`, `create`, `update`, `archive`, `offer`, `unoffer`, and [`pools list`](/docs/reference/cli#pools-list) | Pools and their offers | [pools](/docs/reference/api/pools) |
+| [`drivers list`](/docs/reference/cli#drivers-list) | The registered drivers | [drivers](/docs/reference/api/drivers) |
+| [`secrets`](/docs/reference/cli#secrets-put) `put`, `delete` | Write-only secrets, the value from a file or standard input only | [secrets](/docs/reference/api/secrets) |
+| [`metal`](/docs/reference/cli#metal-enroll) `enroll`, `manage`, `inspect`, `provide`, `rescue`, `unrescue`, `recover`, `retire`, `deploy`, `undeploy`, `abort`, `power`, `bulk` | The bare-metal lifecycle; see [deploying](/docs/guides/bare-metal/deploying#from-the-command-line) | [metal](/docs/reference/api/metal) |
+| [`profiles`](/docs/reference/cli#profiles-list) `list`, `get`, `validate`, `render`, `create`, `update`, `delete` | Provision profiles, from JSON documents | [profiles](/docs/reference/api/profiles) |
+| [`provider-accounts`](/docs/reference/cli#provider-accounts-list) `list`, `get`, `create`, `update`, `delete`, `offers`, `bootstrap` | Provider accounts (`--config-file`, credentials in it as references) | [providerAccounts](/docs/reference/api/provider-accounts) |
+| [`reserve`](/docs/reference/cli#reserve), `release`, `extend`, `reservations list`, `reservations get` | Reservations ([below](#capacity)) | [reservations](/docs/reference/api/reservations) |
+| [`capacity`](/docs/reference/cli#capacity) | Free capacity per pool and GPU model, and a preview | [capacity](/docs/reference/api/capacity) |
+| [`sandbox`](/docs/reference/cli#sandbox-create), [`sandbox-template`](/docs/reference/cli#sandbox-template-create), [`sandbox-snapshot`](/docs/reference/cli#sandbox-snapshot-list) | Sandboxes, their templates and their snapshots ([below](#sandboxes)) | [sandboxes](/docs/reference/api/sandboxes), [sandboxTemplates](/docs/reference/api/sandbox-templates), [sandboxSnapshots](/docs/reference/api/sandbox-snapshots) |
+| [`console`](/docs/reference/cli#console), `exec`, `forward`; [`ssh-cert`](/docs/reference/cli#ssh-cert) | Tunnels and break-glass SSH ([below](#interactive-access)) | [tunnels](/docs/reference/api/tunnels), `nodes.issueSshCert` |
+| [`fleet`](/docs/reference/cli#fleet-export) `export`, `plan`, `status`, `apply` | [Fleet configuration](#fleet-configuration) | [fleet](/docs/reference/api/fleet) |
+| [`batch`](/docs/reference/cli#batch-list) `list`, `show`, `approve`, `create`, `members`, `cancel` | [Destructive batches](#destructive-batches) | [commandBatches](/docs/reference/api/command-batches) |
+| [`auth login`](/docs/reference/cli#auth-login) and `api system.whoami` | Check a token (`auth login` calls `system.whoami`) | [system](/docs/reference/api/system) |
+
+What they share:
+
+- **Ids are checked before anything is sent.** An id that does not look like its kind (`node_…`, `inst_…`,
+  `rollout_…`, `wf_…`, `cmd_…`, `pool_…`, `jreq_…`, `pacct_…`, `snap_…`) is a usage error, exit 2.
+- **Lists print tables.** List commands default to `--format table`, and a page with more rows ends with
+  `(more rows: --cursor …)` (5df9455); pass that cursor to get the next page.
+- **Creates are retry-safe.** A command that creates something sends a new idempotency key on every run unless you
+  pass `--key`; repeat with the same `--key` to retry without creating twice.
+- **Secrets never pass through arguments or the output unless you ask.** `secrets put` reads `--value-file` or
+  `--stdin`; `metal enroll` takes a BMC password only from `--bmc-password-file`; `join-tokens create` and
+  `site-tokens create` with `--out`, and `webhooks create` and `rotate-secret` with `--secret-out`, write the one-time
+  secret to a new 0600 file instead of printing it, never over an existing file (`ALREADY_EXISTS`), and so does
+  `usage export --out` with its export. `join-tokens revoke` and `site-tokens revoke` refuse a pasted token (anything
+  with a `.`), so a secret is never sent as an id.
+- **Bulk work goes through the quorum.** `metal bulk` runs one verb on the nodes of `--nodes` or `--nodes-file`
+  (deduplicated) as one batch, and its required `--reason` is what the batch's approvers see.
+
+`tests/cli-framework.test.ts` ties the commands to the API (fb6304f): every `group.method` a command summary names,
+and every route a command calls, must exist in the method table and the live registry, so a renamed route fails the
+suite rather than a user's first call. The [CLI reference](/docs/reference/cli) has every command's flags.
+
+### Follow events live
+
+`events watch` (e2fe6f8) follows the host's server-sent events route, the same stream as the client's `$watch`, and
+prints one JSON line per event:
+
+```bash
+better-compute events watch --url https://compute.example.com --tenant acme --types 'node.*,reservation.*'
+better-compute events watch --url https://compute.example.com --count 100
+better-compute events watch --url https://compute.example.com --path /api/compute/watch   # the console app's route
+```
+
+- It needs `--url` (`UNSUPPORTED` without it): it follows a running server's stream. `--path` defaults to `/watch`,
+  the route the examples' hosts mount; the console app serves `/api/compute/watch`.
+- `--tenant` is sent as `?tenantId=`, which the host's watch authorizer decides as `events.list` for that tenant.
+- Each line carries the event's `sequence`, and `--since` is meant to resume after one. It reconnects after a broken
+  connection from the last event, and stops on Ctrl-C, after `--count` events, or on a refusal (a revoked session, a
+  withdrawn `compute:events:read`).
+- `--types` takes up to 20 type patterns; they and `--since` are checked before it connects.
+- Lines are terminal-safe: DEL, the C1 controls and U+2028/U+2029, which JSON leaves raw, are escaped as `\uXXXX`.
+
+<Callout type="warn" title="--since does not take the server's cursors yet">
+The CLI accepts `--since` only in the form `<digits>:<digits>`, but the stream's sequences, like every event cursor
+the server makes, are `<txid>.<seq>` (`88213.51120`; `formatCursor` in `@better-compute/events`). A sequence copied
+from a printed line is therefore refused as a usage error, and resuming with `--since` does not work against a real
+server. Within one run the reconnects resume on their own; across runs, use the typed client's `$watch` with
+`lastEventId`.
+</Callout>
+
+See [watch](/docs/guides/events/watch).
 
 ## Capacity
 
@@ -200,6 +314,9 @@ better-compute sandbox delete sbx_01k5w…
 | `sandbox templates` | | `sandboxTemplates.list` |
 
 A sandbox id that does not look like `sbx_…` is a usage error (exit 2) before anything is sent.
+
+`sandbox-snapshot list` (`--all`, `--sandbox ID`), `get` and `delete` (171d9be) wrap `sandboxSnapshots`, so a kept
+snapshot of a deleted sandbox can be found and removed.
 
 **`sandbox exec`** gets a short-lived certificate for your own key and runs `ssh` through a single-use tunnel; there
 is no agent in the guest. It sends the public key beside `--key` (`<key>.pub`; a file that holds a private key is
@@ -472,6 +589,7 @@ exit non-zero with the error's code:
 | `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
 | `AUDIT_TAMPERED`, `INVALID_PROOF`, `AUDIT_KEY_MISSING`, `PKI_NOT_FOUND` | audit verification outcomes |
 | `DOCTOR_FINDINGS` | `doctor --strict` found an error or warning |
+| `ALREADY_EXISTS` | an `--out` or `--secret-out` file exists; a token, secret or export is never written over a file |
 | `SCOPE_MISMATCH`, `SCOPE_CHANGED`, `SCOPE_UNEXPECTED`, `UNBOUND_SCOPE`, `INVALID_RESPONSE` | `batch show`, `approve` and `sign` refused a batch; see [destructive batches](#destructive-batches) |
 | `REMOTE_EXIT` | `console`, `exec`, `sandbox exec` or `ssh-cert --connect`: the binary exits with the remote program's own status (1 to 255), or 255 when the tunnel broke (or ssh was ended by a signal) |
 

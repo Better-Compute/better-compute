@@ -126,9 +126,9 @@ Two things to tell an assistant:
   route; the HTTP endpoint answers `NOT_FOUND` for them. Check the status before generating code against a method.
 - **The daemon is not released.** `bcd` is a Go binary whose v0.1 node agent (with tunnels) is built and tested end to
   end, and whose site and ramdisk modes are written with Go unit tests, but no binary is published. Its VPS host
-  runs instances on `libvirt-kvm` (tested only against a fake `virsh`, never on real hardware) or, on fake-hardware
-  builds, a file-backed runtime; its sim mode (many node agents in one process) runs only on fake-hardware builds;
-  self-update and the WebSocket fallback are written, `cloud-hypervisor` and NVML are not. The
+  runs instances on `libvirt-kvm` or `cloud-hypervisor` (both tested only against fake tools, never on real
+  hardware) or, on fake-hardware builds, a file-backed runtime; its sim mode (many node agents in one process) runs
+  only on fake-hardware builds; self-update and the WebSocket fallback are written, NVML is not. The
   TypeScript `FakeDaemon` in `@better-compute/testing` runs those paths. See
   [what bcd does today](/docs/daemon#what-bcd-does-today).
 

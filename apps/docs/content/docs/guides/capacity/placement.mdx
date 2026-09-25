@@ -165,9 +165,11 @@ between, such as a capability a downgraded daemon no longer advertises, makes th
 replans without the node. A value of `'*'` (`anyLabelValue`) asks only for the label to exist, whatever its value,
 on every path. The capacity API does not take `nodeLabels` from callers; a module sets it on the requests it builds
 through the capacity port. The vps module does (PLAN.md's walkthrough 4): a hosted instance whose runtime `bcd` does
-not build in (anything but `libvirt-kvm`, which host builds with `virsh` run, and the planned `cloud-hypervisor`) asks for `bc.dev/driver.<runtime>: '*'`
+not build in (anything but `libvirt-kvm` and `cloud-hypervisor`, which host builds run when `virsh` or the `cloud-hypervisor` binary is installed) asks for `bc.dev/driver.<runtime>: '*'`
 (`runtimeNodeLabels`), so a plugin runtime such as `firecracker` lands only on hosts whose daemon advertised that
-driver, in any version.
+driver, in any version. The two built-ins ask for no label, although a host build runs each only when its tool is
+installed, so give every host of a pool the pool's runtime: an instance placed on a host without it fails there
+(`runtime <id> is not installed on this host`).
 
 ## Device fit and selectors
 

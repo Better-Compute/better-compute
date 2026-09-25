@@ -114,8 +114,9 @@ The NodeSpec encoder keeps NIC order, since it is the guest's interface order. T
 `allocationId`, which the host names when it fetches the user data. The FakeDaemon's fake hypervisor creates a tap
 per NIC. On a host build with `virsh`, bcd's `libvirt-kvm` runtime (362317c) attaches each NIC as a virtio device on
 the named bridge with the spec's MAC, on a tap named `runtime.TapName`, so bcd's nftables rules for the NIC exist
-before the tap does; it has been tested against a fake `virsh` only, not on a real host. `cloud-hypervisor` is not
-written. A VPS profile can already declare `network: { mode: 'bridge', ipam: 'pool' }`
+before the tap does. bcd's `cloud-hypervisor` runtime (2598f0a) gives the VM a tap of the same name with the spec's
+MAC and attaches it to the named bridge (`ip link set <tap> master <bridge>`) once the VM runs. Both have been tested
+against fake tools only, not on a real host. A VPS profile can already declare `network: { mode: 'bridge', ipam: 'pool' }`
 (see [steps and profiles](/docs/extending/steps-and-profiles)), but `vps()` does not read profiles.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels

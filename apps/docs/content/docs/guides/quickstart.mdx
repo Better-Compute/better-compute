@@ -129,15 +129,17 @@ export BETTER_COMPUTE_TOKEN='biam_ses_…'   # the root token dev printed
 export BETTER_COMPUTE_TENANT='…'           # the root tenant dev printed
 
 better-compute api system.whoami
-better-compute api nodes.list tenantId=$BETTER_COMPUTE_TENANT --format table
+better-compute nodes list
 better-compute pools list --query "items[].id"
+source <(better-compute completion bash)   # optional: tab completion for every command
 ```
 
+- Every API group has its commands (`nodes list`, `pools list`, `reserve`, ...; `better-compute help` lists them),
+  and they read the tenant from `--tenant` or `BETTER_COMPUTE_TENANT`. See
+  [command groups](/docs/guides/clients/cli#command-groups).
 - `api GROUP.METHOD key=value …` calls any method; `key:=json` passes JSON values. `api --list` prints every route
   with the IAM action it is decided on.
-- `nodes.list` shows eight nodes with `provisionState` `adopted`.
-- The capacity shortcuts (`pools list`, `capacity`, `reserve`, `release`, `extend`, `reservations list|get`) read
-  the tenant from `--tenant` or `BETTER_COMPUTE_TENANT`.
+- `nodes list` shows eight nodes with `provisionState` `adopted`.
 
 Copy the pool id and look at its capacity:
 
@@ -165,7 +167,7 @@ on `compute:reservations:create`, then placement in a second transaction. The CL
 generated on standard error; repeat the command with `--key` and the same value to retry safely without booking twice.
 
 The pool's owner gets an effectively unlimited GPU quota when the pool is created, so this reservation fits. To
-try a cap, set one with `better-compute api quotas.set tenantId=$BETTER_COMPUTE_TENANT poolId=$POOL resource=gpu max:=4`
+try a cap, set one with `better-compute quotas set --pool $POOL --resource gpu --max 4`
 and reserve again: the second request fails with `QUOTA_EXCEEDED`. See
 [quotas and usage](/docs/guides/capacity/quotas-and-usage).
 
@@ -207,20 +209,21 @@ and `available` is 60.
 ### Watch events
 
 Events leave through a transactional outbox. The example's `/watch` route streams your tenant's events as
-server-sent events:
+server-sent events, and `events watch` prints them one JSON line each:
 
 ```bash
-curl -N -H "Authorization: Bearer $BETTER_COMPUTE_TOKEN" \
-  "http://127.0.0.1:3000/watch?types=node.*,reservation.*"
+better-compute events watch --types "node.*,reservation.*"
 ```
 
-In another terminal, cordon a node and watch `node.cordoned` arrive:
+It is plain server-sent events, so `curl -N -H "Authorization: Bearer $BETTER_COMPUTE_TOKEN"
+"$BETTER_COMPUTE_URL/watch?types=node.*"` shows the same. In another terminal, cordon a node and watch
+`node.cordoned` arrive:
 
 ```bash
-better-compute api nodes.cordon tenantId=$BETTER_COMPUTE_TENANT nodeId=node_… reason=demo
+better-compute nodes cordon node_… --reason demo
 ```
 
-A cordoned node keeps its current reservations; the placer just stops choosing it. `nodes.uncordon` reverses it.
+A cordoned node keeps its current reservations; the placer just stops choosing it. `nodes uncordon` reverses it.
 
 </Step>
 <Step>

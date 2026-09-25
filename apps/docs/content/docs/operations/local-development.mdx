@@ -172,22 +172,28 @@ In a second terminal, as the root administrator (see the [CLI](/docs/guides/clie
 ```bash
 export BETTER_COMPUTE_URL=http://127.0.0.1:3000
 export BETTER_COMPUTE_TOKEN=biam_ses_…   # the root token dev printed
-export TENANT=ten_…                      # the root tenant dev printed
-better-compute api nodes.list tenantId=$TENANT --query "items[].{id: id, state: provisionState, gpus: gpuCount}"
-export POOL=pool_…                        # the pool dev created
-better-compute api pools.offer tenantId=$TENANT poolId=$POOL toTenantId=$TENANT quota:='{"gpu": 64}'
-better-compute reserve --tenant $TENANT --pool $POOL --gpus 4 --for 1h
+export BETTER_COMPUTE_TENANT=ten_…       # the root tenant dev printed
+better-compute nodes list
+export POOL=pool_…                        # the pool dev created (pools list)
+better-compute pools offer $POOL --to $BETTER_COMPUTE_TENANT --quota gpu=64
+better-compute reserve --pool $POOL --gpus 4 --for 1h
+source <(better-compute completion bash) # optional: tab completion for every command
 ```
 
 The reservation binds through the node's desired state and turns `active` once the simulated daemon reports
 `AllocationBound`; its CDI device names are in the reservation's `binding`. With a configuration that mounts the
-events module's `GET /watch` (the examples do), `curl -N` on it streams `node.*` and `reservation.*` events.
+events module's `GET /watch` (the examples do), `better-compute events watch --types "node.*,reservation.*"` prints
+the tenant's events one JSON line each (`curl -N` on the same route shows the raw stream); cordon a node in another
+terminal (`better-compute nodes cordon node_… --reason demo`) to see `node.cordoned` arrive. This is the walkthrough
+of `examples/dev/README.md` (786cc80).
 
 ### Tunnels
 
 With `--sim`, `dev` issues exec tickets (the configured `tunnels.issuer`, or a throwaway one) and mounts
 `GET /api/compute/tunnels/{ticket}`. The gateway verifies tickets and serves its control API on loopback, and every
-simulated machine answers `OpenTunnel` with an echo shell, so [tunnels](/docs/guides/access/tunnels) work end to end.
+simulated machine answers `OpenTunnel` with an echo shell, so [tunnels](/docs/guides/access/tunnels) work end to end:
+`better-compute console --node node_…` opens a session on a simulated machine, where `size` prints your terminal
+size, `exit` ends it with status 0, `false` with 1, and Ctrl-] detaches (`tests/cli-console.test.ts`).
 Unless the deployment's `tunnels` options bring their own, it also adds a throwaway break-glass SSH CA (`tunnels.ssh`,
 for `nodes.issueSshCert` and `better-compute ssh-cert`) and a separate throwaway sandbox SSH CA (`tunnels.sandboxSsh`),
 so both can be tried against the simulated fleet. It adds these throwaway CAs only on a PGlite store: against a real

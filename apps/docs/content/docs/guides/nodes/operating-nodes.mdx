@@ -15,6 +15,8 @@ sources:
   - packages/pki/src/revocation-feed.ts
   - packages/provision/src/remediation.ts
   - packages/metal/src/store.ts
+  - packages/cli/src/commands/nodes.ts
+  - apps/console/src/components/node-labels.tsx
 ---
 
 Sooner or later every node needs attention: a firmware update, a flaky GPU, a rack move, a decommission. The
@@ -38,8 +40,12 @@ await client.nodes.uncordon({ tenantId, nodeId });
 ```
 
 ```bash
-better-compute api nodes.cordon tenantId=$TENANT nodeId=node_… reason='BIOS update window'
+better-compute nodes cordon node_01k5w… --tenant $TENANT --reason 'BIOS update window'
+better-compute nodes uncordon node_01k5w… --tenant $TENANT
 ```
+
+The `nodes` commands (44915e5) take the node id as their argument and `--if-version N` for the `version`
+check; a node id that does not look like `node_…` is a usage error before anything is sent.
 
 [`nodes.cordon`](/docs/reference/api/nodes#cordon) (`compute:nodes:cordon`) sets `cordoned` and publishes
 `node.cordoned`; cordoning a cordoned node returns it unchanged. [`nodes.uncordon`](/docs/reference/api/nodes#uncordon)
@@ -63,6 +69,11 @@ const node = await client.nodes.get({ tenantId, nodeId });
 const drained = node.cordoned && !node.noScheduleReasons.includes('draining');
 ```
 
+```bash
+better-compute nodes drain node_01k5w… --tenant $TENANT --reason 'replace PSU'
+better-compute nodes events node_01k5w… --tenant $TENANT --type node.drained
+```
+
 Draining a node that is already draining changes nothing. To shorten a drain, release the reservations on it;
 see [reservations](/docs/guides/capacity/reservations).
 
@@ -73,6 +84,10 @@ for a reason that should stay visible, next to the conditions and liveness reaso
 
 ```ts
 await client.nodes.taint({ tenantId, nodeId, add: ['rma-pending'], remove: ['burn-in'] });
+```
+
+```bash
+better-compute nodes taint node_01k5w… --tenant $TENANT --add rma-pending --remove burn-in
 ```
 
 [`nodes.taint`](/docs/reference/api/nodes#taint) (`compute:nodes:update`) adds and removes up to 32 keys each,
@@ -114,6 +129,16 @@ const node = await client.nodes.label({
 `. _ / -`, starting and ending with a letter or digit; a value is up to 256 characters of letters, digits and
 `. _ : / @ + = -`. Setting a key that inventory or the system owns is `INVALID_INPUT`, and
 `remove` only removes operator labels. The call returns the node with its labels and publishes `node.labeled`.
+
+```bash
+better-compute nodes label node_01k5w… --tenant $TENANT --set rack=b7,fabric/rail=3 --remove burn-in
+better-compute nodes list --tenant $TENANT --cordoned
+```
+
+`--set` takes `KEY=VALUE` pairs and `--remove` keys, both comma-separated; one of them is required. The console's
+node page has the same controls: it lists the node's labels (key, value, source) and taints, sets and removes
+operator labels, and adds and removes taints, gated on the node's state and IAM's answer on `compute:nodes:update`
+(3ff9fb3; see [the console](/docs/guides/clients/console)).
 
 ## Maintenance
 

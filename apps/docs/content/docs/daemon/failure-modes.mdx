@@ -140,7 +140,15 @@ crashes or never gets a `Welcome` within 120 seconds is swapped back (under syst
 `bcd-rollback.service`), and the old binary reports `FAILED` with `update-failed` and never tries that version again.
 On a node under `bcd helper`, the helper's own watchdog also swaps back an update still unconfirmed 30 seconds after
 its deadline and restarts `bcd.service`, so a new binary that never gets as far as asking cannot keep the node on it
-(2d67b25). See [self-update](/docs/daemon/install#self-update).
+(2d67b25). The restarted process decides by where the `current` link points, never by the version it claims to run,
+so a lying binary cannot mark the new version failed and disarm the watchdog (c139b9c).
+
+**A bad release that confirmed.** The swap back covers only an update that never confirmed. Once the new binary
+confirms, the release floor rises to its sequence and bcd refuses every older binary, the one still in its other slot
+included, so neither the watchdog nor a rollout can take the node back (c139b9c). `rollouts.abort` with `rollback`
+returns only nodes still upgrading (8347a3d). A release that confirmed and then misbehaves is fixed by rolling
+forward: sign and register a newer release with a higher sequence and roll it out; see
+[rollouts](/docs/guides/rollouts#pause-resume-abort). See [self-update](/docs/daemon/install#self-update).
 
 **The helper is down or refuses.** A `bcd node` running unprivileged beside [`bcd helper`](/docs/daemon#privilege-separation)
 (28dc2ae) keeps its session and journal when the helper is gone, but every operation it sends there (a CDI spec or

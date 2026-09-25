@@ -1,6 +1,6 @@
 ---
 title: Rollouts
-description: Register offline-signed bcd releases and roll a daemon version out in waves within each pool's disruption budget, with a failure gate, pause and rollback.
+description: Register offline-signed bcd releases and roll a daemon version out in waves within each pool's disruption budget, with a failure gate, pause and abort.
 metaTitle: Daemon releases and rollouts
 icon: Rocket
 status: experimental
@@ -13,6 +13,8 @@ sources:
   - packages/rollout/src/migrations.ts
   - packages/pki/src/release.ts
   - packages/cli/src/commands/release.ts
+  - packages/cli/src/commands/operations.ts
+  - daemon/internal/selfupdate/manager.go
   - packages/core/src/domain.ts
   - proto/bettercompute/agent/v1/session.proto
   - daemon/.goreleaser.yaml
@@ -27,7 +29,8 @@ Upgrading the agent on every machine is one of the riskiest things a platform do
 kernel, or loses its session under load, can take a fleet offline faster than anyone can react. A
 <Term id="rollout">rollout</Term> moves one signed `bcd` version through the fleet in waves (1%, 10%, 50%, 100% by
 default), never disrupts more of a pool than its budget allows, pauses by itself when too many nodes of a wave fail,
-waits between waves, and can send upgraded nodes back.
+waits between waves, and can send nodes whose upgrade has not confirmed back. A release that nodes confirmed is
+undone by [rolling forward](#undo-a-bad-release-by-rolling-forward) to a newer one.
 
 Nodes learn their target version through their <Term id="nodespec">NodeSpec</Term> (`daemon`), which is desired
 state rather than a command: a node that was offline during the rollout converges on the right version when it
@@ -39,7 +42,7 @@ returns.
   signed by the release keys pinned in its `[update] release_pins` (and refuses every update without pins), checks
   the sequence against its release floor, the expiry and the binary's SHA-256, stages it in the other of two slots,
   swaps with `upgrade.json` and a 120-second deadline, confirms on the new binary's first `Welcome`, and swaps back
-  when none comes. `tests/e2e/bcd.test.ts` runs a real `daemon.upgrade` to a second signed build. No bcd release has
+  when none comes. Once confirmed, it refuses every older binary, the one in its other slot included (c139b9c). `tests/e2e/bcd.test.ts` runs a real `daemon.upgrade` to a second signed build. No bcd release has
   been cut, so no fleet has self-updated yet. Install nodes with `--release-pins` so they can; see
   [self-update](/docs/daemon/install#self-update). The FakeDaemon's opt-in `selfUpdate` plays the node side in the
   simulator.
@@ -175,7 +178,8 @@ Registering the same manifest again returns the stored release; the same version
 `CONFLICT`. `releases.list` returns every release, highest sequence first.
 
 ```bash
-better-compute api releases.register tenantId=root manifest:=@dist/manifest.json
+better-compute releases register dist/manifest.json --tenant root   # sends the file as it is
+better-compute releases list --tenant root
 ```
 
 ## Start a rollout
@@ -206,9 +210,12 @@ better-compute api releases.register tenantId=root manifest:=@dist/manifest.json
 />
 
 ```bash
-better-compute api rollouts.create tenantId=root version=1.4.0 \
-  'waves:=[1,10,50,100]' soakSeconds:=600 idempotencyKey=bcd-1.4.0
+better-compute rollouts create --tenant root --version 1.4.0 --waves 1,10,50,100 --soak 10m --key bcd-1.4.0
 ```
+
+The CLI takes `--soak` and `--upgrade-timeout` as durations (`10m`, `15m`) and checks `--waves` and
+`--max-failure-ratio` before it calls; without `--key` it sends a new idempotency key. See
+[the rollouts commands](/docs/reference/cli#rollouts-create).
 
 `rollouts.create` snapshots every node with desired state (generation above 0) in the pools in scope, shuffled by
 a hash of the rollout id so the canaries spread across pools, and assigns each to a wave. Every wave holds at least
@@ -279,7 +286,6 @@ stateDiagram-v2
   upgrading --> succeeded: reports the version
   upgrading --> failed: timeout or abort
   upgrading --> rollingBack: abort with rollback
-  succeeded --> rollingBack: abort with rollback
   rollingBack --> rolledBack: reports the old version
   rollingBack --> failed: rollback timeout
 ```
@@ -343,19 +349,51 @@ Reasons are at most 500 characters. Only a running or paused rollout changes; an
 
 Without `rollback`, an abort marks nodes still upgrading as failed, and their NodeSpec points back at the version
 they reported before (or drops the `daemon` section when that version was unknown); nodes that already succeeded
-keep the new version. With `rollback: true`, every node that is
-upgrading or succeeded, and whose previous version is a registered release, moves to `rolling-back`, gets that
-version as its target, and finishes as `rolled-back` when it reports it.
+keep the new version. With `rollback: true`, every node still `upgrading` whose previous version is a registered
+release moves to `rolling-back`, gets that version as its target, and finishes as `rolled-back` when it reports it
+(8347a3d). Nodes that `succeeded` keep the release either way.
 
 ```bash
-better-compute api rollouts.pause tenantId=root rolloutId=rollout_01jzq3v0m6y8x7w5t4s3r2p1n0 reason='XID spike in wave 2'
-better-compute api rollouts.abort tenantId=root rolloutId=rollout_01jzq3v0m6y8x7w5t4s3r2p1n0 rollback:=true
+better-compute rollouts pause rollout_01jzq3v0m6y8x7w5t4s3r2p1n0 --tenant root --reason 'XID spike in wave 2'
+better-compute rollouts abort rollout_01jzq3v0m6y8x7w5t4s3r2p1n0 --tenant root --rollback
 ```
+
+### Undo a bad release by rolling forward
+
+A node that succeeded has confirmed the release: its release floor rose to that release's sequence, and bcd now
+refuses every older binary, including the one still in its other slot (c139b9c). Sending it back would leave it
+`rolling-back` until the timeout, so abort does not try. Only an upgrade that has not confirmed goes back, and bcd's
+own watchdog swaps such an update back anyway when the new binary gets no `Welcome` before its deadline.
+
+To undo a release that nodes already confirmed, roll forward:
+
+1. Build the fix, or rebuild the last good code, as a new version.
+2. Sign it with a higher `--sequence` than the bad release (`releases.register` refuses a lower one with reason
+   `rollback`).
+3. Register it and start a new rollout of that version. Abort the bad rollout first if it is still running, since
+   a node can be in only one running or paused rollout.
+
+```bash
+better-compute release sign dist --product bcd --version 1.4.1 --sequence 15 \
+  --key ~/keys/release-alice.pem --cosigners ~/keys/release-bob.pub.pem
+better-compute release cosign dist/manifest.json --key ~/keys/release-bob.pem
+better-compute releases register dist/manifest.json --tenant root
+better-compute rollouts abort rollout_01jzq3v0m6y8x7w5t4s3r2p1n0 --tenant root --reason 'bad release 1.4.0'
+better-compute rollouts create --tenant root --version 1.4.1 --key bcd-1.4.1
+```
+
+bcd refuses an older release on its own too: the release floor is enforced on the node, so a control plane cannot
+push a node back to an older binary even by accident.
 
 ## Watch progress
 
 `rollouts.list` returns the tenant's latest 100 rollouts. `rollouts.get` adds `nodeList`: every node's pool, wave,
 state, `fromVersion`, start and finish times, and error.
+
+```bash
+better-compute rollouts list --tenant root
+better-compute rollouts get rollout_01jzq3v0m6y8x7w5t4s3r2p1n0 --tenant root --query nodes
+```
 
 ```json title="rollouts.get (excerpt)"
 {

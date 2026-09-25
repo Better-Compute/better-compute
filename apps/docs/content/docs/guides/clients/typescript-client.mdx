@@ -251,6 +251,7 @@ for await (const event of client.$watch({ types: ['reservation.*'], signal: cont
 <TypeTable
   type={{
     types: { type: 'readonly string[]', description: 'Event type patterns such as reservation.* or node.connected, sent as ?types=. Every type when absent.' },
+    tenantId: { type: 'string', description: "The tenant whose events to follow, sent as ?tenantId= for the host's watchAuthorizer to decide (e2fe6f8). The caller's own tenant when absent." },
     lastEventId: { type: 'string', description: "Resume after this cursor: an event's sequence (the SSE id)." },
     signal: { type: 'AbortSignal', description: 'Ends the iteration; so does break or return().' },
     path: { type: 'string', description: 'The watch route, an absolute path below the origin.', default: "'{basePath}/watch'" },
