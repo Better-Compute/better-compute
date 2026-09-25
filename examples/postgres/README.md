@@ -23,7 +23,7 @@ export BETTER_COMPUTE_GATEWAY_KEY=.better-compute/gateway/gateway.key
 export BETTER_COMPUTE_REGION=eu-1
 ```
 
-The bundle (`.better-compute/pki.json`) turns on JoinService, the audit module and the gateway role. Its node CA carries the revocation set the gateway enforces. `better-compute pki show` prints the pins that install scripts carry.
+The bundle (`.better-compute/pki.json`) turns on JoinService, signed intent (commands and node specs signed under its command-signing root), the audit module and the gateway role. Its node CA carries the revocation set the gateway enforces. `better-compute pki show` prints the pins that install scripts carry.
 
 ## 3. Run the roles
 
@@ -51,7 +51,10 @@ const iam = betterIam({
   resolveResource: bridge.resolveResource(),
 });
 // then in the options: iam: bridge.embedded(iam, { rootTenantId }), modules: [...bridge.modules, ...]
+// and in the host export: iam: { bridge, streams: [watches] }
 ```
+
+`host.iam` makes IAM events act on compute: a revoked delegation or suspended agent closes its tunnels (on every gateway) and `/watch` streams and withdraws its unstarted reservations; a sign-out or revoked session re-checks that person's tunnels; an offboarded owner's reservations go to the successor; a deactivated break-glass role revokes the SSH certificates it allowed; a spent budget applies the offers' `onBudgetExceeded`. Pass the same `createWatchRegistry()` to `handleWatch({ registry })` and `host.iam.streams`. With remote IAM that cannot share its database, add `webhook: { secret }` and subscribe better-iam's root to `POST /iam/events`.
 
 ## 5. Join machines
 
@@ -62,3 +65,12 @@ better-compute daemon install-script --pool pool_… --site site_… \
 ```
 
 The script pins the serving CA and JoinService's keys from the bundle. Give each server its join token (`better-compute api joinTokens.create …`) out of band; `bcd` only ever dials out to the gateway.
+
+## 6. Operations
+
+- **Gateway certificates** (30 days): give `host.gateway.tlsFiles: { key, cert }` (the files `pki issue-gateway` writes; keep `tls.ca` from the bundle) and rerun `pki issue-gateway` before expiry; the gateway picks the new files up for new handshakes without a restart. The internal control API takes `internal.tlsFiles` the same way (and always needs its `ca`).
+- **CA certificates** (1 year; `doctor` warns 30 days ahead): `better-compute pki renew-ca --ca node|serving|internal [--root-key root.key]` renews under the root with the same key, so nothing is re-pinned and no node rejoins. Roll the bundle out to every process.
+- **Command-signing root**: `better-compute pki rotate-command-root --stage add`, roll out; once every daemon has the new trust version, `--stage switch`; a day later, `--stage drop`.
+- **Support**: `better-compute support bundle` writes diagnostics with every token and secret redacted.
+- **Operators' CLI access**: `better-compute auth login --url https://compute.example.com < token` keeps a token (owner-only file) for that deployment only; `better-iam login` sessions are used too.
+- **AI agents**: mount `host.mcp: { handler: computeMcpEndpoint({ compute, gate: createMcpGate({ … }) }).handler }` for the MCP endpoint at `/mcp`.
