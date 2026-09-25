@@ -16,8 +16,6 @@ import { defineCommand, type FlagSpec } from '../framework.js';
 import { resolveHost, type HostConfig } from '../host/config.js';
 import { startGateway, type RunningGateway } from '../host/gateway.js';
 import { hostListener } from '../host/http.js';
-import { joinKeysWellKnown } from '../host/well-known.js';
-import { defaultPkiPath, loadPkiBundle, pkiFlag } from './pki.js';
 
 // `serve` and `dev` (PLAN.md §9.3): one process runs the HTTP API (`compute.nodeHandler`) and the
 // worker roles, after migrating, until SIGINT/SIGTERM (or `CliIO.signal`). `dev` needs no setup:
@@ -195,7 +193,7 @@ export const serveCommands = [
     group: 'Setup',
     summary: 'Run the API and the workers in this process',
     description:
-      "serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener; --roles gateway runs the daemon gateway over mTLS from the configuration's host.gateway (all includes it when configured), with the report hooks of the built-in modules and tunnels when the deployment issues exec tickets. Beside the API the listener answers /healthz, /readyz, /.well-known/better-compute (with --pki, the join keys bcd may fall back to) and the host export's own routes (for example GET /watch and GET /metrics). SIGINT or SIGTERM drains the gateway first, then stops the listener and the workers, releasing their leases.",
+      "serve loads the configuration, migrates (skip with --no-migrate once a deploy step runs better-compute migrate), starts the worker roles (controllers: reconcilers and the command sweeper; scheduler; sinks: outbox dispatch; iam: IAM jobs) under their leases, and serves the API with compute.nodeHandler on --host:--port. Run several processes against one database: leases and shard ownership keep each job single-writer. --roles api serves the API only; --roles controllers,sinks runs a worker with no listener; --roles gateway runs the daemon gateway over mTLS from the configuration's host.gateway (all includes it when configured), with the report hooks of the built-in modules and tunnels when the deployment issues exec tickets. Beside the API the listener answers /healthz, /readyz, /.well-known/better-compute (the server's document, with JoinService's public keys when pki.join publishes them: the fallback bcd checks against its pins) and the host export's own routes (for example GET /watch and GET /metrics). SIGINT or SIGTERM drains the gateway first, then stops the listener and the workers, releasing their leases.",
     target: 'config',
     output: 'text',
     flags: {
@@ -215,11 +213,6 @@ export const serveCommands = [
         description: `all, or a comma list of api, gateway and ${workerRoles.join(', ')}`,
       },
       'no-migrate': { type: 'boolean', description: 'Do not run migrations first' },
-      pki: {
-        ...pkiFlag,
-        description:
-          'Publish the join keys of this PKI bundle at /.well-known/better-compute (the bcd fallback to its pins)',
-      },
     },
     examples: [
       'better-compute serve',
@@ -227,7 +220,7 @@ export const serveCommands = [
       'better-compute serve --roles controllers,sinks,iam --no-migrate',
       'better-compute serve --roles gateway,controllers',
     ],
-    async run({ flags, explicit, deployment, configModule, io, env, cwd, path, note }) {
+    async run({ flags, deployment, configModule, io, env, cwd, note }) {
       const parsed = parseRoles(flags.roles ?? 'all');
       const { compute, options } = await deployment();
       const hostConfig = await resolveHost((await configModule()).host, {
@@ -237,13 +230,6 @@ export const serveCommands = [
         cwd,
       });
       const gateway = parsed.gateway === 'auto' ? hostConfig.gateway !== undefined : parsed.gateway;
-      if (explicit.has('pki')) {
-        const bundle = await loadPkiBundle(path(flags.pki ?? defaultPkiPath), env);
-        hostConfig.http = {
-          ...hostConfig.http,
-          wellKnown: { ...joinKeysWellKnown(bundle), ...hostConfig.http?.wellKnown },
-        };
-      }
       const stop = stopSignal(io.signal);
       try {
         const running = await runServer(compute, {

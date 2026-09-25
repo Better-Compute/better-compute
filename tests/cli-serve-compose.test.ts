@@ -386,11 +386,16 @@ export const host = composed.host;
         // The host's built-ins and routes.
         expect((await fetch(`${origin}/healthz`)).status).toBe(200);
         expect((await fetch(`${origin}/readyz`)).status).toBe(200);
-        expect(await (await fetch(`${origin}/.well-known/better-compute`)).json()).toMatchObject({
+        // The server's own document, at the origin root too: JoinService's public keys included.
+        const rootDocument = await (await fetch(`${origin}/.well-known/better-compute`)).json();
+        const apiDocument = await (await fetch(`${api}/.well-known/better-compute`)).json();
+        expect(rootDocument).toEqual(apiDocument);
+        expect(rootDocument).toMatchObject({
           name: 'better-compute',
-          // The public base URL, not the bind address.
-          api: 'http://127.0.0.1:3000/api/compute',
+          basePath: '/api/compute',
+          join: { encryptionJwk: { kty: 'EC', crv: 'P-256' } },
         });
+        expect(rootDocument.join.encryptionJwk).not.toHaveProperty('d');
         expect((await fetch(`${origin}/metrics`)).status).toBe(401);
         const metrics = await fetch(`${origin}/metrics`, {
           headers: { authorization: `Bearer ${METRICS_TOKEN}` },

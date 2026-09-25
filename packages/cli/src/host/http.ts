@@ -1,7 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import type { Duplex } from 'node:stream';
-import { serverVersion } from '@better-compute/server';
 import type { AnyCompute } from '../config.js';
 
 // The HTTP side of `serve` (PLAN.md §8.2, §9.3): compute's API under its base path, plus what a host adds in
@@ -29,7 +28,7 @@ export type HostUpgradeHandler = (
 export interface HostHttpOptions {
   routes?: readonly HostRoute[];
   upgrade?: readonly HostUpgradeHandler[];
-  /** Extra public fields of `/.well-known/better-compute` (e.g. `joinEncryptionJwk`). */
+  /** Extra public fields of `/.well-known/better-compute`; the server's own fields win. */
   wellKnown?: Record<string, unknown>;
 }
 
@@ -140,12 +139,19 @@ export function hostListener(compute: AnyCompute, options: HostHttpOptions = {})
   const routes = options.routes ?? [];
   const { basePath, origin } = compute.endpoint;
   checkHostRoutes(routes, basePath);
-  const wellKnown = Object.freeze({
-    name: 'better-compute',
-    version: serverVersion,
-    api: `${origin}${basePath}`,
-    ...options.wellKnown,
-  });
+  const extra = options.wellKnown ?? {};
+  /**
+   * The server's own document (`{basePath}/.well-known/better-compute`: version, protocol range and
+   * JoinService's public keys), also at the origin root where daemons look first. Host extras add
+   * fields; they never override the server's.
+   */
+  const wellKnown = async () => {
+    const response = await compute.handler(
+      new Request(`${origin}${basePath}/.well-known/better-compute`, { method: 'GET' }),
+    );
+    const document = (await response.json()) as Record<string, unknown>;
+    return { status: response.status, body: response.ok ? { ...extra, ...document } : document };
+  };
 
   const failed = (res: ServerResponse) => {
     if (!res.headersSent) json(res, 500, errorBody('INTERNAL_ERROR', 'Internal error'));
@@ -167,7 +173,17 @@ export function hostListener(compute: AnyCompute, options: HostHttpOptions = {})
       if (pathname === '/.well-known/better-compute') {
         if (method !== 'GET' && method !== 'HEAD')
           return json(res, 405, errorBody('METHOD_NOT_ALLOWED', 'GET only'), { allow: 'GET' });
-        return json(res, 200, wellKnown, { 'cache-control': 'public, max-age=300' });
+        void wellKnown()
+          .then(({ status, body }) =>
+            json(
+              res,
+              status,
+              body,
+              status === 200 ? { 'cache-control': 'public, max-age=300' } : {},
+            ),
+          )
+          .catch(() => failed(res));
+        return;
       }
       const route = routes.find((candidate) => matches(candidate, pathname));
       if (route) {
