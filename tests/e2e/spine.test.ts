@@ -161,7 +161,8 @@ describe('the v0.1 spine end to end (§16)', () => {
       [t.acme.tenantId],
     );
     const live = rows.filter((row) => row.id === mine.id);
-    expect(live).toEqual([{ id: mine.id, state: expect.stringMatching(/placed|active/) }]);
+    // Placed and on its way to active; 'binding' (the node applying the spec) shows with remote IAM's latency.
+    expect(live).toEqual([{ id: mine.id, state: expect.stringMatching(/placed|binding|active/) }]);
     expect(rows.filter((row) => row.state === 'denied')).toHaveLength(3);
     const booked = await dev.database.query<{ owner_id: string }>(
       `SELECT DISTINCT a.owner_id FROM allocations a JOIN device_bookings b ON b.allocation_id = a.id
