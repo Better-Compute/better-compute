@@ -131,30 +131,11 @@ and serves the text with `Cache-Control: no-store`.
 
 ## The standard series
 
-`standardMetrics(registry)` defines these; none carries a tenant label.
-
-| Series | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `better_compute_gateway_sessions` | gauge | `role` | Open daemon sessions on this gateway |
-| `better_compute_gateway_handshakes_total` | counter | `outcome` | Session handshakes |
-| `better_compute_command_latency_seconds` | histogram | `kind`, `lane` | Command enqueue to terminal result; buckets 0.05 to 60 s |
-| `better_compute_commands_swept_total` | counter | `to` | Commands the CommandSweeper moved |
-| `better_compute_work_queue_depth` | gauge | `kind` | Due `work_queue` rows |
-| `better_compute_reconcile_duration_seconds` | histogram | `reconciler` | One reconciler run |
-| `better_compute_generation_lag_nodes` | gauge | | Nodes whose observed generation is behind |
-| `better_compute_placements_total` | counter | `outcome` | Placement attempts |
-| `better_compute_booking_conflicts_total` | counter | | Booking conflicts that forced a replan |
-| `better_compute_pool_gpus` | gauge | `state` | GPUs by state across pools |
-| `better_compute_node_connectivity` | gauge | `state` | Nodes by connectivity |
-| `better_compute_backlog` | gauge | `queue` | Rows waiting in a queue table |
-| `better_compute_usage_dead_letters_total` | counter | | Usage events dead-lettered |
-| `better_compute_iam_inbox_spill_total` | counter | | IAM events spilled because the inbox was down |
-| `better_compute_iam_calls_total` | counter | `op`, `outcome` | IamPort calls (`ok`, `denied`, `error`) |
-| `better_compute_iam_call_duration_seconds` | histogram | `op` | IamPort call latency; each op takes at least one IAM lock acquisition |
-| `better_compute_resolver_lookups_total` | counter | `result` | Authz resolver lookups |
-| `better_compute_cert_expiry_seconds` | gauge | `kind` | Seconds until the soonest expiry |
-| `better_compute_clock_offset_seconds` | gauge | | Process clock minus `compute_now()` |
-| `better_compute_security_events_total` | counter | `type` | Security events recorded |
+`standardMetrics(registry)` defines the section 14 series: sessions and handshakes, command latency and sweeps, the
+work queue and reconcile durations, placements and booking conflicts, pool GPUs, node connectivity, backlogs, IAM
+calls and resolver lookups, certificate expiry, clock offset, and security events. None carries a tenant label.
+The [metrics reference](/docs/reference/metrics) lists every family with its type, labels, help text and buckets,
+generated from `metricCatalog()`, so it always matches the code. This page covers who records them.
 
 Two IAM series have hooks in the IAM bridge you can point at them: `bridge.plugin({ onSpill })` is called for every
 event the plugin spills, and `bridge.resolveResource(fallback, { onLookup })` reports each lookup as `hit`, `miss`,
@@ -207,6 +188,8 @@ every process.
 
 ### Series the instrumentation adds
 
+Beyond the standard set, these come from the collectors and wrappers that record them:
+
 | Series | From | Labels |
 | --- | --- | --- |
 | `better_compute_gateway_open_sessions` | `gatewayCollector` | `gateway`, `role` |
@@ -226,7 +209,10 @@ series (`booking_conflicts_total` counts replans forced by a booking conflict):
 
 ```ts
 capacityModule({ onPlacement: placementObserver(standardMetrics(registry), registry) });
-``` Outcome labels are bounded: ids, method names, error codes and catalog families.
+```
+
+Outcome labels are bounded: ids, method names, error codes and catalog families. Help text and buckets for each of
+these are in the [metrics reference](/docs/reference/metrics).
 
 ## Spans and traces
 

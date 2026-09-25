@@ -15,7 +15,7 @@ sources:
   - apps/docs/lib/glossary.ts
 ---
 
-import { BookA, Blocks, Bot, Braces, Broadcast, Command, History, OctagonAlert, Package, Signpost, SquareTerminal } from '@/lib/icons';
+import { BookA, Blocks, Bot, Braces, Broadcast, ChartLine, Command, History, OctagonAlert, Package, Signpost, SquareTerminal } from '@/lib/icons';
 
 Most of this section is generated from the repository by `apps/docs/scripts/generate.mjs`, so it matches the code
 it documents. The generator does not parse source files. It imports the built packages and constructs a real control
@@ -31,6 +31,7 @@ decision is made. What it reads is the registry a full deployment serves:
 | [Command kinds](/docs/reference/command-kinds) | `registry.commandKinds`: lane, roles, retry-safe, self-terminating, attested and destructive flags, timeout and payload message |
 | [Errors](/docs/reference/errors) | Core's `errorCodes` and `defaultStatus` |
 | [Events](/docs/reference/events) | `eventCatalog` of `@better-compute/events`: every event family with its type, subject and module, the same list `webhooks.eventTypes` returns |
+| [Metrics](/docs/reference/metrics) | `metricCatalog()` of `@better-compute/observability`: every Prometheus family with its type, labels, help and buckets, grouped by the function that defines it |
 | [Modules](/docs/reference/modules) | The registry's modules, their API groups and migrations, and every job in `compute.jobs` |
 | [Packages](/docs/reference/packages) | Every `packages/*/package.json`: name, description and export subpaths |
 
@@ -60,6 +61,9 @@ The rest of the section is written by hand: the [glossary](/docs/reference/gloss
   </Card>
   <Card icon={<Broadcast />} title="Events" href="/docs/reference/events">
     Every event type the outbox publishes, for webhooks and the watch stream.
+  </Card>
+  <Card icon={<ChartLine />} title="Metrics" href="/docs/reference/metrics">
+    Every Prometheus series: type, labels, help text and buckets.
   </Card>
   <Card icon={<Blocks />} title="Modules" href="/docs/reference/modules">
     What each module registers: API groups, migrations and jobs.
