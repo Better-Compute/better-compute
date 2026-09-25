@@ -170,6 +170,47 @@ describe('host.iam', () => {
     expect(events.rows.map((row) => row.tenant_id)).toEqual(['ten_a', 'ten_a', 'ten_sub']);
   });
 
+  it('mirrors IAM tenant suspensions and deletions by default, down the subtree with readTenants', async () => {
+    const { compute } = await deploy([{ name: 'iam', migrations: [successorsMigration] } as never]);
+    const sql = compute.context.sql;
+    const states = async () =>
+      (
+        await sql.query<{ tenant_id: string; state: string }>(
+          'SELECT tenant_id, state FROM compute_tenant_states ORDER BY tenant_id',
+        )
+      ).rows;
+    let installed: IamEventHandlers = {};
+    installIamHandlers(compute, { bridge: { setHandlers: (handlers) => (installed = handlers) } });
+    const tx = sql as never;
+    // Without readTenants: a deletion of the named tenant only; an update is not read.
+    await installed.tenant!(tx, event('iam:tenants:delete', 'ten_gone'));
+    await installed.tenant!(tx, event('iam:tenants:update', 'ten_a'));
+    expect(await states()).toEqual([{ tenant_id: 'ten_gone', state: 'deleted' }]);
+    // With it: the suspension of a parent reaches its children.
+    const asked: string[] = [];
+    installIamHandlers(compute, {
+      bridge: { setHandlers: (handlers) => (installed = handlers) },
+      readTenants: async (tenantId) => {
+        asked.push(tenantId);
+        return [
+          { tenantId, status: 'suspended' },
+          { tenantId: 'ten_child', status: 'suspended' },
+        ];
+      },
+    });
+    await installed.tenant!(tx, event('iam:tenants:update', 'ten_parent'));
+    expect(asked).toEqual(['ten_parent']);
+    expect(await states()).toEqual([
+      { tenant_id: 'ten_child', state: 'suspended' },
+      { tenant_id: 'ten_gone', state: 'deleted' },
+      { tenant_id: 'ten_parent', state: 'suspended' },
+    ]);
+    const context = { compute: {} as never, options: {} as never, env: {}, cwd: '.' };
+    await expect(
+      resolveHost({ iam: { bridge: { setHandlers() {} }, readTenants: 'x' } }, context),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG', message: /readTenants/ });
+  });
+
   it('mounts the remote-IAM webhook intake into the inbox (host.iam.webhook)', async () => {
     const { compute } = await deploy();
     expect(iamWebhookRoutes(compute, { bridge: { setHandlers() {} } })).toEqual([]);

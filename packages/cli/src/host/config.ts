@@ -194,6 +194,11 @@ export async function resolveHost(exported: unknown, context: HostContext): Prom
       'INVALID_CONFIG',
       'host.iam needs the IAM bridge: { bridge } from createComputeIamBridge() (@better-compute/iam)',
     );
+  if (iam?.readTenants !== undefined && typeof iam.readTenants !== 'function')
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'host.iam.readTenants must be a function (tenantId) => [{ tenantId, status }] for the tenant and its subtree',
+    );
   if (metrics !== undefined) {
     if (!isRecord(metrics) || !isRecord(metrics.registry))
       throw new ComputeError(

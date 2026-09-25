@@ -23,7 +23,11 @@ import {
   type IamEventHandlers,
   type IamInboxEvent,
 } from '@better-compute/iam';
-import { revokeIdentitySshCertificates } from '@better-compute/server';
+import {
+  revokeIdentitySshCertificates,
+  tenantStateHandler,
+  type TenantStateHandlerOptions,
+} from '@better-compute/server';
 import type { AnyCompute } from '../config.js';
 import type { HostRoute } from './http.js';
 
@@ -49,11 +53,18 @@ export interface HostIamConfig {
   /** The bridge from `createComputeIamBridge()` (the one whose `modules` and port the configuration uses). */
   bridge: Pick<ComputeIamBridge, 'setHandlers'>;
   /**
-   * Your own reactions, each replacing the default of the same name: `agent` (default: close the agent's
-   * tunnels on every gateway), `identity`/`sessions`/`authz` (default: drop this process's IAM caches).
-   * Handlers without a default (`binding`, `tenant`, `budget`) are only yours.
+   * Your own reactions, each replacing the default of the same name: `agent` (close the agent's tunnels and
+   * withdraw its reservations), `identity`/`sessions` (drop caches, close streams, revoke SSH certificates),
+   * `binding` (end break-glass with the activation), `tenant` (mirror suspensions and deletions, see
+   * `readTenants`), `budget` (the offerings' budget policy), `authz` (drop cached decisions).
    */
   handlers?: IamEventHandlers;
+  /**
+   * Reads a tenant and every tenant below it from IAM, for the default `tenant` reaction
+   * (`tenantStateHandler`): a suspension or deletion cascades to descendants, while the audit event names only
+   * the tenant acted on. Without it only `iam:tenants:delete` is applied, to the named tenant alone.
+   */
+  readTenants?: TenantStateHandlerOptions['readTenants'];
   /** Gateways whose heartbeat is older than this are not asked (default 120 000 ms: they hold no streams). */
   gatewayStaleMs?: number;
   /**
@@ -296,6 +307,12 @@ export function installIamHandlers(
         if (identityId) await revokeSshFor(tx, identityId, event.action);
         closeFor(event, 'sessions');
       }),
+    // A tenant suspended or deleted in IAM (§12.8): its state is mirrored, the gate reloads, a deletion tears down.
+    tenant:
+      own.tenant ??
+      (tenantStateHandler(compute, config.readTenants ? { readTenants: config.readTenants } : {}) as NonNullable<
+        IamEventHandlers['tenant']
+      >),
     authz: own.authz ?? (async () => caches.dropDecisions()),
     onError(error, event, reaction) {
       if (own.onError) own.onError(error, event, reaction);
