@@ -343,6 +343,37 @@ describe('secret broker', () => {
     ]);
   });
 
+  it('releases an instance’s user data only when the secret is the instance’s own tenant’s', async () => {
+    const host = await node();
+    // vps's table, reduced to what the broker reads (this suite does not register vps()).
+    await db.query(
+      'CREATE TABLE IF NOT EXISTS instances (id text PRIMARY KEY, tenant_id text NOT NULL, user_data text)',
+    );
+    const own = await store.put(TENANT, 'cloud-config of acme');
+    const foreign = await store.put('org_other', 'cloud-config of other');
+    let allocations = 0;
+    const instance = async (userData: string) => {
+      const id = `inst_${++allocations}`;
+      await db.query('INSERT INTO instances (id, tenant_id, user_data) VALUES ($1, $2, $3)', [
+        id,
+        TENANT,
+        userData,
+      ]);
+      await db.query(
+        `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, during, version)
+         VALUES ($1, $2, 'pool_s', $3, 'instance', $4, tstzrange(compute_now(), NULL), 1)`,
+        [`alloc_i${allocations}`, TENANT, host.id, id],
+      );
+      return `alloc_i${allocations}`;
+    };
+    const b = broker();
+    const get = async (ref: string, allocationId: string) =>
+      (await b.secret(ask(host, ref, { allocationId }).request, { peerNodeId: host.id })).error;
+    expect(await get(own, await instance(own))).toBe('');
+    // An acme instance naming another tenant's secret as its user data gets nothing.
+    expect(await get(foreign, await instance(foreign))).toBe('not-bound');
+  });
+
   it('answers not-found / unavailable without detail, and bounds refusal events', async () => {
     const agent = await node();
     const missing = 'secret://org_acme/nope';

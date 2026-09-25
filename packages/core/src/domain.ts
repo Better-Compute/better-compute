@@ -573,6 +573,16 @@ export interface InstanceSpec {
   image: { url: string; sha256: string; format: ImageFormat };
   userData?: string;
   deviceIds?: string[];
+  /** The instance's allocation: the host names it in SecretRequest to fetch `userData` (§6). */
+  allocationId?: string;
+  /** NICs with their IPAM addresses (CIDR form), in the guest's interface order. */
+  nics?: InstanceNicSpec[];
+}
+/** One instance NIC: the host bridge or network, its MAC and its IPAM addresses. */
+export interface InstanceNicSpec {
+  network: string;
+  mac: string;
+  addresses: string[];
 }
 /** Empty in v0.1; from v0.3 the SSH CA principals and exec-ticket JWKS. */
 export interface AccessSpec {

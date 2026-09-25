@@ -156,11 +156,14 @@ async function boundToAllocation(
   const allocation = rows[0];
   if (!allocation) return false;
   if (allocation.owner_kind === 'instance' && allocation.has_instances) {
-    const instance = await tx.query('SELECT 1 FROM instances WHERE id = $1 AND user_data = $2', [
-      allocation.owner_id,
-      opened.ref,
-    ]);
-    if (instance.rows.length > 0) return true;
+    const instance = await tx.query<{ tenant_id: string }>(
+      'SELECT tenant_id FROM instances WHERE id = $1 AND user_data = $2',
+      [allocation.owner_id, opened.ref],
+    );
+    // Defence in depth (vps refuses them at admission too): an instance may only name a secret of
+    // its own tenant, so tenant A's VM can never boot with tenant B's secret:// as its user data.
+    const owner = instance.rows[0]?.tenant_id;
+    if (owner !== undefined && parseSecretRef(opened.ref)?.tenantId === owner) return true;
   }
   return (
     (await extra?.(tx, {

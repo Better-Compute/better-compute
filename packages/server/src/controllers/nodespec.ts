@@ -209,6 +209,14 @@ function wireInstance(instance: InstanceSpec): Json {
   };
   if (instance.userData?.startsWith('secret://')) wire.userDataRef = instance.userData;
   if (instance.deviceIds?.length) wire.gpuDeviceIds = [...instance.deviceIds].sort();
+  if (instance.allocationId) wire.allocationId = instance.allocationId;
+  // NIC order is the guest's interface order, so it is kept as the module gave it.
+  if (instance.nics?.length)
+    wire.nics = instance.nics.map((nic) => ({
+      network: nic.network,
+      mac: nic.mac,
+      addresses: [...nic.addresses],
+    }));
   return wire;
 }
 
