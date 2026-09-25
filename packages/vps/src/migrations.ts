@@ -13,6 +13,7 @@ import {
   vpsHostCertificatesMigration,
   vpsSandboxMetricIndexesMigration,
   vpsSandboxSnapshotsMigration,
+  vpsSnapshotAgentMigration,
   vpsSnapshotFixesMigration,
 } from './snapshots.js';
 
@@ -137,4 +138,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsHostCertValidityMigration,
   vpsSandboxExpiringMigration,
   vpsSandboxExtendingMigration,
+  vpsSnapshotAgentMigration,
 ]);

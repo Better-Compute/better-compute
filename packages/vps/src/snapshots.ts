@@ -120,6 +120,18 @@ CREATE INDEX instances_warm_created ON instances (created_at)
 };
 
 /**
+ * The agent whose sandbox a snapshot captured (review 13): a delegated restore takes only its own
+ * agent's snapshots, never its person's other sandboxes' memory.
+ */
+export const vpsSnapshotAgentMigration: Migration = {
+  name: 'vps/0015_snapshot_agent',
+  sql: `
+ALTER TABLE sandbox_snapshots ADD COLUMN agent_id text;
+UPDATE sandbox_snapshots n SET agent_id = s.agent_id FROM sandboxes s WHERE s.id = n.sandbox_id;
+`,
+};
+
+/**
  * Certified guest host keys (§3.7 exec pinning): whether an instance's guest holds a host key
  * certified by the sandbox CA, and whether a memory snapshot carries such a guest.
  */
@@ -155,7 +167,7 @@ export interface SandboxSnapshot {
   sizeBytes?: number;
   cpuModel?: string;
   reason?: string;
-  /** Who took it: only they may restore it. */
+  /** Its sandbox's owner, whoever took it: only they (or the agent that created it) restore it. */
   ownerIdentityId: string;
   createdAt: number;
   readyAt?: number;
@@ -205,6 +217,7 @@ interface RawSnapshot {
   cpu_model: string | null;
   reason: string | null;
   owner_identity_id: string;
+  agent_id: string | null;
   principal_instance_id: string | null;
   host_certified: boolean;
   host_cert_valid_ms: number | null;
@@ -215,7 +228,7 @@ interface RawSnapshot {
 const snapshotColumnsOf = (a: string) => `${a}id, ${a}tenant_id, ${a}sandbox_id, ${a}template_id,
   ${a}instance_id, ${a}node_id, ${a}runtime, ${a}include_memory, ${a}keep, ${a}state, ${a}command_id,
   ${a}url, ${a}sha256, ${a}size_bytes, ${a}cpu_model, ${a}reason, ${a}owner_identity_id,
-  ${a}principal_instance_id, ${a}host_certified,
+  ${a}agent_id, ${a}principal_instance_id, ${a}host_certified,
   (extract(epoch FROM ${a}host_cert_valid_before) * 1000)::float8 AS host_cert_valid_ms,
   (extract(epoch FROM ${a}created_at) * 1000)::float8 AS created_ms,
   (extract(epoch FROM ${a}ready_at) * 1000)::float8 AS ready_ms`;
@@ -255,6 +268,8 @@ export async function sandboxSnapshots(tx: SqlTx, sandboxId: string): Promise<Sa
 /** What a restore needs of a snapshot, checked for the restoring tenant. */
 export interface RestoreSource {
   snapshotId: string;
+  /** The template its sandbox ran: a restore runs under that one only. */
+  templateId: string;
   url: string;
   sha256: string;
   runtime: string;
@@ -268,17 +283,17 @@ export interface RestoreSource {
 }
 
 /**
- * The snapshot a `sandboxes.create({ fromSnapshot })` restores: ready, and taken by the restoring
- * identity (a snapshot holds its sandbox's memory and `/etc/sandbox/env`, so another user of the
- * tenant must not boot it). Another identity's or tenant's snapshot is `NOT_FOUND`, exactly like a
- * missing one.
+ * The snapshot a `sandboxes.create({ fromSnapshot })` restores: ready, and its sandbox's owner's (a
+ * snapshot holds its sandbox's memory and `/etc/sandbox/env`, so another user of the tenant must not
+ * boot it). An agent (`agentId`) restores only snapshots of sandboxes it created itself: its person's
+ * own sandboxes are not its to boot. Anything else is `NOT_FOUND`, exactly like a missing one.
  */
 export async function restoreSource(
   tx: SqlTx,
   tenantId: string,
   snapshotId: string,
   identityId: string,
-  options: { lock?: boolean } = {},
+  options: { lock?: boolean; agentId?: string | null } = {},
 ): Promise<RestoreSource> {
   const { rows } = await tx.query<RawSnapshot>(
     `SELECT ${snapshotColumns} FROM sandbox_snapshots
@@ -286,12 +301,14 @@ export async function restoreSource(
     [snapshotId, tenantId, identityId],
   );
   const raw = rows[0];
-  if (!raw || raw.state === 'deleted')
+  const agentOk = !options.agentId || raw?.agent_id === options.agentId;
+  if (!raw || raw.state === 'deleted' || !agentOk)
     throw new ComputeError('NOT_FOUND', `Snapshot ${snapshotId} not found`);
   if (raw.state !== 'ready' || raw.sha256 === null)
     throw new ComputeError('INVALID_STATE', `Snapshot ${snapshotId} is ${raw.state}`);
   const source: RestoreSource = {
     snapshotId: raw.id,
+    templateId: raw.template_id,
     url: raw.url,
     sha256: raw.sha256,
     runtime: raw.runtime,
@@ -335,10 +352,15 @@ export async function snapshotSandbox(
       `SELECT ${snapshotColumns} FROM sandbox_snapshots WHERE id = $1 AND tenant_id = $2`,
       [snapshotId, input.tenantId],
     );
-    if (rows[0]) {
-      if (rows[0].sandbox_id !== input.sandboxId)
+    const existing = rows[0];
+    if (existing) {
+      if (
+        existing.sandbox_id !== input.sandboxId ||
+        existing.include_memory !== input.includeMemory ||
+        existing.keep !== input.keep
+      )
         throw new ComputeError('CONFLICT', 'This idempotency key was used for a different request');
-      return snapshotView(rows[0]);
+      return snapshotView(existing);
     }
   }
   const { rows: sandboxes } = await tx.query<{
@@ -348,8 +370,9 @@ export async function snapshotSandbox(
     draft: boolean;
     deleting_at: string | null;
     owner_identity_id: string;
+    agent_id: string | null;
   }>(
-    `SELECT id, template_id, instance_id, draft, deleting_at, owner_identity_id FROM sandboxes
+    `SELECT id, template_id, instance_id, draft, deleting_at, owner_identity_id, agent_id FROM sandboxes
       WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
     [input.sandboxId, input.tenantId],
   );
@@ -399,8 +422,8 @@ export async function snapshotSandbox(
     `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
                                     include_memory, keep, state, command_id, url, owner_identity_id,
                                     idempotency_key, principal_instance_id, host_certified,
-                                    host_cert_valid_before, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, $15, $16, 1)
+                                    host_cert_valid_before, agent_id, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, $15, $16, $17, 1)
      RETURNING ${snapshotColumns}`,
     [
       snapshotId,
@@ -423,6 +446,8 @@ export async function snapshotSandbox(
       instance.hostCertValidBefore === undefined
         ? null
         : new Date(instance.hostCertValidBefore).toISOString(),
+      // The agent that created the sandbox: only it (or its person) may boot this memory.
+      sandbox.agent_id,
     ],
   );
   // Its own resource: a kept snapshot outlives its sandbox (and the sandbox's authz row).
@@ -540,6 +565,28 @@ export async function deleteSnapshot(
   await publishSnapshot(deps, tx, raw, 'sandbox.snapshot.deleted');
   await deps.work.enqueue(tx, 'vps.sandboxes', 'all');
   return { deleted: true };
+}
+
+/**
+ * An owner gone with no successor (§12.8): their snapshots, kept ones included, hold memory and
+ * `/etc/sandbox/env` that nobody may restore any more (restores are the owner's), so they go like a
+ * `sandboxSnapshots.delete`: at once for reads, the objects with a later pass. Answers their ids.
+ */
+export async function dropOwnerSnapshots(
+  deps: Pick<InstanceDeps, 'events' | 'work'>,
+  tx: SqlTx,
+  tenantId: string,
+  identityId: string,
+): Promise<string[]> {
+  const { rows } = await tx.query<RawSnapshot>(
+    `UPDATE sandbox_snapshots SET state = 'deleted', purged = false, version = version + 1
+      WHERE tenant_id = $1 AND owner_identity_id = $2 AND state <> 'deleted'
+      RETURNING ${snapshotColumns}`,
+    [tenantId, identityId],
+  );
+  for (const raw of rows) await publishSnapshot(deps, tx, raw, 'sandbox.snapshot.deleted');
+  if (rows.length > 0) await deps.work.enqueue(tx, 'vps.sandboxes', 'all');
+  return rows.map((raw) => raw.id);
 }
 
 async function publishSnapshot(

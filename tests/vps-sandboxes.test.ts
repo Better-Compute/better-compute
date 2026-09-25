@@ -1481,6 +1481,79 @@ describe('snapshots', () => {
     expect(rows[0]!.restore_from.principalInstanceId).toBe(sandbox.instanceId);
   });
 
+  it('let an agent restore only snapshots of sandboxes it created, under their own template', async () => {
+    const agent: Caller = { ...alice, agentId: 'agt_1', delegationId: 'dlg_1' };
+    const { template, sandbox } = await running();
+    const snapshot = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+    })) as SnapshotView;
+    await settle(recorded.commands[0]!.id, 'succeeded');
+    await reconcileWith(snapshot.id);
+    const restore = (key: string, who: Caller, extra: Record<string, unknown> = {}) =>
+      callStore(
+        'create',
+        {
+          tenantId: 'acme',
+          templateId: template.id,
+          fromSnapshot: snapshot.id,
+          idempotencyKey: key,
+          ...extra,
+        },
+        who,
+      ) as Promise<SandboxView>;
+    // The person's own sandbox's memory is not the agent's to boot, though the agent acts for them.
+    await expect(restore('agent', agent)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    // Never under another template: its isolation (network, env) is the snapshot's template's.
+    const other = await createTemplate({ name: 'other' });
+    await expect(restore('other', alice, { templateId: other.id })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('restore it with that template'),
+    });
+    expect(await restore('mine', alice)).toMatchObject({ fromSnapshot: snapshot.id });
+
+    // A snapshot of a sandbox the agent created is its own to restore.
+    const own = (await callStore(
+      'create',
+      { tenantId: 'acme', templateId: template.id, idempotencyKey: 'agent-own' },
+      agent,
+    )) as SandboxView;
+    await hostsReport('running');
+    const ownSnapshot = (await callStore(
+      'snapshot',
+      { tenantId: 'acme', sandboxId: own.id },
+      agent,
+    )) as SnapshotView;
+    await settle(recorded.commands.at(-1)!.id, 'succeeded');
+    await reconcileWith(ownSnapshot.id);
+    expect(
+      await callStore(
+        'create',
+        {
+          tenantId: 'acme',
+          templateId: template.id,
+          fromSnapshot: ownSnapshot.id,
+          idempotencyKey: 'agent-restore',
+        },
+        agent,
+      ),
+    ).toMatchObject({ fromSnapshot: ownSnapshot.id });
+  });
+
+  it('refuse an idempotency key reused for a different snapshot request', async () => {
+    const { sandbox } = await running();
+    const take = (keep: boolean) =>
+      callStore('snapshot', {
+        tenantId: 'acme',
+        sandboxId: sandbox.id,
+        keep,
+        idempotencyKey: 'snap-1',
+      }) as Promise<SnapshotView>;
+    const first = await take(false);
+    expect(await take(false)).toMatchObject({ id: first.id });
+    await expect(take(true)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
   it("refuse a memory restore that would outlive the guest's host certificate", async () => {
     const { template, sandbox } = await running();
     const snapshot = (await callStore('snapshot', {
@@ -1830,6 +1903,41 @@ describe('template env', () => {
     expect(recorded.fleetDecisions).toBe(1);
   });
 
+  it('refuses an update whose decision predates secrets added to the template since', async () => {
+    broker = {
+      resolve: async (ref) => `value:${ref}`,
+      put: async (tenantId) => `secret://${tenantId}/sealed`,
+      delete: async () => {},
+    };
+    const template = await createTemplate();
+    const update = (api.sandboxTemplates as Record<string, Definition>).update!;
+    const input = update.validate({
+      tenantId: 'acme',
+      templateId: template.id,
+      imageId: 'ubuntu-24.04',
+      userData: '#!/bin/sh\necho new code\n',
+    });
+    const context = (sql: SqlExecutor) =>
+      ({
+        ...moduleContext(sql),
+        caller: alice,
+        credential: { kind: 'session', token: 'ses:usr_alice' },
+        requestId: 'req',
+      }) as unknown as MethodContext;
+    // Decided on a template without secrets (no secrets:manage needed)...
+    denied.add('compute:secrets:manage');
+    await update.admission!.check!(context(db), input);
+    // ...then an administrator adds secret env before the update commits.
+    await putSecret('secret://acme/api-token', 'api-token');
+    await db.query(`UPDATE sandbox_templates SET env = $2::jsonb WHERE id = $1`, [
+      template.id,
+      JSON.stringify({ TOKEN: 'secret://acme/api-token' }),
+    ]);
+    await expect(
+      db.transaction((tx) => update.handler(context(within(tx)), input)),
+    ).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'secrets-changed' } });
+  });
+
   it('refuses a fleet-scoped secret outright, whoever may manage it', async () => {
     broker = {
       resolve: async (ref) => `value:${ref}`,
@@ -2005,6 +2113,44 @@ describe('IAM reactions (§12.8)', () => {
       `SELECT owner_identity_id FROM sandbox_snapshots WHERE id = 'snap_kept'`,
     );
     expect(snapshot.rows[0]!.owner_identity_id).toBe('usr_bob');
+  });
+
+  it('refuse an agent replaying its person’s create key (and the reverse)', async () => {
+    const template = await createTemplate();
+    await createSandbox(template.id, { idempotencyKey: 'shared' });
+    await expect(
+      createSandbox(template.id, { idempotencyKey: 'shared' }, agent),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await createSandbox(template.id, { idempotencyKey: 'agents' }, agent);
+    await expect(createSandbox(template.id, { idempotencyKey: 'agents' })).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    // The same caller's retry replays.
+    expect((await createSandbox(template.id, { idempotencyKey: 'agents' }, agent)).id).toBeTruthy();
+  });
+
+  it('drop the kept snapshots of an owner who leaves with no successor', async () => {
+    const template = await createTemplate();
+    const sandbox = await createSandbox(template.id);
+    await db.query(
+      `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
+                                      include_memory, keep, state, command_id, url, owner_identity_id, version)
+       VALUES ('snap_left', 'acme', $1, $2, $3, 'node', 'cloud-hypervisor', true, true, 'ready', 'cmd', 'u',
+               'usr_alice', 1)`,
+      [sandbox.id, template.id, sandbox.instanceId],
+    );
+    await react((tx, context) =>
+      reassignSandboxes(tx, context, {
+        tenantId: 'acme',
+        identityId: 'usr_alice',
+        reason: 'identity:delete',
+      }),
+    );
+    const { rows } = await db.query<{ state: string }>(
+      `SELECT state FROM sandbox_snapshots WHERE id = 'snap_left'`,
+    );
+    expect(rows[0]!.state).toBe('deleted');
+    expect(eventTypes()).toContain('sandbox.snapshot.deleted');
   });
 
   it("drop the departed owner's agent from what moves: its later suspension withdraws nothing", async () => {

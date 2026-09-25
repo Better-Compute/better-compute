@@ -487,10 +487,13 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     const current = rows[0];
     if (!current) return;
     const env = typeof current.env === 'string' ? JSON.parse(current.env) : current.env;
-    await secretsCheck(context, input.tenantId, {
+    const resulting = {
       env: input.env ?? env,
       userData: input.userData === undefined ? current.user_data : input.userData,
-    });
+    };
+    await secretsCheck(context, input.tenantId, resulting);
+    // What this decision covered: the handler refuses secrets added since (read under its lock).
+    input.decidedSecrets = templateSecretRefs(resulting);
   };
   let sandboxExec: InstanceDeps['sandboxExec'];
   if (options.sandboxExec) {

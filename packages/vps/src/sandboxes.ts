@@ -50,6 +50,7 @@ import {
   type VpsImage,
 } from './instances.js';
 import {
+  dropOwnerSnapshots,
   dropSnapshots,
   purgeSettledSnapshots,
   purgeSnapshots,
@@ -254,6 +255,11 @@ export interface TemplateUpdate {
   /** Replaces the whole map (`{}` removes every variable). */
   env?: Record<string, string>;
   network?: SandboxNetwork;
+  /**
+   * Set by the admission check, never by the caller (the parser keeps known fields only): the
+   * secret refs its `compute:secrets:manage` decision covered, read outside the transaction.
+   */
+  decidedSecrets?: string[];
 }
 
 export type TemplateRef = { tenantId: string; templateId: string };
@@ -730,6 +736,23 @@ export async function updateTemplate(
     ? { min: input.warm.min, max: input.warm.max ?? input.warm.min }
     : current.warm;
   const userDataValue = input.userData === undefined ? (current.userData ?? null) : input.userData;
+  const reshapes = shapes(current, { flavor, imageId: image, userData: userDataValue, input });
+  // The check decided on the template it read outside any transaction: secrets added since (by
+  // someone allowed to) were not part of that decision, and new code must not inherit them.
+  if (reshapes) {
+    const decided = new Set(input.decidedSecrets ?? []);
+    const unchecked = templateSecretRefs({
+      env: input.env ?? current.env,
+      userData: userDataValue,
+    }).filter((ref) => !decided.has(ref));
+    if (unchecked.length > 0)
+      throw new ComputeError(
+        'CONFLICT',
+        `Sandbox template ${current.id}'s secrets changed while this update was decided; retry`,
+        undefined,
+        { templateId: current.id, reason: 'secrets-changed' },
+      );
+  }
   const { rows } = await tx.query<RawTemplate>(
     `UPDATE sandbox_templates
         SET flavor = $2, image_id = $3, runtime = $4, user_data = $5, default_ttl_seconds = $6,
@@ -749,7 +772,7 @@ export async function updateTemplate(
       warmPool.max,
       JSON.stringify(input.env ?? current.env),
       input.network ?? current.network,
-      shapes(current, { flavor, imageId: image, userData: userDataValue, input }) ? 1 : 0,
+      reshapes ? 1 : 0,
     ],
   );
   return templateView(toTemplate(rows[0]!));
@@ -1110,7 +1133,15 @@ export async function prepareCreateSandbox(
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
   const { idempotencyKey: _key, wait: _wait, ...request } = input;
-  const hash = await sha256Hex(canonical(request));
+  // Who asks is part of the request: an agent replaying its person's key (or the reverse) would
+  // otherwise take over a sandbox attributed to someone else, which IAM reactions then misjudge.
+  const hash = await sha256Hex(
+    canonical({
+      ...request,
+      ...(caller.agentId ? { agentId: caller.agentId } : {}),
+      ...(caller.delegationId ? { delegationId: caller.delegationId } : {}),
+    }),
+  );
   const sandboxId = await sandboxIdOf(context, input);
   const existing = await readSandbox(tx, sandboxId, { tenantId: input.tenantId, lock: true });
   if (existing && existing.request_hash !== hash)
@@ -1139,7 +1170,16 @@ export async function prepareCreateSandbox(
     );
   if (input.fromSnapshot !== undefined) {
     // The tenant's own ready snapshot (another tenant's is NOT_FOUND), written by this runtime.
-    const source = await restoreSource(tx, input.tenantId, input.fromSnapshot, caller.identityId);
+    const source = await restoreSource(tx, input.tenantId, input.fromSnapshot, caller.identityId, {
+      agentId: caller.agentId ?? null,
+    });
+    // The template decides the guest's isolation (network, env): memory captured under one must
+    // not resume under a laxer one (a `none` sandbox's secrets leaving through an `egress` one).
+    if (source.templateId !== template.id)
+      throw new ComputeError(
+        'INVALID_INPUT',
+        `Snapshot ${source.snapshotId} was taken under template ${source.templateId}; restore it with that template`,
+      );
     if (source.runtime !== template.runtime)
       throw new ComputeError(
         'INVALID_INPUT',
@@ -1647,6 +1687,7 @@ export async function completeCreateSandbox(
       ? undefined
       : await restoreSource(tx, raw.tenant_id, raw.from_snapshot, raw.owner_identity_id, {
           lock: true,
+          agentId: raw.agent_id,
         });
   const now = deps.clock.now();
   const until = now + raw.ttl_seconds * second;
@@ -1870,11 +1911,12 @@ export async function reassignSandboxes(
     input.identityId,
   ]);
   const successor = input.successorId;
-  if (!successor || successor === input.identityId)
-    return {
-      deleted: await withdrawSandboxes(deps, tx, rows, { reason: input.reason }),
-      reassigned: [],
-    };
+  if (!successor || successor === input.identityId) {
+    const deleted = await withdrawSandboxes(deps, tx, rows, { reason: input.reason });
+    // Nobody may restore their snapshots any more; memory and secrets must not linger unreachable.
+    await dropOwnerSnapshots(deps, tx, input.tenantId, input.identityId);
+    return { deleted, reassigned: [] };
+  }
 
   // The departed owner's agent no longer speaks for what moves: its later suspension (events arrive
   // in any order) must not withdraw the successor's sandboxes.
