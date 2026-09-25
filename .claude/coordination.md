@@ -307,7 +307,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       tx1 (18d9ad1, [097b34]).
     - bcd self-update (de9f380, [6a20b8]): rollout sends the signed release manifest in DaemonSection.signature
       (ecf7cd0). Open: the install script's [update] release_pins ([402c97]); the docs callouts ([75b663]).
-    - Next for [f02367]: a quorum sim scenario (tests/sim, with [31c64a]), including Talos POSTs with approvers on.
+    - Quorum sim scenario DONE (15ab62f, tests/sim/quorum.test.ts). 10k-leaf bench: createBatch 446 ms, enqueue 513/s,
+      release of 10k in 252 ms. Talos POSTs get their own bound one-leaf batch (8801451, tests/metal-quorum-proxy).
+      Next for [f02367]: a v0.5→HEAD upgrade with approvers switched on (tests/sim/upgrade), the v1.0 acceptance.
     - Security review 9 (subagent over bcd self-update, proxy and quorum parity), 3 HIGH:
       - HIGH-2 epoch rewind: fixed in bcd 7ac5609; the TS pki + FakeDaemon half is [402c97]'s.
       - HIGH-3 httpProxy: (a) empty targets reach nothing (808379f); (d) anything but GET needs a bound leaf (bcd
