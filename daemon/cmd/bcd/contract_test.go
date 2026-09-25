@@ -16,6 +16,11 @@ import (
 // from provision's user-data renderers and the Hetzner Robot bootstrap.
 type installContract struct {
 	Variables map[string]string `json:"variables"`
+	Pins      struct {
+		ServingCA      string `json:"servingCa"`
+		JoinSigning    string `json:"joinSigning"`
+		JoinEncryption string `json:"joinEncryption"`
+	} `json:"pins"`
 	Provision struct {
 		Join      []string `json:"join"`
 		Node      []string `json:"node"`
@@ -113,6 +118,15 @@ func TestInstallContract(t *testing.T) {
 	name, robot := parseInstalled(t, ic.Robot.Join)
 	if name != "join" || robot["server"] != v["controlPlaneUrl"] || robot["attestor"] != "provisioned" || robot["token-file"] != "/etc/bcd/join-token" {
 		t.Fatalf("robot join = %s %v", name, robot)
+	}
+	// It carries the install's pins (bcd refuses to bootstrap without them), in config.toml's form.
+	if robot["serving-ca-pin"] != ic.Pins.ServingCA || robot["join-signing-pin"] != ic.Pins.JoinSigning || robot["join-encryption-pin"] != ic.Pins.JoinEncryption {
+		t.Fatalf("robot join pins = %v", robot)
+	}
+	for _, flag := range []string{"serving-ca-pin", "join-signing-pin", "join-encryption-pin"} {
+		if _, err := config.DecodePin(robot[flag]); err != nil {
+			t.Fatalf("--%s %q: %v", flag, robot[flag], err)
+		}
 	}
 	if !strings.Contains(ic.Robot.Script, "> /etc/bcd/join-token") {
 		t.Fatal("the Robot bootstrap does not write the token where bcd join reads it")

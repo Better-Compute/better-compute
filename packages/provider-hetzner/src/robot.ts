@@ -146,7 +146,7 @@ const resetTypes: Partial<Record<PowerAction, string>> = {
  * control plane's well-known document, joins with the `provisioned` token (bound to this machine's
  * SMBIOS UUID) and writes its configuration, then removes the token file.
  */
-export function robotJoinArgv(controlPlaneUrl: string): string[] {
+export function robotJoinArgv(controlPlaneUrl: string, pins: RobotJoinPins): string[] {
   return [
     '/usr/local/bin/bcd',
     'join',
@@ -156,7 +156,36 @@ export function robotJoinArgv(controlPlaneUrl: string): string[] {
     robotJoinTokenPath,
     '--attestor',
     'provisioned',
+    '--serving-ca-pin',
+    pins.servingCa,
+    '--join-signing-pin',
+    pins.joinSigning,
+    '--join-encryption-pin',
+    pins.joinEncryption,
   ];
+}
+
+/**
+ * The pins `bcd join` checks the control plane's well-known document against, so the token is
+ * sealed only to the real JoinService (`sha256/<base64>` SPKI pins).
+ */
+export interface RobotJoinPins {
+  servingCa: string;
+  joinSigning: string;
+  joinEncryption: string;
+}
+
+const pinPattern = /^sha256\/[A-Za-z0-9+/]{43}=$/;
+
+function checkPins(pins: RobotJoinPins | undefined): RobotJoinPins {
+  if (!pins)
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'Robot bootstrap needs the join pins (vps({ bootstrap: { pins } })), so the installed bcd trusts only the real control plane',
+    );
+  if (![pins.servingCa, pins.joinSigning, pins.joinEncryption].every((pin) => pinPattern.test(pin)))
+    throw new ComputeError('INVALID_INPUT', 'Join pins must be sha256/<base64> SPKI pins');
+  return pins;
 }
 
 /** Where the installed OS keeps the join token until `bcd join` spends it. */
@@ -179,7 +208,9 @@ export function bootstrapScript(input: {
   bcdUrl: string;
   sha256: string;
   controlPlaneUrl: string;
+  pins: RobotJoinPins;
 }): string {
+  const pins = checkPins(input.pins);
   if (!unitSafeUrl.test(input.controlPlaneUrl))
     throw new ComputeError(
       'INVALID_INPUT',
@@ -220,7 +251,7 @@ export function bootstrapScript(input: {
     '[Service]',
     'Type=oneshot',
     'RemainAfterExit=yes',
-    `ExecStart=${robotJoinArgv(input.controlPlaneUrl).join(' ')}`,
+    `ExecStart=${robotJoinArgv(input.controlPlaneUrl, pins).join(' ')}`,
     'Restart=on-failure',
     'RestartSec=15',
     '[Install]',
@@ -546,7 +577,13 @@ class HetznerRobotClient implements ProviderImpl {
    */
   async bootstrap(
     machine: ExternalMachine,
-    bootstrap: { joinToken: string; bcdUrl: string; sha256: string; controlPlaneUrl?: string },
+    bootstrap: {
+      joinToken: string;
+      bcdUrl: string;
+      sha256: string;
+      controlPlaneUrl?: string;
+      pins?: RobotJoinPins;
+    },
     context: CallContext,
   ): Promise<void> {
     const ssh = this.#ssh();
@@ -560,6 +597,7 @@ class HetznerRobotClient implements ProviderImpl {
         'INVALID_INPUT',
         'controlPlaneUrl must be an https URL without spaces, quotes, % or $',
       );
+    const pins = checkPins(bootstrap.pins);
     if (!/^[0-9a-f]{64}$/.test(bootstrap.sha256))
       throw new ComputeError('INVALID_INPUT', 'bootstrap.sha256 must be a hex sha256');
     if (!/^https:\/\//.test(bootstrap.bcdUrl))
@@ -585,6 +623,7 @@ class HetznerRobotClient implements ProviderImpl {
       bcdUrl: bootstrap.bcdUrl,
       sha256: bootstrap.sha256,
       controlPlaneUrl: bootstrap.controlPlaneUrl,
+      pins,
     });
     const installed = await ssh(target, 'sh -s', script);
     // `reboot` may cut the session before it reports; anything else non-zero is a failure.

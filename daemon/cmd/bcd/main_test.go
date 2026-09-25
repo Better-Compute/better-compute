@@ -255,18 +255,35 @@ func TestJoinBootstrapsItsConfigurationFromTheWellKnownDocument(t *testing.T) {
 	file := filepath.Join(etc, "config.toml")
 	tokenFile := filepath.Join(t.TempDir(), "join-token")
 	_ = os.WriteFile(tokenFile, []byte("bcjt_01k5w0000000000000000000000.secret\n"), 0o600)
-	join := func(nodeID string) (int, string, string) {
-		return runBCD("join", "--config", file, "--server", srv.URL, "--token-file", tokenFile, "--node-id", nodeID)
+	pins := []string{"--serving-ca-pin", caPin, "--join-signing-pin", signPin, "--join-encryption-pin", pin(encPin)}
+	join := func(nodeID string, extra ...string) (int, string, string) {
+		args := append([]string{"join", "--config", file, "--server", srv.URL, "--token-file", tokenFile, "--node-id", nodeID}, pins...)
+		return runBCD(append(args, extra...)...)
 	}
 
 	// A control plane that does not say where its gateway is cannot bootstrap a machine.
 	if code, _, stderr := join("node_1"); code != exitFailure || !strings.Contains(stderr, "does not publish its gateway") {
 		t.Fatalf("join without a published gateway = %d, %q", code, stderr)
 	}
+	withGateway = true
+	// The install's pins win over the document: one that differs refuses the join, and so does a
+	// partial set (only a development build joins with none at all).
+	other := pin(bytes.Repeat([]byte{3}, 32))
+	if code, _, stderr := join("node_1", "--join-encryption-pin", other); code != exitFailure || !strings.Contains(stderr, "does not match --join-encryption-pin") {
+		t.Fatalf("join with a substituted encryption key = %d, %q", code, stderr)
+	}
+	if code, _, stderr := runBCD("join", "--config", file, "--server", srv.URL, "--token-file", tokenFile, "--serving-ca-pin", caPin); code != exitFailure || !strings.Contains(stderr, "needs --serving-ca-pin, --join-signing-pin and --join-encryption-pin") {
+		t.Fatalf("join with a partial set of pins = %d, %q", code, stderr)
+	}
+	// A redirect is never followed.
+	redirect := httptest.NewTLSServer(http.RedirectHandler(srv.URL+"/.well-known/better-compute", http.StatusFound))
+	defer redirect.Close()
+	if code, _, stderr := runBCD(append([]string{"join", "--config", file, "--server", redirect.URL, "--token-file", tokenFile}, pins...)...); code != exitFailure || !strings.Contains(stderr, "302") {
+		t.Fatalf("join through a redirect = %d, %q", code, stderr)
+	}
 	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a configuration was written before joining")
 	}
-	withGateway = true
 
 	// A machine that already joined (a re-run after a reboot) succeeds without spending a token, writes
 	// the configuration the node agent reads and removes the token file.

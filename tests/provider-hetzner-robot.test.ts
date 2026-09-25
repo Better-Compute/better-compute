@@ -12,6 +12,12 @@ import {
   type SshExecutor,
 } from '@better-compute/provider-hetzner';
 
+const pins = {
+  servingCa: `sha256/${Buffer.alloc(32, 1).toString('base64')}`,
+  joinSigning: `sha256/${Buffer.alloc(32, 2).toString('base64')}`,
+  joinEncryption: `sha256/${Buffer.alloc(32, 3).toString('base64')}`,
+};
+
 // Hetzner Robot against an in-memory emulator of the webservice (servers, rename, rescue, reset)
 // and a fake SSH executor: claims instead of orders, power through resets, rescue, and the bootstrap
 // that installs the OS and delivers the join token over SSH stdin only.
@@ -289,6 +295,7 @@ describe('hetznerRobot specifics', () => {
         bcdUrl: 'https://downloads.example/bcd-linux-amd64',
         sha256: 'ab'.repeat(32),
         controlPlaneUrl: 'https://compute.example/api/compute',
+        pins,
       },
       call('boot'),
     );
@@ -330,7 +337,7 @@ describe('hetznerRobot specifics', () => {
     expect(install.stdin).toContain('shred -u /root/bc-join-token');
     // First boot joins through the control plane (bcd-join.service), then runs the node agent.
     expect(install.stdin).toContain(
-      'ExecStart=/usr/local/bin/bcd join --server https://compute.example/api/compute --token-file /etc/bcd/join-token --attestor provisioned',
+      `ExecStart=/usr/local/bin/bcd join --server https://compute.example/api/compute --token-file /etc/bcd/join-token --attestor provisioned --serving-ca-pin ${pins.servingCa} --join-signing-pin ${pins.joinSigning} --join-encryption-pin ${pins.joinEncryption}`,
     );
     expect(install.stdin).toContain('systemctl enable bcd-join.service bcd.service');
   });
@@ -366,6 +373,7 @@ describe('hetznerRobot specifics', () => {
         bcdUrl: 'https://d.example/bcd',
         sha256: 'ab'.repeat(32),
         controlPlaneUrl: 'https://compute.example',
+        pins,
       },
       call('boot'),
     );
@@ -394,6 +402,7 @@ describe('hetznerRobot specifics', () => {
       bcdUrl: 'https://d.example/bcd',
       sha256: 'ab'.repeat(32),
       controlPlaneUrl: 'https://compute.example',
+      pins,
     };
     await expect(noSsh.bootstrap!(machine, args, call('b'))).rejects.toMatchObject({
       code: 'INVALID_CONFIG',
@@ -413,6 +422,13 @@ describe('hetznerRobot specifics', () => {
     await expect(silent.bootstrap!(machine, withoutUrl, call('b'))).rejects.toMatchObject({
       code: 'INVALID_CONFIG',
     });
+    const { pins: _noPins, ...withoutPins } = args;
+    await expect(silent.bootstrap!(machine, withoutPins, call('b'))).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+    });
+    await expect(
+      silent.bootstrap!(machine, { ...args, pins: { ...pins, joinEncryption: 'sha256/x' } }, call('b')),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     for (const controlPlaneUrl of ['https://c.example/%h', 'https://c.example/$HOME', 'https://c.example/a b'])
       await expect(
         silent.bootstrap!(machine, { ...args, controlPlaneUrl }, call('b')),
@@ -430,6 +446,7 @@ describe('bootstrapScript', () => {
     bcdUrl: "https://downloads.example/bcd?x='y'",
     sha256: 'cd'.repeat(32),
     controlPlaneUrl: 'https://compute.example',
+    pins,
   });
 
   it('quotes the URL, embeds the token only from rescue, and pins the binary', () => {
@@ -438,7 +455,7 @@ describe('bootstrapScript', () => {
     );
     expect(script).toContain('"$(base64 -w0 /root/bc-join-token)"');
     expect(script).toContain(
-      `ExecStart=${robotJoinArgv('https://compute.example').join(' ')}`,
+      `ExecStart=${robotJoinArgv('https://compute.example', pins).join(' ')}`,
     );
     expect(script).toContain('ExecStart=/usr/local/bin/bcd node\n');
     expect(script).toContain('> /etc/bcd/join-token');

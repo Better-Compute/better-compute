@@ -635,12 +635,20 @@ export interface ProviderImpl {
   /**
    * `agent: 'bcd'` pools only: delivers a single-use `provisioned` join token through rescue or
    * installimage, never through tenant-readable user-data. The installed OS runs
-   * `bcd join --server <controlPlaneUrl> --token-file … --attestor provisioned`, which reads the
-   * gateway and pins from the control plane's `/.well-known/better-compute`.
+   * `bcd join --server <controlPlaneUrl> --token-file … --attestor provisioned` with `pins`: bcd
+   * reads the gateway from the control plane's `/.well-known/better-compute` and refuses a document
+   * whose pins differ, so the token never goes to whoever can serve that name.
    */
   bootstrap?(
     machine: ExternalMachine,
-    bootstrap: { joinToken: string; bcdUrl: string; sha256: string; controlPlaneUrl?: string },
+    bootstrap: {
+      joinToken: string;
+      bcdUrl: string;
+      sha256: string;
+      controlPlaneUrl?: string;
+      /** `sha256/<base64>` SPKI pins: the gateway serving CA and JoinService's signing and encryption keys. */
+      pins?: { servingCa: string; joinSigning: string; joinEncryption: string };
+    },
     context: CallContext,
   ): Promise<void>;
   /**

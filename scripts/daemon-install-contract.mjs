@@ -23,8 +23,16 @@ const variables = {
   bcdSha256: 'ab'.repeat(32),
 };
 
+// Pins as the PKI bundle gives them (`sha256/<base64>` SPKI digests).
+const pins = {
+  servingCa: `sha256/${Buffer.alloc(32, 1).toString('base64')}`,
+  joinSigning: `sha256/${Buffer.alloc(32, 2).toString('base64')}`,
+  joinEncryption: `sha256/${Buffer.alloc(32, 3).toString('base64')}`,
+};
+
 const out = {
   variables,
+  pins,
   provision: {
     join: provision.bcdJoinArgv(variables),
     node: provision.bcdNodeArgv(),
@@ -32,13 +40,14 @@ const out = {
     ignition: provision.renderTemplate(provision.bcdHostIgnition, variables),
   },
   robot: {
-    join: hetzner.robotJoinArgv(variables.controlPlaneUrl),
+    join: hetzner.robotJoinArgv(variables.controlPlaneUrl, pins),
     script: hetzner.bootstrapScript({
       hostname: variables.hostname,
       image: 'Ubuntu-2404-noble-amd64-base.tar.gz',
       bcdUrl: variables.bcdUrl,
       sha256: variables.bcdSha256,
       controlPlaneUrl: variables.controlPlaneUrl,
+      pins,
     }),
   },
 };

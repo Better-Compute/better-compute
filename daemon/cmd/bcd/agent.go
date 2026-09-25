@@ -103,12 +103,28 @@ func readToken() (string, error) {
 func runJoin(fs *flag.FlagSet, stdout, stderr io.Writer) int {
 	file := fs.Lookup("config").Value.String()
 	server := fs.Lookup("server").Value.String()
+	pins := installPins{
+		ServingCA:      fs.Lookup("serving-ca-pin").Value.String(),
+		JoinSigning:    fs.Lookup("join-signing-pin").Value.String(),
+		JoinEncryption: fs.Lookup("join-encryption-pin").Value.String(),
+	}
 	cfg, _, err := loadConfig(fs)
 	var bootstrapJWK []byte
 	bootstrapped := false
 	if err != nil && errors.Is(err, os.ErrNotExist) && server != "" {
-		cfg, bootstrapJWK, err = bootstrapConfig(server)
+		cfg, bootstrapJWK, err = bootstrapConfig(server, pins)
 		bootstrapped = err == nil
+	} else if err == nil {
+		// An installed configuration wins; pins given as well must agree with it.
+		for _, p := range []struct{ flag, given, have string }{
+			{"serving-ca-pin", pins.ServingCA, cfg.ServingCASPKIPin},
+			{"join-signing-pin", pins.JoinSigning, cfg.JoinSigningKeyPin},
+			{"join-encryption-pin", pins.JoinEncryption, cfg.JoinEncryptionKeyPin},
+		} {
+			if p.given != "" && p.given != p.have {
+				err = fmt.Errorf("--%s does not match %s", p.flag, file)
+			}
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "bcd join: %v\n", err)

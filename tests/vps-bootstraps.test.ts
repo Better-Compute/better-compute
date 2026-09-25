@@ -58,6 +58,7 @@ const provider = {
     bcdUrl: string;
     sha256: string;
     controlPlaneUrl?: string;
+    pins?: { servingCa: string; joinSigning: string; joinEncryption: string };
   }[],
   failBootstraps: 0,
 };
@@ -198,6 +199,11 @@ const options = {
     bcdUrl: 'https://downloads.example/bcd-linux-amd64',
     sha256: 'ab'.repeat(32),
     controlPlaneUrl: 'https://compute.example/api/compute',
+    pins: {
+      servingCa: `sha256/${Buffer.alloc(32, 1).toString('base64')}`,
+      joinSigning: `sha256/${Buffer.alloc(32, 2).toString('base64')}`,
+      joinEncryption: `sha256/${Buffer.alloc(32, 3).toString('base64')}`,
+    },
   },
 };
 const module = vps(options);
@@ -296,6 +302,7 @@ describe('providerAccounts.bootstrap (§3.6 platform-owned provider machines)', 
       bcdUrl: 'https://downloads.example/bcd-linux-amd64',
       sha256: 'ab'.repeat(32),
       controlPlaneUrl: 'https://compute.example/api/compute',
+      pins: { joinEncryption: `sha256/${Buffer.alloc(32, 3).toString('base64')}` },
     });
     expect(delivered!.joinToken).toMatch(/^bcjt_jt_/);
     const [token] = await tokens();
@@ -435,5 +442,14 @@ describe('providerAccounts.bootstrap (§3.6 platform-owned provider machines)', 
         },
       }),
     ).toThrow(/controlPlaneUrl/);
+    expect(() =>
+      vps({
+        bootstrap: {
+          bcdUrl: 'https://d.example/bcd',
+          sha256: 'ab'.repeat(32),
+          pins: { servingCa: 'sha256/x', joinSigning: 'sha256/x', joinEncryption: 'sha256/x' },
+        },
+      }),
+    ).toThrow(/pins/);
   });
 });

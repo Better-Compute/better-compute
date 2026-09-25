@@ -78,7 +78,7 @@ already has into `metal-host` nodes that run bcd (§3.6, "platform-owned provide
   `/sys/class/dmi/id/product_uuid` over SSH, so the bootstrap token can be bound to the machine
   (`expect.productUuid`; the `provisioned` attestor refuses unbound tokens). It leaves the server in
   rescue for `bootstrap`.
-- **`bootstrap(machine, { joinToken, bcdUrl, sha256, controlPlaneUrl })`** runs in these steps:
+- **`bootstrap(machine, { joinToken, bcdUrl, sha256, controlPlaneUrl, pins })`** runs in these steps:
   1. It reuses a rescue system that already answers, else activates rescue and waits for SSH,
      through the injected `SshExecutor` (one hardware reset for identify + bootstrap).
   2. It writes the single-use `provisioned` join token over SSH stdin into a `umask 077` file.
@@ -89,8 +89,9 @@ already has into `metal-host` nodes that run bcd (§3.6, "platform-owned provide
      that runs `robotJoinArgv(controlPlaneUrl)` while the token file exists, and `bcd.service`
      (`bcd node`), then shreds itself.
   5. The server reboots and rescue is deactivated. On first boot `bcd join --server …
-     --attestor provisioned` reads the gateway and pins from the control plane's well-known
-     document, joins, writes `/etc/bcd/config.toml` and removes the token. Re-runs on a joined node
+     --attestor provisioned --serving-ca-pin … --join-signing-pin … --join-encryption-pin …`
+     reads the gateway from the control plane's well-known document, refuses it if its pins differ
+     from the ones on the command line, joins, writes `/etc/bcd/config.toml` and removes the token. Re-runs on a joined node
      succeed without a token. `daemon/cmd/bcd/contract_test.go` parses these command lines with
      bcd's own flags (`scripts/daemon-install-contract.mjs` writes them).
 

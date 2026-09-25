@@ -82,6 +82,12 @@ export interface BootstrapOptions {
    * (Hetzner Robot) need it.
    */
   controlPlaneUrl?: string;
+  /**
+   * The pins the installed bcd checks the well-known document against (`sha256/<base64>` SPKI
+   * pins: the gateway serving CA, JoinService's signing and encryption keys; e.g. from the PKI
+   * bundle). Required by providers that install an OS.
+   */
+  pins?: { servingCa: string; joinSigning: string; joinEncryption: string };
   /** Join token lifetime (default 2 h, at most 6 h). */
   tokenTtlSeconds?: number;
   /** How long `joining` waits for the node (default 1 h). */
@@ -484,6 +490,7 @@ export async function reconcileBootstrap(
         bcdUrl: options.bcdUrl,
         sha256: options.sha256,
         ...(options.controlPlaneUrl ? { controlPlaneUrl: options.controlPlaneUrl } : {}),
+        ...(options.pins ? { pins: options.pins } : {}),
       },
       call,
     );
