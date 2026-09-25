@@ -17,11 +17,17 @@ async function run(argv: string[], cwd?: string) {
   try {
     await createCli().run([...argv, '--url', 'https://compute.test'], {
       out() {},
-      env: { BETTER_COMPUTE_TOKEN: 'biam_ses_0123456789abcdefghij', BETTER_COMPUTE_TENANT: 'org_acme' },
+      env: {
+        BETTER_COMPUTE_TOKEN: 'biam_ses_0123456789abcdefghij',
+        BETTER_COMPUTE_TENANT: 'org_acme',
+      },
       ...(cwd ? { cwd } : {}),
       fetch: async (input, init) => {
         const request = new Request(input, init);
-        calls.push({ path: new URL(request.url).pathname.replace('/api/compute/', ''), body: JSON.parse(await request.text()) });
+        calls.push({
+          path: new URL(request.url).pathname.replace('/api/compute/', ''),
+          body: JSON.parse(await request.text()),
+        });
         return Response.json({ data: {} });
       },
     });
@@ -34,18 +40,38 @@ async function run(argv: string[], cwd?: string) {
 describe('releases and rollouts', () => {
   it('registers a manifest file as it is', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'bc-releases-'));
-    const manifest = { manifest: 'eyJ2ZXJzaW9uIjoiMC45LjEifQ', signatures: [{ kid: 'k1', sig: 'c2ln' }] };
+    const manifest = {
+      manifest: 'eyJ2ZXJzaW9uIjoiMC45LjEifQ',
+      signatures: [{ kid: 'k1', sig: 'c2ln' }],
+    };
     await writeFile(join(dir, 'manifest.json'), JSON.stringify(manifest));
     expect((await run(['releases', 'register', 'manifest.json'], dir)).calls).toEqual([
       { path: 'releases/register', body: { tenantId: 'org_acme', manifest } },
     ]);
-    expect(await run(['releases', 'register', 'missing.json'], dir)).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
+    expect(await run(['releases', 'register', 'missing.json'], dir)).toMatchObject({
+      ok: false,
+      code: 'INVALID_ARGUMENT',
+    });
   });
 
   it('creates a rollout with waves, durations and a key, and refuses malformed waves', async () => {
     const result = await run([
-      'rollouts', 'create', '--version', '0.9.1', '--pools', 'pool_a, pool_b', '--waves', '5,25,100',
-      '--max-failure-ratio', '0.1', '--soak', '30m', '--upgrade-timeout', '20m', '--key', 'k1',
+      'rollouts',
+      'create',
+      '--version',
+      '0.9.1',
+      '--pools',
+      'pool_a, pool_b',
+      '--waves',
+      '5,25,100',
+      '--max-failure-ratio',
+      '0.1',
+      '--soak',
+      '30m',
+      '--upgrade-timeout',
+      '20m',
+      '--key',
+      'k1',
     ]);
     expect(result.calls[0]).toEqual({
       path: 'rollouts/create',
@@ -61,13 +87,19 @@ describe('releases and rollouts', () => {
       },
     });
     for (const waves of ['5,25,90', '50,25,100', '0,100', '1.5,100'])
-      expect(await run(['rollouts', 'create', '--version', '0.9.1', '--waves', waves])).toMatchObject({
+      expect(
+        await run(['rollouts', 'create', '--version', '0.9.1', '--waves', waves]),
+      ).toMatchObject({
         ok: false,
         code: 'INVALID_ARGUMENT',
         calls: [],
       });
-    expect(await run(['rollouts', 'create', '--version', '0.9.1', '--max-failure-ratio', '2'])).toMatchObject({ ok: false });
-    expect(await run(['rollouts', 'create', '--version', '0.9.1', '--upgrade-timeout', '10s'])).toMatchObject({ ok: false });
+    expect(
+      await run(['rollouts', 'create', '--version', '0.9.1', '--max-failure-ratio', '2']),
+    ).toMatchObject({ ok: false });
+    expect(
+      await run(['rollouts', 'create', '--version', '0.9.1', '--upgrade-timeout', '10s']),
+    ).toMatchObject({ ok: false });
   });
 
   it('pauses, resumes and aborts with a rollback', async () => {
@@ -80,7 +112,10 @@ describe('releases and rollouts', () => {
       path: 'rollouts/abort',
       body: { tenantId: 'org_acme', rolloutId: ROLLOUT, rollback: true },
     });
-    expect(await run(['rollouts', 'get', 'wf_x'])).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
+    expect(await run(['rollouts', 'get', 'wf_x'])).toMatchObject({
+      ok: false,
+      code: 'INVALID_ARGUMENT',
+    });
   });
 });
 
@@ -90,7 +125,9 @@ describe('workflows and commands', () => {
       path: 'workflows/list',
       body: { tenantId: 'org_acme', nodeId: NODE, limit: 5 },
     });
-    expect((await run(['workflows', 'abort', WF, '--node', NODE, '--reason', 'wrong image'])).calls[0]).toEqual({
+    expect(
+      (await run(['workflows', 'abort', WF, '--node', NODE, '--reason', 'wrong image'])).calls[0],
+    ).toEqual({
       path: 'workflows/abort',
       body: { tenantId: 'org_acme', nodeId: NODE, workflowId: WF, reason: 'wrong image' },
     });
@@ -99,7 +136,10 @@ describe('workflows and commands', () => {
       nodeId: NODE,
       workflowId: WF,
     });
-    expect((await run(['workflows', 'retry', WF, '--node', NODE, '--from-step', 'deploy'])).calls[0]!.body).toMatchObject({
+    expect(
+      (await run(['workflows', 'retry', WF, '--node', NODE, '--from-step', 'deploy'])).calls[0]!
+        .body,
+    ).toMatchObject({
       fromStep: 'deploy',
     });
     // --node is required.
@@ -107,14 +147,19 @@ describe('workflows and commands', () => {
   });
 
   it('lists, reads and cancels a node’s commands', async () => {
-    expect((await run(['commands', 'list', '--node', NODE, '--state', 'failed'])).calls[0]).toEqual({
-      path: 'commands/list',
-      body: { tenantId: 'org_acme', nodeId: NODE, state: 'failed' },
-    });
+    expect((await run(['commands', 'list', '--node', NODE, '--state', 'failed'])).calls[0]).toEqual(
+      {
+        path: 'commands/list',
+        body: { tenantId: 'org_acme', nodeId: NODE, state: 'failed' },
+      },
+    );
     expect((await run(['commands', 'cancel', CMD, '--node', NODE])).calls[0]).toEqual({
       path: 'commands/cancel',
       body: { tenantId: 'org_acme', nodeId: NODE, commandId: CMD },
     });
-    expect(await run(['commands', 'list', '--node', NODE, '--state', 'bogus'])).toMatchObject({ ok: false, calls: [] });
+    expect(await run(['commands', 'list', '--node', NODE, '--state', 'bogus'])).toMatchObject({
+      ok: false,
+      calls: [],
+    });
   });
 });

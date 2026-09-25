@@ -46,7 +46,8 @@ function bash(manifest: CliManifest): string {
   const top = [...new Set(all.map((entry) => entry.words[0]!))].sort();
   const groups = new Map<string, string[]>();
   for (const entry of all)
-    if (entry.words.length === 2) groups.set(entry.words[0]!, [...(groups.get(entry.words[0]!) ?? []), entry.words[1]!]);
+    if (entry.words.length === 2)
+      groups.set(entry.words[0]!, [...(groups.get(entry.words[0]!) ?? []), entry.words[1]!]);
   const name = (entry: Entry) => entry.words.join(' ');
   const lines = [
     '# better-compute shell completion (bash). Load it with:',
@@ -61,17 +62,22 @@ function bash(manifest: CliManifest): string {
     '  fi',
     '  cmd=',
     '  case "${COMP_WORDS[1]} ${COMP_WORDS[2]:-}" in',
-    ...all.filter((entry) => entry.words.length === 2).map((entry) => `    ${shQuote(name(entry))}) cmd=${shQuote(name(entry))} ;;`),
+    ...all
+      .filter((entry) => entry.words.length === 2)
+      .map((entry) => `    ${shQuote(name(entry))}) cmd=${shQuote(name(entry))} ;;`),
     '  esac',
     '  if [ -z "$cmd" ]; then',
     '    case "${COMP_WORDS[1]}" in',
-    ...all.filter((entry) => entry.words.length === 1).map((entry) => `      ${shQuote(name(entry))}) cmd=${shQuote(name(entry))} ;;`),
+    ...all
+      .filter((entry) => entry.words.length === 1)
+      .map((entry) => `      ${shQuote(name(entry))}) cmd=${shQuote(name(entry))} ;;`),
     '    esac',
     '  fi',
     '  if [ "$COMP_CWORD" -eq 2 ]; then',
     '    case "${COMP_WORDS[1]}" in',
     ...[...groups].map(
-      ([group, subs]) => `      ${shQuote(group)}) COMPREPLY=($(compgen -W ${shQuote(subs.sort().join(' '))} -- "$cur")); return ;;`,
+      ([group, subs]) =>
+        `      ${shQuote(group)}) COMPREPLY=($(compgen -W ${shQuote(subs.sort().join(' '))} -- "$cur")); return ;;`,
     ),
     '    esac',
     '  fi',
@@ -111,16 +117,24 @@ function fish(manifest: CliManifest): string {
   const all = entries(manifest);
   const groups = new Map<string, string[]>();
   for (const entry of all)
-    if (entry.words.length === 2) groups.set(entry.words[0]!, [...(groups.get(entry.words[0]!) ?? []), entry.words[1]!]);
+    if (entry.words.length === 2)
+      groups.set(entry.words[0]!, [...(groups.get(entry.words[0]!) ?? []), entry.words[1]!]);
   const lines = [
     '# better-compute shell completion (fish). Load it with:',
     '#   better-compute completion fish | source',
     'complete -c better-compute -f',
   ];
   const tops = new Map<string, string>();
-  for (const entry of all) if (!tops.has(entry.words[0]!)) tops.set(entry.words[0]!, entry.words.length === 1 ? entry.summary : `${entry.words[0]} commands`);
+  for (const entry of all)
+    if (!tops.has(entry.words[0]!))
+      tops.set(
+        entry.words[0]!,
+        entry.words.length === 1 ? entry.summary : `${entry.words[0]} commands`,
+      );
   for (const [top, summary] of [...tops].sort())
-    lines.push(`complete -c better-compute -n __fish_use_subcommand -a ${fishQuote(top)} -d ${fishText(summary)}`);
+    lines.push(
+      `complete -c better-compute -n __fish_use_subcommand -a ${fishQuote(top)} -d ${fishText(summary)}`,
+    );
   for (const [group, subs] of groups) {
     const none = `not __fish_seen_subcommand_from ${subs.join(' ')}`;
     for (const entry of all.filter((item) => item.words.length === 2 && item.words[0] === group))

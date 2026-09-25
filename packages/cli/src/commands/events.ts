@@ -16,7 +16,9 @@ const typePattern = /^[a-z*][a-z0-9.*-]{0,127}$/;
  * label or a reason would reach the terminal) or the line and paragraph separators; those are escaped too.
  */
 export function terminalSafeJson(value: unknown): string {
-  return JSON.stringify(value).replace(/[\u007f-\u009f]/g, escape).replace(/[\u2028\u2029]/g, escape);
+  return JSON.stringify(value)
+    .replace(/[\u007f-\u009f]/g, escape)
+    .replace(/[\u2028\u2029]/g, escape);
 }
 
 function escape(char: string): string {
@@ -31,11 +33,24 @@ export const eventCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      type: { type: 'string', value: 'TYPE', description: 'Only events of this type (node.cordoned, reservation.placed, …)' },
-      limit: { type: 'integer', value: 'N', min: 1, max: 500, description: 'Page size (at most 500)' },
+      type: {
+        type: 'string',
+        value: 'TYPE',
+        description: 'Only events of this type (node.cordoned, reservation.placed, …)',
+      },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 500,
+        description: 'Page size (at most 500)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
-    examples: ['better-compute events list --type node.draining', 'better-compute events list --query "items[*].type"'],
+    examples: [
+      'better-compute events list --type node.draining',
+      'better-compute events list --query "items[*].type"',
+    ],
     async run({ flags, api }) {
       return (await api()).call('events/list', {
         tenantId: flags.tenant,
@@ -58,11 +73,21 @@ export const eventCommands = [
       types: {
         type: 'string',
         value: 'PATTERN,…',
-        description: 'Event type patterns, comma-separated (node.*, reservation.placed); default all',
+        description:
+          'Event type patterns, comma-separated (node.*, reservation.placed); default all',
       },
-      since: { type: 'string', value: 'CURSOR', description: 'Resume after this event (a printed sequence)' },
+      since: {
+        type: 'string',
+        value: 'CURSOR',
+        description: 'Resume after this event (a printed sequence)',
+      },
       count: { type: 'integer', value: 'N', min: 1, description: 'Stop after N events' },
-      path: { type: 'string', value: 'PATH', default: '/watch', description: 'The watch route on the server' },
+      path: {
+        type: 'string',
+        value: 'PATH',
+        default: '/watch',
+        description: 'The watch route on the server',
+      },
     },
     examples: [
       'better-compute events watch --url https://compute.example.com --types "node.*,reservation.*"',
@@ -82,12 +107,15 @@ export const eventCommands = [
         .map((type) => type.trim())
         .filter(Boolean);
       if (types.length > 20 || types.some((type) => !typePattern.test(type)))
-        throw usageError('--types takes up to 20 event type patterns like node.* or reservation.placed');
+        throw usageError(
+          '--types takes up to 20 event type patterns like node.* or reservation.placed',
+        );
       // The outbox cursor as the stream writes it (<txid>.<seq>; events.list pages use their own <ms>:<seq>).
       if (flags.since !== undefined && !/^\d{1,20}\.\d{1,20}$/.test(flags.since))
         throw usageError('--since takes a printed sequence, like 184467.12');
       const path = flags.path ?? '/watch';
-      if (!/^(?:\/[A-Za-z0-9_.-]+)+$/.test(path)) throw usageError('--path must be an absolute path like /watch');
+      if (!/^(?:\/[A-Za-z0-9_.-]+)+$/.test(path))
+        throw usageError('--path must be an absolute path like /watch');
       const client = createComputeClient<{ api: unknown }>({
         baseURL: origin,
         token: await context.token(),

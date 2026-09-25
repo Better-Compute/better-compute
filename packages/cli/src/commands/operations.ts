@@ -11,11 +11,17 @@ import { newIdempotencyKey, tenantFlag } from './capacity.js';
 const rolloutArg = [{ name: 'rollout', description: 'The rollout id (rollout_…)', required: true }];
 const workflowArg = [{ name: 'workflow', description: 'The workflow id (wf_…)', required: true }];
 const commandArg = [{ name: 'command', description: 'The command id (cmd_…)', required: true }];
-const nodeFlag = { type: 'string', value: 'ID', required: true, description: 'The node (node_…)' } as const;
+const nodeFlag = {
+  type: 'string',
+  value: 'ID',
+  required: true,
+  description: 'The node (node_…)',
+} as const;
 
 function id(args: string[], prefix: string, what: string): string {
   const value = args[0]!;
-  if (!new RegExp(`^${prefix}_[0-9a-z]{26,52}$`).test(value)) throw usageError(`${value} is not a ${what} id (${prefix}_…)`);
+  if (!new RegExp(`^${prefix}_[0-9a-z]{26,52}$`).test(value))
+    throw usageError(`${value} is not a ${what} id (${prefix}_…)`);
   return value;
 }
 
@@ -50,7 +56,13 @@ const workflowChange = (name: 'abort' | 'pause' | 'resume', summary: string) =>
       tenant: tenantFlag,
       node: nodeFlag,
       ...(name === 'abort'
-        ? { reason: { type: 'string', value: 'TEXT', description: 'Recorded on the workflow' } as const }
+        ? {
+            reason: {
+              type: 'string',
+              value: 'TEXT',
+              description: 'Recorded on the workflow',
+            } as const,
+          }
         : {}),
     },
     examples: [`better-compute workflows ${name} wf_01k5w… --node node_01k5w…`],
@@ -107,25 +119,50 @@ export const operationCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      version: { type: 'string', value: 'SEMVER', required: true, description: 'The registered release' },
+      version: {
+        type: 'string',
+        value: 'SEMVER',
+        required: true,
+        description: 'The registered release',
+      },
       pools: { type: 'string', value: 'ID,…', description: 'The pools to upgrade (pool_…)' },
-      waves: { type: 'string', value: 'PCT,…', description: 'Cumulative percentages ending at 100' },
-      'max-failure-ratio': { type: 'string', value: 'RATIO', description: 'The failed share that pauses it (0–1)' },
+      waves: {
+        type: 'string',
+        value: 'PCT,…',
+        description: 'Cumulative percentages ending at 100',
+      },
+      'max-failure-ratio': {
+        type: 'string',
+        value: 'RATIO',
+        description: 'The failed share that pauses it (0–1)',
+      },
       soak: { type: 'string', value: 'DURATION', description: 'How long each wave soaks' },
-      'upgrade-timeout': { type: 'string', value: 'DURATION', description: 'How long a node has to come back' },
-      key: { type: 'string', value: 'KEY', description: 'Idempotency key, to retry the same request' },
+      'upgrade-timeout': {
+        type: 'string',
+        value: 'DURATION',
+        description: 'How long a node has to come back',
+      },
+      key: {
+        type: 'string',
+        value: 'KEY',
+        description: 'Idempotency key, to retry the same request',
+      },
     },
     examples: ['better-compute rollouts create --version 0.9.1 --waves 5,25,100 --soak 30m'],
     async run({ flags, api }) {
       const waves = list(flags.waves).map(Number);
       if (waves.some((wave) => !Number.isInteger(wave) || wave < 1 || wave > 100))
         throw usageError('--waves takes whole percentages from 1 to 100, like 1,10,50,100');
-      if (waves.length && (waves.at(-1) !== 100 || waves.some((wave, index) => index && wave <= waves[index - 1]!)))
+      if (
+        waves.length &&
+        (waves.at(-1) !== 100 || waves.some((wave, index) => index && wave <= waves[index - 1]!))
+      )
         throw usageError('--waves must increase and end at 100');
       let ratio: number | undefined;
       if (flags['max-failure-ratio'] !== undefined) {
         ratio = Number(flags['max-failure-ratio']);
-        if (!(ratio >= 0 && ratio <= 1)) throw usageError('--max-failure-ratio is a number from 0 to 1');
+        if (!(ratio >= 0 && ratio <= 1))
+          throw usageError('--max-failure-ratio is a number from 0 to 1');
       }
       const pools = list(flags.pools);
       return (await api()).call('rollouts/create', {
@@ -136,7 +173,14 @@ export const operationCommands = [
         ...(ratio !== undefined ? { maxFailureRatio: ratio } : {}),
         ...(flags.soak ? { soakSeconds: seconds(flags.soak, 'soak', 0, 604_800) } : {}),
         ...(flags['upgrade-timeout']
-          ? { upgradeTimeoutSeconds: seconds(flags['upgrade-timeout'], 'upgrade-timeout', 60, 86_400) }
+          ? {
+              upgradeTimeoutSeconds: seconds(
+                flags['upgrade-timeout'],
+                'upgrade-timeout',
+                60,
+                86_400,
+              ),
+            }
           : {}),
         idempotencyKey: flags.key ?? newIdempotencyKey(),
       });
@@ -163,7 +207,10 @@ export const operationCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute rollouts get rollout_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('rollouts/get', { tenantId: flags.tenant, rolloutId: id(args, 'rollout', 'rollout') });
+      return (await api()).call('rollouts/get', {
+        tenantId: flags.tenant,
+        rolloutId: id(args, 'rollout', 'rollout'),
+      });
     },
   }),
   defineCommand({
@@ -172,7 +219,10 @@ export const operationCommands = [
     summary: 'Pause a rollout before its next wave (rollouts.pause)',
     target: 'token',
     args: rolloutArg,
-    flags: { tenant: tenantFlag, reason: { type: 'string', value: 'TEXT', description: 'Recorded on the rollout' } },
+    flags: {
+      tenant: tenantFlag,
+      reason: { type: 'string', value: 'TEXT', description: 'Recorded on the rollout' },
+    },
     examples: ['better-compute rollouts pause rollout_01k5w… --reason "XIDs after wave 2"'],
     async run({ flags, args, api }) {
       return (await api()).call('rollouts/pause', {
@@ -191,7 +241,10 @@ export const operationCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute rollouts resume rollout_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('rollouts/resume', { tenantId: flags.tenant, rolloutId: id(args, 'rollout', 'rollout') });
+      return (await api()).call('rollouts/resume', {
+        tenantId: flags.tenant,
+        rolloutId: id(args, 'rollout', 'rollout'),
+      });
     },
   }),
   defineCommand({
@@ -207,7 +260,9 @@ export const operationCommands = [
       reason: { type: 'string', value: 'TEXT', description: 'Recorded on the rollout' },
       rollback: { type: 'boolean', description: 'Also swap back upgrades not confirmed yet' },
     },
-    examples: ['better-compute rollouts abort rollout_01k5w… --rollback --reason "boot loop on H100 nodes"'],
+    examples: [
+      'better-compute rollouts abort rollout_01k5w… --rollback --reason "boot loop on H100 nodes"',
+    ],
     async run({ flags, args, api }) {
       return (await api()).call('rollouts/abort', {
         tenantId: flags.tenant,
@@ -226,7 +281,13 @@ export const operationCommands = [
     flags: {
       tenant: tenantFlag,
       node: nodeFlag,
-      limit: { type: 'integer', value: 'N', min: 1, max: 100, description: 'Page size (at most 100)' },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 100,
+        description: 'Page size (at most 100)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
     examples: ['better-compute workflows list --node node_01k5w…'],
@@ -255,8 +316,14 @@ export const operationCommands = [
       });
     },
   }),
-  workflowChange('abort', 'Abort a workflow: pending steps are cancelled, its cleanup still runs (workflows.abort)'),
-  workflowChange('pause', 'Pause a workflow: the step in flight finishes, no further one starts (workflows.pause)'),
+  workflowChange(
+    'abort',
+    'Abort a workflow: pending steps are cancelled, its cleanup still runs (workflows.abort)',
+  ),
+  workflowChange(
+    'pause',
+    'Pause a workflow: the step in flight finishes, no further one starts (workflows.pause)',
+  ),
   workflowChange('resume', 'Resume a paused workflow (workflows.resume)'),
   defineCommand({
     name: 'workflows retry',
@@ -267,7 +334,11 @@ export const operationCommands = [
     flags: {
       tenant: tenantFlag,
       node: nodeFlag,
-      'from-step': { type: 'string', value: 'STEP', description: 'Start here (default: the first main step that did not succeed)' },
+      'from-step': {
+        type: 'string',
+        value: 'STEP',
+        description: 'Start here (default: the first main step that did not succeed)',
+      },
     },
     examples: ['better-compute workflows retry wf_01k5w… --node node_01k5w…'],
     async run({ flags, args, api }) {
@@ -291,10 +362,26 @@ export const operationCommands = [
       state: {
         type: 'string',
         value: 'STATE',
-        choices: ['pending', 'dispatched', 'acked', 'running', 'succeeded', 'failed', 'rejected', 'expired', 'cancelled'],
+        choices: [
+          'pending',
+          'dispatched',
+          'acked',
+          'running',
+          'succeeded',
+          'failed',
+          'rejected',
+          'expired',
+          'cancelled',
+        ],
         description: 'Only commands in this state',
       },
-      limit: { type: 'integer', value: 'N', min: 1, max: 200, description: 'Page size (at most 200)' },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 200,
+        description: 'Page size (at most 200)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
     examples: ['better-compute commands list --node node_01k5w… --state failed'],
@@ -327,7 +414,8 @@ export const operationCommands = [
   defineCommand({
     name: 'commands cancel',
     group: 'Operations',
-    summary: 'Cancel a command: a pending one never runs, a running one is asked to stop (commands.cancel)',
+    summary:
+      'Cancel a command: a pending one never runs, a running one is asked to stop (commands.cancel)',
     target: 'token',
     args: commandArg,
     flags: { tenant: tenantFlag, node: nodeFlag },

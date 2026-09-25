@@ -10,7 +10,8 @@ import { newIdempotencyKey, tenantFlag } from './capacity.js';
 const nodeArg = [{ name: 'node', description: 'The node id (node_…)', required: true }];
 
 function id(value: string, prefix: string, what: string): string {
-  if (!new RegExp(`^${prefix}_[0-9a-z]{26,52}$`).test(value)) throw usageError(`${value} is not a ${what} id (${prefix}_…)`);
+  if (!new RegExp(`^${prefix}_[0-9a-z]{26,52}$`).test(value))
+    throw usageError(`${value} is not a ${what} id (${prefix}_…)`);
   return value;
 }
 
@@ -23,7 +24,10 @@ async function jsonFile(path: string, flag: string): Promise<unknown> {
 }
 
 /** One lifecycle verb on one node, with the API's own summary. */
-function metalVerb(verb: 'manage' | 'inspect' | 'provide' | 'rescue' | 'unrescue' | 'recover' | 'retire', summary: string) {
+function metalVerb(
+  verb: 'manage' | 'inspect' | 'provide' | 'rescue' | 'unrescue' | 'recover' | 'retire',
+  summary: string,
+) {
   return defineCommand({
     name: `metal ${verb}`,
     group: 'Metal',
@@ -33,7 +37,10 @@ function metalVerb(verb: 'manage' | 'inspect' | 'provide' | 'rescue' | 'unrescue
     flags: { tenant: tenantFlag },
     examples: [`better-compute metal ${verb} node_01k5w…`],
     async run({ flags, args, api }) {
-      return (await api()).call(`metal/${verb}`, { tenantId: flags.tenant, nodeId: id(args[0]!, 'node', 'node') });
+      return (await api()).call(`metal/${verb}`, {
+        tenantId: flags.tenant,
+        nodeId: id(args[0]!, 'node', 'node'),
+      });
     },
   });
 }
@@ -55,19 +62,63 @@ export const metalCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      site: { type: 'string', value: 'ID', required: true, description: 'The site the machine is in' },
+      site: {
+        type: 'string',
+        value: 'ID',
+        required: true,
+        description: 'The site the machine is in',
+      },
       pool: { type: 'string', value: 'ID', required: true, description: 'The pool it joins' },
-      'bmc-address': { type: 'string', value: 'HOST|URL', required: true, description: 'The BMC address' },
-      'bmc-driver': { type: 'string', value: 'DRIVER', required: true, description: 'The BMC driver, e.g. redfish' },
-      'bmc-credentials': { type: 'string', value: 'REF', description: 'secret://, vault:// or env:// reference' },
-      'bmc-username': { type: 'string', value: 'USER', description: 'With --bmc-password-file, instead of a reference' },
-      'bmc-password-file': { type: 'string', value: 'PATH', description: 'A file holding the BMC password' },
-      'bmc-tls-spki': { type: 'string', value: 'HEX', description: 'SHA-256 of the BMC certificate’s public key' },
-      macs: { type: 'string', value: 'MAC,…', description: 'Its MAC addresses, for PXE and matching' },
+      'bmc-address': {
+        type: 'string',
+        value: 'HOST|URL',
+        required: true,
+        description: 'The BMC address',
+      },
+      'bmc-driver': {
+        type: 'string',
+        value: 'DRIVER',
+        required: true,
+        description: 'The BMC driver, e.g. redfish',
+      },
+      'bmc-credentials': {
+        type: 'string',
+        value: 'REF',
+        description: 'secret://, vault:// or env:// reference',
+      },
+      'bmc-username': {
+        type: 'string',
+        value: 'USER',
+        description: 'With --bmc-password-file, instead of a reference',
+      },
+      'bmc-password-file': {
+        type: 'string',
+        value: 'PATH',
+        description: 'A file holding the BMC password',
+      },
+      'bmc-tls-spki': {
+        type: 'string',
+        value: 'HEX',
+        description: 'SHA-256 of the BMC certificate’s public key',
+      },
+      macs: {
+        type: 'string',
+        value: 'MAC,…',
+        description: 'Its MAC addresses, for PXE and matching',
+      },
       'product-uuid': { type: 'string', value: 'UUID', description: 'Its SMBIOS product UUID' },
-      arch: { type: 'string', value: 'ARCH', choices: ['x86_64', 'arm64'], description: 'Default x86_64' },
+      arch: {
+        type: 'string',
+        value: 'ARCH',
+        choices: ['x86_64', 'arm64'],
+        description: 'Default x86_64',
+      },
       'legacy-bios': { type: 'boolean', description: 'Boots in legacy BIOS mode, not UEFI' },
-      'hardware-profile': { type: 'string', value: 'NAME', description: 'Overrides the pool’s hardware profile' },
+      'hardware-profile': {
+        type: 'string',
+        value: 'NAME',
+        description: 'Overrides the pool’s hardware profile',
+      },
     },
     examples: [
       'better-compute metal enroll --site site_01k5w… --pool pool_01k5w… --bmc-address 10.20.0.14 --bmc-driver redfish --bmc-credentials secret://org_acme/bmc-r12',
@@ -86,7 +137,10 @@ export const metalCommands = [
           throw usageError('--bmc-username and --bmc-password-file go together');
         let password: string;
         try {
-          password = (await readFile(path(flags['bmc-password-file']), 'utf8')).replace(/\r?\n$/, '');
+          password = (await readFile(path(flags['bmc-password-file']), 'utf8')).replace(
+            /\r?\n$/,
+            '',
+          );
         } catch {
           throw usageError(`--bmc-password-file ${flags['bmc-password-file']}: cannot read it`);
         }
@@ -120,7 +174,10 @@ export const metalCommands = [
   metalVerb('provide', 'Commission a ready node: diagnostics, a quick wipe, power off'),
   metalVerb('rescue', 'Boot a deployed node into the rescue ramdisk'),
   metalVerb('unrescue', 'Boot a rescued node back into its installed OS'),
-  metalVerb('recover', 'Move a failed node back to the last stable point for the state it failed in'),
+  metalVerb(
+    'recover',
+    'Move a failed node back to the last stable point for the state it failed in',
+  ),
   metalVerb('retire', 'Retire a node: its retiring workflow erases its disks and powers it off'),
   defineCommand({
     name: 'metal deploy',
@@ -130,8 +187,19 @@ export const metalCommands = [
     args: nodeArg,
     flags: {
       tenant: tenantFlag,
-      profile: { type: 'string', value: 'ID', required: true, description: 'The provision profile' },
-      'profile-version': { type: 'integer', value: 'N', required: true, min: 1, description: 'Its version' },
+      profile: {
+        type: 'string',
+        value: 'ID',
+        required: true,
+        description: 'The provision profile',
+      },
+      'profile-version': {
+        type: 'integer',
+        value: 'N',
+        required: true,
+        min: 1,
+        description: 'Its version',
+      },
     },
     examples: ['better-compute metal deploy node_01k5w… --profile ubuntu-gpu --profile-version 3'],
     async run({ flags, args, api }) {
@@ -165,7 +233,10 @@ export const metalCommands = [
     summary: 'Stop a node’s running workflow and mark it failed (metal.abort)',
     target: 'token',
     args: nodeArg,
-    flags: { tenant: tenantFlag, reason: { type: 'string', value: 'TEXT', description: 'Recorded as its last error' } },
+    flags: {
+      tenant: tenantFlag,
+      reason: { type: 'string', value: 'TEXT', description: 'Recorded as its last error' },
+    },
     examples: ['better-compute metal abort node_01k5w… --reason "wrong profile"'],
     async run({ flags, args, api }) {
       return (await api()).call('metal/abort', {
@@ -209,7 +280,12 @@ export const metalCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      pool: { type: 'string', value: 'ID', required: true, description: 'The pool every node is in' },
+      pool: {
+        type: 'string',
+        value: 'ID',
+        required: true,
+        description: 'The pool every node is in',
+      },
       verb: {
         type: 'string',
         value: 'VERB',
@@ -220,11 +296,19 @@ export const metalCommands = [
       nodes: { type: 'string', value: 'ID,…', description: 'The nodes' },
       'nodes-file': { type: 'string', value: 'PATH', description: 'The nodes, one id per line' },
       wipe: wipeFlag,
-      reason: { type: 'string', value: 'TEXT', required: true, description: 'What the batch is for' },
+      reason: {
+        type: 'string',
+        value: 'TEXT',
+        required: true,
+        description: 'What the batch is for',
+      },
     },
-    examples: ['better-compute metal bulk --pool pool_01k5w… --verb retire --nodes-file retire.txt --reason "EOL rack r12"'],
+    examples: [
+      'better-compute metal bulk --pool pool_01k5w… --verb retire --nodes-file retire.txt --reason "EOL rack r12"',
+    ],
     async run({ flags, path, api }) {
-      if (Boolean(flags.nodes) === Boolean(flags['nodes-file'])) throw usageError('Pass exactly one of --nodes or --nodes-file');
+      if (Boolean(flags.nodes) === Boolean(flags['nodes-file']))
+        throw usageError('Pass exactly one of --nodes or --nodes-file');
       let text = flags.nodes ?? '';
       if (flags['nodes-file']) {
         try {
@@ -233,9 +317,12 @@ export const metalCommands = [
           throw usageError(`--nodes-file ${flags['nodes-file']}: cannot read it`);
         }
       }
-      const nodeIds = [...new Set(text.split(/[\s,]+/).filter(Boolean))].map((node) => id(node, 'node', 'node'));
+      const nodeIds = [...new Set(text.split(/[\s,]+/).filter(Boolean))].map((node) =>
+        id(node, 'node', 'node'),
+      );
       if (!nodeIds.length) throw usageError('No nodes given');
-      if (flags.wipe && flags.verb !== 'undeploy') throw usageError('--wipe is for --verb undeploy');
+      if (flags.wipe && flags.verb !== 'undeploy')
+        throw usageError('--wipe is for --verb undeploy');
       return (await api()).call('metal/bulk', {
         tenantId: flags.tenant,
         poolId: flags.pool,
@@ -255,7 +342,13 @@ export const metalCommands = [
     defaultFormat: 'table',
     flags: {
       tenant: tenantFlag,
-      limit: { type: 'integer', value: 'N', min: 1, max: 200, description: 'Page size (at most 200)' },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 200,
+        description: 'Page size (at most 200)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
     examples: ['better-compute profiles list'],
@@ -280,14 +373,21 @@ export const metalCommands = [
       args: [{ name: 'profile', description: 'The profile id', required: true }],
       flags: {
         tenant: tenantFlag,
-        'profile-version': { type: 'integer', value: 'N', min: 1, description: 'The version (default: the latest)' },
+        'profile-version': {
+          type: 'integer',
+          value: 'N',
+          min: 1,
+          description: 'The version (default: the latest)',
+        },
       },
       examples: [`better-compute profiles ${verb} ubuntu-gpu --profile-version 3`],
       async run({ flags, args, api }) {
         return (await api()).call(`profiles/${verb}`, {
           tenantId: flags.tenant,
           profileId: args[0],
-          ...(flags['profile-version'] !== undefined ? { profileVersion: flags['profile-version'] } : {}),
+          ...(flags['profile-version'] !== undefined
+            ? { profileVersion: flags['profile-version'] }
+            : {}),
         });
       },
     }),
@@ -297,7 +397,13 @@ export const metalCommands = [
     group: 'Metal',
     summary: 'Store a profile version from a JSON document (profiles.create)',
     target: 'token',
-    args: [{ name: 'file', description: 'The profile document (JSON: id, version, target, steps…)', required: true }],
+    args: [
+      {
+        name: 'file',
+        description: 'The profile document (JSON: id, version, target, steps…)',
+        required: true,
+      },
+    ],
     flags: {
       tenant: tenantFlag,
       public: { type: 'boolean', description: 'Let every tenant use it (default private)' },
@@ -319,10 +425,30 @@ export const metalCommands = [
     args: [{ name: 'profile', description: 'The profile id', required: true }],
     flags: {
       tenant: tenantFlag,
-      'profile-version': { type: 'integer', value: 'N', required: true, min: 1, description: 'The version to change' },
-      file: { type: 'string', value: 'PATH', description: 'A replacement document (same id and version)' },
-      visibility: { type: 'string', value: 'VIS', choices: ['private', 'public'], description: 'Who may use it' },
-      'if-version': { type: 'integer', value: 'N', min: 1, description: 'Only if the row is still at this version' },
+      'profile-version': {
+        type: 'integer',
+        value: 'N',
+        required: true,
+        min: 1,
+        description: 'The version to change',
+      },
+      file: {
+        type: 'string',
+        value: 'PATH',
+        description: 'A replacement document (same id and version)',
+      },
+      visibility: {
+        type: 'string',
+        value: 'VIS',
+        choices: ['private', 'public'],
+        description: 'Who may use it',
+      },
+      'if-version': {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        description: 'Only if the row is still at this version',
+      },
     },
     examples: ['better-compute profiles update ubuntu-gpu --profile-version 3 --visibility public'],
     async run({ flags, args, path, api }) {
@@ -345,14 +471,21 @@ export const metalCommands = [
     args: [{ name: 'profile', description: 'The profile id', required: true }],
     flags: {
       tenant: tenantFlag,
-      'profile-version': { type: 'integer', value: 'N', min: 1, description: 'Only this version (default: every version)' },
+      'profile-version': {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        description: 'Only this version (default: every version)',
+      },
     },
     examples: ['better-compute profiles delete ubuntu-gpu --profile-version 2'],
     async run({ flags, args, api }) {
       return (await api()).call('profiles/delete', {
         tenantId: flags.tenant,
         profileId: args[0],
-        ...(flags['profile-version'] !== undefined ? { profileVersion: flags['profile-version'] } : {}),
+        ...(flags['profile-version'] !== undefined
+          ? { profileVersion: flags['profile-version'] }
+          : {}),
       });
     },
   }),
@@ -392,24 +525,38 @@ export const metalCommands = [
   defineCommand({
     name: 'provider-accounts create',
     group: 'Metal',
-    summary: 'Store a provider account; its config is checked by the provider (providerAccounts.create)',
+    summary:
+      'Store a provider account; its config is checked by the provider (providerAccounts.create)',
     description:
       'provider-accounts create names an account of --provider and stores --config-file (JSON), checked against the provider’s manifest. Credentials in it are secret references only (secret://…), never values.',
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      provider: { type: 'string', value: 'ID', required: true, description: 'The provider, e.g. provider-hetzner' },
+      provider: {
+        type: 'string',
+        value: 'ID',
+        required: true,
+        description: 'The provider, e.g. provider-hetzner',
+      },
       name: { type: 'string', value: 'NAME', required: true, description: 'The account name' },
       'config-file': { type: 'string', value: 'PATH', description: 'The account config, as JSON' },
-      key: { type: 'string', value: 'KEY', description: 'Idempotency key: a retry returns the same account' },
+      key: {
+        type: 'string',
+        value: 'KEY',
+        description: 'Idempotency key: a retry returns the same account',
+      },
     },
-    examples: ['better-compute provider-accounts create --provider provider-hetzner --name hetzner-main --config-file hetzner.json'],
+    examples: [
+      'better-compute provider-accounts create --provider provider-hetzner --name hetzner-main --config-file hetzner.json',
+    ],
     async run({ flags, path, api }) {
       return (await api()).call('providerAccounts/create', {
         tenantId: flags.tenant,
         provider: flags.provider,
         name: flags.name,
-        ...(flags['config-file'] ? { config: await jsonFile(path(flags['config-file']), 'config-file') } : {}),
+        ...(flags['config-file']
+          ? { config: await jsonFile(path(flags['config-file']), 'config-file') }
+          : {}),
         idempotencyKey: flags.key ?? newIdempotencyKey(),
       });
     },
@@ -422,7 +569,12 @@ export const metalCommands = [
     args: [{ name: 'account', description: 'The account id (pacct_…)', required: true }],
     flags: {
       tenant: tenantFlag,
-      'config-file': { type: 'string', value: 'PATH', required: true, description: 'The new config, as JSON' },
+      'config-file': {
+        type: 'string',
+        value: 'PATH',
+        required: true,
+        description: 'The new config, as JSON',
+      },
     },
     examples: ['better-compute provider-accounts update pacct_01k5w… --config-file hetzner.json'],
     async run({ flags, args, path, api }) {
@@ -442,11 +594,18 @@ export const metalCommands = [
     args: [{ name: 'account', description: 'The account id (pacct_…)', required: true }],
     flags: {
       tenant: tenantFlag,
-      kind: { type: 'string', value: 'KIND', choices: ['metal', 'vps'], description: 'Only this kind' },
+      kind: {
+        type: 'string',
+        value: 'KIND',
+        choices: ['metal', 'vps'],
+        description: 'Only this kind',
+      },
       region: { type: 'string', value: 'REGION', description: 'Only this provider region' },
       'gpu-model': { type: 'string', value: 'MODEL', description: 'Only this GPU model' },
     },
-    examples: ['better-compute provider-accounts offers pacct_01k5w… --kind metal --gpu-model H100'],
+    examples: [
+      'better-compute provider-accounts offers pacct_01k5w… --kind metal --gpu-model H100',
+    ],
     async run({ flags, args, api }) {
       const query = {
         ...(flags.kind ? { kind: flags.kind } : {}),
@@ -468,14 +627,26 @@ export const metalCommands = [
     args: [{ name: 'account', description: 'The account id (pacct_…)', required: true }],
     flags: {
       tenant: tenantFlag,
-      pool: { type: 'string', value: 'ID', required: true, description: 'The vps-host or metal-host pool it joins' },
+      pool: {
+        type: 'string',
+        value: 'ID',
+        required: true,
+        description: 'The vps-host or metal-host pool it joins',
+      },
       machine: { type: 'string', value: 'ID', description: 'A machine the account already has' },
       offer: { type: 'string', value: 'ID', description: 'An offer to order a machine from' },
-      key: { type: 'string', value: 'KEY', description: 'Idempotency key, to retry the same request' },
+      key: {
+        type: 'string',
+        value: 'KEY',
+        description: 'Idempotency key, to retry the same request',
+      },
     },
-    examples: ['better-compute provider-accounts bootstrap pacct_01k5w… --pool pool_01k5w… --offer ax102-h100'],
+    examples: [
+      'better-compute provider-accounts bootstrap pacct_01k5w… --pool pool_01k5w… --offer ax102-h100',
+    ],
     async run({ flags, args, api }) {
-      if (Boolean(flags.machine) === Boolean(flags.offer)) throw usageError('Pass exactly one of --machine or --offer');
+      if (Boolean(flags.machine) === Boolean(flags.offer))
+        throw usageError('Pass exactly one of --machine or --offer');
       return (await api()).call('providerAccounts/bootstrap', {
         tenantId: flags.tenant,
         accountId: id(args[0]!, 'pacct', 'provider account'),
@@ -496,7 +667,13 @@ export const metalCommands = [
       tenant: tenantFlag,
       all: { type: 'boolean', description: 'Every snapshot of the tenant, not only yours' },
       sandbox: { type: 'string', value: 'ID', description: 'Only this sandbox’s (sbx_…)' },
-      limit: { type: 'integer', value: 'N', min: 1, max: 200, description: 'Page size (at most 200)' },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 200,
+        description: 'Page size (at most 200)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
     examples: ['better-compute sandbox-snapshot list --sandbox sbx_01k5w…'],

@@ -44,11 +44,7 @@ const changeFlags = {
 } as const;
 
 /** One node state change (cordon, uncordon, drain) with its optional reason and expected version. */
-function nodeChange(
-  name: 'cordon' | 'uncordon' | 'drain',
-  summary: string,
-  description: string,
-) {
+function nodeChange(name: 'cordon' | 'uncordon' | 'drain', summary: string, description: string) {
   return defineCommand({
     name: `nodes ${name}`,
     group: 'Nodes',
@@ -101,10 +97,19 @@ export const nodeCommands = [
         ],
         description: 'Only nodes in this provisioning state',
       },
-      limit: { type: 'integer', value: 'N', min: 1, max: 50, description: 'Page size (at most 50)' },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 50,
+        description: 'Page size (at most 50)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
-    examples: ['better-compute nodes list --pool h100-eu', 'better-compute nodes list --cordoned --format json'],
+    examples: [
+      'better-compute nodes list --pool h100-eu',
+      'better-compute nodes list --cordoned --format json',
+    ],
     async run({ flags, api }) {
       return (await api()).call('nodes/list', {
         tenantId: flags.tenant,
@@ -124,7 +129,10 @@ export const nodeCommands = [
     target: 'token',
     args: nodeArg,
     flags: { tenant: tenantFlag },
-    examples: ['better-compute nodes get node_01k5w…', 'better-compute nodes get node_01k5w… --query conditions'],
+    examples: [
+      'better-compute nodes get node_01k5w…',
+      'better-compute nodes get node_01k5w… --query conditions',
+    ],
     async run({ flags, args, api }) {
       return (await api()).call('nodes/get', { tenantId: flags.tenant, nodeId: nodeId(args) });
     },
@@ -137,8 +145,18 @@ export const nodeCommands = [
     args: nodeArg,
     flags: {
       tenant: tenantFlag,
-      type: { type: 'string', value: 'TYPE', description: 'Only events of this type (node.cordoned, gpu.xid, …)' },
-      limit: { type: 'integer', value: 'N', min: 1, max: 200, description: 'Page size (at most 200)' },
+      type: {
+        type: 'string',
+        value: 'TYPE',
+        description: 'Only events of this type (node.cordoned, gpu.xid, …)',
+      },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 200,
+        description: 'Page size (at most 200)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
     examples: ['better-compute nodes events node_01k5w… --type gpu.xid'],
@@ -238,15 +256,53 @@ export const nodeCommands = [
     flags: {
       tenant: tenantFlag,
       pool: { type: 'string', value: 'ID', required: true, description: 'The pool machines join' },
-      ttl: { type: 'string', value: 'DURATION', required: true, description: 'How long it is valid: 30m, 2h (at most 24h)' },
-      'max-uses': { type: 'integer', value: 'N', min: 1, max: 10000, description: 'Machines it admits (default 1)' },
-      'allow-reclaim': { type: 'boolean', description: 'May re-admit a machine the pool already knew' },
-      'expect-product-uuid': { type: 'string', value: 'UUID', description: 'Only the machine with this SMBIOS product UUID' },
-      'expect-serial': { type: 'string', value: 'SERIAL', description: 'Only the machine with this serial number' },
-      'expect-mac': { type: 'string', value: 'MAC', description: 'Only the machine with this MAC address' },
-      'expect-gpu-uuid': { type: 'string', value: 'GPU-…', description: 'Only the machine with this GPU' },
-      out: { type: 'string', value: 'PATH', description: 'Write the token to this new file instead of printing it' },
-      key: { type: 'string', value: 'KEY', description: 'Idempotency key, to retry the same request' },
+      ttl: {
+        type: 'string',
+        value: 'DURATION',
+        required: true,
+        description: 'How long it is valid: 30m, 2h (at most 24h)',
+      },
+      'max-uses': {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 10000,
+        description: 'Machines it admits (default 1)',
+      },
+      'allow-reclaim': {
+        type: 'boolean',
+        description: 'May re-admit a machine the pool already knew',
+      },
+      'expect-product-uuid': {
+        type: 'string',
+        value: 'UUID',
+        description: 'Only the machine with this SMBIOS product UUID',
+      },
+      'expect-serial': {
+        type: 'string',
+        value: 'SERIAL',
+        description: 'Only the machine with this serial number',
+      },
+      'expect-mac': {
+        type: 'string',
+        value: 'MAC',
+        description: 'Only the machine with this MAC address',
+      },
+      'expect-gpu-uuid': {
+        type: 'string',
+        value: 'GPU-…',
+        description: 'Only the machine with this GPU',
+      },
+      out: {
+        type: 'string',
+        value: 'PATH',
+        description: 'Write the token to this new file instead of printing it',
+      },
+      key: {
+        type: 'string',
+        value: 'KEY',
+        description: 'Idempotency key, to retry the same request',
+      },
     },
     examples: [
       'better-compute join-tokens create --pool h100-eu --ttl 2h --max-uses 8 --out ./join-token',
@@ -268,7 +324,9 @@ export const nodeCommands = [
         ...(flags['expect-mac'] ? { mac: flags['expect-mac'] } : {}),
         ...(flags['expect-gpu-uuid'] ? { gpuUuid: flags['expect-gpu-uuid'] } : {}),
       };
-      const created = await (await api()).call<Record<string, unknown> & { token?: string }>('joinTokens/create', {
+      const created = await (
+        await api()
+      ).call<Record<string, unknown> & { token?: string }>('joinTokens/create', {
         tenantId: flags.tenant,
         poolId: flags.pool,
         ttlSeconds,
@@ -290,7 +348,10 @@ export const nodeCommands = [
         await writeFile(file, `${token}\n`, { mode: 0o600, flag: 'wx' });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST')
-          throw new CliError('ALREADY_EXISTS', `${file} exists; the token is never written over a file`);
+          throw new CliError(
+            'ALREADY_EXISTS',
+            `${file} exists; the token is never written over a file`,
+          );
         throw error;
       }
       note(`Wrote the join token to ${file} (0600).`);
@@ -307,7 +368,13 @@ export const nodeCommands = [
       tenant: tenantFlag,
       pool: { type: 'string', value: 'ID', required: true, description: 'The pool' },
       all: { type: 'boolean', description: 'Also revoked, expired and used-up tokens' },
-      limit: { type: 'integer', value: 'N', min: 1, max: 200, description: 'Page size (at most 200)' },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 200,
+        description: 'Page size (at most 200)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
     examples: ['better-compute join-tokens list --pool h100-eu'],
@@ -326,7 +393,9 @@ export const nodeCommands = [
     group: 'Nodes',
     summary: 'Revoke a join token before it expires (joinTokens.revoke)',
     target: 'token',
-    args: [{ name: 'token', description: 'The token id (as join-tokens list shows it)', required: true }],
+    args: [
+      { name: 'token', description: 'The token id (as join-tokens list shows it)', required: true },
+    ],
     flags: {
       tenant: tenantFlag,
       pool: { type: 'string', value: 'ID', required: true, description: 'The pool' },
@@ -335,7 +404,11 @@ export const nodeCommands = [
     async run({ flags, args, api }) {
       // An id, never the secret: `bcjt_<id>.<secret>` pasted here would be sent (and logged) as an id.
       if (args[0]!.includes('.')) throw usageError('Pass the token id, not the token itself');
-      return (await api()).call('joinTokens/revoke', { tenantId: flags.tenant, poolId: flags.pool, tokenId: args[0] });
+      return (await api()).call('joinTokens/revoke', {
+        tenantId: flags.tenant,
+        poolId: flags.pool,
+        tokenId: args[0],
+      });
     },
   }),
 ];
@@ -371,10 +444,19 @@ export const instanceCommands = [
         description: 'Only instances in this state',
       },
       pool: { type: 'string', value: 'ID', description: 'Only this pool’s' },
-      limit: { type: 'integer', value: 'N', min: 1, max: 200, description: 'Page size (at most 200)' },
+      limit: {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        max: 200,
+        description: 'Page size (at most 200)',
+      },
       cursor: { type: 'string', value: 'CURSOR', description: 'The cursor of the previous page' },
     },
-    examples: ['better-compute instances list', 'better-compute instances list --all --state running'],
+    examples: [
+      'better-compute instances list',
+      'better-compute instances list --all --state running',
+    ],
     async run({ flags, api }) {
       return (await api()).call('instances/list', {
         tenantId: flags.tenant,
@@ -395,7 +477,10 @@ export const instanceCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute instances get inst_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('instances/get', { tenantId: flags.tenant, instanceId: instanceId(args) });
+      return (await api()).call('instances/get', {
+        tenantId: flags.tenant,
+        instanceId: instanceId(args),
+      });
     },
   }),
   defineCommand({
@@ -403,19 +488,43 @@ export const instanceCommands = [
     group: 'Instances',
     summary: 'Create an instance in a pool (instances.create)',
     description:
-      "instances create boots --image with --flavor in --pool, decided as compute:instances:create. --ssh-key reads OpenSSH public keys from files (comma-separated paths; every non-empty line is a key), --user-data cloud-init from a file, or a secret://<tenant>/<id> reference. --stopped creates it without starting it. It waits up to --wait seconds (default 30) for the instance to settle. Every run sends a new idempotency key unless --key is given: repeat with the same --key to retry safely.",
+      'instances create boots --image with --flavor in --pool, decided as compute:instances:create. --ssh-key reads OpenSSH public keys from files (comma-separated paths; every non-empty line is a key), --user-data cloud-init from a file, or a secret://<tenant>/<id> reference. --stopped creates it without starting it. It waits up to --wait seconds (default 30) for the instance to settle. Every run sends a new idempotency key unless --key is given: repeat with the same --key to retry safely.',
     target: 'token',
     flags: {
       tenant: tenantFlag,
       pool: { type: 'string', value: 'ID', required: true, description: 'The pool' },
-      flavor: { type: 'string', value: 'NAME', required: true, description: 'The flavor (the pool offers it)' },
+      flavor: {
+        type: 'string',
+        value: 'NAME',
+        required: true,
+        description: 'The flavor (the pool offers it)',
+      },
       image: { type: 'string', value: 'ID', required: true, description: 'The image to boot' },
       project: { type: 'string', value: 'ID', description: 'The project it belongs to' },
-      'ssh-key': { type: 'string', value: 'PATH,…', description: 'Files of OpenSSH public keys to authorize' },
-      'user-data': { type: 'string', value: 'FILE|secret://…', description: 'cloud-init user data (at most 32 KiB)' },
+      'ssh-key': {
+        type: 'string',
+        value: 'PATH,…',
+        description: 'Files of OpenSSH public keys to authorize',
+      },
+      'user-data': {
+        type: 'string',
+        value: 'FILE|secret://…',
+        description: 'cloud-init user data (at most 32 KiB)',
+      },
       stopped: { type: 'boolean', description: 'Create it stopped' },
-      wait: { type: 'integer', value: 'SECONDS', default: 30, min: 0, max: 30, description: 'Wait this long for it to settle' },
-      key: { type: 'string', value: 'KEY', description: 'Idempotency key, to retry the same request' },
+      wait: {
+        type: 'integer',
+        value: 'SECONDS',
+        default: 30,
+        min: 0,
+        max: 30,
+        description: 'Wait this long for it to settle',
+      },
+      key: {
+        type: 'string',
+        value: 'KEY',
+        description: 'Idempotency key, to retry the same request',
+      },
     },
     examples: [
       'better-compute instances create --pool vps-eu --flavor g1.small --image img_01k5w… --ssh-key ~/.ssh/id_ed25519.pub',
@@ -429,8 +538,14 @@ export const instanceCommands = [
         } catch {
           throw usageError(`--ssh-key ${file}: cannot read it`);
         }
-        if (text.includes('PRIVATE KEY')) throw usageError(`--ssh-key ${file} holds a private key; pass the .pub`);
-        sshKeys.push(...text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')));
+        if (text.includes('PRIVATE KEY'))
+          throw usageError(`--ssh-key ${file} holds a private key; pass the .pub`);
+        sshKeys.push(
+          ...text
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line && !line.startsWith('#')),
+        );
       }
       let userData: string | undefined;
       if (flags['user-data'])
@@ -466,7 +581,10 @@ export const instanceCommands = [
       flags: { tenant: tenantFlag },
       examples: [`better-compute instances ${name} inst_01k5w…`],
       async run({ flags, args, api }) {
-        return (await api()).call(`instances/${name}`, { tenantId: flags.tenant, instanceId: instanceId(args) });
+        return (await api()).call(`instances/${name}`, {
+          tenantId: flags.tenant,
+          instanceId: instanceId(args),
+        });
       },
     }),
   ),

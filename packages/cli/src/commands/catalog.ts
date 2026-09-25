@@ -9,7 +9,8 @@ import { newIdempotencyKey, parseTime, tenantFlag } from './capacity.js';
 
 function id(args: string[], prefix: string, what: string): string {
   const value = args[0]!;
-  if (!new RegExp(`^${prefix}_[0-9a-z]{26,52}$`).test(value)) throw usageError(`${value} is not a ${what} id (${prefix}_…)`);
+  if (!new RegExp(`^${prefix}_[0-9a-z]{26,52}$`).test(value))
+    throw usageError(`${value} is not a ${what} id (${prefix}_…)`);
   return value;
 }
 
@@ -57,12 +58,48 @@ const page = (flags: { limit?: number; cursor?: string }) => ({
 const flavorFlags = {
   tenant: tenantFlag,
   pool: { type: 'string', value: 'ID', required: true, description: 'The pool (pool_…)' },
-  name: { type: 'string', value: 'NAME', required: true, description: 'The flavor name, e.g. g1.small' },
-  vcpu: { type: 'integer', value: 'N', required: true, min: 1, max: 1024, description: 'Virtual CPUs' },
-  'memory-gib': { type: 'integer', value: 'GIB', required: true, min: 1, max: 16384, description: 'Memory in GiB' },
-  'disk-gib': { type: 'integer', value: 'GIB', required: true, min: 1, max: 65536, description: 'Root disk in GiB' },
-  gpus: { type: 'integer', value: 'N', min: 0, max: 16, description: 'GPUs passed through (default 0)' },
-  offer: { type: 'string', value: 'ID', description: 'Provider pools: the provider offer it creates' },
+  name: {
+    type: 'string',
+    value: 'NAME',
+    required: true,
+    description: 'The flavor name, e.g. g1.small',
+  },
+  vcpu: {
+    type: 'integer',
+    value: 'N',
+    required: true,
+    min: 1,
+    max: 1024,
+    description: 'Virtual CPUs',
+  },
+  'memory-gib': {
+    type: 'integer',
+    value: 'GIB',
+    required: true,
+    min: 1,
+    max: 16384,
+    description: 'Memory in GiB',
+  },
+  'disk-gib': {
+    type: 'integer',
+    value: 'GIB',
+    required: true,
+    min: 1,
+    max: 65536,
+    description: 'Root disk in GiB',
+  },
+  gpus: {
+    type: 'integer',
+    value: 'N',
+    min: 0,
+    max: 16,
+    description: 'GPUs passed through (default 0)',
+  },
+  offer: {
+    type: 'string',
+    value: 'ID',
+    description: 'Provider pools: the provider offer it creates',
+  },
 } as const;
 
 function flavorBody(flags: {
@@ -96,7 +133,8 @@ async function revealSecret(
 ) {
   if (!out) return result;
   const { secret, ...rest } = result;
-  if (typeof secret !== 'string') throw new CliError('INVALID_RESPONSE', 'The answer carries no signing secret');
+  if (typeof secret !== 'string')
+    throw new CliError('INVALID_RESPONSE', 'The answer carries no signing secret');
   const file = path(out);
   await writeNewFile(file, `${secret}\n`);
   note(`Wrote the signing secret to ${file} (0600).`);
@@ -120,7 +158,12 @@ export const catalogCommands = [
     defaultFormat: 'table',
     flags: {
       tenant: tenantFlag,
-      kind: { type: 'string', value: 'KIND', choices: ['shared', 'dedicated', 'custom'], description: 'Only this kind' },
+      kind: {
+        type: 'string',
+        value: 'KIND',
+        choices: ['shared', 'dedicated', 'custom'],
+        description: 'Only this kind',
+      },
       region: { type: 'string', value: 'REGION', description: 'Only this region' },
       ...listFlags,
     },
@@ -143,7 +186,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute sites get site_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('sites/get', { tenantId: flags.tenant, siteId: id(args, 'site', 'site') });
+      return (await api()).call('sites/get', {
+        tenantId: flags.tenant,
+        siteId: id(args, 'site', 'site'),
+      });
     },
   }),
   defineCommand({
@@ -153,10 +199,29 @@ export const catalogCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      kind: { type: 'string', value: 'KIND', required: true, choices: ['shared', 'dedicated', 'custom'], description: 'The site kind' },
-      region: { type: 'string', value: 'REGION', required: true, description: 'Its region, e.g. eu-west' },
-      'iam-region': { type: 'string', value: 'REGION', description: 'The IAM region it answers to' },
-      key: { type: 'string', value: 'KEY', description: 'Idempotency key, to retry the same request' },
+      kind: {
+        type: 'string',
+        value: 'KIND',
+        required: true,
+        choices: ['shared', 'dedicated', 'custom'],
+        description: 'The site kind',
+      },
+      region: {
+        type: 'string',
+        value: 'REGION',
+        required: true,
+        description: 'Its region, e.g. eu-west',
+      },
+      'iam-region': {
+        type: 'string',
+        value: 'REGION',
+        description: 'The IAM region it answers to',
+      },
+      key: {
+        type: 'string',
+        value: 'KEY',
+        description: 'Idempotency key, to retry the same request',
+      },
     },
     examples: ['better-compute sites create --kind dedicated --region eu-west'],
     async run({ flags, api }) {
@@ -180,12 +245,19 @@ export const catalogCommands = [
       region: { type: 'string', value: 'REGION', description: 'The new region' },
       'iam-region': { type: 'string', value: 'REGION', description: 'The new IAM region' },
       'clear-iam-region': { type: 'boolean', description: 'Remove the IAM region' },
-      'if-version': { type: 'integer', value: 'N', min: 1, description: 'Only if the site is still at this version' },
+      'if-version': {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        description: 'Only if the site is still at this version',
+      },
     },
     examples: ['better-compute sites update site_01k5w… --iam-region eu'],
     async run({ flags, args, api }) {
-      if (flags['iam-region'] && flags['clear-iam-region']) throw usageError('Pass --iam-region or --clear-iam-region, not both');
-      if (!flags.region && !flags['iam-region'] && !flags['clear-iam-region']) throw usageError('Nothing to change');
+      if (flags['iam-region'] && flags['clear-iam-region'])
+        throw usageError('Pass --iam-region or --clear-iam-region, not both');
+      if (!flags.region && !flags['iam-region'] && !flags['clear-iam-region'])
+        throw usageError('Nothing to change');
       return (await api()).call('sites/update', {
         tenantId: flags.tenant,
         siteId: id(args, 'site', 'site'),
@@ -204,7 +276,12 @@ export const catalogCommands = [
     args: [{ name: 'site', description: 'The site id (site_…)', required: true }],
     flags: {
       tenant: tenantFlag,
-      'if-version': { type: 'integer', value: 'N', min: 1, description: 'Only if the site is still at this version' },
+      'if-version': {
+        type: 'integer',
+        value: 'N',
+        min: 1,
+        description: 'Only if the site is still at this version',
+      },
     },
     examples: ['better-compute sites delete site_01k5w…'],
     async run({ flags, args, api }) {
@@ -224,7 +301,12 @@ export const catalogCommands = [
     defaultFormat: 'table',
     flags: {
       tenant: tenantFlag,
-      state: { type: 'string', value: 'STATE', choices: ['active', 'archived'], description: 'Only this state' },
+      state: {
+        type: 'string',
+        value: 'STATE',
+        choices: ['active', 'archived'],
+        description: 'Only this state',
+      },
       ...listFlags,
     },
     examples: ['better-compute projects list'],
@@ -245,7 +327,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute projects get prj_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('projects/get', { tenantId: flags.tenant, projectId: id(args, 'prj', 'project') });
+      return (await api()).call('projects/get', {
+        tenantId: flags.tenant,
+        projectId: id(args, 'prj', 'project'),
+      });
     },
   }),
   defineCommand({
@@ -255,8 +340,17 @@ export const catalogCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      name: { type: 'string', value: 'NAME', required: true, description: 'Lowercase letters, digits and dashes' },
-      key: { type: 'string', value: 'KEY', description: 'Idempotency key, to retry the same request' },
+      name: {
+        type: 'string',
+        value: 'NAME',
+        required: true,
+        description: 'Lowercase letters, digits and dashes',
+      },
+      key: {
+        type: 'string',
+        value: 'KEY',
+        description: 'Idempotency key, to retry the same request',
+      },
     },
     examples: ['better-compute projects create --name training'],
     async run({ flags, api }) {
@@ -276,7 +370,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute projects archive prj_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('projects/archive', { tenantId: flags.tenant, projectId: id(args, 'prj', 'project') });
+      return (await api()).call('projects/archive', {
+        tenantId: flags.tenant,
+        projectId: id(args, 'prj', 'project'),
+      });
     },
   }),
   // Images.
@@ -288,7 +385,12 @@ export const catalogCommands = [
     defaultFormat: 'table',
     flags: {
       tenant: tenantFlag,
-      kind: { type: 'string', value: 'KIND', choices: ['os', 'ramdisk'], description: 'Only this kind' },
+      kind: {
+        type: 'string',
+        value: 'KIND',
+        choices: ['os', 'ramdisk'],
+        description: 'Only this kind',
+      },
       ...listFlags,
     },
     examples: ['better-compute images list --kind os'],
@@ -309,7 +411,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute images get img_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('images/get', { tenantId: flags.tenant, imageId: id(args, 'img', 'image') });
+      return (await api()).call('images/get', {
+        tenantId: flags.tenant,
+        imageId: id(args, 'img', 'image'),
+      });
     },
   }),
   defineCommand({
@@ -321,22 +426,59 @@ export const catalogCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      ref: { type: 'string', value: 'NAME@VERSION', required: true, description: 'e.g. ubuntu-24.04@2026.09' },
-      source: { type: 'string', value: 'URL', required: true, description: 'Where nodes fetch it: https:// or oci://' },
-      'disk-format': { type: 'string', value: 'FORMAT', required: true, choices: ['raw', 'qcow2', 'iso'], description: 'The disk format' },
-      sha256: { type: 'string', value: 'HEX', required: true, description: 'The image digest, 64 hex digits' },
-      kind: { type: 'string', value: 'KIND', choices: ['os', 'ramdisk'], description: 'What it boots as (default os)' },
-      compression: { type: 'string', value: 'ALG', choices: ['none', 'zstd', 'gzip'], description: 'Default none' },
+      ref: {
+        type: 'string',
+        value: 'NAME@VERSION',
+        required: true,
+        description: 'e.g. ubuntu-24.04@2026.09',
+      },
+      source: {
+        type: 'string',
+        value: 'URL',
+        required: true,
+        description: 'Where nodes fetch it: https:// or oci://',
+      },
+      'disk-format': {
+        type: 'string',
+        value: 'FORMAT',
+        required: true,
+        choices: ['raw', 'qcow2', 'iso'],
+        description: 'The disk format',
+      },
+      sha256: {
+        type: 'string',
+        value: 'HEX',
+        required: true,
+        description: 'The image digest, 64 hex digits',
+      },
+      kind: {
+        type: 'string',
+        value: 'KIND',
+        choices: ['os', 'ramdisk'],
+        description: 'What it boots as (default os)',
+      },
+      compression: {
+        type: 'string',
+        value: 'ALG',
+        choices: ['none', 'zstd', 'gzip'],
+        description: 'Default none',
+      },
       size: { type: 'integer', value: 'BYTES', min: 0, description: 'Its size in bytes' },
       signature: { type: 'string', value: 'BASE64', description: 'A signature over its identity' },
-      signer: { type: 'string', value: 'ID', description: 'The registered signer that checks --signature' },
+      signer: {
+        type: 'string',
+        value: 'ID',
+        description: 'The registered signer that checks --signature',
+      },
     },
     examples: [
       'better-compute images register --ref ubuntu-24.04@2026.09 --source https://images.example.com/u2404.qcow2 --disk-format qcow2 --sha256 3f…',
     ],
     async run({ flags, api }) {
-      if (Boolean(flags.signature) !== Boolean(flags.signer)) throw usageError('--signature and --signer go together');
-      if (!/^[0-9A-Fa-f]{64}$/.test(flags.sha256!)) throw usageError('--sha256 takes 64 hex digits');
+      if (Boolean(flags.signature) !== Boolean(flags.signer))
+        throw usageError('--signature and --signer go together');
+      if (!/^[0-9A-Fa-f]{64}$/.test(flags.sha256!))
+        throw usageError('--sha256 takes 64 hex digits');
       return (await api()).call('images/register', {
         tenantId: flags.tenant,
         ref: flags.ref,
@@ -359,7 +501,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute images promote img_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('images/promote', { tenantId: flags.tenant, imageId: id(args, 'img', 'image') });
+      return (await api()).call('images/promote', {
+        tenantId: flags.tenant,
+        imageId: id(args, 'img', 'image'),
+      });
     },
   }),
   // Flavors.
@@ -369,7 +514,10 @@ export const catalogCommands = [
     summary: 'List a pool’s instance flavors (flavors.list)',
     target: 'token',
     defaultFormat: 'table',
-    flags: { tenant: tenantFlag, pool: { type: 'string', value: 'ID', required: true, description: 'The pool (pool_…)' } },
+    flags: {
+      tenant: tenantFlag,
+      pool: { type: 'string', value: 'ID', required: true, description: 'The pool (pool_…)' },
+    },
     examples: ['better-compute flavors list --pool pool_01k5w…'],
     async run({ flags, api }) {
       return (await api()).call('flavors/list', { tenantId: flags.tenant, poolId: flags.pool });
@@ -381,7 +529,9 @@ export const catalogCommands = [
     summary: 'Define an instance flavor in a pool (flavors.create)',
     target: 'token',
     flags: flavorFlags,
-    examples: ['better-compute flavors create --pool pool_01k5w… --name g1.small --vcpu 4 --memory-gib 16 --disk-gib 80'],
+    examples: [
+      'better-compute flavors create --pool pool_01k5w… --name g1.small --vcpu 4 --memory-gib 16 --disk-gib 80',
+    ],
     async run({ flags, api }) {
       return (await api()).call('flavors/create', flavorBody(flags));
     },
@@ -392,7 +542,9 @@ export const catalogCommands = [
     summary: 'Redefine an instance flavor; running instances keep theirs (flavors.update)',
     target: 'token',
     flags: flavorFlags,
-    examples: ['better-compute flavors update --pool pool_01k5w… --name g1.small --vcpu 4 --memory-gib 32 --disk-gib 80'],
+    examples: [
+      'better-compute flavors update --pool pool_01k5w… --name g1.small --vcpu 4 --memory-gib 32 --disk-gib 80',
+    ],
     async run({ flags, api }) {
       return (await api()).call('flavors/update', flavorBody(flags));
     },
@@ -409,7 +561,11 @@ export const catalogCommands = [
     },
     examples: ['better-compute flavors delete --pool pool_01k5w… --name g1.small'],
     async run({ flags, api }) {
-      return (await api()).call('flavors/delete', { tenantId: flags.tenant, poolId: flags.pool, name: flags.name });
+      return (await api()).call('flavors/delete', {
+        tenantId: flags.tenant,
+        poolId: flags.pool,
+        name: flags.name,
+      });
     },
   }),
   // Quotas.
@@ -418,10 +574,16 @@ export const catalogCommands = [
     group: 'Catalog',
     summary: 'Show the tenant’s quotas and what is used, per pool (quotas.get)',
     target: 'token',
-    flags: { tenant: tenantFlag, pool: { type: 'string', value: 'ID', description: 'Only this pool (pool_…)' } },
+    flags: {
+      tenant: tenantFlag,
+      pool: { type: 'string', value: 'ID', description: 'Only this pool (pool_…)' },
+    },
     examples: ['better-compute quotas get --pool pool_01k5w…'],
     async run({ flags, api }) {
-      return (await api()).call('quotas/get', { tenantId: flags.tenant, ...(flags.pool ? { poolId: flags.pool } : {}) });
+      return (await api()).call('quotas/get', {
+        tenantId: flags.tenant,
+        ...(flags.pool ? { poolId: flags.pool } : {}),
+      });
     },
   }),
   defineCommand({
@@ -432,7 +594,12 @@ export const catalogCommands = [
     flags: {
       tenant: tenantFlag,
       pool: { type: 'string', value: 'ID', required: true, description: 'The pool (pool_…)' },
-      resource: { type: 'string', value: 'NAME', required: true, description: 'The quota resource, e.g. gpus' },
+      resource: {
+        type: 'string',
+        value: 'NAME',
+        required: true,
+        description: 'The quota resource, e.g. gpus',
+      },
       max: { type: 'integer', value: 'N', required: true, min: 0, description: 'The new limit' },
     },
     examples: ['better-compute quotas set --pool pool_01k5w… --resource gpus --max 64'],
@@ -456,7 +623,11 @@ export const catalogCommands = [
       tenant: tenantFlag,
       project: { type: 'string', value: 'ID', description: 'Only this project’s (prj_…)' },
       meter: { type: 'string', value: 'METER', description: 'Only this meter (gpu.hours, …)' },
-      from: { type: 'string', value: 'TIME', description: 'Windows ending after: ISO 8601, epoch ms, or -7d' },
+      from: {
+        type: 'string',
+        value: 'TIME',
+        description: 'Windows ending after: ISO 8601, epoch ms, or -7d',
+      },
       to: { type: 'string', value: 'TIME', description: 'Windows starting before' },
       ...listFlags,
     },
@@ -482,11 +653,26 @@ export const catalogCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      from: { type: 'string', value: 'TIME', required: true, description: 'ISO 8601, epoch ms, or -30d' },
-      to: { type: 'string', value: 'TIME', required: true, description: 'ISO 8601, epoch ms, -1d or +0s (now)' },
+      from: {
+        type: 'string',
+        value: 'TIME',
+        required: true,
+        description: 'ISO 8601, epoch ms, or -30d',
+      },
+      to: {
+        type: 'string',
+        value: 'TIME',
+        required: true,
+        description: 'ISO 8601, epoch ms, -1d or +0s (now)',
+      },
       project: { type: 'string', value: 'ID', description: 'Only this project’s (prj_…)' },
       meter: { type: 'string', value: 'METER', description: 'Only this meter' },
-      'export-format': { type: 'string', value: 'FORMAT', choices: ['csv', 'jsonl'], description: 'Default csv' },
+      'export-format': {
+        type: 'string',
+        value: 'FORMAT',
+        choices: ['csv', 'jsonl'],
+        description: 'Default csv',
+      },
       out: { type: 'string', value: 'PATH', description: 'Write the export to this new file' },
     },
     examples: ['better-compute usage export --from 2026-09-01 --to 2026-10-01 --out september.csv'],
@@ -495,7 +681,9 @@ export const catalogCommands = [
       const from = usageTime(flags.from!, now, 'from');
       const to = usageTime(flags.to!, now, 'to');
       if (to <= from) throw usageError('--to must be after --from');
-      const exported = await (await api()).call<{ data: string } & Record<string, unknown>>('usage/export', {
+      const exported = await (
+        await api()
+      ).call<{ data: string } & Record<string, unknown>>('usage/export', {
         tenantId: flags.tenant,
         from,
         to,
@@ -534,7 +722,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute webhooks get whk_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('webhooks/get', { tenantId: flags.tenant, webhookId: id(args, 'whk', 'webhook') });
+      return (await api()).call('webhooks/get', {
+        tenantId: flags.tenant,
+        webhookId: id(args, 'whk', 'webhook'),
+      });
     },
   }),
   defineCommand({
@@ -546,16 +737,30 @@ export const catalogCommands = [
     target: 'token',
     flags: {
       tenant: tenantFlag,
-      endpoint: { type: 'string', value: 'URL', required: true, description: 'Where events are posted (https)' },
-      events: { type: 'string', value: 'PATTERN,…', required: true, description: 'Event type patterns' },
+      endpoint: {
+        type: 'string',
+        value: 'URL',
+        required: true,
+        description: 'Where events are posted (https)',
+      },
+      events: {
+        type: 'string',
+        value: 'PATTERN,…',
+        required: true,
+        description: 'Event type patterns',
+      },
       description: { type: 'string', value: 'TEXT', description: 'What it is for' },
       'secret-out': secretOut,
     },
-    examples: ['better-compute webhooks create --endpoint https://hooks.example.com/compute --events "node.*,reservation.*" --secret-out ./whk.secret'],
+    examples: [
+      'better-compute webhooks create --endpoint https://hooks.example.com/compute --events "node.*,reservation.*" --secret-out ./whk.secret',
+    ],
     async run({ flags, path, api, note }) {
       const events = list(flags.events);
       if (!events.length) throw usageError('--events needs at least one pattern');
-      const created = await (await api()).call<{ secret?: unknown } & Record<string, unknown>>('webhooks/create', {
+      const created = await (
+        await api()
+      ).call<{ secret?: unknown } & Record<string, unknown>>('webhooks/create', {
         tenantId: flags.tenant,
         url: flags.endpoint,
         events,
@@ -589,7 +794,11 @@ export const catalogCommands = [
         ...(flags.pause ? { active: false } : flags.resume ? { active: true } : {}),
       };
       if (!Object.keys(body).length) throw usageError('Nothing to change');
-      return (await api()).call('webhooks/update', { tenantId: flags.tenant, webhookId: id(args, 'whk', 'webhook'), ...body });
+      return (await api()).call('webhooks/update', {
+        tenantId: flags.tenant,
+        webhookId: id(args, 'whk', 'webhook'),
+        ...body,
+      });
     },
   }),
   defineCommand({
@@ -601,7 +810,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute webhooks delete whk_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('webhooks/delete', { tenantId: flags.tenant, webhookId: id(args, 'whk', 'webhook') });
+      return (await api()).call('webhooks/delete', {
+        tenantId: flags.tenant,
+        webhookId: id(args, 'whk', 'webhook'),
+      });
     },
   }),
   defineCommand({
@@ -613,7 +825,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute webhooks ping whk_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('webhooks/ping', { tenantId: flags.tenant, webhookId: id(args, 'whk', 'webhook') });
+      return (await api()).call('webhooks/ping', {
+        tenantId: flags.tenant,
+        webhookId: id(args, 'whk', 'webhook'),
+      });
     },
   }),
   defineCommand({
@@ -626,10 +841,16 @@ export const catalogCommands = [
     args: webhookArg,
     flags: {
       tenant: tenantFlag,
-      'keep-previous': { type: 'string', value: 'DURATION', description: 'Keep signing with the old secret this long' },
+      'keep-previous': {
+        type: 'string',
+        value: 'DURATION',
+        description: 'Keep signing with the old secret this long',
+      },
       'secret-out': secretOut,
     },
-    examples: ['better-compute webhooks rotate-secret whk_01k5w… --keep-previous 1h --secret-out ./whk.secret.new'],
+    examples: [
+      'better-compute webhooks rotate-secret whk_01k5w… --keep-previous 1h --secret-out ./whk.secret.new',
+    ],
     async run({ flags, args, path, api, note }) {
       let keep: number | undefined;
       if (flags['keep-previous']) {
@@ -639,10 +860,13 @@ export const catalogCommands = [
         } catch {
           throw usageError(`--keep-previous ${flags['keep-previous']}: a duration like 30m or 2h`);
         }
-        if (ms % 1000 !== 0 || ms > 86_400_000) throw usageError('--keep-previous must be whole seconds up to 24h');
+        if (ms % 1000 !== 0 || ms > 86_400_000)
+          throw usageError('--keep-previous must be whole seconds up to 24h');
         keep = ms / 1000;
       }
-      const rotated = await (await api()).call<{ secret?: unknown } & Record<string, unknown>>('webhooks/rotateSecret', {
+      const rotated = await (
+        await api()
+      ).call<{ secret?: unknown } & Record<string, unknown>>('webhooks/rotateSecret', {
         tenantId: flags.tenant,
         webhookId: id(args, 'whk', 'webhook'),
         ...(keep !== undefined ? { keepPreviousSeconds: keep } : {}),
@@ -686,7 +910,10 @@ export const catalogCommands = [
     flags: { tenant: tenantFlag },
     examples: ['better-compute webhooks redeliver dlv_01k5w…'],
     async run({ flags, args, api }) {
-      return (await api()).call('webhooks/redeliver', { tenantId: flags.tenant, deliveryId: id(args, 'dlv', 'delivery') });
+      return (await api()).call('webhooks/redeliver', {
+        tenantId: flags.tenant,
+        deliveryId: id(args, 'dlv', 'delivery'),
+      });
     },
   }),
   defineCommand({

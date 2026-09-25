@@ -17,12 +17,14 @@ async function completion(shell: string) {
   return out.join('\n');
 }
 
-const bashes = ['/bin/bash', '/usr/bin/bash', 'C:/Program Files/Git/bin/bash.exe'].filter((path) => existsSync(path));
+const bashes = ['/bin/bash', '/usr/bin/bash', 'C:/Program Files/Git/bin/bash.exe'].filter((path) =>
+  existsSync(path),
+);
 
 describe('completion', () => {
   it('completes words, flags and choices in bash (and zsh through bashcompinit)', async () => {
     const script = await completion('bash');
-    expect(script).toContain("complete -o default -F _better_compute better-compute");
+    expect(script).toContain('complete -o default -F _better_compute better-compute');
     expect(script).toMatch(/COMPREPLY=\(\$\(compgen -W '[^']*\bnodes\b[^']*' -- "\$cur"\)\)/);
     expect(script).toContain(`'nodes list|--state') COMPREPLY=($(compgen -W 'adopting adopted`);
     expect(await completion('zsh')).toContain('bashcompinit');
@@ -31,13 +33,16 @@ describe('completion', () => {
     // Drive the function the way bash's completion does.
     const dir = await mkdtemp(join(tmpdir(), 'bc-completion-'));
     const complete = async (words: string[]) => {
-      await writeFile(join(dir, 'run.sh'), [
-        script,
-        `COMP_WORDS=(${words.map((w) => `'${w}'`).join(' ')})`,
-        `COMP_CWORD=${words.length - 1}`,
-        '_better_compute',
-        'printf "%s\\n" "${COMPREPLY[@]}"',
-      ].join('\n'));
+      await writeFile(
+        join(dir, 'run.sh'),
+        [
+          script,
+          `COMP_WORDS=(${words.map((w) => `'${w}'`).join(' ')})`,
+          `COMP_CWORD=${words.length - 1}`,
+          '_better_compute',
+          'printf "%s\\n" "${COMPREPLY[@]}"',
+        ].join('\n'),
+      );
       const result = spawnSync(bash, [join(dir, 'run.sh')], { encoding: 'utf8' });
       expect(result.stderr).toBe('');
       return result.stdout.split('\n').filter(Boolean);
@@ -45,14 +50,19 @@ describe('completion', () => {
     expect(await complete(['better-compute', 'nod'])).toEqual(['nodes']);
     expect(await complete(['better-compute', 'nodes', 'co'])).toEqual(['cordon']);
     expect(await complete(['better-compute', 'nodes', 'list', '--st'])).toEqual(['--state']);
-    expect(await complete(['better-compute', 'nodes', 'list', '--state', 'dep'])).toEqual(['deploying', 'deployed']);
+    expect(await complete(['better-compute', 'nodes', 'list', '--state', 'dep'])).toEqual([
+      'deploying',
+      'deployed',
+    ]);
     expect(await complete(['better-compute', 'reserve', '--po'])).toEqual(['--pool']);
   });
 
   it('completes in fish', async () => {
     const script = await completion('fish');
     expect(script).toContain("complete -c better-compute -n __fish_use_subcommand -a 'nodes'");
-    expect(script).toMatch(/-n '__fish_seen_subcommand_from nodes; and __fish_seen_subcommand_from list' -l state -r -a 'adopting /);
+    expect(script).toMatch(
+      /-n '__fish_seen_subcommand_from nodes; and __fish_seen_subcommand_from list' -l state -r -a 'adopting /,
+    );
   });
 
   it('never lets a command’s name or text become shell code', () => {
@@ -60,7 +70,11 @@ describe('completion', () => {
       name: 'evil',
       summary: "it's $(rm -rf ~) `id`\u001b[2J",
       flags: {
-        mode: { type: 'string', choices: ['ok', "x';reboot;'"], description: "a ' quote\nand a newline" },
+        mode: {
+          type: 'string',
+          choices: ['ok', "x';reboot;'"],
+          description: "a ' quote\nand a newline",
+        },
         'bad;flag': { type: 'boolean', description: 'dropped' },
       },
       run: () => undefined,
