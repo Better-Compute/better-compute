@@ -154,7 +154,10 @@ export function createCommandSigningAuthority(
 export interface VerifyIntentOptions {
   /** `TrustBundle.command_signing_roots` (DER). */
   roots: readonly Uint8Array[];
-  /** Server time in epoch milliseconds (the daemon adds its Welcome offset). */
+  /**
+   * Server time in epoch milliseconds: the daemon adds its Welcome offset, and must never let a Welcome
+   * move it back (beyond skew) from the latest it saw, or a gateway could make old signatures valid again.
+   */
   now: number;
   /** The node this daemon is: a body for any other node is refused. */
   nodeId: string;

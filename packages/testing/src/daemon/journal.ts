@@ -43,6 +43,11 @@ export interface JournalMeta {
   eventSeq: number;
   lastEpoch: number;
   appliedGeneration: number;
+  /**
+   * The latest server time seen (epoch ms, from Welcome and then the local clock): a later Welcome may not
+   * move server time back past it by more than the allowed skew, so an old signature cannot become valid again.
+   */
+  serverTimeMs?: number;
 }
 
 /** A command entry's state. */
@@ -162,9 +167,14 @@ export class MemoryJournal {
     return { ...this.metaValue };
   }
 
-  /** Stores nodeId, lastEpoch and appliedGeneration; journalId and eventSeq belong to the journal. */
+  /**
+   * Stores nodeId, lastEpoch, appliedGeneration and serverTimeMs (which only moves forward); journalId and
+   * eventSeq belong to the journal.
+   */
   saveMeta(meta: JournalMeta): void {
     this.metaValue.nodeId = meta.nodeId;
+    if (meta.serverTimeMs !== undefined && !(meta.serverTimeMs <= (this.metaValue.serverTimeMs ?? -Infinity)))
+      this.metaValue.serverTimeMs = meta.serverTimeMs;
     this.metaValue.lastEpoch = meta.lastEpoch;
     this.metaValue.appliedGeneration = meta.appliedGeneration;
   }

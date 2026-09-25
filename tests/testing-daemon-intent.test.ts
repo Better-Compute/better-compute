@@ -227,6 +227,38 @@ describe('FakeDaemon signed intent', () => {
     expect(h.daemon.appliedGeneration).toBe(applied + 1);
   });
 
+  it('never lets a Welcome rewind server time, so an old signature cannot become valid again', async () => {
+    // A compromised gateway recorded a signed reboot and replays it days later, with a Welcome whose
+    // (unsigned) server_time puts the daemon back inside the old worker certificate's window.
+    let rewindTo: number | undefined;
+    const h = await daemon({
+      autoWelcome: () => (rewindTo === undefined ? {} : { serverTime: timestampFromMs(rewindTo) }),
+    });
+    const recorded = h.commandBody('node.reboot');
+    const signature = fromSignature(signer.sign(toBinary(CommandBodySchema, recorded)));
+    const epoch = h.daemon.epoch;
+    await h.advance(3 * 86_400_000);
+
+    rewindTo = T0;
+    const dials = h.servers.length;
+    h.server.conn.close('gateway failover');
+    await h.advance(30_000);
+    // Every session that tries to rewind is dropped before it is welcomed.
+    expect(h.servers.length).toBeGreaterThan(dials);
+    expect(h.daemon.epoch).toBe(epoch);
+    const command = wrapCommand(recorded, { attempt: 1 });
+    command.signature = signature;
+    h.server.send({ case: 'command', value: command });
+    await h.advance(5);
+    expect(h.daemon.journal.command(recorded.id)).toBeUndefined();
+
+    // A few seconds back (skew between gateways) is fine.
+    rewindTo = h.scheduler.now() - 30_000;
+    h.server.conn.close('gateway failover');
+    await h.advance(30_000);
+    expect(h.daemon.epoch).toBeGreaterThan(epoch);
+  });
+
   it('without signed intent configured, behaves as v0.1 (nothing checked)', async () => {
     const h = await daemon({ intent: undefined });
     const unsigned = send(h, h.commandBody('node.reboot'));

@@ -277,6 +277,8 @@ const OUTCOME_STATE = {
   cancelled: CommandState.CANCELLED,
 } as const;
 const EVENT_BATCH = 64;
+/** How far a Welcome may move server time back from the latest seen (clock skew between gateways). */
+const SERVER_TIME_ROLLBACK_MS = 5 * 60_000;
 const CDI_DIR = '/etc/cdi/';
 const ENV_DIR = '/run/bcd/allocations/';
 
@@ -951,13 +953,28 @@ export class FakeDaemon {
       this.log('frame.ignored', { case: 'welcome', why: 'duplicate' });
       return;
     }
+    // Server time never goes back (beyond clock skew): Welcome.server_time is unsigned, and a gateway
+    // that could rewind it would make expired commands and worker certificates valid again.
+    const meta = this.journalValue.meta();
+    const serverTime = welcome.serverTime ? timestampMs(welcome.serverTime) : undefined;
+    if (
+      serverTime !== undefined &&
+      meta.serverTimeMs !== undefined &&
+      serverTime < meta.serverTimeMs - SERVER_TIME_ROLLBACK_MS
+    ) {
+      this.dropSession(session, 'protocol: server time went backwards');
+      return;
+    }
     session.welcomed = true;
     session.epoch = Number(welcome.epoch);
     // Go: session.ApplyWelcome.
-    const meta = this.journalValue.meta();
-    this.journalValue.saveMeta({ ...meta, lastEpoch: session.epoch });
+    if (serverTime !== undefined) proc.offsetMs = serverTime - this.localNow();
+    this.journalValue.saveMeta({
+      ...meta,
+      lastEpoch: session.epoch,
+      ...(serverTime !== undefined ? { serverTimeMs: serverTime } : {}),
+    });
     this.journalValue.ackEvents(Number(welcome.ackedEventSeq));
-    if (welcome.serverTime) proc.offsetMs = timestampMs(welcome.serverTime) - this.localNow();
     for (const lane of LANES) session.credits.set(lane, DEFAULT_CREDITS[lane]);
     for (const credit of welcome.credits) session.credits.set(credit.lane, credit.credits);
     session.heartbeatIntervalMs = welcome.heartbeatIntervalMs > 0 ? welcome.heartbeatIntervalMs : 10_000;
@@ -995,6 +1012,7 @@ export class FakeDaemon {
   private heartbeat(session: Session): void {
     const proc = this.requireProcess();
     session.heartbeats++;
+    this.journalValue.saveMeta({ ...this.journalValue.meta(), serverTimeMs: this.serverNow() });
     let running = 0;
     for (const count of proc.busyWorkers.values()) running += count;
     const memory = this.hw.inventory.memory?.totalBytes ?? 0n;
