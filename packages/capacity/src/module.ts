@@ -17,6 +17,7 @@ import {
   type PoolAgent,
   type PoolClass,
   type PoolPolicy,
+  type Placer,
   type Reconciler,
   type Reservation,
   type ReservationState,
@@ -27,7 +28,7 @@ import { readAllocation, releaseAllocation } from './bookings.js';
 import { capacityMigrations } from './migrations.js';
 import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
-import { inlinePlacer } from './placer.js';
+import { inlinePlacer, poolLeasePlacer } from './placer.js';
 import {
   chargeQuota,
   quotaDemand,
@@ -46,6 +47,8 @@ import {
   listReservations,
   parseCreateReservation,
   parseExtendReservation,
+  placeQueued,
+  placerWork,
   prepareCreate,
   prepareExtend,
   readReservation,
@@ -583,11 +586,19 @@ export interface CapacityModuleOptions extends PlacementOptions {
   usageEvery?: `${number}${'s' | 'm' | 'h'}`;
   /** The notice a preempted spot reservation gets before its atoms are taken (default 2 min). */
   spotNoticeMs?: number;
+  /**
+   * `inline` (v0.1, default): reservations are placed in the admission transaction. `pool-lease`
+   * (v0.4): they are queued and placed in batches by the worker owning the pool (`capacity.placer`),
+   * so `reservations.create` answers `pending` with a `Queued` condition until the batch runs.
+   */
+  placer?: 'inline' | 'pool-lease';
+  /** Reservations per pool-lease batch (≤64, default 64). */
+  maxBatch?: number;
 }
 
 function depsFrom(
   context: ModuleContext,
-  placer: ReservationDeps['placer'],
+  placers: Placers,
   options: CapacityModuleOptions,
 ): ReservationDeps {
   return {
@@ -596,7 +607,8 @@ function depsFrom(
     work: context.work,
     authz: context.authz,
     desired: context.desired,
-    placer,
+    placer: placers.placer,
+    inline: placers.inline,
     placement: {
       random: options.random ?? Math.random,
       plugins: options.plugins ?? [],
@@ -612,8 +624,19 @@ function inTx<T>(context: ModuleContext, fn: (tx: SqlTx) => Promise<T>): Promise
   return context.sql.transaction(fn);
 }
 
-function buildApi(options: CapacityModuleOptions, placer: ReservationDeps['placer']): CapacityApi {
-  const deps = (context: MethodContext) => depsFrom(context, placer, options);
+interface Placers {
+  placer: Placer;
+  inline: Placer;
+}
+
+function placersFor(options: CapacityModuleOptions): Placers {
+  const settings = options.maxAttempts ? { maxAttempts: options.maxAttempts } : {};
+  const inline = inlinePlacer(settings);
+  return { inline, placer: options.placer === 'pool-lease' ? poolLeasePlacer(settings) : inline };
+}
+
+function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi {
+  const deps = (context: MethodContext) => depsFrom(context, placers, options);
 
   const pools: CapacityApi['pools'] = {
     list: defineMethod({
@@ -1182,18 +1205,30 @@ export function createCapacityPort(
 export function capacityModule(
   options: CapacityModuleOptions = {},
 ): ComputeModule<'capacity', CapacityApi> {
-  const placer = inlinePlacer(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {});
+  const placers = placersFor(options);
   const reservationsReconciler: Reconciler = {
     name: reservationWork,
     shardBy: 'none',
     async run(context, key) {
-      const deps = depsFrom(context, placer, options);
+      const deps = depsFrom(context, placers, options);
       await inTx(context, async (tx) => {
         const next = await reconcileReservation(deps, tx, key);
         if (next !== undefined)
           await context.work.enqueue(tx, reservationWork, key, { notBefore: next });
       });
       return 'DONE';
+    },
+  };
+  // v0.4 pool-lease placer: one batch per pool key, by the worker owning the pool's shard.
+  const placerReconciler: Reconciler = {
+    name: placerWork,
+    shardBy: 'pool',
+    async run(context, poolId) {
+      const deps = depsFrom(context, placers, options);
+      const { more } = await inTx(context, (tx) =>
+        placeQueued(deps, tx, poolId, options.maxBatch ? { maxBatch: options.maxBatch } : {}),
+      );
+      return more ? 'SYNC_AGAIN' : 'DONE';
     },
   };
   // §12.7: hourly usage windows for the IAM usage sink, which flushes hourly before closePeriod.
@@ -1224,8 +1259,13 @@ export function capacityModule(
   return defineModule({
     name: 'capacity',
     migrations: [...capacityMigrations],
-    api: () => buildApi(options, placer),
-    reconcilers: [reservationsReconciler, rollupReconciler, usageReconciler],
+    api: () => buildApi(options, placers),
+    reconcilers: [
+      reservationsReconciler,
+      rollupReconciler,
+      usageReconciler,
+      ...(options.placer === 'pool-lease' ? [placerReconciler] : []),
+    ],
     async nodeSpec(context, node) {
       const assignments = await deviceAssignments(context.sql, node.id);
       return { devices: { assignments } };

@@ -13,7 +13,14 @@ import {
 } from '@better-compute/core';
 import { schedulableSql } from './eligibility.js';
 import { assertGang, chooseGang, maxGangSize, planGangs } from './gang.js';
-import { choosePlan, planPlacement, summarizeRejections, type NodePlan } from './pipeline.js';
+import {
+  choosePlan,
+  planPlacement,
+  summarizeRejections,
+  type NodePlan,
+  type PlacementPlan,
+} from './pipeline.js';
+import type { PoolIndex } from './pool-index.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
 import { planFromShortlist, shortlistable } from './shortlist.js';
 import { loadNodeViews, lockPool, readPool, type PoolRow } from './store.js';
@@ -240,51 +247,153 @@ export function inlinePlacer(options: InlinePlacerOptions = {}): Placer {
         );
       const fast = shortlistable(request, context.plugins);
       let views: NodeView[] | undefined;
-      const conflicts: string[] = [];
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        let plan = fast
-          ? (await planFromShortlist(tx, pool, request, [...excluded], context))?.plan
-          : undefined;
-        if (!plan) {
-          views ??= await loadNodeViews(tx, pool, request.during);
-          plan = planPlacement({ ...request, excludeNodes: [...excluded] }, views, pool, {
+      const current = pool;
+      return placeSingle(
+        tx,
+        request,
+        async (without) => {
+          const short = fast
+            ? (await planFromShortlist(tx, current, request, without, context))?.plan
+            : undefined;
+          if (short) return short;
+          views ??= await loadNodeViews(tx, current, request.during);
+          return planPlacement({ ...request, excludeNodes: without }, views, current, {
             plugins: context.plugins,
             weights: context.weights,
           });
-        }
-        const { ranked, rejected } = plan;
-        const choice = choosePlan(ranked, () => context.random(), context.topN);
-        if (!choice) {
-          const why = summarizeRejections(
-            rejected.filter(
-              (rejection) => rejection.filter !== 'excluded' || conflicts.length === 0,
-            ),
-          );
-          return {
-            status: 'pending',
-            reason: conflicts.length ? `${why}; after conflicts: ${conflicts.join('; ')}` : why,
-          };
-        }
-        const current = await lock();
-        if (!current) return archived;
-        const result = await commitPlan(
-          tx,
-          request,
-          current,
-          choice,
-          `capacity_place_${attempt}`,
-          ids,
-        );
-        if (result.ok) return { status: 'placed', allocations: [result.allocation] };
-        conflicts.push(result.reason);
-        excluded.add(choice.nodeId);
-      }
-      return {
-        status: 'pending',
-        reason: `Unschedulable after ${maxAttempts} conflicting attempts: ${conflicts.join('; ')}`,
-      };
+        },
+        excluded,
+        context,
+        maxAttempts,
+        ids,
+        lock,
+      );
     },
   });
+}
+
+/**
+ * The v0.4 pool-lease placer (PLAN.md §10.3): a reservation is checked (pool, admission plugins)
+ * and answered `queued`; the worker that owns the pool's shard places queued reservations in
+ * batches of ≤64 against an in-memory index (`placeQueued`, work kind `capacity.placer`). The
+ * admission transaction never takes the pool lock. Instances (which need an answer at once) and
+ * gangs go through the inline placer.
+ */
+export function poolLeasePlacer(options: InlinePlacerOptions = {}): Placer {
+  const inline = inlinePlacer(options);
+  return Object.freeze({
+    id: 'pool-lease',
+    async place(
+      tx: SqlTx,
+      request: PlacementRequest,
+      context: PlacementContext,
+    ): Promise<PlacementOutcome> {
+      if (request.reservationId === undefined || request.gang !== undefined)
+        return inline.place(tx, request, context);
+      assertPlacementRequest(request);
+      const pool = await readPool(tx, request.poolId);
+      if (!pool) throw new ComputeError('NOT_FOUND', `Pool ${request.poolId} not found`);
+      if (pool.archived) return archived;
+      if (context.admission)
+        for (const plugin of context.plugins) await plugin.admit?.(request, context.admission);
+      return { status: 'queued' };
+    },
+  });
+}
+
+/**
+ * The single-node replan loop (§10.3): plan without the excluded nodes, pick among the top N, take
+ * the pool lock (`lock`), commit with guarded statements; a lost race excludes that node and replans,
+ * up to `maxAttempts` times, then `pending`.
+ */
+async function placeSingle(
+  tx: SqlTx,
+  request: PlacementRequest,
+  plan: (excluded: string[]) => Promise<PlacementPlan>,
+  excluded: Set<string>,
+  context: PlacementContext,
+  maxAttempts: number,
+  ids: IdGenerator,
+  lock: () => Promise<PoolRow | undefined>,
+): Promise<PlacementOutcome> {
+  const conflicts: string[] = [];
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { ranked, rejected } = await plan([...excluded]);
+    const choice = choosePlan(ranked, () => context.random(), context.topN);
+    if (!choice) {
+      const why = summarizeRejections(
+        rejected.filter((rejection) => rejection.filter !== 'excluded' || conflicts.length === 0),
+      );
+      return {
+        status: 'pending',
+        reason: conflicts.length ? `${why}; after conflicts: ${conflicts.join('; ')}` : why,
+      };
+    }
+    const current = await lock();
+    if (!current) return archived;
+    const result = await commitPlan(tx, request, current, choice, `capacity_place_${attempt}`, ids);
+    if (result.ok) return { status: 'placed', allocations: [result.allocation] };
+    conflicts.push(result.reason);
+    excluded.add(choice.nodeId);
+  }
+  return {
+    status: 'pending',
+    reason: `Unschedulable after ${maxAttempts} conflicting attempts: ${conflicts.join('; ')}`,
+  };
+}
+
+/**
+ * Places one request against a `PoolIndex` (the v0.4 pool-lease placer's batch): views come from
+ * memory, commits are the same guarded statements, and every committed allocation is recorded in
+ * the index. The caller holds the pool lock for the batch.
+ */
+export async function placeFromIndex(
+  tx: SqlTx,
+  index: PoolIndex,
+  request: PlacementRequest,
+  context: PlacementContext,
+  options: InlinePlacerOptions = {},
+): Promise<PlacementOutcome> {
+  assertPlacementRequest(request);
+  if (request.gang !== undefined) assertGang(request.gang);
+  const pool = index.pool;
+  if (pool.archived) return archived;
+  const maxAttempts = options.maxAttempts ?? 3;
+  const ids = options.ids ?? newId;
+  const excluded = new Set(request.excludeNodes ?? []);
+  const lock = async () => pool;
+  const views = index.views(request.during);
+  const outcome =
+    request.gang !== undefined
+      ? await placeGang(
+          tx,
+          request,
+          request.gang,
+          pool,
+          views,
+          excluded,
+          context,
+          maxAttempts,
+          ids,
+          lock,
+        )
+      : await placeSingle(
+          tx,
+          request,
+          async (without) =>
+            planPlacement({ ...request, excludeNodes: without }, views, pool, {
+              plugins: context.plugins,
+              weights: context.weights,
+            }),
+          excluded,
+          context,
+          maxAttempts,
+          ids,
+          lock,
+        );
+  if (outcome.status === 'placed')
+    for (const allocation of outcome.allocations) index.record(allocation);
+  return outcome;
 }
 
 /**

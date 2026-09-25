@@ -30,6 +30,12 @@ The suite is [`tests/bench/placements.bench.ts`](../../tests/bench/placements.be
 |---|---|---|---|
 | Baseline: whole pool loaded under the pool lock | 12.4 | 79 ms | 78 ms |
 | SQL shortlist, planned before the lock | 35.7 | 27 ms | 2.3 ms |
+| v0.4 pool-lease batches of 64 (in-memory `PoolIndex`) | 118.1 | queued, then ~540 ms per batch | the whole batch |
+
+With the pool-lease placer (`capacityModule({ placer: 'pool-lease' })`), admission only queues the request and never
+takes the pool lock. The worker that owns the pool's shard locks the pool once per batch and plans up to 64 requests
+against one in-memory index. The commits are the same guarded statements, so a stale index costs a replan, never a
+double booking.
 
 The shortlist (`packages/capacity/src/shortlist.ts`):
 

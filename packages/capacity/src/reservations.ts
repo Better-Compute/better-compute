@@ -46,7 +46,9 @@ import {
   readSpotAllocations,
   truncateAllocation,
 } from './spot.js';
-import { readPool, readPoolNodes } from './store.js';
+import { lockPool, readPool, readPoolNodes } from './store.js';
+import { placeFromIndex } from './placer.js';
+import { PoolIndex } from './pool-index.js';
 import {
   isTenantRootPool,
   leasableSql,
@@ -583,6 +585,11 @@ export interface ReservationDeps {
   authz: ModuleContext['authz'];
   desired: ModuleContext['desired'];
   placer: Placer;
+  /**
+   * A placer that answers at once, for placements that cannot wait for a batch (BookingRepair,
+   * preemption). Defaults to `placer`; a queuing `placer` must come with one.
+   */
+  inline?: Placer;
   placement: Omit<PlacementContext, 'clock' | 'admission'>;
   /** The notice a preempted spot reservation gets (default `defaultSpotNoticeMs`, 2 min). */
   spotNoticeMs?: number;
@@ -793,8 +800,23 @@ async function attemptPlacement(
     const preempted = await preemptFor(deps, tx, row, during);
     if (preempted) ({ outcome, during } = preempted);
   }
+  return settlePlacement(deps, tx, row, during, outcome);
+}
+
+/** Records a placement outcome on the reservation: `placed`, `pending` (Unschedulable) or `queued`. */
+async function settlePlacement(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  row: ReservationRow,
+  during: TimeRange,
+  outcome: PlacementOutcome,
+): Promise<ReservationRow> {
+  const now = deps.clock.now();
   if (outcome.status === 'placed') {
-    const conditions = withoutCondition(row.conditions, 'Unschedulable');
+    const conditions = withoutCondition(
+      withoutCondition(row.conditions, 'Unschedulable'),
+      'Queued',
+    );
     const lease =
       row.request.leaseSeconds !== undefined ? now + row.request.leaseSeconds * 1000 : undefined;
     const placed = await move(tx, row, 'place', {
@@ -810,12 +832,21 @@ async function attemptPlacement(
     });
     return placed;
   }
+  // Queued: the pool's batch worker places it; the 30 s retry below re-queues it if that is lost.
+  const queued = outcome.status === 'queued';
+  if (queued) await deps.work.enqueue(tx, placerWork, row.poolId);
   const reason = outcome.status === 'pending' ? outcome.reason : 'queued for the pool placer';
-  const conditions = withCondition(
-    row.conditions,
-    { type: 'Unschedulable', status: 'true', reason: 'NoFit', message: reason },
-    now,
-  );
+  const conditions = queued
+    ? withCondition(
+        row.conditions,
+        { type: 'Queued', status: 'true', reason: 'PoolPlacer', message: reason },
+        now,
+      )
+    : withCondition(
+        withoutCondition(row.conditions, 'Queued'),
+        { type: 'Unschedulable', status: 'true', reason: 'NoFit', message: reason },
+        now,
+      );
   if (row.state === 'pending') {
     const { rowCount } = await tx.query(
       `UPDATE reservations SET conditions = $3::jsonb, version = version + 1
@@ -829,8 +860,67 @@ async function attemptPlacement(
   }
   const pending = await move(tx, row, 'defer', { conditions });
   await deps.work.enqueue(tx, reservationWork, row.id, { notBefore: now + pendingRetryMs });
-  await publish(deps, tx, pending, 'reservation.pending', { reason });
+  await publish(deps, tx, pending, queued ? 'reservation.queued' : 'reservation.pending', {
+    reason,
+  });
   return pending;
+}
+
+/** The work kind of the v0.4 pool-lease placer's batch worker (keyed by pool, `shardBy: 'pool'`). */
+export const placerWork = 'capacity.placer';
+
+/** Most reservations one batch places (§10.3: ≤64). */
+export const maxPlacementBatch = 64;
+
+/**
+ * One batch of the v0.4 pool-lease placer (§10.3), run by the worker that owns the pool's shard: the
+ * pool is locked once, up to `maxBatch` queued reservations are taken oldest first (`SKIP LOCKED`, so
+ * a reservation its own reconciler holds is left for the next batch), and each is placed against one
+ * in-memory `PoolIndex` with the usual guarded commits and savepoints. A request that does not fit
+ * may still preempt spot work; otherwise it becomes `Unschedulable` and retries like any pending one.
+ * `more` says whether queued reservations remain.
+ */
+export async function placeQueued(
+  deps: ReservationDeps,
+  tx: SqlTx,
+  poolId: string,
+  options: { maxBatch?: number } = {},
+): Promise<{ placed: number; pending: number; more: boolean }> {
+  const limit = Math.min(Math.max(1, options.maxBatch ?? maxPlacementBatch), maxPlacementBatch);
+  const pool = await readPool(tx, poolId);
+  if (!pool) return { placed: 0, pending: 0, more: false };
+  await lockPool(tx, poolId);
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT id FROM reservations
+      WHERE pool_id = $1 AND state = 'pending' AND conditions @> '[{"type": "Queued"}]'::jsonb
+      ORDER BY created_at, id LIMIT $2 FOR UPDATE SKIP LOCKED`,
+    [poolId, limit + 1],
+  );
+  const batch = rows.slice(0, limit);
+  const now = deps.clock.now();
+  const index = await PoolIndex.load(tx, pool, now);
+  let placed = 0;
+  for (const { id } of batch) {
+    const row = await readReservationById(tx, id, false);
+    if (!row || row.state !== 'pending') continue;
+    const start = Math.max(row.request.start ?? now, now);
+    let during = { start, end: start + requestedDuration(row) };
+    let outcome = await placeFromIndex(tx, index, placementRequest(row, during), {
+      ...deps.placement,
+      clock: deps.clock,
+    });
+    if (outcome.status === 'pending' && row.request.spot !== true) {
+      const preempted = await preemptFor(deps, tx, row, during);
+      if (preempted) {
+        ({ outcome, during } = preempted);
+        if (outcome.status === 'placed')
+          for (const allocation of outcome.allocations) index.record(allocation);
+      }
+    }
+    const next = await settlePlacement(deps, tx, row, during, outcome);
+    if (next.state === 'placed') placed++;
+  }
+  return { placed, pending: batch.length - placed, more: rows.length > limit };
 }
 
 const preemptable: readonly ReservationState[] = ['placed', 'binding', 'active'];
@@ -880,7 +970,7 @@ async function preemptFor(
     const others = (await readPoolNodes(tx, pool.id))
       .map((node) => node.id)
       .filter((nodeId) => !planned.has(nodeId));
-    const outcome = await deps.placer.place(
+    const outcome = await (deps.inline ?? deps.placer).place(
       tx,
       { ...request, excludeNodes: others },
       { ...deps.placement, clock: deps.clock },
@@ -1686,7 +1776,7 @@ export async function repairBooking(
   const again = { ...placementRequest(row, row.during), excludeNodes: [...new Set(bad)] };
   const outcome = nodeLease
     ? await placeNodeLease(tx, again, deps.placement)
-    : await deps.placer.place(tx, again, { ...deps.placement, clock: deps.clock });
+    : await (deps.inline ?? deps.placer).place(tx, again, { ...deps.placement, clock: deps.clock });
   if (outcome.status === 'placed') {
     const conditions = withoutCondition(row.conditions, 'Unschedulable');
     const { rowCount } = await tx.query(

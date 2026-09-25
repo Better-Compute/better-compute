@@ -124,9 +124,9 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
   group: G,
   method: M,
   raw: unknown,
-  options: { deny?: boolean | ComputeError; who?: Caller } = {},
+  options: { deny?: boolean | ComputeError; who?: Caller; api?: CapacityApi } = {},
 ): Promise<unknown> {
-  const definition = (api[group] as Record<string, CapacityApi[G][M]>)[
+  const definition = ((options.api ?? api)[group] as Record<string, CapacityApi[G][M]>)[
     method as string
   ] as unknown as {
     validate(raw: unknown): unknown;
@@ -1714,5 +1714,101 @@ describe('node leases: binding node (v0.5)', () => {
       await expect(call('reservations', 'create', bad)).rejects.toMatchObject({
         code: 'INVALID_INPUT',
       });
+  });
+});
+
+describe('the v0.4 pool-lease placer', () => {
+  const batching = capacityModule({ random: () => 0, topN: 1, placer: 'pool-lease', maxBatch: 3 });
+  const batchApi = batching.api!(moduleContext(db)) as CapacityApi;
+  const queue = (key: string, gpus: number) =>
+    call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: gpus }], idempotencyKey: key }),
+      { api: batchApi },
+    ) as Promise<Rsv>;
+  async function runBatch(): Promise<string> {
+    const reconciler = batching.reconcilers!.find((entry) => entry.name === 'capacity.placer')!;
+    expect(reconciler.shardBy).toBe('pool');
+    return reconciler.run({ ...moduleContext(db), signal: new AbortController().signal }, poolId);
+  }
+  const get = async (id: string) =>
+    (await call('reservations', 'get', { tenantId: 'acme', reservationId: id })) as Rsv;
+
+  beforeEach(async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+  });
+
+  it('queues reservations at admission and places them in one batch', async () => {
+    expect(capacityModule().reconcilers!.map((entry) => entry.name)).not.toContain(
+      'capacity.placer',
+    );
+    const queued = [await queue('q1', 2), await queue('q2', 2), await queue('q3', 4)];
+    for (const reservation of queued)
+      expect(reservation).toMatchObject({
+        state: 'pending',
+        conditions: [expect.objectContaining({ type: 'Queued', reason: 'PoolPlacer' })],
+      });
+    expect(recorded.work).toContainEqual({ kind: 'capacity.placer', key: poolId });
+    expect(recorded.events.map((event) => event.type)).toContain('reservation.queued');
+    const { rows: none } = await db.query(`SELECT 1 FROM allocations`);
+    expect(none).toEqual([]);
+
+    expect(await runBatch()).toBe('DONE');
+    for (const reservation of queued) {
+      const placed = await get(reservation.id);
+      expect(placed.state).toBe('placed');
+      expect(placed.conditions.map((condition) => condition.type)).not.toContain('Queued');
+    }
+    // One in-memory index across the batch: 2 + 2 + 4 GPUs fill both 4-GPU nodes exactly.
+    const { rows } = await db.query<{ node_id: string; n: string }>(
+      `SELECT d.node_id, count(*)::text AS n FROM device_bookings b JOIN devices d ON d.id = b.device_id
+        GROUP BY d.node_id ORDER BY d.node_id`,
+    );
+    expect(rows.map((row) => Number(row.n))).toEqual([4, 4]);
+    expect(recorded.work).toContainEqual({
+      kind: reservationWork,
+      key: queued[0]!.id,
+      notBefore: T0,
+    });
+  });
+
+  it('leaves what does not fit Unschedulable, and batches at most maxBatch', async () => {
+    const queued = [];
+    for (const key of ['a', 'b', 'c', 'd']) queued.push(await queue(key, 4));
+    // Four queued, a batch of three: two fit the two nodes, one is Unschedulable, one waits.
+    const summary = async () =>
+      (
+        await Promise.all(
+          queued.map(async (entry) => {
+            const row = await get(entry.id);
+            return row.state === 'placed' ? 'placed' : row.conditions.map((c) => c.type).join();
+          }),
+        )
+      ).sort();
+    expect(await runBatch()).toBe('SYNC_AGAIN');
+    expect(await summary()).toEqual(['Queued', 'Unschedulable', 'placed', 'placed']);
+    expect(await runBatch()).toBe('DONE');
+    expect(await summary()).toEqual(['Unschedulable', 'Unschedulable', 'placed', 'placed']);
+  });
+
+  it('places instances and gangs at once, and pending retries re-queue', async () => {
+    const gang = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 1 }], gang: { size: 2 }, idempotencyKey: 'g' }),
+      { api: batchApi },
+    )) as Rsv;
+    expect(gang.state).toBe('placed');
+    const queued = await queue('later', 1);
+    recorded.work = [];
+    await db.transaction(async (tx) => {
+      const reconciler = batching.reconcilers!.find((entry) => entry.name === reservationWork)!;
+      await reconciler.run(
+        { ...moduleContext(within(tx)), signal: new AbortController().signal },
+        queued.id,
+      );
+    });
+    expect(recorded.work).toContainEqual({ kind: 'capacity.placer', key: poolId });
   });
 });

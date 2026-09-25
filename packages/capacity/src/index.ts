@@ -21,3 +21,4 @@ export * from './gang.js';
 export * from './shortlist.js';
 export * from './spot.js';
 export * from './node-lease.js';
+export * from './pool-index.js';

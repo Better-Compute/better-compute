@@ -4,7 +4,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PlacementRequest, SqlExecutor, SqlTx } from '@better-compute/core';
 import { useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
-import { capacityMigrations, inlinePlacer } from '@better-compute/capacity';
+import {
+  capacityMigrations,
+  inlinePlacer,
+  lockPool,
+  placeFromIndex,
+  PoolIndex,
+} from '@better-compute/capacity';
 
 // The v0.1 placements/s measurement (PLAN.md §16, bench/REFERENCE.md "placements"): the inline placer
 // on one pool of BENCH_PLACE_NODES nodes × 8 GPUs. Each placement is an admission-shaped transaction
@@ -204,4 +210,63 @@ describe('placements', () => {
       expect(errors).toBe(0);
       expect(placed).toBe(count);
     });
+
+  // The v0.4 pool-lease placer's batch: one transaction per ≤64 requests, one in-memory index each.
+  it(`places ${count} × ${gpus} GPU in pool-lease batches of 64`, async () => {
+    await db.query(`DELETE FROM device_bookings`);
+    await db.query(`DELETE FROM allocations`);
+    await db.query(`DELETE FROM pool_capacity_rollup`);
+    const context = {
+      clock: { now: () => T0 },
+      random: Math.random,
+      plugins: [],
+      weights: {},
+      topN: 5,
+    };
+    let sequence = 0;
+    let placed = 0;
+    const batches: number[] = [];
+    const started = performance.now();
+    for (let done = 0; done < count; done += 64) {
+      const size = Math.min(64, count - done);
+      const batchStart = performance.now();
+      placed += await db.transaction(async (tx) => {
+        const pool = await lockPool(tx, 'pool_bench');
+        const index = await PoolIndex.load(tx, pool, T0);
+        let ok = 0;
+        for (let i = 0; i < size; i++) {
+          const outcome = await placeFromIndex(
+            tx,
+            index,
+            {
+              tenantId: 'acme',
+              poolId: 'pool_bench',
+              reservationId: `rsv_batch_${++sequence}`,
+              devices: [{ class: 'gpu', count: gpus }],
+              during: { start: T0, end: T0 + HOUR },
+            },
+            context,
+          );
+          if (outcome.status === 'placed') ok++;
+        }
+        return ok;
+      });
+      batches.push(performance.now() - batchStart);
+    }
+    const seconds = (performance.now() - started) / 1000;
+    const step: Step = {
+      concurrency: 0,
+      placements: placed,
+      pending: count - placed,
+      errors: 0,
+      seconds: Math.round(seconds * 100) / 100,
+      placementsPerSecond: Math.round((placed / seconds) * 10) / 10,
+      latencyMs: summary(batches),
+      // The batch holds the pool lock for its whole transaction.
+      lockHeldMs: summary(batches),
+    };
+    steps.push(step);
+    console.log('placements pool-lease batch', JSON.stringify(step));
+    expect(placed).toBe(count);
+  });
 });
