@@ -1,15 +1,19 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { create } from '@bufbuild/protobuf';
+import { create, type MessageInitShape } from '@bufbuild/protobuf';
 import { anyPack } from '@bufbuild/protobuf/wkt';
 import {
   CommandBodySchema,
+  InstanceDesiredState,
+  InstancesSectionSchema,
+  type InstanceSpecSchema,
   decodeMessage,
   InstanceSnapshotRequestSchema,
   InstanceSnapshotResultSchema,
   NodeRebootRequestSchema,
 } from '@better-compute/protocol';
 import {
+  FakeHypervisor,
   fakeHardware,
   fakeInstanceSnapshot,
   type FakeKindContext,
@@ -64,6 +68,59 @@ const request = (includeMemory: boolean, uploadUrl = 'https://store.example/put/
       includeMemory,
     }),
   );
+
+describe('FakeHypervisor snapshot round trip', () => {
+  const section = (specs: MessageInitShape<typeof InstanceSpecSchema>[]) =>
+    create(InstancesSectionSchema, { instances: specs });
+  const spec = (
+    instanceId: string,
+    extra: Partial<MessageInitShape<typeof InstanceSpecSchema>> = {},
+  ): MessageInitShape<typeof InstanceSpecSchema> => ({
+    instanceId,
+    desiredState: InstanceDesiredState.RUNNING,
+    runtime: 'cloud-hypervisor',
+    allocationId: `alloc_${instanceId}`,
+    vcpu: 2,
+    memoryBytes: 4n << 30n,
+    diskBytes: 20n << 30n,
+    image: {
+      url: 'https://images.example/base.raw',
+      sha256: new Uint8Array(32).fill(1),
+      format: 'raw',
+    },
+    nics: [],
+    ...extra,
+  });
+
+  it('brings guest memory back on another host sharing the store; disk-only snapshots do not', () => {
+    const store = new Map<string, Uint8Array>();
+    const source = new FakeHypervisor({ runtimes: ['cloud-hypervisor'], snapshotStore: store });
+    const target = new FakeHypervisor({ runtimes: ['cloud-hypervisor'], snapshotStore: store });
+    source.converge(section([spec('inst_src')]));
+    source.domains.get('inst_src')!.memory = 'python> x = 42';
+    const withMemory = source.snapshot('inst_src', true);
+    const diskOnly = source.snapshot('inst_src', false);
+    expect(store.has(withMemory.sha256)).toBe(true);
+
+    const restoreFrom = (sha256: string) => ({
+      url: `https://store.example/${sha256}`,
+      sha256: Uint8Array.from(Buffer.from(sha256, 'hex')),
+      ref: 'snap_1',
+    });
+    target.converge(
+      section([
+        spec('inst_warm', { restoreFrom: restoreFrom(withMemory.sha256) }),
+        spec('inst_cold', { restoreFrom: restoreFrom(diskOnly.sha256) }),
+      ]),
+    );
+    expect(target.domains.get('inst_warm')).toMatchObject({
+      memory: 'python> x = 42',
+      restoredFrom: withMemory.sha256,
+      state: 'running',
+    });
+    expect(target.domains.get('inst_cold')?.memory).toBeUndefined();
+  });
+});
 
 describe('fake instance.snapshot', () => {
   it('uploads the capture and reports its size, sha256, runtime and the host CPU model', async () => {

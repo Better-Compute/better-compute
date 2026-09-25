@@ -55,6 +55,11 @@ export interface FakeDomain {
   restoredFrom?: string;
   /** (v0.5) Snapshots taken of it (`instance.snapshot`). */
   snapshots?: number;
+  /**
+   * (v0.5) A stand-in for guest memory: whatever a test writes here is captured by a memory
+   * snapshot and comes back in a domain restored from it (sandboxes, §3.7).
+   */
+  memory?: string;
 }
 
 /** What `FakeHypervisor.snapshot` captured: the upload an `instance.snapshot` command reports. */
@@ -71,6 +76,11 @@ export interface FakeHypervisorOptions {
   runtimes?: readonly string[];
   /** Host limits for running domains (default unlimited); a start beyond them fails the instance. */
   capacity?: { vcpu?: number; memoryBytes?: bigint };
+  /**
+   * (v0.5) The object store snapshots go to and restores come from, by hex sha256: share one map
+   * between hosts so a snapshot taken on one restores on another (default: this host's own).
+   */
+  snapshotStore?: Map<string, Uint8Array>;
 }
 
 /** What the converger asks its daemon to fetch (a SecretRequest for the instance's allocation). */
@@ -122,6 +132,8 @@ export class FakeHypervisor {
   /** Base images cached on the host: hex sha256 → URL. */
   readonly imageCache = new Map<string, string>();
   readonly runtimes: readonly string[];
+  /** (v0.5) Snapshot objects by hex sha256 (`FakeHypervisorOptions.snapshotStore`). */
+  readonly snapshotStore: Map<string, Uint8Array>;
   private readonly capacity: NonNullable<FakeHypervisorOptions['capacity']>;
   /** Fetched user data by ref: the value, or the broker's refusal. */
   private readonly userData = new Map<string, { value: string } | { error: string }>();
@@ -137,6 +149,7 @@ export class FakeHypervisor {
   constructor(options: FakeHypervisorOptions = {}) {
     this.runtimes = [...(options.runtimes ?? ['libvirt-kvm'])];
     this.capacity = { ...options.capacity };
+    this.snapshotStore = options.snapshotStore ?? new Map();
   }
 
   /**
@@ -230,6 +243,9 @@ export class FakeHypervisor {
           boots: 0,
           ...(restore ? { restoredFrom: hex(restore.sha256) } : {}),
         };
+        // A memory snapshot brings its guest memory back (when the store holds the object).
+        const memory = restore ? this.restoredMemory(hex(restore.sha256)) : undefined;
+        if (memory !== undefined) domain.memory = memory;
         this.domains.set(id, domain);
         this.files.set(overlayPath(id, format), id);
         this.files.set(seedPath(id), id);
@@ -363,15 +379,25 @@ export class FakeHypervisor {
         image: domain.image,
         restoredFrom: domain.restoredFrom ?? null,
         memory: includeMemory ? `${domain.memoryBytes}` : null,
+        guest: includeMemory ? (domain.memory ?? null) : null,
         n: domain.snapshots,
       }),
     );
-    return {
-      bytes,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-      runtime: domain.runtime,
-      includeMemory,
-    };
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    this.snapshotStore.set(sha256, bytes);
+    return { bytes, sha256, runtime: domain.runtime, includeMemory };
+  }
+
+  /** The guest memory a stored snapshot carries, if the store holds it and it has any. */
+  private restoredMemory(sha256: string): string | undefined {
+    const bytes = this.snapshotStore.get(sha256);
+    if (!bytes) return undefined;
+    try {
+      const captured = JSON.parse(new TextDecoder().decode(bytes)) as { guest?: string | null };
+      return typeof captured.guest === 'string' ? captured.guest : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** The host is reinstalled: every domain, disk, tap and cached image is gone. */
