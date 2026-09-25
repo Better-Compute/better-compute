@@ -7,14 +7,19 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
 	"github.com/better-compute/better-compute/daemon/internal/pki"
+	"github.com/better-compute/better-compute/daemon/internal/transport"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -57,6 +62,45 @@ func joinFixture(t *testing.T) *joinService {
 	return &joinService{
 		t: t, encKey: enc, signKey: sign, signDER: selfSigned(t, sign, "join", false), pin: pin,
 		caKey: caKey, ca: ca, nodeID: "node_01k5w00000000000000000join",
+	}
+}
+
+// herdGateway refuses the first join the way a gateway sheds a herd: RESOURCE_EXHAUSTED with the
+// wait it wants (grpc-retry-pushback-ms).
+type herdGateway struct {
+	*joinService
+	refused bool
+}
+
+func (h *herdGateway) Join(ctx context.Context, req *agentv1.JoinRequest) (*agentv1.JoinResponse, error) {
+	if !h.refused {
+		h.refused = true
+		e := connect.NewError(connect.CodeResourceExhausted, errors.New("handshake bucket empty"))
+		e.Meta().Set(transport.PushbackHeader, "4321")
+		return nil, e
+	}
+	return h.joinService.Join(ctx, req)
+}
+
+func TestJoinWaitsExactlyThePushback(t *testing.T) {
+	f := joinFixture(t)
+	var slept []time.Duration
+	_, err := Join(context.Background(), JoinOptions{
+		Client:        &herdGateway{joinService: f},
+		Token:         "bcjt_join_01k5w0000000000000000000000." + strings.Repeat("A", 43),
+		EncryptionKey: &f.encKey.PublicKey,
+		SignerPin:     f.pin,
+		DataDir:       t.TempDir(),
+		Sleep: func(_ context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(slept) == 0 || slept[0] != 4321*time.Millisecond {
+		t.Fatalf("slept %v; want the gateway's 4.321s first", slept)
 	}
 }
 

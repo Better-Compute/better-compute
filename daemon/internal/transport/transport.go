@@ -22,6 +22,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -227,6 +229,28 @@ func (c *Client) decorate(h http.Header) {
 	if c.opts.TestNode != "" {
 		h.Set(TestNodeHeader, c.opts.TestNode)
 	}
+}
+
+// PushbackHeader is the gRPC retry pushback a gateway sets on a refusal (RESOURCE_EXHAUSTED):
+// milliseconds to wait before retrying, jittered and scaled to the herd it is refusing.
+const PushbackHeader = "grpc-retry-pushback-ms"
+
+// maxPushback bounds how long a pushback may keep a daemon away.
+const maxPushback = 15 * time.Minute
+
+// Pushback returns the wait a failed call's gRPC retry pushback asks for. A negative value means
+// "do not retry" in gRPC; bcd always retries, so it is ignored like a missing one.
+func Pushback(err error) (time.Duration, bool) {
+	var ce *connect.Error
+	if !errors.As(err, &ce) {
+		return 0, false
+	}
+	raw := strings.TrimSpace(ce.Meta().Get(PushbackHeader))
+	ms, perr := strconv.ParseInt(raw, 10, 64)
+	if raw == "" || perr != nil || ms < 0 {
+		return 0, false
+	}
+	return min(time.Duration(ms)*time.Millisecond, maxPushback), true
 }
 
 // Retryable reports whether a call failed in a way the daemon retries with jittered backoff:

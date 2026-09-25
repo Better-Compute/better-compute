@@ -123,6 +123,10 @@ func Join(ctx context.Context, o JoinOptions) (*State, error) {
 			}
 			delay := o.Backoff.Delay(failures, rng)
 			failures++
+			if pushback, ok := transport.Pushback(err); ok {
+				// The gateway says when (grpc-retry-pushback-ms, scaled to the herd): exactly then.
+				delay = pushback
+			}
 			o.Log.Warn("join failed, retrying", "error", err.Error(), "in", delay.String())
 			if err := o.Sleep(ctx, delay); err != nil {
 				return nil, err

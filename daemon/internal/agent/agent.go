@@ -29,6 +29,7 @@ import (
 	"github.com/better-compute/better-compute/daemon/internal/journal"
 	"github.com/better-compute/better-compute/daemon/internal/runtime"
 	"github.com/better-compute/better-compute/daemon/internal/session"
+	"github.com/better-compute/better-compute/daemon/internal/transport"
 )
 
 // Stream is one Session stream (connect's BidiStreamForClient in production).
@@ -340,6 +341,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		attempt++
 		if after != nil {
 			delay = *after
+		} else if pushback, ok := transport.Pushback(err); ok {
+			// A refusal that says when to come back (grpc-retry-pushback-ms, scaled to the herd): then,
+			// and the doubling starts over.
+			delay, attempt = pushback, 0
 		}
 		reason := "closed"
 		if err != nil {
