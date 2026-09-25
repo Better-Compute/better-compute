@@ -34,6 +34,13 @@ export class RemoteExitError extends CliError {
   }
 }
 
+/**
+ * Text safe to write to a terminal: control characters (escape sequences, carriage returns) become spaces; line
+ * breaks and tabs stay. For anything that may carry a server's words (error messages, ids, reasons).
+ */
+export const terminalSafe = (text: string): string =>
+  text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ' ');
+
 /** A usage mistake (unknown flag, missing value, bad number): the binary exits with status 2 for these. */
 export function usageError(message: string, hint?: string): CliError {
   return new CliError('INVALID_ARGUMENT', message, hint);

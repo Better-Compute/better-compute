@@ -13,7 +13,7 @@ import {
   type ResolvedConfigPath,
 } from './config.js';
 import { resolveToken } from './credentials.js';
-import { CliError, didYouMean, usageError } from './errors.js';
+import { CliError, didYouMean, terminalSafe, usageError } from './errors.js';
 import { formatResult, outputFormats, type OutputFormat } from './output.js';
 import { localTransport, remoteTransport, type ApiTransport } from './transport.js';
 
@@ -848,7 +848,8 @@ async function execute(
           values.query as string | undefined,
         ),
       ),
-    note: (message) => io.err?.(message),
+    // Notes often carry a server's words (ids, error messages): never an escape sequence to the terminal.
+    note: (message) => io.err?.(terminalSafe(message)),
     configPath,
     configModule,
     deployment,

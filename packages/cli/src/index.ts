@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { isComputeError } from '@better-compute/core';
 import { builtinCommands } from './commands/index.js';
 import { embedCommands, type EmbedOptions, type PortableCommandSpec } from './embed.js';
-import { CliError, errorCode, RemoteExitError, usageCodes } from './errors.js';
+import { CliError, errorCode, RemoteExitError, terminalSafe, usageCodes } from './errors.js';
 import {
   createCliProgram,
   manifestOf,
@@ -280,8 +280,8 @@ export async function main(
         'better-compute command failed. Check the configuration and database connectivity (set BETTER_COMPUTE_DEBUG=1 for details).',
       );
     if (error instanceof CliError && error.hint) err(`Hint: ${error.hint}`);
-    else if (known && code !== undefined && codeHints[code]) err(`Hint: ${codeHints[code]}`);
-    if (io.env.BETTER_COMPUTE_DEBUG && error instanceof Error && error.stack) err(error.stack);
+    else if (known && code !== undefined && Object.hasOwn(codeHints, code)) err(`Hint: ${codeHints[code]}`);
+    if (io.env.BETTER_COMPUTE_DEBUG && error instanceof Error && error.stack) err(terminalSafe(error.stack));
     return code !== undefined && usageCodes.has(code) ? 2 : 1;
   }
 }

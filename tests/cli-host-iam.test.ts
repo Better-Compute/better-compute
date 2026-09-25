@@ -176,7 +176,8 @@ describe('host.iam', () => {
     );
     expect(rows).toEqual([
       { serial: '11', revoked: true, reason: 'identity:offboard' },
-      { serial: '12', revoked: true, reason: 'identity:offboard' },
+      // Another tenant's record says only that access was withdrawn, not why (an offboarding elsewhere).
+      { serial: '12', revoked: true, reason: 'access-withdrawn' },
       { serial: '13', revoked: true, reason: 'identity:revoke-sessions' },
       { serial: '14', revoked: false, reason: null },
       { serial: '15', revoked: false, reason: null },

@@ -232,8 +232,14 @@ export function installIamHandlers(
       .catch((error: unknown) => report(error, { event }));
   };
   /** Every SSH certificate the identity holds, in any tenant. */
-  const revokeSshFor = (tx: SqlTx, identityId: string, reason: string) =>
-    revokeIdentitySshCertificates(tx, compute.context, { identityId, reason, by: 'iam' });
+  const revokeSshFor = (tx: SqlTx, identityId: string, event: IamInboxEvent) =>
+    revokeIdentitySshCertificates(tx, compute.context, {
+      identityId,
+      reason: event.action,
+      by: 'iam',
+      // The action (offboarding, sign-out) is recorded only where it happened; other tenants see a generic reason.
+      homeTenantId: event.tenantId,
+    });
   const caches = compute.caches;
   const own = config.handlers ?? {};
   const handlers: IamEventHandlers = {
@@ -264,7 +270,7 @@ export function installIamHandlers(
         // An identity that is gone keeps no streams and no break-glass SSH (an update, such as a rename, keeps
         // them): a certificate would otherwise open its node until it expires.
         if (end || identityEnds.has(event.action)) {
-          if (identityId) await revokeSshFor(tx, identityId, event.action);
+          if (identityId) await revokeSshFor(tx, identityId, event);
           closeFor(event, 'end');
         }
       }),
@@ -289,7 +295,7 @@ export function installIamHandlers(
           });
           return;
         }
-        await revokeSshFor(tx, holder, event.action);
+        await revokeSshFor(tx, holder, event);
         closeFor({ ...event, subjectId: holder }, 'sessions');
       }),
     // A budget spent: the offerings' onBudgetExceeded (stop-new, drain) for the alert's tenant.
@@ -309,7 +315,7 @@ export function installIamHandlers(
         caches.clear();
         if (!identitySessionEnds.has(event.action)) return;
         const identityId = text(event.subjectId);
-        if (identityId) await revokeSshFor(tx, identityId, event.action);
+        if (identityId) await revokeSshFor(tx, identityId, event);
         closeFor(event, 'sessions');
       }),
     // A tenant suspended or deleted in IAM (§12.8): its state is mirrored, the gate reloads, a deletion tears down.

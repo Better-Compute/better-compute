@@ -19,6 +19,10 @@ interface OpenedTunnel {
 
 /** Ctrl-]: ends the session from this side (telnet's escape; Ctrl-C belongs to the remote). */
 const DETACH = 0x1d;
+/** How long a hang-up waits for the node's exit status before the socket is closed from this side. */
+const DETACH_GRACE_MS = 3_000;
+/** At most this many forwarded connections (open or opening) at once; beyond it, connections are refused. */
+const FORWARD_MAX_CONNECTIONS = 16;
 
 /** The server's origin and API base path from --url; tunnels need a real server's WebSocket. */
 function tunnelEndpoint(context: CommandContext<any>): { origin: string; basePath: string } {
@@ -55,9 +59,15 @@ async function attach(
   }
   context.note(`Connected to ${opened.nodeId} (tunnel ${opened.tunnelId}); Ctrl-] detaches.`);
   let detached = false;
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  // The first Ctrl-] asks the node to end the program; if it does not answer within the grace period (a stuck
+  // program, a node gone away), or on a second Ctrl-], the socket is closed from this side.
   const detach = () => {
+    if (detached) return tunnel.terminate();
     detached = true;
     tunnel.close();
+    grace = setTimeout(() => tunnel.terminate(), DETACH_GRACE_MS);
+    grace.unref?.();
   };
   const restore = terminal.raw?.() ?? (() => undefined);
   const resize = () => {
@@ -77,6 +87,7 @@ async function attach(
   try {
     exit = await tunnel.exited;
   } finally {
+    if (grace) clearTimeout(grace);
     stopInput();
     stopResize();
     restore();
@@ -102,8 +113,26 @@ async function forward(
   const api = await context.api();
   const stop = stopSignal(context.io.signal);
   const sockets = new Set<Socket>();
+  const tunnels = new Set<ReturnType<typeof connectTunnel>>();
   const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  // Anything local can connect (other users, a web page's fetch to 127.0.0.1): each connection spends a
+  // tunnels.open of YOUR identity, so connections are capped, a RATE_LIMITED answer pauses accepting for its
+  // retryAfterMs, and refusals are noted at most every 5 s.
+  let pausedUntil = 0;
+  let lastNote = 0;
+  const refuse = (socket: Socket, why: string) => {
+    socket.destroy();
+    const now = Date.now();
+    if (now - lastNote >= 5_000) {
+      lastNote = now;
+      context.note(why);
+    }
+  };
   const server = createServer((socket) => {
+    if (Date.now() < pausedUntil)
+      return refuse(socket, 'Refusing connections while the server rate-limits tunnels for you.');
+    if (sockets.size >= FORWARD_MAX_CONNECTIONS)
+      return refuse(socket, `Refusing a connection: ${FORWARD_MAX_CONNECTIONS} are already forwarded.`);
     sockets.add(socket);
     socket.pause();
     let closed = false;
@@ -111,7 +140,10 @@ async function forward(
     const hangUp = () => {
       if (closed) return;
       closed = true;
-      tunnel?.close();
+      if (!tunnel) return;
+      tunnel.close();
+      const opened = tunnel;
+      setTimeout(() => opened.terminate(), DETACH_GRACE_MS).unref?.();
     };
     socket.on('close', () => {
       sockets.delete(socket);
@@ -122,16 +154,21 @@ async function forward(
       try {
         const opened = await api.call<OpenedTunnel>('tunnels/open', { ...input, op: 'tcp' });
         if (socket.destroyed) return;
-        tunnel = connectTunnel({ url: tunnelUrl(origin, basePath, opened.path) });
-        tunnel.onData((data) => void (socket.destroyed || socket.write(data)));
-        void tunnel.exited.then(() => {
+        const current = connectTunnel({ url: tunnelUrl(origin, basePath, opened.path) });
+        tunnel = current;
+        tunnels.add(current);
+        current.onData((data) => void (socket.destroyed || socket.write(data)));
+        void current.exited.then(() => {
+          tunnels.delete(current);
           closed = true;
           socket.end();
         });
-        await tunnel.ready;
+        await current.ready;
       } catch (error) {
-        context.note(`A connection could not be forwarded: ${describe(error)}`);
-        socket.destroy();
+        const failure = error as { code?: string; details?: { retryAfterMs?: number } };
+        if (failure.code === 'RATE_LIMITED')
+          pausedUntil = Date.now() + Math.min(Math.max(failure.details?.retryAfterMs ?? 10_000, 1_000), 60_000);
+        refuse(socket, `A connection could not be forwarded: ${describe(error)}`);
         return;
       }
       // The tunnel has no half-close: the client ending its side ends the connection.
@@ -162,6 +199,8 @@ async function forward(
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
       for (const socket of sockets) socket.destroy();
+      // Nothing keeps the process alive after Ctrl-C: open tunnels close from this side at once.
+      for (const tunnel of tunnels) tunnel.terminate();
     });
   }
 }
@@ -211,7 +250,7 @@ export const tunnelCommands = [
     group: 'Access',
     summary: 'Forward a local port to a port of a running instance',
     description:
-      'forward listens on --bind (default 127.0.0.1) at --local-port (default: the same as --port; 0 picks a free one) and forwards each connection to --port on the instance through its own tcp tunnel (tunnels.open, compute:instances:exec on the instance), like ssh -L. It runs until Ctrl-C. The tunnels run over the server’s WebSocket, so it needs --url (or BETTER_COMPUTE_URL). A connection is re-authorized like any tunnel: revoking your session or the delegation closes it. Binding anything but loopback lets whoever reaches that address use your access.',
+      'forward listens on --bind (default 127.0.0.1) at --local-port (default: the same as --port; 0 picks a free one) and forwards each connection to --port on the instance through its own tcp tunnel (tunnels.open, compute:instances:exec on the instance), like ssh -L. It runs until Ctrl-C. The tunnels run over the server’s WebSocket, so it needs --url (or BETTER_COMPUTE_URL). A connection is re-authorized like any tunnel: revoking your session or the delegation closes it. Binding anything but loopback lets whoever reaches that address use your access; even on loopback, other users of this machine and web pages open in your browser can reach the port, as with ssh -L. At most 16 connections are forwarded at once, and new ones are refused while the server rate-limits your tunnels.',
     target: 'token',
     output: 'text',
     flags: {

@@ -547,6 +547,19 @@ describe('nodes.issueSshCert', () => {
     const kept = (await issue({}, { ...mfa, sessionId: 'ses_kept' })) as unknown as { serial: string };
     const gone = (await issue({}, { ...mfa, sessionId: 'ses_gone' })) as unknown as { serial: string };
     const flaky = (await issue({}, { ...mfa, sessionId: 'ses_flaky' })) as unknown as { serial: string };
+    const denied = (await issue({}, { ...mfa, sessionId: 'ses_denied' })) as unknown as { serial: string };
+    // A certificate of a tenant compute holds suspended: revoked without asking IAM.
+    await db.query(`CREATE TABLE IF NOT EXISTS compute_tenant_states (tenant_id text PRIMARY KEY, state text NOT NULL,
+                      reason text, updated_at timestamptz, teardown_done_at timestamptz)`);
+    await db.query(
+      `INSERT INTO compute_tenant_states (tenant_id, state, reason) VALUES ('frozen', 'suspended', 'test')
+       ON CONFLICT (tenant_id) DO UPDATE SET state = 'suspended'`,
+    );
+    await db.query(
+      `INSERT INTO ssh_certificates (serial, node_id, tenant_id, identity_id, principal, key_id, expires_at, session_id)
+       VALUES ('777', $1, 'frozen', 'usr_frozen', $2, 'k', compute_now() + interval '10 minutes', 'ses_frozen')`,
+      [NODE, `root@${NODE}`],
+    );
     const { rows: recorded } = await db.query<{ session_id: string }>(
       'SELECT session_id FROM ssh_certificates WHERE serial = $1',
       [gone.serial],
@@ -566,6 +579,9 @@ describe('nodes.issueSshCert', () => {
             decisions.push([session.sessionId, decision]);
             // The binding was deleted (IAM announced nothing compute reacts to), or IAM is down.
             if (session.sessionId === 'ses_flaky') throw new Error('IAM unreachable');
+            // An error that means "no": revoked like a false.
+            if (session.sessionId === 'ses_denied')
+              throw Object.assign(new Error('denied'), { code: 'ACCESS_DENIED' });
             return session.sessionId !== 'ses_gone';
           },
         },
@@ -588,18 +604,51 @@ describe('nodes.issueSshCert', () => {
       `SELECT serial, revoked_at IS NOT NULL AS revoked, reauthorized_at IS NOT NULL AS checked,
               revoke_reason AS reason
          FROM ssh_certificates WHERE serial = ANY($1) ORDER BY serial`,
-      [[kept.serial, gone.serial, flaky.serial]],
+      [[kept.serial, gone.serial, flaky.serial, denied.serial, '777']],
     );
     const by = Object.fromEntries(rows.map((row) => [row.serial, row]));
     expect(by[kept.serial]).toMatchObject({ revoked: false, checked: true });
     expect(by[gone.serial]).toMatchObject({ revoked: true, reason: 'access-withdrawn' });
-    // IAM unreachable: kept (break-glass is for outages), and reported.
-    expect(by[flaky.serial]).toMatchObject({ revoked: false, checked: false });
+    expect(by[denied.serial]).toMatchObject({ revoked: true, reason: 'access-withdrawn' });
+    // IAM unreachable: kept (break-glass is for outages) and reported, but stamped, so it never crowds out the rest.
+    expect(by[flaky.serial]).toMatchObject({ revoked: false, checked: true });
     expect(warnings).toHaveLength(1);
-    expect(invalidated).toEqual([NODE]);
-    expect(events).toEqual(['node.ssh-cert.revoked']);
+    expect(by['777']).toMatchObject({ revoked: true, reason: 'tenant-suspended' });
+    expect(decisions.map((entry) => (entry as [string])[0])).not.toContain('ses_frozen');
+    expect(invalidated).toEqual([NODE, NODE, NODE]);
+    expect(events).toEqual(['node.ssh-cert.revoked', 'node.ssh-cert.revoked', 'node.ssh-cert.revoked']);
     const spec = await withSsh.nodeSpec!(specContext(), { id: NODE } as NodeRecord);
     expect(spec.access?.sshRevokedSerials).toContain(gone.serial);
+  });
+
+  it('issues only to a session (it is re-decided for it) and revokes a deleted tenant’s certificates', async () => {
+    await expect(issue({}, { ...alice, mfa: true, sessionId: undefined } as never)).rejects.toMatchObject({
+      code: 'ACCESS_DENIED',
+      details: { reason: 'session-required' },
+    });
+    const issued = (await issue({})) as unknown as { serial: string };
+    invalidated.length = 0;
+    events = [];
+    const result = await withSsh.tenantDeleted!(
+      {
+        sql: db,
+        desired: { invalidate: async (_tx: SqlTx, nodeId: string) => invalidated.push(nodeId) },
+        events: {
+          async publish(_tx: SqlTx, event: { type: string }) {
+            events.push(event.type);
+          },
+        },
+      } as never,
+      'acme',
+    );
+    expect(result).toBe('DONE');
+    const { rows } = await db.query<{ reason: string | null }>(
+      'SELECT revoke_reason AS reason FROM ssh_certificates WHERE serial = $1',
+      [issued.serial],
+    );
+    expect(rows[0]?.reason).toBe('tenant-deleted');
+    expect(invalidated).toEqual([NODE]);
+    expect(events.every((type) => type === 'node.ssh-cert.revoked')).toBe(true);
   });
 
   it('lists the tenant’s certificates for a node, newest first, with their state and without the certificate', async () => {

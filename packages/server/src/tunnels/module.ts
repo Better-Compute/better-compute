@@ -73,6 +73,16 @@ function slidingLimit(max: number, windowMs: number, what: string) {
   };
 }
 
+/** IAM answers that mean "no longer allowed" when re-deciding a certificate (unlike IAM being unreachable). */
+const deniedCodes: ReadonlySet<string> = new Set([
+  'ACCESS_DENIED',
+  'UNAUTHENTICATED',
+  'NOT_FOUND',
+  'TENANT_SUSPENDED',
+  'SESSION_EXPIRED',
+  'SESSION_REVOKED',
+]);
+
 /** The certificate principal for `account` on `nodeId`: node-bound, never a bare account. */
 export const sshPrincipal = (account: string, nodeId: string): string => `${account}@${nodeId}`;
 
@@ -579,6 +589,15 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
           } catch {
             invalid('publicKey must be an Ed25519 or ECDSA P-256 OpenSSH public key');
           }
+          // Re-decided every minute for the session that asked (IAM's authorizeSession): without one (an API key)
+          // nothing could withdraw it before it expires.
+          if (!caller.sessionId)
+            throw new ComputeError(
+              'ACCESS_DENIED',
+              'Break-glass certificates are issued to a signed-in session, not an API key',
+              undefined,
+              { reason: 'session-required' },
+            );
           const account = input.principal ?? 'root';
           if (!sshAccounts.includes(account))
             invalid(`principal must be one of ${sshAccounts.join(', ')}`);
@@ -795,26 +814,65 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
         // A certificate outlives every request check, and IAM does not announce every way access ends
         // (a deleted binding, an expired activation, a changed policy). Like a tunnel's 60 s re-check, each
         // outstanding certificate is re-decided for its issuing session; a denial revokes it (the node's KRL).
-        // IAM unreachable keeps it: break-glass is for outages, and it expires within the hour anyway.
+        // A tenant compute holds suspended or deleted revokes without asking. An answer that means "no" (denied,
+        // unauthenticated, not found, tenant suspended) revokes too; only IAM being unreachable keeps a
+        // certificate: break-glass is for outages, and it expires within the hour anyway. Every attempt stamps
+        // `reauthorized_at`, so failing rows never crowd out the rest.
         name: 'tunnels.ssh-certificates-reauthorize',
         shardBy: 'none',
         periodic: [{ key: 'ssh-certificates', every: '1m' }],
         async run(context) {
+          if (!options.ssh) return 'DONE';
           const authorizeSession = context.iam.authorizeSession?.bind(context.iam);
-          if (!options.ssh || !authorizeSession) return 'DONE';
+          const { rows: states } = await context.sql.query<{ found: string | null }>(
+            "SELECT to_regclass('compute_tenant_states')::text AS found",
+          );
+          const tenantState = states[0]?.found
+            ? `(SELECT t.state FROM compute_tenant_states t WHERE t.tenant_id = c.tenant_id)`
+            : 'NULL::text';
           const { rows } = await context.sql.query<{
             serial: string;
             node_id: string;
             tenant_id: string;
             identity_id: string;
-            session_id: string;
+            session_id: string | null;
+            tenant_state: string | null;
           }>(
-            `SELECT serial, node_id, tenant_id, identity_id, session_id FROM ssh_certificates
-              WHERE revoked_at IS NULL AND expires_at > compute_now() AND session_id IS NOT NULL
-              ORDER BY reauthorized_at NULLS FIRST, serial LIMIT 500`,
+            `SELECT c.serial, c.node_id, c.tenant_id, c.identity_id, c.session_id, ${tenantState} AS tenant_state
+               FROM ssh_certificates c
+              WHERE c.revoked_at IS NULL AND c.expires_at > compute_now()
+                AND (c.session_id IS NOT NULL OR ${tenantState} IN ('suspended', 'deleted'))
+              ORDER BY c.reauthorized_at NULLS FIRST, c.serial LIMIT 500`,
           );
+          const revoke = (row: (typeof rows)[number], reason: string) =>
+            context.sql.transaction(async (tx) => {
+              const { rows: revoked } = await tx.query<{ serial: string }>(
+                `UPDATE ssh_certificates
+                    SET revoked_at = compute_now(), revoked_by = 'iam', revoke_reason = $2
+                  WHERE serial = $1 AND revoked_at IS NULL
+                  RETURNING serial`,
+                [row.serial, reason],
+              );
+              if (!revoked.length) return;
+              await context.desired.invalidate(tx, row.node_id);
+              await context.events.publish(tx, {
+                type: 'node.ssh-cert.revoked',
+                tenantId: row.tenant_id,
+                subject: `node/${row.node_id}`,
+                data: { serial: row.serial, identityId: row.identity_id, reason },
+              });
+            });
+          const stamp = (serial: string) =>
+            context.sql.query('UPDATE ssh_certificates SET reauthorized_at = compute_now() WHERE serial = $1', [
+              serial,
+            ]);
           for (const row of rows) {
             if (context.signal.aborted) break;
+            if (row.tenant_state === 'suspended' || row.tenant_state === 'deleted') {
+              await revoke(row, `tenant-${row.tenant_state}`);
+              continue;
+            }
+            if (!authorizeSession || !row.session_id) continue;
             let allowed: boolean;
             try {
               allowed = await authorizeSession(
@@ -826,36 +884,19 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
                 },
               );
             } catch (error) {
-              context.log.warn('Re-authorizing an SSH certificate failed; it stays valid until it expires', {
-                serial: row.serial,
-                error: error instanceof Error ? error.message : String(error),
-              });
-              continue;
+              const code = (error as { code?: unknown }).code;
+              if (typeof code === 'string' && deniedCodes.has(code)) allowed = false;
+              else {
+                context.log.warn('Re-authorizing an SSH certificate failed; it stays valid until it expires', {
+                  serial: row.serial,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                await stamp(row.serial);
+                continue;
+              }
             }
-            if (allowed) {
-              await context.sql.query(
-                'UPDATE ssh_certificates SET reauthorized_at = compute_now() WHERE serial = $1',
-                [row.serial],
-              );
-              continue;
-            }
-            await context.sql.transaction(async (tx) => {
-              const { rows: revoked } = await tx.query<{ serial: string }>(
-                `UPDATE ssh_certificates
-                    SET revoked_at = compute_now(), revoked_by = 'iam', revoke_reason = 'access-withdrawn'
-                  WHERE serial = $1 AND revoked_at IS NULL
-                  RETURNING serial`,
-                [row.serial],
-              );
-              if (!revoked.length) return;
-              await context.desired.invalidate(tx, row.node_id);
-              await context.events.publish(tx, {
-                type: 'node.ssh-cert.revoked',
-                tenantId: row.tenant_id,
-                subject: `node/${row.node_id}`,
-                data: { serial: row.serial, identityId: row.identity_id, reason: 'access-withdrawn' },
-              });
-            });
+            if (allowed) await stamp(row.serial);
+            else await revoke(row, 'access-withdrawn');
           }
           // The longest-unchecked 500 per minute; the rest wait for the next period (never a tight loop while
           // IAM is failing).
@@ -863,6 +904,28 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
         },
       },
     ],
+    // A deleted tenant keeps no break-glass access: its unexpired certificates join their nodes' KRLs.
+    async tenantDeleted(context, tenantId) {
+      await context.sql.transaction(async (tx) => {
+        const { rows } = await tx.query<{ serial: string; node_id: string; identity_id: string }>(
+          `UPDATE ssh_certificates
+              SET revoked_at = compute_now(), revoked_by = 'iam', revoke_reason = 'tenant-deleted'
+            WHERE tenant_id = $1 AND revoked_at IS NULL AND expires_at > compute_now()
+            RETURNING serial, node_id, identity_id`,
+          [tenantId],
+        );
+        for (const nodeId of [...new Set(rows.map((row) => row.node_id))].sort())
+          await context.desired.invalidate(tx, nodeId);
+        for (const row of rows)
+          await context.events.publish(tx, {
+            type: 'node.ssh-cert.revoked',
+            tenantId,
+            subject: `node/${row.node_id}`,
+            data: { serial: row.serial, identityId: row.identity_id, reason: 'tenant-deleted' },
+          });
+      });
+      return 'DONE';
+    },
     // Every node pins the issuer's JWKS (the daemon verifies each ticket against it, P14) and
     // trusts the compute SSH CA for break-glass certificates naming this node only, minus the
     // revoked ones still within their lifetime (its KRL).

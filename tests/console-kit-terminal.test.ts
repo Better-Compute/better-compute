@@ -17,6 +17,7 @@ function fakeTunnel() {
     resize: (rows, cols) => sent.push({ resize: [rows, cols] }),
     onData: (handler) => void handlers.push(handler),
     close: () => markExited({ exitCode: 0, reason: 'bye' }),
+    terminate: () => markExited({ exitCode: -1, reason: 'terminated' }),
   };
   return {
     tunnel,

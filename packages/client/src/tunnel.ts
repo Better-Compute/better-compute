@@ -165,6 +165,11 @@ export interface TunnelConnection {
   onData(handler: (data: Uint8Array, channel: number) => void): void;
   /** Ends the session (the node reports its exit status, then the socket closes). */
   close(): void;
+  /**
+   * Closes the socket now, without waiting for the node: for when `close()` got no answer (a stuck program or a
+   * node that went away). `exited` resolves with exit code -1.
+   */
+  terminate(): void;
 }
 
 /** The tunnel's WebSocket URL from the API base and `tunnels.open`'s `path`. */
@@ -251,5 +256,14 @@ export function connectTunnel(options: {
     resize: (rows, cols) => send(encodeTunnelFrame({ case: 'resize', rows, cols })),
     onData: (handler) => void handlers.push(handler),
     close: () => send(encodeTunnelFrame({ case: 'closed', exitCode: 0, reason: '' })),
+    terminate() {
+      failReady(new Error('Tunnel terminated'));
+      markExited(exit ?? { exitCode: -1, reason: 'terminated' });
+      try {
+        ws.close(1000, 'terminated');
+      } catch {
+        // Already closing or closed.
+      }
+    },
   };
 }
