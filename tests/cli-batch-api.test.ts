@@ -167,6 +167,30 @@ describe('batch commands against commandBatches', () => {
     expect(listed.items.map((item: { batchId: string }) => item.batchId)).toEqual([s.batchId]);
   });
 
+  it('creates a batch from a scope file whose operations approvers then see', { timeout: 60_000 }, async () => {
+    const s = await setup();
+    await writeFile(
+      join(s.cwd, 'rack7.json'),
+      JSON.stringify([
+        { subject: 'node_a', kind: 'node.reboot', payload: { json: { reason: 'firmware 2.1' } } },
+        { subject: 'node_b', kind: 'node.reboot', payload: { json: { reason: 'firmware 2.1' } } },
+      ]),
+    );
+    const created = await s.run(['batch', 'create', '--reason', 'firmware rollout', '--scope', 'rack7.json', '--hours', '2', '--key', 'k-rack7']);
+    const batchId = (created.batchId ?? created.batch?.batchId) as string;
+    expect(batchId).toMatch(/^batch_/);
+    // The same key: the same batch, never a second one.
+    const again = await s.run(['batch', 'create', '--reason', 'firmware rollout', '--scope', 'rack7.json', '--hours', '2', '--key', 'k-rack7']);
+    expect(again.batchId ?? again.batch?.batchId).toBe(batchId);
+    const shown = await s.run(['batch', 'show', '--batch', batchId]);
+    expect(shown).toMatchObject({ scopeVerified: true, scopeSize: 2, reason: 'firmware rollout' });
+    await s.run(['batch', 'approve', '--batch', batchId, '--key', 'alice.pem']);
+    expect(s.err.join('\n')).toMatch(/node\.reboot ×2: \{"reason":"firmware 2\.1"\}/);
+    // A payload given as JSON that is not the kind's message is refused before anything is created.
+    await writeFile(join(s.cwd, 'bad.json'), JSON.stringify([{ subject: 'node_a', kind: 'node.reboot', payload: { json: { nope: 1 } } }]));
+    await expect(s.run(['batch', 'create', '--reason', 'x', '--scope', 'bad.json'])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it('refuses a batch whose listed commands do not give its root, and cancels on request', { timeout: 60_000 }, async () => {
     const s = await setup();
     // The control plane lists one more BMC than the root it asks approvers to sign commits to.

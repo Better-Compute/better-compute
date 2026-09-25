@@ -1,4 +1,4 @@
-import { createPrivateKey, type KeyObject } from 'node:crypto';
+import { createPrivateKey, randomUUID, type KeyObject } from 'node:crypto';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import {
   approverKeyOf,
@@ -8,6 +8,7 @@ import {
   batchScope,
   createApproverKey,
   decodeBatchPayload,
+  encodeBatchPayload,
   signApproverSet,
   signBatchApproval,
   type ApproverSet,
@@ -899,6 +900,63 @@ export const batchCommands = [
           : `Approved by ${signature.kid}: ${after.approvals.length} of ${after.requiredApprovals}.`,
       );
       return after;
+    },
+  }),
+  defineCommand({
+    name: 'batch create',
+    group: 'Quorum',
+    summary: 'Create a destructive batch that waits for its approvers',
+    description:
+      "batch create creates a batch (commandBatches.create, compute:batches:create) from --scope FILE: a JSON array of { subject, kind, payload } leaves. subject is the node id for kinds a node runs on itself, bmc:<site agent node id>/<address> for bmc.*, node:<target> for site.httpProxy. payload binds the leaf to exactly one operation, which approvers are shown: { json } (the kind's payload message as proto3 JSON, encoded here) or { typeUrl, value } (base64); a leaf without one admits any payload of its kind and approvers must accept that explicitly. The batch admits its commands for --hours (default 24, at most 72) once approved; run them with commands.run { batchId }. Prints the batch; approvers then run better-compute batch approve.",
+    target: 'token',
+    output: 'json',
+    flags: {
+      tenant: tenantFlag,
+      reason: { type: 'string', value: 'TEXT', required: true, description: 'What the batch does, shown to approvers' },
+      scope: { type: 'string', value: 'PATH', required: true, description: 'The leaves (JSON array of { subject, kind, payload })' },
+      hours: { type: 'integer', value: 'N', min: 1, max: 72, default: 24, description: 'How long it admits its commands' },
+      key: { type: 'string', value: 'KEY', description: 'Idempotency key: repeat it to retry the same creation' },
+    },
+    examples: ['better-compute batch create --tenant org_acme --reason "reimage rack 7" --scope rack7.json'],
+    async run({ flags, api, path, note }) {
+      const file = path(flags.scope!);
+      let raw: unknown;
+      try {
+        raw = JSON.parse(await readFile(file, 'utf8'));
+      } catch {
+        throw new CliError('INVALID_INPUT', `${file} is not JSON`);
+      }
+      if (!Array.isArray(raw) || raw.length === 0)
+        throw new CliError('INVALID_INPUT', `${file} must be a JSON array of { subject, kind, payload } leaves`);
+      const scope = raw.map((item: unknown, index) => {
+        const leaf = item as { subject?: unknown; kind?: unknown; payload?: { json?: unknown; typeUrl?: unknown; value?: unknown } };
+        if (typeof leaf?.subject !== 'string' || !printableName.test(leaf.subject) || typeof leaf.kind !== 'string' || !printableName.test(leaf.kind))
+          throw new CliError('INVALID_INPUT', `${file}[${index}] needs a subject and a kind (printable ASCII)`);
+        if (leaf.payload === undefined) return { subject: leaf.subject, kind: leaf.kind };
+        if ('json' in leaf.payload) {
+          const encoded = encodeBatchPayload(leaf.kind, leaf.payload.json);
+          return {
+            subject: leaf.subject,
+            kind: leaf.kind,
+            payload: { typeUrl: encoded.typeUrl, value: Buffer.from(encoded.value).toString('base64') },
+          };
+        }
+        if (typeof leaf.payload.typeUrl !== 'string' || typeof leaf.payload.value !== 'string')
+          throw new CliError('INVALID_INPUT', `${file}[${index}].payload is { json } or { typeUrl, value (base64) }`);
+        return { subject: leaf.subject, kind: leaf.kind, payload: { typeUrl: leaf.payload.typeUrl, value: leaf.payload.value } };
+      });
+      const unboundCount = scope.filter((leaf) => !('payload' in leaf)).length;
+      if (unboundCount)
+        note(`Warning: ${unboundCount} leaf/leaves admit any payload of their kind; approvers must accept that explicitly.`);
+      const idempotencyKey = flags.key ?? `cli-${randomUUID()}`;
+      if (!flags.key) note(`Idempotency key: ${idempotencyKey} (pass --key ${idempotencyKey} to retry this creation)`);
+      return (await api()).call('commandBatches/create', {
+        tenantId: flags.tenant,
+        reason: flags.reason,
+        scope,
+        notAfterSeconds: (flags.hours ?? 24) * 3600,
+        idempotencyKey,
+      });
     },
   }),
   defineCommand({

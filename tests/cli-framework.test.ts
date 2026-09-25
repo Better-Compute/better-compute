@@ -196,6 +196,7 @@ describe('help and the manifest', () => {
       'batch list',
       'batch show',
       'batch approve',
+      'batch create',
       'batch members',
       'batch cancel',
       'daemon install-script',

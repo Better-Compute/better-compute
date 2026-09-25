@@ -7,6 +7,7 @@ import {
   batchLeafInput,
   batchNodeInput,
   commandKinds,
+  encodeMessageJson,
   isCommandKind,
   protocolRegistry,
   SignatureSchema,
@@ -343,6 +344,27 @@ export function expectedPayloadType(kind: string): string | undefined {
       'diag.dcgm': 'bettercompute.agent.v1.DiagDcgmRequest',
     } as Record<string, string>
   )[kind];
+}
+
+/**
+ * A leaf's payload from its proto3 JSON, as the kind's own payload type (what `batch create` stores so approvers see
+ * the operation): `{ typeUrl, value, payloadSha256 }`. Throws INVALID_INPUT for a kind without a known type, or JSON
+ * that is not that message.
+ */
+export function encodeBatchPayload(
+  kind: string,
+  json: unknown,
+): { typeUrl: string; value: Uint8Array; payloadSha256: Uint8Array } {
+  const typeName = expectedPayloadType(kind);
+  if (!typeName)
+    throw new ComputeError('INVALID_INPUT', `${kind} has no payload type known here: give its payload as { typeUrl, value }`);
+  let value: Uint8Array;
+  try {
+    value = encodeMessageJson(typeName, json);
+  } catch (error) {
+    throw new ComputeError('INVALID_INPUT', `Not a ${typeName}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { typeUrl: `type.googleapis.com/${typeName}`, value, payloadSha256: sha256(value) };
 }
 
 /** A batch leaf's operation, as an approver is shown it. */
