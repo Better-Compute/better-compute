@@ -9,6 +9,7 @@ import {
   type PlacementRequest,
   type SqlTx,
 } from '@better-compute/core';
+import { dedicatedTaint, dedicatedTaintPrefix } from './eligibility.js';
 import { chooseGang, planGangs } from './gang.js';
 import type { NodePlan } from './pipeline.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
@@ -42,6 +43,17 @@ export function isTenantRootPool(pool: { policy?: unknown }): boolean {
 /** The SQL predicate of a leasable node over `nodes n`. */
 export const leasableSql = `n.provision_state = 'ready' AND NOT n.maintenance AND NOT n.cordoned
    AND n.trust = 'platform'`;
+
+/**
+ * `leasableSql` for one tenant's lease: a node dedicated to another tenant (§10.6
+ * `dedicated=<tenant>`) is not leasable by it. `tolerated` is an SQL `text[]` expression bound to
+ * `[dedicatedTaint(tenantId)]`.
+ */
+export function leasableSqlFor(tolerated: string): string {
+  return `${leasableSql}
+   AND NOT EXISTS (SELECT 1 FROM unnest(n.no_schedule_reasons) AS r(reason)
+                    WHERE r.reason LIKE '${dedicatedTaintPrefix}%' AND NOT (r.reason = ANY(${tolerated})))`;
+}
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -81,11 +93,17 @@ export async function leaseCandidates(
 ): Promise<{ candidates: LeaseFit[]; labels: Map<string, Record<string, string>> }> {
   const { rows } = await tx.query<{ id: string }>(
     `SELECT n.id FROM nodes n
-      WHERE n.pool_id = $1 AND ${leasableSql} AND NOT (n.id = ANY($2::text[]))
+      WHERE n.pool_id = $1 AND ${leasableSqlFor('$5::text[]')} AND NOT (n.id = ANY($2::text[]))
         AND NOT EXISTS (SELECT 1 FROM allocations a WHERE a.node_id = n.id AND a.released_at IS NULL
                            AND a.during && tstzrange($3::timestamptz, $4::timestamptz))
       ORDER BY n.id`,
-    [poolId, [...excluded], iso(request.during.start), iso(request.during.end)],
+    [
+      poolId,
+      [...excluded],
+      iso(request.during.start),
+      iso(request.during.end),
+      [dedicatedTaint(request.tenantId)],
+    ],
   );
   const nodeIds = rows.map((row) => row.id);
   const [devices, labels] = [await readDevices(tx, nodeIds), await readNodeLabels(tx, nodeIds)];
@@ -214,8 +232,9 @@ async function commitLease(
   ids: IdGenerator,
 ): Promise<Allocation | undefined> {
   const node = await tx.query(
-    `SELECT n.id FROM nodes n WHERE n.id = $1 AND n.pool_id = $2 AND ${leasableSql} FOR SHARE OF n`,
-    [fit.nodeId, pool.id],
+    `SELECT n.id FROM nodes n
+      WHERE n.id = $1 AND n.pool_id = $2 AND ${leasableSqlFor('$3::text[]')} FOR SHARE OF n`,
+    [fit.nodeId, pool.id, [dedicatedTaint(request.tenantId)]],
   );
   if (node.rows.length === 0) return undefined;
   const allocationId = ids('alloc');

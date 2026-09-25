@@ -2176,6 +2176,26 @@ describe('node leases: binding node (v0.5)', () => {
       });
   });
 
+  it('never leases a node dedicated to another tenant (dedicated=<tenant>)', async () => {
+    await db.query(
+      `UPDATE nodes SET no_schedule_reasons = ARRAY['taint:dedicated=beta'] WHERE id = 'node_01jz00000000000000000000la'`,
+    );
+    const first = (await call('reservations', 'create', lease({ idempotencyKey: 'd1' }))) as Rsv;
+    expect(first.state).toBe('placed');
+    expect((await allocationsOf(first.id)).map((row) => row.node_id)).toEqual([
+      'node_01jz00000000000000000000lb',
+    ]);
+    // The only node left is beta's: acme's next lease waits.
+    const second = (await call('reservations', 'create', lease({ idempotencyKey: 'd2' }))) as Rsv;
+    expect(second.state).toBe('pending');
+    // Dedicated to acme instead, it is acme's to lease.
+    await db.query(
+      `UPDATE nodes SET no_schedule_reasons = ARRAY['taint:dedicated=acme'] WHERE id = 'node_01jz00000000000000000000la'`,
+    );
+    const third = (await call('reservations', 'create', lease({ idempotencyKey: 'd3' }))) as Rsv;
+    expect(third.state).toBe('placed');
+  });
+
   it('runs scheduler admission hooks for node leases too', async () => {
     const seen: string[] = [];
     const policy = capacityModule({

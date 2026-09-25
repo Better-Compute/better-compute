@@ -63,7 +63,7 @@ import { planPlacement, type NodePlan } from './pipeline.js';
 import { PoolIndex, type PoolIndexCache } from './pool-index.js';
 import {
   isTenantRootPool,
-  leasableSql,
+  leasableSqlFor,
   metalWork,
   nodeBindTimeoutMs,
   placeNodeLease,
@@ -2364,7 +2364,7 @@ export async function repairBooking(
     `SELECT a.node_id,
             EXISTS (SELECT 1 FROM nodes n JOIN pools p ON p.id = n.pool_id
                      WHERE n.id = a.node_id
-                       AND ${nodeLease ? leasableSql : schedulableSqlTolerating('$2::text[]')}) AS node_ok,
+                       AND ${nodeLease ? leasableSqlFor('$2::text[]') : schedulableSqlTolerating('$2::text[]')}) AS node_ok,
             ${nodeLease ? 'true OR ' : ''}NOT EXISTS (SELECT 1 FROM devices d WHERE d.id = ANY(a.atoms)
                          AND NOT (d.healthy AND d.bookable)) AS atoms_ok
        FROM allocations a
