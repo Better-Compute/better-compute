@@ -8,7 +8,9 @@ import { CliError } from './errors.js';
  *   site and the three key pins), the JoinService encryption key (public) and a hardened bcd.service;
  * - runs `bcd join` with the token on standard input, then enables and starts the service.
  * Without a token on a host that is already configured it upgrades in place (the v0.1-v0.3 upgrade
- * path). Every embedded value is validated against a narrow character set, so nothing a caller passes
+ * path), keeping the sections the operator configured ([plugins], [boot], [imds]…). A node whose config has a
+ * [plugins] section gets the bcx plugin drop-in (their own uids and cgroups); others keep the tighter unit.
+ * Every embedded value is validated against a narrow character set, so nothing a caller passes
  * can break out of the shell or TOML quoting.
  */
 
@@ -29,6 +31,11 @@ export interface InstallScriptOptions {
   joinEncryptionKeyPin: string;
   /** The JoinService encryption key bcd seals the token to (public; checked against its pin). */
   joinEncryptionJwk: { kty: string; crv: string; x: string; y: string };
+  /**
+   * bcx driver plugins on this node (PLAN.md §5.5): a [plugins] section (dir, a delegated cgroup) in config.toml.
+   * `privileged` names the plugins that run as root without the seccomp filter (a Kata runtime plugin).
+   */
+  plugins?: { privileged?: readonly string[] };
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -74,6 +81,8 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
     if (!hexPattern.test(hash!))
       throw invalid('--sha256', `for ${arch} must be 64 lower-case hex digits`);
   }
+  for (const name of options.plugins?.privileged ?? [])
+    if (!idPattern.test(name)) throw invalid('--privileged-plugins', 'must name plugins by letters, digits and . _ -');
   const jwk = options.joinEncryptionJwk;
   if (
     jwk.kty !== 'EC' ||
@@ -106,6 +115,41 @@ export function renderBcdConfig(
     '',
   ].join('\n');
 }
+
+/** Where plugins live (root-owned, 0755: each runs under its own uid and must reach its binary). */
+export const bcdPluginsDir = '/usr/local/lib/bcd/plugins';
+
+/**
+ * The [plugins] section of a node that runs bcx plugins: their directory and a child of bcd's own delegated cgroup
+ * (the drop-in's Delegate=yes, with bcd itself in the "main" subgroup), where each plugin gets its own limits.
+ */
+export function renderBcdPluginsSection(plugins: { privileged?: readonly string[] }): string {
+  return [
+    '[plugins]',
+    `dir = "${bcdPluginsDir}"`,
+    'cgroup = "/sys/fs/cgroup/system.slice/bcd.service/plugins"',
+    ...(plugins.privileged?.length ? [`privileged = "${plugins.privileged.join(',')}"`] : []),
+    '',
+  ].join('\n');
+}
+
+/**
+ * The drop-in (bcd.service.d/plugins.conf) for a node with [plugins]: bcd starts each plugin under its own uid
+ * (CAP_SETUID/CAP_SETGID; CAP_KILL to stop it) in its own child of bcd's delegated cgroup (memory_max, pids_max).
+ * CapabilityBoundingSet adds to the unit's; nothing else is loosened.
+ */
+export const bcdPluginsDropIn = `[Service]
+# bcx plugins ([plugins] in /etc/bcd/config.toml): their own uids, their own cgroups.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
+Delegate=yes
+DelegateSubgroup=main
+ProtectControlGroups=no
+`;
+
+/** Added for plugins named in plugins.privileged (a runtime plugin makes namespaces and mounts). */
+export const bcdPrivilegedPluginsDropIn = `# plugins.privileged in /etc/bcd/config.toml: runtime plugins that make namespaces (Kata).
+RestrictNamespaces=no
+`;
 
 /** The systemd unit, with the §6 hardening. Until the v0.4 helper split, bcd runs as root. */
 export const bcdServiceUnit = `[Unit]
@@ -219,7 +263,7 @@ fi
 printf '%s  %s\\n' "$SHA256" "$TMP/bcd" | sha256sum -c - >/dev/null 2>&1 || fail 'the downloaded bcd does not match its pinned SHA-256'
 
 install -d -m 0700 /etc/bcd /var/lib/bcd
-install -d -m 0755 /etc/cdi
+install -d -m 0755 /etc/cdi${options.plugins ? ` ${bcdPluginsDir}` : ''}
 # Copy beside the target, then rename: the swap is atomic even while bcd runs.
 cp "$TMP/bcd" /usr/local/bin/bcd.new
 chmod 0755 /usr/local/bin/bcd.new
@@ -227,7 +271,20 @@ mv -f /usr/local/bin/bcd.new /usr/local/bin/bcd
 
 cat > /etc/bcd/config.toml.new <<'BCD_CONFIG'
 ${renderBcdConfig(options)}BCD_CONFIG
-chmod 0600 /etc/bcd/config.toml.new
+if [ -f /etc/bcd/config.toml ] && grep -q '^\\[' /etc/bcd/config.toml; then
+  # An upgrade keeps the sections the operator configured ([plugins], [boot], [imds]...).
+  sed -n '/^\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
+fi
+${
+  options.plugins
+    ? `# This node runs bcx plugins: a [plugins] section unless the operator's config already has one.
+if ! grep -q '^\\[plugins\\]' /etc/bcd/config.toml.new; then
+  cat >> /etc/bcd/config.toml.new <<'BCD_PLUGINS'
+${renderBcdPluginsSection(options.plugins)}BCD_PLUGINS
+fi
+`
+    : ''
+}chmod 0600 /etc/bcd/config.toml.new
 mv -f /etc/bcd/config.toml.new /etc/bcd/config.toml
 
 cat > /etc/bcd/join-encryption.jwk.new <<'BCD_JWK'
@@ -240,6 +297,20 @@ cat > /etc/systemd/system/bcd.service.new <<'BCD_UNIT'
 ${bcdServiceUnit}BCD_UNIT
 chmod 0644 /etc/systemd/system/bcd.service.new
 mv -f /etc/systemd/system/bcd.service.new /etc/systemd/system/bcd.service
+# bcx plugins: the drop-in exactly when config.toml has a [plugins] section (others keep the tighter unit).
+install -d -m 0755 /etc/systemd/system/bcd.service.d
+if grep -q '^\\[plugins\\]' /etc/bcd/config.toml; then
+  cat > /etc/systemd/system/bcd.service.d/plugins.conf.new <<'BCD_DROPIN'
+${bcdPluginsDropIn}BCD_DROPIN
+  if sed -n '/^\\[plugins\\]/,/^\\[[a-z]/p' /etc/bcd/config.toml | grep -Eq '^privileged *= *"[^"]'; then
+    cat >> /etc/systemd/system/bcd.service.d/plugins.conf.new <<'BCD_DROPIN'
+${bcdPrivilegedPluginsDropIn}BCD_DROPIN
+  fi
+  chmod 0644 /etc/systemd/system/bcd.service.d/plugins.conf.new
+  mv -f /etc/systemd/system/bcd.service.d/plugins.conf.new /etc/systemd/system/bcd.service.d/plugins.conf
+else
+  rm -f /etc/systemd/system/bcd.service.d/plugins.conf
+fi
 systemctl daemon-reload
 
 /usr/local/bin/bcd doctor --config /etc/bcd/config.toml >/dev/null 2>&1 ||

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   bcdServiceUnit,
@@ -347,6 +347,66 @@ describe('daemon install-script', () => {
     const checked = spawnSync(shell, ['-n', file], { encoding: 'utf8' });
     expect(checked.stderr).toBe('');
     expect(checked.status).toBe(0);
+  });
+
+  it('gives a node with [plugins] the plugin drop-in, keeps the operator’s sections on upgrade', async () => {
+    const shell = posixShell();
+    if (!shell) return;
+    const root = (await mkdtemp(join(tmpdir(), 'bc-install-root-'))).replace(/\\/g, '/');
+    // Run the script's config and unit steps against a scratch root (no systemctl).
+    const apply = async (extra: string[]) => {
+      const script = (await run([...base, ...extra])).stdout;
+      const block = script
+        .slice(script.indexOf("cat > /etc/bcd/config.toml.new"), script.indexOf('systemctl daemon-reload'))
+        .split('/etc/')
+        .join(`${root}/etc/`);
+      const file = join(scratch, 'plugins-check.sh');
+      // (Git for Windows' minimal usr/bin has no chmod or install: shims there, the real ones elsewhere.)
+      const shims = [
+        'command -v chmod >/dev/null 2>&1 || chmod() { :; }',
+        'command -v install >/dev/null 2>&1 || install() { [ "$1" = -d ] || return 1; shift; [ "$1" = -m ] && shift 2; mkdir -p "$@"; }',
+      ].join('\n');
+      await writeFile(file, `set -eu\n${shims}\nmkdir -p ${root}/etc/bcd ${root}/etc/systemd/system\n${block}`);
+      // sed, grep, install… from the shell's own directory (Git's usr/bin on Windows).
+      const result = spawnSync(shell, [file], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${dirname(shell)}${delimiter}${process.env.PATH ?? ''}` },
+      });
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      const read = async (path: string) => readFile(`${root}${path}`, 'utf8').catch(() => undefined);
+      return {
+        config: (await read('/etc/bcd/config.toml'))!,
+        dropIn: await read('/etc/systemd/system/bcd.service.d/plugins.conf'),
+      };
+    };
+    // A node without plugins keeps the tight unit: no section, no drop-in.
+    let node = await apply([]);
+    expect(node.config).not.toContain('[plugins]');
+    expect(node.dropIn).toBeUndefined();
+    expect(bcdServiceUnit).not.toContain('CAP_SETUID');
+    // --plugins with a privileged (Kata) plugin: the section and the drop-in, namespaces allowed.
+    node = await apply(['--plugins', '--privileged-plugins', 'kata']);
+    expect(node.config).toContain('[plugins]\ndir = "/usr/local/lib/bcd/plugins"\n');
+    expect(node.config).toContain('privileged = "kata"');
+    expect(node.dropIn).toContain('CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL');
+    expect(node.dropIn).toContain('Delegate=yes');
+    expect(node.dropIn).toContain('RestrictNamespaces=no');
+    // An upgrade from a script without --plugins keeps the operator's sections, and so the drop-in.
+    await writeFile(`${root}/etc/bcd/config.toml`, `${node.config}[imds]\nlisten = "169.254.169.254:80"\n`);
+    node = await apply([]);
+    expect(node.config).toContain('privileged = "kata"');
+    expect(node.config).toContain('[imds]\nlisten = "169.254.169.254:80"');
+    expect(node.config.match(/^\[plugins\]$/gm)).toHaveLength(1);
+    expect(node.dropIn).toContain('CAP_SETUID');
+    // The operator removes [plugins]: the next run removes the drop-in; without privileged plugins, no namespaces.
+    await writeFile(`${root}/etc/bcd/config.toml`, node.config.replace(/\[plugins\][^[]*/, ''));
+    node = await apply([]);
+    expect(node.dropIn).toBeUndefined();
+    node = await apply(['--plugins']);
+    expect(node.dropIn).toContain('Delegate=yes');
+    expect(node.dropIn).not.toContain('RestrictNamespaces=no');
+    expect(await run([...base, '--privileged-plugins', 'kata;rm'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 
   it('reads the token from the environment or stdin only, and refuses anything else', async () => {

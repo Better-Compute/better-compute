@@ -101,7 +101,7 @@ export const daemonCommands = [
     group: 'Fleet',
     summary: 'Write the POSIX sh script that installs bcd on a server and joins it to a pool',
     description:
-      "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band.",
+      "daemon install-script emits the bcd installer (PLAN.md §3.3, §6). The script reads the join token only from BCD_JOIN_TOKEN or standard input, downloads the pinned bcd for the machine's architecture from {base-url}{base-path}/downloads/bcd/{version}/linux-{arch}, checks it against --sha256 (or the digests of a --release-manifest verified here under --release-pins, product bcd, version --bcd-version), installs /usr/local/bin/bcd, /etc/bcd/config.toml (mode 0600: gateway URL, site and the serving CA, join signing and join encryption key pins, in bcd's sha256/<base64> form), the JoinService encryption key, and a hardened bcd.service, then runs bcd join and starts the service. Run on a configured host without a token, it upgrades bcd in place. The pins come from the PKI bundle's public half (pki init), so no secret is needed. The script holds no secret either: create the join token separately (joinTokens.create) and hand it over out of band. --plugins prepares the node for bcx driver plugins: a [plugins] section (dir /usr/local/lib/bcd/plugins, a child of bcd's delegated cgroup) and a bcd.service.d drop-in that lets bcd run each plugin under its own uid in its own cgroup (CAP_SETUID/CAP_SETGID/CAP_KILL, Delegate=yes); --privileged-plugins names the ones that run as root and make namespaces (Kata). Any node whose config.toml has a [plugins] section gets the drop-in, and an upgrade keeps the sections the operator configured.",
     output: 'text',
     flags: {
       pool: {
@@ -167,6 +167,12 @@ export const daemonCommands = [
         max: 16,
         description: 'Release keys that must have signed (default 1)',
       },
+      plugins: { type: 'boolean', description: 'Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)' },
+      'privileged-plugins': {
+        type: 'string',
+        value: 'NAMES',
+        description: 'Plugins that run as root without the seccomp filter (comma-separated; implies --plugins)',
+      },
       pki: pkiFlag,
       out: {
         type: 'string',
@@ -228,6 +234,16 @@ export const daemonCommands = [
           x: string;
           y: string;
         },
+        ...(flags.plugins || flags['privileged-plugins']
+          ? {
+              plugins: {
+                privileged: (flags['privileged-plugins'] ?? '')
+                  .split(',')
+                  .map((name) => name.trim())
+                  .filter(Boolean),
+              },
+            }
+          : {}),
         generatedAt: new Date().toISOString(),
         generator: `better-compute ${program.version}`,
       });

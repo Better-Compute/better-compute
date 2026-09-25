@@ -30,7 +30,11 @@ export { requestBody } from './commands/api.js';
 export { parseSha256Flag } from './commands/daemon.js';
 export { defaultPkiPath, loadPkiBundle } from './commands/pki.js';
 export {
+  bcdPluginsDir,
+  bcdPluginsDropIn,
+  bcdPrivilegedPluginsDropIn,
   bcdServiceUnit,
+  renderBcdPluginsSection,
   checkInstallScriptOptions,
   renderBcdConfig,
   renderInstallScript,
