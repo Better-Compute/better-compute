@@ -5,7 +5,9 @@ import type {
   Notifier,
   SqlExecutor,
 } from '@better-compute/core';
+import { createExecTicketIssuer, type ExecTicketIssuer } from '@better-compute/pki';
 import type { AnyCompute, AnyComputeOptions } from './config.js';
+import type { HostTunnelsConfig } from './host/tunnels.js';
 import { importOptional } from './config.js';
 import { CliError } from './errors.js';
 import { isUnconfiguredIam } from './iam.js';
@@ -53,6 +55,7 @@ interface TestingDev {
     rootTenantId: string;
     insecureHeaderAuth: true;
     gateway?: { host?: string; port?: number };
+    tunnels?: { issuer: ExecTicketIssuer; issuerName?: string };
   }): Promise<DevFleet>;
 }
 interface EmbeddedTestIam {
@@ -69,6 +72,8 @@ interface IamTesting {
 export interface DevSim {
   /** The deployment options with the dev join keys, the poke notifier and (if needed) embedded IAM. */
   options: AnyComputeOptions;
+  /** How the dev server mounts tunnels to the simulated machines (`host.tunnels`). */
+  hostTunnels: HostTunnelsConfig;
   /** After migrations: binds the embedded IAM's projection to the store. */
   afterMigrate(): Promise<void>;
   /** Once the server runs: attaches the gateway, creates the pool, joins the machines. */
@@ -121,6 +126,10 @@ export async function prepareDevSim(
   }
   if (options.pki?.join)
     sim.note('--sim: JoinService uses throwaway dev keys instead of the configured pki.join');
+  // Tunnels to the simulated machines: the deployment's issuer, else a throwaway one.
+  const issuerName = new URL(options.baseURL).origin;
+  const configured = (options as { tunnels?: { issuer?: ExecTicketIssuer } }).tunnels;
+  const issuer = configured?.issuer ?? createExecTicketIssuer({ issuer: issuerName });
   const simOptions: AnyComputeOptions = {
     ...options,
     iam,
@@ -128,11 +137,18 @@ export async function prepareDevSim(
     modules,
     pki: { ...options.pki, nodeCa: keys.pki.nodeCa as never, join: keys.pki.join as never },
     notifier: options.notifier ?? notifier,
+    ...({ tunnels: { ...configured, issuer } } as object),
   };
+  // The embedded test IAM has no session reviewer, so it cannot re-authorize an open tunnel: dev skips
+  // the 60 s re-check (tickets are still decided by tunnels.open). A configured IAM keeps the default.
+  const hostTunnels: HostTunnelsConfig = embedded ? { authorize: async () => true } : {};
+  if (embedded)
+    sim.note('--sim: tunnels are not re-authorized while open (embedded dev IAM, loopback only)');
   let fleet: DevFleet | undefined;
   let ended = false;
   return {
     options: simOptions,
+    hostTunnels,
     // The IAM bridge's module binds its projection to the runtime's store in `initialize()`.
     async afterMigrate() {},
     async started(compute) {
@@ -145,6 +161,7 @@ export async function prepareDevSim(
         rootTenantId,
         insecureHeaderAuth: true,
         gateway: { host: '127.0.0.1', port: 0 },
+        tunnels: { issuer, issuerName },
       });
       sim.note(`Dev gateway (h2c, header auth, loopback only): ${fleet.gatewayUrl}`);
       if (embedded)

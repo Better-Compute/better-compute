@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
+import { connectTunnel } from '@better-compute/client';
 import { parseRoles } from '../packages/cli/src/commands/serve.js';
 
 // `better-compute serve` and `dev` (PLAN.md §9.3): a real listener over PGlite, stopped through
@@ -133,6 +134,68 @@ describe('serve and dev', () => {
       const { data } = (await response.json()) as { data: { items: { provisionState: string }[] } };
       expect(data.items.map((node) => node.provisionState)).toEqual(['adopted', 'adopted']);
       await server.stop();
+    },
+  );
+
+  it(
+    'dev --sim serves a console tunnel to a simulated machine over WebSocket',
+    { timeout: 120_000 },
+    async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'bc-dev-tunnel-'));
+      const server = await start(['dev', '--memory', '--port', '0', '--sim', '1'], {}, cwd);
+      const noted = async (pattern: RegExp) => {
+        for (let i = 0; i < 1200; i++) {
+          const line = server.notes.find((note) => pattern.test(note));
+          if (line) return line;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error(`no note matching ${pattern}: ${server.notes.join('\n')}`);
+      };
+      try {
+        const token = /root token \(dev only\): (\S+)/.exec(await noted(/root token/))![1]!;
+        const tenantId = /root tenant (\S+);/.exec(await noted(/root tenant/))![1]!;
+        await noted(/1 simulated node\(s\) adopted/);
+        expect(server.notes.join('\n')).toContain('Tunnels: /api/compute/tunnels/{ticket}');
+        const call = async (path: string, body: unknown) => {
+          const response = await fetch(`${server.url}/${path}`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': 'application/json',
+              'x-better-compute': '1',
+            },
+            body: JSON.stringify(body),
+          });
+          const json = (await response.json()) as { data?: any; error?: unknown };
+          if (!response.ok) throw new Error(`${path}: ${JSON.stringify(json.error)}`);
+          return json.data;
+        };
+        const nodes = await call('nodes/list', { tenantId });
+        const nodeId = nodes.items[0].id as string;
+        const opened = await call('tunnels/open', { tenantId, nodeId, op: 'console' });
+        const url = `${server.url.replace(/^http/, 'ws')}/${opened.path}`;
+        const tunnel = connectTunnel({ url });
+        // Output handlers first: the banner follows `opened` immediately.
+        let text = '';
+        tunnel.onData((data) => (text += new TextDecoder().decode(data)));
+        // The api answers `opened` once the node's end is up (the daemon verified the ticket).
+        await tunnel.ready;
+        for (let i = 0; i < 300 && !text.includes(`fake console on ${nodeId}`); i++)
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        // The shell's banner arrives first (the gateway holds node frames until its 200: aa3f948).
+        expect(text).toContain(`fake console on ${nodeId}`);
+        tunnel.write('hello\r');
+        for (let i = 0; i < 300 && !text.includes('echo: hello'); i++)
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(text).toContain('echo: hello');
+        tunnel.write('exit\r');
+        expect(await tunnel.exited).toMatchObject({ exitCode: 0 });
+        // A ticket opens one tunnel, ever.
+        const replay = connectTunnel({ url });
+        await expect(replay.ready).rejects.toThrow();
+      } finally {
+        await server.stop();
+      }
     },
   );
 

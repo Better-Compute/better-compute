@@ -11,6 +11,7 @@
 // demands `insecureHeaderAuth: true`.
 
 import type { KeyObject } from 'node:crypto';
+import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import {
   ComputeError,
   type ComputeModule,
@@ -22,12 +23,15 @@ import {
 } from '@better-compute/core';
 import {
   createGateway,
+  gatewayTunnelRelay,
   serveGateway,
+  serveInternal,
   type Gateway,
   type GatewayOptions,
   type ServedGateway,
 } from '@better-compute/gateway';
 import {
+  createExecTicketIssuer,
   createNodeCa,
   createRevocationFeed,
   createSigningKey,
@@ -35,10 +39,11 @@ import {
   normalizeSerial,
   parseCertificate,
   publicJwk,
+  type ExecTicketIssuer,
   type SignerTrust,
 } from '@better-compute/pki';
 import { pglite } from '@better-compute/postgres/pglite';
-import { AgentRole, type JoinRequest } from '@better-compute/protocol';
+import { AgentRole, type JoinRequest, type TunnelFrame } from '@better-compute/protocol';
 import {
   betterCompute,
   gatewayReportHandlers,
@@ -50,6 +55,8 @@ import {
 import { FakeDaemon, type FakeDaemonOptions } from '../daemon/fake-daemon.js';
 import type { FakeKind } from '../daemon/kinds.js';
 import { runAgentJoin } from '../daemon/join.js';
+import type { TunnelConn } from '../daemon/tunnels.js';
+import type { CloseInfo, FrameHandler } from '../frame-conn.js';
 import { fakeHardware, type FakeHardwareVariant } from '../fake-hw.js';
 import { fakeIam } from '../fake-iam.js';
 import {
@@ -185,9 +192,17 @@ export interface DevFleetOptions {
   >;
   /** Options for every FakeDaemon (default reconnect backoff 100 ms → 5 s). */
   daemon?: Partial<Omit<FakeDaemonOptions, 'nodeId' | 'scheduler' | 'dial' | 'hardware'>>;
+  /**
+   * Interactive tunnels (§7.6): the control plane's exec-ticket issuer (`ComputeOptions.tunnels.issuer`).
+   * The gateway verifies its tickets and serves its control API on loopback h2c (for the api's relay);
+   * every FakeDaemon answers OpenTunnel with its echo shell.
+   */
+  tunnels?: { issuer: ExecTicketIssuer; issuerName?: string };
 }
 
 export interface DevFleet {
+  /** The api's relay to this fleet's gateway (`handleTunnel`'s `relay`), when tunnels are on. */
+  readonly tunnelRelay: ReturnType<typeof gatewayTunnelRelay> | undefined;
   gateway: Gateway;
   served: ServedGateway;
   /** `http://host:port` of the gateway (cleartext HTTP/2). */
@@ -230,6 +245,87 @@ export interface DevFleet {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** A free loopback port (the gateway must know its control API's URL before it starts). */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+/**
+ * The daemon end of a Tunnel stream, in process: the frames `gateway.acceptTunnel` would get from the
+ * gRPC `Tunnel` rpc (http2.ts `tunnel()`), without the h2 hop.
+ */
+function gatewayTunnelConn(
+  gateway: Gateway,
+  peer: { nodeId: string; siteId: string; serial: string },
+  id: string,
+): TunnelConn {
+  const inbox: TunnelFrame[] = [];
+  const closeHandlers: ((info: CloseInfo) => void | Promise<void>)[] = [];
+  let handler: FrameHandler<TunnelFrame> | undefined;
+  let closeInfo: CloseInfo | undefined;
+  const deliver = () => {
+    while (handler && inbox.length) void handler(inbox.shift()!);
+  };
+  const finish = (info: CloseInfo) => {
+    if (closeInfo) return;
+    closeInfo = info;
+    for (const onClose of closeHandlers) void Promise.resolve(onClose(info)).catch(() => {});
+  };
+  const handle = gateway.acceptTunnel(peer, {
+    send(frame) {
+      if (closeInfo) return false;
+      inbox.push(frame);
+      queueMicrotask(deliver);
+      return true;
+    },
+    onDrain: (callback) => queueMicrotask(callback),
+    pause() {},
+    resume() {},
+    close: (error) =>
+      finish({ reason: error ? `grpc-${error.code}: ${error.message}` : 'closed', by: 'remote' }),
+  });
+  return {
+    id,
+    get closed() {
+      return closeInfo !== undefined;
+    },
+    get closeInfo() {
+      return closeInfo;
+    },
+    send(frame) {
+      if (closeInfo) return false;
+      handle.receive(frame);
+      return true;
+    },
+    onFrame(next) {
+      handler = next;
+      deliver();
+    },
+    onClose(next) {
+      closeHandlers.push(next);
+      if (closeInfo) void Promise.resolve(next(closeInfo)).catch(() => {});
+    },
+    close(reason = 'closed') {
+      if (closeInfo) return;
+      handle.end(reason);
+      finish({ reason, by: 'local' });
+    },
+    abort(reason = 'aborted') {
+      if (closeInfo) return;
+      handle.end(reason);
+      finish({ reason, by: 'local' });
+    },
+    ping: (_timeoutMs, onResult) => onResult(!closeInfo),
+  };
+}
+
 /** Adds a gateway on h2c and simulated machines to a running control plane. */
 export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet> {
   if (options.insecureHeaderAuth !== true)
@@ -253,10 +349,14 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   const feed = createRevocationFeed({ sql: database, revocations, intervalMs: 250 });
   let gateway: Gateway | undefined;
   let served: ServedGateway | undefined;
+  let internal: Awaited<ReturnType<typeof serveInternal>> | undefined;
+  let tunnelRelay: ReturnType<typeof gatewayTunnelRelay> | undefined;
   let client: H2cClient | undefined;
 
   const close = async () => {
     feed.stop();
+    tunnelRelay?.close();
+    await internal?.close().catch(() => {});
     for (const daemon of daemons.values())
       if (daemon.state !== 'stopped') daemon.crash('dev-fleet-close');
     daemons.clear();
@@ -267,8 +367,20 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   };
 
   const { host = '127.0.0.1', port = 0, ...gatewayOptions } = options.gateway ?? {};
+  // The gateway advertises its control API in its directory row at start, so its port is chosen first.
+  const internalPort = options.tunnels ? await freePort() : undefined;
+  const tunnelIssuer = options.tunnels?.issuer;
   try {
     gateway = createGateway({
+      ...(tunnelIssuer
+        ? {
+            internalUrl: `http://127.0.0.1:${internalPort}`,
+            tunnels: {
+              jwks: () => tunnelIssuer.jwksJson(),
+              ...(options.tunnels?.issuerName ? { issuer: options.tunnels.issuerName } : {}),
+            },
+          }
+        : {}),
       region,
       database,
       services: compute.gatewayServices,
@@ -295,6 +407,14 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         return { nodeId, siteId: identity.siteId, serial: identity.serial };
       },
     });
+    if (tunnelIssuer) {
+      internal = await serveInternal(gateway, {
+        insecure: true,
+        host: '127.0.0.1',
+        port: internalPort!,
+      });
+      tunnelRelay = gatewayTunnelRelay({ sql: compute.context.sql });
+    }
   } catch (error) {
     await close();
     throw error;
@@ -326,7 +446,11 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   };
 
   // The agent's Join loop (deferrals included), with a sealed-token join.
-  const joinOne = async (token: string, hardware: ReturnType<typeof fakeHardware>, role: AgentRole = AgentRole.NODE) => {
+  const joinOne = async (
+    token: string,
+    hardware: ReturnType<typeof fakeHardware>,
+    role: AgentRole = AgentRole.NODE,
+  ) => {
     const { body, privateKey } = await runAgentJoin({
       send,
       role,
@@ -350,10 +474,26 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
     return { nodeId: body.nodeId, siteId, serial: normalizeSerial(leaf.serial), privateKey };
   };
 
+  /** A daemon's tunnel dial: its Tunnel stream, in process, into the gateway it holds a session on. */
+  const tunnelsFor = (nodeId: string): Pick<FakeDaemonOptions, 'tunnels'> => {
+    if (!tunnelIssuer) return {};
+    const ready = gateway!;
+    return {
+      tunnels: {
+        dial: (tunnelId) => {
+          const identity = joined.get(nodeId);
+          if (!identity || revocations.has(identity.serial)) return undefined;
+          return gatewayTunnelConn(ready, { nodeId, ...identity }, `tunnel-${tunnelId}`);
+        },
+      },
+    };
+  };
+
   return {
     gateway,
     served,
     gatewayUrl,
+    tunnelRelay,
     pins: keys.pins,
     daemons,
     async createPool(poolOptions = {}) {
@@ -407,6 +547,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
           nodeKey: privateKey,
           scheduler,
           dial: () => h2c.session(nodeId),
+          ...tunnelsFor(nodeId),
         });
         daemons.set(nodeId, daemon);
         daemon.start();
@@ -429,7 +570,11 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
       const ids: string[] = [];
       for (let index = 0; index < count; index++) {
         const hardware = fakeHardware({ seed: `site-${seed}-${index}` });
-        const { nodeId, siteId, serial, privateKey } = await joinOne(minted.token, hardware, AgentRole.SITE);
+        const { nodeId, siteId, serial, privateKey } = await joinOne(
+          minted.token,
+          hardware,
+          AgentRole.SITE,
+        );
         joined.set(nodeId, { siteId, serial });
         const daemon = new FakeDaemon({
           backoff: { minMs: 100, maxMs: 5_000 },
@@ -437,10 +582,13 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
           nodeId,
           role: AgentRole.SITE,
           hardware,
-          ...(siteOptions.kinds ? { kinds: { ...options.daemon?.kinds, ...siteOptions.kinds } } : {}),
+          ...(siteOptions.kinds
+            ? { kinds: { ...options.daemon?.kinds, ...siteOptions.kinds } }
+            : {}),
           nodeKey: privateKey,
           scheduler,
           dial: () => h2c.session(nodeId),
+          ...tunnelsFor(nodeId),
         });
         daemons.set(nodeId, daemon);
         daemon.start();
@@ -546,14 +694,19 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
   const database = options.database ?? pglite();
   const keys = createDevJoinKeys(options.trustDomain ? { trustDomain: options.trustDomain } : {});
   const notifier = devFleetNotifier();
+  const baseURL = options.baseURL ?? 'http://127.0.0.1:3000';
+  // Tunnels on: the api issues exec tickets, the gateway and the daemons verify them.
+  const issuerName = new URL(baseURL).origin;
+  const tunnels = { issuer: createExecTicketIssuer({ issuer: issuerName }), issuerName };
   const compute = betterCompute<readonly ComputeModule[], []>({
     database,
     iam: iam.port,
     rootTenantId: iam.rootTenantId,
     secret: options.secret ?? DEV_SECRET,
-    baseURL: options.baseURL ?? 'http://127.0.0.1:3000',
+    baseURL,
     modules: [...(iam.modules ?? []), ...(options.modules ?? [])],
     pki: keys.pki,
+    tunnels: { issuer: tunnels.issuer },
     notifier,
     worker: { pollMs: 100, ...options.worker },
     ...(options.log ? { log: options.log } : {}),
@@ -577,6 +730,7 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
       root: iam.root,
       rootTenantId: iam.rootTenantId,
       insecureHeaderAuth: true,
+      tunnels,
       ...(options.region ? { region: options.region } : {}),
       ...(options.gateway ? { gateway: options.gateway } : {}),
       ...(options.daemon ? { daemon: options.daemon } : {}),

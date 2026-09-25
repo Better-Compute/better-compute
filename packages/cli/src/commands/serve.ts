@@ -406,12 +406,12 @@ export const serveCommands = [
             cwd,
           })
         : undefined;
-      const devHost: HostConfig | undefined = configured
-        ? {
-            ...(configured.http ? { http: configured.http } : {}),
-            ...(configured.metrics ? { metrics: configured.metrics } : {}),
-          }
-        : undefined;
+      const devHost: HostConfig = {
+        ...(configured?.http ? { http: configured.http } : {}),
+        ...(configured?.metrics ? { metrics: configured.metrics } : {}),
+        // Tunnels to the simulated machines: dev's re-authorization, over the config's.
+        ...(sim ? { tunnels: { ...configured?.tunnels, ...sim.hostTunnels } } : {}),
+      };
       const stop = stopSignal(io.signal);
       try {
         const running = await runServer(chosen.compute, {
@@ -421,7 +421,9 @@ export const serveCommands = [
           migrate: true,
           signal: stop.signal,
           note,
-          ...(devHost ? { hostConfig: devHost } : {}),
+          hostConfig: devHost,
+          // The api role mounts tunnels when the deployment (or --sim) issues exec tickets.
+          computeOptions: chosen.options,
           ...(sim
             ? {
                 afterMigrate: () => sim.afterMigrate(),
