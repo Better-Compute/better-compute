@@ -144,4 +144,30 @@ declaration merging. After that, `defineDriver({ implements: { power: … } })` 
 - **`MetalOptions`** takes `hardwareProfiles`: per-concern driver bindings that a pool's nodes
   inherit.
 
+## Destructive-command batches (PLAN.md §13, the v1.0 quorum)
+
+Wipes, image writes, kexec and the BMC's power, boot, storage, firmware and credential operations
+(and `site.httpProxy`) are destructive. With approvers set, the command queue sends them only under
+an approved batch, whose scope lists every (subject, kind) leaf before anything runs:
+
+- **Subjects.** A leaf's subject is the node for work it runs on itself (`disk.wipe`,
+  `deploy.image`, `boot.kexec`). A BMC operation is `bmc:<site agent>/<BMC address>`, with one leaf
+  per site agent of the site, because a site agent failover reroutes the command. `site.httpProxy`
+  is `node:<target>`. See `batchSubject` and `metalBatchScope`.
+- **Kinds.** The kinds come from the workflow's profile: agent steps' `command`, and every relaying
+  step's `sends` (the engine refuses anything else), recorded as `workflows.command_kinds`.
+- **One node.** When the metal reconciler starts a workflow and the node is not under a bulk batch,
+  the workflow gets a one-node batch of its own before any step sends anything.
+- **Many nodes.** `metal.bulk({ tenantId, poolId, verb, nodeIds, wipe?, reason })` applies
+  `manage`, `inspect`, `provide`, `undeploy`, `rescue` or `retire` to up to 10,000 nodes of one
+  pool as one batch, so operators approve "retire these 412 machines" once.
+  - It is decided on the pool, and each node as its own `metal/<verb>` call.
+  - The scope covers the verb's whole chain of workflows (`verbChain`, e.g. inspecting →
+    commissioning).
+  - The batch is parked on the nodes (`metal_nodes.batch_id`) until each rests.
+  - The answer is `{ batch: { batchId, held, required, size }, nodes }`.
+- **Plugin steps.** A plugin step that relays commands (`httpViaSite`) must declare them, for
+  example `sends: ['site.httpProxy']`. Otherwise its commands fall outside the batch and are
+  refused.
+
 License: Apache-2.0.
