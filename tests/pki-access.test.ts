@@ -216,6 +216,48 @@ describe('SSH break-glass certificates', () => {
     });
   });
 
+  it('issues host certificates (sandbox host-key pinning) with host principals and up to 30 days', () => {
+    const clock = manualClock(start);
+    const ca = createSshCertificateAuthority({ clock });
+    const hostKey = generateKeyPairSync('ed25519').publicKey;
+    const base = {
+      publicKey: formatSshPublicKey(hostKey, 'root@guest'),
+      principals: ['inst_01k5w000000000000000000abc'],
+      keyId: 'host/inst_01k5w000000000000000000abc',
+      validBefore: start + 7 * 86_400_000,
+    };
+    const cert = parseSshCertificate(ca.issueHostCertificate(base).certificate);
+    expect(cert).toMatchObject({
+      certType: 'host',
+      principals: ['inst_01k5w000000000000000000abc'],
+      extensions: {},
+      criticalOptions: {},
+      validBefore: start + 7 * 86_400_000,
+      signatureValid: true,
+    });
+    expect(cert.publicKey.equals(hostKey)).toBe(true);
+    expect(() => ca.issueHostCertificate({ ...base, validBefore: start + 31 * 86_400_000 })).toThrow(/at most/);
+    // A host principal is a name: never an account, a list or a pattern.
+    for (const principal of ['root@x', 'a,b', '*.example.com', ''])
+      expect(() => ca.issueHostCertificate({ ...base, principals: [principal] })).toThrow(/principal/);
+  });
+
+  it.skipIf(!sshKeygen)('host certificates are read by OpenSSH ssh-keygen', () => {
+    const ca = createSshCertificateAuthority();
+    const issued = ca.issueHostCertificate({
+      publicKey: formatSshPublicKey(generateKeyPairSync('ed25519').publicKey),
+      principals: ['inst_host1'],
+      keyId: 'host/inst_host1',
+      validBefore: Date.now() + 86_400_000,
+    });
+    const certFile = join(scratch, 'host-cert.pub');
+    writeFileSync(certFile, `${issued.certificate}\n`);
+    const listed = spawnSync(sshKeygen!, ['-L', '-f', certFile], { encoding: 'utf8' });
+    expect(listed.stderr).toBe('');
+    expect(listed.stdout).toContain('ssh-ed25519-cert-v01@openssh.com host certificate');
+    expect(listed.stdout).toMatch(/Principals:\s+inst_host1/);
+  });
+
   it.skipIf(!sshKeygen)(
     'is read by OpenSSH ssh-keygen, and verifies certificates ssh-keygen signs',
     () => {
