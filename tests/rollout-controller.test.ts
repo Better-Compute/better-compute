@@ -315,22 +315,45 @@ describe('rollouts', () => {
     // A failed node goes back to its previous version.
     expect((await spec(second.started[0]!))?.version).toBe('1.0.0');
 
-    // Abort with rollback: upgraded nodes go back to 1.0.0 and finish when they report it.
+    // Abort with rollback: the canaries CONFIRMED 1.1.0, so they keep it. bcd refuses any older
+    // binary once a release is confirmed (c139b9c); a bad release is undone by a newer one.
     const aborted = await call<Rollout>('rollouts', 'abort', {
       tenantId: 'root',
       rolloutId: rollout.id,
       rollback: true,
     });
-    expect(aborted).toMatchObject({ state: 'aborted', nodes: { 'rolling-back': 2 } });
-    expect(await spec(first.started[0]!)).toMatchObject({ version: '1.0.0' });
-    await report(first.started, '1.0.0');
-    expect((await advance(rollout.id))!.succeeded).toEqual(first.started);
+    expect(aborted.state).toBe('aborted');
+    expect(aborted.nodes['rolling-back'] ?? 0).toBe(0);
+    expect(await spec(first.started[0]!)).toMatchObject({ version: '1.1.0' });
     const got = await call<Rollout & { nodeList: { state: string }[] }>('rollouts', 'get', {
       tenantId: 'root',
       rolloutId: rollout.id,
     });
-    expect(got.nodes['rolled-back']).toBe(2);
+    expect(got.nodes.succeeded).toBe(2);
     expect(got.nodeList).toHaveLength(20);
+  });
+
+  it('rolls back only upgrades not yet confirmed when aborted with rollback', async () => {
+    const rollout = await call<Rollout>('rollouts', 'create', {
+      tenantId: 'root',
+      version: '1.1.0',
+      poolIds: [pools[0]],
+      waves: [100],
+    });
+    const { started } = (await advance(rollout.id))!;
+    expect(started.length).toBeGreaterThan(0);
+    // Still upgrading (nobody confirmed): they go back to 1.0.0 and finish when they report it.
+    const aborted = await call<Rollout>('rollouts', 'abort', {
+      tenantId: 'root',
+      rolloutId: rollout.id,
+      rollback: true,
+    });
+    expect(aborted).toMatchObject({ state: 'aborted', nodes: { 'rolling-back': started.length } });
+    expect(await spec(started[0]!)).toMatchObject({ version: '1.0.0' });
+    await report(started, '1.0.0');
+    expect((await advance(rollout.id))!.succeeded).toEqual(started);
+    const got = await call<Rollout>('rollouts', 'get', { tenantId: 'root', rolloutId: rollout.id });
+    expect(got.nodes['rolled-back']).toBe(started.length);
   });
 
   it('completes, and then every node of the pool gets the version as its default', async () => {

@@ -549,7 +549,10 @@ export async function changeRollout(
     await set('running', null);
   } else {
     await set('aborted', input.reason ?? 'aborted by an operator', input.rollback === true);
-    // Nodes not started stay where they are; with rollback, upgraded ones go back.
+    // Nodes not started stay where they are. With rollback, only upgrades not yet confirmed go back:
+    // a node that confirmed the release raised its floor to it, and bcd refuses any older binary
+    // after that, the one in its other slot included (c139b9c; otherwise a downgrade path). A bad
+    // confirmed release is undone by rolling forward: a new release with a higher sequence.
     await tx.query(
       `UPDATE rollout_nodes SET state = 'skipped', error = 'aborted', finished_at = compute_now()
         WHERE rollout_id = $1 AND state = 'pending'`,
@@ -558,7 +561,7 @@ export async function changeRollout(
     const moved = input.rollback
       ? await tx.query<{ node_id: string }>(
           `UPDATE rollout_nodes rn SET state = 'rolling-back', started_at = compute_now(), finished_at = NULL
-            WHERE rn.rollout_id = $1 AND rn.state IN ('upgrading', 'succeeded')
+            WHERE rn.rollout_id = $1 AND rn.state = 'upgrading'
               AND rn.from_version IS NOT NULL
               AND EXISTS (SELECT 1 FROM daemon_releases d WHERE d.version = rn.from_version)
             RETURNING rn.node_id`,
