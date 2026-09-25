@@ -71,6 +71,8 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
         ...action('images', 'read', 'publish'),
         ...action('providers', 'read', 'manage'),
         ...action('sandboxes', 'read', 'manage'),
+        // §13 destructive-batch quorum (v1.0).
+        ...action('batches', 'read', 'approve'),
       ],
     },
     [`${p}project`]: {
