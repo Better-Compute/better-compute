@@ -12,7 +12,15 @@
 // `GIT` overrides the git executable (default: GitHub Desktop's bundled git on this machine).
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, symlinkSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  symlinkSync,
+  unlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,26 +63,65 @@ if (existsSync(join(tree, '.git'))) {
 console.log(`head-check: ${git(['log', '--oneline', '-1', commit])}`);
 console.log(`head-check: worktree ${tree}`);
 
-// node_modules of the root, packages/*, apps/* and examples/* become junctions to this checkout's.
+// Every node_modules of the root, packages/*, apps/* and examples/* is rebuilt in the worktree as a
+// real directory of junctions to this checkout's entries, EXCEPT workspace links (an entry whose
+// target is a directory of this checkout, e.g. `@better-compute/core` -> packages/core): those point
+// at the worktree's own copy, so no import ever reaches another session's uncommitted code.
 const dirs = ['.'];
 for (const parent of ['packages', 'apps', 'examples'])
   if (existsSync(join(root, parent)))
     for (const entry of readdirSync(join(root, parent), { withFileTypes: true }))
       if (entry.isDirectory()) dirs.push(join(parent, entry.name));
+const inCheckout = (path) => {
+  const rel = relative(root, path);
+  return rel && !rel.startsWith('..') && !rel.split(/[\\/]/).includes('node_modules')
+    ? rel
+    : undefined;
+};
 let linked = 0;
-for (const dir of dirs) {
-  const source = join(root, dir, 'node_modules');
-  const target = join(tree, dir, 'node_modules');
-  if (!existsSync(source) || !existsSync(join(tree, dir))) continue;
+/** Mirrors `source` (a node_modules or a scope directory) into `target`. */
+function mirror(source, target) {
+  let stat;
   try {
-    lstatSync(target);
-    continue; // already there (a junction from an earlier run)
+    stat = lstatSync(target);
   } catch {
-    symlinkSync(source, target, 'junction');
+    stat = undefined;
+  }
+  // An earlier run's whole-directory junction: replace it (unlink removes the link, not its target).
+  if (stat?.isSymbolicLink()) unlinkSync(target);
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (existsSync(to) || isLink(to)) continue;
+    if (entry.name.startsWith('@') && entry.isDirectory() && !lstatSync(from).isSymbolicLink()) {
+      mirror(from, to);
+      continue;
+    }
+    let real;
+    try {
+      real = realpathSync(from);
+    } catch {
+      continue; // a dangling link
+    }
+    const workspace = inCheckout(real);
+    symlinkSync(workspace ? join(tree, workspace) : from, to, 'junction');
     linked++;
   }
 }
-if (linked) console.log(`head-check: linked ${linked} node_modules directories`);
+function isLink(path) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+for (const dir of dirs) {
+  const source = join(root, dir, 'node_modules');
+  if (!existsSync(source) || !existsSync(join(tree, dir))) continue;
+  mirror(source, join(tree, dir, 'node_modules'));
+}
+if (linked) console.log(`head-check: linked ${linked} node_modules entries`);
 
 const run = (label, args) => {
   console.log(`head-check: ${label}`);

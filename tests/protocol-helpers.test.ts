@@ -237,6 +237,7 @@ describe('protocol contract shape (PLAN.md §7.7)', () => {
       'inventory = 6',
       'spec_request = 7',
       'secret_request = 8',
+      'workload_token_request = 9',
     ]);
     expect(fieldsOf(ServerFrameSchema)).toEqual([
       'welcome = 1',
@@ -248,6 +249,7 @@ describe('protocol contract shape (PLAN.md §7.7)', () => {
       'drain = 7',
       'revoked = 8',
       'secret = 9',
+      'workload_token = 10',
     ]);
   });
 
