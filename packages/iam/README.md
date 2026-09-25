@@ -99,6 +99,12 @@ Simulation is identity-level: it can't see what a delegation, an assumed role or
 - An unknown or mismatched action, or a ticket without a session or tenant, answers false.
 - A port without `authorizeSession` throws `INVALID_CONFIG`.
 
+## Suspended and deleted tenants (§12.8)
+
+The server's `tenancy` module mirrors IAM tenant states. Its `tenantStateHandler(compute, { readTenants })` is the bridge's `tenant` handler (the host installs it by default). On `iam:tenants:update|delete` it re-reads the tenant and its subtree, and the envelope then refuses a suspended tenant's mutations and everything in a deleted one with `TENANT_SUSPENDED` (403); root callers are exempt. A deleted tenant is torn down through every module's `tenantDeleted` hook.
+
+`iamTenantReader(iam, { credential })` is that `readTenants` for a better-iam instance or client. It needs a root credential, since only root reads suspended and deleted tenants and every tenant's children. better-iam writes a deletion into every descendant's own status, but a suspension only into decisions, so the reader gives each tenant its effective status: the worst of its own and its ancestors'. A tenant IAM no longer knows reads as `missing` (deleted), and a subtree larger than `maxTenants` (10 000) is refused rather than truncated.
+
 ## License
 
 [Apache License 2.0](LICENSE)
