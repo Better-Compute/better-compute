@@ -280,6 +280,27 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         BETTER_COMPUTE_TRUST_VERSION/APPROVER_SET_SIGNATURES, and maybe `pki trust-version`.
       - lint:repo runs the docs generate --check (267f8f4). MethodAdmission.abandoned (d14564e) is for
         [097b34] to wire into the vps/capacity extends.
+      - API: commandBatches.create (batches:create) and commands.run({ batchId }) (46afe75). Leaves may carry
+        their payload, which scope returns (2ca0ba4).
+    - Security review 7 (subagent over 77cdf4f..edbd63f + 40be696 + 6a7f1b7, 2026-09-25):
+      - HIGH-1 site.httpProxy got around the quorum: fixed in bcd 0d42de8 (destructive, every kind signed with
+        roots, BMC hosts and /redfish refused) and metal f66e236 (destructive, plugin steps declare sends).
+        pki/FakeDaemon "every kind signed": [402c97]. Follow-up: a SiteSpec allowed-proxy-targets list ([6a20b8]).
+      - HIGH-2 approver-set signing had no trust domain: fixed in 4835f4f ([402c97]); bcd [6a20b8].
+      - M1 ([402c97]'s review): a daemon that missed the set-change version stayed stuck. DECIDED: TrustBundle
+        approver_set_epoch = 8, parts [u64 epoch, sha(set), domain], signatures published on every version,
+        root changes applied even when the quorum part is refused. One commit by [402c97]; bcd [6a20b8].
+      - M2: a keyless daemon trusts the first set on first use. Fix: bcd config approver_set_sha256 pin, emitted by
+        the CLI ([402c97] CLI/FakeDaemon, [6a20b8] bcd).
+      - MEDIUM-3 approvers saw only digests: server stores and returns leaf payloads (2ca0ba4); CLI decode by
+        [402c97]; metal to pass payloads ([f02367]).
+      - MEDIUM-4 a stale replica could roll daemons back: trust_bundle_history (0a31734).
+      - LOW-5 the CLI signs the server-reported domain: [402c97] (pin it).
+      - LOW-6 FakeDaemon run-once keyed by index: leaf hash (c589c5d).
+      - LOW denyPending cleared others' pending, and concurrent extends could interleave: per-row in-flight
+        marker ([097b34], in progress).
+    - Ramdisk image mount: REDUCED. ext* is written with debugfs, never mounted (1ae1789). The xfs/btrfs/vfat
+      fallbacks and the Ignition boot partition remain ([6a20b8]).
       - proto: 525c199, 4f11548;
       - pki: 36387c8, 2d2fe6f;
       - FakeDaemon: 4b48f08;
