@@ -12,7 +12,7 @@ import { closeFixtures, computeFixture } from '@better-compute/testing';
 // Every module's method inputs describe themselves as JSON Schema (`validate.jsonSchema`, core's
 // `describedBy` or a `manifest`), for the generated API reference. The description and the validator
 // must agree: `{}` is refused for exactly the required fields, unknown fields are refused, enums and
-// string types hold. Groups listed in `fullyDescribed` must describe every method.
+// string types hold. Every registered method must be described.
 
 afterEach(closeFixtures);
 
@@ -32,8 +32,6 @@ const issuesOf = (run: () => unknown): { message: string; path: string[] }[] => 
     return (error.details?.issues as { message: string; path: string[] }[] | undefined) ?? [];
   }
 };
-
-const fullyDescribed = ['webhooks', 'inventory', 'system'];
 
 async function everyModule() {
   const metalModule = metal();
@@ -114,12 +112,12 @@ describe('validate.jsonSchema across modules', () => {
     }
   });
 
-  it('describes every method of the fully described groups', async () => {
+  it('describes every registered method', async () => {
     const methods = await everyModule();
     const missing = methods
-      .filter((method) => fullyDescribed.includes(method.group))
       .filter((method) => (method.definition.validate as { jsonSchema?: unknown }).jsonSchema === undefined)
       .map((method) => method.path);
     expect(missing).toEqual([]);
+    expect(methods.length).toBeGreaterThan(100);
   });
 });
