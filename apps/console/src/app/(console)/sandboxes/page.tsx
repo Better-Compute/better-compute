@@ -281,6 +281,12 @@ export default function SandboxesPage() {
                         {sandbox.warm ? ' · warm' : ''}
                         {sandbox.fromSnapshot ? ` · from ${sandbox.fromSnapshot}` : ''}
                       </div>
+                      {sandbox.identityRebound === false && (
+                        <div className="warning">
+                          Still answers to its source&apos;s SSH identity: exec waits until the source and sibling
+                          restores are gone, or the host gives it its own.
+                        </div>
+                      )}
                     </td>
                     <td>{sandbox.state}</td>
                     <td className={left.urgent ? 'warning' : ''}>{left.text}</td>

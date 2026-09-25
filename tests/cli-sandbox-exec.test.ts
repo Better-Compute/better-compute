@@ -216,4 +216,35 @@ describe('sandbox exec', () => {
       status: 3,
     });
   });
+
+  it('says what unblocks a restore that still answers to its source’s SSH identity', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'bc-sandbox-restore-'));
+    await mkdir(join(home, '.ssh'));
+    await writeFile(
+      join(home, '.ssh', 'id_ed25519.pub'),
+      `${formatSshPublicKey(generateKeyPairSync('ed25519').publicKey, 'dev@laptop')}\n`,
+    );
+    const io: CliIO = {
+      out() {},
+      env: { HOME: home, BETTER_COMPUTE_TOKEN: TOKEN, BETTER_COMPUTE_TENANT: ROOT },
+      fetch: async () =>
+        Response.json(
+          {
+            error: {
+              code: 'INVALID_STATE',
+              message: `Sandbox ${SANDBOX} shares its SSH identity with another running guest`,
+              details: { reason: 'restore-shares-identity' },
+            },
+          },
+          { status: 409 },
+        ),
+      spawn: async () => 0,
+    };
+    await expect(
+      createCli().run(['sandbox', 'exec', SANDBOX, '--url', 'https://compute.test'], io),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      hint: expect.stringContaining(`sandbox get ${SANDBOX} shows identityRebound: true`),
+    });
+  });
 });

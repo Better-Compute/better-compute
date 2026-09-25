@@ -291,12 +291,24 @@ export const sandboxCommands = [
       }
       if (publicKey.includes('PRIVATE KEY'))
         throw new CliError('INVALID_INPUT', `${keyPath}.pub holds a private key; it must be the public key`);
-      const granted = await (await context.api()).call<SandboxExecGrant>('sandboxes/exec', {
-        tenantId: flags.tenant,
-        sandboxId: id,
-        publicKey,
-        ttlSeconds: (flags.minutes ?? 10) * 60,
-      });
+      const granted = await (await context.api())
+        .call<SandboxExecGrant>('sandboxes/exec', {
+          tenantId: flags.tenant,
+          sandboxId: id,
+          publicKey,
+          ttlSeconds: (flags.minutes ?? 10) * 60,
+        })
+        .catch((error: unknown) => {
+          // A memory restore still answering to its source's SSH identity: say what unblocks it.
+          const failure = error as { code?: string; message?: string; details?: { reason?: unknown } };
+          if (failure?.details?.reason === 'restore-shares-identity')
+            throw new CliError(
+              'INVALID_STATE',
+              failure.message ?? `${id} shares its SSH identity with another running guest`,
+              `Delete the sandbox it was restored from (or its sibling restores), or wait until the host gives it its own identity: better-compute sandbox get ${id} shows identityRebound: true then.`,
+            );
+          throw error;
+        });
       // The account comes from the server: a Unix name only (it reaches ssh's %r/%u expansions).
       if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(granted.account))
         throw new CliError('INVALID_RESPONSE', 'The server named an invalid guest account');

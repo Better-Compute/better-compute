@@ -20,6 +20,11 @@ export interface SandboxRow {
   readyAt?: number;
   expiredAt?: number;
   fromSnapshot?: string;
+  /**
+   * A memory restore: false while it still answers to its source's SSH identity (exec is refused then, reason
+   * restore-shares-identity), true once the host gave it its own; absent for other sandboxes.
+   */
+  identityRebound?: boolean;
   snapshots?: { id: string; state: string; includeMemory: boolean; keep: boolean; createdAt: number }[];
 }
 
