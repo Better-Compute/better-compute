@@ -168,6 +168,11 @@ export const daemonCommands = [
         description: 'Release keys that must have signed (default 1)',
       },
       plugins: { type: 'boolean', description: 'Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)' },
+      'bmc-networks': {
+        type: 'string',
+        value: 'CIDRS',
+        description: "A site agent's BMC networks (comma-separated): site.httpProxy never reaches into them",
+      },
       'approver-set-sha256': {
         type: 'string',
         value: 'HEX',
@@ -248,6 +253,14 @@ export const daemonCommands = [
           y: string;
         },
         ...(flags['approver-set-sha256'] ? { approverSetSha256: flags['approver-set-sha256'] } : {}),
+        ...(flags['bmc-networks'] !== undefined
+          ? {
+              bmcNetworks: flags['bmc-networks']
+                .split(',')
+                .map((cidr) => cidr.trim())
+                .filter(Boolean),
+            }
+          : {}),
         // The release keys that verified the manifest are the ones bcd self-updates under.
         ...(flags['release-pins']
           ? {

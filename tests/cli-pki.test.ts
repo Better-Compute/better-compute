@@ -363,6 +363,15 @@ describe('daemon install-script', () => {
     expect(checked.status).toBe(0);
   });
 
+  it('writes a site agent’s BMC networks ([site] bmc_networks) with --bmc-networks', async () => {
+    const script = (await run([...base, '--bmc-networks', '10.20.0.0/16, fd00:bmc::/64'.replace('bmc', 'b0c')])).stdout;
+    expect(script).toContain('[site]\nbmc_networks = "10.20.0.0/16,fd00:b0c::/64"\n');
+    expect((await run(base)).stdout).not.toContain('[site]');
+    for (const bad of ['10.20.0.0', '10.20.0.0/33', '"; rm -rf /', ','])
+      expect(await run([...base, '--bmc-networks', bad]), bad).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+    expect(await run([...base, '--bmc-networks', ''])).toMatchObject({ ok: false });
+  });
+
   it('pins the deployment’s approver set in config.toml with --approver-set-sha256', async () => {
     const digest = 'ab'.repeat(32);
     const script = (await run([...base, '--approver-set-sha256', digest])).stdout;

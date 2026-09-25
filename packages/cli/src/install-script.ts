@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { CliError } from './errors.js';
 
 /**
@@ -51,6 +52,11 @@ export interface InstallScriptOptions {
     /** The release floor (the release sequence bcd never goes below, beside its own embedded one and its state). */
     sequence?: number;
   };
+  /**
+   * A site agent's BMC networks (CIDRs): site.httpProxy never reaches into them, whatever the control plane asks
+   * ([site] bmc_networks; local config, so the control plane cannot loosen it).
+   */
+  bmcNetworks?: readonly string[];
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -62,6 +68,15 @@ const pinPattern = /^sha256\/[A-Za-z0-9+/]{43}=$/;
 const hexPattern = /^[0-9a-f]{64}$/;
 const base64urlPattern = /^[A-Za-z0-9_-]{43}$/;
 const safeUrlPattern = /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~\/-]*)?$/;
+
+/** `10.20.0.0/16`, `fd00::/64`: an address and a prefix length that fits it. */
+function isCidr(value: string): boolean {
+  const match = /^([0-9A-Fa-f:.]+)\/(\d{1,3})$/.exec(value);
+  if (!match) return false;
+  const family = isIP(match[1]!);
+  const bits = Number(match[2]);
+  return family === 4 ? bits <= 32 : family === 6 ? bits <= 128 : false;
+}
 
 function invalid(field: string, detail: string): CliError {
   return new CliError('INVALID_INPUT', `${field} ${detail}`);
@@ -110,6 +125,8 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
     if (sequence !== undefined && !(Number.isSafeInteger(sequence) && sequence >= 1))
       throw invalid('--release-sequence', 'must be a whole number of at least 1');
   }
+  for (const cidr of options.bmcNetworks ?? []) if (!isCidr(cidr)) throw invalid('--bmc-networks', `has ${JSON.stringify(cidr)}, not a CIDR`);
+  if (options.bmcNetworks && options.bmcNetworks.length === 0) throw invalid('--bmc-networks', 'lists no network');
   for (const name of options.plugins?.privileged ?? [])
     if (!idPattern.test(name)) throw invalid('--privileged-plugins', 'must name plugins by letters, digits and . _ -');
   const jwk = options.joinEncryptionJwk;
@@ -144,6 +161,11 @@ export function renderBcdConfig(
     ...(options.approverSetSha256 ? [`approver_set_sha256 = "${options.approverSetSha256}"`] : []),
     '',
   ].join('\n');
+}
+
+/** The [site] section of a site agent: the BMC networks site.httpProxy never reaches. */
+export function renderBcdSiteSection(bmcNetworks: readonly string[]): string {
+  return ['[site]', `bmc_networks = "${bmcNetworks.join(',')}"`, ''].join('\n');
 }
 
 /**
@@ -331,6 +353,17 @@ if [ -f /etc/bcd/config.toml ] && grep -q '^\\[' /etc/bcd/config.toml; then
   sed -n '/^\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
 fi
 ${
+  options.bmcNetworks
+    ? `# A site agent's BMC networks: a [site] section unless the operator's config already has one.
+if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*site[[:space:]]*\\]' /etc/bcd/config.toml.new; then
+  cat >> /etc/bcd/config.toml.new <<'BCD_SITE'
+${renderBcdSiteSection(options.bmcNetworks)}BCD_SITE
+else
+  printf 'bcd install: note: config.toml already has a [site] section; --bmc-networks was not applied to it\\n' >&2
+fi
+`
+    : ''
+}${
   options.update
     ? `# bcd self-update: an [update] section unless the operator's config already has one.
 if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*update[[:space:]]*\\]' /etc/bcd/config.toml.new; then
