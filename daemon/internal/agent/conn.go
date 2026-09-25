@@ -85,6 +85,17 @@ func (a *Agent) runSession(ctx context.Context) (bool, *time.Duration, error) {
 		}
 	})
 	defer welcomeTimer.Stop()
+	// A Receive blocked in the transport's body read does not always see the context end: close the
+	// stream, so a stop (SIGTERM, a self-update restart) never waits on the gateway.
+	receiving := make(chan struct{})
+	defer close(receiving)
+	go func() {
+		select {
+		case <-sctx.Done():
+			_ = stream.CloseResponse()
+		case <-receiving:
+		}
+	}()
 
 	var recvErr error
 	for {
@@ -155,6 +166,10 @@ func (a *Agent) hello() (*agentv1.Hello, error) {
 	a.invMu.Unlock()
 	if len(a.o.Runtimes) > 0 {
 		h.Capabilities = append(h.Capabilities, InstanceDialCapability, NetworkPolicyCapability)
+	}
+	if a.role() == dispatch.RoleSite && len(a.o.BMCNetworks) > 0 {
+		// The local [site] bmc_networks deny list is set (doctor warns for site agents without it).
+		h.Capabilities = append(h.Capabilities, BMCNetworksCapability)
 	}
 	for _, d := range a.o.Drivers {
 		h.Drivers = append(h.Drivers, d.Manifest)

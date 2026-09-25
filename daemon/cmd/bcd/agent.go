@@ -416,6 +416,10 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	if alongside != nil {
 		go alongside(ctx, a)
 	}
+	go func() {
+		<-ctx.Done()
+		log.Info("bcd " + mode + " stopping")
+	}()
 	log.Info("bcd "+mode+" starting", "version", version, "node", state.NodeID, "site", state.SiteID, "gateway", cfg.GatewayURL, "hardware", hardwareBackend)
 	if err := a.Run(ctx); err != nil {
 		if errors.Is(err, agent.ErrRestart) {

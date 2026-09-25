@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createPublicKey, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -8,9 +8,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { create } from '@bufbuild/protobuf';
-import { parseCertificate, spkiPin } from '@better-compute/pki';
+import {
+  buildReleaseManifest,
+  createReleaseSigningKey,
+  parseCertificate,
+  releaseArtifact,
+  signReleaseManifest,
+  spkiPin,
+} from '@better-compute/pki';
 import { TunnelFrameSchema } from '@better-compute/protocol';
 import { pkiAllocationBindingCheck } from '@better-compute/server';
+import { rolloutModule } from '@better-compute/rollout';
 import { createDevStack, type DevStack } from '@better-compute/testing';
 
 // The real Go daemon (daemon/, W1) against the real control plane and gateway: `bcd join` with a
@@ -52,6 +60,9 @@ async function until<T>(what: string, probe: () => Promise<T | undefined | false
   }
 }
 
+// The release key self-update trusts (its pin goes into the node's [update] config).
+const releaseKey = createReleaseSigningKey();
+
 let dev: DevStack;
 let api: any;
 let poolId: string;
@@ -81,8 +92,8 @@ function runLinux(argv: string[], input?: string): Promise<{ status: number | nu
   });
 }
 
-function startNode() {
-  const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=41', toLinux(binary), 'node', '--config', toLinux(config)]);
+function startNode(exe = toLinux(binary)) {
+  const { cmd, args } = linux(['env', 'BCD_FAKEHW_SEED=41', exe, 'node', '--config', toLinux(config)]);
   node = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
   node.stderr!.on('data', (chunk: Buffer) => {
     nodeLog += chunk.toString();
@@ -110,6 +121,8 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
       externalTls: { host: '0.0.0.0' },
       tunnels: {},
       capacity: { attestedBindings: pkiAllocationBindingCheck() },
+      // daemon.upgrade is the rollout module's kind.
+      modules: [rolloutModule({ release: { pins: [spkiPin(releaseKey.publicKey)] }, downloadsUrl: 'https://downloads.invalid' })],
     });
     api = dev.compute.api;
     ({ poolId } = await dev.createPool({ key: 'bcd', expectGpuCount: 8 }));
@@ -387,4 +400,85 @@ describe.skipIf(!enabled)('bcd, the Go daemon, against the control plane (W1)', 
     );
     expect(rows[0]?.boot_id).toBe(after);
   }, 120_000);
+
+  it('self-updates to a signed release (daemon.upgrade): A/B slots, exec, confirmed by the Welcome', async () => {
+    // A second build that reports 0.9.0, released under a key only this node's config pins.
+    const nextBinary = join(daemonDir, 'bin', 'bcd-linux-amd64-next');
+    const built = spawnSync(goBinary, ['build', '-tags', 'nonvml,fakehw', '-ldflags', '-X main.version=0.9.0', '-o', 'bin/bcd-linux-amd64-next', './cmd/bcd'], {
+      cwd: daemonDir,
+      env: { ...process.env, GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' },
+      encoding: 'utf8',
+    });
+    expect(built.status, built.stderr).toBe(0);
+    const bytes = readFileSync(nextBinary);
+    const key = releaseKey;
+    const signed = signReleaseManifest(
+      buildReleaseManifest({
+        product: 'bcd',
+        version: '0.9.0',
+        sequence: 1,
+        artifacts: [releaseArtifact('bcd_0.9.0_linux_amd64', bytes, 'linux-amd64')],
+        signers: [key],
+      }),
+      [key],
+    );
+    const served = createServer((_req, res) => res.end(bytes));
+    await new Promise<void>((resolve) => served.listen(0, '0.0.0.0', resolve));
+    try {
+      const host = windows ? sh("ip route show default | awk '{print $3}'") : '127.0.0.1';
+      const url = `http://${host}:${(served.address() as AddressInfo).port}/downloads/bcd/0.9.0/linux-amd64`;
+
+      // Restart the node from an entrypoint it may replace, with the release key pinned.
+      // [n]ode: the pattern must not match the shell running pkill/pgrep.
+      sh(`pkill -f '[n]ode --config ${toLinux(config)}' ; true`);
+      let left = '';
+      await until('the node to stop', async () => (left = sh(`pgrep -af '[n]ode --config ${toLinux(config)}' || echo gone`)) === 'gone', 30_000).catch(async (error) => {
+        const before = nodeLog.length;
+        sh(`pkill -QUIT -f '[n]ode --config ${toLinux(config)}' ; true`);
+        await sleep(3000);
+        throw new Error(`${error}: ${left}\n${nodeLog.slice(before)}`);
+      });
+      const entry = `${dataDir}/entry/bcd`;
+      sh(`mkdir -p '${dataDir}/entry' && cp '${toLinux(binary)}' '${entry}' && chmod 0755 '${entry}'`);
+      writeFileSync(
+        config,
+        `${readFileSync(config, 'utf8')}\n[update]\nrelease_pins = "${spkiPin(key.publicKey)}"\nentrypoint = "${entry}"\n`,
+      );
+      const restarted = new Date();
+      startNode(entry);
+      const version = async (since = new Date(0)) =>
+        (
+          await dev.database.query<{ daemon_version: string }>(
+            'SELECT daemon_version FROM node_sessions WHERE node_id = $1 AND connected_at > $2',
+            [nodeId, since],
+          )
+        ).rows[0]?.daemon_version;
+      await until('the node to reconnect', async () => (await version(restarted)) === '0.0.0-dev', 90_000);
+
+      // daemon.upgrade is the rollout controller's (not runnable through the API): enqueue it as it does.
+      const upgrade = await dev.database.transaction((tx: any) =>
+        dev.compute.context.commands.enqueue(tx, {
+          nodeId,
+          kind: 'daemon.upgrade',
+          payload: {
+            version: '0.9.0',
+            url,
+            sha256: createHash('sha256').update(bytes).digest('base64'),
+            signature: Buffer.from(JSON.stringify(signed)).toString('base64'),
+          },
+          idempotencyKey: 'bcd-e2e-upgrade',
+          notAfter: Date.now() + 600_000,
+        }),
+      );
+      await until('daemon.upgrade to succeed', async () => (await commandState(upgrade.id)) === 'succeeded', 120_000).catch((error) => {
+        throw new Error(`${error}\n--- bcd log ---\n${nodeLog.slice(-4000)}`);
+      });
+      expect(await version()).toBe('0.9.0');
+      expect(sh(`readlink '${dataDir}/bin/current'`)).toBe('bcd-b');
+      expect(sh(`readlink '${entry}'`)).toBe(`${dataDir}/bin/current`);
+      expect(sh(`test -f '${dataDir}/upgrade.json' && echo pending || echo confirmed`)).toBe('confirmed');
+    } finally {
+      served.close();
+    }
+  }, 300_000);
 });

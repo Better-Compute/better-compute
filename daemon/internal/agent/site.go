@@ -160,6 +160,10 @@ func (a *Agent) runBMC(ctx context.Context, cmd dispatch.Command) (journal.Resul
 	return bmcResult(true, result, "", "")
 }
 
+// BMCNetworksCapability (Hello.capabilities) says a site agent's local configuration names its BMC
+// networks ([site] bmc_networks), which site.httpProxy never reaches.
+const BMCNetworksCapability = "site.bmc-networks"
+
 // bmcHostsFile remembers the BMC hosts this site agent has driven (site.httpProxy refuses them).
 const bmcHostsFile = "bmc-hosts.json"
 
