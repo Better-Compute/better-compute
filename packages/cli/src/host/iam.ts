@@ -4,11 +4,16 @@ import {
   type ControlClientOptions,
   type GatewayControlClient,
 } from '@better-compute/gateway';
+import { applyBudgetPolicy, reassignReservations, withdrawAgentReservations } from '@better-compute/capacity';
 import {
   agentStreamCloser,
+  agentStreamFilter,
+  budgetAlertHandler,
   combineStreamClosers,
   gatewayStreamCloser,
+  identityEndOf,
   localStreamCloser,
+  successorLookup,
   type AgentStreamFilter,
   type LocalStreamRegistry,
   type ComputeIamBridge,
@@ -199,6 +204,9 @@ export function installIamHandlers(
       own.agent ??
       (async (tx, event) => {
         await closeStreams(tx, event);
+        // The reservations the agent or delegation created that have not started are cancelled (§12.8).
+        const filter = agentStreamFilter(event);
+        if (filter) await withdrawAgentReservations(tx, compute.context, { ...filter, reason: event.action });
         // The agent's cached authentications and decisions, where the event names it.
         const agentId =
           event.action === 'delegation:revoke' ? text(event.metadata?.agentId) : text(event.subjectId);
@@ -207,12 +215,22 @@ export function installIamHandlers(
       }),
     identity:
       own.identity ??
-      (async (_tx, event) => {
+      (async (tx, event) => {
         const identityId = text(event.subjectId);
         if (identityId) caches.dropIdentity(identityId);
         else caches.clear();
+        // An owner gone for good (offboarded, expired, deleted, or found so by IamReconcile): its reservations go
+        // to the successor, else the unstarted ones are cancelled (§12.8).
+        const end = await identityEndOf(event, successorLookup(compute.context.sql));
+        if (end) await reassignReservations(tx, compute.context, { ...end, reason: event.action });
         // An identity that is gone keeps no streams (an update, such as a rename, keeps them).
-        if (identityEnds.has(event.action)) closeFor(event, 'end');
+        if (end || identityEnds.has(event.action)) closeFor(event, 'end');
+      }),
+    // A budget spent: the offerings' onBudgetExceeded (stop-new, drain) for the alert's tenant.
+    budget:
+      own.budget ??
+      budgetAlertHandler(async (tx, alert) => {
+        await applyBudgetPolicy(tx as never, compute.context, alert);
       }),
     // Session revocations name an identity, a role or a tenant; dropping every cached authentication is exact
     // for all of them and costs one IAM call per caller. An identity's own revocations close or re-check its

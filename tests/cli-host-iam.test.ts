@@ -8,7 +8,7 @@ import {
   unconfiguredIam,
   type Deployment,
 } from '@better-compute/cli';
-import type { IamEventHandlers, IamInboxEvent } from '@better-compute/iam';
+import { successorsMigration, type IamEventHandlers, type IamInboxEvent } from '@better-compute/iam';
 import { pglite } from '@better-compute/postgres/pglite';
 
 // `host.iam` (PLAN.md §12.8): the host installs compute's reactions to IAM events on the bridge. `agent`
@@ -106,7 +106,8 @@ describe('host.iam', () => {
   });
 
   it('installs defaults that drop the caches, and keeps your own handlers', async () => {
-    const { compute } = await deploy();
+    // The iam module's table (successors) is there wherever a bridge is: the reactions read it.
+    const { compute } = await deploy([{ name: 'iam', migrations: [successorsMigration] } as never]);
     const calls: string[] = [];
     const spied = {
       dropIdentity: (id: string) => calls.push(`dropIdentity:${id}`),
