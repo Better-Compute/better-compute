@@ -154,6 +154,7 @@ describe('help and the manifest', () => {
       'auth login',
       'auth status',
       'auth logout',
+      'ssh-cert',
       'reserve',
       'release',
       'extend',
