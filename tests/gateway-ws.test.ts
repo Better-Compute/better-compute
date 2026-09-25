@@ -384,6 +384,37 @@ describe('connectGatewayWs (the daemon side)', () => {
     ).rejects.toMatchObject({ code: 'UNAUTHENTICATED', details: { reason: 'serving chain not trusted' } });
   });
 
+  it("answers a busy refusal 429 with retry-after and the pushback, which the client surfaces as retryAfterMs", async () => {
+    const busy = await f.another({ handshakesPerSecond: 1 });
+    const busyServed = await serveGatewayWs(busy, {
+      insecure: true,
+      roots: [p.nodeCa.certificate],
+      audiences: ['gw.eu-1.test'],
+      serving: p.serving,
+      clock: f.clock,
+    });
+    try {
+      const [a, b] = [await f.addNode(), await f.addNode()];
+      const dialBusy = async (node: string) =>
+        connectGatewayWs({
+          url: `ws://127.0.0.1:${busyServed.port}`,
+          nodeId: node,
+          ...(await p.agent(node)),
+          audience: 'gw.eu-1.test',
+          servingRoots: [p.servingCa.certificate],
+          clock: f.clock,
+          onFrame: () => {},
+        });
+      (await dialBusy(a)).close();
+      const refused = await dialBusy(b).catch((error: unknown) => error);
+      expect(refused).toMatchObject({ code: 'RATE_LIMITED' });
+      expect((refused as { retryAfterMs?: number }).retryAfterMs).toBeGreaterThanOrEqual(250);
+    } finally {
+      await busyServed.close();
+      await busy.stop();
+    }
+  });
+
   it('works through a TLS-inspecting proxy: transport trust from the proxy CA, identity from the in-band proofs', async () => {
     // The proxy re-signs TLS with its own CA; the client trusts it for transport only. (Wall clock:
     // node:tls checks transport certificates against real time.)

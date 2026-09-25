@@ -101,7 +101,16 @@ export function connectGatewayWs(options: GatewayWsClientOptions): Promise<Gatew
       const status = Number(lines[0]!.split(' ')[1]);
       if (status !== 101) {
         const reason = decodeURIComponent(headers.get('x-bc-reason') ?? `HTTP ${status}`);
-        return fail(new ComputeError(status === 401 ? 'UNAUTHENTICATED' : status === 429 ? 'RATE_LIMITED' : 'INTERNAL_ERROR', reason));
+        // A busy gateway says when to come back: exact ms, else whole seconds (`retry-after`).
+        const pushback = Number(headers.get('grpc-retry-pushback-ms') ?? Number(headers.get('retry-after')) * 1000);
+        return fail(
+          new ComputeError(
+            status === 401 ? 'UNAUTHENTICATED' : status === 429 ? 'RATE_LIMITED' : 'INTERNAL_ERROR',
+            reason,
+            undefined,
+            Number.isFinite(pushback) && pushback >= 0 ? { retryAfterMs: pushback } : undefined,
+          ),
+        );
       }
       if (headers.get('sec-websocket-protocol') !== WS_SUBPROTOCOL)
         return fail(new ComputeError('INVALID_INPUT', `the gateway did not select ${WS_SUBPROTOCOL}`));
