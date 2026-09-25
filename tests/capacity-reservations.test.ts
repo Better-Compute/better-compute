@@ -1864,6 +1864,39 @@ describe('the v0.4 pool-lease placer', () => {
     expect(await summary()).toEqual(['Unschedulable', 'Unschedulable', 'placed', 'placed']);
   });
 
+  it('never double-books from a stale cached index: the guarded commit replans', async () => {
+    // The worker caches the pool's index between batches (the sim clock never moves here).
+    await queue('warm', 1);
+    expect(await runBatch()).toBe('DONE');
+    // Behind the cache's back, the inline placer fills three of the four remaining GPUs of
+    // node A, and all of node B.
+    await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 3 }], idempotencyKey: 'x1' }),
+    );
+    await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 4 }], idempotencyKey: 'x2' }),
+    );
+    const late = await queue('late', 2);
+    await runBatch();
+    // The stale index thought 2 GPUs were free somewhere; the commit found otherwise.
+    const after = (await get(late.id)) as Rsv & {
+      conditions: { type: string; message?: string }[];
+    };
+    expect(after.state).toBe('pending');
+    expect(after.conditions.find((c) => c.type === 'Unschedulable')?.message).toMatch(
+      /booked concurrently/,
+    );
+    const overlaps = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM device_bookings a JOIN device_bookings b
+         ON a.device_id = b.device_id AND a.ctid < b.ctid AND a.during && b.during`,
+    );
+    expect(overlaps.rows[0]!.n).toBe('0');
+  });
+
   it('places instances and gangs at once, and pending retries re-queue', async () => {
     const gang = (await call(
       'reservations',
