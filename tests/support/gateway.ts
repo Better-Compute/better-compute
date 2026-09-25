@@ -80,6 +80,8 @@ export interface HelloOverrides {
   inventoryHashes?: Record<string, Uint8Array>;
   trustVersion?: bigint;
   capabilities?: string[];
+  approverSetEpoch?: bigint;
+  approverSetSha256?: Uint8Array;
 }
 
 export function helloFrame(nodeId: string, overrides: HelloOverrides = {}): AgentFrame {
@@ -99,6 +101,8 @@ export function helloFrame(nodeId: string, overrides: HelloOverrides = {}): Agen
       inventoryHashes: overrides.inventoryHashes ?? {},
       trustVersion: overrides.trustVersion ?? 0n,
       capabilities: overrides.capabilities ?? [],
+      approverSetEpoch: overrides.approverSetEpoch ?? 0n,
+      approverSetSha256: overrides.approverSetSha256 ?? new Uint8Array(),
     },
   });
 }

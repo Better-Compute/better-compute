@@ -621,6 +621,8 @@ export function createGateway(options: GatewayOptions): Gateway {
           daemonVersion: hello.daemonVersion,
           protoMax: hello.protoMax,
           trustVersion: hello.trustVersion,
+          approverSetEpoch: hello.approverSetEpoch,
+          approverSetSha256: hello.approverSetSha256,
           capabilities: hello.capabilities,
           drivers: hello.drivers.map((driver) => ({ id: driver.id, version: driver.version })),
           ...(peer.serial ? { certSerial: peer.serial } : {}),

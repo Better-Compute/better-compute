@@ -97,6 +97,12 @@ export interface HelloInput {
    */
   trustVersion?: bigint;
   /**
+   * `Hello.approver_set_epoch` / `approver_set_sha256` (v1.0 §13): the approver set the daemon HOLDS,
+   * which can lag its trust_version (a quorum change refused). Stored as NULL when it holds none.
+   */
+  approverSetEpoch?: bigint;
+  approverSetSha256?: Uint8Array;
+  /**
    * `Hello.capabilities` (e.g. `tunnel.instance-dial`), stored as `node_sessions.capabilities`, as-is
    * from each Hello, for API checks such as `tunnels.open`. Malformed entries are dropped.
    */
@@ -112,6 +118,16 @@ export interface HelloInput {
 export function sessionCapabilities(capabilities: readonly string[] | undefined): string[] {
   const valid = (capabilities ?? []).filter((name) => /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name));
   return [...new Set(valid)].sort().slice(0, 64);
+}
+
+/**
+ * The approver set a daemon reports holding, as SQL parameters (epoch as a decimal string for
+ * numeric(20,0), digest as bytes): both NULL when it holds none (an empty digest), so readers can tell
+ * "no quorum" from a real set.
+ */
+function approverSetParams(epoch: bigint | undefined, sha256: Uint8Array | undefined): [string | null, Buffer | null] {
+  if (!sha256?.byteLength) return [null, null];
+  return [String(epoch ?? 0n), Buffer.from(sha256)];
 }
 
 /** The prefix of the node labels Hello writes for advertised drivers (source `system`). */
@@ -995,6 +1011,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           `UPDATE node_sessions SET gateway_id = $2, session_id = $3, session_epoch = session_epoch + 1,
              boot_id = $4, journal_id = $5, role = $6, daemon_version = $7, proto_max = $8,
              trust_version = $9, capabilities = $10::text[],
+             approver_set_epoch = $11::numeric, approver_set_sha256 = $12::bytea,
              acked_event_seq = CASE WHEN journal_id IS DISTINCT FROM $5 THEN 0 ELSE acked_event_seq END,
              connected_at = compute_now(), last_seen = compute_now(), disconnected_at = NULL
            WHERE node_id = $1
@@ -1013,6 +1030,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             // must not count a node that lost the new bundle.
             String(input.trustVersion ?? 0n),
             sessionCapabilities(input.capabilities),
+            ...approverSetParams(input.approverSetEpoch, input.approverSetSha256),
           ],
         );
         const epoch = Number(bumped.rows[0]!.session_epoch);
@@ -1375,10 +1393,16 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         if (advanced.rowCount) await work.enqueue(tx, 'node', nodeId);
         // A newer TrustBundle applied mid-session (Welcome.trust) is acked here, not at the next
         // Hello (§13 root switch). 0 means unchanged, so the usual report adds no statement.
+        // The approver set held after that bundle is written only from a report at least as new as
+        // the recorded version, so a late older report never pairs an old set with a newer version.
         if (report.trustVersion > 0n)
           await tx.query(
-            'UPDATE node_sessions SET trust_version = GREATEST(trust_version, $2::bigint) WHERE node_id = $1',
-            [nodeId, String(report.trustVersion)],
+            `UPDATE node_sessions SET
+               approver_set_epoch = CASE WHEN $2::bigint >= trust_version THEN $3::numeric ELSE approver_set_epoch END,
+               approver_set_sha256 = CASE WHEN $2::bigint >= trust_version THEN $4::bytea ELSE approver_set_sha256 END,
+               trust_version = GREATEST(trust_version, $2::bigint)
+             WHERE node_id = $1`,
+            [nodeId, String(report.trustVersion), ...approverSetParams(report.approverSetEpoch, report.approverSetSha256)],
           );
         // Health, instances, … are the host's; a failing handler must not hold back
         // observed_generation or the other handlers: each runs under its own savepoint.

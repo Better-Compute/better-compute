@@ -59,6 +59,42 @@ describe('session versions', () => {
     expect(await trust()).toBe(2);
   });
 
+  it('records the approver set a daemon holds, NULL for none, and never pairs an old set with a newer version', async () => {
+    f = await gatewayFixture();
+    const node = await f.addNode();
+    const held = async () =>
+      (
+        await f.db.query<{ trust_version: string; approver_set_epoch: string | null; approver_set_sha256: Uint8Array | null }>(
+          'SELECT trust_version, approver_set_epoch, approver_set_sha256 FROM node_sessions WHERE node_id = $1',
+          [node],
+        )
+      ).rows[0]!;
+    const setA = new Uint8Array(32).fill(0xa);
+    const setB = new Uint8Array(32).fill(0xb);
+    // No set held: both NULL, so "no quorum" differs from any digest.
+    await f.connect(node, { trustVersion: 3n });
+    expect(await held()).toMatchObject({ approver_set_epoch: null, approver_set_sha256: null });
+    const { handle } = await f.connect(node, { bootId: 'boot-2', trustVersion: 3n, approverSetEpoch: 1n, approverSetSha256: setA });
+    expect(Number((await held()).approver_set_epoch)).toBe(1);
+    expect(Buffer.from((await held()).approver_set_sha256!).equals(Buffer.from(setA))).toBe(true);
+
+    const report = (version: bigint, epoch: bigint, digest: Uint8Array) =>
+      agentFrame({
+        case: 'status',
+        value: { observedGeneration: 1n, appliedGeneration: 1n, trustVersion: version, approverSetEpoch: epoch, approverSetSha256: digest },
+      });
+    // A newer bundle with a new set: both move.
+    await handle.receive(report(5n, 2n, setB));
+    await f.gateway.jobs.status.tick();
+    expect(Number((await held()).trust_version)).toBe(5);
+    expect(Number((await held()).approver_set_epoch)).toBe(2);
+    // A late report from an older bundle changes neither.
+    await handle.receive(report(4n, 1n, setA));
+    await f.gateway.jobs.status.tick();
+    expect(Number((await held()).approver_set_epoch)).toBe(2);
+    expect(Buffer.from((await held()).approver_set_sha256!).equals(Buffer.from(setB))).toBe(true);
+  });
+
   it('stores Hello.capabilities as-is from each Hello, dropping malformed names', async () => {
     f = await gatewayFixture();
     const node = await f.addNode();
