@@ -552,6 +552,7 @@ export async function createTemplate(
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
   assertEnvDeliverable(deps, input.env, input.userData);
   const { runtime } = await resolveTemplate(deps, tx, input);
+  await assertNetworkDeliverable(tx, input.poolId, input.network);
   const { defaultTtl, maxTtl } = ttlBounds(input.defaultTtlSeconds, input.maxTtlSeconds);
   const taken = await tx.query(
     `SELECT 1 FROM sandbox_templates WHERE tenant_id = $1 AND name = $2 AND NOT deleted`,
@@ -593,6 +594,24 @@ export async function createTemplate(
   return templateView(toTemplate(rows[0]!));
 }
 
+/**
+ * `private` and `none` are enforced on the instance's NIC addresses (bcd fails closed without
+ * them), and `none` is reachable only from the host on that subnet: both need the pool's IP range.
+ */
+async function assertNetworkDeliverable(
+  tx: SqlTx,
+  poolId: string,
+  network: SandboxNetwork | undefined,
+): Promise<void> {
+  if (network === undefined || network === 'egress') return;
+  const { rows } = await tx.query(`SELECT 1 FROM ip_pools WHERE pool_id = $1`, [poolId]);
+  if (rows.length === 0)
+    throw new ComputeError(
+      'INVALID_STATE',
+      `network '${network}' needs an IP range on pool ${poolId} (setIpPool): the host enforces it on the instance's addresses`,
+    );
+}
+
 /** Whether an update changes what the template's instances are made of. */
 function shapes(
   current: TemplateRow,
@@ -631,6 +650,7 @@ export async function updateTemplate(
           runtime: current.runtime,
         })
       : current;
+  await assertNetworkDeliverable(tx, current.poolId, input.network);
   const { defaultTtl, maxTtl } = ttlBounds(input.defaultTtlSeconds, input.maxTtlSeconds, current);
   const warmPool = input.warm
     ? { min: input.warm.min, max: input.warm.max ?? input.warm.min }
@@ -1137,6 +1157,8 @@ async function createManagedInstance(
       );
   }
   const { flavor, image, runtime } = await resolveTemplate(deps, tx, template);
+  // The range may have gone since the template was written; never start an instance bcd must stop.
+  await assertNetworkDeliverable(tx, template.poolId, template.network);
   // Rendered, then sealed, before the row exists: resolved secrets never touch the table (§6).
   const rendered = await instanceUserData(deps, template, spec.instanceId);
   const sealed = rendered !== null && deps.broker !== undefined && !isSecretRef(rendered);

@@ -1227,6 +1227,22 @@ describe('template network and versions', () => {
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 
+  it('needs an IP range for private and none (the host enforces them on the addresses)', async () => {
+    await db.query(`DELETE FROM ip_pools WHERE pool_id = $1`, [pool]);
+    await expect(createTemplate({ name: 'none', network: 'none' })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: expect.stringContaining('IP range'),
+    });
+    const open = await createTemplate({ name: 'open' });
+    await expect(
+      call('sandboxTemplates', 'update', {
+        tenantId: 'acme',
+        templateId: open.id,
+        network: 'private',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_STATE' });
+  });
+
   it('never claims a warm instance made from an older template version, and replaces it', async () => {
     const template = await createTemplate({ warm: { min: 1 } });
     await reconcileSandboxes();
