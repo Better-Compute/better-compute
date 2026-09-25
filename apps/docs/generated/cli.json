@@ -1648,7 +1648,7 @@
       "group": "Sandboxes",
       "summary": "Run a command (or a shell) in a sandbox over SSH through a tunnel (sandboxes.exec)",
       "description": "sandbox exec asks sandboxes.exec for a short-lived SSH certificate for your own key (--key, default ~/.ssh/id_ed25519; its .pub is sent, the private key never leaves this machine) and a single-use tunnel ticket to the sandbox's instance, then runs your OpenSSH client (--ssh, default ssh) through that tunnel: the command after --, or a login shell. There is no agent in the guest; its sshd trusts the sandbox CA for <account>@<instance>. The certificate and a known_hosts file for this one connection live in a temporary directory that is removed afterwards. It exits with ssh's status. Needs --url (tunnels run over the server's WebSocket) and a signed-in session.",
-      "usage": "better-compute sandbox exec SANDBOX [COMMAND...] --tenant ID [--key PATH] [--minutes N] [--ssh PROGRAM] [--config PATH] [--url URL]",
+      "usage": "better-compute sandbox exec SANDBOX [COMMAND...] --tenant ID [--key PATH] [--minutes N] [--ssh PROGRAM] [--accept-host-key] [--config PATH] [--url URL]",
       "target": "token",
       "args": [
         {
@@ -1689,6 +1689,11 @@
           "optional": true,
           "description": "The OpenSSH client to run",
           "default": "ssh"
+        },
+        {
+          "flag": "--accept-host-key",
+          "optional": true,
+          "description": "Connect although the guest's host key is not certified (older guests, or an expired host certificate): accepted on first use"
         },
         {
           "flag": "--config",
