@@ -115,6 +115,9 @@ func (c siteConverger) Plan(_ context.Context, desired []byte) ([]converge.Actio
 			ctx = context.Background()
 		}
 		missing, failures := c.a.cache.warm(ctx, spec.GetCacheImages(), c.a.imageClient(), func(msg string, kv ...any) { c.a.log.Info(msg, kv...) })
+		if missing > 0 {
+			go c.a.refreshSections()
+		}
 		if len(failures) > 0 {
 			return nil, converge.Terminal(errors.New(strings.Join(failures, "; ")))
 		}

@@ -227,6 +227,7 @@ func New(o Options) (*Agent, error) {
 	a.devices = &devicesConverger{a: a}
 	a.boot = newBootEntries(o.DataDir)
 	a.cache = newImageCache(filepath.Join(o.DataDir, "cache"))
+	a.cache.changed = a.refreshSections
 	a.loadFaults()
 	a.access = &accessConverger{a: a}
 	a.key.Store(o.Key)

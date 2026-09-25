@@ -43,9 +43,33 @@ func TestSiteCacheWarmsAndServes(t *testing.T) {
 		}
 		return agentv1.SectionState_SECTION_STATE_UNSPECIFIED
 	}
-	s.next(t, "site converged", func(f *agentv1.AgentFrame) bool {
-		return f.GetStatus() != nil && siteState(f.GetStatus()) == agentv1.SectionState_SECTION_STATE_CONVERGED
-	})
+	// The pull completes (the "images" section goes out), then the retried pass converges the site.
+	var images *agentv1.InventorySection
+	converged := false
+	for images == nil || !converged {
+		f := s.next(t, "images section and converged site", func(f *agentv1.AgentFrame) bool {
+			return f.GetStatus() != nil || f.GetInventory().GetSection() == "images"
+		})
+		if st := f.GetStatus(); st != nil && siteState(st) == agentv1.SectionState_SECTION_STATE_CONVERGED {
+			converged = true
+		}
+		if inv := f.GetInventory(); inv != nil {
+			sec := &agentv1.ImagesSection{}
+			_ = proto.Unmarshal(inv.GetContent(), sec)
+			if len(sec.GetImages()) == 1 && sec.GetImages()[0].GetState() == agentv1.CachedImageState_CACHED_IMAGE_STATE_READY {
+				images = inv
+			}
+		}
+	}
+	sec := &agentv1.ImagesSection{}
+	_ = proto.Unmarshal(images.GetContent(), sec)
+	if img := sec.GetImages()[0]; !bytes.Equal(img.GetSha256(), good[:]) || img.GetRef() != upstream.URL+"/ubuntu.raw" ||
+		img.GetSizeBytes() != uint64(len(image)) || sec.GetUsedBytes() != uint64(len(image)) || img.GetLastUsed().AsTime().Minute() != 0 {
+		t.Fatalf("images section = %v", sec)
+	}
+	if sum := sha256.Sum256(images.GetContent()); !bytes.Equal(sum[:], images.GetSha256()) {
+		t.Fatal("the images section hash does not cover its content")
+	}
 	srv := httptest.NewServer(h.agent.BootHandler(BootConfig{}))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/cache/" + hex.EncodeToString(good[:]))

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"time"
@@ -107,7 +108,7 @@ func (a *Agent) runInventoryRefresh(_ context.Context, cmd dispatch.Command) (jo
 	if err := payloadOf(cmd, req); err != nil {
 		return journal.Result{}, err
 	}
-	known := map[string]bool{}
+	known := map[string]bool{"images": true}
 	for _, n := range inventory.SectionNames() {
 		known[n] = true
 	}
@@ -290,10 +291,43 @@ func (a *Agent) collect(rescan bool) ([]inventory.Section, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The "images" section (not in the P0 inventory mirror): the site image cache, when it holds
+	// anything, encoded with the generated message (deterministic, no maps).
+	if images := a.cache.section(); len(images.GetImages()) > 0 {
+		content, err := marshal(images)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(content)
+		sections = append(sections, inventory.Section{Name: "images", Content: content, Sha256: sum[:]})
+	}
 	a.inv = inv
 	a.collected = sections
 	a.collectedAt = time.Now()
 	return sections, nil
+}
+
+// refreshSections re-collects the inventory and sends the sections whose hash changed.
+func (a *Agent) refreshSections() {
+	a.invMu.Lock()
+	before := map[string]string{}
+	for _, s := range a.collected {
+		before[s.Name] = string(s.Sha256)
+	}
+	a.invMu.Unlock()
+	sections, err := a.collect(true)
+	if err != nil {
+		return
+	}
+	var changed []int
+	for i, s := range sections {
+		if before[s.Name] != string(s.Sha256) {
+			changed = append(changed, i)
+		}
+	}
+	if len(changed) > 0 {
+		a.sendSections(sections, changed)
+	}
 }
 
 // inventoryHashes maps section names to the SHA-256 of their content (Hello, heartbeats).
