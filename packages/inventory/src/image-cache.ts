@@ -50,18 +50,29 @@ export async function applyImageCache(
 ): Promise<{ upserted: number; removed: number }> {
   const rows = imageCacheRows(section);
   let upserted = 0;
-  for (const row of rows) {
+  if (rows.length > 0) {
+    // One statement for the whole section (imageCacheRows already made the digests unique).
     const { rowCount } = await tx.query(
       `INSERT INTO node_image_cache (node_id, sha256, image_id, ref, state, size_bytes, last_used_at)
-       VALUES ($1, decode($2, 'hex'), $3, $4, $5, $6, $7)
+       SELECT $1, decode(i.sha256, 'hex'), i.image_id, i.ref, i.state, i.size_bytes, i.last_used_at
+         FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[], $7::timestamptz[])
+              AS i(sha256, image_id, ref, state, size_bytes, last_used_at)
        ON CONFLICT (node_id, sha256) DO UPDATE SET image_id = EXCLUDED.image_id, ref = EXCLUDED.ref,
          state = EXCLUDED.state, size_bytes = EXCLUDED.size_bytes, last_used_at = EXCLUDED.last_used_at,
          updated_at = compute_now()
        WHERE (node_image_cache.image_id, node_image_cache.ref, node_image_cache.state, node_image_cache.size_bytes, node_image_cache.last_used_at)
              IS DISTINCT FROM (EXCLUDED.image_id, EXCLUDED.ref, EXCLUDED.state, EXCLUDED.size_bytes, EXCLUDED.last_used_at)`,
-      [nodeId, row.sha256, row.imageId, row.ref, row.state, row.sizeBytes, row.lastUsedAt],
+      [
+        nodeId,
+        rows.map((row) => row.sha256),
+        rows.map((row) => row.imageId),
+        rows.map((row) => row.ref),
+        rows.map((row) => row.state),
+        rows.map((row) => row.sizeBytes),
+        rows.map((row) => row.lastUsedAt),
+      ],
     );
-    upserted += rowCount ?? 0;
+    upserted = rowCount ?? 0;
   }
   const { rowCount: removed } = await tx.query(
     `DELETE FROM node_image_cache WHERE node_id = $1 AND NOT (encode(sha256, 'hex') = ANY($2::text[]))`,
