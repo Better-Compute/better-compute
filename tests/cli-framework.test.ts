@@ -168,6 +168,7 @@ describe('help and the manifest', () => {
       'pki init',
       'pki show',
       'pki rotate-command-root',
+      'pki renew-ca',
       'pki issue-gateway',
       'daemon install-script',
       'iam setup',

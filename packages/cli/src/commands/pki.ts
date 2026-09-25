@@ -8,9 +8,12 @@ import {
   importPkiBundle,
   pkiPins,
   privateKeyPem,
+  parseCertificate,
   readPkiPins,
+  renewBundleCa,
   rotateCommandSigningRoot,
   toPem,
+  type BundleCa,
   type CommandRootRotationStage,
   type PkiBundle,
 } from '@better-compute/pki';
@@ -73,6 +76,15 @@ export async function loadPkiBundle(path: string, env: NodeJS.ProcessEnv): Promi
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
+/** What to run for an expiring certificate of `readPkiPins().expires`. */
+function renewalFor(name: string): string {
+  if (name === 'nodeCa' || name === 'servingCa' || name === 'internalCa')
+    return `renew it from the root: better-compute pki renew-ca --ca ${name.slice(0, -2)}`;
+  if (name === 'commandSigningRoot')
+    return 'rotate it: better-compute pki rotate-command-root --stage add, then switch and drop';
+  return 'replace the root: a new PKI (pki init), and every node rejoins';
+}
+
 /** CAs expiring within this window are reported by `doctor`. */
 export const caExpiryWarningMs = 30 * 86_400_000;
 
@@ -113,14 +125,14 @@ export async function pkiFindings(
         check: 'pki.ca-expired',
         severity: 'error',
         message: `The ${name} certificate expired at ${iso(notAfter)}`,
-        fix: 'Reissue the CA from the offline root before any certificate it signs can be trusted again',
+        fix: `Nothing it signs is trusted until you ${renewalFor(name)}`,
       });
     else if (notAfter - now <= caExpiryWarningMs)
       findings.push({
         check: 'pki.ca-expiring',
         severity: 'warning',
         message: `The ${name} certificate expires at ${iso(notAfter)}`,
-        fix: 'Reissue the CA from the offline root and roll the new certificate out before it expires',
+        fix: `Before it expires, ${renewalFor(name)}, and roll the bundle out`,
       });
   }
   try {
@@ -282,6 +294,70 @@ export const pkiCommands = [
         ...(pins.commandSigningPreviousRootSha256
           ? { previousRoot: pins.commandSigningPreviousRootSha256 }
           : {}),
+      };
+    },
+  }),
+  defineCommand({
+    name: 'pki renew-ca',
+    group: 'PKI',
+    summary: "Renew a CA's certificate under the root, keeping its key",
+    description:
+      "pki renew-ca issues a new certificate for the node, serving or internal CA from the root CA, for the same key and subject, and writes the bundle back (sealed with BETTER_COMPUTE_SECRET when set). Certificates the CA issued stay valid and the serving CA's SPKI pin does not change, so nothing is re-pinned and no node rejoins; roll the bundle out to every process before the old certificate expires (doctor warns 30 days ahead). The root key comes from the bundle or, for an offline root, from --root-key; it is never written into the bundle then.",
+    output: 'json',
+    flags: {
+      ca: {
+        type: 'string',
+        value: 'CA',
+        required: true,
+        choices: ['node', 'serving', 'internal'],
+        description: 'Which CA to renew',
+      },
+      'root-key': {
+        type: 'string',
+        value: 'PATH',
+        description: 'The offline root key (pki init --offline-root), when the bundle has none',
+      },
+      days: {
+        type: 'integer',
+        value: 'N',
+        default: 365,
+        min: 1,
+        max: 3650,
+        description: 'Lifetime of the new certificate in days (capped by the root)',
+      },
+      pki: pkiFlag,
+    },
+    examples: [
+      'better-compute pki renew-ca --ca node',
+      'better-compute pki renew-ca --ca serving --root-key /media/usb/root-ca.key',
+    ],
+    async run({ flags, env, path, note }) {
+      const target = path(flags.pki ?? defaultPkiPath);
+      const secret = env.BETTER_COMPUTE_SECRET;
+      const rootKeyPath = flags['root-key'] ? path(flags['root-key']) : undefined;
+      const bundle = importPkiBundle(await readBundleText(target), {
+        ...(secret ? { secret } : {}),
+        ...(rootKeyPath ? { rootKey: await readFile(rootKeyPath, 'utf8') } : {}),
+      });
+      const which = flags.ca as BundleCa;
+      let renewed: PkiBundle;
+      try {
+        renewed = renewBundleCa(bundle, which, { validitySeconds: (flags.days ?? 365) * 86_400 });
+      } catch (error) {
+        throw new CliError('INVALID_STATE', (error as Error).message);
+      }
+      // An offline root stays offline: the key read from --root-key is not written into the bundle.
+      await replace(
+        target,
+        exportPkiBundle(renewed, { ...(secret ? { secret } : {}), omitRootKey: Boolean(rootKeyPath) }),
+      );
+      const ca = which === 'node' ? renewed.nodeCa : which === 'serving' ? renewed.servingCa : renewed.internalCa;
+      note(`Renewed the ${which} CA certificate; roll the bundle out to every process.`);
+      return {
+        ca: which,
+        notAfter: iso(ca.notAfter),
+        serial: parseCertificate(ca.certificate).serial,
+        ...(which === 'serving' ? { servingCaSpkiPin: pkiPins(renewed).servingCaSpkiPin } : {}),
       };
     },
   }),

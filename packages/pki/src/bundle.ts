@@ -12,6 +12,7 @@ import {
   createNodeCa,
   createRootCa,
   createServingCa,
+  renewCaCertificate,
   type LocalCertificateAuthority,
 } from './ca.js';
 import { createCommandSigningAuthority, type CommandSigningAuthority } from './intent.js';
@@ -196,6 +197,41 @@ export function commandSigningOptions(bundle: PkiBundle):
     ],
     trustVersion: bundle.trustVersion ?? 1,
   };
+}
+
+export type BundleCa = 'node' | 'serving' | 'internal';
+
+/**
+ * The bundle with one subordinate CA's certificate renewed under the root (same key and subject; see
+ * `renewCaCertificate`). Needs the root key: in the bundle, or loaded with `importPkiBundle({ rootKey })`.
+ */
+export function renewBundleCa(
+  bundle: PkiBundle,
+  which: BundleCa,
+  options: { validitySeconds?: number; clock?: Clock } = {},
+): PkiBundle {
+  if (!bundle.root)
+    throw new ComputeError(
+      'INVALID_STATE',
+      'Renewing a CA needs the root key: load the bundle with the offline root key',
+    );
+  const clock = options.clock ?? systemClock;
+  const current =
+    which === 'node' ? bundle.nodeCa : which === 'serving' ? bundle.servingCa : bundle.internalCa;
+  const chain = renewCaCertificate(bundle.root, current, {
+    clock,
+    ...(options.validitySeconds !== undefined ? { validitySeconds: options.validitySeconds } : {}),
+  });
+  const existing = { privateKey: current.export().privateKeyPem, certificates: chain };
+  const common = { id: current.id, clock, revocations: bundle.revocations, existing };
+  switch (which) {
+    case 'node':
+      return { ...bundle, nodeCa: createNodeCa({ ...common, trustDomain: bundle.trustDomain }) };
+    case 'serving':
+      return { ...bundle, servingCa: createServingCa(common) };
+    case 'internal':
+      return { ...bundle, internalCa: createInternalCa(common) };
+  }
 }
 
 export type CommandRootRotationStage = 'add' | 'switch' | 'drop';

@@ -319,6 +319,41 @@ interface InternalCa extends LocalCertificateAuthority {
   readonly [signerKey]: KeyObject;
 }
 
+/**
+ * A new certificate for a subordinate CA's existing key and subject, signed by `root` (the CA certificates live a
+ * year; `doctor` warns 30 days ahead). Leaves the CA issued stay valid: they name the same subject and verify
+ * against the same key, and the serving CA's SPKI pin does not change. Returns the new chain (the CA's
+ * certificate, then the root's chain), for `existing.certificates` of the matching `create*Ca`.
+ */
+export function renewCaCertificate(
+  root: LocalCertificateAuthority,
+  ca: LocalCertificateAuthority,
+  options: { validitySeconds?: number; clock?: Clock; backdateSeconds?: number } = {},
+): Uint8Array[] {
+  if (root.kind !== 'root') throw invalid('Only the root CA renews a subordinate CA');
+  if (ca.kind === 'root') throw invalid('The root is renewed on its own');
+  const clock = options.clock ?? systemClock;
+  const now = clock.now();
+  if (now > root.notAfter) throw new ComputeError('INVALID_STATE', 'The root CA has expired');
+  const validity = (options.validitySeconds ?? 365 * day) * 1000;
+  if (!(validity > 0)) throw invalid('validitySeconds must be positive');
+  const current = parseCertificate(ca.certificate);
+  const certificate = buildCertificate(
+    {
+      serial: randomSerial(),
+      issuer: parseCertificate(root.certificate).subject,
+      subject: current.subject,
+      notBefore: now - (options.backdateSeconds ?? 60) * 1000,
+      notAfter: Math.min(now + validity, root.notAfter),
+      publicKey: ca.publicKey,
+      ca: { pathLength: 0 },
+      authorityKeyId: root.subjectKeyId,
+    },
+    (root as InternalCa)[signerKey],
+  );
+  return [certificate, ...root.chain];
+}
+
 /** The offline root that certifies per-region node, serving and internal CAs. */
 export const createRootCa = (options: Omit<LocalCaOptions, 'issuer'> = {}) =>
   createLocalCa('root', options);
