@@ -3,6 +3,7 @@ export type {
   ControlPlaneFacts,
   ControlPlaneSim,
   ControlPlaneSimOptions,
+  ExtraPoolOptions,
 } from './control-plane.js';
 export { runColdStart } from './cold-start.js';
 export type { ColdStartOptions, ColdStartPhase, ColdStartReport } from './cold-start.js';

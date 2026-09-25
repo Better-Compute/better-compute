@@ -5,6 +5,7 @@
 // from compute's own tables: bookings (I1), billed allocations and usage windows (I8), command outcomes (I2) and
 // connectivity transitions (I5).
 
+import type { KeyObject } from 'node:crypto';
 import { create } from '@bufbuild/protobuf';
 import {
   ComputeError,
@@ -20,6 +21,7 @@ import {
   xidStatusHandler,
   type Gateway,
   type GatewayOptions,
+  type StatusHandler,
 } from '@better-compute/gateway';
 import {
   createCsr,
@@ -43,7 +45,12 @@ import {
 } from '@better-compute/server';
 import { fakeHardware, type FakeHardware, type FakeHardwareVariant } from '../fake-hw.js';
 import { fakeIam, type FakeIam } from '../fake-iam.js';
-import { createFleetSim, type FleetSim, type FleetSimOptions } from './fleet-sim.js';
+import {
+  createFleetSim,
+  type FleetDaemonOptions,
+  type FleetSim,
+  type FleetSimOptions,
+} from './fleet-sim.js';
 import type {
   BilledAllocation,
   BookingRow,
@@ -248,6 +255,35 @@ export interface ControlPlaneSimOptions
       'database' | 'services' | 'work' | 'events' | 'reports' | 'manual' | 'clock' | 'id'
     >
   >;
+  /**
+   * More pools on the same site, each with its own nodes, which join after the main pool's (in order):
+   * e.g. a `vps-host` pool whose daemons run a FakeHypervisor (`daemon: { instances: {} }`). `nodes`
+   * stays the main pool's; `pools` lists these.
+   */
+  extraPools?: readonly ExtraPoolOptions[];
+  /** Status report handlers run after the XID health handler, e.g. vps's `instanceStatusHandler()`. */
+  statusHandlers?: readonly StatusHandler[];
+}
+
+export interface ExtraPoolOptions {
+  class: string;
+  /** Nodes to join into it (default 1). */
+  count?: number;
+  /** Options for its daemons, over the fleet's (`daemon`). */
+  daemon?: FleetDaemonOptions;
+  policy?: Record<string, unknown>;
+  /** Anything else `pools.create` takes (e.g. `ownerQuota`). */
+  create?: Record<string, unknown>;
+  /** Runs once the pool exists, before its nodes join (flavors, IP pools). */
+  setup?(pool: {
+    poolId: string;
+    siteId: string;
+    compute: BetterCompute;
+    database: SqlExecutor;
+    /** The root administrator's credential and tenant, for API calls. */
+    root: { token: string };
+    rootTenantId: string;
+  }): Promise<void>;
 }
 
 interface GatewaySlot {
@@ -271,6 +307,8 @@ export interface ControlPlaneSim {
   siteId: string;
   poolId: string;
   nodes: readonly { nodeId: string; hardware: FakeHardware }[];
+  /** The `extraPools`, in order, with the nodes that joined each. */
+  pools: readonly { poolId: string; class: string; nodeIds: readonly string[] }[];
   /** The first gateway slot's current process. */
   readonly gateway: Gateway | undefined;
   /** Every slot's current process (undefined while down, or before its first dial). */
@@ -452,6 +490,10 @@ export async function createControlPlaneSim(
     'compute:reservations:create',
     'compute:reservations:read',
     'compute:reservations:release',
+    // Instances in a vps-host `extraPools` entry.
+    'compute:instances:create',
+    'compute:instances:read',
+    'compute:instances:delete',
   ])
     fake.allow({ token: tenants.acme.token, action });
 
@@ -546,37 +588,88 @@ export async function createControlPlaneSim(
 
     const nodes: { nodeId: string; hardware: FakeHardware }[] = [];
     const serials = new Map<string, string>();
+    const nodeKeys = new Map<string, KeyObject>();
+    const joinOne = async (token: string, hardware: FakeHardware, attestor?: string): Promise<string> => {
+      const { privateKey } = generateP256KeyPair();
+      const csr = createCsr(privateKey);
+      const sealed = sealJoinToken(token, encryption.publicKey, {
+        csr,
+        issuedAt: now(),
+      });
+      const response = await compute.gatewayServices.join(
+        create(JoinRequestSchema, {
+          sealedToken: new TextEncoder().encode(sealed),
+          csr,
+          ...(attestor ? { attestor } : {}),
+          claims: create(HardwareClaimsSchema, hardware.claims),
+          daemonVersion: '0.1.0',
+          role: AgentRole.NODE,
+        }),
+      );
+      const { nodeId, certChain } = verifyJoinResponse(response, {
+        signer: { publicKey: signingKey.publicKey },
+        csr,
+        nodeCaRoots: [nodeCa.certificate],
+        now: now(),
+      });
+      serials.set(nodeId, parseCertificate(certChain[0]!).serial);
+      nodeKeys.set(nodeId, privateKey);
+      return nodeId;
+    };
     await trace('join', async () => {
       for (let index = 0; index < count; index++) {
         const hardware = fakeHardware({
           seed: `${options.seed}-${index}`,
           ...(options.variant ? { variant: options.variant } : {}),
         });
-        const csr = createCsr(generateP256KeyPair().privateKey);
-        const sealed = sealJoinToken(minted.token!, encryption.publicKey, {
-          csr,
-          issuedAt: now(),
-        });
-        const response = await compute.gatewayServices.join(
-          create(JoinRequestSchema, {
-            sealedToken: new TextEncoder().encode(sealed),
-            csr,
-            ...(index >= restrictedFrom ? { attestor: 'sim-restricted' } : {}),
-            claims: create(HardwareClaimsSchema, hardware.claims),
-            daemonVersion: '0.1.0',
-            role: AgentRole.NODE,
-          }),
-        );
-        const { nodeId, certChain } = verifyJoinResponse(response, {
-          signer: { publicKey: signingKey.publicKey },
-          csr,
-          nodeCaRoots: [nodeCa.certificate],
-          now: now(),
-        });
+        const nodeId = await joinOne(minted.token!, hardware, index >= restrictedFrom ? 'sim-restricted' : undefined);
         nodes.push({ nodeId, hardware });
-        serials.set(nodeId, parseCertificate(certChain[0]!).serial);
       }
     });
+
+    // More pools on the site, each with its own join token and nodes (after the main pool's).
+    const pools: { poolId: string; class: string; nodeIds: string[] }[] = [];
+    const extraNodes: { nodeId: string; hardware: FakeHardware; daemon?: FleetDaemonOptions }[] = [];
+    for (const [poolIndex, extra] of (options.extraPools ?? []).entries()) {
+      const created = await api(() =>
+        compute.api.pools.create(root, {
+          tenantId: tenants.root.id,
+          siteId: site.id,
+          class: extra.class,
+          policy: extra.policy ?? {},
+          ...extra.create,
+          idempotencyKey: `sim-pool-${poolIndex + 1}`,
+        } as never),
+      );
+      await extra.setup?.({
+        poolId: created.id,
+        siteId: site.id,
+        compute: compute as unknown as BetterCompute,
+        database: raw,
+        root,
+        rootTenantId: tenants.root.id,
+      });
+      const extraCount = extra.count ?? 1;
+      const token = await api(() =>
+        compute.api.joinTokens.create(root, {
+          tenantId: tenants.root.id,
+          poolId: created.id,
+          maxUses: extraCount,
+          ttlSeconds: 3600,
+          idempotencyKey: `sim-token-${poolIndex + 1}`,
+        }),
+      );
+      const nodeIds: string[] = [];
+      await trace('join', async () => {
+        for (let index = 0; index < extraCount; index++) {
+          const hardware = fakeHardware({ seed: `${options.seed}-pool${poolIndex + 1}-${index}` });
+          const nodeId = await joinOne(token.token!, hardware);
+          nodeIds.push(nodeId);
+          extraNodes.push({ nodeId, hardware, ...(extra.daemon ? { daemon: extra.daemon } : {}) });
+        }
+      });
+      pools.push({ poolId: created.id, class: extra.class, nodeIds });
+    }
 
     // Gateway slots: each runs one real gateway process at a time. A dial goes to the next live, running slot;
     // `killGateway` crashes a slot's process (no disconnect writes, no lease release) and resets its links so the
@@ -601,7 +694,10 @@ export async function createControlPlaneSim(
           work: compute.context.work,
           events: compute.context.events,
           // As `serve` composes them: node XIDs feed §10.1 health (conditions, NoSchedule, the health reconciler).
-          reports: { ...gatewayReportHandlers, status: xidStatusHandler },
+          reports: {
+            ...gatewayReportHandlers,
+            status: options.statusHandlers?.length ? [xidStatusHandler, ...options.statusHandlers] : xidStatusHandler,
+          },
           revocations,
           ...options.gateway,
         });
@@ -628,13 +724,23 @@ export async function createControlPlaneSim(
       modules: _modules,
       gateway: _gateway,
       workerPasses: _workerPasses,
+      extraPools: _extraPools,
+      statusHandlers: _statusHandlers,
       ...fleetOptions
     } = options;
     const workerPasses = Math.max(1, options.workerPasses ?? 1);
     sim = createFleetSim({
       ...fleetOptions,
       start,
-      nodes: nodes.map(({ nodeId, hardware }) => ({ nodeId, hardware })),
+      nodes: [
+        ...nodes.map(({ nodeId, hardware }) => ({ nodeId, hardware })),
+        // Extra pools' daemons hold the key they joined with: a VPS host signs its SecretRequests (user data).
+        ...extraNodes.map(({ nodeId, hardware, daemon }) => ({
+          nodeId,
+          hardware,
+          daemon: { ...fleetOptions.daemon, ...daemon, nodeKey: nodeKeys.get(nodeId)! },
+        })),
+      ],
       logFrames: options.logFrames ?? false,
       gateway: () => ({
         async accept(conn, peer) {
@@ -706,6 +812,7 @@ export async function createControlPlaneSim(
       siteId: site.id,
       poolId: pool.id,
       nodes,
+      pools,
       get gateway() {
         return slots[0]!.gateway;
       },
