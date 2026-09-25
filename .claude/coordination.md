@@ -159,6 +159,35 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       hide GPUs from node-lease billing and rewrite labels): now advisory, a5af436. The docs "Trust" line in
       guides/nodes/inventory-and-health.mdx is still to be written (docs session).
   - FleetConfig sandboxTemplates (5f2067e); MCP sandbox tools (54da7a8); iamGuard (54facfc).
+  - [402c97] security review #3 fixed:
+    - HIGH: a multi-line CA injected into TrustedUserCAKeys via legacy/unsealed bundles (7b9e9af, bcd 512ca6a);
+    - pins read unauthenticated (7b9e9af);
+    - no cap on forward connections, and SSH re-authorization failing open (3238a5a);
+    - tenancy delete trusted subjectId (392cb86).
+  - v0.5/v1.0 exit-gap audit ([f85da7], 2026-09-25):
+    - [097b34]:
+      - sandboxes.exec: DONE (dd352d3);
+      - tests: a denied create claims nothing; concurrent SKIP LOCKED claims; the snapshot memory round trip;
+      - template env and network (network needs a proto seam; they propose, [f85da7] lands it).
+    - [31c64a]:
+      - tests/e2e/sandboxes.test.ts (500 TTL expiries, zero-leak diff, warm claim with no placement);
+      - widen vitest.iam-remote beyond 9 files.
+    - [6a20b8]:
+      - bcd instance-address dial + advertise `tunnel.instance-dial`;
+      - a bcx host in bcd;
+      - walkthrough 4 as a Go runtime plugin;
+      - PAUSED/restore_from/instance.snapshot in the converger.
+    - [f02367], v1.0:
+      - "upgrade from v0.5 disturbs no running allocation" scenario;
+      - an N−2 skew harness;
+      - an API surface freeze snapshot check (script; [f85da7] wires lint:repo).
+    - [f85da7]:
+      - nightly.yml (sim + 10k cold start, IAM-guarded suite, Postgres full suite, green-night streak): 6e723b1 (see its git note);
+      - release.yml (goreleaser + syft SBOM + keyless cosign + SLSA3 provenance): 30ed477.
+    - Open, no owner:
+      - the real-hardware nightly (needs hardware);
+      - a Postgres CPU <50% bench (needs reference Postgres);
+      - the v1.0 external security review (a process item).
   - Sandboxes step 5 seams (paused, restore_from, instance.snapshot, runtime pause/resume/snapshot): b78045b.
   - DONE this round: tenancy §12.8 (ae9a7bb); vps instances.create wait + budget check (32c25ae); wake edge on
     dedicated nodes (9093323); ramdisk allowed kinds (464788a); capacity jsonSchema (45e9685); PoolIndex lazy load
