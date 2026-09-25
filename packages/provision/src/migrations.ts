@@ -159,4 +159,24 @@ ALTER TABLE workflows
   ADD COLUMN profile_document jsonb;
 `,
   },
+  {
+    name: 'provision/0004_gated_mig_layout',
+    sql: `
+-- The MIG layout a node may apply now (PLAN.md §10.4, §10.6): capacity freezes a node at its old
+-- layout while a pool's new one waits for every atom to be free (capacity/0004 capacity_mig_layouts).
+-- provision does not depend on capacity, so this reads the table only when it exists; NULL means the
+-- node is not frozen and the pool's layout applies.
+CREATE FUNCTION provision_gated_mig_layout(node text) RETURNS text LANGUAGE plpgsql STABLE AS $fn$
+DECLARE
+  granted text;
+BEGIN
+  IF to_regclass('capacity_mig_layouts') IS NULL THEN
+    RETURN NULL;
+  END IF;
+  EXECUTE 'SELECT layout FROM capacity_mig_layouts WHERE node_id = $1' INTO granted USING node;
+  RETURN granted;
+END
+$fn$;
+`,
+  },
 ]);

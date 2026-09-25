@@ -124,8 +124,15 @@ export async function hostSpecFor(
   nodeId: string,
   units: readonly ConfigUnitDefinition[] = builtinConfigUnits,
 ): Promise<Partial<NodeSpec>> {
-  const { rows } = await sql.query<{ host_config: Record<string, Record<string, Json>> | null; pool_policy: Record<string, unknown> | null }>(
-    `SELECT w.profile_document->'hostConfig' AS host_config, p.policy AS pool_policy
+  // A pool layout change reaches a node only once capacity granted it (every atom free, §10.4):
+  // until then the node keeps the layout capacity froze it at (provision/0004).
+  const { rows } = await sql.query<{
+    host_config: Record<string, Record<string, Json>> | null;
+    pool_policy: Record<string, unknown> | null;
+    gated_layout: string | null;
+  }>(
+    `SELECT w.profile_document->'hostConfig' AS host_config, p.policy AS pool_policy,
+            provision_gated_mig_layout(n.id) AS gated_layout
        FROM workflows w JOIN nodes n ON n.id = w.node_id LEFT JOIN pools p ON p.id = n.pool_id
       WHERE w.node_id = $1 AND w.state = 'succeeded' AND w.profile_document ? 'hostConfig'
       ORDER BY w.finished_at DESC NULLS LAST, w.id DESC LIMIT 1`,
@@ -134,9 +141,10 @@ export async function hostSpecFor(
   const row = rows[0];
   if (!row?.host_config) return {};
   const labels = await sql.query<{ key: string; value: string }>('SELECT key, value FROM node_labels WHERE node_id = $1', [nodeId]);
+  const poolPolicy = row.gated_layout !== null ? { ...(row.pool_policy ?? {}), migLayout: row.gated_layout } : row.pool_policy;
   const host = await resolveHostConfig(row.host_config, {
     labels: Object.fromEntries(labels.rows.map((label) => [label.key, label.value])),
-    poolPolicy: row.pool_policy,
+    poolPolicy,
   }, units);
   return host.config ? { host } : {};
 }

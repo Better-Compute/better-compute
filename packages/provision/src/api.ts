@@ -10,7 +10,15 @@ import {
   type Workflow,
   type WorkflowStep,
 } from '@better-compute/core';
-import { abortWorkflow, retryWorkflow, type EngineOptions, type StepRow, type WorkflowRow } from './engine.js';
+import {
+  abortWorkflow,
+  pauseWorkflow,
+  resumeWorkflow,
+  retryWorkflow,
+  type EngineOptions,
+  type StepRow,
+  type WorkflowRow,
+} from './engine.js';
 import { expandProfile, type ExpansionIssue, type PlannedStep } from './expand.js';
 import {
   listImages,
@@ -168,6 +176,9 @@ export type ProvisionApi = {
     list: MethodDefinition<ListWorkflowsInput, { items: WorkflowView[]; cursor?: string }>;
     abort: MethodDefinition<AbortWorkflowInput, WorkflowView>;
     retry: MethodDefinition<RetryWorkflowInput, WorkflowView>;
+    /** The step in flight finishes; no further step starts until `resume`. */
+    pause: MethodDefinition<WorkflowRefInput, WorkflowView>;
+    resume: MethodDefinition<WorkflowRefInput, WorkflowView>;
   };
 };
 
@@ -499,6 +510,28 @@ export function provisionApi(
           await ctx.sql.transaction((tx) =>
             retryWorkflow(ctx, tx, input.workflowId, { tenantId: input.tenantId, ...(input.fromStep ? { fromStep: input.fromStep } : {}) }),
           );
+          return readWorkflow(ctx, input);
+        },
+      }),
+      pause: defineMethod<WorkflowRefInput, WorkflowView>({
+        action: 'compute:workflows:manage',
+        kind: 'mutation',
+        resource: nodeResource,
+        validate: (raw) => workflowRef(raw, []) as WorkflowRefInput,
+        async handler(ctx, input) {
+          await readWorkflow(ctx, input);
+          await ctx.sql.transaction((tx) => pauseWorkflow(ctx, tx, input.workflowId, input.tenantId));
+          return readWorkflow(ctx, input);
+        },
+      }),
+      resume: defineMethod<WorkflowRefInput, WorkflowView>({
+        action: 'compute:workflows:manage',
+        kind: 'mutation',
+        resource: nodeResource,
+        validate: (raw) => workflowRef(raw, []) as WorkflowRefInput,
+        async handler(ctx, input) {
+          await readWorkflow(ctx, input);
+          await ctx.sql.transaction((tx) => resumeWorkflow(ctx, tx, input.workflowId, input.tenantId));
           return readWorkflow(ctx, input);
         },
       }),

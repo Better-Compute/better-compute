@@ -11,7 +11,7 @@ import {
   type SqlExecutor,
 } from '@better-compute/core';
 import { pglite } from '@better-compute/postgres/pglite';
-import { defineStep, provisionMigrations, provisionModule, type ProvisionApi } from '@better-compute/provision';
+import { advanceWorkflow, defineStep, provisionMigrations, provisionModule, type ProvisionApi } from '@better-compute/provision';
 
 // The profiles and workflows groups of PLAN.md §9.2 (v0.2 rows), called through their handlers.
 
@@ -208,5 +208,34 @@ describe('workflows', () => {
     expect(aborted).toMatchObject({ state: 'cancelled', error: { code: 'CANCELLED', message: 'changed my mind' } });
     await expect(call('workflows', 'retry', ref)).rejects.toMatchObject({ code: 'INVALID_STATE' });
     await expect(call('workflows', 'abort', { ...ref, workflowId: 'not-a-wf' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('pauses between steps and resumes (§11.2)', async () => {
+    const PAUSED_NODE = 'node_01j00000000000000000000003';
+    await db.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity, trust,
+         generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($1, 'site_a', 'ten_a', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 0, 0, 1)`,
+      [PAUSED_NODE],
+    );
+    const { id } = await db.transaction((tx) =>
+      module.workflowEngine(context).start(tx, { tenantId: 'ten_a', profileId: 'gpu-host', profileVersion: 1, nodeId: PAUSED_NODE }),
+    );
+    const ref = { tenantId: 'ten_a', nodeId: PAUSED_NODE, workflowId: id };
+    // Started: main.1 (a control-plane step) runs, then main.2 waits for a site agent.
+    await advanceWorkflow(context as never, module.engineOptions, id);
+    expect((await call('workflows', 'get', ref)).state).toBe('running');
+    const paused = await call('workflows', 'pause', ref);
+    expect(paused.state).toBe('paused');
+    // Paused: the step in flight may still settle, but the engine starts nothing more.
+    const before = paused.steps.map((s: { state: string }) => s.state);
+    await advanceWorkflow(context as never, module.engineOptions, id);
+    expect((await call('workflows', 'get', ref)).steps.map((s: { state: string }) => s.state)).toEqual(before);
+    await expect(call('workflows', 'pause', ref)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect((await call('workflows', 'resume', ref)).state).toBe('running');
+    await expect(call('workflows', 'resume', ref)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await expect(call('workflows', 'pause', { ...ref, tenantId: 'ten_b' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(() => api.workflows.pause.validate({ ...ref, fromStep: 'main.1' })).toThrow();
+    await call('workflows', 'abort', ref);
   });
 });

@@ -91,6 +91,46 @@ describe('hostConfig as desired state', () => {
       host: { config: { 'container-toolkit': { cdi: true }, 'nvidia-driver': { branch: '580' } } },
     });
   });
+
+  it("keeps a node at its frozen MIG layout until capacity grants the pool's new one (§10.4)", async () => {
+    const mig = defineProfile({
+      id: 'mig-host',
+      version: 1,
+      target: 'metal',
+      entry: 'adopt',
+      hostConfig: { 'mig-layout': { from: 'pool' } },
+      acceptance: [{ use: 'wait.generationObserved' }],
+    });
+    const withMig = provisionModule({ profiles: [mig] });
+    await db.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version)
+       VALUES ('pool_mig', 't', 's', 'metal-host', 'exclusive', 'bcd', '{"migLayout":"all-1g.10gb"}', 1)`,
+    );
+    await db.query(
+      `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance, cordoned, connectivity, trust,
+         generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ('node_mig', 's', 'pool_mig', 't', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 0, 0, 1)`,
+    );
+    const context = { sql: db, work, events, desired, commands: { async enqueue() { return { id: 'x', seq: 0 }; }, async cancel() {} } };
+    const { id } = await db.transaction((tx) =>
+      startWorkflow(context, withMig.engineOptions, tx, { tenantId: 't', profileId: 'mig-host', profileVersion: 1, nodeId: 'node_mig' }),
+    );
+    await advanceWorkflow(context, withMig.engineOptions, id);
+    const layout = async () => ((await hostSpecFor(db, 'node_mig')).host?.config?.['mig-layout'] as { layout?: string } | undefined)?.layout;
+    // Without capacity installed (no capacity_mig_layouts), the pool's layout applies.
+    expect(await layout()).toBe('all-1g.10gb');
+    // capacity/0004's table: the pool moved to 3g, but the node is frozen at 1g until its atoms are free.
+    await db.query(`CREATE TABLE capacity_mig_layouts (node_id text PRIMARY KEY, layout text NOT NULL)`);
+    await db.query(`UPDATE pools SET policy = '{"migLayout":"all-3g.40gb"}' WHERE id = 'pool_mig'`);
+    await db.query(`INSERT INTO capacity_mig_layouts (node_id, layout) VALUES ('node_mig', 'all-1g.10gb')`);
+    expect(await layout()).toBe('all-1g.10gb');
+    // Granted: capacity sets the frozen layout to the new one; then drops the row once converged.
+    await db.query(`UPDATE capacity_mig_layouts SET layout = 'all-3g.40gb' WHERE node_id = 'node_mig'`);
+    expect(await layout()).toBe('all-3g.40gb');
+    await db.query(`DELETE FROM capacity_mig_layouts`);
+    expect(await layout()).toBe('all-3g.40gb');
+    await db.query(`DROP TABLE capacity_mig_layouts`);
+  });
 });
 
 describe('Ignition', () => {
