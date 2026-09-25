@@ -83,7 +83,13 @@ export default function ReservationPage({
               </section>
               <section className="panel">
                 <h3>Actions</h3>
-                <DetailActions detail={detail} />
+                <DetailActions
+                  detail={detail}
+                  confirm={{
+                    'reservations/release': `Release ${reservationId} now? Its GPUs go back to the pool and billing stops.`,
+                    'reservations/cancel': `Cancel ${reservationId}? It will not start.`,
+                  }}
+                />
               </section>
             </>
           )}

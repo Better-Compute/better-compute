@@ -56,6 +56,10 @@ export default function InstancePage({ params }: { params: Promise<{ instanceId:
                 <DetailActions
                   detail={detail}
                   only={['instances/start', 'instances/stop', 'instances/delete']}
+                  confirm={{
+                    'instances/stop': `Stop ${instanceId}? Its guest is shut down.`,
+                    'instances/delete': `Delete ${instanceId} and its disks? This cannot be undone.`,
+                  }}
                 />
                 {instance.state === 'running' && (
                   <p>
