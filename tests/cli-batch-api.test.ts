@@ -9,9 +9,11 @@ import {
   createCommandSigningAuthority,
   createNodeCa,
   createSigningKey,
+  expectedPayloadType,
   generateP256KeyPair,
 } from '@better-compute/pki';
 import { pglite } from '@better-compute/postgres/pglite';
+import { encodeMessageJson } from '@better-compute/protocol';
 import {
   betterCompute,
   createCommandBatch,
@@ -33,11 +35,17 @@ afterEach(async () => {
   compute = undefined;
 });
 
-const digest = (text: string) => new Uint8Array(createHash('sha256').update(text).digest());
+const digest = (bytes: Uint8Array) => new Uint8Array(createHash('sha256').update(bytes).digest());
+/** A leaf bound to its operation, with the payload stored for approvers to read. */
+const leaf = (subject: string, kind: string, typeName: string, json: unknown) => {
+  const value = encodeMessageJson(typeName, json);
+  return { subject, kind, payloadSha256: digest(value), payload: { typeUrl: `type.googleapis.com/${typeName}`, value } };
+};
+// (Built-in destructive kinds: this deployment registers no module kinds.)
 const scope = [
-  { subject: 'node_a', kind: 'disk.wipe', payloadSha256: digest('wipe node_a') },
-  { subject: 'node_b', kind: 'disk.wipe', payloadSha256: digest('wipe node_b') },
-  { subject: 'bmc:node_site/10.0.0.7', kind: 'bmc.power', payloadSha256: digest('power cycle') },
+  leaf('node_a', 'node.reboot', 'bettercompute.agent.v1.NodeRebootRequest', { reason: 'rack 7 reimage' }),
+  leaf('node_b', 'node.reboot', 'bettercompute.agent.v1.NodeRebootRequest', { reason: 'rack 7 reimage' }),
+  leaf('node_site', 'gpu.reset', 'bettercompute.agent.v1.GpuResetRequest', { gpuUuids: ['GPU-0a1b'] }),
 ];
 
 async function setup() {
@@ -80,7 +88,7 @@ async function setup() {
     createCommandBatch(
       tx,
       { tenantId: ACME, scope, reason: 'reimage rack 7', notAfterMs: Date.now() + 3_600_000 } as never,
-      { now: Date.now(), quorum } as never,
+      { now: Date.now(), quorum, payloadTypeOf: expectedPayloadType } as never,
     ),
   );
   const cwd = await mkdtemp(join(tmpdir(), 'bc-batch-api-'));
@@ -120,7 +128,11 @@ describe('batch commands against commandBatches', () => {
     const dry = await s.run(['batch', 'approve', '--batch', s.batchId, '--key', 'alice.pem']);
     expect(dry).toMatchObject({ approved: false, scopeRoot: shown.scopeRoot });
     expect(s.err.join('\n')).toMatch(/reimage rack 7/);
-    expect(s.err.join('\n')).toMatch(/bmc\.power: bmc:node_site\/10\.0\.0\.7/);
+    expect(s.err.join('\n')).toMatch(/gpu\.reset: node_site/);
+    // The operations themselves, decoded from the stored payloads the leaves bind (MEDIUM-3).
+    expect(s.err.join('\n')).toMatch(/Operations:/);
+    expect(s.err.join('\n')).toMatch(/node\.reboot ×2: \{"reason":"rack 7 reimage"\}/);
+    expect(s.err.join('\n')).toMatch(/gpu\.reset ×1: \{"gpuUuids":\["GPU-0a1b"\]\}/);
 
     // A reviewed root that changed is refused; the reviewed one is approved.
     await expect(

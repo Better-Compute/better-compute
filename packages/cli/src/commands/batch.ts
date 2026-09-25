@@ -7,6 +7,7 @@ import {
   base64url,
   batchScope,
   createApproverKey,
+  decodeBatchPayload,
   signApproverSet,
   signBatchApproval,
   type ApproverSet,
@@ -68,34 +69,126 @@ export async function loadApproverKey(
   }
 }
 
-/** A scope entry as JSON carries it: `payloadSha256` hex, empty or absent for "any payload of this kind". */
+/**
+ * A scope entry as JSON carries it: `payloadSha256` hex, empty or absent for "any payload of this kind", and the
+ * stored payload (`{ typeUrl, value }`, base64) when the batch's creator kept it.
+ */
 interface ScopeEntryJson {
   subject: string;
   kind: string;
   payloadSha256?: string;
+  payload?: { typeUrl: string; value: string };
 }
 
-const isEntry = (value: unknown): value is ScopeEntryJson =>
-  typeof value === 'object' &&
-  value !== null &&
-  typeof (value as ScopeEntryJson).subject === 'string' &&
-  (value as ScopeEntryJson).subject.length > 0 &&
-  typeof (value as ScopeEntryJson).kind === 'string' &&
-  (value as ScopeEntryJson).kind.length > 0 &&
-  ((value as ScopeEntryJson).payloadSha256 === undefined ||
-    (typeof (value as ScopeEntryJson).payloadSha256 === 'string' &&
-      /^([0-9a-f]{64})?$/.test((value as ScopeEntryJson).payloadSha256!)));
+/** A leaf with the operation it binds, when known. */
+type ScopeLeaf = BatchScopeEntry & { payload?: { typeUrl: string; value: Uint8Array } };
 
-const entryOf = ({ subject, kind, payloadSha256 }: ScopeEntryJson): BatchScopeEntry => ({
+// Subjects and kinds are printable ASCII (node ids, bmc:<node>/<address>, node:<id>): anything else could reorder
+// or fake the lines an approver reads (review 7 L1).
+const printableName = /^[\x21-\x7e]{1,512}$/;
+
+const isEntry = (value: unknown): value is ScopeEntryJson => {
+  if (typeof value !== 'object' || value === null) return false;
+  const entry = value as ScopeEntryJson;
+  if (typeof entry.subject !== 'string' || !printableName.test(entry.subject)) return false;
+  if (typeof entry.kind !== 'string' || !printableName.test(entry.kind)) return false;
+  if (entry.payloadSha256 !== undefined && (typeof entry.payloadSha256 !== 'string' || !/^([0-9a-f]{64})?$/.test(entry.payloadSha256)))
+    return false;
+  if (entry.payload === undefined || entry.payload === null) return true;
+  return (
+    typeof entry.payload === 'object' &&
+    typeof entry.payload.typeUrl === 'string' &&
+    entry.payload.typeUrl.length <= 512 &&
+    typeof entry.payload.value === 'string' &&
+    /^[A-Za-z0-9+/_-]*={0,2}$/.test(entry.payload.value)
+  );
+};
+
+const entryOf = ({ subject, kind, payloadSha256, payload }: ScopeEntryJson): ScopeLeaf => ({
   subject,
   kind,
   ...(payloadSha256 ? { payloadSha256: new Uint8Array(Buffer.from(payloadSha256, 'hex')) } : {}),
+  ...(payload ? { payload: { typeUrl: payload.typeUrl, value: new Uint8Array(Buffer.from(payload.value, 'base64')) } } : {}),
 });
-const jsonOf = ({ subject, kind, payloadSha256 }: BatchScopeEntry): ScopeEntryJson => ({
+const jsonOf = ({ subject, kind, payloadSha256, payload }: ScopeLeaf): ScopeEntryJson => ({
   subject,
   kind,
   payloadSha256: payloadSha256?.length ? Buffer.from(payloadSha256).toString('hex') : '',
+  ...(payload ? { payload: { typeUrl: payload.typeUrl, value: Buffer.from(payload.value).toString('base64') } } : {}),
 });
+
+/** Server text on one line of printable ASCII (everything else escaped): what an approver reads is what it is. */
+export const printable = (text: string): string =>
+  text.replace(/[^\x20-\x7e]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+/**
+ * The operations a batch runs (MEDIUM-3): each bound leaf's stored payload, checked against the digest the leaf binds
+ * and decoded as its kind's payload type (pki decodeBatchPayload), shown once per distinct operation with how many
+ * leaves run it. `opaque`: bound leaves whose payload the server did not give (the approver sees only a digest).
+ * Throws SCOPE_MISMATCH when a payload is not the one its leaf binds.
+ */
+export function operationsOf(entries: readonly ScopeLeaf[]): { lines: string[]; opaque: ScopeLeaf[] } {
+  const counts = new Map<string, number>();
+  const opaque: ScopeLeaf[] = [];
+  for (const entry of entries) {
+    if (unbound(entry)) continue;
+    if (!entry.payload) {
+      opaque.push(entry);
+      continue;
+    }
+    let decoded;
+    try {
+      decoded = decodeBatchPayload({ kind: entry.kind, payloadSha256: entry.payloadSha256! }, entry.payload);
+    } catch (error) {
+      throw new CliError(
+        'SCOPE_MISMATCH',
+        `The ${entry.kind} payload for ${entry.subject} is not what its leaf binds: ${(error as Error).message}`,
+        'Do not approve it. Report it: the control plane shows another operation than the batch runs.',
+      );
+    }
+    let json = JSON.stringify(decoded.json);
+    if (json.length > 400) json = `${json.slice(0, 400)}…`;
+    const key = `${entry.kind} ${decoded.typeChecked ? '' : '(type as the server says) '}${printable(json)}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const lines = [...counts].map(([key, count]) => {
+    const space = key.indexOf(' ');
+    return `  ${key.slice(0, space)} ×${count}: ${key.slice(space + 1)}`;
+  });
+  return { lines, opaque };
+}
+
+/** Bound leaves whose operation the approver cannot see are refused unless accepted (--allow-opaque). */
+function checkOpaque(opaque: readonly ScopeLeaf[], allow: boolean, note: (line: string) => void): void {
+  if (opaque.length === 0) return;
+  const listed = opaque
+    .slice(0, 5)
+    .map((entry) => `${entry.kind} on ${entry.subject}`)
+    .join(', ');
+  const message = `${opaque.length} command(s) show only a digest of their payload (${listed}${opaque.length > 5 ? ', …' : ''}): what they do cannot be checked here`;
+  if (!allow) throw new CliError('OPAQUE_SCOPE', message, 'Ask the batch creator to store the payloads, or pass --allow-opaque.');
+  note(`Warning: ${message}.`);
+}
+
+const allowOpaqueFlag = {
+  type: 'boolean',
+  description: 'Approve commands whose operation the batch shows only as a digest',
+} as const satisfies FlagSpec;
+
+/** Shows the operations and refuses what the approver cannot see or did not accept. */
+function reviewOperations(
+  entries: readonly ScopeLeaf[],
+  flags: { 'allow-unbound'?: boolean; 'allow-opaque'?: boolean },
+  note: (line: string) => void,
+): void {
+  const { lines, opaque } = operationsOf(entries);
+  if (lines.length) {
+    note('Operations:');
+    for (const line of lines) note(line);
+  }
+  checkUnbound(entries, flags['allow-unbound'] === true, note);
+  checkOpaque(opaque, flags['allow-opaque'] === true, note);
+}
 /** A leaf that admits any payload of its kind (the batch's creator could not fix it in advance). */
 const unbound = (entry: BatchScopeEntry) => !entry.payloadSha256?.length;
 
@@ -427,6 +520,7 @@ export const batchCommands = [
       },
       expect: expectFlag,
       'allow-unbound': allowUnboundFlag,
+      'allow-opaque': allowOpaqueFlag,
       'max-hours': maxHoursFlag,
       unchecked: { type: 'boolean', description: 'Sign --root and --size without a scope to check them against' },
     },
@@ -474,7 +568,7 @@ export const batchCommands = [
           checkExpected(scope.entries, await readFile(expected, 'utf8'), expected);
           note(`Every subject is one ${flags.expect} expects.`);
         }
-        checkUnbound(scope.entries, flags['allow-unbound'], note);
+        reviewOperations(scope.entries, flags, note);
       } else {
         if (!batchId) throw usageError('Pass --batch with --root and --size');
         note(`Signing root ${flags.root} of batch ${batchId} unchecked: pass --scope to see what it contains.`);
@@ -678,6 +772,7 @@ export const batchCommands = [
       root: { type: 'string', value: 'HEX', description: 'Approve only if the batch still has this root (64 hex digits)' },
       expect: expectFlag,
       'allow-unbound': allowUnboundFlag,
+      'allow-opaque': allowOpaqueFlag,
       'max-hours': maxHoursFlag,
       yes: { type: 'boolean', description: 'Sign and submit without stopping after the summary' },
     },
@@ -697,7 +792,7 @@ export const batchCommands = [
       if (view.state !== 'pending') throw new CliError('INVALID_STATE', `Batch ${view.batchId} is ${view.state}`);
       checkWindow(view.notAfter, Date.now(), flags['max-hours'] ?? 72);
       const entries = await verifiedScope(client, view);
-      note(`Batch ${view.batchId}: ${view.reason}`);
+      note(`Batch ${view.batchId}: ${printable(view.reason)}`);
       note(`${scopeLine(view.scopeSize, entries)}:`);
       for (const line of subjectLines(entries)) note(line);
       if (flags.expect !== undefined) {
@@ -705,7 +800,7 @@ export const batchCommands = [
         checkExpected(entries, await readFile(expected, 'utf8'), expected);
         note(`Every subject is one ${flags.expect} expects.`);
       }
-      checkUnbound(entries, flags['allow-unbound'], note);
+      reviewOperations(entries, flags, note);
       note(
         `Approvals: ${view.approvals.length} of ${view.requiredApprovals}; the window closes at ${new Date(view.notAfter).toISOString()}.`,
       );

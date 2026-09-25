@@ -13,7 +13,7 @@ import {
   verifyApproverSetChange,
   verifyBatchApproval,
 } from '@better-compute/pki';
-import { BatchApprovalSchema } from '@better-compute/protocol';
+import { BatchApprovalSchema, encodeMessageJson } from '@better-compute/protocol';
 
 // The approver's side of the destructive-batch quorum (PLAN.md §13): keygen writes a P-256 pair whose public half
 // is what pki.approvers.keys takes, and batch sign recomputes the scope root from the listed commands, shows every
@@ -35,12 +35,22 @@ async function harness(env: NodeJS.ProcessEnv = {}) {
 
 const batchId = 'batch_01k5w00000000000000000000q';
 const trustDomain = 'compute.test';
-const digest = (text: string) => createHash('sha256').update(text).digest('hex');
-// Every leaf fixes its payload (the operation itself), as JSON carries it: hex.
+const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+/** A leaf bound to its operation, as `batch show --scope-out` writes it: the digest (hex) and the payload (base64). */
+const leaf = (subject: string, kind: string, typeName: string, json: unknown) => {
+  const value = encodeMessageJson(typeName, json);
+  return {
+    subject,
+    kind,
+    payloadSha256: digest(value),
+    payload: { typeUrl: `type.googleapis.com/${typeName}`, value: Buffer.from(value).toString('base64') },
+  };
+};
+const power = { driver: 'redfish', address: '10.0.0.7', operation: 'power.setPower' };
 const entries = [
-  { subject: 'node_a', kind: 'disk.wipe', payloadSha256: digest('wipe node_a') },
-  { subject: 'node_b', kind: 'disk.wipe', payloadSha256: digest('wipe node_b') },
-  { subject: 'bmc:node_site/10.0.0.7', kind: 'bmc.power', payloadSha256: digest('power cycle') },
+  leaf('node_a', 'disk.wipe', 'bettercompute.agent.v1.WipeRequest', {}),
+  leaf('node_b', 'disk.wipe', 'bettercompute.agent.v1.WipeRequest', {}),
+  leaf('bmc:node_site/10.0.0.7', 'bmc.power', 'bettercompute.site.v1.BmcOperationRequest', power),
 ];
 /** The same scope as pki takes it. */
 const leaves = (list: { subject: string; kind: string; payloadSha256?: string }[]) =>
@@ -168,7 +178,11 @@ describe('batch sign', () => {
   it('refuses leaves that admit any payload unless --allow-unbound, naming them', async () => {
     const h = await harness();
     await h.run(['batch', 'keygen', '--out', 'alice.pem']);
-    const open = [...entries.slice(0, 2), { subject: 'bmc:node_site/10.0.0.7', kind: 'bmc.power', payloadSha256: '' }];
+    const open = [...entries.slice(0, 2), { subject: 'bmc:node_site/10.0.0.7', kind: 'bmc.power', payloadSha256: '' }] as {
+      subject: string;
+      kind: string;
+      payloadSha256: string;
+    }[];
     await writeFile(join(h.cwd, 'scope.json'), JSON.stringify({ batchId, trustDomain, scope: open }));
     const sign = ['batch', 'sign', '--key', 'alice.pem', '--scope', 'scope.json', '--not-after', later()];
     await expect(h.run(sign)).rejects.toMatchObject({ code: 'UNBOUND_SCOPE', message: /bmc\.power on bmc:node_site\/10\.0\.0\.7/ });
@@ -176,6 +190,36 @@ describe('batch sign', () => {
     expect(signed.scopeRoot).toBe(Buffer.from(batchScope(batchId, leaves(open)).root).toString('hex'));
     expect(h.err.join('\n')).toMatch(/\(any payload\)/);
     expect(h.err.join('\n')).toMatch(/Warning: 1 command\(s\) admit any payload/);
+  });
+
+  it('shows each operation its leaves bind, and refuses a payload that is not the one bound', async () => {
+    const h = await harness();
+    await h.run(['batch', 'keygen', '--out', 'alice.pem']);
+    const sign = (file: string, extra: string[] = []) => [
+      'batch', 'sign', '--key', 'alice.pem', '--scope', file, '--not-after', later(), ...extra,
+    ];
+    await writeFile(join(h.cwd, 'scope.json'), JSON.stringify({ batchId, trustDomain, scope: entries }));
+    await h.run(sign('scope.json'));
+    expect(h.err.join('\n')).toMatch(/disk\.wipe ×2: \{\}/);
+    expect(h.err.join('\n')).toMatch(/bmc\.power ×1: \{"driver":"redfish","address":"10\.0\.0\.7","operation":"power\.setPower"\}/);
+    // Another operation under the leaf's digest (a power cycle shown as a query): refused.
+    const other = leaf('bmc:node_site/10.0.0.7', 'bmc.power', 'bettercompute.site.v1.BmcOperationRequest', { ...power, operation: 'power.getPower' });
+    const swapped = [entries[0], entries[1], { ...entries[2]!, payload: other.payload }];
+    await writeFile(join(h.cwd, 'swapped.json'), JSON.stringify({ batchId, trustDomain, scope: swapped }));
+    await expect(h.run(sign('swapped.json'))).rejects.toMatchObject({ code: 'SCOPE_MISMATCH' });
+    // The same bytes labelled as another message (read as an HTTP proxy request): refused, decoded as the kind's type.
+    const relabelled = [entries[0], entries[1], { ...entries[2]!, payload: { ...entries[2]!.payload, typeUrl: 'type.googleapis.com/bettercompute.site.v1.HttpProxyRequest' } }];
+    await writeFile(join(h.cwd, 'relabelled.json'), JSON.stringify({ batchId, trustDomain, scope: relabelled }));
+    await expect(h.run(sign('relabelled.json'))).rejects.toMatchObject({ code: 'SCOPE_MISMATCH', message: /BmcOperationRequest/ });
+    // A bound leaf without its payload shows only a digest: refused unless --allow-opaque.
+    const { payload: _payload, ...digestOnly } = entries[2]!;
+    await writeFile(join(h.cwd, 'opaque.json'), JSON.stringify({ batchId, trustDomain, scope: [entries[0], entries[1], digestOnly] }));
+    await expect(h.run(sign('opaque.json'))).rejects.toMatchObject({ code: 'OPAQUE_SCOPE' });
+    await expect(h.run(sign('opaque.json', ['--allow-opaque']))).resolves.toMatchObject({ batchId });
+    // Subjects are printable ASCII: a right-to-left override or a newline is refused.
+    const spoofed = [entries[0], { ...entries[1]!, subject: 'node_\u202eb' }];
+    await writeFile(join(h.cwd, 'spoofed.json'), JSON.stringify({ batchId, trustDomain, scope: spoofed }));
+    await expect(h.run(sign('spoofed.json'))).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 
   it('checks the subjects against --expect', async () => {

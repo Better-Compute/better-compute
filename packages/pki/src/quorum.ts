@@ -1,11 +1,14 @@
 import { createHash, type KeyObject } from 'node:crypto';
-import { create } from '@bufbuild/protobuf';
+import { create, fromBinary, toJson, type JsonValue } from '@bufbuild/protobuf';
 import { anyUnpack, timestampFromMs, timestampMs, type Any } from '@bufbuild/protobuf/wkt';
 import { ComputeError } from '@better-compute/core';
 import {
   batchApprovalSigningInput,
   batchLeafInput,
   batchNodeInput,
+  commandKinds,
+  isCommandKind,
+  protocolRegistry,
   SignatureSchema,
   site,
   type BatchApproval,
@@ -322,6 +325,62 @@ export function verifyBatchCommand(
     });
   const inScope = (command.payloadSha256?.length ? walk(command.payloadSha256) : false) || walk(undefined);
   if (!inScope) throw deny('not-in-scope');
+}
+
+/**
+ * The payload type an agent decodes a kind's payload as: the built-in kinds' (protocol), and metal's and the site
+ * agent's destructive kinds. Undefined for a kind whose type only its module knows.
+ */
+export function expectedPayloadType(kind: string): string | undefined {
+  if (isCommandKind(kind)) return commandKinds[kind].payload.typeName;
+  if (isBmcKind(kind)) return 'bettercompute.site.v1.BmcOperationRequest';
+  return (
+    {
+      'site.httpProxy': 'bettercompute.site.v1.HttpProxyRequest',
+      'disk.wipe': 'bettercompute.agent.v1.WipeRequest',
+      'deploy.image': 'bettercompute.agent.v1.DeployImageRequest',
+      'boot.kexec': 'bettercompute.agent.v1.KexecRequest',
+      'diag.dcgm': 'bettercompute.agent.v1.DiagDcgmRequest',
+    } as Record<string, string>
+  )[kind];
+}
+
+/** A batch leaf's operation, as an approver is shown it. */
+export interface DecodedBatchPayload {
+  typeName: string;
+  /** The payload as proto3 JSON. */
+  json: JsonValue;
+  /** Whether the type is the one the kind's agent decodes (false: only the server's word for it). */
+  typeChecked: boolean;
+}
+
+/**
+ * Checks a batch leaf's stored payload against the digest the leaf binds (SHA-256 of the payload bytes) and decodes
+ * it as the kind's own payload type, never as whatever type the server labels it with: the same bytes read as
+ * another message would show the approver another operation. Throws INVALID_INPUT with `details.reason`
+ * `payload-digest`, `payload-type`, `payload-unknown-type` or `payload-undecodable`.
+ */
+export function decodeBatchPayload(
+  leaf: { kind: string; payloadSha256: Uint8Array },
+  payload: { typeUrl: string; value: Uint8Array },
+): DecodedBatchPayload {
+  const fail = (reason: string, message: string) => new ComputeError('INVALID_INPUT', message, undefined, { reason });
+  if (leaf.payloadSha256.length !== 32 || Buffer.compare(sha256(payload.value), leaf.payloadSha256) !== 0)
+    throw fail('payload-digest', `The ${leaf.kind} payload is not the one its leaf binds`);
+  const served = payload.typeUrl.slice(payload.typeUrl.lastIndexOf('/') + 1);
+  const expected = expectedPayloadType(leaf.kind);
+  if (expected && served !== expected)
+    throw fail('payload-type', `A ${leaf.kind} payload is a ${expected}, not ${served}`);
+  const typeName = expected ?? served;
+  const schema = protocolRegistry.getMessage(typeName);
+  if (!schema) throw fail('payload-unknown-type', `${typeName} is not a better-compute message`);
+  let json: JsonValue;
+  try {
+    json = toJson(schema, fromBinary(schema, payload.value), { registry: protocolRegistry });
+  } catch {
+    throw fail('payload-undecodable', `The ${leaf.kind} payload is not a valid ${typeName}`);
+  }
+  return { typeName, json, typeChecked: expected !== undefined };
 }
 
 /** The protocol's signing input for an approval (what approvers sign, for tooling that shows or checks it). */
