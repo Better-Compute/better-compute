@@ -85,13 +85,14 @@ function accepted(h: DaemonHarness, id: string) {
 }
 
 describe('FakeDaemon signed intent', () => {
-  it('rejects an unsigned destructive command BAD_SIGNATURE and runs a signed one', async () => {
+  it('rejects every unsigned command BAD_SIGNATURE, destructive or not, and runs a signed one', async () => {
     const h = await daemon();
     const unsigned = send(h, h.commandBody('node.reboot'));
-    const plain = send(h, h.commandBody('diag.nvml')); // not destructive: unsigned is fine
+    // Not destructive, still refused unsigned (review 7 HIGH-1: site.httpProxy reaches any BMC of a site).
+    const plain = send(h, h.commandBody('diag.nvml'));
     await h.advance(5);
     expect(states(h, unsigned.id)).toEqual(['REJECTED:BAD_SIGNATURE']);
-    expect(states(h, plain.id)).not.toContain('REJECTED:BAD_SIGNATURE');
+    expect(states(h, plain.id)).toEqual(['REJECTED:BAD_SIGNATURE']);
 
     const signed = send(h, h.commandBody('node.reboot'), (bytes) => signer.sign(bytes));
     await h.advance(5);
@@ -361,8 +362,8 @@ describe('FakeDaemon signed intent', () => {
     await h.advance(5);
     expect(states(h, first.id).filter((state) => state.startsWith('REJECTED'))).toEqual([]);
     expect(states(h, second.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
-    // Non-destructive commands never need a batch.
-    const plain = send(h, h.commandBody('diag.nvml'));
+    // Non-destructive commands never need a batch (signed, as every command is).
+    const plain = send(h, h.commandBody('diag.nvml'), (bytes) => signer.sign(bytes));
     await h.advance(5);
     expect(states(h, plain.id).filter((state) => state.startsWith('REJECTED'))).toEqual([]);
   });

@@ -162,8 +162,9 @@ export interface VerifyIntentOptions {
   /** The node this daemon is: a body for any other node is refused. */
   nodeId: string;
   /**
-   * Whether a signature is mandatory for this body (the daemon's own kind table decides, never the
-   * body). A signature that is present is always checked, required or not.
+   * Whether a signature is mandatory for this body. A daemon holding command-signing roots requires one for
+   * every command, whatever its kind (an unsigned "harmless" kind is a compromised gateway's way in); false only
+   * before signed intent is in force. A signature that is present is always checked, required or not.
    */
   required: boolean;
 }

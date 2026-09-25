@@ -1180,12 +1180,11 @@ export class FakeDaemon {
     }
     // Go: intent.VerifyCommand. The verdict is applied by precheck, in its place in the order.
     if (this.intentRoots) {
-      const kind = this.kinds.get(body.kind);
-      // The daemon's own kind table decides, never the body.
-      const required =
-        kind?.destructive ?? (isCommandKind(body.kind) && commandKinds[body.kind].destructive);
+      // Once command-signing roots are in force EVERY kind must be signed (review 7 HIGH-1): an unsigned
+      // "harmless" kind is a gateway's way in (site.httpProxy reaches any BMC of the site). The control plane
+      // signs every command it enqueues.
       try {
-        verifyCommand(command, { roots: this.intentRoots, now: this.serverNow(), nodeId: this.nodeId, required });
+        verifyCommand(command, { roots: this.intentRoots, now: this.serverNow(), nodeId: this.nodeId, required: true });
         this.badSignatures.delete(body.id);
       } catch (error) {
         this.badSignatures.add(body.id);
