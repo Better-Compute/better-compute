@@ -1057,7 +1057,9 @@ export async function placeQueued(
   const limit = Math.min(Math.max(1, options.maxBatch ?? maxPlacementBatch), maxPlacementBatch);
   const pool = await readPool(tx, poolId);
   if (!pool) return { placed: 0, pending: 0, more: false };
-  await lockPool(tx, poolId);
+  // Reservation rows first, then the index, and only then the pool lock: loading the index (a pool
+  // of 10k nodes: ~1 s on PGlite) never holds the lock that inline placements on the pool wait for.
+  // A booking committed between the load and the lock is caught by the guarded commits.
   const { rows } = await tx.query<{ id: string }>(
     `SELECT id FROM reservations
       WHERE pool_id = $1 AND state = 'pending' AND conditions @> '[{"type": "Queued"}]'::jsonb
@@ -1069,6 +1071,7 @@ export async function placeQueued(
   if (batch.length === 0) return { placed: 0, pending: 0, more: false };
   const checkout = options.cache ? await options.cache.checkout(tx, pool, now) : undefined;
   const index = checkout?.index ?? (await PoolIndex.load(tx, pool, now));
+  await lockPool(tx, poolId);
   const context = { ...deps.placement, clock: deps.clock };
   const { rows: raw } = await tx.query<RawReservation>(
     `SELECT ${reservationColumns} FROM reservations WHERE id = ANY($1::text[])`,

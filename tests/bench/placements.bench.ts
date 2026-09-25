@@ -376,13 +376,26 @@ describe('placements', () => {
     const indexes = new PoolIndexCache();
     let placed = 0;
     const batches: number[] = [];
+    const held: number[] = [];
     const started = performance.now();
     for (let more = true; more; ) {
       const batchStart = performance.now();
-      const result = await db.transaction((tx) =>
-        placeQueued(deps, tx, 'pool_bench', { cache: indexes }),
-      );
-      batches.push(performance.now() - batchStart);
+      let locked: number | undefined;
+      const result = await db.transaction((tx) => {
+        // The pool row lock, from `pools … FOR UPDATE` to the commit.
+        const timed: SqlTx = {
+          async query(text, params) {
+            const answer = await tx.query(text, params);
+            if (locked === undefined && /FROM pools WHERE id = \$1 FOR UPDATE/.test(text))
+              locked = performance.now();
+            return answer;
+          },
+        };
+        return placeQueued(deps, timed, 'pool_bench', { cache: indexes });
+      });
+      const ended = performance.now();
+      batches.push(ended - batchStart);
+      if (locked !== undefined) held.push(ended - locked);
       placed += result.placed;
       more = result.more;
       result.keep?.();
@@ -396,7 +409,7 @@ describe('placements', () => {
       seconds: Math.round(seconds * 100) / 100,
       placementsPerSecond: Math.round((placed / seconds) * 10) / 10,
       latencyMs: summary(batches),
-      lockHeldMs: summary(batches),
+      lockHeldMs: summary(held),
     };
     steps.push(step);
     console.log('placements placeQueued', JSON.stringify(step));
