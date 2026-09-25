@@ -39,7 +39,7 @@ import {
   type AllocationRecord,
 } from './bookings.js';
 import { chargeQuota, quotaDemand, refundQuota } from './quota.js';
-import { schedulableSql } from './eligibility.js';
+import { dedicatedTaint, schedulableSqlTolerating } from './eligibility.js';
 import { assertGang } from './gang.js';
 import { assertSelector } from './selector.js';
 import {
@@ -2006,12 +2006,13 @@ export async function repairBooking(
   const { rows } = await tx.query<{ node_id: string; node_ok: boolean; atoms_ok: boolean }>(
     `SELECT a.node_id,
             EXISTS (SELECT 1 FROM nodes n JOIN pools p ON p.id = n.pool_id
-                     WHERE n.id = a.node_id AND ${nodeLease ? leasableSql : schedulableSql}) AS node_ok,
+                     WHERE n.id = a.node_id
+                       AND ${nodeLease ? leasableSql : schedulableSqlTolerating('$2::text[]')}) AS node_ok,
             ${nodeLease ? 'true OR ' : ''}NOT EXISTS (SELECT 1 FROM devices d WHERE d.id = ANY(a.atoms)
                          AND NOT (d.healthy AND d.bookable)) AS atoms_ok
        FROM allocations a
       WHERE a.owner_kind = 'reservation' AND a.owner_id = $1 AND a.released_at IS NULL`,
-    [row.id],
+    [row.id, [dedicatedTaint(row.tenantId)]],
   );
   const bad = rows
     .filter((entry) => !entry.node_ok || !entry.atoms_ok)

@@ -12,20 +12,27 @@ import { pglite } from '@better-compute/postgres/pglite';
 import {
   capacityMigrations,
   chargeQuota,
+  commitPlansBulk,
   createCapacityPort,
+  dedicatedTaint,
   extendAllocation,
   inlinePlacer,
   isSchedulable,
   loadNodeViews,
+  parseSelector,
+  placeFromIndex,
+  PoolIndex,
   quotaDemand,
   readAllocation,
   readOwnerAllocations,
+  readPool,
   readPoolCapacity,
   readQuotas,
   rebuildPoolRollup,
   refundQuota,
   releaseAllocation,
   schedulableSql,
+  schedulableSqlTolerating,
   setQuota,
   writeDeviceLinks,
 } from '@better-compute/capacity';
@@ -565,6 +572,82 @@ describe('rollups and eligibility SQL', () => {
       .map((view) => view.id);
     expect(rows.map((row) => row.id)).toEqual(fromTs);
     expect(fromTs).toEqual(['n4', 'n7']);
+
+    // Dedications (§10.6 dedicated=<tenant>): tolerated by that tenant only, never with another reason.
+    await addNode('n8', { noSchedule: [dedicatedTaint('acme')], gpus: 0 });
+    await addNode('n9', { noSchedule: [dedicatedTaint('acme'), 'x'], gpus: 0 });
+    await addNode('n10', { noSchedule: [dedicatedTaint('beta')], gpus: 0 });
+    await addNode('n11', { noSchedule: [dedicatedTaint('acme'), dedicatedTaint('beta')], gpus: 0 });
+    const all = await loadNodeViews(
+      db,
+      { id: 'pool_1', ownerTenantId: 'root' },
+      { start: T0, end: T0 + HOUR },
+    );
+    for (const tenant of ['acme', 'beta', 'gamma']) {
+      const sql = await db.query<{ id: string }>(
+        `SELECT n.id FROM nodes n JOIN pools p ON p.id = n.pool_id
+          WHERE ${schedulableSqlTolerating('$1::text[]')} ORDER BY n.id`,
+        [[dedicatedTaint(tenant)]],
+      );
+      const ts = all
+        .filter((view) => isSchedulable(view, { ownerTenantId: 'root' }, tenant))
+        .map((view) => view.id);
+      expect(
+        sql.rows.map((row) => row.id),
+        tenant,
+      ).toEqual(ts);
+    }
+    const forTenant = (tenant: string) =>
+      all.filter((view) => isSchedulable(view, { ownerTenantId: 'root' }, tenant)).map((v) => v.id);
+    expect(forTenant('acme')).toEqual(['n4', 'n7', 'n8']);
+    expect(forTenant('beta')).toEqual(['n10', 'n4', 'n7']);
+    expect(forTenant('gamma')).toEqual(['n4', 'n7']);
+    // Generic checks (rollups, node edges) still see a dedication as NoSchedule.
+    expect(
+      all.filter((view) => isSchedulable(view, { ownerTenantId: 'root' })).map((v) => v.id),
+    ).toEqual(['n4', 'n7']);
+  });
+
+  it('places on a node dedicated to a tenant only for that tenant, on every placement path', async () => {
+    const dedicated = await addNode('node_d', { gpus: 2, noSchedule: [dedicatedTaint('acme')] });
+    await setQuota(db, 'beta', 'pool_1', 'gpu', 8);
+    // Inline, whole-pool and shortlist planning.
+    expect(await place(request(1, { tenantId: 'beta' }))).toMatchObject({ status: 'pending' });
+    expect(
+      await place(
+        request(1, {
+          tenantId: 'beta',
+          devices: [{ class: 'gpu', count: 1, selector: parseSelector('vramGiB >= 80') }],
+        }),
+      ),
+    ).toMatchObject({ status: 'pending' });
+    expect(await place(request(1))).toMatchObject({
+      status: 'placed',
+      allocations: [{ nodeId: 'node_d' }],
+    });
+    // The pool index: its ranking is per tenant once a node is dedicated.
+    const outcome = await db.transaction(async (tx) => {
+      const pool = (await readPool(tx, 'pool_1'))!;
+      const index = await PoolIndex.load(tx, pool, T0);
+      expect(index.ranked(request(1, { tenantId: 'beta' }))).toEqual([]);
+      expect(index.ranked(request(1)).map((entry) => entry.nodeId)).toEqual(['node_d']);
+      const beta = await placeFromIndex(tx, index, request(1, { tenantId: 'beta' }), context());
+      const acme = await placeFromIndex(tx, index, request(1), context());
+      // A bulk commit of a plan for the wrong tenant is refused at the lock.
+      const bulk = await commitPlansBulk(tx, pool, [
+        {
+          request: request(1, {
+            tenantId: 'beta',
+            during: { start: T0 + 2 * HOUR, end: T0 + 3 * HOUR },
+          }),
+          plan: { nodeId: 'node_d', atoms: [dedicated[0]!], resources: {}, score: 1, scores: {} },
+        },
+      ]);
+      return { beta, acme, bulk };
+    });
+    expect(outcome.beta.status).toBe('pending');
+    expect(outcome.acme).toMatchObject({ status: 'placed', allocations: [{ nodeId: 'node_d' }] });
+    expect([...outcome.bulk.failed.values()]).toEqual(['node_d is no longer schedulable']);
   });
 });
 

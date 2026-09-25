@@ -5,7 +5,7 @@ import type {
   SchedulerPlugin,
   SqlTx,
 } from '@better-compute/core';
-import { schedulableSql } from './eligibility.js';
+import { dedicatedTaint, schedulableSqlTolerating } from './eligibility.js';
 import { defaultScorerWeights, planPlacement, type PlacementPlan } from './pipeline.js';
 import { loadNodeViews, type PoolRow } from './store.js';
 
@@ -93,8 +93,9 @@ async function candidates(
   // Three single-table-driven statements rather than one: their plans stay sane without statistics.
   const nodes = await tx.query<{ node_id: string }>(
     `SELECT n.id AS node_id FROM nodes n JOIN pools p ON p.id = n.pool_id
-      WHERE n.pool_id = $1 AND ${schedulableSql} AND NOT (n.id = ANY($2::text[])) AND ${scalarsOk}`,
-    [pool.id, [...excluded], JSON.stringify(scalars)],
+      WHERE n.pool_id = $1 AND ${schedulableSqlTolerating('$4::text[]')}
+        AND NOT (n.id = ANY($2::text[])) AND ${scalarsOk}`,
+    [pool.id, [...excluded], JSON.stringify(scalars), [dedicatedTaint(request.tenantId)]],
   );
   if (want.size === 0) return nodes.rows.map((row) => ({ nodeId: row.node_id, free: 0, total: 0 }));
   const classes = [...want.keys()];

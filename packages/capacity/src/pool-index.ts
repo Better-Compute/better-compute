@@ -7,7 +7,7 @@ import type {
   SqlTx,
   TimeRange,
 } from '@better-compute/core';
-import { isSchedulable } from './eligibility.js';
+import { dedicatedTenant, mayBeSchedulable } from './eligibility.js';
 import { before, partialScorer, type Candidate, type CandidateCounts } from './shortlist.js';
 import {
   readDeviceLinks,
@@ -101,16 +101,24 @@ export class PoolIndex {
       this.classCounts.set(nodeId, counts);
     }
     for (const deviceId of bookings.keys()) this.markBooked(deviceId);
-    this.schedulable = nodes.filter((node) => isSchedulable(node, pool));
+    this.schedulable = nodes.filter((node) => mayBeSchedulable(node, pool));
     this.schedulableIds = new Set(this.schedulable.map((node) => node.id));
     this.nodeById = new Map(nodes.map((node) => [node.id, node]));
+    for (const node of this.schedulable) {
+      const tenant = dedicatedTenant(node);
+      if (tenant !== undefined) this.dedicatedTo.set(node.id, tenant);
+    }
   }
 
   private readonly nodeById: Map<string, NodeRow>;
 
-  /** The schedulable nodes, as loaded (node columns only change through a rebuild). */
+  /**
+   * The nodes any tenant may place on, as loaded (node columns only change through a rebuild):
+   * schedulable ones, and those dedicated to one tenant (`dedicatedTo`, schedulable for it alone).
+   */
   private readonly schedulable: NodeRow[];
   private readonly schedulableIds: Set<string>;
+  private readonly dedicatedTo = new Map<string, string>();
 
   private readonly deviceById = new Map<string, Device>();
   /** Bookable devices per node and class: all, and healthy. */
@@ -132,7 +140,7 @@ export class PoolIndex {
   /** Loads a pool: every node, and devices, scalars, links and bookings ending after `from` for schedulable ones. */
   static async load(tx: SqlTx, pool: PoolRow, from: number): Promise<PoolIndex> {
     const nodes = await readPoolNodes(tx, pool.id);
-    const live = nodes.filter((node) => isSchedulable(node, pool)).map((node) => node.id);
+    const live = nodes.filter((node) => mayBeSchedulable(node, pool)).map((node) => node.id);
     const devices = new Map<string, Device[]>();
     for (const device of await readDevices(tx, live))
       devices.set(device.nodeId, [...(devices.get(device.nodeId) ?? []), device]);
@@ -199,6 +207,8 @@ export class PoolIndex {
     request: PlacementRequest,
     want: ReadonlyMap<string, number>,
   ): CandidateCounts | undefined {
+    const dedicated = this.dedicatedTo.get(nodeId);
+    if (dedicated !== undefined && dedicated !== request.tenantId) return undefined;
     const resources = request.resources;
     if (resources) {
       const scalars = this.resources.get(nodeId) ?? {};
@@ -251,6 +261,8 @@ export class PoolIndex {
       request.resources ?? {},
       request.imageId ?? null,
       weights,
+      // Rankings differ per tenant only when some node is dedicated to one.
+      this.dedicatedTo.size > 0 ? request.tenantId : null,
     ]);
     let shape = this.shapes.get(key);
     if (!shape) {

@@ -11,7 +11,7 @@ import {
   type Placer,
   type SqlTx,
 } from '@better-compute/core';
-import { schedulableSql } from './eligibility.js';
+import { blockingReasons, dedicatedTaint, schedulableSqlTolerating } from './eligibility.js';
 import { assertGang, chooseGang, maxGangSize, planGangs } from './gang.js';
 import {
   choosePlan,
@@ -88,12 +88,13 @@ async function commitPlan(
     return { ok: false, reason };
   };
   try {
-    // Linearizes with cordon, taint and liveness writes, which update these node columns.
+    // Linearizes with cordon, taint and liveness writes, which update these node columns. A node
+    // dedicated to the request's tenant is schedulable for it.
     const node = await tx.query(
       `SELECT n.id FROM nodes n JOIN pools p ON p.id = n.pool_id
-        WHERE n.id = $1 AND n.pool_id = $2 AND ${schedulableSql}
+        WHERE n.id = $1 AND n.pool_id = $2 AND ${schedulableSqlTolerating('$3::text[]')}
           FOR SHARE OF n`,
-      [plan.nodeId, pool.id],
+      [plan.nodeId, pool.id, [dedicatedTaint(request.tenantId)]],
     );
     if (node.rows.length === 0) return conflict(`${plan.nodeId} is no longer schedulable`);
 
@@ -483,13 +484,20 @@ export async function commitPlansBulk(
   await tx.query(`SAVEPOINT capacity_bulk`);
   try {
     const nodeIds = [...new Set(items.map((item) => item.plan.nodeId))];
-    const nodes = await tx.query<{ id: string }>(
-      `SELECT n.id FROM nodes n JOIN pools p ON p.id = n.pool_id
-        WHERE n.id = ANY($1::text[]) AND n.pool_id = $2 AND ${schedulableSql}
+    // Every batch tenant's dedication is tolerated by the lock; each plan is then checked against
+    // its own tenant's (a node dedicated to A is not schedulable for B's plan).
+    const tolerated = [...new Set(items.map((item) => dedicatedTaint(item.request.tenantId)))];
+    const nodes = await tx.query<{ id: string; no_schedule_reasons: string[] }>(
+      `SELECT n.id, n.no_schedule_reasons FROM nodes n JOIN pools p ON p.id = n.pool_id
+        WHERE n.id = ANY($1::text[]) AND n.pool_id = $2 AND ${schedulableSqlTolerating('$3::text[]')}
         ORDER BY n.id FOR SHARE OF n`,
-      [nodeIds, pool.id],
+      [nodeIds, pool.id, tolerated],
     );
-    const okNodes = new Set(nodes.rows.map((row) => row.id));
+    const reasonsOf = new Map(nodes.rows.map((row) => [row.id, row.no_schedule_reasons ?? []]));
+    const schedulableFor = (nodeId: string, tenantId: string) => {
+      const reasons = reasonsOf.get(nodeId);
+      return reasons !== undefined && blockingReasons(reasons, tenantId).length === 0;
+    };
     const atomIds = items.flatMap((item) => item.plan.atoms);
     const atoms = await tx.query<{ id: string; class: string }>(
       `SELECT id, class FROM devices WHERE id = ANY($1::text[]) AND healthy AND bookable
@@ -500,7 +508,7 @@ export async function commitPlansBulk(
 
     const allocationIds = new Map<number, string>();
     items.forEach((item, index) => {
-      if (!okNodes.has(item.plan.nodeId))
+      if (!schedulableFor(item.plan.nodeId, item.request.tenantId))
         failed.set(index, `${item.plan.nodeId} is no longer schedulable`);
       else if (!item.plan.atoms.every((atom) => classes.has(atom)))
         failed.set(index, `an atom on ${item.plan.nodeId} turned unhealthy or unbookable`);

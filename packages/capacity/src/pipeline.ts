@@ -285,7 +285,7 @@ export function planPlacement(
       rejected.push({ nodeId: node.id, filter: 'eligible', reason: 'in another pool' });
       continue;
     }
-    const why = ineligibility(node, pool);
+    const why = ineligibility(node, pool, request.tenantId);
     if (why) {
       rejected.push({ nodeId: node.id, filter: 'eligible', reason: why.reason });
       continue;

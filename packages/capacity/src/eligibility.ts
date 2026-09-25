@@ -47,10 +47,61 @@ export const capacityBuckets: readonly CapacityBucket[] = [
 /** Provision states whose capacity can be booked. */
 export const schedulableProvisionStates: readonly ProvisionState[] = ['adopted', 'deployed'];
 
-/** Why a node is not schedulable, or `undefined` when it is. Checks run in bucket order. */
+/**
+ * The operator taint that dedicates a node to one tenant (§10.6 `dedicated=<tenant>`, set with
+ * `nodes.taint`): stored in `no_schedule_reasons` as `taint:dedicated=<tenantId>`, it keeps every
+ * other tenant's work off the node and is tolerated by that tenant's.
+ */
+export const dedicatedTaintPrefix = 'taint:dedicated=';
+
+/** The `no_schedule_reasons` entry that dedicates a node to `tenantId`. */
+export function dedicatedTaint(tenantId: string): string {
+  return `${dedicatedTaintPrefix}${tenantId}`;
+}
+
+/**
+ * The NoSchedule reasons that keep `tenantId`'s work off a node: all of them, except a
+ * `dedicated=<tenantId>` taint. Without a tenant (rollups, generic checks) every reason counts.
+ */
+export function blockingReasons(reasons: readonly string[], tenantId?: string): readonly string[] {
+  if (tenantId === undefined || reasons.length === 0) return reasons;
+  const tolerated = dedicatedTaint(tenantId);
+  return reasons.filter((reason) => reason !== tolerated);
+}
+
+/**
+ * The tenant a node is dedicated to when its only NoSchedule reasons are `dedicated=<tenant>` taints
+ * for that one tenant; `undefined` otherwise (no reasons, other reasons, or several tenants).
+ */
+export function dedicatedTenant(
+  node: Pick<EligibilityNode, 'noScheduleReasons'>,
+): string | undefined {
+  let tenant: string | undefined;
+  for (const reason of node.noScheduleReasons) {
+    if (!reason.startsWith(dedicatedTaintPrefix)) return undefined;
+    const named = reason.slice(dedicatedTaintPrefix.length);
+    if (tenant !== undefined && tenant !== named) return undefined;
+    tenant = named;
+  }
+  return tenant;
+}
+
+/**
+ * Whether any tenant could place on the node: schedulable, or blocked by nothing but a dedication.
+ * Loaders read devices and bookings for these; the pipeline then decides per request tenant.
+ */
+export function mayBeSchedulable(node: EligibilityNode, pool: EligibilityPool): boolean {
+  return isSchedulable(node, pool, dedicatedTenant(node));
+}
+
+/**
+ * Why a node is not schedulable, or `undefined` when it is. Checks run in bucket order. With
+ * `tenantId` (placement), a `dedicated=<tenantId>` taint does not count against the node.
+ */
 export function ineligibility(
   node: EligibilityNode,
   pool: EligibilityPool,
+  tenantId?: string,
 ): { bucket: Exclude<CapacityBucket, 'schedulable'>; reason: string } | undefined {
   if (node.role !== 'host') return { bucket: 'excluded', reason: `role ${node.role}` };
   if (node.trust === 'tenant-controlled')
@@ -65,14 +116,19 @@ export function ineligibility(
     return { bucket: 'provisioning', reason: 'awaiting its first converged spec' };
   if (node.connectivity !== 'connected')
     return { bucket: 'unreachable', reason: `connectivity ${node.connectivity}` };
-  if (node.noScheduleReasons.length > 0)
-    return { bucket: 'unhealthy', reason: `NoSchedule: ${node.noScheduleReasons.join(', ')}` };
+  const blocking = blockingReasons(node.noScheduleReasons, tenantId);
+  if (blocking.length > 0)
+    return { bucket: 'unhealthy', reason: `NoSchedule: ${blocking.join(', ')}` };
   return undefined;
 }
 
-/** Schedulable ⇔ every §10.2 condition holds. */
-export function isSchedulable(node: EligibilityNode, pool: EligibilityPool): boolean {
-  return ineligibility(node, pool) === undefined;
+/** Schedulable ⇔ every §10.2 condition holds (for `tenantId`'s work, when given). */
+export function isSchedulable(
+  node: EligibilityNode,
+  pool: EligibilityPool,
+  tenantId?: string,
+): boolean {
+  return ineligibility(node, pool, tenantId) === undefined;
 }
 
 /** The bucket a node's capacity is reported in. */
@@ -90,3 +146,15 @@ export const schedulableSql = `n.role = 'host' AND NOT n.maintenance AND NOT n.c
    AND n.observed_generation >= 1
    AND cardinality(n.no_schedule_reasons) = 0
    AND (n.trust = 'platform' OR (n.trust = 'tenant-owned' AND p.owner_tenant_id = n.owner_tenant_id))`;
+
+/**
+ * `schedulableSql` for placement, tolerating the reasons in `tolerated` (an SQL `text[]`
+ * expression, e.g. `$3::text[]` bound to `[dedicatedTaint(tenantId)]`): the node's
+ * `no_schedule_reasons` must all be among them.
+ */
+export function schedulableSqlTolerating(tolerated: string): string {
+  return schedulableSql.replace(
+    'cardinality(n.no_schedule_reasons) = 0',
+    `n.no_schedule_reasons <@ ${tolerated}`,
+  );
+}

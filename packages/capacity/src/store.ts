@@ -16,7 +16,7 @@ import type {
 } from '@better-compute/core';
 import { ComputeError } from '@better-compute/core';
 import { gpuLinks, type GpusSection } from '@better-compute/inventory';
-import { isSchedulable } from './eligibility.js';
+import { mayBeSchedulable } from './eligibility.js';
 import { gpuLinkOrder } from './pipeline.js';
 
 // Row loaders shared by placers, rollups and read methods. Timestamps cross the wire as ISO strings
@@ -380,7 +380,8 @@ export async function loadNodeViews(
   const nodes = (await readPoolNodes(tx, pool.id, options.onlyNodes)).filter(
     (node) => !excluded.has(node.id),
   );
-  const live = nodes.filter((node) => isSchedulable(node, pool)).map((node) => node.id);
+  // Nodes dedicated to a tenant load too: the pipeline decides per request tenant.
+  const live = nodes.filter((node) => mayBeSchedulable(node, pool)).map((node) => node.id);
   const [devices, busy, resources, labels, links] = [
     await readDevices(tx, live),
     await readBusyDevices(tx, live, during, options.ignoreAllocations),
