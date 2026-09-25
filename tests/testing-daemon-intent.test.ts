@@ -309,8 +309,8 @@ describe('FakeDaemon signed intent', () => {
     });
     const batchId = 'batch_01k5w00000000000000000000q';
     const scope = batchScope(batchId, [
-      { nodeId: 'node_a', kind: 'test.destroy' },
-      { nodeId: 'node_other', kind: 'test.destroy' },
+      { subject: 'node_a', kind: 'test.destroy' },
+      { subject: 'node_other', kind: 'test.destroy' },
     ]);
     const approvalBy = (signers: number[]) => {
       const input = { batchId, scopeRoot: scope.root, scopeSize: scope.size, notAfter: T0 + 3_600_000 };

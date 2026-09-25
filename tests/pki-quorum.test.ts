@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { create } from '@bufbuild/protobuf';
-import { timestampFromMs } from '@bufbuild/protobuf/wkt';
+import { anyPack, timestampFromMs } from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 import {
   approverKeyOf,
   batchApprovalSigningBytes,
   batchScope,
+  batchSubject,
   createApproverKey,
   createSigningKey,
   requiredApprovals,
@@ -16,17 +17,19 @@ import {
   verifyBatchProof,
   verifyTrustBundle,
 } from '@better-compute/pki';
-import { BatchApprovalSchema, BatchProofSchema, signingInput } from '@better-compute/protocol';
+import { BatchApprovalSchema, BatchProofSchema, signingInput, site } from '@better-compute/protocol';
 
 // The v1.0 destructive-batch quorum, pki half (PLAN.md §13): the scope tree must reproduce the protocol's golden
 // tree byte for byte (bcd reproduces it too), proofs verify only for their own leaf, and approvals count distinct
-// approver keys of the trust bundle against the threshold (or the batch size's tier).
+// approver keys of the trust bundle against the threshold (or the batch size's tier). A leaf's subject is what the
+// command acts on: the golden tree uses node ids (kinds a node runs on itself).
 
 const golden = JSON.parse(readFileSync('packages/protocol/golden/batch-scope.json', 'utf8')) as {
   batchId: string;
   root: string;
   leaves: { index: number; nodeId: string; kind: string; hash: string; siblings: string[] }[];
 };
+const goldenEntries = golden.leaves.map(({ nodeId, kind }) => ({ subject: nodeId, kind }));
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const fromHex = (text: string) => new Uint8Array(Buffer.from(text, 'hex'));
 const NOW = Date.UTC(2026, 8, 25, 12);
@@ -34,7 +37,7 @@ const NOW = Date.UTC(2026, 8, 25, 12);
 describe('batch scope', () => {
   it('reproduces the golden tree: root, leaf order and every proof', () => {
     // Entries in any order, with a duplicate: the tree sorts and dedupes.
-    const entries = [...golden.leaves].reverse().map(({ nodeId, kind }) => ({ nodeId, kind }));
+    const entries = [...goldenEntries].reverse();
     const scope = batchScope(golden.batchId, [...entries, entries[0]!]);
     expect(hex(scope.root)).toBe(golden.root);
     expect(scope.size).toBe(golden.leaves.length);
@@ -43,7 +46,7 @@ describe('batch scope', () => {
       expect(proof.index).toBe(leaf.index);
       expect(proof.siblings.map(hex)).toEqual(leaf.siblings);
       expect(
-        verifyBatchProof({ batchId: golden.batchId, nodeId: leaf.nodeId, kind: leaf.kind, proof, root: scope.root, size: scope.size }),
+        verifyBatchProof({ batchId: golden.batchId, subject: leaf.nodeId, kind: leaf.kind, proof, root: scope.root, size: scope.size }),
       ).toBe(true);
     }
     expect(scope.proofOf('node_other', 'disk.wipe')).toBeUndefined();
@@ -53,7 +56,7 @@ describe('batch scope', () => {
     const leaf = golden.leaves[0]!;
     const base = {
       batchId: golden.batchId,
-      nodeId: leaf.nodeId,
+      subject: leaf.nodeId,
       kind: leaf.kind,
       proof: { index: leaf.index, siblings: leaf.siblings.map(fromHex) },
       root: fromHex(golden.root),
@@ -61,7 +64,9 @@ describe('batch scope', () => {
     };
     expect(verifyBatchProof(base)).toBe(true);
     for (const wrong of [
-      { nodeId: 'node_01k5w000000000000000000009' },
+      { subject: 'node_01k5w000000000000000000009' },
+      // The same machine named another way (its BMC) is another leaf.
+      { subject: `bmc:${leaf.nodeId}` },
       { kind: 'node.reboot' },
       { batchId: 'batch_other' },
       { proof: { index: 1, siblings: base.proof.siblings } },
@@ -75,21 +80,76 @@ describe('batch scope', () => {
   });
 
   it('proves every member of a large batch with log-sized proofs', () => {
-    const entries = Array.from({ length: 1001 }, (_, i) => ({ nodeId: `node_${String(i).padStart(26, '0')}`, kind: 'deploy.image' }));
+    const entries = Array.from({ length: 1001 }, (_, i) => ({ subject: `node_${String(i).padStart(26, '0')}`, kind: 'deploy.image' }));
     const scope = batchScope('batch_big', entries);
     expect(scope.size).toBe(1001);
     for (const entry of entries.filter((_, i) => i % 97 === 0)) {
-      const proof = scope.proofOf(entry.nodeId, entry.kind)!;
+      const proof = scope.proofOf(entry.subject, entry.kind)!;
       expect(proof.siblings.length).toBeLessThanOrEqual(10);
       expect(verifyBatchProof({ batchId: 'batch_big', ...entry, proof, root: scope.root, size: scope.size })).toBe(true);
     }
   });
 });
 
+describe('batch subjects', () => {
+  const siteNode = 'node_01k5w0000000000000000000s1';
+  const bmc = (address: string) =>
+    anyPack(site.BmcOperationRequestSchema, create(site.BmcOperationRequestSchema, { driver: 'redfish', address, operation: 'power.setPower' }));
+  const proxy = (targetNodeId: string) =>
+    anyPack(site.HttpProxyRequestSchema, create(site.HttpProxyRequestSchema, { targetNodeId }));
+
+  it('is the node for its own kinds, the BMC or proxied node for relayed ones', () => {
+    expect(batchSubject({ nodeId: 'node_a', kind: 'disk.wipe' })).toBe('node_a');
+    expect(batchSubject({ nodeId: siteNode, kind: 'bmc.power', payload: bmc('10.0.0.7') })).toBe('bmc:10.0.0.7');
+    expect(batchSubject({ nodeId: siteNode, kind: 'site.httpProxy', payload: proxy('node_b') })).toBe('node:node_b');
+  });
+
+  it('refuses a relayed kind whose payload names no target', () => {
+    for (const body of [
+      { nodeId: siteNode, kind: 'bmc.power' },
+      { nodeId: siteNode, kind: 'bmc.power', payload: bmc('') },
+      { nodeId: siteNode, kind: 'bmc.power', payload: proxy('node_b') },
+      { nodeId: siteNode, kind: 'site.httpProxy', payload: proxy('') },
+      { nodeId: siteNode, kind: 'site.httpProxy', payload: bmc('10.0.0.7') },
+      { nodeId: '', kind: 'disk.wipe' },
+    ])
+      expect(() => batchSubject(body)).toThrow(/payload|names no node/);
+  });
+
+  it('lets a site agent act on exactly the approved BMCs', () => {
+    const scope = batchScope('batch_bmc', [
+      { subject: 'bmc:10.0.0.7', kind: 'bmc.power' },
+      { subject: 'bmc:10.0.0.8', kind: 'bmc.power' },
+    ]);
+    const approver = createApproverKey();
+    const approval = create(BatchApprovalSchema, {
+      batchId: 'batch_bmc',
+      scopeRoot: scope.root,
+      scopeSize: scope.size,
+      notAfter: timestampFromMs(NOW + 60_000),
+      signatures: [
+        signBatchApproval({ batchId: 'batch_bmc', scopeRoot: scope.root, scopeSize: scope.size, notAfter: NOW + 60_000 }, approver.privateKey),
+      ],
+    });
+    const options = { approverKeys: [approver.key], threshold: 1, now: NOW };
+    const proof = create(BatchProofSchema, scope.proofOf('bmc:10.0.0.7', 'bmc.power')!);
+    const check = (address: string) =>
+      verifyBatchCommand(
+        { batchId: 'batch_bmc', subject: batchSubject({ nodeId: siteNode, kind: 'bmc.power', payload: bmc(address) }), kind: 'bmc.power' },
+        approval,
+        proof,
+        options,
+      );
+    expect(() => check('10.0.0.7')).not.toThrow();
+    // The same proof for another BMC behind the same site agent: not in scope.
+    expect(() => check('10.0.0.9')).toThrow();
+  });
+});
+
 describe('batch approvals', () => {
   const approvers = [createApproverKey(), createApproverKey(), createApproverKey()];
   const approverKeys = approvers.map((approver) => approver.key);
-  const scope = batchScope(golden.batchId, golden.leaves);
+  const scope = batchScope(golden.batchId, goldenEntries);
   const input = { batchId: golden.batchId, scopeRoot: scope.root, scopeSize: scope.size, notAfter: NOW + 3_600_000 };
   const approvalWith = (signers: number[], override: Partial<typeof input> = {}) =>
     create(BatchApprovalSchema, {
@@ -150,9 +210,9 @@ describe('batch approvals', () => {
     const leaf = golden.leaves[1]!;
     const proof = create(BatchProofSchema, scope.proofOf(leaf.nodeId, leaf.kind)!);
     expect(() =>
-      verifyBatchCommand({ batchId: golden.batchId, nodeId: leaf.nodeId, kind: leaf.kind }, approval, proof, options),
+      verifyBatchCommand({ batchId: golden.batchId, subject: leaf.nodeId, kind: leaf.kind }, approval, proof, options),
     ).not.toThrow();
-    const reason = (command: { batchId: string; nodeId: string; kind: string }, withProof = proof) => {
+    const reason = (command: { batchId: string; subject: string; kind: string }, withProof = proof) => {
       try {
         verifyBatchCommand(command, approval, withProof, options);
         return 'ok';
@@ -160,10 +220,10 @@ describe('batch approvals', () => {
         return (error as { details?: { reason?: string } }).details?.reason;
       }
     };
-    expect(reason({ batchId: golden.batchId, nodeId: leaf.nodeId, kind: 'node.reboot' })).toBe('not-in-scope');
-    expect(reason({ batchId: 'batch_other', nodeId: leaf.nodeId, kind: leaf.kind })).toBe('other-batch');
+    expect(reason({ batchId: golden.batchId, subject: leaf.nodeId, kind: 'node.reboot' })).toBe('not-in-scope');
+    expect(reason({ batchId: 'batch_other', subject: leaf.nodeId, kind: leaf.kind })).toBe('other-batch');
     expect(() =>
-      verifyBatchCommand({ batchId: golden.batchId, nodeId: leaf.nodeId, kind: leaf.kind }, undefined, proof, options),
+      verifyBatchCommand({ batchId: golden.batchId, subject: leaf.nodeId, kind: leaf.kind }, undefined, proof, options),
     ).toThrow();
   });
 

@@ -9,6 +9,7 @@ import {
   openWorkloadTokenResponse,
   signAttestedReport,
   signCommandUpdate,
+  batchSubject,
   verifyBatchCommand,
   verifyCommand,
   verifyDesiredState,
@@ -1177,8 +1178,8 @@ export class FakeDaemon {
 
   /**
    * (v1.0, §13) The destructive-batch quorum, bcd's intent.CheckBatch: with approver keys in force, a destructive
-   * command with a batch_id needs a BatchApproval of enough distinct approver keys whose scope proves this
-   * (node_id, kind); one without a batch_id counts against the unbatched hourly cap. The verdict is applied by
+   * command with a batch_id needs a BatchApproval of enough distinct approver keys whose scope proves its
+   * (subject, kind); one without a batch_id counts against the unbatched hourly cap. The verdict is applied by
    * precheck, after the signature check.
    */
   private checkQuorum(command: Command, body: CommandBody): void {
@@ -1190,7 +1191,10 @@ export class FakeDaemon {
     const now = this.serverNow();
     if (body.batchId) {
       try {
-        verifyBatchCommand({ batchId: body.batchId, nodeId: this.nodeId, kind: body.kind }, command.batchApproval, command.batchProof, {
+        // The subject comes from the signed body: this node for its own kinds, the BMC or proxied node a site
+        // agent acts on for relayed ones (precheck has already required body.nodeId to be this node).
+        const subject = batchSubject(body);
+        verifyBatchCommand({ batchId: body.batchId, subject, kind: body.kind }, command.batchApproval, command.batchProof, {
           approverKeys: quorum.approverKeys,
           threshold: quorum.threshold,
           ...(quorum.tiers ? { tiers: quorum.tiers } : {}),

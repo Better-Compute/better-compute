@@ -1,12 +1,13 @@
 import { createHash, type KeyObject } from 'node:crypto';
 import { create } from '@bufbuild/protobuf';
-import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
+import { anyUnpack, timestampFromMs, timestampMs, type Any } from '@bufbuild/protobuf/wkt';
 import { ComputeError } from '@better-compute/core';
 import {
   batchApprovalSigningInput,
   batchLeafInput,
   batchNodeInput,
   SignatureSchema,
+  site,
   type BatchApproval,
   type BatchProof,
   type Signature,
@@ -16,8 +17,9 @@ import { signPurpose, verifyPurpose } from './signing.js';
 
 // The v1.0 destructive-batch quorum (PLAN.md §13). A fleet-wide destructive batch (reimage, wipe, reboot of many
 // nodes) runs only with k-of-n operator approval: approver keys held off the control plane sign a Merkle root over
-// the batch's (node_id, kind) scope, and each command carries its inclusion proof, so the daemon checks membership
-// itself and neither a compromised api/worker nor a gateway can widen the batch. Layouts are the protocol
+// the batch's (subject, kind) scope, and each command carries its inclusion proof, so the executing agent checks
+// membership itself and neither a compromised api/worker nor a gateway can widen the batch. The subject is what the
+// command acts on (batchSubject): the node itself, a BMC the site agent drives, or a node it proxies HTTP to. Layouts are the protocol
 // package's (RFC 6962 style; golden vectors in packages/protocol/golden/batch-scope.json).
 
 const sha256 = (bytes: Uint8Array) => new Uint8Array(createHash('sha256').update(bytes).digest());
@@ -44,33 +46,61 @@ export function createApproverKey(): { privateKey: KeyObject; key: ApproverKey }
 }
 
 export interface BatchScopeEntry {
-  nodeId: string;
+  /** What the command acts on (see batchSubject): a node id, `bmc:<address>` or `node:<target node id>`. */
+  subject: string;
   kind: string;
+}
+
+/** The kinds a site agent runs against a machine's BMC: their subject is `bmc:` + the BMC address. */
+export const isBmcKind = (kind: string): boolean => kind.startsWith('bmc.');
+
+/**
+ * The subject of a command's batch leaf, computed from the signed body the way the executing agent does:
+ * `bmc:` + BmcOperationRequest.address for bmc.* kinds, `node:` + HttpProxyRequest.target_node_id for
+ * site.httpProxy, else the command's node_id (kinds a node runs on itself). Throws INVALID_INPUT when a relayed
+ * kind's payload is not its request message or names no target.
+ */
+export function batchSubject(body: { nodeId: string; kind: string; payload?: Any | undefined }): string {
+  const bad = (what: string) => new ComputeError('INVALID_INPUT', `${body.kind}: the payload ${what}`);
+  if (isBmcKind(body.kind)) {
+    const request = body.payload && anyUnpack(body.payload, site.BmcOperationRequestSchema);
+    if (!request) throw bad('is not a BmcOperationRequest');
+    if (!request.address) throw bad('names no BMC address');
+    return `bmc:${request.address}`;
+  }
+  if (body.kind === 'site.httpProxy') {
+    const request = body.payload && anyUnpack(body.payload, site.HttpProxyRequestSchema);
+    if (!request) throw bad('is not an HttpProxyRequest');
+    if (!request.targetNodeId) throw bad('names no target node');
+    return `node:${request.targetNodeId}`;
+  }
+  if (!body.nodeId) throw new ComputeError('INVALID_INPUT', `${body.kind}: the command names no node`);
+  return body.nodeId;
 }
 
 /** A batch's scope tree: the root and size approvers sign, and each entry's inclusion proof. */
 export interface BatchScope {
   batchId: string;
   root: Uint8Array;
-  /** Leaves (distinct (node_id, kind) pairs). */
+  /** Leaves (distinct (subject, kind) pairs). */
   size: number;
-  /** The proof a command for `(nodeId, kind)` carries; undefined when it is not in the batch. */
-  proofOf(nodeId: string, kind: string): { index: number; siblings: Uint8Array[] } | undefined;
+  /** The proof a command for `(subject, kind)` carries; undefined when it is not in the batch. */
+  proofOf(subject: string, kind: string): { index: number; siblings: Uint8Array[] } | undefined;
 }
 
-const entryKey = (nodeId: string, kind: string) => `${nodeId}\u0000${kind}`;
+const entryKey = (subject: string, kind: string) => `${subject}\u0000${kind}`;
 
 /**
- * Builds the scope tree of a batch: one leaf per distinct (node_id, kind), ordered by leaf hash, inner nodes
+ * Builds the scope tree of a batch: one leaf per distinct (subject, kind), ordered by leaf hash, inner nodes
  * H(0x01 ‖ left ‖ right), an odd node promoted unchanged.
  */
 export function batchScope(batchId: string, entries: readonly BatchScopeEntry[]): BatchScope {
   if (!batchId) throw new ComputeError('INVALID_INPUT', 'A batch needs an id');
   const seen = new Map<string, BatchScopeEntry>();
-  for (const entry of entries) seen.set(entryKey(entry.nodeId, entry.kind), entry);
+  for (const entry of entries) seen.set(entryKey(entry.subject, entry.kind), entry);
   if (seen.size === 0) throw new ComputeError('INVALID_INPUT', 'A batch has at least one command');
   const leaves = [...seen.values()]
-    .map((entry) => ({ ...entry, hash: sha256(batchLeafInput(batchId, entry.nodeId, entry.kind)) }))
+    .map((entry) => ({ ...entry, hash: sha256(batchLeafInput(batchId, entry.subject, entry.kind)) }))
     .sort((a, b) => Buffer.compare(a.hash, b.hash));
   const proofs = leaves.map(() => [] as Uint8Array[]);
   let level = leaves.map((leaf, index) => ({ hash: leaf.hash, members: [index] }));
@@ -89,22 +119,22 @@ export function batchScope(batchId: string, entries: readonly BatchScopeEntry[])
     }
     level = next;
   }
-  const indexOf = new Map(leaves.map((leaf, index) => [entryKey(leaf.nodeId, leaf.kind), index]));
+  const indexOf = new Map(leaves.map((leaf, index) => [entryKey(leaf.subject, leaf.kind), index]));
   return {
     batchId,
     root: level[0]!.hash,
     size: leaves.length,
-    proofOf(nodeId, kind) {
-      const index = indexOf.get(entryKey(nodeId, kind));
+    proofOf(subject, kind) {
+      const index = indexOf.get(entryKey(subject, kind));
       return index === undefined ? undefined : { index, siblings: proofs[index]!.map((hash) => hash.slice()) };
     },
   };
 }
 
-/** Whether `(nodeId, kind)` of `batchId` is leaf `proof.index` of the tree with `root` and `size` leaves. */
+/** Whether `(subject, kind)` of `batchId` is leaf `proof.index` of the tree with `root` and `size` leaves. */
 export function verifyBatchProof(input: {
   batchId: string;
-  nodeId: string;
+  subject: string;
   kind: string;
   proof: Pick<BatchProof, 'index' | 'siblings'>;
   root: Uint8Array;
@@ -113,7 +143,7 @@ export function verifyBatchProof(input: {
   const { proof, size } = input;
   if (!Number.isInteger(size) || size < 1 || !Number.isInteger(proof.index) || proof.index >= size) return false;
   if (input.root.length !== 32 || proof.siblings.some((sibling) => sibling.length !== 32)) return false;
-  let hash = sha256(batchLeafInput(input.batchId, input.nodeId, input.kind));
+  let hash = sha256(batchLeafInput(input.batchId, input.subject, input.kind));
   let index = proof.index;
   let width = size;
   let next = 0;
@@ -222,11 +252,12 @@ export function verifyBatchApproval(
 }
 
 /**
- * The daemon's check of one destructive command with a batch_id: the approval is for this batch, holds, and
- * the command's (node_id, kind) is in its scope. Throws ACCESS_DENIED (BATCH_UNAPPROVED on the wire).
+ * The executing agent's check of one destructive command with a batch_id: the approval is for this batch, holds,
+ * and the command's (subject, kind) is in its scope (`subject` from batchSubject of the signed body). Throws
+ * ACCESS_DENIED (BATCH_UNAPPROVED on the wire).
  */
 export function verifyBatchCommand(
-  command: { batchId: string; nodeId: string; kind: string },
+  command: { batchId: string; subject: string; kind: string },
   approval: BatchApproval | undefined,
   proof: BatchProof | undefined,
   options: VerifyBatchApprovalOptions,
@@ -238,7 +269,7 @@ export function verifyBatchCommand(
   verifyBatchApproval(approval, options);
   const inScope = verifyBatchProof({
     batchId: command.batchId,
-    nodeId: command.nodeId,
+    subject: command.subject,
     kind: command.kind,
     proof,
     root: approval.scopeRoot,
