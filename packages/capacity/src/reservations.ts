@@ -1805,6 +1805,14 @@ export async function reconcileReservation(
     // A node lease is deployed by metal from its start, never earlier.
     if (isNodeBinding(row)) await wakeMetal(deps, tx, allocations);
     await publish(deps, tx, binding, 'reservation.binding');
+    // A report that arrived while the reservation was still `placed` (early, stale or forged) is
+    // judged now, not after the bind timeout.
+    const { rows: early } = await tx.query(
+      `SELECT 1 FROM allocations WHERE owner_kind = 'reservation' AND owner_id = $1
+          AND released_at IS NULL AND (bound_at IS NOT NULL OR binding ? 'failed') LIMIT 1`,
+      [id],
+    );
+    if (early.length > 0) return now;
     return wake(now + (isNodeBinding(row) ? nodeBindTimeoutMs : bindTimeoutMs));
   }
 

@@ -2123,6 +2123,28 @@ describe('attested bindings (v0.2, P14: a gateway-forged AllocationBound is reje
     expect((await allocationOf(created.id)).bound).toBe(true); // billing keeps the real binding
   });
 
+  it('judges a report stored while still placed at the start, not after the bind timeout', async () => {
+    const created = (await call(
+      'reservations',
+      'create',
+      create({ start: T0 + HOUR, idempotencyKey: 'early' }),
+    )) as Rsv;
+    const allocation = await allocationOf(created.id);
+    await bind(allocation.id, { evidence: sign({ allocationId: allocation.id }, 'gateway-key') });
+    await advance(HOUR);
+    recorded.work = [];
+    await reconcileAttested(created.id); // placed → binding, and straight back in
+    expect((await get(created.id)).state).toBe('binding');
+    expect(recorded.work).toEqual([
+      { kind: reservationWork, key: created.id, notBefore: T0 + HOUR },
+    ]);
+    await reconcileAttested(created.id);
+    expect(await allocationOf(created.id)).toMatchObject({
+      bound: false,
+      binding: { rejected: 'bad signature' },
+    });
+  });
+
   it('without the option, an unsigned report binds as before', async () => {
     const created = (await call('reservations', 'create', create())) as Rsv;
     await reconcile(created.id);
