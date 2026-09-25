@@ -21,7 +21,8 @@ sources:
 ---
 
 `@better-compute/mcp` turns the compute API into [Model Context Protocol](https://modelcontextprotocol.io) tools, so
-an AI agent can find GPU capacity, reserve and release GPUs, look at a node and run a diagnostic. It is built for
+an AI agent can find GPU capacity, reserve and release GPUs, create, stop, start and delete VPS instances (the
+[sandboxes](/docs/guides/vps/sandboxes) of today), look at a node and run a diagnostic. It is built for
 the v0.3 goal "an agent reserves via MCP with human confirmation, retrying with the same key", and the end-to-end
 test `tests/mcp-e2e-confirmation.test.ts` runs exactly that against a real server and an embedded Better IAM.
 
@@ -186,6 +187,11 @@ framework.
 | `node_status` | `nodes.get` | `compute:nodes:read` on the node | read-only |
 | `run_diagnostic` | `commands.run` with `diag.nvml` | `compute:nodes:read` on the node | idempotent |
 | `create_instance` | `instances.create` | `compute:pools:read` on the pool | idempotent |
+| `list_instances` | `instances.list`: the caller's own by default, `scope: 'all'`, filter `poolId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
+| `get_instance` | `instances.get` | any authenticated caller | read-only |
+| `start_instance` | `instances.start` | any authenticated caller | idempotent |
+| `stop_instance` | `instances.stop` | any authenticated caller | destructive, idempotent |
+| `delete_instance` | `instances.delete` | any authenticated caller | destructive, idempotent |
 | `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot` | `compute:nodes:read` on the node | destructive |
 | `fleet_export` (with `fleet: true`) | `fleet.export` | `compute:fleet:admin` on the fleet | read-only |
 | `fleet_plan` (with `fleet: true`) | `fleet.plan` | `compute:fleet:admin` on the fleet | read-only |
@@ -194,10 +200,17 @@ The GPU tools share one argument shape: `poolId`, `gpus` (1 to 64 whole GPUs), `
 `3d`), and optionally `gpuModel` (`H100`), `gpuProduct` (`H100-SXM5-80GB`), `nvlink` (all GPUs in one NVLink
 domain) and `selector` (up to 32 `{ key, op, values }` expressions with `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt`,
 `Gte`, `Lt` or `Lte`). The tool turns them into one device request of class `gpu`. `reserve_gpus` also takes an
-`idempotencyKey` and `waitSeconds` (0 to 30, default 20).
+`idempotencyKey` and `waitSeconds` (0 to 30, default 20), which it sends as `wait: { timeoutMs }`, so on a pool-lease
+pool the call returns once the reservation is placed or the wait runs out; see
+[waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement).
+
+The instance tools take one `instanceId` (`inst_…`), except `list_instances`. They pass it to compute as is, with the
+caller's tenant: `stop_instance` is a graceful shutdown that keeps the disk and addresses, `start_instance` runs a
+stopped instance again, and `delete_instance` removes the instance and its disk for good. Unlike `create_instance`,
+they do not turn `CONFIRMATION_REQUIRED` into a result; it comes back as a tool error.
 
 Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
-(`pool_…`, `node_…`, `rsv_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
+(`pool_…`, `node_…`, `rsv_…`, `inst_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
 with the path of the first problem.
 
 **Fleet tools plan but never apply.** `fleet_plan` returns the changes and the `planHash`, with the list of calls
@@ -211,10 +224,11 @@ deliberately light:
 
 - A tool that names a pool is visible to a caller with `compute:pools:read` on `compute-pool/{poolId}`; one that
   names a node needs `compute:nodes:read` on `compute-node/{nodeId}`.
-- `list_pools`, `capacity_summary` and the reservation tools (`release_reservation`, `list_reservations`,
-  `get_reservation`, `extend_reservation`) are open to any authenticated caller, because the compute API filters and
-  decides every call anyway, on the reservation itself (`OwnReservations`, `BoundedExtend`, a delegation's confirm
-  list).
+- `list_pools`, `capacity_summary`, the reservation tools (`release_reservation`, `list_reservations`,
+  `get_reservation`, `extend_reservation`) and the instance tools (`list_instances`, `get_instance`,
+  `start_instance`, `stop_instance`, `delete_instance`) are open to any authenticated caller, because the compute API
+  filters and decides every call anyway, on the reservation or instance itself (`OwnReservations`, `BoundedExtend`,
+  a delegation's confirm list).
 - The fleet tools need `compute:fleet:admin` on `compute-fleet/global`, which only resolves in the root tenant.
 
 The gate never checks the action a tool performs, such as `compute:reservations:create`. That decision happens once,
@@ -284,7 +298,8 @@ to `expired`. Without a bearer token or a tenant it returns nothing and the tool
   and `node_status` or the command's own methods show it.
 - `reserve_gpus` always books with `binding: 'hold'`; whole-node leases, spot, gangs and calendar starts are not
   exposed as tool arguments.
-- `release_reservation` is marked destructive: many MCP hosts ask the user before calling such a tool.
+- `release_reservation`, `stop_instance` and `delete_instance` are marked destructive: many MCP hosts ask the user
+  before calling such a tool.
 - The server is stateless, with JSON responses only: it does not open SSE streams or send server notifications, and
   `tools.listChanged` is `false`. It negotiates protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`,
   answering with the newest when the client asks for another.

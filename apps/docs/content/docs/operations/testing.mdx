@@ -127,7 +127,15 @@ migrated.
   `policy(document)`, `grant(identityId, ...documents)` and `share(type, id, relation, subject)`.
 - Options: `now`, `sql`, `sessionJwts`, `runIamJobs`, `inbox` (`'store'` or `'memory'`), `iamOptions`, and the
   catalog's `modules`, `plugins`, `extra` and `typePrefix`.
+- `mode`: `'embedded'` (the default, or `BETTER_COMPUTE_IAM_MODE`) or `'remote'`, which hands compute
+  `bridge.remote()` over the same better-iam's HTTP handler, so the suite runs as it would against IAM in another
+  process.
 - The secret is fixed and public. Never use it outside tests.
+
+`pnpm test:iam-remote` reruns the IAM-dependent suites in remote mode (`vitest.iam-remote.config.ts`: policies,
+confirmation, streams, MCP confirmation, watch, the e2e access and spine tests), and `pnpm check` runs it after
+`pnpm test`, so every change stays green in both IAM modes (a v0.4 exit). `pnpm check:head` runs
+`scripts/head-check.mjs`, which checks the committed tree in a separate worktree.
 
 `spyIamPort(port)` from `better-compute/iam` wraps any `IamPort` and records every call. Code paths tag themselves with
 `spy.path(name, fn)`; each call is attributed to the innermost path across awaits, so a test can assert that fleet

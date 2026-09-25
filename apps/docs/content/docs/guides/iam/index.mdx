@@ -239,10 +239,28 @@ and every reaction is level-triggered: it re-reads current state instead of trus
 built in: remembering `successorId` from `identity:offboard`, and invalidating the flag cache. The rest are hooks.
 
 `better-compute serve` installs default handlers when the configuration's host sets `host.iam: { bridge }`
-(`installIamHandlers`): `agent` closes the agent's or delegation's tunnels on every live gateway within the 2-second
-inbox drain, with `agentStreamCloser(gatewayStreamCloser(...))` from this package, and drops the agent's cached
-authentications; `identity`, `sessions` and `authz` drop this process's caches, close the tunnels and streams of an
-identity that is gone, and re-authorize an identity's tunnels at once when its sessions are revoked. `host.iam.handlers` replace the defaults one by one; `binding`, `tenant` and `budget` have no default.
+(`installIamHandlers`), each running in the inbox transaction:
+
+| Reaction | Default |
+| --- | --- |
+| `agent` | Closes the agent's or delegation's tunnels on every live gateway within the 2-second inbox drain (`agentStreamCloser(gatewayStreamCloser(...))`), drops its cached authentications, and cancels the reservations it created that have not started (`pending`, `placed`, `awaiting-confirmation`) with capacity's `withdrawAgentReservations` |
+| `identity` | Drops the identity's cached authentications. For an owner gone for good (offboarded, expired, deleted, or found so by the `IamReconcile` backstop), `identityEndOf` finds the successor (from the event, or the one remembered in `iam_successors`) and `reassignReservations` hands its live reservations to it (`reservation.reassigned`); without a successor its unstarted reservations are cancelled. Its streams and tunnels close |
+| `sessions` | Clears the authentication cache, and re-authorizes an identity's tunnels at once when its own sessions are revoked |
+| `authz` | Drops read-decision and flag caches |
+| `binding` | On `binding:deactivate`, revokes the holder's live SSH certificates in the tenant (`node.ssh-cert.revoked`, the serial joins the node's KRL) and has every gateway re-check the holder's tunnels |
+| `budget` | `budgetAlertHandler(applyBudgetPolicy)`: for an exceeded budget, each offer to the tenant publishes `quota.budget-exceeded`, and `drain` also cancels the tenant's unstarted reservations in that pool |
+| `tenant` | No default |
+
+`host.iam.handlers` replace the defaults one by one. A failed successor lookup fails the reaction, so the inbox
+retries it rather than cancelling as if there were no successor.
+
+**Remote IAM without its database.** When compute cannot read the IAM database's inbox, Better IAM can deliver the
+same events as signed webhooks (v0.4 fallback intake). `host.iam.webhook: { secret, path? }` makes `serve` mount
+`createIamWebhookHandler({ secret, inbox })` at `POST /iam/events` (or `path`); it verifies
+`X-Better-IAM-Signature` (HMAC-SHA256 over `<timestamp>.<body>`, 300-second tolerance), writes the events compute
+reacts to into `iam_inbox`, and dedupes redeliveries on the audit event id. The IAM root subscribes once with
+`webhooks.create({ scope: 'subtree', events: computeIamEventPatterns, outcomes: ['allow'], url })`, and `secret` is
+what that call returned. Tampered, stale and unsigned deliveries get 401.
 See [tunnels](/docs/guides/access/tunnels#closing-on-iam-revocation). If you build the server yourself, wire the ones
 you need:
 

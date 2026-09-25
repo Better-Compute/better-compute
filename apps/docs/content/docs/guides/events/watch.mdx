@@ -3,9 +3,11 @@ title: Watch
 description: Stream a tenant's events live over Server-Sent Events with handleWatch, resume from any cursor with Last-Event-ID, filter by type, and authorize every stream.
 metaTitle: Live events over SSE
 icon: Activity
-packages: ['@better-compute/events', '@better-compute/console-kit']
+packages: ['@better-compute/events', '@better-compute/client', '@better-compute/console-kit']
 sources:
   - packages/events/src/watch.ts
+  - packages/client/src/index.ts
+  - tests/client-watch.test.ts
   - packages/cli/src/host/watch.ts
   - packages/cli/src/host/iam.ts
   - packages/events/src/outbox.ts
@@ -252,8 +254,24 @@ filtered stream resumes correctly too.
 
 ## Consume it
 
+**The typed client: `$watch`.** `client.$watch({ types?, lastEventId?, signal?, path?, maxBackoffMs? })` from
+`@better-compute/client` is an async iterable over the stream. It sends the client's token and headers, yields each
+event with its cursor as `sequence`, reconnects with `Last-Event-ID` after the server's `retry:` delay (or with
+back-off, up to 30 seconds by default, after failures), stops on `break` or its `signal`, and throws
+`UNAUTHENTICATED` on a 401 and `ACCESS_DENIED` on a 403. It reads `{basePath}/watch` by default
+(`/api/compute/watch`); pass `path: '/watch'` for a stream mounted at the root, as in the `serve` tab above.
+
+```ts
+for await (const event of client.$watch({ types: ['reservation.*'], lastEventId: savedCursor, path: '/watch' })) {
+  handle(event);
+  savedCursor = event.sequence;
+}
+```
+
+See [the TypeScript client](/docs/guides/clients/typescript-client#watching-events) for its options.
+
 **Browsers and Node.js: console-kit.** `watchEvents` from `@better-compute/console-kit` reads the stream over
-`fetch`, so it can send an `Authorization` header, which `EventSource` cannot. It keeps the last `id`, reconnects
+`fetch` with callbacks instead of a loop, and can also send an `Authorization` header, which `EventSource` cannot. It keeps the last `id`, reconnects
 after the server's `retry:` delay when the server closes the stream, backs off (doubling, up to 60 seconds) after
 failures, and sends `Last-Event-ID` on every reconnect.
 

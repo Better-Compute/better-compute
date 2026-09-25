@@ -353,8 +353,8 @@ NodeSpec controller calls every module's `nodeSpec` in registration order and me
   union;
 - `devices.assignments` merge by `allocationId` and `instances` by `id`;
 - `site` merges field by field, the last contribution per field winning, so one module's `boot` and another's
-  `cacheImages` do not erase each other (the site-boot module contributes `boot`; `cacheImages` is meant for
-  provision, which does not contribute it yet). A `site` section with no `boot` goes on the wire as
+  `cacheImages` do not erase each other (the site-boot module contributes `boot`, provision contributes
+  `cacheImages` from the pools' `policy.prewarmImages`). A `site` section with no `boot` goes on the wire as
   `boot { active: false }`;
 - `daemon` is taken whole from the last module that returns it.
 

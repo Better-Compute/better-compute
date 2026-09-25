@@ -236,13 +236,15 @@ The capacity module's placer is a deployment option: `betterCompute({ capacity: 
 | | `inline` (v0.1, default) | `pool-lease` (v0.4) |
 | --- | --- | --- |
 | Where it runs | In the admission transaction, fenced by the pool row's `FOR UPDATE` | In the worker owning the pool's shard, as the `capacity.placer` reconciler (`shardBy: 'pool'`) |
-| What `reservations.create` answers | `placed`, or `pending` with `Unschedulable` | `pending` with a `Queued` condition until the batch runs |
+| What `reservations.create` answers | `placed`, or `pending` with `Unschedulable` | `pending` with a `Queued` condition until the batch runs, unless `wait: { timeoutMs }` holds the answer until it has |
 | Throughput per pool | One writer at a time; tens of placements/s on Postgres by PLAN.md's estimate, 35.7/s measured on PGlite at 1k nodes | Batches of up to `maxBatch` (at most 64, default 64) against one in-memory index |
 | Best for | Small pools, synchronous answers, simple tests | Hot pools and placement storms |
 
 Both commit with the same guarded statements, so a stale in-memory index costs a replan, never a double booking.
 Gangs and placements without a reservation (VPS instances) always use the inline placer, as do repairs. The CLI's
-`reserve` polls while a reservation is `Queued`. See [placement](/docs/guides/capacity/placement).
+`reserve` sends `wait` and polls while a reservation is still `Queued`; see
+[waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement) and
+[placement](/docs/guides/capacity/placement).
 
 ## PGlite is not a benchmark database
 

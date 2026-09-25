@@ -8,6 +8,8 @@ packages: ['@better-compute/server', '@better-compute/pki']
 sources:
   - PLAN.md
   - packages/server/src/tunnels/module.ts
+  - packages/server/src/tunnels/revoke.ts
+  - packages/cli/src/host/iam.ts
   - packages/pki/src/ssh.ts
   - packages/pki/src/bundle.ts
   - packages/pki/README.md
@@ -60,9 +62,13 @@ export const compute = betterCompute({
     issuer: execTicketIssuer(bundle, { issuer: 'https://compute.example.com' }),
     ssh: bundle.sshCa, // [!code highlight]
     sshRequiresMfa: true, // the default
+    sshAccounts: ['root'], // the default: the Unix accounts certificates may name
+    limits: { tunnelsPerMinute: 10, sshCertsPerHour: 20 }, // the defaults, per identity and api replica
   },
 });
 ```
+
+Beyond the limits a call is `RATE_LIMITED` with `retryAfterMs`. Each api replica counts its own calls in memory.
 
 To manage the key yourself, build the CA with `createSshCertificateAuthority` from `better-compute/pki` and give
 every api replica the same private key:
@@ -112,20 +118,25 @@ it into every node's NodeSpec as `access.sshCaPublicKeys`.
     },
     principal: {
       type: 'string',
-      description: 'The Unix account to log in as: a lowercase letter or underscore, then up to 31 lowercase letters, digits, underscores or hyphens.',
+      description: "The Unix account to log in as: one of the module's sshAccounts.",
       default: "'root'",
     },
-    ttlSeconds: { type: 'number', description: 'Lifetime, 60 to 3600.', default: '900' },
+    ttlSeconds: { type: 'number', description: "Lifetime, 60 to 3600, and never past the caller's session.", default: '900' },
   }}
 />
+
+A certificate never outlives the session that asked for it: when the caller's session has an expiry,
+`validBefore` is the earlier of now plus `ttlSeconds` and that expiry.
 
 | Situation | Error |
 | --- | --- |
 | No SSH CA is configured | `UNSUPPORTED` |
 | The session has no MFA (and `sshRequiresMfa` is not `false`) | `ACCESS_DENIED` with `details.reason: 'mfa-required'` |
+| The session ends within a minute | `ACCESS_DENIED` with `details.reason: 'session-ending'`: sign in again |
 | IAM does not allow `compute:nodes:ssh-root` on the node | `ACCESS_DENIED` |
 | The node is not visible to the tenant | `NOT_FOUND` |
-| An RSA or malformed key, a bad account name, a TTL outside 60 to 3600 | `INVALID_INPUT` |
+| More than `sshCertsPerHour` certificates for this identity | `RATE_LIMITED` with `retryAfterMs` |
+| An RSA or malformed key, an account not in `sshAccounts`, a TTL outside 60 to 3600 | `INVALID_INPUT` |
 
 <Tabs items={['CLI', 'TypeScript']}>
 <Tab value="CLI">
@@ -174,10 +185,11 @@ it by path.
 Every certificate is an OpenSSH `cert-v01` user certificate, written without external tools:
 
 - **Type.** It follows your key: `ssh-ed25519-cert-v01@openssh.com` or `ecdsa-sha2-nistp256-cert-v01@openssh.com`.
-- **One principal.** The account you asked for, `root` by default. An empty principal list, which OpenSSH reads as
-  "any account", is never issued.
+- **One node-bound principal.** `<account>@<nodeId>`, such as `root@node_01jzq3…`, never a bare account. Each node
+  accepts only its own principals (NodeSpec `access.sshPrincipals`), so a certificate for one node opens no other
+  node that trusts the same CA. An empty principal list, which OpenSSH reads as "any account", is never issued.
 - **Validity.** From 1 minute before issue (for clock skew) until `validBefore`, which the server computes on its own
-  clock as now plus `ttlSeconds`.
+  clock as now plus `ttlSeconds`, capped at the session's expiry.
 - **Permissions.** Only `permit-pty`: no agent, port or X11 forwarding, and no user rc file.
 - **Key id.** `bc:<identityId>:<nodeId>:ssh_<id>`, which sshd writes to its log on every login, so a log line leads
   back to the person and the issue record.
@@ -191,39 +203,59 @@ To read one back, run `ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub`, or call `pa
 
 Each issue writes an `audit_events` row with the admission context and publishes `node.ssh-cert.issued` (subject
 `node/<id>`) with the key id, serial, principals, identity and `validBefore`. Route it to a
-[webhook](/docs/guides/events/webhooks) if every break-glass login should page someone.
+[webhook](/docs/guides/events/webhooks) if every break-glass login should page someone. The certificate itself is
+recorded in `ssh_certificates` (serial, node, tenant, identity, principal, key id, expiry) for revocation and audit.
+
+## Revoke a certificate
+
+`nodes.revokeSshCert({ tenantId, nodeId, serial, reason? })` ends a certificate before `validBefore`. It is decided
+as `compute:nodes:ssh-root` on the node, takes the decimal `serial` that `issueSshCert` returned and a `reason` of up
+to 500 characters, and answers `{ nodeId, serial, principal, expiresAt, revokedAt }`. It is idempotent: the first
+revocation stands. An unknown serial, or one issued for another node or tenant, is `NOT_FOUND`.
+
+A revocation invalidates the node's desired state and publishes `node.ssh-cert.revoked`. From the next NodeSpec on,
+`access.sshRevokedSerials` lists the node's revoked certificates that are still within their lifetime: the node's
+KRL, for sshd's `RevokedKeys`. The hourly `tunnels.ssh-certificates-gc` reconciler drops records a day past their
+expiry, in batches of 5,000.
+
+Revocation also happens without a call: when a Better IAM role activation ends (`binding:deactivate`), `serve`'s
+default IAM `binding` handler revokes the holder's live certificates in that tenant the same way. See
+[IAM events](/docs/guides/iam#iam-events-compute-reacts-to).
 
 ## What the node needs
 
-The node must trust the CA for user certificates. The control plane sends the CA key in NodeSpec
-`access.sshCaPublicKeys` (protobuf `AccessSection.ssh_ca_public_keys`), but nothing applies it yet: `bcd`'s
-`access` converger is still empty, and the FakeDaemon reports a non-empty `access` section as
-`SectionUnsupported`. Until the daemon does it, configure sshd yourself with the `sshCaPublicKey` that
-`better-compute pki show` prints:
+The node must trust the CA for user certificates, accept only its own principals and honour the revocation list.
+The control plane sends all three in NodeSpec `access` (`sshCaPublicKeys`, `sshPrincipals`, `sshRevokedSerials`),
+but nothing applies them yet: `bcd`'s `access` converger is still empty, and the FakeDaemon reports a non-empty
+`access` section as `SectionUnsupported`. Until the daemon does it, configure sshd yourself with the
+`sshCaPublicKey` that `better-compute pki show` prints:
 
 ```text title="/etc/ssh/sshd_config.d/10-better-compute.conf"
 TrustedUserCAKeys /etc/ssh/better-compute-ca.pub
+AuthorizedPrincipalsFile /etc/ssh/better-compute-principals/%u
 ```
 
-Without an `AuthorizedPrincipalsFile`, sshd accepts a certificate for the account its principal names, which is how
-`principal` maps to a Unix account. Logging in as `root` also needs `PermitRootLogin` to allow key logins; its
-default, `prohibit-password`, does.
+Put `root@<nodeId>` (one line per account in `sshAccounts`) in `/etc/ssh/better-compute-principals/root`. Without an
+`AuthorizedPrincipalsFile`, sshd would only accept a principal equal to the account name, which these node-bound
+certificates never carry. To honour revocations by hand, build a KRL from the revoked serials with `ssh-keygen -k`
+and point `RevokedKeys` at it. Logging in as `root` also needs `PermitRootLogin` to allow key logins; its default,
+`prohibit-password`, does.
 
 ## In the console
 
 A platform administrator sees a **Break-glass SSH** panel on each node's page. It takes your public key, the
 account (default `root`) and a lifetime of 5, 15, 30 or 60 minutes, and returns the certificate with a copy button
-and the file name to save it under. When the session lacks MFA, it asks you to sign in again with a second factor
-instead of showing the error.
+and the file name to save it under, and it can revoke the certificate it just issued. When the session lacks MFA, it
+asks you to sign in again with a second factor instead of showing the error.
 
 ## Shipped and planned
 
 | Behavior | State |
 | --- | --- |
-| `nodes.issueSshCert` with MFA, TTL at most 1 h, `permit-pty` only, recorded | Shipped when `tunnels.ssh` is set |
-| The CA key in NodeSpec `access.sshCaPublicKeys` | Shipped |
-| Nodes trusting the CA automatically | Not yet: needs the daemon's `access` converger |
-| TTL capped by the IAM activation that granted `ssh-root` | Planned in PLAN.md §12.6; the method does not read activations |
-| Revoking break-glass certificates on offboarding, capping them on `binding:deactivate` | Planned in PLAN.md §12.8; the IAM bridge has the handler hooks, no shipped handler does it |
-| A revocation list for issued certificates | None; certificates live until `validBefore`, so keep TTLs short |
+| `nodes.issueSshCert` with MFA, TTL at most 1 h and never past the session, node-bound principal, `permit-pty` only, recorded, rate-limited | Shipped when `tunnels.ssh` is set |
+| The CA key, principals and revoked serials in NodeSpec `access` | Shipped |
+| Nodes applying them automatically | Not yet: needs the daemon's `access` converger |
+| `nodes.revokeSshCert` and the node's KRL (`access.sshRevokedSerials`) | Shipped in the control plane; sshd enforces it only once the node applies it |
+| Revoking certificates on `binding:deactivate` | Shipped as `serve`'s default IAM `binding` handler |
+| Revoking certificates on offboarding | Not done; the `identity` handler closes the identity's streams and tunnels, and certificates end with the session at the latest |
 | Rotating the SSH CA | No rotation flow; `access.sshCaPublicKeys` lists only the current key |

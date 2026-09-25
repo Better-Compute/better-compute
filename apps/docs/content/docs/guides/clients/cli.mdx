@@ -81,7 +81,10 @@ The file is `BETTER_COMPUTE_CREDENTIALS`, else `%APPDATA%\better-compute\credent
 `$XDG_CONFIG_HOME/better-compute/credentials.json` or `~/.config/better-compute/credentials.json`. It is found only
 from the environment, and every write replaces it atomically with mode 0600; treat it like a password. `auth logout`
 forgets a profile but does not revoke the session in Better IAM (`better-iam logout` does). A saved profile records
-the `--url` it was saved for, but commands still take the URL from `--url` or `BETTER_COMPUTE_URL`.
+the `--url` it was saved for, but commands still take the URL from `--url` or `BETTER_COMPUTE_URL`. The profile's
+token is used only for that deployment: a command whose URL has another origin, or a profile saved in process
+(without `--url`) when a command calls a remote server, gets no token from it, so a token for one deployment is
+never sent to another.
 
 **Where the call goes.**
 

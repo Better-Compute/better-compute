@@ -25,6 +25,8 @@ sources:
   - tests/server-operation.test.ts
   - tests/server-composite.test.ts
   - tests/server-admission.test.ts
+  - tests/server-admission-check.test.ts
+  - tests/server-async-wait.test.ts
   - PLAN.md
 ---
 
@@ -44,6 +46,7 @@ interface MethodDefinition<I, O> {
   handler(context: MethodContext, input: I): Promise<O>;
   admission?: MethodAdmission<I, O>;
   transaction?: 'auto' | 'manual';
+  poll?: MethodPoll<I, O>;
 }
 ```
 
@@ -56,6 +59,7 @@ interface MethodDefinition<I, O> {
     handler: { type: '(ctx, input) => Promise<O>', description: 'Runs after the decision, in a transaction unless transaction is manual.', required: true },
     admission: { type: 'MethodAdmission', description: 'Request-as-resource admission for creates and extends. Mutations only.' },
     transaction: { type: "'auto' | 'manual'", description: 'manual: composite mutations that open their own transactions and use check/invoke.', default: "'auto'" },
+    poll: { type: '{ done(output); refresh(ctx, input, output) }', description: 'Async-with-wait: how the envelope waits when the input asks wait: { timeoutMs }. Mutations only; see below.' },
   }}
 />
 
@@ -179,6 +183,7 @@ interface MethodAdmission<I, O> {
   >;
   denied?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
   describe?(input: I): string;
+  check?(context: MethodContext, input: I, resource: MethodResource): Promise<void>;
 }
 ```
 
@@ -186,7 +191,9 @@ interface MethodAdmission<I, O> {
 flowchart TD
   P["tx 1: prepare()"] -->|replay| R["return the stored result, no decision"]
   P -->|decide| Q["iam.require on the returned resource"]
-  Q -->|allowed| H["tx 2: handler() + audit row"]
+  Q -->|allowed| C["check(), no transaction open"]
+  C -->|passes| H["tx 2: handler() + audit row"]
+  C -->|throws| Y["throw its error; the draft stays"]
   Q -->|refused| D["own tx: denied(error)"]
   D --> X["throw ACCESS_DENIED or CONFIRMATION_REQUIRED"]
 ```
@@ -198,6 +205,11 @@ flowchart TD
   `better-compute/core` derives a deterministic id for the draft.
 - **The decision** is one `require` on the resource `prepare` returned. `resource(input)` may return `undefined`
   for admission methods, which learn their resource only in `prepare`.
+- **`check`** (optional) runs after the decision allowed the request and before the handler, with **no transaction
+  open**, so it may call IAM: for example `ctx.iam.billingCheck` for a budget. Its `ctx.sql` runs each statement on
+  its own. A throw refuses the request with that error and does **not** call `denied`: the draft stays as it is, so
+  a retry with the same key is decided again later (say, once a budget's window resets). Composite `ctx.check` runs
+  it too.
 - **`handler`** runs in a second transaction with `ctx.admission` set, and the audit row is written there.
 - **`denied`** runs in a transaction of its own after a refusal, to mark the draft denied or clear pending changes.
   If it throws, the failure is logged and the refusal is still what the caller gets.
@@ -212,6 +224,26 @@ A replay-only admission needs no draft at all. `projects.create` derives its id 
 `pools.create` does the same when an `idempotencyKey` is given.
 
 Only mutations take an `admission`, and a method cannot combine it with `transaction: 'manual'`.
+
+## Async-with-wait
+
+A mutation whose work finishes later (a queued placement) can let callers wait for it in the same request (PLAN.md
+section 9.1). Declare `poll`, and accept `wait: { timeoutMs }` in `validate`:
+
+```ts title="@better-compute/core"
+interface MethodPoll<I, O> {
+  done(output: O): boolean;
+  refresh(context: MethodContext, input: I, output: O): Promise<O>;
+}
+```
+
+After the mutation commits (plain or admitted, and on a replay too), the envelope checks `done(output)`. When it is
+false and the input asks for a positive `wait.timeoutMs`, it calls `refresh` in read-only transactions, backing off
+from 50 ms to 1 s, until `done`, the timeout (at most 30 seconds, wall clock) or the request's abort, and answers the
+last output. A timeout is not an error: the output itself must say the work is still pending, as a reservation's
+`operation.state: 'running'` does. `reservations.create` is the built-in user; see
+[waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement). The registry refuses (`INVALID_CONFIG`)
+a `poll` on a method that is not a mutation, or one without both functions.
 
 ## Composite methods
 

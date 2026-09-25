@@ -205,8 +205,9 @@ The certificate is the node's identity from here on. Its properties:
 - **Name.** One URI SAN, the <Term id="spiffe-id">SPIFFE ID</Term>
   `spiffe://<trustDomain>/site/<siteId>/node/<nodeId>`. Names come only from JoinService, never from the CSR's
   subject, and no tenant appears in the certificate.
-- **Role.** A non-critical extension, OID `2.25.121396728463777788658791269357486937304.1.1`, holds `node`,
-  `site`, `ramdisk` or `node-tenant` as a UTF8String.
+- **Role.** One subject attribute `OU=bc-role:<role>` holds `node`, `site`, `ramdisk` or `node-tenant`. The
+  certificate carries no private-arc OID, so Go's `crypto/x509` (and bcd) can parse it. See
+  [PKI](/docs/operations/pki).
 - **Record.** Every issued certificate is a `node_certs` row with its serial, identity generation, SPKI hash and
   DER, which is what later renewals and attested results are checked against.
 - **Allowed kinds.** An attestor may restrict the command kinds a certificate accepts (`allowedKinds`: exact

@@ -16,6 +16,7 @@ sources:
   - packages/metal/src/profiles.ts
   - packages/server/src/ports.ts
   - tests/metal-lifecycle.test.ts
+  - tests/metal-rescue.test.ts
   - PLAN.md
 ---
 
@@ -156,7 +157,7 @@ stateDiagram-v2
 | `deploying` | The profile named in `metal.deploy` runs | the tenant's profile |
 | `deployed` | Running the installed OS; schedulable | none |
 | `releasing` | Wipe with the chosen mode, power off | `metal-release` |
-| `rescue` | The rescue ramdisk is booted on a deployed machine | `metal-rescue` |
+| `rescue` | The rescue ramdisk is booted on a deployed machine; after `metal.unrescue`, the machine boots back into its OS | `metal-rescue`, then `metal-unrescue` |
 | `failed` | A workflow failed or an operator aborted; `failedFrom` says where | none |
 | `retiring` | Crypto-erase, power off, revoke the identity | `metal-retire` |
 | `retired` | Terminal: identity revoked, BMC credentials forgotten | none |
@@ -180,6 +181,7 @@ Every method is a mutation decided as `compute:nodes:provision` on the node, exc
 | [`deploy`](/docs/reference/api/metal#deploy) | `deploy` | `ready` | `deploying` |
 | [`undeploy`](/docs/reference/api/metal#undeploy) | `release` | `deployed`, `rescue` | `releasing` |
 | [`rescue`](/docs/reference/api/metal#rescue) | `rescue` | `deployed` | `rescue` |
+| [`unrescue`](/docs/reference/api/metal#unrescue) | `unrescue` | `rescue` | `deployed`, once the installed OS is back |
 | [`abort`](/docs/reference/api/metal#abort) | `abort` | `enrolling`, `inspecting`, `commissioning`, `deploying`, `releasing` | `failed` |
 | [`recover`](/docs/reference/api/metal#recover) | `recover` | `failed` | the recover target below |
 | [`retire`](/docs/reference/api/metal#retire) | `retire` | `adopting`, `adopted`, `enrolling`, `ready`, `failed` | `retiring` |
@@ -209,6 +211,20 @@ const node = await compute.api.metal.deploy(credential, {
 `metal.undeploy` takes an optional `wipe` (`none`, `quick`, `secure-erase` or `crypto-erase`;
 default `quick`), and `metal.abort` an optional `reason` of up to 512 characters. The inputs of
 `enroll` and `power` are on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
+
+### Rescue and unrescue
+
+`metal.rescue` boots the rescue ramdisk on a deployed machine (`metal-rescue`, one `metal.ensureRamdisk` step), for
+repairs from outside the installed OS. `metal.unrescue` brings it back without a reinstall: it starts the
+`metal-unrescue` workflow (set the boot device to disk, persistently; power-cycle; wait up to 20 minutes for the
+installed OS to rejoin with role `node`; clean up boot entries) and publishes `node.provision.unrescuing`. The node
+stays in `rescue` while that runs. The metal reconciler applies `unrescue` and moves it to `deployed` only once the
+workflow succeeded; if it failed, the node goes to `failed` with maintenance on, and `metal.recover` takes it back to
+`deployed`.
+
+`unrescue` outside `rescue` is `INVALID_STATE`, a second call while the workflow runs returns the node unchanged, and
+a call while the rescue ramdisk is still booting is `CONFLICT`. It needs the provision module (`INVALID_CONFIG`
+otherwise).
 
 ## How a verb becomes work
 
@@ -251,8 +267,8 @@ also aborts the running workflow, which still runs its cleanup steps.
   fails with `UNVERIFIED_WIPE` instead of reaching `ready`.
 - `recover` clears `failedFrom` but leaves maintenance on. Clearing maintenance is a separate
   operator decision, and the API has no method for it yet.
-- The state table has `unrescue` (`rescue` back to `deployed`), but the metal group has no method for
-  it yet. Leave rescue with `metal.undeploy`.
+- Leave rescue with `metal.unrescue` to keep the installed OS, or with `metal.undeploy` to wipe and release the
+  machine. See [rescue and unrescue](#rescue-and-unrescue).
 - `retired` is terminal. `recover` on a retired node is `INVALID_STATE`.
 
 ## Events
@@ -262,6 +278,7 @@ Metal publishes into the node owner's tenant:
 - `node.enrolled`, then `node.provision.<state>` on every move (`node.provision.ready`,
   `node.provision.failed`, …);
 - `node.provision.workflow` when a state's workflow starts, with its `workflowId` and profile;
+- `node.provision.unrescuing` when `metal.unrescue` starts its workflow, with the `workflowId`;
 - `node.release.unverified` when an agentless pool released without an attested wipe;
 - `node.tenant-root.leased`, `.bound`, `.ending` and `.refused` for
   [dedicated-root leases](/docs/guides/bare-metal/dedicated-root).

@@ -66,7 +66,7 @@ simulator, so placements replay), the scheduler `plugins`, the scorer `weights`,
 
 | | `inline` (default) | `pool-lease` (v0.4, for production on Postgres) |
 | --- | --- | --- |
-| `reservations.create` answers | `placed` or `pending` | `pending` with a `Queued` condition, then `placed` once the batch runs |
+| `reservations.create` answers | `placed` or `pending` | `pending` with a `Queued` condition, then `placed` once the batch runs; with `wait: { timeoutMs }` the answer holds until then (at most 30 s) |
 | Where placement runs | In the request's second transaction | In the `capacity.placer` reconciler that owns the pool's shard |
 | Pool lock | Taken only for the commit, a few milliseconds | Never at admission; once per batch of at most 64 |
 | Throughput in `bench/placements` (PGlite, 1,000 nodes) | about 35 placements/s | about 118 placements/s |

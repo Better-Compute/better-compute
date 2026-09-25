@@ -105,6 +105,15 @@ When a pass touched anything it logs `retention pass` at info level with the cou
 call `runRetention(sql, options)`; it returns `{ outbox, authzChanges, commands, attestationUses,
 joinRequestsExpired, partitionsCreated, inventorySnapshots, usageWindows, partitionsDropped }`.
 
+The module also has a `selfCheck`, so [`doctor`](/docs/operations/observability#doctor) warns when retention is not
+keeping up. `retentionFindings(sql, { staleCursorSeconds? })` returns the same findings for your own checks:
+
+| Check | Warns when | Fix |
+| --- | --- | --- |
+| `history-partitions` | this or next month's partition of a history table is missing: no pass is running | register `retentionModule()` on a worker, or run `ensureHistoryPartitions` |
+| `history-default-partition` | rows of the last 13 months sit in a default partition | let a pass create their months, which moves them out |
+| `retention-cursors` | a durable `outbox_cursors` row has not moved for a day (`staleCursorSeconds`, 86,400) | revive the sink or reader that owns it, or delete the row if it is gone for good |
+
 <Callout type="warn" title="Pruned commands free their idempotency keys">
 A command's idempotency key is unique per node, so a retry with the same key finds the old row. Once a settled
 command is pruned, its key is free again. Keep `commandsOlderThanDays` longer than any caller retries a key.
@@ -136,7 +145,8 @@ flowchart LR
   every open transaction go. If you add a durable reader, save its position with
   `saveCursor(tx, { name, stream: 'authz_changes', txid, seq })`: from then on only the cursor rule prunes the stream.
 - **A stopped reader holds everything back.** A cursor row that no longer moves keeps every row after it. When you
-  retire a sink or reader, delete its `outbox_cursors` row.
+  retire a sink or reader, delete its `outbox_cursors` row. `doctor` reports such a row as `retention-cursors` once it
+  has not moved for a day.
 
 `saveCursor` and `loadCursor` are exported from `@better-compute/postgres`; `txid` is passed as text, as readers
 alias it (`txid_text`). See [database](/docs/operations/database) for the runtime tables.

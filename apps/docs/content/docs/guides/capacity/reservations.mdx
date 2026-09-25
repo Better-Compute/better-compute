@@ -114,7 +114,7 @@ can retry. See the [CLI reference](/docs/reference/cli).
     projectId: { type: 'string', description: 'A project (prj_) to account the reservation to.' },
     spot: { type: 'boolean', description: 'Preemptible, billed at the spot meter (v0.5).', default: 'false' },
     gang: { type: '{ size: number; topologyKey?: string }', description: '2 to 64 nodes, each taking devices, all or nothing (v0.5).' },
-    wait: { type: '{ timeoutMs: number }', description: '0 to 30000. Accepted and validated; see the admission sequence below.' },
+    wait: { type: '{ timeoutMs: number }', description: '0 to 30000. Holds the answer while the reservation is queued for the pool-lease placer; see waiting for placement below.' },
   }}
 />
 
@@ -139,6 +139,7 @@ with `instances.create` and book through the capacity port (see [instances](/doc
     idempotencyKey: { type: 'string', description: 'The key it was created with.' },
     conditions: { type: 'Condition[]', description: '{ type, status, reason?, message?, since } entries.' },
     binding: { type: '{ nodeId; cdiDevices; envFile }', description: 'hold bindings, once a node reported the devices bound.' },
+    operation: { type: '{ id; state; error? }', description: "The async operation behind the reservation: running, pending, succeeded or failed. See waiting for placement." },
     version: { type: 'number', description: 'Raised by every change.' },
   }}
 />
@@ -164,6 +165,7 @@ with `instances.create` and book through the capacity port (see [instances](/doc
     "cdiDevices": ["bcd.dev/gpu=GPU-…", "bcd.dev/gpu=GPU-…", "bcd.dev/gpu=GPU-…", "bcd.dev/gpu=GPU-…"],
     "envFile": "/run/bcd/allocations/alloc_….env"
   },
+  "operation": { "id": "rsv_…", "state": "succeeded" },
   "version": 4
 }
 ```
@@ -269,10 +271,38 @@ lifecycle, writes the event to the outbox and records the audit row with the adm
 </Steps>
 
 Two details differ from the PLAN.md text. Quota is charged by the reservation service before
-placement, never by the placer, because a pending reservation keeps its charge (decision D9). And the
-server answers as soon as transaction 2 commits: `wait` is validated and excluded from the request
-hash, but it does not hold the response open. The `better-compute reserve`
-command polls `reservations.get` while a reservation is `Queued`, up to `--wait` seconds.
+placement, never by the placer, because a pending reservation keeps its charge (decision D9).
+
+## Waiting for placement
+
+`create` is async-with-wait (PLAN.md section 9.1): every reservation carries an `operation`, and a
+request with `wait: { timeoutMs }` holds its answer until that operation stops running. The same client
+code therefore works with both [placers](/docs/guides/capacity/placement#two-placers).
+
+| `operation.state` | Reservation |
+| --- | --- |
+| `running` | A draft, or `pending` with a `Queued` condition: waiting for the pool-lease batch. The only state a `wait` waits on |
+| `pending` | `pending` without `Queued` (`Unschedulable`, retried every 30 seconds), or `awaiting-confirmation` |
+| `succeeded` | `placed`, `binding`, `active`, `releasing` or `released` |
+| `failed` | `failed` (`CAPACITY_UNAVAILABLE`), `denied` (`ACCESS_DENIED`), `cancelled` or `expired` (`INVALID_STATE`), with `error` |
+
+After transaction 2 commits (or a repeated key returns the stored reservation), the server re-reads the
+reservation in read-only transactions, backing off from 50 ms to 1 s, until the operation is no longer
+`running`, `timeoutMs` passes (capped at 30 seconds), or the request is aborted. The answer is the last
+read either way: a timeout is not an error, it returns the reservation still `Queued`. With the inline
+placer a create is placed or `Unschedulable` at once, so `wait` returns immediately. `wait` is excluded
+from the request hash, and `extend` does not wait.
+
+```ts
+const reservation = await client.reservations.create({ ...input, wait: { timeoutMs: 20_000 } });
+if (reservation.operation?.state === 'running') {
+  // Still queued after 20 s: read it again later with reservations.get.
+}
+```
+
+The `better-compute reserve` command sends `wait` (its `--wait`, 20 seconds by default) and, if the
+answer is still `Queued`, keeps polling `reservations.get` until the same deadline. The MCP
+`reserve_gpus` tool sends `wait` from its `waitSeconds`.
 
 ## States and conditions
 
@@ -304,6 +334,9 @@ stateDiagram-v2
 `denied`, `released`, `failed`, `cancelled` and `expired` are terminal. The `capacity.reservations`
 <Term id="reconciler">reconciler</Term> drives each reservation, woken by the work queue at the moments
 that matter: the start, 15 minutes before it, the bind deadline, the end and the lease deadline.
+While a reservation is active, the reconciler only sets and clears conditions from its nodes and atoms, and
+never releases it (PLAN.md section 10.5): node connectivity and health changes wake it, and it rechecks every
+15 minutes without them.
 
 | Condition | Reason | Meaning |
 | --- | --- | --- |
@@ -315,6 +348,8 @@ that matter: the start, 15 minutes before it, the bind deadline, the end and the
 | `Queued` | `PoolPlacer` | Waiting for the pool-lease placer's next batch |
 | `BindTimeout` | `NodeDidNotBind`, `NodeRejectedBinding` | The node did not bind in time or refused; the message counts attempts |
 | `Degraded` | `BindingLost` | A node reported it lost devices it had bound |
+| `Degraded` | `AtomUnhealthy` | A booked atom of an active reservation is unhealthy; the message lists them. `BindingLost` wins when both apply |
+| `NodeUnreachable` | `Unreachable` | A node of an active reservation is not connected; the message lists the nodes |
 | `Preempted` | `SpotPreempted` | A running spot reservation was cut back to its notice deadline |
 | `ConfirmationRequired` | the confirmation id | Waiting for a person; the message is the deadline in epoch milliseconds |
 | `UnhealthyAtoms` | `NotBilled` | A node lease holds unhealthy GPUs that it is not billed for |
@@ -324,7 +359,8 @@ Lifecycle changes emit events with subject `reservation/<id>` and `state` and `p
 `reservation.binding`, `reservation.active`, `reservation.extended`, `reservation.released` (with
 `reason`: `release`, `expired`, `lease-lapsed` or `preempted`), `reservation.cancelled`,
 `reservation.failed`, `reservation.awaiting-confirmation`, `reservation.expired`,
-`reservation.repaired`, `reservation.preempting`, `reservation.preempted` and
+`reservation.repaired`, `reservation.preempting`, `reservation.preempted`, `reservation.reassigned` (an
+offboarded owner's reservation handed to the successor; see [IAM events](/docs/guides/iam#iam-events-compute-reacts-to)) and
 `reservation.binding-rejected` (with `allocationId`, `nodeId` and `reason`; see
 [attested bindings](#attested-bindings)). Subscribe with
 [webhooks](/docs/guides/events/webhooks) or [watch](/docs/guides/events/watch).

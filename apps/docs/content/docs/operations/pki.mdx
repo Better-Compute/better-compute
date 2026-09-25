@@ -48,7 +48,7 @@ certificate, and the key that signs `JoinResponse` is not the one join tokens ar
 | Key | Signs or does | Lifetime | Who trusts it |
 | --- | --- | --- | --- |
 | Root CA | Only the three subordinate CAs | 10 years | Anchor above the CAs; can be kept offline |
-| Node CA | Agent client certificates: one SPIFFE URI SAN, a role extension, `clientAuth` | CA 1 year; leaves at most 24 h (ramdisk at most 2 h) | Gateways, as the trust anchor for daemon mTLS |
+| Node CA | Agent client certificates: one SPIFFE URI SAN, the role as `OU=bc-role:<role>`, `clientAuth` | CA 1 year; leaves at most 24 h (ramdisk at most 2 h) | Gateways, as the trust anchor for daemon mTLS |
 | Gateway serving CA | Gateway server certificates: DNS SANs, `serverAuth` | CA 1 year; leaves at most 30 days | Daemons, by its SPKI pin |
 | Internal CA | Control-plane mutual TLS between api, workers and gateways | CA 1 year; leaves at most 7 days | The control plane |
 | JoinService signing key | `JoinResponse` and `SignedTrustBundle` | Certificate 10 years | Daemons, by pin |
@@ -213,8 +213,12 @@ The trust domain is lower-case `a-z`, `0-9`, `.`, `-` and `_`, up to 255 charact
 The node id always comes from this SAN, never from a message field, so a daemon cannot speak for another node. The
 gateway checks the SPIFFE ID's trust domain against its configured one.
 
-The role travels in a non-critical extension (OID `2.25.121396728463777788658791269357486937304.1.1`, a UTF8String):
-`node`, `site`, `ramdisk` or `node-tenant` for agents, `gateway` and `internal` for control-plane certificates.
+The role travels in the subject as one `OU=bc-role:<role>` attribute (1 to 32 of `a-z`, `0-9` and `-`, starting
+with a letter; a subject with two roles is malformed): `node`, `site`, `ramdisk` or `node-tenant` for agents,
+`gateway`, `internal` and `worker` for control-plane certificates. No certificate carries an OID under the private
+`2.25.<uuid>` arc any more, because Go's `crypto/x509` refuses to parse such certificates, so bcd could not have
+read them. For one release, `parseCertificate` still reads the old role extension of certificates issued before the
+change; the OU wins when both are present, and Go accepts only the OU.
 Each role accepts only its own command kinds. A `node-tenant` certificate (a dedicated-root lease) runs as a node
 that gets no secrets and no destructive platform commands, and never attests.
 
@@ -254,8 +258,9 @@ gateway. A serial the set learns about is refused at the next session open, and 
 ## Signed intent
 
 With `pki.commandSigning` set, every command the queue writes is signed by a worker key: a P-256 key the
-command-signing root certifies for at most 24 h, with the command-signing extended key usage
-(`2.25.121396728463777788658791269357486937304.2.1`). Each process replaces its worker key after 60% of its lifetime.
+command-signing root certifies for at most 24 h, with role `worker` (`OU=bc-role:worker`). A signer is valid only as
+a `worker` certificate chaining to a command-signing root; there is no command-signing extended key usage. Each
+process replaces its worker key after 60% of its lifetime.
 Daemons receive the roots in their trust bundle, first in `JoinResponse` and then in `Welcome`, signed by the
 JoinService key so a gateway can relay it but not change it. A daemon requires a signature for the kinds its own
 table marks destructive, and checks any signature that is present.

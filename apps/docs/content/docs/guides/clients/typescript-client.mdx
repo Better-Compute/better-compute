@@ -14,6 +14,7 @@ sources:
   - packages/console-kit/src/events.ts
   - apps/console/src/components/console-provider.tsx
   - tests/client.test.ts
+  - tests/client-watch.test.ts
   - tests/client-types.test.ts
   - tests/tsconfig.client.json
   - PLAN.md
@@ -234,14 +235,43 @@ polling loop with `@better-iam/client`.
 
 ## Watching events
 
-<Callout type="warn" title="No $watch on the client yet">
-  PLAN.md lists a `$watch` method on the client. It is not implemented: the client only makes JSON calls. To follow
-  events live, read `GET /watch` with `watchEvents` from `@better-compute/console-kit`, which works in browsers and
-  in Node.js 22 (it uses `fetch` and `TextDecoderStream`).
-</Callout>
+`$watch(options?)` follows the [watch stream](/docs/guides/events/watch) (`GET {basePath}/watch`, served by the
+events module's `handleWatch`) as an async iterable. It reads Server-Sent Events over `fetch` with the client's
+`token`, `headers` and `credentials`, so it can send an `Authorization` header, which the browser's `EventSource`
+cannot:
 
-`watchEvents` reads Server-Sent Events over `fetch`, so it can send an `Authorization` header, which the browser's
-`EventSource` cannot. It resumes with `Last-Event-ID` after a reconnect:
+```ts title="Wait for a reservation to become active"
+const controller = new AbortController();
+for await (const event of client.$watch({ types: ['reservation.*'], signal: controller.signal })) {
+  console.log(event.type, event.subject, event.sequence);
+  if (event.type === 'reservation.active' && event.subject === `reservation/${reservationId}`) break;
+}
+```
+
+<TypeTable
+  type={{
+    types: { type: 'readonly string[]', description: 'Event type patterns such as reservation.* or node.connected, sent as ?types=. Every type when absent.' },
+    lastEventId: { type: 'string', description: "Resume after this cursor: an event's sequence (the SSE id)." },
+    signal: { type: 'AbortSignal', description: 'Ends the iteration; so does break or return().' },
+    path: { type: 'string', description: 'The watch route, an absolute path below the origin.', default: "'{basePath}/watch'" },
+    maxBackoffMs: { type: 'number', description: 'The longest wait between reconnects after failures.', default: '30000' },
+  }}
+/>
+
+Each event is `{ id, type, tenantId, subject, time?, sequence?, data? }`, in commit order, with the SSE `id` as its
+`sequence`; save it and pass it back as `lastEventId` to resume after a restart. The iterator keeps the last id and
+reconnects with `Last-Event-ID` whenever the stream ends: after the server's `retry:` delay when the server closed it
+(its maximum duration), and with doubling back-off up to `maxBackoffMs` after network failures or other non-2xx
+answers. A 401 ends it with `ComputeClientError('UNAUTHENTICATED')` (and calls `onUnauthenticated`), a 403 with
+`ACCESS_DENIED`. `event: error` blocks and malformed data are skipped. The stream is always the caller's tenant: the
+server's `authorize` decides which one.
+
+The default path assumes the stream is mounted under the API's base path, as the console's
+`/api/compute/watch` route is. A host that serves it at `/watch` (the `serve` host export in
+[watch](/docs/guides/events/watch#mount-the-endpoint)) passes `path: '/watch'`.
+
+**Callbacks instead of a loop.** `watchEvents` from `@better-compute/console-kit` reads the same stream with
+`onEvent` and `onStatus` callbacks and a `stop()`, which suits UI stores. It works in browsers and in Node.js 22:
 
 ```ts title="Follow reservation events"
 import { watchEvents } from '@better-compute/console-kit';
@@ -302,11 +332,12 @@ The exported types let you name what the client infers:
 
 | Type | Is |
 | --- | --- |
-| `ComputeClient<typeof compute>` | the whole client: its groups, `plugins`, and `$request` |
+| `ComputeClient<typeof compute>` | the whole client: its groups, `plugins`, `$request` and `$watch` |
 | `ClientGroups<Api>` | the groups of an API type, each method mapped to `(input, options?) => Promise<Output>` |
 | `ComputeClientOptions` | the options above |
 | `ComputeCallOptions` | `{ signal?, headers? }` per call |
-| `ClientTransport` | `{ $request }`, all that console-kit and the MCP tools need |
+| `ClientTransport` | `{ $request, $watch }`; console-kit's stores and the MCP tools use only `$request` |
+| `ComputeWatchOptions`, `ComputeWatchEvent` | `$watch`'s options and the events it yields |
 
 A server parameter counts as the credential, and is dropped from the client signature, when every key it has is a
 key of core's `Credential` (`headers`, `token`). `tests/client-types.test.ts`, compiled with

@@ -121,7 +121,7 @@ Anything wrong throws `INVALID_CONFIG` before a connection is opened.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `placer` | `inline` | `inline` places a reservation in the admission transaction. `pool-lease` (v0.4) queues it; the worker owning the pool places up to `maxBatch` at a time and `reservations.create` answers `pending` with a `Queued` condition. |
+| `placer` | `inline` | `inline` places a reservation in the admission transaction. `pool-lease` (v0.4) queues it; the worker owning the pool places up to `maxBatch` at a time and `reservations.create` answers `pending` with a `Queued` condition, or waits for the batch when the request sets `wait: { timeoutMs }`. |
 | `maxBatch` | 64 | Reservations per pool-lease batch, at most 64. |
 | `maxAttempts` | 3 | Placement attempts per admission. |
 | `rollupEvery` | `5m` | How often the rollup job rebuilds every pool. |
@@ -231,13 +231,14 @@ export const host = defineHost(async ({ compute, env }) => ({
 | `tunnels.reauthorizeMs`, `maxDurationMs`, `onClose` | Tunnel re-authorization period, lifetime and close hook |
 | `iam.bridge` | The IAM bridge whose inbox the workers drain: a revoked delegation closes the agent's tunnels on every gateway, and revocations drop IAM caches |
 | `iam.streams`, `iam.handlers`, `iam.gatewayStaleMs` | This process's `createWatchRegistry()` registries, closed on revocation too; your own reactions in place of the defaults; gateways asked (heartbeat within 120 s by default). See [tunnels](/docs/guides/access/tunnels#closing-on-iam-revocation) |
+| `iam.webhook` | `{ secret, path? }`: remote IAM's signed event webhooks into `iam_inbox` at `POST /iam/events` (or `path`), for deployments that cannot read the IAM database. See [IAM events](/docs/guides/iam#iam-events-compute-reacts-to) |
 | `mcp` | `{ path?, handler }`: the gated MCP endpoint (`computeMcpEndpoint(...).handler`), default path `/mcp`. See [MCP](/docs/guides/clients/mcp) |
 | `gateway.region` | Required. The region, as in `sites.region` |
 | `gateway.listen` | Daemon listener, default `0.0.0.0:8443` |
 | `gateway.tls` | Required. `key` and `cert` from the serving CA, `ca` the node CA roots; any of them may come from `tlsFiles` instead |
 | `gateway.tlsFiles` | `{ key, cert, ca?, intervalMs? }`: file paths read at start and re-read every `intervalMs` (60 s); a renewed certificate is hot-reloaded for new handshakes. See [PKI](/docs/operations/pki#pki-issue-gateway) |
 | `gateway.identity` | `{ roots, trustDomain, revocations }`; default: `pki.nodeCa`, `pki.join.trustDomain` and the node CA's revocation set |
-| `gateway.internal` | `{ url, listen?, tls, tlsFiles? }`: the internal control API (default port 8444) over internal-CA mutual TLS; `url` is advertised in the `gateways` row |
+| `gateway.internal` | `{ url, listen?, tls, tlsFiles? }`: the internal control API (default port 8444) over internal-CA mutual TLS; `url` is advertised in the `gateways` row. `tls` or `tlsFiles` must include `ca` (the internal CA), or `serve` refuses it: without it Node would accept any publicly issued client certificate |
 | `gateway.ws` | `{ publicHost, listen? }`: the v0.4 WebSocket fallback (default port 443) |
 | `gateway.options` | Anything else `createGateway()` takes (`maxStreams`, rates, extra `reports`) |
 

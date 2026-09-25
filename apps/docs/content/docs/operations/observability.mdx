@@ -28,6 +28,8 @@ sources:
   - packages/iam/src/iam-plugin.ts
   - packages/events/src/module.ts
   - packages/audit/src/module.ts
+  - packages/postgres/src/retention-module.ts
+  - tests/server-self-check-operations.test.ts
   - packages/capacity/src/module.ts
   - proto/bettercompute/agent/v1/session.proto
   - examples/shared/compose.ts
@@ -285,25 +287,45 @@ better-compute doctor --strict --query "findings[].check"
 | `clock.skew` | warning | This process's clock differs from `compute_now()` by more than 1 s |
 | `catalog.*` | error or warning | Methods whose actions are uncatalogued, mismatched or undeclared |
 | `database` | error | The check itself could not run |
+| `workers.queue` | warning | Work items more than 5 minutes overdue and unclaimed, noting when no worker has heartbeated in the last minute |
+| `workers.sweeper` | warning | Pending commands more than 2 minutes past `not_after` and not yet expired: no worker holds the CommandSweeper's lease |
+| `usage.dead-letters` | warning | Unresolved rows in `usage_dead_letters` |
+| `usage.backlog` | warning | Closed usage windows unrecorded for more than 2 hours |
+| `fleet.gateway-headroom` | warning | Live, non-draining gateways holding at least 80% of their `max_streams` |
+| `fleet.heartbeats` | warning | Connected nodes whose session sent nothing for more than 2 minutes |
+| `fleet.daemon-skew` | warning | Connected daemons whose newest protocol is below the control plane's minimum |
+| `fleet.cert-expiry` | warning | Connected nodes with no unrevoked certificate valid for another hour: renewals are failing |
 | `iam.not-configured` | warning | No IAM is configured, so only public methods answer |
 | `iam.projection` | error | The authz projection is not loaded, so every decision is denied |
 | `iam.inbox-spill` | warning or error | IAM events spilled in memory, or dropped |
 | `iam.inbox-backlog` | warning | More than 10,000 IAM events wait in `iam_inbox` |
+| `iam.usage-dead-letters` | warning | Usage events that could not be recorded in IAM billing |
+| `iam.usage-backlog` | warning or error | Usage windows over 2 hours unrecorded (warning), or windows of a past month that IAM's `closePeriod` will refuse (error) |
 | `events.webhook-dead-letters` | warning | Webhook deliveries that failed every attempt |
 | `events.webhook-backlog` | warning | More than 1,000 deliveries overdue by 5 minutes |
 | `capacity.reservations.stale` | warning | Reservations more than 10 minutes past their end and not released |
+| `capacity.mig.stuck` | warning | Nodes that have waited more than 24 hours for a MIG layout change |
+| `capacity.dedicated.unoffered` | warning | Nodes dedicated to a tenant their pool is not offered to, so nobody can use them |
 | `capacity.device_counts.drift` | error | The trigger-kept per-node device counts the placement shortlist ranks on disagree with `devices` (a `TRUNCATE` bypasses the trigger) |
 | `vps.pools.runtime` | error | A `vps-host` pool runs a runtime this deployment does not list in `vps({ runtimes })` |
 | `vps.pools.single-tenant` | error | A container-runtime pool without `policy.singleTenant: true`, which cannot run instances |
 | `vps.pools.ipam` | warning | A `vps-host` pool without an IP range, so its instances get no address |
 | `vps.hosts.capacity` | warning | Adopted VPS hosts without vCPU, memory and disk capacity rows: no inventory yet, or no worker runs `vps.hosts` |
 | `audit.checkpoints` | warning | Audit rows older than 3 hours not sealed by a checkpoint |
+| `history-partitions` | warning | `retentionModule()`: this or next month's partition of a history table is missing, so the retention pass is not running |
+| `history-default-partition` | warning | `retentionModule()`: rows of the last 13 months sit in a history table's default partition |
+| `retention-cursors` | warning | `retentionModule()`: a durable `outbox_cursors` row has not moved for a day, so its stream is not pruned behind it |
 | `pki.*` | error or warning | The PKI bundle unreadable or not unsealable, or a CA expired (error) or expiring (warning) |
 | `host.*` | error or warning | The `host` export: routes, tunnels, IAM, and whether the gateway role can authenticate daemons, reach the API's pokes, tunnels and revocations |
 
 [`system.selfCheck`](/docs/reference/api/system#selfcheck) serves the server's part of the report over the API
 (action `compute:fleet:admin` on `compute-fleet`); the `pki.*`, `host.*` and `iam.not-configured` findings come from
 the CLI only.
+
+The `workers.*`, `usage.*` and `fleet.*` checks are one read-only statement the server runs once the schema is fully
+migrated (they are skipped while a `migrations` finding stands). Each is a warning with a `count` and a `fix`, and
+each maps to an operations check of PLAN.md section 14: queues, the sweeper, usage, gateway headroom, heartbeats,
+daemon version skew and certificate expiry.
 
 ## What to alert on
 
@@ -316,8 +338,8 @@ These follow from the series and findings above, and from PLAN.md section 8.6 on
   add a gateway before handshakes are refused.
 - **The IAM lane.** `better_compute_iam_call_duration_seconds` p99 rising, or `iam_calls_total{outcome="error"}`.
   Every IAM call takes at least one global lock acquisition in embedded mode.
-- **Backlogs.** `iam.inbox-backlog`, `events.webhook-backlog` and `audit.checkpoints` findings: a worker role is not
-  running or cannot keep up. Run `doctor --strict` on a schedule and alert on a non-zero exit.
+- **Backlogs.** `workers.queue`, `workers.sweeper`, `iam.inbox-backlog`, `usage.backlog`, `events.webhook-backlog`
+  and `audit.checkpoints` findings: a worker role is not running or cannot keep up. Run `doctor --strict` on a schedule and alert on a non-zero exit.
 - **Clock.** `clock.skew`: run NTP on every host. Business time stays anchored to the database, but ids and logs use
   the host clock.
 - **Stale reservations.** `capacity.reservations.stale`: the `controllers` role is not running reconcilers.

@@ -123,6 +123,7 @@ profile named in `metal.deploy`.
 | `metal-release@1` | `releasing` | `metal.ensureRamdisk`, `disk.wipe` with the undeploy's mode, `power.setPower` off | `boot.cleanUp` |
 | `metal-retire@1` | `retiring` | `metal.ensureRamdisk`, `disk.wipe` crypto-erase, `power.setPower` off (each continues on failure), `metal.revokeIdentity` | `boot.cleanUp` |
 | `metal-rescue@1` | `rescue` | `metal.ensureRamdisk` | none |
+| `metal-unrescue@1` | `rescue`, started by `metal.unrescue` | `management.setBootDevice` disk (persistent), `power.setPower` cycle, `wait.agentJoined` role `node` (20m) | `boot.cleanUp` |
 
 Pools whose machines never run `bcd` (`agent: 'none'`) cannot boot a ramdisk, so they get
 out-of-band variants: `metal-inspect-oob@1` (`inspect.oob`), `metal-commission-oob@1` (power off),
@@ -317,5 +318,7 @@ The catalog also tracks which site caches hold which images (`image_locations`: 
 `failed`, `evicting`). `recordImageLocation` and `touchImageLocation` record reports and use (and pin
 an image while a deploy streams it), `imagesCachedAt(siteId)` feeds the `image-cached` placement
 scorer, and `evictionCandidates(siteId, bytes, inUse)` picks the least recently used ready images,
-never pinned or in-use ones. The agent side (a `bcd site` cache that pulls on demand, pre-warms per
-pool policy and re-verifies digests before serving) arrives with the site agent.
+never pinned or in-use ones. What to pre-warm is desired state today: a pool's `policy.prewarmImages` lists
+`name@version` refs, and provision puts the ones that verify into its site agents' NodeSpec `site.cacheImages`
+(see [sites](/docs/guides/bare-metal/sites)). The agent side (a `bcd site` cache that pulls on demand, pre-warms
+that list and re-verifies digests before serving) arrives with the site agent.

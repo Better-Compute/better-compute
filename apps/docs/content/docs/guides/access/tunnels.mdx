@@ -414,6 +414,8 @@ names the identity, not the session, in its session events, so:
 - `auth:session:revoke`, `auth:session:revoke-others` and `identity:revoke-sessions` close the identity's local
   streams (clients reconnect and are re-authorized) and make every gateway re-authorize the identity's tunnels at
   once: the revoked sessions' shells close, the others keep running;
+- a `binding:deactivate` (a role activation ended) makes every gateway re-check the holder's tunnels, and revokes
+  the holder's break-glass SSH certificates ([SSH](/docs/guides/access/ssh#revoke-a-certificate));
 - role- and tenant-wide revocations are left to the periodic re-check. Your own `host.iam.handlers` replace the
 default of the same name. `better-compute doctor` warns `host.iam` when the IAM module is registered without it. See
 [delegated confirmation](/docs/guides/iam/delegated-confirmation).
@@ -425,8 +427,14 @@ function returning the issuer's JWKS, read on every open), `issuer`, `jtiCache`,
 `reauthorizeMs` (60 s), `iamOutageMs` (2 min), `maxDurationMs` (12 h) and `openTimeoutMs` (10 s, how long the node
 has to open its `Tunnel` stream). Opening fails with `ACCESS_DENIED` for a bad, foreign or replayed ticket,
 `NOT_FOUND` when the node has no session on that gateway, `CONFLICT` when the tunnel id is already open, and
-`INVALID_STATE` when the node did not open in time. A `Tunnel` stream from a node that no gateway asked for, or one
+`INVALID_STATE` when the node did not open in time, or at once when the node is connected over the WebSocket
+fallback, which carries Session frames only. A `Tunnel` stream from a node that no gateway asked for, or one
 that answers for another node's tunnel, is refused.
+
+`serve`'s gateway role wires `reauthorize` itself when the IAM port can re-authorize sessions: every 60 seconds, and
+on `POST /v1/tunnels/reauthorize`, it decides the ticket's action (`compute:instances:exec` or
+`compute:nodes:console`) on its instance or node again for the ticket's identity and session, the same decision
+the api side makes. A ticket without a session, or with an unexpected action, fails closed.
 
 On the api side, `gatewayTunnelRelay` looks up the gateway holding the node's session (`node_sessions.gateway_id`,
 then `gateways.internal_url`, cached 30 s) and calls that gateway's `gatewayControlClient(...).openTunnel`, an

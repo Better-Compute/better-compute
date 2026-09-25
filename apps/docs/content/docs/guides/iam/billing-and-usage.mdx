@@ -247,7 +247,7 @@ const exported = await compute.api.usage.export(credential, {
 
 ## Budgets
 
-PLAN.md stops spending in three layers. Only the first works end to end today:
+PLAN.md stops spending in three layers. The first works end to end today, and the third in part:
 
 1. **In the decision.** The `StopWhenOverBudget` statement of the [gpu-user policy](/docs/guides/iam/policies)
    denies new reservations, extensions and instances once `principal.spendExceeded` is true, meaning an enforced
@@ -256,12 +256,19 @@ PLAN.md stops spending in three layers. Only the first works end to end today:
 2. **Per pool, before admission.** A pool whose policy sets `admission.budgetCheck: 'meter'` is meant to call
    Better IAM's `billing.check` on each admission, for one more lock acquisition. The port implements the call,
    `IamPort.billingCheck({ tenantId, identityId, meter }, credential)`, answering
-   `{ allowed, budgets, blockedBy }`, and the pool policy field exists, but the admission path does not call it
-   yet. In remote mode the check runs as the caller, because Better IAM's HTTP `billing.check` reports the
-   credential's own spend in its own tenant.
-3. **On a budget alert.** Better IAM's `billing:budget-alert` event reaches the IAM inbox's `budget` reaction,
-   meant to apply the offering's `onBudgetExceeded` (`notify`, `stop-new` or `drain`). The offerings table has
-   the column, but no built-in handler reads it; supply one with `bridge.setHandlers({ budget })`.
+   `{ allowed, budgets, blockedBy }`, and the pool policy field exists. The server has the hook such a check needs,
+   [`MethodAdmission.check`](/docs/extending/methods#admission-the-request-as-a-resource), which runs after the IAM
+   decision with no transaction open, but no shipped admission calls `billingCheck` through it yet. In remote mode
+   the check runs as the caller, because Better IAM's HTTP `billing.check` reports the credential's own spend in
+   its own tenant.
+3. **On a budget alert.** Better IAM's `billing:budget-alert` event reaches the IAM inbox's `budget` reaction.
+   `budgetAlertHandler` reads the alert (`budgetAlertOf`: budget, `actual` or `forecast`, threshold, spent,
+   amount, window) and acts only on an exceeded budget, an `actual` alert at 100% or more. `serve`'s default
+   handler then applies capacity's `applyBudgetPolicy`: every offer to the tenant with an `onBudgetExceeded`
+   publishes `quota.budget-exceeded`, and `drain` also cancels the tenant's unstarted reservations in that pool.
+   `stop-new` is meant to refuse new admissions through the per-pool check above, which is not wired yet. Offers
+   inherited through `includeDescendants` are not covered, because compute does not know the tenant tree: offer
+   the budgeted tenant directly.
 
 With `runIamJobs: true`, the `iam` module also runs Better IAM's budget checks every hour and its period close
 every day. The error catalog already has `SPEND_LIMIT_REACHED` (402), which no shipped method raises yet.

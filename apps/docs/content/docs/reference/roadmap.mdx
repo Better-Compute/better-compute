@@ -204,6 +204,7 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | Signing of all commands and specs | Done | With `pki.commandSigning`, every command and every NodeSpec generation is signed by a worker key; the gateway relays stored signed specs verbatim, and the FakeDaemon verifies them (`intent.signedSpecs`). bcd's verification needs Go |
 | Remote IAM (`remoteIam`, `computeIamHost`, `replicaProjection`, `postgresInbox`) | Done | U0 is an upstream Better IAM item outside this repository. With `remoteIam({ refresh })`, an admission waits (at most 2 s) until the IAM host's replica has replayed compute's commit and re-reads the row, failing closed with `UNAVAILABLE`; `doctor` warns `iam.refresh` when it is missing |
 | Remote-IAM MCP | Done | `remoteMcpIam()` gives `@better-iam/mcp`'s gate an IAM reached over HTTP; see [MCP](/docs/guides/clients/mcp#remote-iam) |
+| Remote-IAM event intake over webhooks | Done | `host.iam.webhook`: Better IAM's signed subtree webhooks into `iam_inbox`, for deployments that cannot read the IAM database. See [IAM events](/docs/guides/iam#iam-events-compute-reacts-to) |
 | Scheduler worker role | Done | `Reconciler.role` in core, the runtime's scheduler role with its own shard membership, and the pool-lease placer `capacity.placer` running in it |
 | Partitioned history | Done | `audit_events`, `inventory_snapshots` and `usage_windows` by UTC month (`core/0018_partitioned_history`); `retentionModule()` keeps months created ahead, prunes and drops emptied months; audit months are archived by hand. See [retention](/docs/operations/retention#history-partitions) |
 | Merkle audit checkpoints | Done | `@better-compute/audit`, with `better-compute audit verify` |
@@ -218,7 +219,7 @@ The v0.4 acceptance is set at 10,000 nodes and 100,000 GPUs on the reference Pos
 | 0 false unreachable marks | Met in simulation (`tests/sim/v04-scenarios.test.ts`) |
 | At least 200 placements/s | Indicative: 1,092/s end to end at 1k nodes and 161/s at 10k with the pool-lease placer, on PGlite. The benchmark's sustained mode (`BENCH_PLACE_SUSTAIN_SECONDS=1800` for the acceptance, gate `BENCH_PLACE_GATE`, default 200, judged on the slowest 10 s window, I1 checked) measured 699/s, slowest window 639/s, over 30 s at 1k nodes on PGlite |
 | Cold start under 3 minutes, command p99 under 1.5 s with polling only, PostgreSQL CPU under 50% | Not measured: needs the reference PostgreSQL |
-| Suites green in both IAM modes | In progress: embedded and remote modes are both tested |
+| Suites green in both IAM modes | Done: `pnpm check` runs `pnpm test:iam-remote`, which reruns the IAM-dependent suites against IAM over HTTP |
 | Every §15 v0.4 scenario green on 3 consecutive nights | In progress: the scenarios run in the simulator and `sim:nightly` exists; no nightly history is recorded |
 
 ## v0.5: GPU depth and ecosystem
@@ -248,15 +249,17 @@ Most of v0.5 landed early, on the control plane.
 
 ## Sandboxes
 
-Sandboxes are part of the product direction beside GPU and CPU capacity. PLAN.md's v1 non-goals still list "a sandbox
-product", so nothing below has a phase or a design section yet. What exists and what does not:
+Sandboxes are part of the product beside GPU and CPU capacity. Decision D24 (PLAN.md section 17) was taken on
+2026-09-24: build a dedicated sandbox API. The work is being planned, so the items below have no phase yet. What
+exists and what does not:
 
 | Item | State | Notes |
 | --- | --- | --- |
 | Isolated VMs as sandboxes | Done in the control plane (v0.3) | A sandbox is a VPS instance: flavors of vCPU, memory, disk and 0 to 16 GPUs, one IAM decision per create, quota, metering, sealed user data, no platform secrets in the guest, exec, SSH and TCP through tunnels. See [sandboxes](/docs/guides/vps/sandboxes) |
 | Provider pools running them | Done | Hetzner Cloud and Proxmox VE |
 | Hosted runtimes on your own servers | Not started | `libvirt-kvm` and `cloud-hypervisor` inside bcd (v0.3), which needs Go; a Kata runtime plugin via bcx (v0.5) |
-| A dedicated sandbox API | Not planned in PLAN.md yet | Templates, snapshots, pause and resume, time-to-live and fast start from a warm pool are not in the code or the plan |
+| Agents managing sandboxes over MCP | Done | `create_instance`, `list_instances`, `get_instance`, `start_instance`, `stop_instance` and `delete_instance`. See [MCP](/docs/guides/clients/mcp#the-tools) |
+| A dedicated sandbox API | Decided (D24), being planned, not built | The shape: a `sandboxes` group layered on `vps()`, with templates (flavor, image and user data), a time-to-live with auto-delete, snapshots and restore through the runtime driver, warm pools of pre-created stopped instances per template, and the microVM runtime (cloud-hypervisor or Kata via bcx) for untrusted code. It would reuse instances' admission, quota, IPAM, tunnels and IMDS, with no new placement or tenancy path. None of it is in the code yet |
 
 ## v1.0: Freeze
 

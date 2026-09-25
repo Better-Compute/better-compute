@@ -83,11 +83,13 @@ payloads are messages of `bettercompute.site.v1`, which stays a draft package un
 [command kinds reference](/docs/reference/command-kinds).
 
 The agent's desired state is the `site` section of its NodeSpec (`SiteSpec`): the boot lease state (below) and,
-since v0.2, `cacheImages`, the verified catalog images its cache pre-warms (`url`, `sha256`, `format`). PLAN.md
-fills that list from the pools' policy, and the agent pulls each image and re-verifies its digest before serving
-it. The field and its wire form exist, but no built-in module contributes it yet; modules contribute `site`
-fields independently, because the section merges field by field (see
-[NodeSpec sections](/docs/extending/modules#nodespec-sections)).
+since v0.2, `cacheImages`, the verified catalog images its cache pre-warms (`url`, `sha256`, `format`). The
+provision module fills that list: every live pool of the agent's site can name images in `policy.prewarmImages`
+(`name@version` refs, resolved in the pool owner's catalog), and only images that still verify (signed, signer not
+revoked, row untampered) are listed, deduplicated by URL. The agent pulls each one and re-verifies its digest before
+serving it. `images.register` and `images.promote` recompute the specs of the site agents whose pools name the ref,
+and so does `pools.update` when `prewarmImages` changes. Modules contribute `site` fields independently, because
+the section merges field by field (see [NodeSpec sections](/docs/extending/modules#nodespec-sections)).
 
 <Callout type="info" title="Status">
 `bcd site` is designed and its contracts are in `proto/bettercompute/site/v1`, but the Go daemon is

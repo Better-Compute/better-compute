@@ -39,7 +39,7 @@ A <Term id="nodespec">NodeSpec</Term> is the full desired state of one node, in 
 | `access` | SSH CA public keys, the exec-ticket JWKS | tunnels (v0.3) |
 | `telemetry` | OTLP endpoint and export interval | no built-in module yet; your own module can set it |
 | `daemon` | The bcd version, URL, SHA-256 and signature to run | `rollout` |
-| `site` | Whether this site agent holds the boot lease, and its epoch; the images its cache pre-warms (`cacheImages`, v0.2) | the site-boot controller (`boot`); nothing contributes `cacheImages` yet |
+| `site` | Whether this site agent holds the boot lease, and its epoch; the images its cache pre-warms (`cacheImages`, v0.2) | the site-boot controller (`boot`); provision (`cacheImages`, from the pools' `policy.prewarmImages`) |
 
 Modules contribute sections through `nodeSpec(context, node)` (a `NodeSpecPart`), and the NodeSpec controller merges
 the contributions in registration order; `site` merges field by field, so modules can contribute different fields

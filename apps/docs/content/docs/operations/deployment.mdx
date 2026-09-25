@@ -145,8 +145,9 @@ built-in paths; `doctor` reports a clash as `host.routes`. `GET /metrics` is add
 
 Use `/healthz` for liveness and `/readyz` for readiness of api processes. `{basePath}/health` also pings the store
 and answers `{ status, database, latencyMs, time }`. Worker-only and gateway-only processes open no HTTP listener,
-so check them through the database instead: `better-compute doctor` reports lease health and gateway headroom, and
-the `gateways` row of a live gateway has a fresh `heartbeat_at`.
+so check them through the database instead: `better-compute doctor` reports overdue work and a stalled sweeper
+(`workers.queue`, `workers.sweeper`), gateways near their stream limit (`fleet.gateway-headroom`) and silent nodes
+(`fleet.heartbeats`), and the `gateways` row of a live gateway has a fresh `heartbeat_at`.
 
 ### Shutdown
 

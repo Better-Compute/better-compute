@@ -160,7 +160,9 @@ better-compute doctor --strict
 
 `doctor` checks the schema, the clock, the method registry, the PKI bundle and the `host` export: whether the
 gateway role can authenticate daemons, whether the API can reach gateways, and whether host routes fit beside the
-API. See [deployment](/docs/operations/deployment).
+API. Once the schema is migrated it also reports running problems: overdue work, a stalled command sweeper, usage
+backlogs, gateway headroom, silent nodes, old daemons and expiring node certificates, plus each module's findings.
+See [deployment](/docs/operations/deployment) and [the doctor checks](/docs/operations/observability#doctor).
 
 </Step>
 </Steps>

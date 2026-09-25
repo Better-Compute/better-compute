@@ -1,6 +1,6 @@
 ---
 title: Sandboxes
-description: Run isolated CPU or GPU sandboxes as VPS instances today, with what isolates them, how to size and open them, and what a dedicated sandbox API will add.
+description: Run isolated CPU or GPU sandboxes as VPS instances today, with what isolates them, how to size and open them, and what a sandbox API might add.
 metaTitle: Sandboxes on CPU and GPU capacity
 icon: Box
 status: beta
@@ -13,6 +13,8 @@ sources:
   - packages/core/src/catalog.ts
   - packages/server/src/tunnels/module.ts
   - packages/capacity/src/pipeline.ts
+  - packages/mcp/src/tools.ts
+  - packages/mcp/src/server.ts
   - PLAN.md
 ---
 
@@ -28,8 +30,10 @@ There is no separate sandbox API: a sandbox is an instance, created with `instan
 `instances.delete`. The control plane for instances is built and tested (v0.3, beta). Provider pools run the VMs on
 Hetzner Cloud or Proxmox VE. The hosted runtimes that run VMs on your own servers, `libvirt-kvm` and
 `cloud-hypervisor`, are planned inside bcd for v0.3 and are not built yet, and a Kata runtime plugin is planned for
-v0.5. A dedicated sandbox API (templates, snapshots, pause and resume, time-to-live) is on the
-[roadmap](/docs/reference/roadmap#sandboxes), not in the code.
+v0.5. A dedicated sandbox API is decided (D24 in PLAN.md) and being planned, but not built yet: its shape is a
+`sandboxes` group layered on `vps()` (templates, a time-to-live with auto-delete, snapshots, warm pools, a microVM
+runtime) that reuses instances' admission, quota, IPAM, tunnels and IMDS. See the
+[roadmap](/docs/reference/roadmap#sandboxes).
 </Callout>
 
 ## Why a VM
@@ -142,6 +146,16 @@ await client.instances.delete({ tenantId: 'acme', instanceId: sandbox.id });
 `delete` sets `desiredState: 'deleted'`. The reconciler stops the VM, removes it through the runtime (or the
 provider), releases the allocation and the IP lease, deletes the sealed user data and publishes `instance.deleted`.
 A sandbox that must not outlive its job is deleted by the caller: there is no time-to-live on instances yet.
+
+## Let an agent manage sandboxes
+
+The [MCP server](/docs/guides/clients/mcp) gives AI agents the whole lifecycle as tools, each calling the instance
+method as the agent: `create_instance` (`instances.create`, with an idempotency key and delegated confirmation),
+`list_instances` (its own by default, or `scope: 'all'`), `get_instance`, `start_instance`, `stop_instance` and
+`delete_instance`. The MCP gate lets any authenticated agent call the last five; compute decides each on the instance
+itself, so an agent can only touch sandboxes its policies allow. `stop_instance` and `delete_instance` are marked
+destructive, so many MCP hosts ask the person before calling them. Running code inside a sandbox is not an MCP tool:
+agents open [tunnels](/docs/guides/access/tunnels) through the API.
 
 ## Sandboxes and GPU reservations
 
