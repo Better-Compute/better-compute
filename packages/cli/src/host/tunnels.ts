@@ -1,5 +1,5 @@
 import { ComputeError } from '@better-compute/core';
-import { gatewayControlClient, type ControlClientOptions } from '@better-compute/gateway';
+import { gatewayTunnelRelay, type ControlClientOptions } from '@better-compute/gateway';
 import { tunnelAuthorizer } from '@better-compute/iam';
 import {
   handleTunnel,
@@ -65,32 +65,18 @@ export function mountTunnels(
       'Tunnels need a re-authorizer: an IamPort with authorizeSession (the IAM bridge), or host.tunnels.authorize',
     );
 
-  // One control client per gateway, by the directory's internal URL.
-  const clients = new Map<string, ReturnType<typeof gatewayControlClient>>();
-  const relay: TunnelRelay = {
-    async open({ ticket, nodeId, gatewayId }) {
-      let client = clients.get(gatewayId);
-      if (!client) {
-        const { rows } = await options.database.query<{ internal_url: string | null }>(
-          'SELECT internal_url FROM gateways WHERE id = $1',
-          [gatewayId],
-        );
-        const baseUrl = rows[0]?.internal_url;
-        if (!baseUrl)
-          throw new ComputeError(
-            'INVALID_STATE',
-            `Gateway ${gatewayId} advertises no internal control API; set host.gateway.internal on it`,
-          );
-        client = gatewayControlClient({ baseUrl, ...config.control });
-        clients.set(gatewayId, client);
-      }
-      return (await client.openTunnel({ ticket, nodeId })) as unknown as RelayedTunnel;
-    },
-  };
+  // The gateway package's relay: the node's gateway by `gateways.internal_url`, clients cached.
+  const relay = gatewayTunnelRelay({
+    sql: compute.context.sql,
+    ...(config.control?.tls ? { tls: config.control.tls } : {}),
+    ...(config.control?.timeoutMs === undefined ? {} : { timeoutMs: config.control.timeoutMs }),
+  });
   const handlerOptions: HandleTunnelOptions = {
-    sql: options.database,
+    sql: compute.context.sql as HandleTunnelOptions['sql'],
     issuer,
-    relay,
+    // Tickets must come from this deployment's issuer (the public base URL).
+    issuerName: compute.endpoint.origin,
+    relay: relay as unknown as TunnelRelay,
     authorize,
     basePath: compute.endpoint.basePath,
     ...(config.reauthorizeMs === undefined ? {} : { reauthorizeMs: config.reauthorizeMs }),
@@ -99,9 +85,6 @@ export function mountTunnels(
   };
   return {
     upgrade: (req, socket, head) => handleTunnel(req, socket, head, handlerOptions),
-    close() {
-      for (const client of clients.values()) client.close();
-      clients.clear();
-    },
+    close: () => relay.close(),
   };
 }

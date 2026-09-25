@@ -49,6 +49,35 @@ async function run(argv: string[], answer: unknown = { ok: true }) {
   }
 }
 
+describe('reserve with the pool-lease placer', () => {
+  it('reads a queued reservation until it is placed', async () => {
+    const queued = { id: RSV, state: 'pending', conditions: [{ type: 'Queued', status: 'true' }] };
+    const answers = [queued, queued, { id: RSV, state: 'placed', conditions: [] }];
+    const paths: string[] = [];
+    const out: string[] = [];
+    await createCli().run(
+      ['reserve', '--pool', POOL, '--gpus', '1', '--for', '1h', '--url', 'https://compute.test'],
+      {
+        out: (line) => out.push(line),
+        env: {
+          BETTER_COMPUTE_TOKEN: 'biam_ses_0123456789abcdefghij',
+          BETTER_COMPUTE_TENANT: 'org_acme',
+        },
+        fetch: async (input, init) => {
+          paths.push(new URL(new Request(input, init).url).pathname);
+          return Response.json({ data: answers.shift() });
+        },
+      },
+    );
+    expect(paths).toEqual([
+      '/api/compute/reservations/create',
+      '/api/compute/reservations/get',
+      '/api/compute/reservations/get',
+    ]);
+    expect(JSON.parse(out.join('\n'))).toMatchObject({ id: RSV, state: 'placed' });
+  });
+});
+
 describe('reserve', () => {
   it('builds reservations.create with a selector, a fresh key and a wait', async () => {
     const result = await run([

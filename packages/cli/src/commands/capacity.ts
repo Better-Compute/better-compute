@@ -57,6 +57,19 @@ function checkDuration(value: string, flag: string): string {
   return value;
 }
 
+interface QueuedReservation {
+  id: string;
+  state: string;
+  conditions?: { type: string; status: string }[];
+}
+
+/** Waiting for the pool-lease placer: `pending` with a true `Queued` condition. */
+export const isQueued = (reservation: QueuedReservation): boolean =>
+  reservation.state === 'pending' &&
+  (reservation.conditions ?? []).some(
+    (condition) => condition.type === 'Queued' && condition.status === 'true',
+  );
+
 /** The device request `reserve` sends: a GPU count, and a selector from the shorthand and --model. */
 export function gpuRequest(options: {
   gpus: number;
@@ -198,7 +211,23 @@ export const capacityCommands = [
         note(
           `Idempotency key ${idempotencyKey} (pass --key ${idempotencyKey} to retry this request).`,
         );
-      return (await api()).call('reservations/create', body);
+      const transport = await api();
+      const deadline = Date.now() + (flags.wait ?? 20) * 1000;
+      let reservation = (await transport.call('reservations/create', body)) as QueuedReservation;
+      // The pool-lease placer (v0.4) answers `pending` with a `Queued` condition and places in a batch:
+      // keep reading until it is placed (or fails), within --wait.
+      while (isQueued(reservation) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        reservation = (await transport.call('reservations/get', {
+          tenantId: flags.tenant!,
+          reservationId: reservation.id,
+        })) as QueuedReservation;
+      }
+      if (isQueued(reservation))
+        note(
+          `Still queued for placement; check with: better-compute reservations get ${reservation.id} --tenant ${flags.tenant!}`,
+        );
+      return reservation;
     },
   }),
   defineCommand({

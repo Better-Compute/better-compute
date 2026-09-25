@@ -53,6 +53,11 @@ export interface ExampleContext {
   metal?: Parameters<typeof metal>[0];
   /** Refuse to start without Postgres (the production-shaped examples). */
   requirePostgres?: boolean;
+  /**
+   * The capacity placer: `inline` (default; placed in the request) or `pool-lease` (v0.4: queued, then
+   * placed in batches of up to 64 per pool by the `capacity.placer` reconciler).
+   */
+  placer?: 'inline' | 'pool-lease';
 }
 
 /** The PKI bundle, when `pki init` wrote one. */
@@ -125,6 +130,7 @@ export async function exampleOptions(
     rootTenantId: env.BETTER_COMPUTE_ROOT_TENANT ?? 'root',
     iam,
     modules: [...everyModule(secret, bundle, env, context.metal), ...(context.modules ?? [])],
+    ...(context.placer ? { capacity: { placer: context.placer } } : {}),
     ...(bundle
       ? {
           pki: {

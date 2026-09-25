@@ -12,6 +12,8 @@ export default defineConfig(({ env, cwd } = {}) =>
     ...(cwd ? { cwd } : {}),
     // pglite: URLs are refused here, except in the repository's smoke test (EXAMPLES_ALLOW_PGLITE).
     requirePostgres: !(env ?? process.env).EXAMPLES_ALLOW_PGLITE,
+    // Many api replicas: reservations queue and one worker per pool places them in batches.
+    placer: 'pool-lease',
   }),
 );
 

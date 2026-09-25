@@ -320,7 +320,10 @@ describe('serve composition audit', () => {
   });
 
   it('mounts tunnels only with an issuer, and never without a re-authorizer', () => {
-    const compute = { endpoint: { basePath: '/api/compute' } } as any;
+    const compute = {
+      endpoint: { basePath: '/api/compute', origin: 'http://127.0.0.1:3000' },
+      context: { sql: { query: async () => ({ rows: [] }) } },
+    } as any;
     const issuer = { jwksJson: () => ({ keys: [] }) };
     expect(mountTunnels(compute, { iam: {} } as any)).toBeUndefined();
     // An IamPort without authorizeSession and no host.tunnels.authorize: refuse to mount.
