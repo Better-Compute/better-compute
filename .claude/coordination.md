@@ -219,7 +219,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         - the user-data pins that replace trust on first use: pki bootstrapPins (afdaeb6), provision flags
           ([f02367]), bcd preferring the user-data pins ([6a20b8]).
     - [31c64a] security review #5 (routed by them):
-      - HIGH: tenancy read a bare IAM 404 as "tenant missing" and could tear down root: [31c64a] fixing;
+      - ALL FIXED: tenancy HIGH and the rest in 43b2fc9; join pins bcd 69aaba9 + renderers 88dd206; template
+        secrets 24f26c7; secret broker 6a3248a; vps.sandbox.warm meter 542dd19. Still in progress: bcd
+        snapshots/symlinks/plugin isolation/IMDS anti-spoofing ([6a20b8]).
+      - 10k cold start with every node powering on at once: ready in 95 s, but 23 real session drops during
+        the herd (likely Welcome timeouts behind the Hello path): [31c64a] diagnosing, with [c321a3] (gateway).
+      - (details) HIGH: tenancy read a bare IAM 404 as "tenant missing" and could tear down root;
       - MED-HIGH: the well-known join trusts web PKI only; the fix is user-data pins
         ([f02367] renderers + [6a20b8] bcd + [402c97] host pins);
       - MED: IMDS matches by source IP only; bcx plugins run as root without seccomp; >5 min snapshot
