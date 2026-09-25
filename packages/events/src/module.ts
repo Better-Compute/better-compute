@@ -111,14 +111,17 @@ export function eventsModule(options: EventsModuleOptions): ComputeModule<'event
   const store = webhookStore(options);
   const method = <I, O>(
     kind: 'read' | 'mutation',
-    schema: { parse(value: unknown): I },
+    schema: { parse(value: unknown): I; jsonSchema(): object },
     run: (tx: SqlTx, input: I) => Promise<O>,
   ) =>
     defineMethod<I, O>({
       action: 'compute:webhooks:manage',
       kind,
       resource: (input) => ({ type: 'tenant', id: (input as { tenantId: string }).tenantId }),
-      validate: (input) => schema.parse(input),
+      // `jsonSchema` describes the input for the API reference and tool schemas.
+      validate: Object.assign((input: unknown) => schema.parse(input), {
+        jsonSchema: schema.jsonSchema(),
+      }),
       handler: (context, input) => context.sql.transaction((tx) => run(tx, input)),
     });
 
