@@ -45,7 +45,8 @@ export const leasableSql = `n.provision_state = 'ready' AND NOT n.maintenance AN
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-type Fit = { nodeId: string; atoms: Device[] };
+/** A node a lease could take, with every bookable atom it would book. */
+export type LeaseFit = { nodeId: string; atoms: Device[] };
 
 function fits(
   request: PlacementRequest,
@@ -69,6 +70,47 @@ function fits(
 }
 
 /**
+ * The nodes a lease could take in its window: leasable, no live allocation overlapping, healthy
+ * atoms covering `request.devices`. Each comes with every bookable atom (what a lease books).
+ */
+export async function leaseCandidates(
+  tx: SqlTx,
+  poolId: string,
+  request: PlacementRequest,
+  excluded: readonly string[] = [],
+): Promise<{ candidates: LeaseFit[]; labels: Map<string, Record<string, string>> }> {
+  const { rows } = await tx.query<{ id: string }>(
+    `SELECT n.id FROM nodes n
+      WHERE n.pool_id = $1 AND ${leasableSql} AND NOT (n.id = ANY($2::text[]))
+        AND NOT EXISTS (SELECT 1 FROM allocations a WHERE a.node_id = n.id AND a.released_at IS NULL
+                           AND a.during && tstzrange($3::timestamptz, $4::timestamptz))
+      ORDER BY n.id`,
+    [poolId, [...excluded], iso(request.during.start), iso(request.during.end)],
+  );
+  const nodeIds = rows.map((row) => row.id);
+  const [devices, labels] = [await readDevices(tx, nodeIds), await readNodeLabels(tx, nodeIds)];
+  const byNode = new Map<string, Device[]>();
+  for (const device of devices)
+    byNode.set(device.nodeId, [...(byNode.get(device.nodeId) ?? []), device]);
+  const candidates = nodeIds
+    .filter((nodeId) => fits(request, byNode.get(nodeId) ?? [], labels.get(nodeId) ?? {}))
+    .map((nodeId) => ({
+      nodeId,
+      atoms: (byNode.get(nodeId) ?? []).filter((device) => device.bookable),
+    }));
+  return { candidates, labels };
+}
+
+/** Lease candidates grouped for a gang (or one group for a single node): the best choice, if any. */
+export function leaseGroups(
+  request: PlacementRequest,
+  candidates: readonly LeaseFit[],
+  labels: ReadonlyMap<string, Record<string, string>>,
+): LeaseFit[] | undefined {
+  return choose(request, candidates, labels, { random: () => 0, topN: 1 });
+}
+
+/**
  * Places a node lease: `gang.size` (default 1) leasable nodes of the pool that have no live booking
  * or allocation in the window and whose healthy atoms cover `request.devices`, all on one topology
  * value for gangs. Each node gets one allocation booking all its bookable atoms. Runs under the pool
@@ -88,25 +130,7 @@ export async function placeNodeLease(
   const excluded = new Set(request.excludeNodes ?? []);
   const conflicts: string[] = [];
   for (let attempt = 1; attempt <= (options.maxAttempts ?? 3); attempt++) {
-    const { rows } = await tx.query<{ id: string }>(
-      `SELECT n.id FROM nodes n
-        WHERE n.pool_id = $1 AND ${leasableSql} AND NOT (n.id = ANY($2::text[]))
-          AND NOT EXISTS (SELECT 1 FROM allocations a WHERE a.node_id = n.id AND a.released_at IS NULL
-                             AND a.during && tstzrange($3::timestamptz, $4::timestamptz))
-        ORDER BY n.id`,
-      [pool.id, [...excluded], iso(request.during.start), iso(request.during.end)],
-    );
-    const nodeIds = rows.map((row) => row.id);
-    const [devices, labels] = [await readDevices(tx, nodeIds), await readNodeLabels(tx, nodeIds)];
-    const byNode = new Map<string, Device[]>();
-    for (const device of devices)
-      byNode.set(device.nodeId, [...(byNode.get(device.nodeId) ?? []), device]);
-    const candidates: Fit[] = nodeIds
-      .filter((nodeId) => fits(request, byNode.get(nodeId) ?? [], labels.get(nodeId) ?? {}))
-      .map((nodeId) => ({
-        nodeId,
-        atoms: (byNode.get(nodeId) ?? []).filter((device) => device.bookable),
-      }));
+    const { candidates, labels } = await leaseCandidates(tx, pool.id, request, [...excluded]);
     const chosen = choose(request, candidates, labels, context);
     if (!chosen) {
       const size = request.gang?.size ?? 1;
@@ -152,10 +176,10 @@ export async function placeNodeLease(
 
 function choose(
   request: PlacementRequest,
-  candidates: readonly Fit[],
+  candidates: readonly LeaseFit[],
   labels: ReadonlyMap<string, Record<string, string>>,
   context: Pick<PlacementContext, 'random' | 'topN'>,
-): Fit[] | undefined {
+): LeaseFit[] | undefined {
   const byId = new Map(candidates.map((fit) => [fit.nodeId, fit]));
   if (request.gang === undefined) {
     const window = Math.min(Math.max(1, Math.floor(context.topN ?? 5)), candidates.length);
@@ -186,7 +210,7 @@ async function commitLease(
   tx: SqlTx,
   request: PlacementRequest,
   pool: PoolRow,
-  fit: Fit,
+  fit: LeaseFit,
   ids: IdGenerator,
 ): Promise<Allocation | undefined> {
   const node = await tx.query(

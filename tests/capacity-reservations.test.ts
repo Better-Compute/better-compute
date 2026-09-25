@@ -1382,6 +1382,18 @@ describe('spot reservations (v0.5)', () => {
     recorded.events = [];
     recorded.work = [];
 
+    // Preview says a regular request fits by preempting one spot reservation, a spot one does not.
+    const previewOf = async (extra: Record<string, unknown>) =>
+      (await call('capacity', 'preview', four('p', { duration: '2h', ...extra }))) as {
+        fits: boolean;
+        preemptible?: { reservations: number; startsAt: number };
+      };
+    expect(await previewOf({})).toMatchObject({
+      fits: false,
+      preemptible: { reservations: 1, startsAt: T0 + NOTICE },
+    });
+    expect((await previewOf({ spot: true })).preemptible).toBeUndefined();
+
     // A regular request finds the pool full of spot work: it takes one node after the notice.
     const regular = (await call('reservations', 'create', four('r1', { duration: '2h' }))) as Rsv;
     expect(regular.state).toBe('placed');
@@ -1614,6 +1626,14 @@ describe('node leases: binding node (v0.5)', () => {
     ).rows;
 
   it('books the whole node, lets metal deploy it from the start, and hands it back on release', async () => {
+    expect(await call('capacity', 'preview', lease())).toMatchObject({
+      fits: true,
+      candidates: [{ nodeId: 'node_01jz00000000000000000000la', atoms: expect.any(Array) }],
+    });
+    expect(await call('capacity', 'preview', lease({ gang: { size: 3 } }))).toMatchObject({
+      fits: false,
+      reason: '2 leasable node(s) fit, 3 needed',
+    });
     const leased = (await call('reservations', 'create', lease())) as Rsv;
     expect(leased.state).toBe('placed');
     expect((await get(leased.id)).request).toMatchObject({

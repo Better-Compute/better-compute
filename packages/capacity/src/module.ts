@@ -29,6 +29,8 @@ import { capacityMigrations } from './migrations.js';
 import { planGangs } from './gang.js';
 import { planPlacement, summarizeRejections } from './pipeline.js';
 import { inlinePlacer, poolLeasePlacer } from './placer.js';
+import { leaseCandidates, leaseGroups } from './node-lease.js';
+import { defaultSpotNoticeMs, planPreemption, readSpotAllocations } from './spot.js';
 import {
   chargeQuota,
   quotaDemand,
@@ -413,6 +415,11 @@ export interface CapacityPreview {
   fits: boolean;
   candidates: { nodeId: string; atoms: string[]; score: number }[];
   reason?: string;
+  /**
+   * When it does not fit now but would by preempting spot work (a regular request only): how many
+   * spot reservations would get a notice, and when the request would start (after the notice).
+   */
+  preemptible?: { reservations: number; startsAt: number };
 }
 
 export type CapacityApi = {
@@ -948,20 +955,36 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
         const now = context.clock.now();
         const start = Math.max(input.start ?? now, now);
         const during = { start, end: start + input.duration };
+        const request = {
+          tenantId: input.tenantId,
+          poolId: input.poolId,
+          reservationId: 'rsv_preview',
+          devices: input.devices,
+          ...(input.topology !== undefined ? { topology: input.topology } : {}),
+          ...(input.gang !== undefined ? { gang: input.gang } : {}),
+          during,
+        };
+        if (input.binding === 'node') {
+          // A node lease takes whole leasable nodes; show the ones it would take.
+          const { candidates, labels } = await leaseCandidates(tx, pool.id, request);
+          const chosen = leaseGroups(request, candidates, labels);
+          const preview: CapacityPreview = {
+            fits: chosen !== undefined,
+            candidates: (chosen ?? []).map((fit) => ({
+              nodeId: fit.nodeId,
+              atoms: fit.atoms.map((atom) => atom.id),
+              score: 0,
+            })),
+          };
+          if (!chosen)
+            preview.reason = `${candidates.length} leasable node(s) fit, ${input.gang?.size ?? 1} needed`;
+          return preview;
+        }
         const views = await loadNodeViews(tx, pool, during);
-        const plan = planPlacement(
-          {
-            tenantId: input.tenantId,
-            poolId: input.poolId,
-            reservationId: 'rsv_preview',
-            devices: input.devices,
-            ...(input.topology !== undefined ? { topology: input.topology } : {}),
-            during,
-          },
-          views,
-          pool,
-          { plugins: options.plugins ?? [], weights: options.weights ?? {} },
-        );
+        const plan = planPlacement(request, views, pool, {
+          plugins: options.plugins ?? [],
+          weights: options.weights ?? {},
+        });
         const toCandidate = ({ nodeId, atoms, score }: (typeof plan.ranked)[number]) => ({
           nodeId,
           atoms,
@@ -988,7 +1011,27 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
           fits: plan.ranked.length > 0,
           candidates: plan.ranked.slice(0, 10).map(toCandidate),
         };
-        if (!preview.fits) preview.reason = summarizeRejections(plan.rejected);
+        if (!preview.fits) {
+          preview.reason = summarizeRejections(plan.rejected);
+          if (input.spot !== true) {
+            // Would it fit by preempting spot work? A count only: never another tenant's ids.
+            const at = Math.max(start, now + (options.spotNoticeMs ?? defaultSpotNoticeMs));
+            const window = { start: at, end: at + input.duration };
+            const spot = await readSpotAllocations(tx, pool.id, window);
+            const preemption = await planPreemption(
+              tx,
+              pool,
+              { ...request, during: window },
+              spot,
+              {
+                plugins: options.plugins ?? [],
+                weights: options.weights ?? {},
+              },
+            );
+            if (preemption)
+              preview.preemptible = { reservations: preemption.victims.length, startsAt: at };
+          }
+        }
         return preview;
       },
     }),
