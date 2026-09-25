@@ -37,6 +37,7 @@ const needed = [
   'rollout',
   'audit',
   'cli',
+  'observability',
 ];
 const missing = needed.filter(
   (pkg) => !existsSync(dist(pkg, pkg === 'postgres' ? 'pglite.js' : 'index.js')),
@@ -59,6 +60,7 @@ const { fleetModule } = await load('fleet');
 const { rolloutModule } = await load('rollout');
 const { auditModule } = await load('audit');
 const { cliManifest } = await load('cli');
+const { metricCatalog } = await load('observability');
 
 // ---- The live registry, with every module --------------------------------------------------------
 
@@ -451,6 +453,37 @@ files.set(
   ].join('\n'),
 );
 
+const metrics = metricCatalog().map((family) => ({ ...family, labels: [...family.labels] }));
+const metricSources = [...new Set(metrics.map((family) => family.source))];
+files.set(
+  `${reference}/metrics.mdx`,
+  [
+    frontmatter({
+      title: 'Metrics',
+      description: `The ${metrics.length} Prometheus metric families better-compute exposes on /metrics, with their labels.`,
+    }),
+    generatedNote("the observability package's metricCatalog"),
+    '',
+    'Every family carries the `better_compute_` prefix and none has a tenant label (series stay bounded by `maxSeries`). Histograms also expose `_bucket`, `_sum` and `_count` series. Families are grouped by the function that registers them: `standardMetrics` on every process, the others where a host wires them.',
+    '',
+    ...metricSources.flatMap((source) => [
+      `## ${source}`,
+      '',
+      '| Metric | Type | Labels | Description |',
+      '| --- | --- | --- | --- |',
+      ...metrics
+        .filter((family) => family.source === source)
+        .map(
+          (family) =>
+            `| ${code(family.name)} | ${family.kind} | ${family.labels.map(code).join(', ')} | ${cell(family.help)}${
+              family.buckets?.length ? `. Buckets (s): ${family.buckets.join(', ')}` : ''
+            } |`,
+        ),
+      '',
+    ]),
+  ].join('\n'),
+);
+
 // The reference section's own meta.json and index are hand-written; the generated pages are listed there.
 
 const data = {
@@ -459,6 +492,7 @@ const data = {
   'generated/cli.json': cli,
   'generated/command-kinds.json': commandKinds,
   'generated/events.json': events,
+  'generated/metrics.json': metrics,
   'generated/modules.json': { modules, jobs },
   'generated/packages.json': packages,
 };

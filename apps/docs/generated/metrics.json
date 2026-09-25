@@ -1,0 +1,290 @@
+[
+  {
+    "name": "better_compute_gateway_sessions",
+    "kind": "gauge",
+    "help": "Open daemon sessions on this gateway",
+    "labels": ["role"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_gateway_handshakes_total",
+    "kind": "counter",
+    "help": "Session handshakes",
+    "labels": ["outcome"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_command_latency_seconds",
+    "kind": "histogram",
+    "help": "Command enqueue to terminal result",
+    "labels": ["kind", "lane"],
+    "buckets": [0.05, 0.1, 0.25, 0.5, 1, 1.5, 2.5, 5, 10, 30, 60],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_commands_swept_total",
+    "kind": "counter",
+    "help": "Commands the CommandSweeper moved",
+    "labels": ["to"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_work_queue_depth",
+    "kind": "gauge",
+    "help": "Due work_queue rows",
+    "labels": ["kind"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_reconcile_duration_seconds",
+    "kind": "histogram",
+    "help": "One reconciler run",
+    "labels": ["reconciler"],
+    "buckets": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_generation_lag_nodes",
+    "kind": "gauge",
+    "help": "Nodes whose observed generation is behind",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_placements_total",
+    "kind": "counter",
+    "help": "Placement attempts",
+    "labels": ["outcome"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_booking_conflicts_total",
+    "kind": "counter",
+    "help": "Booking conflicts that forced a replan",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_pool_gpus",
+    "kind": "gauge",
+    "help": "GPUs by state across pools",
+    "labels": ["state"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_node_connectivity",
+    "kind": "gauge",
+    "help": "Nodes by connectivity",
+    "labels": ["state"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_backlog",
+    "kind": "gauge",
+    "help": "Rows waiting in a queue table",
+    "labels": ["queue"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_usage_dead_letters_total",
+    "kind": "counter",
+    "help": "Usage events dead-lettered",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_iam_inbox_spill_total",
+    "kind": "counter",
+    "help": "IAM events spilled because the inbox was down",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_iam_calls_total",
+    "kind": "counter",
+    "help": "IamPort calls",
+    "labels": ["op", "outcome"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_iam_call_duration_seconds",
+    "kind": "histogram",
+    "help": "IamPort call latency (each op takes ≥1 IAM lock acquisition)",
+    "labels": ["op"],
+    "buckets": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_resolver_lookups_total",
+    "kind": "counter",
+    "help": "Authz resolver lookups",
+    "labels": ["result"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_cert_expiry_seconds",
+    "kind": "gauge",
+    "help": "Seconds until the soonest expiry",
+    "labels": ["kind"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_clock_offset_seconds",
+    "kind": "gauge",
+    "help": "Process clock minus compute_now()",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_security_events_total",
+    "kind": "counter",
+    "help": "Security events recorded",
+    "labels": ["type"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_spans_total",
+    "kind": "counter",
+    "help": "Units of work by kind, name, outcome and code",
+    "labels": ["kind", "name", "outcome", "code"],
+    "source": "createObserver"
+  },
+  {
+    "name": "better_compute_span_duration_seconds",
+    "kind": "histogram",
+    "help": "Latency of units of work by kind",
+    "labels": ["kind"],
+    "buckets": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    "source": "createObserver"
+  },
+  {
+    "name": "better_compute_attestor_verifications_total",
+    "kind": "counter",
+    "help": "Attestor verifications by outcome",
+    "labels": ["attestor", "outcome"],
+    "source": "meteredAttestor"
+  },
+  {
+    "name": "better_compute_attestor_verification_seconds",
+    "kind": "histogram",
+    "help": "Attestor verification time",
+    "labels": ["attestor"],
+    "buckets": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    "source": "meteredAttestor"
+  },
+  {
+    "name": "better_compute_gateway_service_calls_total",
+    "kind": "counter",
+    "help": "Join, Renew and Secret calls by outcome",
+    "labels": ["method", "outcome"],
+    "source": "meteredGatewayServices"
+  },
+  {
+    "name": "better_compute_gateway_service_seconds",
+    "kind": "histogram",
+    "help": "Join, Renew and Secret time",
+    "labels": ["method"],
+    "buckets": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    "source": "meteredGatewayServices"
+  },
+  {
+    "name": "better_compute_provider_calls_total",
+    "kind": "counter",
+    "help": "Provider API calls by outcome",
+    "labels": ["provider", "method", "outcome"],
+    "source": "meteredProvider"
+  },
+  {
+    "name": "better_compute_provider_call_seconds",
+    "kind": "histogram",
+    "help": "Provider API call time",
+    "labels": ["provider", "method"],
+    "buckets": [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
+    "source": "meteredProvider"
+  },
+  {
+    "name": "better_compute_placement_seconds",
+    "kind": "histogram",
+    "help": "One placement attempt, by placer",
+    "labels": ["placer"],
+    "buckets": [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    "source": "placementObserver"
+  },
+  {
+    "name": "better_compute_gateway_open_sessions",
+    "kind": "gauge",
+    "help": "Open agent sessions by role",
+    "labels": ["gateway", "role"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_stream_headroom",
+    "kind": "gauge",
+    "help": "Streams this gateway can still admit",
+    "labels": ["gateway"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_draining",
+    "kind": "gauge",
+    "help": "Whether the gateway is draining (1) or not (0)",
+    "labels": ["gateway"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_lease_held",
+    "kind": "gauge",
+    "help": "Whether the gateway holds its lease (1) or is fenced (0)",
+    "labels": ["gateway"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_commands_in_flight",
+    "kind": "gauge",
+    "help": "Commands dispatched and not yet settled",
+    "labels": ["gateway"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_sessions_upgrade_required",
+    "kind": "gauge",
+    "help": "Sessions told to upgrade",
+    "labels": ["gateway"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_loop_consecutive_failures",
+    "kind": "gauge",
+    "help": "Failed runs of a gateway loop since its last clean one (alert on a stuck loop)",
+    "labels": ["gateway", "loop"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_loop_failures",
+    "kind": "gauge",
+    "help": "Failed runs of a gateway loop since start",
+    "labels": ["gateway", "loop"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_gateway_loop_last_ok_age_seconds",
+    "kind": "gauge",
+    "help": "Seconds since a gateway loop last ran cleanly (-1 before its first clean run)",
+    "labels": ["gateway", "loop"],
+    "source": "gatewayCollector"
+  },
+  {
+    "name": "better_compute_revocation_feed_consecutive_failures",
+    "kind": "gauge",
+    "help": "Revocation feed polls failed in a row: revoked certificates keep their sessions while it fails",
+    "labels": ["feed"],
+    "source": "revocationFeedCollector"
+  },
+  {
+    "name": "better_compute_events_total",
+    "kind": "counter",
+    "help": "Outbox events by catalog family",
+    "labels": ["family", "module"],
+    "source": "eventCounter"
+  }
+]

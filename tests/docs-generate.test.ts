@@ -87,9 +87,20 @@ describe('generated reference', () => {
   });
 
   it('every other generated page exists with frontmatter', async () => {
-    for (const name of ['cli', 'command-kinds', 'errors', 'events', 'modules', 'packages']) {
+    for (const name of ['cli', 'command-kinds', 'errors', 'events', 'metrics', 'modules', 'packages']) {
       const page = await readFile(join(docs, `content/docs/reference/${name}.mdx`), 'utf8');
       expect(page.replace(/\r\n/g, '\n'), name).toMatch(/^---\ntitle: .+\ndescription: .+\n---\n/);
+    }
+  });
+
+  it('the metrics page lists every family of generated/metrics.json, prefixed and tenant-free', async () => {
+    const metrics = await readJson<{ name: string; labels: string[] }[]>('generated/metrics.json');
+    expect(metrics.length).toBeGreaterThan(20);
+    const page = await readFile(join(docs, 'content/docs/reference/metrics.mdx'), 'utf8');
+    for (const family of metrics) {
+      expect(family.name, family.name).toMatch(/^better_compute_/);
+      expect(family.labels, family.name).not.toContain('tenant');
+      expect(page, family.name).toContain(`\`${family.name}\``);
     }
   });
 
