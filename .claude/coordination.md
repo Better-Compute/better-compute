@@ -250,10 +250,18 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - deleting a kept snapshot: [097b34];
       - the sandbox-templates reference regen: [c321a3];
       - SDK exec/files helpers: deferred (PLAN §3.7).
-    - v1.0 destructive-batch quorum (§13), checked in the daemon: proto seams 525c199 + quorum_tiers 4f11548
-      ([f85da7]). pki keys/Merkle/sign + CLI `batch approve` + FakeDaemon: [402c97]. Server batch hold +
-      commands.approveBatch + ctx.commands.batch seam: [f85da7]. Metal/provision batch grouping: [f02367].
-      bcd enforcement: [6a20b8].
+    - v1.0 destructive-batch quorum (§13), checked in the daemon. The leaf is (subject, kind): a node id,
+      bmc:<address> or node:<target> (081928a, [f02367]'s finding).
+      - proto: 525c199, 4f11548;
+      - pki: 36387c8, 2d2fe6f;
+      - FakeDaemon: 4b48f08;
+      - bcd: e7ddb38 (both goldens);
+      - server: trust bundle b816600, the quorum module + commandBatches API ce067e0 (see its git note),
+        MCP read-only tools c86b30a.
+      Open:
+      - CommandQueue createBatch/EnqueueCommand.batchId + gateway attach ([c321a3]);
+      - CLI `batch approve` ([402c97]);
+      - the metal/provision funnels + metal.bulk ([f02367]).
     - head-check v4 GREEN at 109ffde (the v3 reds were the shared-worktree artifact).
     - Open, no owner:
       - the real-hardware nightly (needs hardware);
