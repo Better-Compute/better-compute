@@ -100,6 +100,7 @@ describe('iam setup', () => {
             'node.metal.hours',
             'vps.vcpu.hours',
             'vps.memory.gib.hours',
+            'vps.sandbox.warm',
           ],
           existing: [],
         },
@@ -115,7 +116,7 @@ describe('iam setup', () => {
     // Without --gpu-models every known family gets a meter.
     const all = await run(argv.slice(0, -2), env, fetch);
     expect(all.ok && all.value.meters.created.length + all.value.meters.existing.length).toBe(
-      gpuModelFamilies.filter((model) => model !== 'other').length + 3,
+      gpuModelFamilies.filter((model) => model !== 'other').length + 4,
     );
 
     // A tenant owner is not root: better-iam refuses.

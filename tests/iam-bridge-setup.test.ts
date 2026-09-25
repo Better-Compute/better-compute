@@ -108,6 +108,7 @@ describe('iam setup', () => {
       'node.metal.hours',
       'vps.vcpu.hours',
       'vps.memory.gib.hours',
+      'vps.sandbox.warm',
     ]);
     expect(() => gpuMeterKey('other')).toThrow(/No meter/);
     expect(() => gpuMeterKey('H 100')).toThrow(/No meter/);
@@ -124,7 +125,13 @@ describe('iam setup', () => {
       unit: 'hour',
     });
     expect(await setupIamMeters(f.iam.api, root, meters)).toEqual({
-      created: ['gpu.b200.hours', 'node.metal.hours', 'vps.vcpu.hours', 'vps.memory.gib.hours'],
+      created: [
+        'gpu.b200.hours',
+        'node.metal.hours',
+        'vps.vcpu.hours',
+        'vps.memory.gib.hours',
+        'vps.sandbox.warm',
+      ],
       existing: ['gpu.h100.hours'],
     });
     expect((await setupIamMeters(f.iam.api, root, meters)).created).toEqual([]);

@@ -22,7 +22,10 @@ export function gpuMeterKey(gpuModel: string): string {
   return key;
 }
 
-/** The root meters (§12.7): one per GPU model, plus metal node hours and VPS vCPU and memory hours. */
+/**
+ * The root meters (§12.7): one per GPU model, plus metal node hours, VPS vCPU and memory hours, and warm sandbox
+ * vCPU hours.
+ */
 export function computeMeters(gpuModels: readonly string[]): ComputeMeter[] {
   return [
     ...[...new Set(gpuModels)]
@@ -31,6 +34,8 @@ export function computeMeters(gpuModels: readonly string[]): ComputeMeter[] {
     { key: 'node.metal.hours', name: 'Bare-metal node hours', unit: 'hour' },
     { key: 'vps.vcpu.hours', name: 'VPS vCPU hours', unit: 'hour' },
     { key: 'vps.memory.gib.hours', name: 'VPS memory GiB hours', unit: 'hour' },
+    // §3.7: idle warm-pool capacity, billed to the template's tenant until a sandbox claims it.
+    { key: 'vps.sandbox.warm', name: 'Warm sandbox vCPU hours', unit: 'hour' },
   ];
 }
 
