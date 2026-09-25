@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ComputeError } from '@better-compute/core';
+import { apiMethod, ComputeError } from '@better-compute/core';
 import {
   CliError,
   cliManifest,
@@ -142,6 +142,33 @@ describe('help and the manifest', () => {
       const flags = (command.flags ?? []).map((flag) => flag.flag);
       expect(flags.filter((flag, index) => flags.indexOf(flag) !== index), command.name).toEqual([]);
     }
+  });
+
+  it('names only API methods that exist in its summaries: `(group.method)`', async () => {
+    const named = cliManifest().commands.flatMap((command: { name: string; summary: string }) =>
+      [...command.summary.matchAll(/\b([a-z][A-Za-z]+)\.([a-z][A-Za-z]+)\b/g)].map((match) => ({
+        command: command.name,
+        group: match[1]!,
+        method: match[2]!,
+      })),
+    );
+    expect(named.length).toBeGreaterThan(100);
+    // The §9.2 table, and the live registry's methods beyond it (as the docs generator records them).
+    const registry = JSON.parse(await readFile(join(import.meta.dirname, '../apps/docs/generated/api.json'), 'utf8')) as {
+      group: string;
+      methods: { method: string }[];
+    }[];
+    const served = new Set(registry.flatMap((group) => group.methods.map((method) => `${group.group}.${method.method}`)));
+    expect(named.filter((ref) => !apiMethod(ref.group, ref.method) && !served.has(`${ref.group}.${ref.method}`))).toEqual([]);
+    // And every literal route the commands call.
+    const dir = join(import.meta.dirname, '../packages/cli/src/commands');
+    const { readdir } = await import('node:fs/promises');
+    const routes: string[] = [];
+    for (const file of await readdir(dir))
+      for (const match of (await readFile(join(dir, file), 'utf8')).matchAll(/\.call(?:<[^>]*>)?\(\s*'([A-Za-z]+)\/([A-Za-z]+)'/g))
+        routes.push(`${match[1]}.${match[2]}`);
+    expect(routes.length).toBeGreaterThan(100);
+    expect(routes.filter((route) => !served.has(route))).toEqual([]);
   });
 
   it('prints every command as JSON with help --json', async () => {
