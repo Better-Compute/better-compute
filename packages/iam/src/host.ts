@@ -267,6 +267,131 @@ export function createInboxHandler(
   };
 }
 
+// --- Admission refresh (§12.4 in remote mode) ------------------------------------------------------------------
+// An admission commits its draft or pending change in compute's transaction 1, then asks IAM to decide on it. The
+// IAM host's replica projection may still hold the older row (tail interval plus replication lag), so compute's
+// remote port first posts a signed refresh: the host waits until its replica has replayed compute's WAL position
+// from after the commit, then re-reads the row. Compute fails the admission when this fails (fail closed).
+
+/** The signed body of a refresh request. */
+export interface RefreshRequest {
+  purpose: 'refresh';
+  tenantId: string;
+  /** The projection kind (the IAM type without its prefix). */
+  type: string;
+  id: string;
+  /** compute's `pg_current_wal_lsn()` after the commit; the replica must have replayed it. */
+  lsn?: string;
+}
+
+// Ids are opaque (drafts are `draft:<idempotency key>`): any printable string, bounded.
+const idPattern = /^[^\s\u0000-\u001f\u007f]{1,512}$/;
+const lsnPattern = /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/i;
+
+/** Signs a refresh body as compute's remote port sends it (header `x-better-compute-signature`). */
+export function signRefresh(
+  secret: string,
+  request: RefreshRequest,
+  now: number,
+): { body: string; signature: string } {
+  checkSecret(secret);
+  const body = JSON.stringify(request);
+  return { body, signature: `t=${now},v1=${sign(secret, now, body)}` };
+}
+
+export interface RefreshHandlerOptions {
+  projection: AuthzProjection;
+  /** Shared with compute's `remoteIam({ refresh })`, at least 32 characters (use a different one than the inbox's). */
+  secret: string;
+  /**
+   * The projection's replica connection: a request carrying an LSN waits until `pg_last_wal_replay_lsn()` reached
+   * it (a primary is always caught up). Without it the LSN is not waited for.
+   */
+  sql?: Pick<SqlExecutor, 'query'>;
+  /** How long to wait for the replica (default 2000 ms), polling every `pollMs` (default 10). */
+  timeoutMs?: number;
+  pollMs?: number;
+  clock?: Clock;
+  toleranceMs?: number;
+}
+
+/** Whether the replica behind `sql` has replayed `lsn` (true on a primary). */
+async function replayed(sql: Pick<SqlExecutor, 'query'>, lsn: string): Promise<boolean> {
+  const { rows } = await sql.query<{ caught: boolean }>(
+    `SELECT CASE WHEN pg_is_in_recovery() THEN coalesce(pg_last_wal_replay_lsn() >= $1::pg_lsn, false)
+                 ELSE true END AS caught`,
+    [lsn],
+  );
+  return rows[0]?.caught === true;
+}
+
+/**
+ * The IAM host's refresh endpoint (mount it next to better-iam's routes, e.g. `POST /compute/refresh`): verifies the
+ * signature and timestamp, waits for the replica to replay compute's commit, then re-reads the row into the
+ * projection. 200 when refreshed; 401 on a bad signature; 503 while the projection is not loaded; 504 when the
+ * replica did not catch up in time (compute then fails the admission).
+ */
+export function createRefreshHandler(
+  options: RefreshHandlerOptions,
+): (request: Request) => Promise<Response> {
+  checkSecret(options.secret);
+  const clock = options.clock ?? systemClock;
+  const toleranceMs = options.toleranceMs ?? 300_000;
+  const timeoutMs = options.timeoutMs ?? 2_000;
+  const pollMs = options.pollMs ?? 10;
+  const unauthorized = () =>
+    json(401, { error: { code: 'UNAUTHENTICATED', message: 'Bad signature' } });
+  return async (request) => {
+    if (request.method !== 'POST')
+      return json(405, { error: { code: 'METHOD_NOT_ALLOWED', message: 'POST only' } });
+    const body = await request.text();
+    if (Buffer.byteLength(body) > 16_384)
+      return json(413, { error: { code: 'PAYLOAD_TOO_LARGE', message: 'Body too large' } });
+    const match = /^t=(\d{1,16}),v1=([0-9a-f]{64})$/.exec(
+      request.headers.get(signatureHeader) ?? '',
+    );
+    if (!match) return unauthorized();
+    const timestamp = Number(match[1]);
+    if (Math.abs(clock.now() - timestamp) > toleranceMs) return unauthorized();
+    const expected = Buffer.from(sign(options.secret, timestamp, body), 'hex');
+    if (!timingSafeEqual(expected, Buffer.from(match[2]!, 'hex'))) return unauthorized();
+    let input: RefreshRequest;
+    try {
+      const parsed = JSON.parse(body) as Partial<RefreshRequest>;
+      if (
+        parsed.purpose !== 'refresh' ||
+        typeof parsed.tenantId !== 'string' ||
+        !idPattern.test(parsed.tenantId) ||
+        typeof parsed.type !== 'string' ||
+        !/^[a-z][a-z0-9-]{0,63}$/.test(parsed.type) ||
+        typeof parsed.id !== 'string' ||
+        !idPattern.test(parsed.id) ||
+        (parsed.lsn !== undefined &&
+          (typeof parsed.lsn !== 'string' || !lsnPattern.test(parsed.lsn)))
+      )
+        throw new Error('malformed refresh');
+      input = parsed as RefreshRequest;
+    } catch (error) {
+      return json(400, { error: { code: 'INVALID_INPUT', message: (error as Error).message } });
+    }
+    if (!options.projection.ready)
+      return json(503, { error: { code: 'UNAVAILABLE', message: 'The projection is not loaded' } });
+    if (input.lsn !== undefined && options.sql) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        if (await replayed(options.sql, input.lsn)) break;
+        if (Date.now() >= deadline)
+          return json(504, {
+            error: { code: 'UNAVAILABLE', message: 'The replica has not replayed the commit yet' },
+          });
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+    }
+    await options.projection.refresh(input.type, input.id, input.tenantId);
+    return json(200, { refreshed: true });
+  };
+}
+
 export interface ComputeIamHostOptions extends ComputeCatalogOptions {
   /** A replica of compute's authz projection (`replicaProjection({ sql })`). */
   projection: AuthzProjection;
@@ -289,6 +414,10 @@ export interface ComputeIamHost {
   /** Loads the projection and starts tailing; until then compute decisions on this host deny. */
   start(): Promise<void>;
   stop(): void;
+  /** `createRefreshHandler` over this host's projection (mount it for compute's `remoteIam({ refresh })`). */
+  refreshHandler(
+    options: Omit<RefreshHandlerOptions, 'projection'>,
+  ): (request: Request) => Promise<Response>;
 }
 
 /**
@@ -318,5 +447,7 @@ export function computeIamHost(options: ComputeIamHostOptions): ComputeIamHost {
     projection: options.projection,
     start: () => options.projection.start(),
     stop: () => options.projection.stop(),
+    refreshHandler: (handler) =>
+      createRefreshHandler({ ...handler, projection: options.projection }),
   };
 }

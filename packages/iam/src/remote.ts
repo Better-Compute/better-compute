@@ -15,7 +15,9 @@ import {
   type Clock,
   type Credential,
   type IamPort,
+  type SqlExecutor,
 } from '@better-compute/core';
+import { signRefresh } from './host.js';
 import { confirmationValidSeconds } from './confirmation.js';
 import { sessionAuthorization, type ListedSession } from './sessions.js';
 import { authorizeManyLimit, fromIamError } from './embedded.js';
@@ -153,6 +155,20 @@ export interface RemoteIamOptions {
    * `iam:identities:read` and `iam:policies:simulate`. Default false: the port has no `authorizeSession`.
    */
   authorizeSessions?: boolean;
+  /**
+   * Admission refresh (§12.4): before an admission's `require`, post a signed refresh to the IAM host's
+   * `createRefreshHandler` so it decides on the row transaction 1 committed, not its replica's older copy.
+   * `sql` (compute's primary) supplies the WAL position the replica must reach. Without this option the port has
+   * no `refreshResource` and remote admissions can decide on a row up to the replica lag plus 1 s old.
+   */
+  refresh?: {
+    url: string;
+    secret: string;
+    sql?: Pick<SqlExecutor, 'query'>;
+    /** Default `compute-`. */
+    typePrefix?: string;
+    fetch?: typeof globalThis.fetch;
+  };
 }
 
 export interface RemoteIam extends IamPort {
@@ -456,5 +472,57 @@ export function remoteIam(options: RemoteIamOptions): RemoteIam {
     });
     port.authorizeSession = (session, decision) => mapped(() => decide(session, decision));
   }
+  if (options.refresh) port.refreshResource = remoteRefresher(options.refresh, options.clock);
   return port;
+}
+
+/** `refreshResource` over the IAM host's refresh endpoint; any failure throws, so the admission fails closed. */
+export function remoteRefresher(
+  refresh: NonNullable<RemoteIamOptions['refresh']>,
+  clock: Clock = systemClock,
+): NonNullable<IamPort['refreshResource']> {
+  const prefix = refresh.typePrefix ?? 'compute-';
+  const send = refresh.fetch ?? globalThis.fetch;
+  return async (tenantId, resource) => {
+    // Other types are the IAM host's own, resolved without compute's projection.
+    if (!resource.type.startsWith(prefix)) return;
+    let lsn: string | undefined;
+    if (refresh.sql) {
+      const { rows } = await refresh.sql.query<{ lsn: string }>(
+        'SELECT pg_current_wal_lsn()::text AS lsn',
+      );
+      lsn = rows[0]?.lsn;
+    }
+    const { body, signature } = signRefresh(
+      refresh.secret,
+      {
+        purpose: 'refresh',
+        tenantId,
+        type: resource.type.slice(prefix.length),
+        id: resource.id,
+        ...(lsn ? { lsn } : {}),
+      },
+      clock.now(),
+    );
+    let response: Response;
+    try {
+      response = await send(refresh.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-better-compute-signature': signature },
+        body,
+      });
+    } catch (error) {
+      throw new ComputeError(
+        'UNAVAILABLE',
+        'The IAM host refresh endpoint is unreachable',
+        undefined,
+        { cause: String(error) },
+      );
+    }
+    if (!response.ok)
+      throw new ComputeError(
+        'UNAVAILABLE',
+        `The IAM host could not refresh ${resource.type}/${resource.id} (${response.status})`,
+      );
+  };
 }

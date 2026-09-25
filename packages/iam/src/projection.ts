@@ -103,6 +103,11 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
   let ready = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   let syncing: Promise<number> | undefined;
+  // Fresh single-row reads (refresh, the miss path) against tail pages read concurrently: a page whose read began
+  // before a row's fresh read finished may carry an older state of that row, so it re-reads the row instead of
+  // applying its copy. `epoch` orders page starts and fresh reads; `freshAt` holds each fresh row's epoch.
+  let epoch = 0;
+  const freshAt = new Map<string, number>();
 
   const put = (row: ProjectionRow) => {
     rows.set(key(row.type, row.id, row.tenantId), freezeRow(row));
@@ -124,6 +129,24 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
     return source;
   };
 
+  /** Puts (or drops) a row read fresh by primary key, and marks it so older tail pages don't overwrite it. */
+  const putFresh = (type: string, id: string, tenantId: string, row: ProjectionRow | undefined) => {
+    if (row) put(row);
+    else remove(type, id, tenantId);
+    freshAt.set(key(type, id, tenantId), ++epoch);
+  };
+
+  const readFresh = async (type: string, id: string, tenantId: string) => {
+    const from = requireSource();
+    try {
+      putFresh(type, id, tenantId, await from.get(type, id, tenantId));
+    } catch (error) {
+      // Fail closed: without the row the next `resolve` takes the bounded miss path, never a stale copy.
+      remove(type, id, tenantId);
+      options.onError?.(error);
+    }
+  };
+
   const sync = (): Promise<number> => {
     syncing ??= (async () => {
       try {
@@ -131,15 +154,26 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
         if (!cursor) return 0;
         let applied = 0;
         for (;;) {
+          const started = ++epoch;
+          // Marks older than this page's start concern no page from now on.
+          for (const [marked, at] of freshAt) if (at < started) freshAt.delete(marked);
           const page = await from.changes(cursor, batch);
           const current = new Map(
             page.rows.map((row) => [key(row.type, row.id, row.tenantId), row]),
           );
+          const reread: ProjectionChange[] = [];
           for (const change of page.changed) {
-            const row = current.get(key(change.type, change.id, change.tenantId));
+            const changeKey = key(change.type, change.id, change.tenantId);
+            if ((freshAt.get(changeKey) ?? 0) > started) {
+              // Read fresh while this page was being read: the page's copy may be older.
+              reread.push(change);
+              continue;
+            }
+            const row = current.get(changeKey);
             if (row) put(row);
             else remove(change.type, change.id, change.tenantId);
           }
+          for (const change of reread) await readFresh(change.type, change.id, change.tenantId);
           applied += page.changed.length;
           cursor = page.cursor;
           if (page.changed.length < batch) return applied;
@@ -176,7 +210,7 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
         ]);
         if (row === 'timeout') return { status: 'timeout' };
         if (!row) return { status: 'miss' };
-        put(row);
+        putFresh(type, id, tenantId, row);
         return { status: 'hit', row: rows.get(key(type, id, tenantId))! };
       } catch (error) {
         options.onError?.(error);
@@ -198,14 +232,7 @@ export function createAuthzProjection(options: AuthzProjectionOptions = {}): Aut
     sync,
     async refresh(type, id, tenantId) {
       if (!ready || !source) return;
-      try {
-        const row = await source.get(type, id, tenantId);
-        if (row) put(row);
-        else remove(type, id, tenantId);
-      } catch (error) {
-        remove(type, id, tenantId);
-        options.onError?.(error);
-      }
+      await readFresh(type, id, tenantId);
     },
     async start() {
       await this.load();

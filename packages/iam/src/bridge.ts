@@ -268,7 +268,23 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
       portTaken();
       const { iamDatabase, inboxTable, ...options } = remoteOptions;
       rootTenantId = options.rootTenantId;
-      const remote = remoteIam({ ...options, successorOf: options.successorOf ?? successorOf });
+      const remote = remoteIam({
+        ...options,
+        successorOf: options.successorOf ?? successorOf,
+        // The admission refresh reads the WAL position from compute's own store once the bridge is bound.
+        ...(options.refresh
+          ? {
+              refresh: {
+                typePrefix: catalog.typePrefix,
+                sql: {
+                  query: async (text: string, params?: readonly unknown[]) =>
+                    requireSql().query(text, params),
+                } as Pick<SqlExecutor, 'query'>,
+                ...options.refresh,
+              },
+            }
+          : {}),
+      });
       flags = remote.flags;
       if (iamDatabase)
         module.reconcilers!.push(
@@ -324,7 +340,11 @@ export function createComputeIamBridge(options: ComputeIamBridgeOptions = {}): C
       // §12.4: an admission's committed draft or pending change is in memory before `require`.
       port.refreshResource = async (tenantId, resource) => {
         if (!resource.type.startsWith(catalog.typePrefix)) return;
-        await projection.refresh(resource.type.slice(catalog.typePrefix.length), resource.id, tenantId);
+        await projection.refresh(
+          resource.type.slice(catalog.typePrefix.length),
+          resource.id,
+          tenantId,
+        );
       };
       return port;
     },
