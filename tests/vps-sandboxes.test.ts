@@ -1423,12 +1423,15 @@ describe('template network and versions', () => {
     // ...while a 30-minute one fits it.
     const claimed = await createSandbox(template.id, { idempotencyKey: 'short', ttlSeconds: 1800 });
     expect(claimed).toMatchObject({ warm: true, instanceId: warm });
+    recorded.pending = [];
     await expect(
       call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: claimed.id, by: '30m' }),
     ).rejects.toMatchObject({
       code: 'INVALID_INPUT',
       message: expect.stringContaining('host certificate is valid until'),
     });
+    // Refused before the pending lifetime is written: no later decision sees the refused one.
+    expect(recorded.pending).toEqual([]);
     expect(
       await call('sandboxes', 'extend', { tenantId: 'acme', sandboxId: claimed.id, by: '10m' }),
     ).toMatchObject({ expiresAt: T0 + 40 * 60_000 });
@@ -1442,6 +1445,38 @@ describe('template network and versions', () => {
     const after = await warmIds();
     expect(after).toHaveLength(1);
     expect(after).not.toContain(refill);
+    // A certified instance with no known end (written between vps/0011 and 0012) goes too.
+    await hostsReport('paused');
+    await db.query(
+      `UPDATE instances SET host_certified = true, host_cert_valid_before = NULL WHERE id = $1`,
+      [after[0]],
+    );
+    await reconcileSandboxes();
+    expect(await warmIds()).not.toContain(after[0]);
+  });
+
+  it('never claims a private warm instance on a host that stopped enforcing it, and replaces it', async () => {
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       SELECT id, 'bc.dev/cap.instance.network-policy', '1', 'system' FROM nodes`,
+    );
+    const template = await createTemplate({ name: 'closed', network: 'none', warm: { min: 1 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const {
+      rows: [warm],
+    } = await db.query<{ id: string }>(`SELECT id FROM instances WHERE warm_template_id = $1`, [
+      template.id,
+    ]);
+    // Its host's bcd is downgraded: the capability label goes, and the guest would get full egress.
+    await db.query(`DELETE FROM node_labels WHERE key = 'bc.dev/cap.instance.network-policy'`);
+    expect((await createSandbox(template.id)).warm).toBe(false);
+    await reconcileSandboxes();
+    const { rows } = await db.query<{ desired_state: string }>(
+      `SELECT desired_state FROM instances WHERE id = $1`,
+      [warm!.id],
+    );
+    expect(rows[0]!.desired_state).toBe('deleted');
   });
 
   it('stamps readyAt the moment the instance runs, not a sandbox pass later', async () => {
@@ -1760,6 +1795,35 @@ describe('IAM reactions (§12.8)', () => {
       `SELECT owner_identity_id FROM sandbox_snapshots WHERE id = 'snap_kept'`,
     );
     expect(snapshot.rows[0]!.owner_identity_id).toBe('usr_bob');
+  });
+
+  it("drop the departed owner's agent from what moves: its later suspension withdraws nothing", async () => {
+    const template = await createTemplate();
+    const sandbox = await createSandbox(template.id, { idempotencyKey: 'agent' }, agent);
+    await react((tx, context) =>
+      reassignSandboxes(tx, context, {
+        tenantId: 'acme',
+        identityId: 'usr_alice',
+        successorId: 'usr_bob',
+        reason: 'identity:offboard',
+      }),
+    );
+    // Events arrive in any order (§12.8): the agent's suspension lands after the offboarding.
+    expect(
+      await react((tx, context) =>
+        withdrawAgentSandboxes(tx, context, {
+          tenantId: 'acme',
+          agentId: 'agt_1',
+          reason: 'agent:suspend',
+        }),
+      ),
+    ).toEqual({ deleted: [], reassigned: [] });
+    expect(await states()).toEqual({ [sandbox.id]: false });
+    const { rows } = await db.query<{ agent_id: string | null }>(
+      `SELECT agent_id FROM instances WHERE id = $1`,
+      [sandbox.instanceId],
+    );
+    expect(rows[0]!.agent_id).toBeNull();
   });
 
   it('delete an owner’s open sandboxes when nobody succeeds them', async () => {

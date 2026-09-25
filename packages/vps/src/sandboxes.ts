@@ -33,6 +33,7 @@ import {
   instanceAttributes,
   isSecretRef,
   moveInstance,
+  networkPolicyCapabilityLabel,
   publishInstance,
   readInstance,
   runtimeTable,
@@ -1553,7 +1554,7 @@ async function claimWarm(
     `SELECT id FROM instances
       WHERE warm_template_id = $1 AND tenant_id = $2 AND NOT draft AND desired_state <> 'deleted'
         AND state = ANY($3::text[]) AND warm_template_version = $4
-        AND (NOT host_certified OR host_cert_valid_before >= $5::timestamptz)
+        AND ${certificateCovers('', '$5::timestamptz')} AND NOT ${networkUnenforced('')}
       ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`,
     [
       template.id,
@@ -1846,14 +1847,17 @@ export async function reassignSandboxes(
       reassigned: [],
     };
 
-  const reown = async (instanceId: string) => {
+  // The departed owner's agent no longer speaks for what moves: its later suspension (events arrive
+  // in any order) must not withdraw the successor's sandboxes.
+  const reown = async (instanceId: string): Promise<InstanceRow | undefined> => {
     const { rowCount } = await tx.query(
-      `UPDATE instances SET owner_identity_id = $2, version = version + 1
+      `UPDATE instances SET owner_identity_id = $2, agent_id = NULL, delegation_id = NULL,
+                            version = version + 1
         WHERE id = $1 AND owner_identity_id = $3`,
       [instanceId, successor, input.identityId],
     );
     const row = rowCount > 0 ? await readInstance(tx, instanceId) : undefined;
-    if (!row || row.state === 'deleted') return;
+    if (!row || row.state === 'deleted') return undefined;
     await deps.authz.upsert(tx, {
       type: 'instance',
       id: row.id,
@@ -1863,36 +1867,36 @@ export async function reassignSandboxes(
       parentId: row.poolId,
       ownerId: successor,
     });
+    return row;
   };
 
   const reassigned: string[] = [];
   for (const raw of rows) {
     await tx.query(
-      `UPDATE sandboxes SET owner_identity_id = $2, version = version + 1 WHERE id = $1`,
+      `UPDATE sandboxes SET owner_identity_id = $2, agent_id = NULL, delegation_id = NULL,
+                            version = version + 1
+        WHERE id = $1`,
       [raw.id, successor],
     );
+    const instance = await reown(raw.instance_id);
     const template = await readTemplate(tx, raw.tenant_id, raw.template_id, { deleted: true });
-    const flavor = template
-      ? await readFlavorByName(tx, template.poolId, template.flavor)
-      : undefined;
+    // The shape the sandbox runs, not its template's current flavor (which may have changed since).
     await deps.authz.upsert(tx, {
       type: 'sandbox',
       id: raw.id,
       tenantId: raw.tenant_id,
-      attributes:
-        template && flavor
-          ? sandboxAttributes(
-              template,
-              flavor,
-              Number(raw.ttl_seconds),
-              raw.from_snapshot ?? undefined,
-            )
-          : { templateId: raw.template_id, ttlSeconds: Number(raw.ttl_seconds) },
+      attributes: instance
+        ? sandboxAttributes(
+            { id: raw.template_id, warm: template?.warm ?? { min: 0, max: 0 } },
+            instance.shape,
+            Number(raw.ttl_seconds),
+            raw.from_snapshot ?? undefined,
+          )
+        : { templateId: raw.template_id, ttlSeconds: Number(raw.ttl_seconds) },
       parentType: 'pool',
       parentId: raw.pool_id,
       ownerId: successor,
     });
-    await reown(raw.instance_id);
     await publishSandbox(deps, tx, raw, 'sandbox.reassigned', {
       from: input.identityId,
       to: successor,
@@ -1950,8 +1954,38 @@ export async function reassignSandboxes(
   return { deleted: [], reassigned };
 }
 
+/** Both reactions, for the host's `iamReactions` (after capacity's, in the inbox transaction). */
+export const sandboxIamReactions = {
+  agent: withdrawAgentSandboxes,
+  identity: reassignSandboxes,
+} as const;
+
 function extendedExpiry(raw: RawSandbox, input: ExtendSandboxInput): number {
   return input.until ?? Number(raw.expires_ms) + input.by!;
+}
+
+/**
+ * An extend to `expires` stays within the template's `maxTtlSeconds` and, for a certified guest,
+ * its host certificate. Answers the template (deleted ones too), if any.
+ */
+async function assertExtendable(
+  tx: SqlTx,
+  raw: RawSandbox,
+  expires: number,
+  now: number,
+): Promise<TemplateRow | undefined> {
+  const template = await readTemplate(tx, raw.tenant_id, raw.template_id, { deleted: true });
+  const lifetime = Math.ceil((expires - Number(raw.created_ms)) / second);
+  if (template && lifetime > template.maxTtlSeconds)
+    throw new ComputeError(
+      'INVALID_INPUT',
+      `A sandbox of template ${template.name} lives at most ${template.maxTtlSeconds}s`,
+    );
+  if (expires > Number(raw.expires_ms)) {
+    const instance = await readInstance(tx, raw.instance_id);
+    assertCertificateCovers(instance?.hostCertValidBefore, expires, now, `Sandbox ${raw.id}`);
+  }
+  return template;
 }
 
 /**
@@ -1970,6 +2004,9 @@ export async function prepareExtendSandbox(
   const expires = extendedExpiry(raw, input);
   if (input.until !== undefined && expires <= Number(raw.expires_ms))
     return { status: 'replay', result: sandboxView(raw) };
+  // Refusals come before the pending lifetime: a throw in transaction 2 would roll back its clearing
+  // and leave every later decision on this sandbox made with the refused lifetime.
+  await assertExtendable(tx, raw, expires, context.clock.now());
   // The handler applies this absolute expiry, not "current + by" again: two concurrent extends
   // decided on the same lifetime must not add up to one no decision covered.
   input.until = expires;
@@ -2004,23 +2041,10 @@ export async function extendSandbox(
   const raw = await lockOpenSandbox(tx, input);
   if (raw.deleting_ms !== null)
     throw new ComputeError('INVALID_STATE', `Sandbox ${raw.id} is being deleted`);
-  const template = await readTemplate(tx, raw.tenant_id, raw.template_id, { deleted: true });
   const expires = extendedExpiry(raw, input);
   const lifetime = Math.ceil((expires - Number(raw.created_ms)) / second);
-  if (template && lifetime > template.maxTtlSeconds)
-    throw new ComputeError(
-      'INVALID_INPUT',
-      `A sandbox of template ${template.name} lives at most ${template.maxTtlSeconds}s`,
-    );
-  if (expires > Number(raw.expires_ms)) {
-    const instance = await readInstance(tx, raw.instance_id);
-    assertCertificateCovers(
-      instance?.hostCertValidBefore,
-      expires,
-      deps.clock.now(),
-      `Sandbox ${raw.id}`,
-    );
-  }
+  // Checked in transaction 1 already; again for a template changed in between.
+  const template = await assertExtendable(tx, raw, expires, deps.clock.now());
   await context.authz.setPending(
     tx,
     { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id },
@@ -2281,7 +2305,20 @@ export async function sandboxSelfCheck(sql: SqlExecutor): Promise<Finding[]> {
  */
 const warmStale = (a: string, version: string, now: string, cover: string) =>
   `(${a}warm_template_version IS DISTINCT FROM ${version} OR ${a}state IN ('error', 'lost')
-    OR (${a}host_certified AND ${a}host_cert_valid_before < ${now}::timestamptz + make_interval(secs => ${cover})))`;
+    OR NOT ${certificateCovers(a, `${now}::timestamptz + make_interval(secs => ${cover})`)}
+    OR ${networkUnenforced(a)})`;
+
+/** Whether an instance's host certificate, if it has one, lasts until `until` (none known: it does not). */
+const certificateCovers = (a: string, until: string) =>
+  `(NOT ${a}host_certified OR coalesce(${a}host_cert_valid_before, '-infinity'::timestamptz) >= ${until})`;
+
+/**
+ * A private or none network on a host that does not say it enforces it (placed before the
+ * capability constraint, or its bcd since downgraded): the guest would have full egress.
+ */
+const networkUnenforced = (a: string) =>
+  `(${a}network_policy IS NOT NULL AND ${a}node_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM node_labels nl WHERE nl.node_id = ${a}node_id AND nl.key = '${networkPolicyCapabilityLabel}'))`;
 
 /**
  * Deletes up to `count` of a template's warm instances: stale ones (`warmStale`), or else current

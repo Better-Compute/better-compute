@@ -194,7 +194,8 @@ show it.
   enforces it on the instance's taps with nftables and fails closed without NIC addresses, so
   `private` and `none` need the pool's IP range. They place only on hosts labelled
   `bc.dev/cap.instance.network-policy` (the bcd capability), never on an older bcd that would drop the
-  policy. `private` means the pool's whole IPAM subnet, so on a pool offered to several tenants it
+  policy. A warm instance whose host loses that label (a downgraded bcd) is never claimed and is
+  replaced. `private` means the pool's whole IPAM subnet, so on a pool offered to several tenants it
   includes theirs.
 - **Secrets.** Secrets are write-only, but a sandbox reads whatever its template names. A template's
   env and `secret://` user data must therefore be secrets the tenant wrote with `secrets.put` (a
@@ -208,7 +209,8 @@ show it.
   `INVALID_CONFIG`.
 
 - **IAM reactions (§12.8).** The host calls these from the iam bridge's inbox handlers, in the
-  inbox transaction, next to capacity's reservation reactions. Both are level-triggered.
+  inbox transaction, next to capacity's reservation reactions. Both are level-triggered, and
+  `sandboxIamReactions` is `{ agent, identity }` for the host's `iamReactions`.
   - `withdrawAgentSandboxes(tx, context, { tenantId, agentId | delegationId | allAgents, reason })`
     handles an agent suspended or a delegation revoked. It deletes the open sandboxes they created,
     after `sandbox.withdrawn { reason }`. A sandbox is the agent's own workspace, so unlike a started
@@ -216,7 +218,8 @@ show it.
   - `reassignSandboxes(tx, context, { tenantId, identityId, successorId?, reason })` handles an owner
     who is gone. With a successor, it moves the owner's open sandboxes and their instances, their
     snapshots, and the templates they wrote (with their warm instances) to the successor, authz rows
-    included (`sandbox.reassigned`). Without one, it deletes the owner's open sandboxes; their
+    included (`sandbox.reassigned`), and clears their agent attribution, so the departed owner's
+    agent being suspended later withdraws nothing. Without one, it deletes the owner's open sandboxes; their
     templates and kept snapshots stay for the tenant's administrators.
 
 ## Tenant teardown (§12.8)
