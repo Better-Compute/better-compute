@@ -6,6 +6,7 @@ import {
   type AdmissionContext,
   type AdmissionPlan,
   type Caller,
+  type CommandQueue,
   type Credential,
   type Decision,
   type MethodAdmission,
@@ -26,10 +27,21 @@ import {
   type Registry,
 } from './registry.js';
 
+/** The command queue a traced request's method sees: its commands carry the request's trace. */
+function tracedCommands(commands: CommandQueue, traceparent: string): CommandQueue {
+  return {
+    enqueue: (tx, command) =>
+      commands.enqueue(tx, command.traceparent ? command : { ...command, traceparent }),
+    cancel: (tx, commandId) => commands.cancel(tx, commandId),
+  };
+}
+
 /** Per-call details the transport supplies. */
 export interface CallOptions {
   /** The caller's valid `X-Request-Id`, or one the server generated. */
   requestId: string;
+  /** The request's valid W3C `traceparent`, passed on to the commands the method enqueues. */
+  traceparent?: string;
   signal?: AbortSignal;
 }
 
@@ -406,10 +418,15 @@ export function createOperations(
 
   return {
     caches: publicCaches(caches),
-    async call(entry, raw, rawInput, { requestId, signal }) {
+    async call(entry, raw, rawInput, { requestId, signal, traceparent }) {
       const { definition, path } = entry;
       const credential = presentedCredential(raw, acceptIamCookie);
-      const base = { ...context, requestId, ...(signal ? { signal } : {}) };
+      const base = {
+        ...context,
+        requestId,
+        ...(signal ? { signal } : {}),
+        ...(traceparent ? { traceparent, commands: tracedCommands(context.commands, traceparent) } : {}),
+      };
 
       if (definition.kind === 'public') {
         const input = definition.validate(rawInput ?? {});

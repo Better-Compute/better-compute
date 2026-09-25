@@ -26,6 +26,15 @@ function requestIdOf(headers: Headers): string {
   return value && requestIdPattern.test(value) ? value : newId('req');
 }
 
+/** W3C trace context, version 00; the all-zero trace and parent ids are invalid. */
+const traceparentPattern = /^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$/;
+
+/** The caller's `traceparent` when it is a valid W3C trace context; otherwise none (dropped). */
+function traceparentOf(headers: Headers): string | undefined {
+  const value = headers.get('traceparent')?.trim();
+  return value && traceparentPattern.test(value) ? value : undefined;
+}
+
 /** Reads at most `limit` bytes of the body; more is `PAYLOAD_TOO_LARGE`. */
 async function limitedBody(request: Request, limit: number): Promise<Uint8Array> {
   const declared = Number(request.headers.get('content-length'));
@@ -213,9 +222,11 @@ export function createHttp({ options, registry, operations }: HttpHost) {
       // IAM sees the request id the caller sees.
       const headers = new Headers(request.headers);
       headers.set('x-request-id', requestId);
+      const traceparent = traceparentOf(request.headers);
       const data = await operations.call(method, { headers }, body, {
         requestId,
         signal: request.signal,
+        ...(traceparent ? { traceparent } : {}),
       });
       return answer(Response.json({ data: data ?? null }, { headers: hardened }));
     } catch (error) {

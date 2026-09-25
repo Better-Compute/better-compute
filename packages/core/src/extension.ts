@@ -915,6 +915,11 @@ export interface MethodContext extends ModuleContext {
   /** Allowed mutations: the recorded decision context. */
   admission?: AdmissionContext;
   requestId: string;
+  /**
+   * The request's W3C trace context (`traceparent` header), when it was valid. Commands the method
+   * enqueues through `commands` carry it unless they set their own (§14).
+   */
+  traceparent?: string;
   signal?: AbortSignal;
   /**
    * Composite methods (e.g. `fleet.apply`), phase 1: decides another method's call exactly as the
