@@ -1,5 +1,6 @@
 import {
   defineModule,
+  type CommandKindSpec,
   type ComputeModule,
   type ModuleContext,
   type ProfileDocument,
@@ -18,7 +19,7 @@ import {
   type EngineContext,
   type EngineOptions,
 } from './engine.js';
-import { stepRegistry } from './expand.js';
+import { driverInvokeKind, stepRegistry } from './expand.js';
 import { provisionMigrations } from './migrations.js';
 import type { ImageSignatureVerifier } from './images.js';
 import { profileSource } from './profiles.js';
@@ -57,6 +58,22 @@ export interface ProvisionOptions {
   /** How `images.register` checks signatures (default: Ed25519/P-256 keys in `image_signers`). */
   imageVerifier?: ImageSignatureVerifier;
 }
+
+/**
+ * `driver.invoke` (§5.1, §5.5): one driver operation of a driver the agent hosts (built into bcd,
+ * or a bcx plugin), sent by the engine for profile steps that name a driver operation. Driver
+ * operations include power and deploy, so the kind is destructive (always signed) and never
+ * retried blindly; each step's own timeout overrides `notAfter`.
+ */
+export const driverInvokeCommandKind: CommandKindSpec = Object.freeze({
+  kind: driverInvokeKind,
+  lane: 'provision',
+  retrySafe: false,
+  destructive: true,
+  timeout: '10m',
+  roles: ['node', 'site', 'ramdisk'],
+  payload: Object.freeze({ kind: 'message', typeName: 'bettercompute.agent.v1.DriverInvokeRequest' }),
+} satisfies CommandKindSpec);
 
 /** The provision module, plus the `WorkflowEngine` the host puts on `ModuleContext.workflows`. */
 export interface ProvisionModule extends ComputeModule<'provision', ProvisionApi> {
@@ -112,6 +129,7 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
     extensions: steps.list().filter((step) => !borrowed.has(step)),
     profiles: moduleProfiles.filter((profile) => !borrowedProfiles.has(profile)),
     nodeSpec: provisionNodeSpec([...builtinConfigUnits, ...(options.configUnits ?? [])]),
+    commandKinds: [driverInvokeCommandKind],
     reconcilers: remediation
       ? [
           reconciler,
