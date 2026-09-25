@@ -28,16 +28,23 @@ func (a *Agent) IMDS() *imds.Service {
 	})
 }
 
-// instanceOf maps a request's source address to the running instance holding it.
+// instanceOf maps a request's source address to the running instance holding it. The address is
+// only trusted while the anti-spoofing rules are loaded (an instance cannot send from another's
+// address); a host-local (loopback) caller is never an instance, and an address two instances
+// claim names neither.
 func (a *Agent) instanceOf(r *http.Request) (string, bool) {
+	if !a.spoofGuard.Load() {
+		return "", false
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return "", false
 	}
 	ip := net.ParseIP(host)
-	if ip == nil {
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
 		return "", false
 	}
+	found := ""
 	for _, rt := range a.o.Runtimes {
 		domains, err := rt.List(r.Context())
 		if err != nil {
@@ -53,12 +60,16 @@ func (a *Agent) instanceOf(r *http.Request) (string, bool) {
 					addr = net.ParseIP(cidr)
 				}
 				if addr != nil && addr.Equal(ip) {
-					return d.ID, true
+					if found != "" && found != d.ID {
+						a.log.Warn("metadata request refused: two instances hold its address", "address", ip.String(), "instances", found+","+d.ID)
+						return "", false
+					}
+					found = d.ID
 				}
 			}
 		}
 	}
-	return "", false
+	return found, found != ""
 }
 
 // ServeIMDS serves the metadata service on listen (the host's link-local metadata address) until

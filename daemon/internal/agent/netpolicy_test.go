@@ -58,13 +58,39 @@ func TestFirewallRuleset(t *testing.T) {
 	if strings.Contains(ruleset, "iifname "+tap("inst_none")+" ip daddr") {
 		t.Errorf("a NONE instance may reach its subnet:\n%s", ruleset)
 	}
-	for _, id := range []string{"inst_egress", "inst_noipam", "inst_gone"} {
+	for _, id := range []string{"inst_noipam", "inst_gone"} {
 		if strings.Contains(ruleset, tap(id)) {
 			t.Errorf("%s has rules", id)
 		}
 	}
-	// No enforced policy: the table is only removed.
-	if empty, _ := firewallRuleset([]*agentv1.InstanceSpec{egress}); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\n" {
+	// Every addressed NIC is guarded against spoofing, whatever its policy, before any accept.
+	for _, want := range []string{
+		"iifname " + tap("inst_egress") + " ether saddr != 52:54:00:00:00:01 drop",
+		"iifname " + tap("inst_egress") + " ether type ip ip saddr != { 10.0.0.5, 0.0.0.0 } drop",
+		"iifname " + tap("inst_egress") + " ether type arp arp saddr ip != { 10.0.0.5, 0.0.0.0 } drop",
+		"iifname " + tap("inst_private") + " ether type ip6 ip6 saddr != { fd00::6, fe80::/10, :: } drop",
+	} {
+		if !strings.Contains(ruleset, want) {
+			t.Errorf("ruleset lacks %q", want)
+		}
+	}
+	if strings.Contains(ruleset, tap("inst_egress")+" drop\n") || strings.Contains(ruleset, "oifname "+tap("inst_egress")) {
+		t.Errorf("an egress instance is restricted beyond anti-spoofing:\n%s", ruleset)
+	}
+	input := ruleset[strings.Index(ruleset, "chain input"):strings.Index(ruleset, "chain forward")]
+	if strings.Index(input, "ether saddr != ") > strings.Index(input, " accept\n") {
+		t.Errorf("an accept precedes the anti-spoofing rules:\n%s", input)
+	}
+	// A malformed MAC never reaches the ruleset.
+	odd := vm("inst_odd", running)
+	odd.Nics[0].Mac = `52:54:00:00:00:01" accept; drop "`
+	if rs, _ := firewallRuleset([]*agentv1.InstanceSpec{odd}); strings.Contains(rs, "accept;") {
+		t.Fatalf("the MAC was injected:\n%s", rs)
+	}
+	// Nothing addressed: the table is only removed.
+	bare := vm("inst_bare", running)
+	bare.Nics[0].Addresses = nil
+	if empty, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\n" {
 		t.Fatalf("empty ruleset = %q", empty)
 	}
 	if n := len(runtime.TapName("inst_"+strings.Repeat("x", 200), 99)); n > 15 {
@@ -150,5 +176,9 @@ func TestNetworkPoliciesAreEnforcedBeforeInstancesRun(t *testing.T) {
 		if d.ID == "inst_sbx" && d.State != runtime.StateStopped {
 			t.Fatalf("an instance whose policy could not be loaded is %s", d.State)
 		}
+	}
+	// Without the anti-spoofing rules the metadata service names no instance.
+	if h.agent.spoofGuard.Load() {
+		t.Fatal("the guard is on although the rules did not load")
 	}
 }

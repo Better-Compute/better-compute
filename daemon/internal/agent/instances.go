@@ -34,31 +34,29 @@ type instancesConverger struct {
 	firewall string
 }
 
-// enforceNetworkPolicies loads the instances' network-policy rules when they changed. It returns
-// the instances that must not run: a policy that cannot be expressed, or rules that failed to load
-// (fail closed). A host without nft and without enforced policies is fine.
+// enforceNetworkPolicies loads the instances' firewall (anti-spoofing and network policies) when it
+// changed. It returns the instances that must not run: a policy that cannot be expressed, or rules
+// that failed to load (fail closed). Egress instances run without the rules, but the metadata
+// service stays off; a failed load is retried on the next pass.
 func (c *instancesConverger) enforceNetworkPolicies(ctx context.Context, specs []*agentv1.InstanceSpec) map[string]string {
 	ruleset, failed := firewallRuleset(specs)
 	if ruleset == c.firewall {
 		return failed
 	}
 	err := c.a.host.ApplyFirewall(ctx, ruleset)
+	// The metadata service names instances by address: it serves only while spoofing is dropped.
+	c.a.spoofGuard.Store(err == nil)
 	if err == nil {
 		c.firewall = ruleset
 		return failed
 	}
-	enforced := false
+	c.a.log.Warn("instance firewall not loaded; the metadata service is off until it is", "error", err.Error())
 	for _, s := range specs {
 		if policyEnforced(s.GetNetworkPolicy()) && s.GetDesiredState() != agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
-			enforced = true
 			if _, already := failed[s.GetInstanceId()]; !already {
 				failed[s.GetInstanceId()] = "network policy: " + err.Error()
 			}
 		}
-	}
-	if !enforced {
-		c.a.log.Debug("no instance network policy to enforce; nft unavailable", "error", err.Error())
-		c.firewall = ruleset
 	}
 	return failed
 }

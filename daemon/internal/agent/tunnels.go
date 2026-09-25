@@ -246,8 +246,25 @@ func (a *Agent) instanceTunnelProgram(ctx context.Context, claims pki.ExecTicket
 
 // instanceAddress is the first usable address of a running instance of this host. An address the
 // host itself holds, or a loopback, link-local, multicast or unspecified one, is refused: an instance
-// ticket never reaches the host.
+// ticket never reaches the host. The address is dialled only while the anti-spoofing rules are
+// loaded (no other instance can answer for it) and only when no other instance claims it.
 func (a *Agent) instanceAddress(ctx context.Context, id string) (net.IP, error) {
+	if !a.spoofGuard.Load() {
+		return nil, fmt.Errorf("the instance firewall is not loaded on this host; instance %s is not dialled", id)
+	}
+	claimed := map[string]string{}
+	for _, rt := range a.o.Runtimes {
+		domains, _ := rt.List(ctx)
+		for _, d := range domains {
+			for _, cidr := range d.Addresses {
+				if ip, _, err := net.ParseCIDR(cidr); err == nil && d.ID != id {
+					claimed[ip.String()] = d.ID
+				} else if ip := net.ParseIP(cidr); ip != nil && d.ID != id {
+					claimed[ip.String()] = d.ID
+				}
+			}
+		}
+	}
 	own := map[string]bool{}
 	if addrs, err := net.InterfaceAddrs(); err == nil {
 		for _, ad := range addrs {
@@ -275,6 +292,9 @@ func (a *Agent) instanceAddress(ctx context.Context, id string) (net.IP, error) 
 				}
 				if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() || own[ip.String()] {
 					continue
+				}
+				if other, taken := claimed[ip.String()]; taken {
+					return nil, fmt.Errorf("instance %s shares its address with %s; not dialled", id, other)
 				}
 				return ip, nil
 			}

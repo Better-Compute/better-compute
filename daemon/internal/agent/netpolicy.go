@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"sort"
 	"strings"
@@ -17,6 +18,11 @@ import (
 //     beyond them and nothing from outside them;
 //   - NONE: the host only: DHCP, ARP, replies, and connections the host opens from its address on the
 //     subnet (bcd's tunnel dial); no other instance, nothing routed.
+//
+// Every tap whose NIC has a MAC and IPAM addresses is also guarded against spoofing, whatever its
+// policy: frames must carry the NIC's MAC, IP packets its own addresses (0.0.0.0 and :: for DHCP,
+// link-local for IPv6 neighbour discovery) and ARP its own IPv4 addresses. The metadata service and
+// instance tunnels name an instance by its address, so another instance must never claim it.
 //
 // The rules live in one bridge-family table that bcd owns and replaces in a single transaction. The
 // bridge family sees every frame of a tap: input (to the host, including what the host would route
@@ -39,43 +45,62 @@ func policyEnforced(p agentv1.InstanceNetworkPolicy) bool {
 // without IPAM addresses) are left out and returned in failed: they must not run.
 func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[string]string) {
 	failed = map[string]string{}
-	var input, forward, output []string
+	var guard, input, forward, output []string
 	sorted := append([]*agentv1.InstanceSpec(nil), specs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].GetInstanceId() < sorted[j].GetInstanceId() })
 	for _, spec := range sorted {
-		policy := spec.GetNetworkPolicy()
-		if !policyEnforced(policy) || spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
+		if spec.GetDesiredState() == agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED {
 			continue
 		}
+		policy := spec.GetNetworkPolicy()
+		enforced := policyEnforced(policy)
 		type nicRules struct {
-			tap    string
-			v4, v6 []string
+			tap            string
+			v4, v6         []string // subnets
+			hosts4, hosts6 []string // the NIC's own addresses
 		}
 		var nics []nicRules
+		var problem string
 		for i, nic := range spec.GetNics() {
 			r := nicRules{tap: runtime.TapName(spec.GetInstanceId(), i)}
 			for _, a := range nic.GetAddresses() {
 				p, err := netip.ParsePrefix(a)
 				if err != nil {
-					failed[spec.GetInstanceId()] = fmt.Sprintf("network policy: NIC %d address %q is not in CIDR form", i, a)
+					problem = fmt.Sprintf("network policy: NIC %d address %q is not in CIDR form", i, a)
 					break
 				}
 				if p.Addr().Is4() {
-					r.v4 = append(r.v4, p.Masked().String())
+					r.v4, r.hosts4 = append(r.v4, p.Masked().String()), append(r.hosts4, p.Addr().String())
 				} else {
-					r.v6 = append(r.v6, p.Masked().String())
+					r.v6, r.hosts6 = append(r.v6, p.Masked().String()), append(r.hosts6, p.Addr().String())
 				}
 			}
-			if _, bad := failed[spec.GetInstanceId()]; bad {
-				break
+			if problem == "" && len(r.v4)+len(r.v6) == 0 {
+				problem = fmt.Sprintf("network policy %s needs IPAM addresses on NIC %d", policyName(policy), i)
 			}
-			if len(r.v4)+len(r.v6) == 0 {
-				failed[spec.GetInstanceId()] = fmt.Sprintf("network policy %s needs IPAM addresses on NIC %d", policyName(policy), i)
-				break
+			if problem != "" {
+				if enforced {
+					break
+				}
+				problem = "" // an egress NIC without IPAM addresses is not guarded
+				continue
+			}
+			// The MAC goes into the ruleset: only a well-formed one.
+			if mac, err := net.ParseMAC(nic.GetMac()); err == nil && len(mac) == 6 {
+				in := fmt.Sprintf("iifname %q", r.tap)
+				guard = append(guard,
+					in+" ether saddr != "+mac.String()+" drop",
+					in+" ether type ip ip saddr != "+set(append(r.hosts4, "0.0.0.0"))+" drop",
+					in+" ether type arp arp saddr ip != "+set(append(r.hosts4, "0.0.0.0"))+" drop",
+					in+" ether type ip6 ip6 saddr != "+set(append(r.hosts6, "fe80::/10", "::"))+" drop")
 			}
 			nics = append(nics, r)
 		}
-		if _, bad := failed[spec.GetInstanceId()]; bad {
+		if problem != "" {
+			failed[spec.GetInstanceId()] = problem
+			continue
+		}
+		if !enforced {
 			continue
 		}
 		none := policy == agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_NONE
@@ -124,6 +149,8 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 	// Declaring the table first makes the delete succeed when it does not exist yet; the file is one
 	// transaction, so the old rules are replaced atomically.
 	fmt.Fprintf(&b, "table bridge %s\ndelete table bridge %s\n", firewallTable, firewallTable)
+	// Spoofed frames are dropped before any policy accepts them.
+	input, forward = append(append([]string{}, guard...), input...), append(append([]string{}, guard...), forward...)
 	if len(input)+len(forward)+len(output) > 0 {
 		fmt.Fprintf(&b, "table bridge %s {\n", firewallTable)
 		chain := func(name string, rules []string) {

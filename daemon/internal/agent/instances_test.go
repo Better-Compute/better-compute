@@ -109,11 +109,25 @@ func TestIMDSMintsForTheCallingInstance(t *testing.T) {
 	})
 	s, _ := h.open()
 	web := vm("inst_web", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_RUNNING)
-	web.Nics[0].Addresses = []string{"127.0.0.1/8"}
+	web.Nics[0].Addresses = []string{"10.0.0.5/24"}
 	s.push(desired(1, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web}}}))
 	s.next(t, "status", func(f *agentv1.AgentFrame) bool { return len(f.GetStatus().GetInstances()) == 1 })
-	srv := httptest.NewServer(h.agent.IMDS())
+	// The instance's requests arrive from its address on the bridge.
+	from := "10.0.0.5:40000"
+	service := h.agent.IMDS()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = from
+		service.ServeHTTP(w, r)
+	}))
 	defer srv.Close()
+	// A host-local caller is not an instance.
+	from = "127.0.0.1:40000"
+	probe, _ := http.NewRequest(http.MethodPut, srv.URL+"/latest/api/token", nil)
+	probe.Header.Set(imds.SessionTTLHeader, "60")
+	if resp, err := http.DefaultClient.Do(probe); err != nil || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a loopback caller: %v %v", err, resp)
+	}
+	from = "10.0.0.5:40000"
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/latest/api/token", nil)
 	req.Header.Set(imds.SessionTTLHeader, "60")
 	resp, err := http.DefaultClient.Do(req)

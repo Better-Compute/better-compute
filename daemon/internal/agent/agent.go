@@ -113,6 +113,8 @@ type Agent struct {
 	devices     *devicesConverger
 	boot        *BootEntries
 	instances   *instancesConverger
+	// spoofGuard: the instances' anti-spoofing rules are loaded (netpolicy.go); IMDS needs it.
+	spoofGuard atomic.Bool
 	// uploads are the snapshot files instance.snapshot is uploading (collectSnapshots keeps them).
 	uploads    sync.Map
 	cache      *imageCache
