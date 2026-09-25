@@ -57,7 +57,7 @@ export function provisionedAttestor(options: ProvisionedAttestorOptions = {}): A
         { role: 'provisioned', agentRole: context.role, claims, now: context.clock.now() },
         refuse,
       );
-      const ids = { tokenId: record.id };
+      const ids = { tokenId: record.id, tenantId: record.tenantId };
       const target = await options.resolveTarget?.(context.tx, {
         id: record.id,
         tenantId: record.tenantId,

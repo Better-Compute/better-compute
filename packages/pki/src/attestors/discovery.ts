@@ -182,7 +182,11 @@ export function discoveryAttestor(options: DiscoveryAttestorOptions = {}): Attes
         { role: 'discovery', agentRole: context.role, claims, now: context.clock.now() },
         refuse,
       );
-      const ids = { tokenId: record.id, nodeId: assertion.siteAgentNodeId };
+      const ids = {
+        tokenId: record.id,
+        tenantId: record.tenantId,
+        nodeId: assertion.siteAgentNodeId,
+      };
       if (!record.siteId || record.siteId !== assertion.siteId) return refuse('site-mismatch', ids);
       // A token minted for one machine (the iPXE script's) only goes with that machine's assertion.
       if (

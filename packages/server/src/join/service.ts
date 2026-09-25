@@ -71,6 +71,31 @@ export interface JoinServiceOptions {
   certTtlSeconds?: number;
   /** Writes the node's `compute-node` projection row at join, so IAM can decide on it (§12.4). */
   authz?: AuthzWriter;
+  /**
+   * The IAM root tenant: refused joins that name no authenticated tenant are recorded under it
+   * (`security.join.refused`). Without it refusals are only logged.
+   */
+  rootTenantId?: string;
+  /** `security.join.refused` events per (attestor, reason) per minute (default 60). */
+  refusalEventsPerMinute?: number;
+}
+
+/** What JoinService records about a refused join (`security.join.refused`). */
+export interface JoinRefusalEvent {
+  attestor: string;
+  /** `<attestor>:<reason>` from the attestor, or JoinService's own reason. */
+  reason: string;
+  role: string;
+  /** SHA-256 of the request's CSR (hex): correlates retries, reveals nothing. */
+  csrSha256: string | null;
+  /** SHA-256 hardware key claimed (hex), when the claims make one. */
+  hardwareKey: string | null;
+  gatewayId?: string;
+  /** Only when the token's secret verified (the event is then the token's tenant's). */
+  tokenId?: string;
+  nodeId?: string;
+  /** Refusals of the same (attestor, reason) dropped by the rate bound since the last event. */
+  suppressed: number;
 }
 
 export interface JoinService {
@@ -171,6 +196,37 @@ function checkedKinds(kinds: readonly string[] | undefined): readonly string[] |
         `Attestor returned an invalid allowed kind: ${String(kind)}`,
       );
   return kinds;
+}
+
+/**
+ * A token bucket per key: `perMinute` events a minute, refilled continuously. `take` answers the
+ * count suppressed since the last admitted event, or undefined when this one is dropped. Bounded
+ * to 1 000 keys (the oldest idle key goes first).
+ */
+function refusalBucket(perMinute: number) {
+  const buckets = new Map<string, { tokens: number; at: number; suppressed: number }>();
+  const rate = perMinute / 60_000;
+  return {
+    take(key: string, now: number): number | undefined {
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        if (buckets.size >= 1000) buckets.delete(buckets.keys().next().value!);
+        bucket = { tokens: perMinute, at: now, suppressed: 0 };
+      }
+      buckets.delete(key);
+      buckets.set(key, bucket);
+      bucket.tokens = Math.min(perMinute, bucket.tokens + Math.max(0, now - bucket.at) * rate);
+      bucket.at = now;
+      if (bucket.tokens < 1) {
+        bucket.suppressed++;
+        return undefined;
+      }
+      bucket.tokens -= 1;
+      const suppressed = bucket.suppressed;
+      bucket.suppressed = 0;
+      return suppressed;
+    },
+  };
 }
 
 /** `node_bindings` (core/0012_v02_evidence): one node per (attestor, subject); another node is `bound-elsewhere`. */
@@ -351,9 +407,81 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
     };
   }
 
+  const refusals = refusalBucket(options.refusalEventsPerMinute ?? 60);
+
+  /**
+   * `security.join.refused` (§13), in its own short transaction after the join's rolled back. The
+   * tenant is the token's only when the attestor authenticated the token; otherwise the root
+   * tenant, so an unauthenticated caller cannot write into another tenant's event stream. No token,
+   * CSR bytes or raw claims: hashes only. Rate-bounded per (attestor, reason).
+   */
+  async function recordRefusal(
+    error: unknown,
+    request: JoinRequest,
+    context: GatewayCallContext,
+  ): Promise<void> {
+    const attestorId = (request?.attestor as string | undefined) || 'join-token';
+    const details = (isComputeError(error) ? error.details : undefined) ?? {};
+    const refusal =
+      typeof details.refusal === 'string'
+        ? details.refusal
+        : typeof details.reason === 'string'
+          ? `join:${details.reason}`
+          : 'join:denied';
+    const tenantId = typeof details.tenantId === 'string' ? details.tenantId : options.rootTenantId;
+    log?.warn('join refused', { attestor: attestorId, reason: refusal });
+    if (!tenantId) return;
+    const admitted = refusals.take(`${attestorId}\0${refusal}`, clock.now());
+    if (admitted === undefined) return;
+    const authenticated = typeof details.tenantId === 'string';
+    let hardwareKey: string | null = null;
+    try {
+      hardwareKey = claimedHardwareKey(request.claims)?.key ?? null;
+    } catch {
+      hardwareKey = null;
+    }
+    const data: JoinRefusalEvent = {
+      attestor: attestorId,
+      reason: refusal,
+      role: String(request?.role ?? ''),
+      csrSha256: request?.csr instanceof Uint8Array ? toHex(sha256(request.csr)) : null,
+      hardwareKey,
+      ...(context.gatewayId ? { gatewayId: context.gatewayId } : {}),
+      ...(authenticated && typeof details.tokenId === 'string' ? { tokenId: details.tokenId } : {}),
+      ...(authenticated && typeof details.nodeId === 'string' ? { nodeId: details.nodeId } : {}),
+      suppressed: admitted,
+    };
+    try {
+      await database.transaction((tx) =>
+        events.publish(tx, {
+          type: 'security.join.refused',
+          tenantId,
+          subject: `join/${attestorId}`,
+          data: { ...data },
+        }),
+      );
+    } catch (failure) {
+      log?.error('recording a join refusal failed', {
+        error: failure instanceof Error ? failure.message : String(failure),
+      });
+    }
+  }
+
   async function join(
     request: JoinRequest,
     context: GatewayCallContext = {},
+  ): Promise<JoinResponse> {
+    try {
+      return await joinOnce(request, context);
+    } catch (error) {
+      if (isComputeError(error, 'ACCESS_DENIED')) await recordRefusal(error, request, context);
+      throw error;
+    }
+  }
+
+  async function joinOnce(
+    request: JoinRequest,
+    context: GatewayCallContext,
   ): Promise<JoinResponse> {
     const crypto = requireCrypto();
     if (!(request?.csr instanceof Uint8Array) || request.csr.length === 0)

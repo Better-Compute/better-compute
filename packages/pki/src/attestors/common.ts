@@ -24,6 +24,7 @@ export type AttestorRefusalHook = (refusal: {
   reason: string;
   tokenId?: string;
   nodeId?: string;
+  tenantId?: string;
 }) => void;
 
 export interface AttestorBaseOptions {
@@ -32,9 +33,22 @@ export interface AttestorBaseOptions {
 
 /** Throws the one generic denial after telling the hook why. */
 export function refuser(attestor: string, hook: AttestorRefusalHook | undefined) {
-  return (reason: string, ids: { tokenId?: string; nodeId?: string } = {}): never => {
+  /**
+   * `tenantId` only for refusals after the token's secret verified: JoinService attributes the
+   * `security.join.refused` event to it, and an unauthenticated caller must not pick a tenant.
+   */
+  return (
+    reason: string,
+    ids: { tokenId?: string; nodeId?: string; tenantId?: string } = {},
+  ): never => {
     hook?.({ attestor, reason, ...ids });
-    throw new ComputeError('ACCESS_DENIED', 'Join refused');
+    // `details` stay server-side (the gateway answers with the message only): JoinService records
+    // them in `security.join.refused`.
+    throw new ComputeError('ACCESS_DENIED', 'Join refused', undefined, {
+      reason: attestor,
+      refusal: `${attestor}:${reason}`,
+      ...ids,
+    });
   };
 }
 
@@ -167,8 +181,15 @@ export async function checkSingleUseToken(
     role: input.agentRole,
     claims: input.claims,
   });
-  if (!verdict.ok) return refuse(verdict.reason, { tokenId: parsed.id });
-  if (record!.role !== input.role) return refuse('token-role', { tokenId: parsed.id });
-  if (record!.usesLeft !== 1) return refuse('not-single-use', { tokenId: parsed.id });
+  if (!verdict.ok) {
+    const authenticated = !['malformed', 'unknown', 'secret-mismatch'].includes(verdict.reason);
+    return refuse(verdict.reason, {
+      tokenId: parsed.id,
+      ...(authenticated ? { tenantId: record!.tenantId } : {}),
+    });
+  }
+  const owned = { tokenId: parsed.id, tenantId: record!.tenantId };
+  if (record!.role !== input.role) return refuse('token-role', owned);
+  if (record!.usesLeft !== 1) return refuse('not-single-use', owned);
   return { record: record!, now };
 }

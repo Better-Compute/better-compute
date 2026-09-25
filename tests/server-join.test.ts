@@ -859,6 +859,76 @@ describe('JoinService restricted certificates (AttestationResult.allowedKinds, c
   });
 });
 
+describe('JoinService security.join.refused', () => {
+  async function recording() {
+    const s = await setup();
+    const service = createJoinService({
+      database: s.fixture.database,
+      clock: s.fixture.clock,
+      work: s.fixture.compute.context.work,
+      events: s.fixture.compute.context.events,
+      crypto: s.crypto,
+      rootTenantId: s.fixture.tenants.root.id,
+    });
+    const refused = async () =>
+      (
+        await s.fixture.database.query<{
+          payload: { tenantId: string; data: Record<string, unknown> };
+        }>(`SELECT payload FROM outbox WHERE topic = 'security.join.refused' ORDER BY seq`)
+      ).rows.map((row) => row.payload);
+    return { s, service, refused };
+  }
+
+  it('bounds a spray of bad tokens to 60 root-tenant events and reports what it suppressed', async () => {
+    const { s, service, refused } = await recording();
+    const real = await mintToken(s, { tenantId: s.fixture.tenants.acme.id });
+    const forged = `${real.token.slice(0, -4)}AAAA`; // a real id, a wrong secret
+    for (let i = 0; i < 200; i++)
+      expect(
+        await refusal(service.join(joinRequest(s, forged, machine(40 + (i % 50))).request)),
+      ).toBe('token');
+    let events = await refused();
+    expect(events).toHaveLength(60);
+    // The id is real but the secret is not: nothing is attributed to acme, and no token id leaks.
+    for (const event of events) {
+      expect(event.tenantId).toBe(s.fixture.tenants.root.id);
+      expect(event.data).toMatchObject({
+        attestor: 'join-token',
+        reason: 'join-token:secret-mismatch',
+      });
+      expect(event.data.tokenId).toBeUndefined();
+      expect(JSON.stringify(event)).not.toContain(forged.split('.')[1]!);
+    }
+    expect(events[0]!.data).toMatchObject({
+      suppressed: 0,
+      csrSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+
+    await s.fixture.advance(2_000); // two tokens refill
+    await refusal(service.join(joinRequest(s, forged, machine(99)).request));
+    events = await refused();
+    expect(events).toHaveLength(61);
+    expect(events[60]!.data.suppressed).toBe(140);
+  });
+
+  it("attributes a refusal after the token's secret verified to the token's tenant", async () => {
+    const { s, service, refused } = await recording();
+    const token = await mintToken(s, { tenantId: s.fixture.tenants.acme.id });
+    // A valid node token presented by a site agent: authenticated, then refused for its role.
+    expect(
+      await refusal(
+        service.join(joinRequest(s, token.token, machine(7), { role: AgentRole.SITE }).request),
+      ),
+    ).toBe('token');
+    const [event] = await refused();
+    expect(event).toMatchObject({
+      tenantId: s.fixture.tenants.acme.id,
+      data: { attestor: 'join-token', reason: 'join-token:role-mismatch', tokenId: token.id },
+    });
+    expect(JSON.stringify(event)).not.toContain(token.token.split('.')[1]!);
+  });
+});
+
 describe('JoinService node bindings (AttestationResult.bind)', () => {
   it('binds a proven hardware subject to one node and refuses it for any other', async () => {
     const s = await setup();

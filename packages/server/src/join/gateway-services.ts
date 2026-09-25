@@ -57,6 +57,8 @@ export interface GatewayServicesInput {
   /** Writes each joined node's authz projection row (`ctx.authz`). */
   authz?: AuthzWriter;
   log?: Logger;
+  /** The IAM root tenant, for `security.join.refused` events no token attributes. */
+  rootTenantId?: string;
 }
 
 /** JoinService behind the gateway-facing interface. */
@@ -70,6 +72,7 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
     ...(input.attestors ? { attestors: input.attestors } : {}),
     ...(input.authz ? { authz: input.authz } : {}),
     ...(input.log ? { log: input.log } : {}),
+    ...(input.rootTenantId ? { rootTenantId: input.rootTenantId } : {}),
   });
   return Object.freeze({
     join: (request: JoinRequest, context?: GatewayCallContext) => service.join(request, context),

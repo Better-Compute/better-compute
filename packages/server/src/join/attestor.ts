@@ -53,9 +53,16 @@ export function joinTokenAttestor(options: JoinTokenAttestorOptions = {}): Attes
     version: '1.0.0',
     roles: ['node', 'site'],
     async verify(evidence, context): Promise<AttestationResult> {
-      const refuse = (reason: JoinTokenRefusal, tokenId?: string): never => {
+      // `tenantId` only once the secret matched: `security.join.refused` goes to that tenant, and an
+      // unauthenticated caller must not choose whose event stream it lands in.
+      const refuse = (reason: JoinTokenRefusal, tokenId?: string, tenantId?: string): never => {
         options.onRefusal?.({ reason, ...(tokenId ? { tokenId } : {}) });
-        throw new ComputeError('ACCESS_DENIED', 'Join refused', undefined, { reason: 'token' });
+        throw new ComputeError('ACCESS_DENIED', 'Join refused', undefined, {
+          reason: 'token',
+          refusal: `join-token:${reason}`,
+          ...(tokenId ? { tokenId } : {}),
+          ...(tenantId ? { tenantId } : {}),
+        });
       };
       const parsed = parseJoinToken(new TextDecoder().decode(evidence.payload));
       if (!parsed) return refuse('malformed');
@@ -73,15 +80,15 @@ export function joinTokenAttestor(options: JoinTokenAttestorOptions = {}): Attes
       }
       if (!sameDigest(presented, new Uint8Array(row.secret_hash)))
         return refuse('secret-mismatch', row.id);
-      if (row.revoked) return refuse('revoked', row.id);
-      if (!row.live) return refuse('expired', row.id);
-      if (!(Number(row.uses_left) > 0)) return refuse('exhausted', row.id);
-      if (admits[row.role] !== context.role) return refuse('role-mismatch', row.id);
+      if (row.revoked) return refuse('revoked', row.id, row.tenant_id);
+      if (!row.live) return refuse('expired', row.id, row.tenant_id);
+      if (!(Number(row.uses_left) > 0)) return refuse('exhausted', row.id, row.tenant_id);
+      if (admits[row.role] !== context.role) return refuse('role-mismatch', row.id, row.tenant_id);
       const consumed = await context.tx.query(
         'UPDATE join_tokens SET uses_left = uses_left - 1 WHERE id = $1 AND uses_left > 0',
         [row.id],
       );
-      if (consumed.rowCount !== 1) return refuse('exhausted', row.id);
+      if (consumed.rowCount !== 1) return refuse('exhausted', row.id, row.tenant_id);
       return {
         tenantId: row.tenant_id,
         role: context.role,
