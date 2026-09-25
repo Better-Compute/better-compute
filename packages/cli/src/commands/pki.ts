@@ -184,6 +184,8 @@ export interface PublishedTrust {
   version: number;
   digest: Uint8Array;
   approverSet?: ApproverSet;
+  /** The published set's epoch (0 before epochs, or without a set). */
+  approverSetEpoch: number;
 }
 
 /** The published trust bundle's record, or undefined before the quorum module migrated (or published). */
@@ -193,7 +195,13 @@ export async function publishedTrust(sql: Pick<SqlExecutor, 'query'>): Promise<P
   const { rows } = await sql.query<{
     version: string;
     digest: Uint8Array;
-    approver_set: { keys: { kid: string; spki: string }[]; threshold: number; tiers: ApproverSet['quorumTiers']; unbatched: number } | null;
+    approver_set: {
+      keys: { kid: string; spki: string }[];
+      threshold: number;
+      tiers: ApproverSet['quorumTiers'];
+      unbatched: number;
+      epoch?: string;
+    } | null;
   }>(`SELECT version::text AS version, digest, approver_set FROM trust_bundle_state WHERE id = 'current'`);
   const row = rows[0];
   if (!row) return undefined;
@@ -201,6 +209,7 @@ export async function publishedTrust(sql: Pick<SqlExecutor, 'query'>): Promise<P
   return {
     version: Number(row.version),
     digest: new Uint8Array(row.digest),
+    approverSetEpoch: Number(stored?.epoch ?? 0),
     ...(stored
       ? {
           approverSet: {
@@ -220,6 +229,7 @@ interface ConfiguredApprovers {
   tiers?: readonly { maxScopeSize: number; threshold: number }[];
   unbatchedDestructivePerHour?: number;
   setSignatures?: readonly unknown[];
+  epoch?: number | bigint;
 }
 const approversOf = (options: AnyComputeOptions) =>
   (options as { pki?: { approvers?: ConfiguredApprovers; trustVersion?: number | bigint } }).pki;
@@ -253,17 +263,18 @@ export function configuredTrustDigest(bundle: PkiBundle, options: AnyComputeOpti
 }
 
 /**
- * doctor's quorum check (review 6 H1): a configured approver quorum that differs from the published one reaches the
- * daemons that hold approver keys only when k of the CURRENT approvers signed it for the next version.
+ * doctor's quorum check (review 6 H1, review 7 M1): a configured approver quorum that differs from the published one
+ * reaches the daemons that hold approver keys only when k of the CURRENT approvers signed it for a higher epoch.
  */
 export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: AnyComputeOptions): Promise<Finding[]> {
   const published = await publishedTrust(sql);
   if (!published?.approverSet) return [];
   const configured = configuredApproverSet(options);
   if (sameApproverSet(published.approverSet, configured)) return [];
-  const next = published.version + 1;
+  const next = published.approverSetEpoch + 1;
   const pki = approversOf(options);
-  const signed = (pki?.approvers?.setSignatures?.length ?? 0) > 0 && Number(pki?.trustVersion) === next;
+  const epoch = Number(pki?.approvers?.epoch ?? 1);
+  const signed = (pki?.approvers?.setSignatures?.length ?? 0) > 0 && epoch > published.approverSetEpoch;
   if (!published.approverSet.approverKeys.length)
     return [
       {
@@ -278,7 +289,7 @@ export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: A
       {
         check: 'pki.quorum-change',
         severity: 'info',
-        message: `The configured approver quorum is signed for trust version ${next}: daemons take it on their next session`,
+        message: `The configured approver quorum is signed for epoch ${epoch}: daemons take it on their next session`,
         fix: 'Roll the configuration out to every process',
       },
     ];
@@ -286,8 +297,8 @@ export async function quorumFindings(sql: Pick<SqlExecutor, 'query'>, options: A
     {
       check: 'pki.quorum-unsigned',
       severity: 'warning',
-      message: `The configured approver quorum differs from the one published at trust version ${published.version}, and no current approvers signed it for version ${next}: daemons that hold approver keys will refuse the new bundle and keep the old quorum`,
-      fix: `Each of ${published.approverSet.approverThreshold} current approver(s): better-compute batch sign-approvers --key <key> --version ${next} --approvers <new .pub files> --threshold <k>; then set pki.trustVersion to ${next} and pki.approvers.setSignatures to their signatures`,
+      message: `The configured approver quorum differs from the one published (epoch ${published.approverSetEpoch}, trust version ${published.version}), and its current approvers have not signed it for a higher epoch: daemons that hold approver keys will keep the old quorum`,
+      fix: `Each of ${published.approverSet.approverThreshold} current approver(s): better-compute batch sign-approvers --key <key> --epoch ${next} --approvers <new .pub files> --threshold <k>; then set pki.approvers.epoch to ${next} and pki.approvers.setSignatures to their signatures`,
     },
   ];
 }
@@ -644,7 +655,7 @@ export const pkiCommands = [
     group: 'PKI',
     summary: 'Show the trust bundle version the deployment publishes, and the one to sign a quorum change for',
     description:
-      "pki trust-version reads the trust bundle the deployment last published (its version follows its content: a changed bundle publishes the next version, pki.trustVersion is a floor) and compares it with this configuration and PKI bundle: whether they publish the same bundle, whether the configured approver quorum differs (then its current approvers sign it for nextVersion: better-compute batch sign-approvers --version <nextVersion>, with pki.trustVersion set to it), and how many connected daemons hold that version.",
+      "pki trust-version reads the trust bundle the deployment last published (its version follows its content: a changed bundle publishes the next version, pki.trustVersion is a floor) and compares it with this configuration and PKI bundle: whether they publish the same bundle, the published approver-set epoch, whether the configured approver quorum differs (then its current approvers sign it for signQuorumForEpoch: better-compute batch sign-approvers --epoch <n>, with pki.approvers.epoch set to it), and how many connected daemons hold that version.",
     target: 'config',
     output: 'json',
     flags: { pki: pkiFlag },
@@ -671,8 +682,9 @@ export const pkiCommands = [
         ...(matches === undefined ? {} : { configurationMatches: matches }),
         // What this configuration would publish: the same version, or the next one.
         nextVersion: matches === false ? published.version + 1 : published.version,
+        approverSetEpoch: published.approverSetEpoch,
         quorumChanged,
-        ...(quorumChanged ? { signQuorumFor: published.version + 1 } : {}),
+        ...(quorumChanged ? { signQuorumForEpoch: published.approverSetEpoch + 1 } : {}),
         connected: lag.connected,
         behind: lag.behind,
       };

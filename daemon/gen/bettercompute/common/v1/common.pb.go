@@ -466,13 +466,20 @@ type TrustBundle struct {
 	QuorumTiers []*QuorumTier `protobuf:"bytes,6,rep,name=quorum_tiers,json=quorumTiers,proto3" json:"quorum_tiers,omitempty"`
 	// (v1.0) The quorum fields (3-6) are signed by the approvers themselves, not only by the join key
 	// the control plane holds: k-of-the-CURRENT-set signatures, purpose "approver-set", parts
-	// [uint64_be(version), sha256(approver set input)] (see protocol's approverSetInput). A daemon
-	// that holds approver keys accepts a bundle that changes any quorum field, removal included, only
-	// with these signatures by its current set at its current threshold. A daemon without keys takes
-	// the first set as-is: that only adds restrictions.
+	// [uint64_be(approver_set_epoch), sha256(approver set input), trust_domain] (see protocol's
+	// approverSetInput; the verifier's own trust domain). Published on every version while the set is
+	// current. A daemon that holds approver keys at epoch e takes a different set, removal included,
+	// only with approver_set_epoch > e and these signatures by its current set at its current
+	// threshold; an older epoch is refused. When the quorum part is refused, the rest of the bundle
+	// (roots, version) still applies and the old quorum stays. A daemon without keys takes the first set
+	// as-is: that only adds restrictions. A daemon that missed two set changes with disjoint keys needs
+	// re-provisioning.
 	ApproverSetSignatures []*Signature `protobuf:"bytes,7,rep,name=approver_set_signatures,json=approverSetSignatures,proto3" json:"approver_set_signatures,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// (v1.0) The epoch of the quorum fields (3-6): monotonic, separate from `version` (roots rotate
+	// without touching it), raised with every change of the set.
+	ApproverSetEpoch uint64 `protobuf:"varint,8,opt,name=approver_set_epoch,json=approverSetEpoch,proto3" json:"approver_set_epoch,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *TrustBundle) Reset() {
@@ -552,6 +559,13 @@ func (x *TrustBundle) GetApproverSetSignatures() []*Signature {
 		return x.ApproverSetSignatures
 	}
 	return nil
+}
+
+func (x *TrustBundle) GetApproverSetEpoch() uint64 {
+	if x != nil {
+		return x.ApproverSetEpoch
+	}
+	return 0
 }
 
 type QuorumTier struct {
@@ -825,7 +839,7 @@ const file_bettercompute_common_v1_common_proto_rawDesc = "" +
 	"\tSignature\x12\x10\n" +
 	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x10\n" +
 	"\x03sig\x18\x02 \x01(\fR\x03sig\x12\x14\n" +
-	"\x05chain\x18\x03 \x03(\fR\x05chain\"\xbe\x03\n" +
+	"\x05chain\x18\x03 \x03(\fR\x05chain\"\xec\x03\n" +
 	"\vTrustBundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x122\n" +
 	"\x15command_signing_roots\x18\x02 \x03(\fR\x13commandSigningRoots\x12I\n" +
@@ -833,7 +847,8 @@ const file_bettercompute_common_v1_common_proto_rawDesc = "" +
 	"\x12approver_threshold\x18\x04 \x01(\rR\x11approverThreshold\x12C\n" +
 	"\x1eunbatched_destructive_per_hour\x18\x05 \x01(\rR\x1bunbatchedDestructivePerHour\x12F\n" +
 	"\fquorum_tiers\x18\x06 \x03(\v2#.bettercompute.common.v1.QuorumTierR\vquorumTiers\x12Z\n" +
-	"\x17approver_set_signatures\x18\a \x03(\v2\".bettercompute.common.v1.SignatureR\x15approverSetSignatures\"P\n" +
+	"\x17approver_set_signatures\x18\a \x03(\v2\".bettercompute.common.v1.SignatureR\x15approverSetSignatures\x12,\n" +
+	"\x12approver_set_epoch\x18\b \x01(\x04R\x10approverSetEpoch\"P\n" +
 	"\n" +
 	"QuorumTier\x12$\n" +
 	"\x0emax_scope_size\x18\x01 \x01(\rR\fmaxScopeSize\x12\x1c\n" +

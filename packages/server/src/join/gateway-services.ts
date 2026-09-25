@@ -134,6 +134,7 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
           kid: signature.kid,
           sig: signature.sig,
         })),
+        approverSetEpoch: bundle.approverSetEpoch ?? 0n,
       }),
     );
     const signature = await crypto.sign('trust-bundle', [body]);

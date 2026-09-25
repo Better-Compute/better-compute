@@ -733,6 +733,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
           })),
           approverThreshold: bundle?.approverThreshold ?? 0,
           unbatchedDestructivePerHour: bundle?.unbatchedDestructivePerHour ?? 0,
+          approverSetEpoch: bundle?.approverSetEpoch ?? 0n,
           approverSetSignatures: (bundle?.approverSetSignatures ?? []).map((signature) => ({
             $typeName: 'bettercompute.common.v1.Signature' as const,
             kid: signature.kid,

@@ -435,7 +435,7 @@ const signingVectors: {
     purpose: 'approver-set',
     parts: [be(8, 7n), digest(approverSetInput(approverSet)), utf8('compute.acme.test')],
     built: approverSetSigningInput({
-      version: 7n,
+      epoch: 7n,
       setSha256: digest(approverSetInput(approverSet)),
       trustDomain: 'compute.acme.test',
     }),
@@ -537,7 +537,7 @@ function approverSetGolden() {
     unbatchedDestructivePerHour: approverSet.unbatchedDestructivePerHour,
     approverSetInput: hex(input),
     setSha256: hex(digest(input)),
-    version: '7',
+    epoch: '7',
     trustDomain: 'compute.acme.test',
     signingInput: hex(
       signingInput('approver-set', [new Uint8Array(be(8, 7n)), digest(input), utf8('compute.acme.test')]),
@@ -642,7 +642,7 @@ describe('protocol golden vectors', () => {
     expect(readJson(`${goldenDir}approver-set.json`)).toEqual(golden);
     expect(hex(approverSetInput(approverSet))).toBe(golden.approverSetInput);
     expect(
-      hex(approverSetSigningInput({ version: 7n, setSha256: fromHex(golden.setSha256), trustDomain: golden.trustDomain })),
+      hex(approverSetSigningInput({ epoch: 7n, setSha256: fromHex(golden.setSha256), trustDomain: golden.trustDomain })),
     ).toBe(golden.signingInput);
     expect(batchNodeInput(filled(32, 1), filled(32, 2))[0]).toBe(1);
     expect(() => batchNodeInput(filled(31, 1), filled(32, 2))).toThrow(/32-byte/);

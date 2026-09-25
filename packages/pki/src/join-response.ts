@@ -51,6 +51,8 @@ export interface TrustBundleInput {
    * daemon that holds approver keys take a changed quorum.
    */
   approverSetSignatures?: readonly { kid: string; sig: Uint8Array }[];
+  /** The epoch of the quorum fields (what approverSetSignatures sign). */
+  approverSetEpoch?: bigint | number;
 }
 
 export interface JoinResponseInput {
@@ -79,6 +81,7 @@ function trustBundle(input: TrustBundleInput | undefined): TrustBundle {
       kid: signature.kid,
       sig: signature.sig,
     })),
+    approverSetEpoch: BigInt(input?.approverSetEpoch ?? 0),
   });
 }
 

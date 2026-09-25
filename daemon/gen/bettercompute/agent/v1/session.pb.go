@@ -2214,8 +2214,9 @@ func (x *Command) GetBatchProof() *BatchProof {
 //
 // payload_sha256 is SHA-256 of the command's payload (CommandBody.payload.value), binding the leaf
 // to exactly that operation (image, firmware, power action), or EMPTY for "any payload of this kind"
-// where the payload is built later (approvers see unbound leaves flagged). Daemons run each leaf at
-// most once per batch.
+// where the payload is built later (approvers see unbound leaves flagged). The executing agent
+// accepts a proof that walks to the root from either the bound leaf (its payload's digest) or the
+// unbound one. Daemons run each leaf at most once per batch.
 // Signing purpose "batch-approval", parts [batch_id, scope_root, uint32_be(scope_size),
 // int64_be(not_after.seconds) ‖ int32_be(not_after.nanos), trust_domain]. The trust domain (the
 // deployment's, JoinResponseBody.trust_domain) is supplied by each verifier from its own config, so

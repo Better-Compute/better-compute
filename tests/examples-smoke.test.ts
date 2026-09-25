@@ -71,15 +71,16 @@ describe('examples', () => {
     const v = published.version as number;
     await run(['batch', 'keygen', '--out', 'carol.pem'], env, cwd);
     const wider = { ...quorum, BETTER_COMPUTE_APPROVER_KEYS: 'alice.pem.pub,bob.pem.pub,carol.pem.pub' };
-    expect(await trust(wider)).toMatchObject({ version: v, quorumChanged: true, signQuorumFor: v + 1 });
+    const epoch = published.approverSetEpoch as number;
+    expect(await trust(wider)).toMatchObject({ version: v, quorumChanged: true, signQuorumForEpoch: epoch + 1 });
     const unsigned = JSON.parse(await run(['doctor', '--config', config('dev')], wider, cwd)) as {
       findings: { check: string; fix?: string }[];
     };
     const finding = unsigned.findings.find((item) => item.check === 'pki.quorum-unsigned');
-    expect(finding?.fix).toContain(`--version ${v + 1}`);
+    expect(finding?.fix).toContain(`--epoch ${epoch + 1}`);
     for (const name of ['alice', 'bob']) {
       const signed = await run(
-        ['batch', 'sign-approvers', '--key', `${name}.pem`, '--version', String(v + 1), '--approvers', 'alice.pem.pub,bob.pem.pub,carol.pem.pub', '--threshold', '2'],
+        ['batch', 'sign-approvers', '--key', `${name}.pem`, '--epoch', String(epoch + 1), '--approvers', 'alice.pem.pub,bob.pem.pub,carol.pem.pub', '--threshold', '2'],
         env,
         cwd,
       );
@@ -87,14 +88,19 @@ describe('examples', () => {
     }
     const signedEnv = { ...wider, BETTER_COMPUTE_APPROVER_SET_SIGNATURES: 'alice.set.json,bob.set.json' };
     const signedOptions = await exampleOptions({ env: signedEnv, cwd });
-    expect(signedOptions.pki).toMatchObject({ trustVersion: v + 1 });
+    expect(signedOptions.pki?.approvers).toMatchObject({ epoch: epoch + 1 });
     expect(signedOptions.pki?.approvers?.setSignatures).toHaveLength(2);
     await signedOptions.database.close?.();
     const checked = JSON.parse(await run(['doctor', '--config', config('dev')], signedEnv, cwd)) as { findings: { check: string }[] };
     expect(checked.findings.map((item) => item.check)).toContain('pki.quorum-change');
-    // Deployed: the signed quorum is published at that version.
+    // Deployed: the signed quorum is published (the next trust version) at its epoch.
     await run(['migrate', '--config', config('dev')], signedEnv, cwd);
-    expect(await trust(signedEnv)).toMatchObject({ version: v + 1, configurationMatches: true, quorumChanged: false });
+    expect(await trust(signedEnv)).toMatchObject({
+      version: v + 1,
+      approverSetEpoch: epoch + 1,
+      configurationMatches: true,
+      quorumChanged: false,
+    });
     // Signatures over another quorum are refused at startup.
     await expect(
       exampleOptions({ env: { ...signedEnv, BETTER_COMPUTE_APPROVER_THRESHOLD: '3' }, cwd }),

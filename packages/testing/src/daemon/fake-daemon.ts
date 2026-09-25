@@ -328,6 +328,8 @@ export interface FakeQuorumTrust {
   threshold: number;
   tiers?: readonly { maxScopeSize: number; threshold: number }[];
   unbatchedPerHour?: number;
+  /** The epoch of this set (TrustBundle.approver_set_epoch; default 0): a changed set needs a higher one. */
+  epoch?: bigint;
 }
 
 const rejectionCode = (reason: string | undefined): CommandRejectReason =>
@@ -1077,39 +1079,49 @@ export class FakeDaemon {
     if (this.options.intent?.trustSigner && welcome.trust) {
       try {
         const bundle = verifyTrustBundle(welcome.trust, this.options.intent.trustSigner, this.intentVersion);
-        // A change of the quorum, removal included, needs the CURRENT approvers' signatures (the join key alone,
-        // which the api holds, cannot lift or replace it): otherwise the whole bundle is refused.
-        const held = this.quorum;
-        verifyApproverSetChange(
-          held
-            ? {
-                approverKeys: held.approverKeys,
-                approverThreshold: held.threshold,
-                quorumTiers: held.tiers ?? [],
-                unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
-              }
-            : undefined,
-          {
-            ...approverSetOf(bundle),
-            version: bundle.version,
-            approverSetSignatures: bundle.approverSetSignatures,
-            // The deployment's own trust domain, as for batch approvals.
-            trustDomain: held?.trustDomain ?? this.options.intent.trustDomain,
-          },
-        );
         this.intentRoots = [...bundle.commandSigningRoots];
         this.intentVersion = bundle.version;
-        // The quorum travels in the same signed bundle: a newer one without approver keys lifts it.
-        this.quorum = bundle.approverKeys.length
-          ? {
-              approverKeys: bundle.approverKeys.map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
-              threshold: bundle.approverThreshold,
-              tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
-              unbatchedPerHour: bundle.unbatchedDestructivePerHour,
-              // The deployment's own trust domain (absent: every approval fails, closed).
-              trustDomain: this.quorum?.trustDomain ?? this.options.intent.trustDomain ?? '',
-            }
-          : undefined;
+        // A change of the quorum, removal included, needs the CURRENT approvers' signatures for a higher epoch (the
+        // join key alone, which the api holds, cannot lift or replace it). Refused, the old quorum stays while the
+        // rest of the bundle (roots, version) applies.
+        const held = this.quorum;
+        try {
+          verifyApproverSetChange(
+            held
+              ? {
+                  approverKeys: held.approverKeys,
+                  approverThreshold: held.threshold,
+                  quorumTiers: held.tiers ?? [],
+                  unbatchedDestructivePerHour: held.unbatchedPerHour ?? 0,
+                  epoch: held.epoch ?? 0n,
+                }
+              : undefined,
+            {
+              ...approverSetOf(bundle),
+              epoch: bundle.approverSetEpoch,
+              approverSetSignatures: bundle.approverSetSignatures,
+              // The deployment's own trust domain, as for batch approvals.
+              trustDomain: held?.trustDomain ?? this.options.intent.trustDomain,
+            },
+          );
+          // The quorum travels in the same signed bundle: a signed one without approver keys lifts it.
+          this.quorum = bundle.approverKeys.length
+            ? {
+                approverKeys: bundle.approverKeys.map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
+                threshold: bundle.approverThreshold,
+                tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
+                unbatchedPerHour: bundle.unbatchedDestructivePerHour,
+                // The deployment's own trust domain (absent: every approval fails, closed).
+                trustDomain: this.quorum?.trustDomain ?? this.options.intent.trustDomain ?? '',
+                epoch: bundle.approverSetEpoch,
+              }
+            : undefined;
+        } catch (error) {
+          this.log('trust.quorum-refused', {
+            version: Number(bundle.version),
+            reason: isComputeError(error) ? String(error.details?.reason ?? error.message) : String(error),
+          });
+        }
         this.log('trust.updated', { version: Number(bundle.version), roots: bundle.commandSigningRoots.length });
       } catch (error) {
         this.log('trust.ignored', {

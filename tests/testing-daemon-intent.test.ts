@@ -417,9 +417,15 @@ describe('FakeDaemon signed intent', () => {
     accepted(h, legit.id);
   });
 
-  it('takes a changed quorum from Welcome.trust only when the current approvers signed it (review 6 H1)', async () => {
+  it('takes a changed quorum from Welcome.trust only when the current approvers signed it (review 6 H1, 7 M1)', async () => {
     const approvers = [createApproverKey(), createApproverKey()];
-    const quorum = { approverKeys: approvers.map((a) => a.key), threshold: 2, unbatchedPerHour: 0, trustDomain: 'compute.test' };
+    const quorum = {
+      approverKeys: approvers.map((a) => a.key),
+      threshold: 2,
+      unbatchedPerHour: 0,
+      trustDomain: 'compute.test',
+      epoch: 1n,
+    };
     const kinds = {
       'test.destroy': { lane: Lane.CONTROL, roles: [AgentRole.NODE], destructive: true, run: () => ({ outcome: 'succeeded' as const }) },
     };
@@ -431,7 +437,8 @@ describe('FakeDaemon signed intent', () => {
           version: 2,
           commandSigningRoots: [authority.certificate],
           ...lifted,
-          approverSetSignatures: signers.map((i) => signApproverSet({ version: 2, set: lifted, trustDomain: 'compute.test' }, approvers[i]!.privateKey)),
+          approverSetEpoch: 2,
+          approverSetSignatures: signers.map((i) => signApproverSet({ epoch: 2, set: lifted, trustDomain: 'compute.test' }, approvers[i]!.privateKey)),
         },
         joinKey,
       );
@@ -445,11 +452,14 @@ describe('FakeDaemon signed intent', () => {
       await h.advance(5);
       return { h, cmd };
     };
-    // Signed by the join key alone, or by one approver of two: the bundle is refused; the quorum stays.
+    // Signed by the join key alone, or by one approver of two: the quorum part is refused and the quorum stays,
+    // while the rest of the bundle (roots, version 2) applies.
     for (const signers of [[], [0], [0, 0]]) {
       const { h, cmd } = await run(signers);
       expect(states(h, cmd.id)).toEqual(['REJECTED:UNBATCHED_LIMIT']);
-      expect(h.server.of('hello').at(-1)?.trustVersion).toBe(1n);
+      h.server.send({ case: 'desired', value: desiredStateFromStored(storedDesiredState({ nodeId: 'node_a', generation: 1, spec: {} }).body, signer.signDesiredState(storedDesiredState({ nodeId: 'node_a', generation: 1, spec: {} }).body)) });
+      await h.advance(20_000);
+      expect(h.server.of('status').at(-1)?.trustVersion).toBe(2n);
     }
     // Both current approvers signed the change: it applies, and the quorum is lifted.
     const { h, cmd } = await run([0, 1]);

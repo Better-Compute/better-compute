@@ -500,11 +500,11 @@ export const batchCommands = [
     group: 'Quorum',
     summary: 'Sign a change of the approver set with a current approver key',
     description:
-      "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for trust bundle --version of the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers with that version. Prints the set's digest and the signature.",
+      "batch sign-approvers signs, as one of the CURRENT approvers (--key), the quorum a new trust bundle will carry: its approver keys (--approvers, the .pub files of the whole new set), --threshold, --tiers and --unbatched, for approver-set --epoch (one above the current set's; better-compute pki trust-version prints it) in the deployment's --trust-domain (default: the PKI bundle's; a set signed for staging never changes prod's quorum, even with shared approver keys). Daemons that hold approver keys take a changed quorum, removal included, only with such signatures from their current threshold of current approvers (PLAN.md §13): the join key alone, which the control plane holds, cannot lift or replace it. Give the signatures to the deployment's pki.approvers.setSignatures with pki.approvers.epoch; they stay valid on every later trust bundle version while the set is current. Prints the set's digest and the signature.",
     output: 'json',
     flags: {
       key: { type: 'string', value: 'PATH', required: true, description: 'Your CURRENT approver private key (PEM)' },
-      version: { type: 'integer', value: 'N', required: true, min: 1, description: 'The trust bundle version that publishes the new set' },
+      epoch: { type: 'integer', value: 'N', required: true, min: 1, description: "The new set's epoch: one above the current set's" },
       approvers: {
         type: 'string',
         value: 'PATHS',
@@ -521,7 +521,7 @@ export const batchCommands = [
       pki: pkiFlag,
     },
     examples: [
-      'better-compute batch sign-approvers --key alice.pem --version 4 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2',
+      'better-compute batch sign-approvers --key alice.pem --epoch 2 --approvers alice.pem.pub,bob.pem.pub,carol.pem.pub --threshold 2',
     ],
     async run({ flags, env, path, note }) {
       const { privateKey, kid } = await loadApproverKey(path(flags.key!), env);
@@ -583,10 +583,10 @@ export const batchCommands = [
           : `Signing, as ${kid}, the REMOVAL of the quorum: destructive batches will no longer need approvals.`,
       );
       if (!approverKeys.some((key) => key.kid === kid)) note(`Your own key ${kid} is not in the new set.`);
-      note(`For trust bundle version ${flags.version} of ${trustDomain}.`);
-      const signature = signApproverSet({ version: flags.version!, set, trustDomain }, privateKey);
+      note(`For approver-set epoch ${flags.epoch} of ${trustDomain}.`);
+      const signature = signApproverSet({ epoch: flags.epoch!, set, trustDomain }, privateKey);
       return {
-        version: flags.version,
+        epoch: flags.epoch,
         trustDomain,
         setSha256: hexOf(approverSetDigest(set)),
         set: {

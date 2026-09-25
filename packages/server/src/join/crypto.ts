@@ -42,11 +42,13 @@ export interface JoinTrustBundle {
   quorumTiers?: readonly { maxScopeSize: number; threshold: number }[];
   unbatchedDestructivePerHour?: number;
   /**
-   * (v1.0, review #6 H1) The current approvers' "approver-set" signatures over this bundle's quorum
-   * fields at `version` (`better-compute batch sign-approvers`): daemons that hold approver keys take a
-   * quorum change only with them. Published only when the settled version is the signed one.
+   * (v1.0, review #6 H1, review #7 M1) The current approvers' "approver-set" signatures over this bundle's
+   * quorum fields at `approverSetEpoch` (`better-compute batch sign-approvers --epoch`): daemons that hold
+   * approver keys take a quorum change only with them. Published on every version while the set is current.
    */
   approverSetSignatures?: readonly { kid: string; sig: Uint8Array }[];
+  /** The epoch of the quorum fields (`pki.approvers.epoch`, default 1 with approvers, else 0). */
+  approverSetEpoch?: bigint;
 }
 
 /**

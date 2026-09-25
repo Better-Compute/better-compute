@@ -47,7 +47,7 @@ export type SigningPurpose =
   | 'batch-approval'
   /**
    * Operator approver key of the CURRENT set (v1.0 quorum, §13): a change of the trust bundle's
-   * quorum fields; parts [uint64_be(version), sha256(approverSetInput(...)), trust_domain].
+   * quorum fields; parts [uint64_be(approver_set_epoch), sha256(approverSetInput(...)), trust_domain].
    */
   | 'approver-set';
 
@@ -196,19 +196,19 @@ export function approverSetInput(fields: ApproverSetFields): Uint8Array {
 }
 
 /**
- * Signing input of an `approver_set_signatures` entry: the new version, its set's digest and the deployment's
- * trust domain (each verifier supplies its own), so a set signed for one deployment (staging) never changes the
- * quorum of another (prod) that shares approver keys.
+ * Signing input of an `approver_set_signatures` entry: the set's epoch (TrustBundle.approver_set_epoch), its digest
+ * and the deployment's trust domain (each verifier supplies its own), so a set signed for one deployment (staging)
+ * never changes the quorum of another (prod) that shares approver keys, and an older set is never taken back.
  */
 export const approverSetSigningInput = (input: {
-  version: bigint;
+  epoch: bigint;
   setSha256: Uint8Array;
   trustDomain: string;
 }): Uint8Array => {
   if (!input.trustDomain) throw new Error('An approver-set signature names its trust domain');
-  const version = new Uint8Array(8);
-  new DataView(version.buffer).setBigUint64(0, input.version);
-  return signingInput('approver-set', [version, digest('setSha256', input.setSha256), utf8.encode(input.trustDomain)]);
+  const epoch = new Uint8Array(8);
+  new DataView(epoch.buffer).setBigUint64(0, input.epoch);
+  return signingInput('approver-set', [epoch, digest('setSha256', input.setSha256), utf8.encode(input.trustDomain)]);
 };
 
 /** `uint32_be(len) ‖ bytes`. */

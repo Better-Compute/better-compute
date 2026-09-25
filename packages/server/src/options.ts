@@ -182,12 +182,17 @@ export interface ComputeOptions<
       tiers?: readonly { maxScopeSize: number; threshold: number }[];
       unbatchedDestructivePerHour?: number;
       /**
-       * (review #6 H1) The CURRENT approvers' signatures over this quorum for bundle version
-       * `trustVersion` (`better-compute batch sign-approvers --version N`, `sig` as base64url or bytes).
-       * A daemon holding approver keys takes a quorum change only with k of them. Needs an explicit
-       * `pki.trustVersion`: the version they were signed for.
+       * (review #6 H1) The CURRENT approvers' signatures over this quorum at `epoch`
+       * (`better-compute batch sign-approvers --epoch N`, `sig` as base64url or bytes). A daemon
+       * holding approver keys takes a quorum change only with k of them, for a higher epoch. Needs
+       * `epoch`: the one they were signed for.
        */
       setSignatures?: readonly { kid: string; sig: string | Uint8Array }[];
+      /**
+       * (review #7 M1) The epoch of this set (default 1): raise it with every change of the set.
+       * Signatures sign it rather than the bundle version, so they stay valid while the set is current.
+       */
+      epoch?: number | bigint;
     };
   };
   secrets?: SecretStore[];
@@ -534,7 +539,7 @@ function resolveCommandSigning(
     trustBundle: {
       version: BigInt(version),
       commandSigningRoots: [...commandSigner.roots],
-      ...resolveApprovers(pki?.approvers, pki?.trustVersion !== undefined),
+      ...resolveApprovers(pki?.approvers),
     },
   };
 }
@@ -542,7 +547,6 @@ function resolveCommandSigning(
 /** `pki.approvers` → the trust bundle's quorum fields (kid = base64url SHA-256 of the SPKI). */
 function resolveApprovers(
   approvers: NonNullable<ComputeOptions['pki']>['approvers'],
-  versionGiven: boolean,
 ): Partial<JoinTrustBundle> {
   if (approvers === undefined) return {};
   if (!isRecord(approvers)) throw invalid('pki.approvers must be an object');
@@ -552,6 +556,7 @@ function resolveApprovers(
     tiers = [],
     unbatchedDestructivePerHour = 0,
     setSignatures = [],
+    epoch,
   } = approvers;
   if (!Array.isArray(keys) || keys.length === 0 || !keys.every((key) => key instanceof Uint8Array))
     throw invalid('pki.approvers.keys must be approver public keys (SPKI DER)');
@@ -616,15 +621,21 @@ function resolveApprovers(
       throw invalid(`pki.approvers.setSignatures[${index}] must be { kid, sig } (a 64-byte P-256 signature)`);
     return { kid: signature.kid, sig };
   });
-  if (approverSetSignatures.length && !versionGiven)
-    throw invalid(
-      'pki.approvers.setSignatures need pki.trustVersion: the bundle version they were signed for',
-    );
+  // Review #7 M1: the set's own epoch, which the signatures sign (not the bundle version): they stay valid on every
+  // later version, so a daemon that missed one bundle still takes the set.
+  if (
+    epoch !== undefined &&
+    !((typeof epoch === 'bigint' && epoch >= 1n) || (typeof epoch === 'number' && Number.isInteger(epoch) && epoch >= 1))
+  )
+    throw invalid('pki.approvers.epoch must be a whole number of at least 1');
+  if (approverSetSignatures.length && epoch === undefined)
+    throw invalid('pki.approvers.setSignatures need pki.approvers.epoch: the epoch they were signed for');
   return {
     approverKeys,
     approverThreshold: threshold,
     quorumTiers,
     unbatchedDestructivePerHour,
+    approverSetEpoch: BigInt(epoch ?? 1),
     ...(approverSetSignatures.length ? { approverSetSignatures } : {}),
   };
 }

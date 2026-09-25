@@ -67,11 +67,18 @@ message TrustBundle {
   repeated QuorumTier quorum_tiers = 6;
   // (v1.0) The quorum fields (3-6) are signed by the approvers themselves, not only by the join key
   // the control plane holds: k-of-the-CURRENT-set signatures, purpose "approver-set", parts
-  // [uint64_be(version), sha256(approver set input)] (see protocol's approverSetInput). A daemon
-  // that holds approver keys accepts a bundle that changes any quorum field, removal included, only
-  // with these signatures by its current set at its current threshold. A daemon without keys takes
-  // the first set as-is: that only adds restrictions.
+  // [uint64_be(approver_set_epoch), sha256(approver set input), trust_domain] (see protocol's
+  // approverSetInput; the verifier's own trust domain). Published on every version while the set is
+  // current. A daemon that holds approver keys at epoch e takes a different set, removal included,
+  // only with approver_set_epoch > e and these signatures by its current set at its current
+  // threshold; an older epoch is refused. When the quorum part is refused, the rest of the bundle
+  // (roots, version) still applies and the old quorum stays. A daemon without keys takes the first set
+  // as-is: that only adds restrictions. A daemon that missed two set changes with disjoint keys needs
+  // re-provisioning.
   repeated Signature approver_set_signatures = 7;
+  // (v1.0) The epoch of the quorum fields (3-6): monotonic, separate from `version` (roots rotate
+  // without touching it), raised with every change of the set.
+  uint64 approver_set_epoch = 8;
 }
 
 message QuorumTier {

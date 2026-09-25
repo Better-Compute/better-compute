@@ -102,53 +102,59 @@ describe('trust bundle version (review #6 M5)', () => {
     const firstSet = { approverKeys: two, approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
     expect((await boot({ approvers: first })).version).toBe(1n);
 
-    // Adding a third approver, signed by both current ones for version 2.
+    // Adding a third approver, signed by both current ones for epoch 2 (the first set is epoch 1).
     const all = approvers.map((approver) => approver.key);
     const nextSet = { approverKeys: all, approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
     const setSignatures = approvers.slice(0, 2).map((approver) => {
-      const signature = signApproverSet({ version: 2n, set: nextSet, trustDomain: 'compute.test' }, approver.privateKey);
+      const signature = signApproverSet({ epoch: 2n, set: nextSet, trustDomain: 'compute.test' }, approver.privateKey);
       return { kid: signature.kid, sig: Buffer.from(signature.sig).toString('base64url') };
     });
-    const next = { keys: all.map((key) => key.spkiDer), threshold: 2, setSignatures };
-    const bundle = await boot({ approvers: next, trustVersion: 2 });
+    const next = { keys: all.map((key) => key.spkiDer), threshold: 2, setSignatures, epoch: 2 };
+    const bundle = await boot({ approvers: next });
     expect(bundle.version).toBe(2n);
+    expect(bundle.approverSetEpoch).toBe(2n);
     expect(bundle.approverSetSignatures).toHaveLength(2);
     // What a daemon holding the first set checks.
     expect(
-      verifyApproverSetChange(firstSet, {
+      verifyApproverSetChange({ ...firstSet, epoch: 1n }, {
         ...approverSetOf(bundle),
-        version: bundle.version,
+        epoch: bundle.approverSetEpoch,
         approverSetSignatures: bundle.approverSetSignatures,
         trustDomain: 'compute.test',
       }),
     ).toHaveLength(2);
     expect(warnings).toEqual([]);
 
-    // The same signatures for another quorum change under version 2 (already published): refused, and
-    // nothing is recorded.
-    await expect(
-      boot({ approvers: { ...next, threshold: 3 }, trustVersion: 2 }),
-    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
-    // A root rotation with the quorum unchanged: the next version, without the stale signatures.
+    // A root rotation with the quorum unchanged: the next version, still with the set's signatures, so a daemon
+    // that missed version 2 takes the set from version 3.
     const rotated = await boot({
       approvers: next,
-      trustVersion: 2,
       commandSigningRoots: [createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) }).certificate],
     });
     expect(rotated.version).toBe(3n);
-    expect(rotated.approverSetSignatures).toEqual([]);
+    expect(rotated.approverSetEpoch).toBe(2n);
+    expect(rotated.approverSetSignatures).toHaveLength(2);
+    expect(
+      verifyApproverSetChange({ ...firstSet, epoch: 1n }, {
+        ...approverSetOf(rotated),
+        epoch: rotated.approverSetEpoch,
+        approverSetSignatures: rotated.approverSetSignatures,
+        trustDomain: 'compute.test',
+      }),
+    ).toHaveLength(2);
     expect(warnings).toEqual([]);
 
-    // An unsigned quorum change is published, with a warning that key-holding daemons refuse it.
-    expect((await boot({ approvers: { ...first, threshold: 1 } })).version).toBe(4n);
+    // The same signatures for another quorum: published, with a warning naming the epoch to sign.
+    expect((await boot({ approvers: { ...next, threshold: 3 } })).version).toBe(4n);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/sign-approvers --version 4/);
-    // setSignatures without the version they were signed for: refused at configuration.
+    expect(warnings[0]).toMatch(/sign-approvers --epoch 3/);
+    // setSignatures without the epoch they were signed for: refused at configuration.
+    const { epoch: _epoch, ...unepoched } = next;
     expect(() =>
       betterCompute({
         ...options(db!, fakeIam()),
-        pki: { join, commandSigning: authority, approvers: next },
+        pki: { join, commandSigning: authority, approvers: unepoched },
       } as never),
-    ).toThrow(/trustVersion/);
+    ).toThrow(/pki.approvers.epoch/);
   });
 });

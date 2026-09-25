@@ -10,11 +10,10 @@ import type { JoinTrustBundle } from '../join/crypto.js';
 // bundle it last published: a process whose bundle differs publishes the next version (or
 // `pki.trustVersion`, when that is higher), and every process with that bundle then agrees on it.
 //
-// A quorum change also needs the current approvers' signatures for its exact version (H1,
-// `pki.approvers.setSignatures` for `pki.trustVersion`): they are published only when the settled
-// version is the signed one, a changed quorum whose signatures name another version refuses to
-// start, and a changed quorum without signatures is published with a warning (daemons holding
-// approver keys keep their old quorum until it is signed).
+// A quorum change also needs the current approvers' signatures (H1), for the set's own epoch
+// (review #7 M1, `pki.approvers.epoch` and `setSignatures`), which they keep on every later version. A
+// changed quorum without valid signatures for a higher epoch is published with a warning: daemons
+// holding approver keys keep their old quorum (and take the rest of the bundle) until it is signed.
 
 export const trustBundleStateMigration: Migration = {
   name: 'quorum/0003_trust_bundle_state',
@@ -59,9 +58,12 @@ interface StoredApproverSet {
   threshold: number;
   tiers: { maxScopeSize: number; threshold: number }[];
   unbatched: number;
+  /** The set's epoch (absent in records from before epochs: 0). */
+  epoch?: string;
 }
 
-const storeSet = (set: ApproverSet): StoredApproverSet => ({
+const storeSet = (set: ApproverSet, epoch: bigint): StoredApproverSet => ({
+  epoch: epoch.toString(),
   keys: set.approverKeys.map((key) => ({
     kid: key.kid,
     spki: Buffer.from(key.spkiDer).toString('base64'),
@@ -106,6 +108,7 @@ export function trustVersionSettler(
 ): () => Promise<void> {
   const configured = bundle.version;
   const signatures = bundle.approverSetSignatures ?? [];
+  const epoch = bundle.approverSetEpoch ?? 0n;
   let settled: Promise<void> | undefined;
   const settle = async () => {
     const exists = await database.query<{ table: string | null }>(
@@ -119,7 +122,7 @@ export function trustVersionSettler(
         `INSERT INTO trust_bundle_state (id, version, digest, approver_set)
            VALUES ('current', $1, $2, $3::jsonb)
            ON CONFLICT (id) DO NOTHING`,
-        [configured.toString(), digest, JSON.stringify(storeSet(set))],
+        [configured.toString(), digest, JSON.stringify(storeSet(set, epoch))],
       );
       const { rows } = await tx.query<{
         version: string;
@@ -148,38 +151,34 @@ export function trustVersionSettler(
           [digest],
         );
         if (past.rows[0])
-          return { version: BigInt(past.rows[0].version), stale: recorded, previous: undefined, quorumChanged: false };
+          return {
+            version: BigInt(past.rows[0].version),
+            stale: recorded,
+            previous: undefined,
+            previousEpoch: 0n,
+            quorumChanged: false,
+          };
       }
       const floor = same ? recorded : recorded + 1n;
       const version = configured > floor ? configured : floor;
       const previous = row.approver_set ? loadSet(row.approver_set) : undefined;
+      const previousEpoch = BigInt(row.approver_set?.epoch ?? 0);
       const quorumChanged = previous !== undefined && !sameApproverSet(previous, set);
-      // Signatures bind a version: for a changed quorum published under another one, they are
-      // worthless and daemons would keep the old quorum. Refuse before recording anything.
-      if (signatures.length && quorumChanged && version !== configured)
-        throw new ComputeError(
-          'INVALID_CONFIG',
-          `pki.approvers.setSignatures are for trust bundle version ${configured}, but this bundle publishes version ${version}: sign the quorum for version ${version} (better-compute batch sign-approvers --version ${version}) and set pki.trustVersion to it`,
-          undefined,
-          { signedVersion: configured.toString(), version: version.toString() },
-        );
       if (version !== recorded || !same || !row.approver_set)
         await tx.query(
           `UPDATE trust_bundle_state SET version = $1, digest = $2, approver_set = $3::jsonb,
                   updated_at = now()
             WHERE id = 'current'`,
-          [version.toString(), digest, JSON.stringify(storeSet(set))],
+          [version.toString(), digest, JSON.stringify(storeSet(set, epoch))],
         );
       await tx.query(
         `INSERT INTO trust_bundle_history (digest, version) VALUES ($1, $2::numeric)
            ON CONFLICT (digest) DO UPDATE SET version = EXCLUDED.version, published_at = now()`,
         [digest, version.toString()],
       );
-      return { version, stale: undefined, previous, quorumChanged };
+      return { version, stale: undefined, previous, previousEpoch, quorumChanged };
     });
     bundle.version = outcome.version;
-    // Published only for the version they sign (an unchanged quorum needs none).
-    bundle.approverSetSignatures = outcome.version === configured ? signatures : [];
     if (outcome.stale !== undefined) {
       options.log?.warn(
         `This process's trust bundle is the one published as version ${outcome.version}, since replaced by version ${outcome.stale}: it serves version ${outcome.version}, which daemons ignore. Update its configuration, or set pki.trustVersion above ${outcome.stale} to publish this bundle again on purpose.`,
@@ -190,17 +189,17 @@ export function trustVersionSettler(
     if (!outcome.quorumChanged || !outcome.previous?.approverKeys.length) return;
     // A quorum change that daemons holding keys will refuse: say so loudly, once per process.
     try {
-      verifyApproverSetChange(outcome.previous, {
-        ...set,
-        version: outcome.version,
-        approverSetSignatures: bundle.approverSetSignatures,
-        trustDomain: options.trustDomain,
-      });
+      verifyApproverSetChange(
+        { ...outcome.previous, epoch: outcome.previousEpoch },
+        { ...set, epoch, approverSetSignatures: signatures, trustDomain: options.trustDomain },
+      );
     } catch (error) {
+      const next = outcome.previousEpoch + 1n;
       options.log?.warn(
-        `The trust bundle changes the approver quorum without k signatures of the previous approvers: daemons that hold approver keys keep the old quorum. Sign it with better-compute batch sign-approvers --version ${outcome.version} and set pki.approvers.setSignatures and pki.trustVersion.`,
+        `The trust bundle changes the approver quorum without k signatures of the previous approvers for a higher epoch: daemons that hold approver keys keep the old quorum. Sign it with better-compute batch sign-approvers --epoch ${next} and set pki.approvers.epoch to ${next} and pki.approvers.setSignatures.`,
         {
           version: outcome.version.toString(),
+          epoch: epoch.toString(),
           reason: error instanceof ComputeError ? error.details?.reason : String(error),
         },
       );

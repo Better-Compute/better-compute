@@ -95,16 +95,16 @@ describe('batch sign-approvers', () => {
     await h.run(['batch', 'keygen', '--out', 'carol.pem']);
     const key = async (name: string) => approverKeyOf(await readFile(join(h.cwd, `${name}.pem.pub`), 'utf8'));
     const [alice, bob, carol] = [await key('alice'), await key('bob'), await key('carol')];
-    const current = { approverKeys: [alice, bob], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0 };
+    const current = { approverKeys: [alice, bob], approverThreshold: 2, quorumTiers: [], unbatchedDestructivePerHour: 0, epoch: 3n };
     const argv = (signer: string) => [
-      'batch', 'sign-approvers', '--key', `${signer}.pem`, '--version', '4',
+      'batch', 'sign-approvers', '--key', `${signer}.pem`, '--epoch', '4',
       '--approvers', 'alice.pem.pub,bob.pem.pub,carol.pem.pub', '--threshold', '2', '--tiers', '5:1,100:2',
       '--trust-domain', 'compute.test',
     ];
     const byAlice = await h.run(argv('alice'));
     const byBob = await h.run(argv('bob'));
     expect(byAlice).toMatchObject({
-      version: 4,
+      epoch: 4,
       trustDomain: 'compute.test',
       set: { approverKids: [alice.kid, bob.kid, carol.kid], threshold: 2 },
     });
@@ -117,7 +117,7 @@ describe('batch sign-approvers', () => {
         { maxScopeSize: 100, threshold: 2 },
       ],
       unbatchedDestructivePerHour: 0,
-      version: 4n,
+      epoch: 4n,
       trustDomain: 'compute.test',
     };
     const signatures = [byAlice, byBob].map((out) => ({ kid: out.signature.kid, sig: fromBase64url(out.signature.sig) }));
@@ -128,7 +128,7 @@ describe('batch sign-approvers', () => {
     // Without a PKI bundle to read the trust domain from, it must be given.
     await expect(h.run(argv('alice').slice(0, -2))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT', message: /--trust-domain/ });
     // Removing the quorum is said out loud; bad thresholds and tier orders are refused.
-    await h.run(['batch', 'sign-approvers', '--key', 'alice.pem', '--version', '5', '--trust-domain', 'compute.test']);
+    await h.run(['batch', 'sign-approvers', '--key', 'alice.pem', '--epoch', '5', '--trust-domain', 'compute.test']);
     expect(h.err.join('\n')).toMatch(/REMOVAL of the quorum/);
     await expect(h.run([...argv('alice'), '--threshold', '4'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(h.run([...argv('alice'), '--tiers', '100:2,5:1'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
