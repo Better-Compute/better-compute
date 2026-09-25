@@ -17,7 +17,14 @@
     - `iamGuard` / `BETTER_COMPUTE_IAM_GUARD=warn|throw` reports or refuses an IamPort call made inside a compute transaction (§8.1); `computeFixture` defaults to `throw`.
     - Sandboxes seams: paused instances, `restore_from`, `instance.snapshot` messages, runtime `pause`/`resume`/`snapshot`.
     - Workload tokens are refused for suspended or deleted tenants.
-    - MCP `create_instance` waits for the instance to start.
+    - MCP `create_instance` waits for the instance to start; MCP sandbox tools; FleetConfig `sandboxTemplates`.
+    - Sandbox seams: `InstanceSpec.network_policy` (egress/private/none).
+    - CI:
+      - nightly workflow: simulation plus 10k cold start, the IAM-guarded suite, the whole suite on Postgres,
+        and a green-night streak;
+      - the bcd release pipeline: SBOMs, keyless cosign, SLSA3 provenance;
+      - the API surface freeze check in `lint:repo`.
+    - The §16 gateway gate is met on a workstation: 5k mTLS sessions, 0 drops, dispatch p99 26 ms.
   - Tests: the §16 v0.3 MCP confirmation acceptance and §12.6 example policies end to end, §5.6 walkthrough 2 (acme-cloud), the authz matrix known-key replay step; `pnpm check` runs the remote-IAM suites, `proto-gen --check` and `buf breaking`. Tools: `scripts/private-commit.mjs` (compare-and-swap commits), `scripts/head-check.mjs` (tests the committed tree in a worktree).
 
 - Metal attestation and dedicated-root leases:

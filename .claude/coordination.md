@@ -185,9 +185,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
     - [f85da7]:
       - nightly.yml (sim + 10k cold start, IAM-guarded suite, Postgres full suite, green-night streak): 6e723b1 (see its git note);
       - release.yml (goreleaser + syft SBOM + keyless cosign + SLSA3 provenance): 30ed477.
+    - §16 gateway gate: met on the workstation (bc596e5: 5k mTLS sessions in a split process, 0 drops,
+      dispatch p99 26 ms, storm back in 39 s; listen backlog 4096 in 03dc281, [c321a3]); only the 30-min
+      reference-Postgres run is left.
     - Open, no owner:
       - the real-hardware nightly (needs hardware);
-      - a Postgres CPU <50% bench (needs reference Postgres);
+      - a Postgres CPU <50% bench and the 30-min gateway run (need reference Postgres);
       - the v1.0 external security review (a process item).
   - Sandboxes step 5 seams (paused, restore_from, instance.snapshot, runtime pause/resume/snapshot): b78045b.
   - DONE this round: tenancy §12.8 (ae9a7bb); vps instances.create wait + budget check (32c25ae); wake edge on
