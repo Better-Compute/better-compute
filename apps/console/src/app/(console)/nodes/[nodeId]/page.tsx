@@ -86,6 +86,37 @@ export default function NodePage({ params }: { params: Promise<{ nodeId: string 
                 </p>
               )}
             </section>
+            {/* Bare-metal lifecycle (metal.*): offered as the provision state allows; destructive ones ask first. */}
+            {typeof node.provisionState === 'string' &&
+              !['adopting', 'adopted'].includes(node.provisionState) && (
+                <section className="panel">
+                  <h3>Lifecycle</h3>
+                  <p className="muted">
+                    Provision state {node.provisionState}. Deploying a profile and power actions are in the CLI
+                    (metal deploy, metal power).
+                  </p>
+                  <DetailActions
+                    detail={detail}
+                    only={[
+                      'metal/manage',
+                      'metal/inspect',
+                      'metal/provide',
+                      'metal/rescue',
+                      'metal/unrescue',
+                      'metal/abort',
+                      'metal/recover',
+                      'metal/undeploy',
+                      'metal/retire',
+                    ]}
+                    confirm={{
+                      'metal/undeploy': `Undeploy ${nodeId}? Its disks are wiped (quick) and it is powered off.`,
+                      'metal/retire': `Retire ${nodeId}? Its disks are erased and it leaves the fleet for good.`,
+                      'metal/abort': `Abort ${nodeId}'s running workflow? The node is marked failed.`,
+                      'metal/provide': `Commission ${nodeId}? Diagnostics run and its disks get a quick wipe.`,
+                    }}
+                  />
+                </section>
+              )}
             <NodeLabels detail={detail} />
             {/* Break-glass shells are a platform operation (compute:nodes:ssh-root; IAM still decides). */}
             {root && <SshCertPanel nodeId={nodeId} />}
