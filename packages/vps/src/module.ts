@@ -122,11 +122,18 @@ import {
 } from './sandboxes.js';
 import { vpsTenantDeleted } from './tenancy.js';
 import {
+  deleteSnapshot,
+  getSnapshot,
   instanceSnapshotKind,
+  listSnapshots,
+  parseListSnapshots,
+  parseSnapshotRef,
   parseSnapshotSandbox,
   settleSnapshots,
   snapshotSandbox,
+  type ListSnapshotsInput,
   type SandboxSnapshot,
+  type SnapshotRef,
   type SnapshotSandboxInput,
   type SnapshotStore,
 } from './snapshots.js';
@@ -217,6 +224,11 @@ export type VpsApi = {
     update: MethodDefinition<TemplateUpdate, SandboxTemplate>;
     delete: MethodDefinition<TemplateRef, { deleted: true }>;
   };
+  sandboxSnapshots: {
+    list: MethodDefinition<ListSnapshotsInput, { items: SandboxSnapshot[]; cursor?: string }>;
+    get: MethodDefinition<SnapshotRef, SandboxSnapshot>;
+    delete: MethodDefinition<SnapshotRef, { deleted: true }>;
+  };
 };
 
 function tenantResource<I extends { tenantId: string }>(input: I) {
@@ -236,6 +248,9 @@ function sandboxResource<I extends { sandboxId: string }>(input: I) {
 }
 function templateResource<I extends { templateId: string }>(input: I) {
   return { type: 'sandbox-template', id: input.templateId };
+}
+function snapshotResource<I extends { snapshotId: string }>(input: I) {
+  return { type: 'sandbox-snapshot', id: input.snapshotId };
 }
 
 function parsePool(raw: unknown): PoolInput {
@@ -741,6 +756,30 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
         resource: templateResource,
         validate: describedBy(schemas.template, parseTemplateRef),
         handler: (context, input) => deleteTemplate(depsOf(context), context.sql, input),
+      }),
+    },
+    // Snapshots are their own resource: a kept one outlives its sandbox (§3.7).
+    sandboxSnapshots: {
+      list: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: tenantResource,
+        validate: describedBy(schemas.listSnapshots, parseListSnapshots),
+        handler: (context, input) => listSnapshots(context.sql, input, context.caller?.identityId),
+      }),
+      get: defineMethod({
+        action: 'compute:sandboxes:read',
+        kind: 'read',
+        resource: snapshotResource,
+        validate: describedBy(schemas.snapshot, parseSnapshotRef),
+        handler: (context, input) => getSnapshot(context.sql, input),
+      }),
+      delete: defineMethod({
+        action: 'compute:sandboxes:delete',
+        kind: 'mutation',
+        resource: snapshotResource,
+        validate: describedBy(schemas.snapshot, parseSnapshotRef),
+        handler: (context, input) => deleteSnapshot(depsOf(context), context.sql, input),
       }),
     },
   });

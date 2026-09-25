@@ -1691,7 +1691,7 @@ export async function reconcileSandboxes(
       );
       await deps.authz.remove(tx, { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id });
       // Snapshots hold memory: they go with the sandbox unless kept.
-      dropped.push(...(await dropSnapshots(tx, { sandboxId: raw.id })));
+      dropped.push(...(await dropSnapshots(tx, { sandboxId: raw.id }, deps.authz)));
       await publishSandbox(deps, tx, raw, 'sandbox.deleted', {
         expired: raw.expired_ms !== null,
       });

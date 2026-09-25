@@ -37,6 +37,7 @@ export const computeResourceKinds = [
   'provider-account',
   'sandbox',
   'sandbox-template',
+  'sandbox-snapshot',
 ] as const;
 export type ComputeResourceKind = (typeof computeResourceKinds)[number];
 
@@ -207,6 +208,12 @@ const definitions = {
   'sandbox-template': {
     description: "A tenant's sandbox template: pool, flavor, image, runtime, TTL bounds, warm pool",
     actions: a('sandboxes', 'read', 'manage'),
+  },
+  'sandbox-snapshot': {
+    description:
+      "A sandbox's snapshot (disk and memory; tenant-private, owned by who took it; may outlive its sandbox)",
+    actions: a('sandboxes', 'read', 'delete'),
+    attributes: { sandboxId: 'string', templateId: 'string', includeMemory: 'boolean' },
   },
 } as const satisfies Record<ComputeResourceKind, KindDefinition>;
 
@@ -534,6 +541,11 @@ group('sandboxTemplates', 'vps', [
   ['get', 'read', 'sandboxes:read', 'sandbox-template', 'v0.5'],
   ['update', 'mutation', 'sandboxes:manage', 'sandbox-template', 'v0.5'],
   ['delete', 'mutation', 'sandboxes:manage', 'sandbox-template', 'v0.5'],
+]);
+group('sandboxSnapshots', 'vps', [
+  ['list', 'read', 'sandboxes:read', 'tenant', 'v0.5', list],
+  ['get', 'read', 'sandboxes:read', 'sandbox-snapshot', 'v0.5'],
+  ['delete', 'mutation', 'sandboxes:delete', 'sandbox-snapshot', 'v0.5'],
 ]);
 group('tunnels', 'tunnels', [
   ['open', 'mutation', 'instances:exec', 'instance', 'v0.3', { or: [['nodes:console', 'node']] }],

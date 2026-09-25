@@ -172,6 +172,10 @@ export function computeCatalog(p = 'compute-'): Record<string, ResourceTypeDefin
       },
     },
     [`${p}sandbox-template`]: { actions: action('sandboxes', 'read', 'manage') },
+    [`${p}sandbox-snapshot`]: {
+      actions: action('sandboxes', 'read', 'delete'),
+      attributes: { sandboxId: 'string', templateId: 'string', includeMemory: 'boolean' },
+    },
   };
 }
 

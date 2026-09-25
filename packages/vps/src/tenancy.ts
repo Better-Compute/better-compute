@@ -36,7 +36,7 @@ export async function vpsTenantDeleted(
   let dropped: DroppedSnapshot[] = [];
   const outcome = await context.sql.transaction(async (tx) => {
     // Its snapshots, kept ones included (tenant data with memory state).
-    dropped = await dropSnapshots(tx, { tenantId });
+    dropped = await dropSnapshots(tx, { tenantId }, deps.authz);
     const templates = await tx.query<{ id: string }>(
       `UPDATE sandbox_templates SET deleted = true, version = version + 1
         WHERE tenant_id = $1 AND NOT deleted RETURNING id`,

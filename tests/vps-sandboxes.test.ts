@@ -378,7 +378,7 @@ const used = async () =>
 
 describe('vps() sandboxes surface', () => {
   it('matches the §9.2 rows, and declares the migration and reconciler', () => {
-    for (const group of ['sandboxes', 'sandboxTemplates'] as const)
+    for (const group of ['sandboxes', 'sandboxTemplates', 'sandboxSnapshots'] as const)
       for (const [method, definition] of Object.entries(
         api[group] as Record<string, { action: string; kind: string }>,
       ))
@@ -1089,6 +1089,63 @@ describe('snapshots', () => {
     // The tenant's teardown takes kept ones too.
     await withStore.tenantDeleted!(moduleContext(db), 'acme');
     expect(deletedObjects).toEqual([dropped.id, kept.id]);
+  });
+
+  it('are listed, read and deleted as their own resource, kept ones after their sandbox', async () => {
+    const { sandbox } = await running();
+    const kept = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+      keep: true,
+    })) as SnapshotView;
+    expect(recorded.authz.findLast((row) => row.type === 'sandbox-snapshot')).toMatchObject({
+      id: kept.id,
+      ownerId: 'usr_alice',
+      attributes: { sandboxId: sandbox.id, includeMemory: true },
+    });
+    await settle(recorded.commands[0]!.id, 'succeeded');
+    await reconcileWith(kept.id);
+    // The sandbox goes; its kept snapshot stays, visible to its owner only by default.
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
+    await reconcileInstance(sandbox.instanceId);
+    await hostsReport('absent');
+    await reconcileWith('all');
+    const snapshots = storeApi.sandboxSnapshots as unknown as Record<string, Definition>;
+    expect(await run(snapshots.list!, { tenantId: 'acme' }, alice)).toMatchObject({
+      items: [{ id: kept.id, state: 'ready', ownerIdentityId: 'usr_alice' }],
+    });
+    expect(await run(snapshots.list!, { tenantId: 'acme' }, bob)).toMatchObject({ items: [] });
+    expect(await run(snapshots.list!, { tenantId: 'acme', scope: 'all' }, bob)).toMatchObject({
+      items: [{ id: kept.id }],
+    });
+    expect(
+      await run(snapshots.get!, { tenantId: 'acme', snapshotId: kept.id }, alice),
+    ).toMatchObject({ id: kept.id, sandboxId: sandbox.id });
+
+    deletedObjects.length = 0;
+    recorded.events = [];
+    expect(await run(snapshots.delete!, { tenantId: 'acme', snapshotId: kept.id }, alice)).toEqual({
+      deleted: true,
+    });
+    expect(eventTypes()).toEqual(['sandbox.snapshot.deleted']);
+    expect(recorded.removed.at(-1)).toEqual({
+      type: 'sandbox-snapshot',
+      id: kept.id,
+      tenantId: 'acme',
+    });
+    await expect(
+      run(snapshots.get!, { tenantId: 'acme', snapshotId: kept.id }, alice),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    // Idempotent; the object goes with the next pass, outside the request's transaction.
+    expect(await run(snapshots.delete!, { tenantId: 'acme', snapshotId: kept.id }, alice)).toEqual({
+      deleted: true,
+    });
+    expect(deletedObjects).toEqual([]);
+    await reconcileWith('all');
+    expect(deletedObjects).toEqual([kept.id]);
+    await expect(
+      run(snapshots.delete!, { tenantId: 'globex', snapshotId: kept.id }, alice),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('keep a pending upload’s object until its command settles, then delete it', async () => {

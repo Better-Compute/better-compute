@@ -16,7 +16,7 @@ import {
   InstanceSnapshotResultSchema,
   MAX_COMMAND_BODY_BYTES,
 } from '@better-compute/protocol';
-import { id, key, object, optional, tenant } from './input.js';
+import { id, int, key, object, optional, tenant } from './input.js';
 import { cpuModelLabelValue, readInstance, type InstanceDeps } from './instances.js';
 
 // Sandbox snapshots (PLAN.md §3.7): `sandboxes.snapshot` sends the host the `instance.snapshot`
@@ -120,6 +120,8 @@ export interface SandboxSnapshot {
   sizeBytes?: number;
   cpuModel?: string;
   reason?: string;
+  /** Who took it: only they may restore it. */
+  ownerIdentityId: string;
   createdAt: number;
   readyAt?: number;
 }
@@ -191,6 +193,7 @@ function snapshotView(raw: RawSnapshot): SandboxSnapshot {
     includeMemory: raw.include_memory,
     keep: raw.keep,
     runtime: raw.runtime,
+    ownerIdentityId: raw.owner_identity_id,
     createdAt: Number(raw.created_ms),
   };
   if (raw.sha256 !== null) view.sha256 = raw.sha256;
@@ -263,7 +266,7 @@ export async function restoreSource(
  * retry returns the same snapshot.
  */
 export async function snapshotSandbox(
-  deps: Pick<InstanceDeps, 'clock' | 'events'>,
+  deps: Pick<InstanceDeps, 'clock' | 'events' | 'authz'>,
   store: SnapshotStore | undefined,
   context: MethodContext,
   input: SnapshotSandboxInput,
@@ -363,7 +366,122 @@ export async function snapshotSandbox(
       instance.restoreFrom?.principalInstanceId ?? instance.id,
     ],
   );
+  // Its own resource: a kept snapshot outlives its sandbox (and the sandbox's authz row).
+  await deps.authz.upsert(tx, {
+    type: 'sandbox-snapshot',
+    id: snapshotId,
+    tenantId: input.tenantId,
+    attributes: {
+      sandboxId: sandbox.id,
+      templateId: sandbox.template_id,
+      includeMemory: input.includeMemory,
+    },
+    ownerId: caller.identityId,
+  });
   return snapshotView(rows[0]!);
+}
+
+export type SnapshotRef = { tenantId: string; snapshotId: string };
+
+export interface ListSnapshotsInput {
+  tenantId: string;
+  scope: 'mine' | 'all';
+  sandboxId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export function parseSnapshotRef(raw: unknown): SnapshotRef {
+  const input = object(raw, ['tenantId', 'snapshotId']);
+  return {
+    tenantId: tenant(input.tenantId),
+    snapshotId: id(input.snapshotId, 'snap', 'snapshotId'),
+  };
+}
+
+export function parseListSnapshots(raw: unknown): ListSnapshotsInput {
+  const input = object(raw, ['tenantId', 'scope', 'sandboxId', 'limit', 'cursor']);
+  if (input.scope !== undefined && input.scope !== 'mine' && input.scope !== 'all')
+    throw new ComputeError('INVALID_INPUT', 'scope must be mine or all');
+  const result: ListSnapshotsInput = {
+    tenantId: tenant(input.tenantId),
+    scope: (input.scope as 'mine' | 'all' | undefined) ?? 'mine',
+  };
+  const sandboxId = optional(input.sandboxId, (value) => id(value, 'sbx', 'sandboxId'));
+  if (sandboxId !== undefined) result.sandboxId = sandboxId;
+  const limit = optional(input.limit, (value) => int(value, 'limit', 1, 200));
+  if (limit !== undefined) result.limit = limit;
+  const cursor = optional(input.cursor, (value) => id(value, 'snap', 'cursor'));
+  if (cursor !== undefined) result.cursor = cursor;
+  return result;
+}
+
+/**
+ * A tenant's snapshots (kept ones of deleted sandboxes included), newest first; `scope: 'mine'` (the
+ * default) filters to the caller's own.
+ */
+export async function listSnapshots(
+  tx: SqlTx,
+  input: ListSnapshotsInput,
+  callerIdentityId: string | undefined,
+): Promise<{ items: SandboxSnapshot[]; cursor?: string }> {
+  const limit = input.limit ?? 50;
+  const owner = input.scope === 'mine' ? (callerIdentityId ?? '') : null;
+  const { rows } = await tx.query<RawSnapshot>(
+    `SELECT ${snapshotColumns} FROM sandbox_snapshots
+      WHERE tenant_id = $1 AND state <> 'deleted'
+        AND ($2::text IS NULL OR owner_identity_id = $2) AND ($3::text IS NULL OR sandbox_id = $3)
+        AND ($4::text IS NULL OR (created_at, id) <
+             (SELECT created_at, id FROM sandbox_snapshots WHERE id = $4 AND tenant_id = $1))
+      ORDER BY created_at DESC, id DESC LIMIT $5`,
+    [input.tenantId, owner, input.sandboxId ?? null, input.cursor ?? null, limit + 1],
+  );
+  const page = rows.slice(0, limit);
+  const result: { items: SandboxSnapshot[]; cursor?: string } = { items: page.map(snapshotView) };
+  if (rows.length > limit) result.cursor = page[page.length - 1]!.id;
+  return result;
+}
+
+export async function getSnapshot(tx: SqlTx, ref: SnapshotRef): Promise<SandboxSnapshot> {
+  const { rows } = await tx.query<RawSnapshot>(
+    `SELECT ${snapshotColumns} FROM sandbox_snapshots WHERE id = $1 AND tenant_id = $2`,
+    [ref.snapshotId, ref.tenantId],
+  );
+  if (!rows[0] || rows[0].state === 'deleted')
+    throw new ComputeError('NOT_FOUND', `Snapshot ${ref.snapshotId} not found`);
+  return snapshotView(rows[0]);
+}
+
+/**
+ * `sandboxSnapshots.delete`: the snapshot is gone at once for reads and restores; its stored object
+ * is deleted by the next `vps.sandboxes` pass (after its command settled, for a pending upload), so
+ * no network call runs in this transaction. Idempotent.
+ */
+export async function deleteSnapshot(
+  deps: Pick<InstanceDeps, 'authz' | 'events' | 'work'>,
+  tx: SqlTx,
+  ref: SnapshotRef,
+): Promise<{ deleted: true }> {
+  const { rows } = await tx.query<RawSnapshot>(
+    `UPDATE sandbox_snapshots SET state = 'deleted', purged = false, version = version + 1
+      WHERE id = $1 AND tenant_id = $2 AND state <> 'deleted'
+      RETURNING ${snapshotColumns}`,
+    [ref.snapshotId, ref.tenantId],
+  );
+  const raw = rows[0];
+  if (!raw) {
+    const exists = await tx.query(
+      `SELECT 1 FROM sandbox_snapshots WHERE id = $1 AND tenant_id = $2`,
+      [ref.snapshotId, ref.tenantId],
+    );
+    if (exists.rows.length === 0)
+      throw new ComputeError('NOT_FOUND', `Snapshot ${ref.snapshotId} not found`);
+    return { deleted: true };
+  }
+  await deps.authz.remove(tx, { type: 'sandbox-snapshot', id: raw.id, tenantId: raw.tenant_id });
+  await publishSnapshot(deps, tx, raw, 'sandbox.snapshot.deleted');
+  await deps.work.enqueue(tx, 'vps.sandboxes', 'all');
+  return { deleted: true };
 }
 
 async function publishSnapshot(
@@ -466,6 +584,7 @@ export interface DroppedSnapshot {
 export async function dropSnapshots(
   tx: SqlTx,
   scope: { sandboxId: string } | { tenantId: string },
+  authz?: Pick<InstanceDeps['authz'], 'remove'>,
 ): Promise<DroppedSnapshot[]> {
   // A pending upload may still land: its object is deleted once the command settles
   // (`purgeSettledSnapshots`), not now.
@@ -475,6 +594,9 @@ export async function dropSnapshots(
       RETURNING id, tenant_id, url, purged`,
     ['sandboxId' in scope ? scope.sandboxId : scope.tenantId],
   );
+  if (authz)
+    for (const row of rows)
+      await authz.remove(tx, { type: 'sandbox-snapshot', id: row.id, tenantId: row.tenant_id });
   return rows
     .filter((row) => row.purged)
     .map((row) => ({ tenantId: row.tenant_id, snapshotId: row.id, url: row.url }));

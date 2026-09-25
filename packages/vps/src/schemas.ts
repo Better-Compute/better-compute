@@ -325,6 +325,20 @@ export const schemas = {
     },
     ['tenantId'],
   ),
+  snapshot: strictObject({ tenantId, snapshotId: idOf('snap', 'The snapshot') }, [
+    'tenantId',
+    'snapshotId',
+  ]),
+  listSnapshots: strictObject(
+    {
+      tenantId,
+      scope: { enum: ['mine', 'all'], default: 'mine' },
+      sandboxId: { ...sandboxId, description: 'Only this sandbox’s snapshots' },
+      limit: integer(1, 200),
+      cursor: { ...idOf('snap', 'The last snapshot id of the previous page') },
+    },
+    ['tenantId'],
+  ),
   snapshotSandbox: strictObject(
     {
       tenantId,

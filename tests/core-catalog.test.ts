@@ -79,6 +79,7 @@ const planActions: Record<string, string[]> = {
   'compute-provider-account': a('providers', 'read', 'manage'),
   'compute-sandbox': a('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),
   'compute-sandbox-template': a('sandboxes', 'read', 'manage'),
+  'compute-sandbox-snapshot': a('sandboxes', 'read', 'delete'),
 };
 
 describe('resource types (§12.3)', () => {
@@ -384,6 +385,7 @@ describe('apiSurface (§9.2)', () => {
         'providerAccounts.list',
         'sandboxes.list',
         'sandboxTemplates.list',
+        'sandboxSnapshots.list',
       ],
     );
   });
