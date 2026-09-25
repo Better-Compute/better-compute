@@ -156,7 +156,10 @@ describe('FakeDaemon signed intent', () => {
   });
 
   it('refuses unsigned specs that change access, and forged specs (signed NodeSpecs)', async () => {
-    const h = await daemon();
+    // The v0.2 policy: only access changes need a signature.
+    const h = await daemon({
+      intent: { roots: [authority.certificate], version: 1n, signedSpecs: 'access' },
+    });
     const rogue = createCommandSigner({
       authority: createCommandSigningAuthority({ clock }),
       workerId: 'gw',
@@ -171,7 +174,7 @@ describe('FakeDaemon signed intent', () => {
     };
     const access = { access: { sshPrincipals: ['root@node_a'] } };
 
-    // No access change: an unsigned spec is still accepted under the default ('access') policy.
+    // No access change: an unsigned spec is still accepted under the 'access' policy.
     const plain = sendSpec({});
     await h.advance(5);
     expect(h.daemon.appliedGeneration).toBe(plain);
@@ -191,10 +194,8 @@ describe('FakeDaemon signed intent', () => {
     expect(h.daemon.appliedGeneration).toBe(signedAccess);
     expect(h.daemon.specRejections.map((rejection) => rejection.generation)).toContain(forged);
 
-    // signedSpecs 'always' (v0.4): every spec needs a signature.
-    const strict = await daemon({
-      intent: { roots: [authority.certificate], version: 1n, signedSpecs: 'always' },
-    });
+    // The default with roots ('always'): every spec needs a signature.
+    const strict = await daemon();
     const before = strict.daemon.appliedGeneration;
     const { body } = storedDesiredState({ nodeId: 'node_a', generation: before + 1, spec: {} });
     strict.server.send({ case: 'desired', value: desiredStateFromStored(body, null) });
@@ -206,6 +207,24 @@ describe('FakeDaemon signed intent', () => {
     });
     await strict.advance(5);
     expect(strict.daemon.appliedGeneration).toBe(before + 1);
+  });
+
+  it('cannot be frozen by an unsigned spec with a huge generation (a compromised gateway)', async () => {
+    const h = await daemon();
+    const applied = h.daemon.appliedGeneration;
+    const freeze = storedDesiredState({ nodeId: 'node_a', generation: 2 ** 53 - 1, spec: {} });
+    h.server.send({ case: 'desired', value: desiredStateFromStored(freeze.body, null) });
+    await h.advance(5);
+    // Refused and not journaled: the next real (signed) generation still applies.
+    expect(h.daemon.appliedGeneration).toBe(applied);
+    expect(h.daemon.specRejections.at(-1)).toMatchObject({ reason: 'unsigned' });
+    const next = storedDesiredState({ nodeId: 'node_a', generation: applied + 1, spec: {} });
+    h.server.send({
+      case: 'desired',
+      value: desiredStateFromStored(next.body, signer.signDesiredState(next.body)),
+    });
+    await h.advance(5);
+    expect(h.daemon.appliedGeneration).toBe(applied + 1);
   });
 
   it('without signed intent configured, behaves as v0.1 (nothing checked)', async () => {
