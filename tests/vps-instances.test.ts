@@ -723,6 +723,78 @@ describe('hosted instances', () => {
   });
 });
 
+describe('instances.create: async-with-wait and the budget check', () => {
+  type CreateDefinition = Definition & {
+    poll: {
+      done(output: unknown): boolean;
+      refresh(c: MethodContext, i: unknown, o: unknown): Promise<unknown>;
+    };
+    admission: { check(c: MethodContext, i: unknown, r: unknown): Promise<void> };
+  };
+  const create = () => api.instances.create as unknown as CreateDefinition;
+
+  it('parses wait (≤ 30 s) and leaves it out of the request, so a retry with another wait replays', async () => {
+    expect(create().validate(createHosted({ wait: { timeoutMs: 5000 } }))).toMatchObject({
+      wait: { timeoutMs: 5000 },
+    });
+    for (const wait of [{ timeoutMs: 30_001 }, { timeoutMs: -1 }, { timeoutMs: 1, x: 1 }, 5])
+      expect(() => create().validate(createHosted({ wait }))).toThrow(ComputeError);
+    const first = (await call(
+      'instances',
+      'create',
+      createHosted({ wait: { timeoutMs: 1000 } }),
+    )) as View;
+    const again = (await call(
+      'instances',
+      'create',
+      createHosted({ wait: { timeoutMs: 9000 } }),
+    )) as View;
+    expect(again.id).toBe(first.id);
+  });
+
+  it('polls until the instance leaves provisioning, refreshed from its row', async () => {
+    const created = (await call('instances', 'create', createHosted())) as View;
+    const { poll } = create();
+    expect(poll.done(created)).toBe(false);
+    const context = { ...moduleContext(db), caller: alice } as MethodContext;
+    const input = create().validate(createHosted());
+    expect(poll.done(await poll.refresh(context, input, created))).toBe(false);
+    await report(created.nodeId!, [{ id: created.id, state: 'running', addresses: [] }]);
+    await reconcile(created.id);
+    const refreshed = (await poll.refresh(context, input, created)) as View;
+    expect(refreshed.state).toBe('running');
+    expect(poll.done(refreshed)).toBe(true);
+  });
+
+  it('refuses with SPEND_LIMIT_REACHED when the pool meters budgets and the budget is spent', async () => {
+    const input = create().validate(createHosted());
+    let allowed = true;
+    const context = {
+      ...moduleContext(db),
+      caller: alice,
+      iam: {
+        billingCheck: async () =>
+          allowed
+            ? { allowed: true, budgets: [] }
+            : { allowed: false, budgets: [], blockedBy: { budgetId: 'bud_1', name: 'monthly' } },
+      },
+    } as unknown as MethodContext;
+    // No budget policy on the pool: not asked.
+    allowed = false;
+    await expect(create().admission.check(context, input, {})).resolves.toBeUndefined();
+    await db.query(
+      `UPDATE pools SET policy = jsonb_set(policy, '{admission}', '{"budgetCheck":"meter"}') WHERE id = $1`,
+      [hostedPool],
+    );
+    await expect(create().admission.check(context, input, {})).rejects.toMatchObject({
+      code: 'SPEND_LIMIT_REACHED',
+      details: { budgetId: 'bud_1', name: 'monthly' },
+    });
+    allowed = true;
+    await expect(create().admission.check(context, input, {})).resolves.toBeUndefined();
+  });
+});
+
 describe('flavors and IPAM', () => {
   it('lists flavors for tenants the pool is offered to, and archives used ones', async () => {
     const flavors = (await call('flavors', 'list', { tenantId: 'acme', poolId: hostedPool })) as {

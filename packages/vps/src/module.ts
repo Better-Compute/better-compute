@@ -40,6 +40,7 @@ import {
   completeCreateInstance,
   deleteInstance,
   denyCreateInstance,
+  instanceSettled,
   instanceView,
   instanceWork,
   listInstances,
@@ -57,6 +58,7 @@ import {
   type InstanceRef,
   type ListInstancesInput,
 } from './instances.js';
+import { budgetAdmissionCheck } from '@better-compute/capacity';
 import { instanceSpecs, reconcileInstance } from './lifecycle.js';
 import {
   bootstrapWork,
@@ -301,8 +303,20 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
           prepare: (context, input, tx) =>
             prepareCreateInstance(depsOf(context), context, input, tx),
           denied: (context, input, tx) => denyCreateInstance(context, input, tx),
+          // A pool's budget policy (stop-new/drain offers, `budgetCheck: 'meter'`) covers
+          // instances as it covers reservations: SPEND_LIMIT_REACHED, with the draft kept.
+          check: (context, input) => budgetAdmissionCheck(context, input.tenantId, input.poolId),
         },
         handler: (context, input) => completeCreateInstance(depsOf(context), context, input),
+        // §9.1 async-with-wait: `wait` holds the answer until the instance is placed and started
+        // (or failed), refreshed from its row.
+        poll: {
+          done: instanceSettled,
+          refresh: async (context, input, output) => {
+            const row = await readInstance(context.sql, output.id, { tenantId: input.tenantId });
+            return row && !row.draft ? instanceView(row) : output;
+          },
+        },
       }),
       list: defineMethod({
         action: 'compute:instances:read',

@@ -105,6 +105,11 @@ export interface CreateInstanceInput {
   userData?: string;
   desiredState: 'running' | 'stopped';
   idempotencyKey: string;
+  /**
+   * §9.1 async-with-wait: hold the answer up to `timeoutMs` (≤ 30 s) until the instance leaves
+   * `pending`/`scheduling`/`provisioning`/`starting`. Not part of the request: a retry may differ.
+   */
+  wait?: { timeoutMs: number };
 }
 
 /** User data that starts like a URI (`secret://…`, `vault://…`, `env://…`) is a reference, not content. */
@@ -127,6 +132,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     'userData',
     'desiredState',
     'idempotencyKey',
+    'wait',
   ]);
   if (
     typeof input.imageId !== 'string' ||
@@ -163,8 +169,25 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   const projectId = optional(input.projectId, (value) => id(value, 'prj', 'projectId'));
   if (projectId !== undefined) result.projectId = projectId;
   if (input.userData !== undefined) result.userData = input.userData as string;
+  if (input.wait !== undefined) {
+    if (typeof input.wait !== 'object' || input.wait === null || Array.isArray(input.wait))
+      fail('wait must be an object');
+    const wait = object(input.wait, ['timeoutMs']);
+    result.wait = { timeoutMs: int(wait.timeoutMs, 'wait.timeoutMs', 0, 30_000) };
+  }
   return result;
 }
+
+/** Instance states an `instances.create` wait holds on (the create is still in flight). */
+const inFlight: ReadonlySet<string> = new Set([
+  'pending',
+  'scheduling',
+  'provisioning',
+  'starting',
+]);
+
+/** Whether a created instance is past the states a `wait` holds on. */
+export const instanceSettled = (instance: Instance): boolean => !inFlight.has(instance.state);
 
 export type InstanceRef = { tenantId: string; instanceId: string };
 
@@ -720,7 +743,7 @@ export async function prepareCreateInstance(
 ): Promise<AdmissionPlan<Instance>> {
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
-  const { idempotencyKey: _key, ...request } = input;
+  const { idempotencyKey: _key, wait: _wait, ...request } = input;
   const hash = await sha256Hex(canonical(request));
   const instanceId = await draftId('inst', input.tenantId, caller.identityId, input.idempotencyKey);
   const existing = await readInstance(tx, instanceId, { tenantId: input.tenantId, lock: true });
