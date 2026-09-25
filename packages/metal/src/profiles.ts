@@ -16,10 +16,12 @@ export const enrollProfile = defineProfile({
 /** inspecting → commissioning: boot the ramdisk and take the in-band inventory. */
 export const inspectProfile = defineProfile({
   id: 'metal-inspect',
-  version: 1,
+  // v2: the cleanup removes the boot entry and its discovery token (the ramdisk keeps running).
+  version: 2,
   target: 'metal',
   description: 'Boot the ramdisk and inspect in band',
   steps: [{ use: 'metal.ensureRamdisk' }, { use: 'inventory.refresh' }],
+  cleanup: [{ use: 'boot.cleanUp' }],
 });
 
 /** commissioning → ready: DCGM level 2, a quick wipe, then power off (§3.5 step 3). */

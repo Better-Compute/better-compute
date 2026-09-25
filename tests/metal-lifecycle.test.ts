@@ -345,6 +345,7 @@ describe('enroll → ready (§3.5)', () => {
       'boot.prepareRamdisk',
       'bmc.power', // cycle into the ramdisk
       'inventory.refresh',
+      'boot.cleanUp', // inspection's cleanup: the entry and its discovery token go; the ramdisk stays up
       'diag.dcgm',
       'disk.wipe',
       'bmc.power', // off
@@ -398,9 +399,12 @@ describe('deploy, release, retire', () => {
     expect(deployPayload).toMatchObject({ userDataKind: 'cloud-init', userDataRef: expect.stringMatching(/^secret:\/\//) });
     expect(JSON.stringify(seen)).not.toContain('bcj_secret_');
     const document = stored.get(deployPayload.userDataRef as string)!;
-    expect(document).toContain(`bcj_secret_${issuedTokens.length}`);
+    const provisioned = issuedTokens.findLastIndex((token) => token.role === 'provisioned');
+    expect(document).toContain(`bcj_secret_${provisioned + 1}`);
     expect(document).toContain(`--node-id, ${id}`);
-    expect(issuedTokens.at(-1)).toMatchObject({ role: 'provisioned', maxUses: 1 });
+    expect(issuedTokens[provisioned]).toMatchObject({ role: 'provisioned', maxUses: 1 });
+    // The deploy's ramdisk boot got its own MAC-bound discovery token.
+    expect(issuedTokens.filter((token) => token.role === 'discovery').at(-1)).toMatchObject({ maxUses: 1, expect: { mac: 'b8:ce:f6:00:00:01' } });
     const session = await db.query<{ role: string }>('SELECT role FROM node_sessions WHERE node_id = $1', [id]);
     expect(session.rows[0]!.role).toBe('node');
   });

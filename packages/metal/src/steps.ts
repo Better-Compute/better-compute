@@ -14,6 +14,7 @@ import {
   renderedUserData,
   resolveImageRef,
   siteAgentFor,
+  stepCommandKey,
   stepNotReady,
   workflowProfile,
   type CommandOutcome,
@@ -134,20 +135,60 @@ const compressionNames: Readonly<Record<string, string>> = {
   gzip: 'IMAGE_COMPRESSION_GZIP',
 };
 
-/** Sends the boot entries (one per MAC) through the site agent. */
+/** How long a ramdisk's discovery token is good for: the boot it was minted for, no more. */
+export const discoveryTokenTtlSeconds = 900;
+
+/**
+ * Sends the boot entries (one per MAC) through the site agent. Each carries a single-use `discovery`
+ * join token for the ramdisk, bound to that MAC (`expect`). It travels only as a secret ref: the
+ * site agent fetches the bearer with a SecretRequest for this workflow step and renders it into that
+ * MAC's iPXE script, so no command body ever holds it. A token is minted only when its entry's
+ * command is first sent, not on every poll of the step. boot.cleanUp deletes the refs.
+ */
 async function prepareBootEntries(context: StepContext, node: MetalNodeRow, keyPrefix?: string): Promise<void> {
   if (node.macs.length === 0)
     throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no known PXE MAC; inspect it out of band first`);
   const agent = await siteAgent(context, node.node_id);
   const { rows } = await context.sql.query<{ not_after: Date }>(`SELECT compute_now() + interval '2 hours' AS not_after`);
   const entries = proxyDhcpEntriesJson(node, context.workflowId, rows[0]!.not_after);
-  for (const [i, entry] of entries.entries())
-    await awaitCommand(context, {
-      nodeId: agent,
-      kind: 'boot.prepareRamdisk',
-      key: `${keyPrefix ?? 'entry'}-${i}`,
-      payload: entry,
-    });
+  for (const [i, entry] of entries.entries()) {
+    const key = `${keyPrefix ?? 'entry'}-${i}`;
+    const sent = await context.sql.query('SELECT 1 FROM commands WHERE node_id = $1 AND idempotency_key = $2', [agent, stepCommandKey(context, key)]);
+    let payload = entry;
+    if (!sent.rowCount && context.pki && context.secrets) {
+      const mac = node.macs[i]!;
+      const { token } = await context.sql.transaction((tx) =>
+        context.pki!.issueJoinToken(tx, {
+          tenantId: node.tenant_id,
+          role: 'discovery',
+          siteId: node.site_id,
+          ...(node.pool_id ? { poolId: node.pool_id } : {}),
+          ttlSeconds: discoveryTokenTtlSeconds,
+          maxUses: 1,
+          expect: { mac },
+        }),
+      );
+      const ref = await context.secrets.put(node.tenant_id, token);
+      payload = { ...(entry as Record<string, Json>), discoveryTokenRef: ref };
+    }
+    await awaitCommand(context, { nodeId: agent, kind: 'boot.prepareRamdisk', key, payload });
+  }
+}
+
+/**
+ * The discovery token refs this workflow's boot entries carried. Refs are not secrets, and they appear
+ * verbatim in the stored command body, whether it is a protobuf CommandBody or proto3 JSON.
+ */
+async function discoveryTokenRefs(context: StepContext): Promise<string[]> {
+  const { rows } = await context.sql.query<{ body: Uint8Array }>(
+    `SELECT body FROM commands WHERE kind = 'boot.prepareRamdisk' AND idempotency_key LIKE $1`,
+    [`wf:${context.workflowId}:%`],
+  );
+  const refs = new Set<string>();
+  for (const row of rows)
+    for (const match of Buffer.from(row.body).toString('latin1').matchAll(/secret:\/\/[A-Za-z0-9._:-]{1,128}\/[A-Za-z0-9._-]{1,128}/g))
+      refs.add(match[0]);
+  return [...refs];
 }
 
 const powerActions = ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'] as const;
@@ -275,7 +316,10 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
         kind: 'boot.cleanUp',
         payload: { nodeId: node.node_id, macs: node.macs, workflowId: context.workflowId },
       });
-      return { cleaned: true };
+      // The entries are gone, and so are their discovery tokens (single-use and short-lived anyway).
+      const refs = context.secrets?.delete ? await discoveryTokenRefs(context) : [];
+      for (const ref of refs) await context.secrets!.delete!(ref as SecretRef);
+      return { cleaned: true, discoveryTokensDeleted: refs.length };
     },
   });
 

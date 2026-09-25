@@ -123,8 +123,11 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     },
   };
   const tokens: string[] = [];
+  /** Every join token request (role, site, pool, ttl, uses, expect), in order. */
+  const tokenRequests: Record<string, unknown>[] = [];
   const pki = {
     async issueJoinToken(_tx: unknown, input: { role: string }) {
+      tokenRequests.push({ ...input });
       const token = `bcj_${input.role}_${tokens.length + 1}`;
       tokens.push(token);
       return { id: `jt_${tokens.length}`, token };
@@ -364,6 +367,6 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       )
     ).rows[0]!;
 
-  return { db, context, api, provision, bareMetal, queue, events, seen, faults, tokens, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, settle, call, state, close: () => db.close() };
+  return { db, context, api, provision, bareMetal, queue, events, seen, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, settle, call, state, close: () => db.close() };
 }
 export type MetalSim = Awaited<ReturnType<typeof createMetalSim>>;
