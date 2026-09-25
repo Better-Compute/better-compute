@@ -43,13 +43,27 @@ func policyEnforced(p agentv1.InstanceNetworkPolicy) bool {
 	return p == agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_PRIVATE || p == agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_NONE
 }
 
+// eui64 is the EUI-64 link-local address of a MAC (RFC 4291): the only link-local a guarded NIC may
+// use, so no instance can answer for a neighbour's or the host's.
+func eui64(mac net.HardwareAddr) string {
+	ip := make(net.IP, 16)
+	ip[0], ip[1] = 0xfe, 0x80
+	copy(ip[8:11], mac[0:3])
+	ip[8] ^= 0x02
+	ip[11], ip[12] = 0xff, 0xfe
+	copy(ip[13:16], mac[3:6])
+	return ip.String()
+}
+
 // firewallRuleset renders the table for specs. Instances whose policy cannot be enforced (a NIC
-// without IPAM addresses) are left out and returned in failed: they must not run. guarded maps each
-// address the rules bind to its instance's tap (address → instance id): only those may name an
-// instance to the metadata service or an instance tunnel.
-func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[string]string, guarded map[string]string) {
+// without IPAM addresses or a MAC) are left out and returned in failed: they must not run. guarded
+// maps each address the rules bind to its instance's tap (address → instance id): only those may
+// name an instance to the metadata service or an instance tunnel. host are the host's own addresses
+// on the instances' bridges: no tap may send from them or claim them.
+func firewallRuleset(specs []*agentv1.InstanceSpec, host []string) (ruleset string, failed map[string]string, guarded map[string]string) {
 	failed, guarded = map[string]string{}, map[string]string{}
 	var claims, guard, input, forward, output []string
+	anyNIC := false
 	sorted := append([]*agentv1.InstanceSpec(nil), specs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].GetInstanceId() < sorted[j].GetInstanceId() })
 	for _, spec := range sorted {
@@ -66,6 +80,7 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 		var nics []nicRules
 		var problem string
 		for i, nic := range spec.GetNics() {
+			anyNIC = true
 			r := nicRules{tap: runtime.TapName(spec.GetInstanceId(), i)}
 			for _, a := range nic.GetAddresses() {
 				p, err := netip.ParsePrefix(a)
@@ -82,6 +97,10 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 			if problem == "" && len(r.v4)+len(r.v6) == 0 {
 				problem = fmt.Sprintf("network policy %s needs IPAM addresses on NIC %d", policyName(policy), i)
 			}
+			mac, macErr := net.ParseMAC(nic.GetMac())
+			if problem == "" && (macErr != nil || len(mac) != 6) {
+				problem = fmt.Sprintf("network policy %s needs the MAC of NIC %d", policyName(policy), i)
+			}
 			if problem != "" {
 				if enforced {
 					break
@@ -89,19 +108,21 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 				problem = "" // an egress NIC without IPAM addresses is not guarded
 				continue
 			}
-			// The MAC goes into the ruleset: only a well-formed one.
-			if mac, err := net.ParseMAC(nic.GetMac()); err == nil && len(mac) == 6 {
+			// The MAC goes into the ruleset: only a well-formed one (an egress NIC without one is not
+			// guarded; an enforced one failed above).
+			if macErr == nil && len(mac) == 6 {
 				in := fmt.Sprintf("iifname %q", r.tap)
+				ll := eui64(mac)
 				guard = append(guard,
-					// Its own MAC and addresses only (0.0.0.0 and :: for DHCP, link-local for NDP).
+					// Its own MAC and addresses only (0.0.0.0 and :: for DHCP, its own EUI-64 link-local
+					// for NDP).
 					in+" ether saddr != "+mac.String()+" drop",
 					in+" ether type ip ip saddr != "+set(append(r.hosts4, "0.0.0.0"))+" drop",
 					in+" ether type arp arp saddr ip != "+set(append(r.hosts4, "0.0.0.0"))+" drop",
-					in+" ether type ip6 ip6 saddr != "+set(append(r.hosts6, "fe80::/10", "::"))+" drop",
-					// Never a DHCP server or a router, and neighbour adverts only for its own addresses.
-					in+" udp sport { 67, 547 } drop",
-					in+" icmpv6 type { nd-router-advert, nd-redirect } drop",
-					in+" icmpv6 type nd-neighbor-advert icmpv6 taddr != "+set(append(r.hosts6, "fe80::/10"))+" drop")
+					in+" ether type ip6 ip6 saddr != "+set(append(r.hosts6, ll, "::"))+" drop",
+					// Neighbour adverts only for its own addresses.
+					in+" icmpv6 type nd-neighbor-advert icmpv6 taddr != "+set(append(r.hosts6, ll))+" drop")
+				r.hosts6 = append(r.hosts6, ll)
 				// Its addresses belong to its tap: no other port of the bridge (another tap, bcd's or
 				// not, an uplink) may send from them or claim them in ARP or NDP.
 				tap := fmt.Sprintf("iifname != %q", r.tap)
@@ -169,8 +190,26 @@ func firewallRuleset(specs []*agentv1.InstanceSpec) (ruleset string, failed map[
 	// Declaring the table first makes the delete succeed when it does not exist yet; the file is one
 	// transaction, so the old rules are replaced atomically.
 	fmt.Fprintf(&b, "table bridge %s\ndelete table bridge %s\n", firewallTable, firewallTable)
+	// Every instance tap, guarded or not: never a DHCP server or a router, and never the host (its
+	// addresses on the bridges belong to the host).
+	var taps []string
+	if anyNIC {
+		taps = append(taps,
+			`iifname "bc*" udp sport { 67, 547 } drop`,
+			`iifname "bc*" icmpv6 type { nd-router-advert, nd-redirect } drop`)
+		for _, a := range host {
+			ip := net.ParseIP(a)
+			switch {
+			case ip == nil:
+			case ip.To4() != nil:
+				taps = append(taps, `iifname "bc*" ip saddr `+a+` drop`, `iifname "bc*" ether type arp arp saddr ip `+a+` drop`)
+			default:
+				taps = append(taps, `iifname "bc*" ip6 saddr `+a+` drop`, `iifname "bc*" icmpv6 type nd-neighbor-advert icmpv6 taddr `+a+` drop`)
+			}
+		}
+	}
 	// Spoofed frames are dropped before any policy accepts them.
-	first := append(append([]string{}, claims...), guard...)
+	first := append(append(append([]string{}, taps...), claims...), guard...)
 	input, forward = append(append([]string{}, first...), input...), append(append([]string{}, first...), forward...)
 	if len(input)+len(forward)+len(output) > 0 {
 		fmt.Fprintf(&b, "table bridge %s {\n", firewallTable)
@@ -195,11 +234,26 @@ func policyName(p agentv1.InstanceNetworkPolicy) string {
 	return strings.ToLower(strings.TrimPrefix(p.String(), "INSTANCE_NETWORK_POLICY_"))
 }
 
-// firewallLoop notices when bcd's table disappears (an nftables reload, "flush ruleset"): the
-// metadata service and instance dials stop trusting addresses at once, and the next pass loads the
-// table again.
+// firewallCheckEvery is how often bcd verifies its table is still loaded as it wrote it.
+const firewallCheckEvery = 5 * time.Second
+
+// countRules counts the rules of a ruleset bcd rendered (every chain line but its header).
+func countRules(ruleset string) int {
+	n := 0
+	for _, line := range strings.Split(ruleset, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, " drop") || strings.HasSuffix(line, " accept") {
+			n++
+		}
+	}
+	return n
+}
+
+// firewallLoop notices when bcd's table is gone or emptied (an nftables reload, "flush ruleset",
+// "flush table", a flushed chain): the metadata service and instance dials stop trusting addresses
+// at once, and the table is loaded again right here, outside any converge pass.
 func (a *Agent) firewallLoop(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(firewallCheckEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -212,14 +266,50 @@ func (a *Agent) firewallLoop(ctx context.Context) {
 }
 
 func (a *Agent) checkFirewall(ctx context.Context) {
-	if !a.tableLoaded.Load() {
+	last := a.lastFirewall.Load()
+	if !a.tableLoaded.Load() || last == nil {
 		return
 	}
-	if err := a.host.CheckFirewall(ctx); err != nil {
-		a.log.Warn("the instance firewall is gone; loading it again", "error", err.Error())
-		a.spoofGuard.Store(false)
+	err := a.host.CheckFirewall(ctx, countRules(*last))
+	if err == nil {
+		return
+	}
+	a.log.Warn("the instance firewall is not as bcd loaded it; loading it again", "error", err.Error())
+	a.spoofGuard.Store(false)
+	if err := a.host.ApplyFirewall(ctx, *last); err != nil {
+		// The next converge pass tries again (and fails the policy-bearing instances meanwhile).
+		a.log.Error("reloading the instance firewall failed", "error", err.Error())
 		a.tableLoaded.Store(false)
 		a.instances.stale.Store(true)
 		a.triggerConverge()
+		return
 	}
+	a.spoofGuard.Store(true)
+}
+
+// bridgeAddrs are the host's own addresses on the bridges the instances' NICs attach to (tests
+// replace it).
+var bridgeAddrs = func(specs []*agentv1.InstanceSpec) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, spec := range specs {
+		for _, nic := range spec.GetNics() {
+			if seen[nic.GetNetwork()] {
+				continue
+			}
+			seen[nic.GetNetwork()] = true
+			iface, err := net.InterfaceByName(nic.GetNetwork())
+			if err != nil {
+				continue
+			}
+			addrs, _ := iface.Addrs()
+			for _, a := range addrs {
+				if ipn, ok := a.(*net.IPNet); ok {
+					out = append(out, ipn.IP.String())
+				}
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

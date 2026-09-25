@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,8 +30,12 @@ func TestFirewallRuleset(t *testing.T) {
 	unaddressed.Nics[0].Addresses = nil
 	gone := withPolicy(vm("inst_gone", agentv1.InstanceDesiredState_INSTANCE_DESIRED_STATE_DELETED), agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_NONE)
 
-	ruleset, failed, guarded := firewallRuleset([]*agentv1.InstanceSpec{none, egress, private, unaddressed, gone})
-	if len(failed) != 1 || !strings.Contains(failed["inst_noipam"], "needs IPAM addresses") {
+	macless := withPolicy(vm("inst_nomac", running), agentv1.InstanceNetworkPolicy_INSTANCE_NETWORK_POLICY_PRIVATE)
+	macless.Nics[0].Mac = ""
+	host := []string{"10.0.0.1", "fe80::1"}
+
+	ruleset, failed, guarded := firewallRuleset([]*agentv1.InstanceSpec{none, egress, private, unaddressed, gone, macless}, host)
+	if len(failed) != 2 || !strings.Contains(failed["inst_noipam"], "needs IPAM addresses") || !strings.Contains(failed["inst_nomac"], "needs the MAC") {
 		t.Fatalf("failed = %v", failed)
 	}
 	if !strings.HasPrefix(ruleset, "table bridge bcd_instances\ndelete table bridge bcd_instances\ntable bridge bcd_instances {\n") {
@@ -72,9 +77,15 @@ func TestFirewallRuleset(t *testing.T) {
 		"ether type arp arp saddr ip 10.0.0.6 iifname != " + tap("inst_private") + " drop",
 		"ip6 saddr fd00::6 iifname != " + tap("inst_private") + " drop",
 		"icmpv6 type nd-neighbor-advert icmpv6 taddr fd00::6 iifname != " + tap("inst_private") + " drop",
-		"iifname " + tap("inst_egress") + " udp sport { 67, 547 } drop",
-		"iifname " + tap("inst_egress") + " icmpv6 type { nd-router-advert, nd-redirect } drop",
-		"iifname " + tap("inst_private") + " icmpv6 type nd-neighbor-advert icmpv6 taddr != { fd00::6, fe80::/10 } drop",
+		// Every instance tap, guarded or not: no DHCP server, no router, never the host.
+		`iifname "bc*" udp sport { 67, 547 } drop`,
+		`iifname "bc*" icmpv6 type { nd-router-advert, nd-redirect } drop`,
+		`iifname "bc*" ip saddr 10.0.0.1 drop`,
+		`iifname "bc*" ether type arp arp saddr ip 10.0.0.1 drop`,
+		`iifname "bc*" icmpv6 type nd-neighbor-advert icmpv6 taddr fe80::1 drop`,
+		// Its own EUI-64 link-local only, bound to its tap.
+		"iifname " + tap("inst_private") + " icmpv6 type nd-neighbor-advert icmpv6 taddr != { fd00::6, fe80::5054:ff:fe00:1 } drop",
+		"ip6 saddr fe80::5054:ff:fe00:1 iifname != " + tap("inst_private") + " drop",
 	} {
 		if !strings.Contains(ruleset, want) {
 			t.Errorf("ruleset lacks %q", want)
@@ -88,7 +99,7 @@ func TestFirewallRuleset(t *testing.T) {
 		"iifname " + tap("inst_egress") + " ether saddr != 52:54:00:00:00:01 drop",
 		"iifname " + tap("inst_egress") + " ether type ip ip saddr != { 10.0.0.5, 0.0.0.0 } drop",
 		"iifname " + tap("inst_egress") + " ether type arp arp saddr ip != { 10.0.0.5, 0.0.0.0 } drop",
-		"iifname " + tap("inst_private") + " ether type ip6 ip6 saddr != { fd00::6, fe80::/10, :: } drop",
+		"iifname " + tap("inst_private") + " ether type ip6 ip6 saddr != { fd00::6, fe80::5054:ff:fe00:1, :: } drop",
 	} {
 		if !strings.Contains(ruleset, want) {
 			t.Errorf("ruleset lacks %q", want)
@@ -104,14 +115,21 @@ func TestFirewallRuleset(t *testing.T) {
 	// A malformed MAC never reaches the ruleset.
 	odd := vm("inst_odd", running)
 	odd.Nics[0].Mac = `52:54:00:00:00:01" accept; drop "`
-	if rs, _, g := firewallRuleset([]*agentv1.InstanceSpec{odd}); strings.Contains(rs, "accept;") || len(g) != 0 {
+	if rs, _, g := firewallRuleset([]*agentv1.InstanceSpec{odd}, nil); strings.Contains(rs, `accept; drop`) || strings.Contains(rs, "52:54:00:00:00:01") || len(g) != 0 {
 		t.Fatalf("the MAC was injected:\n%s", rs)
 	}
-	// Nothing addressed: the table is only removed.
+	// An unguarded NIC (no IPAM addresses) still gets the rules every tap has; no instance: the table
+	// is only removed.
 	bare := vm("inst_bare", running)
 	bare.Nics[0].Addresses = nil
-	if empty, _, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\n" {
+	if rs, _, _ := firewallRuleset([]*agentv1.InstanceSpec{bare}, host); !strings.Contains(rs, `iifname "bc*" udp sport { 67, 547 } drop`) || strings.Contains(rs, tap("inst_bare")) {
+		t.Fatalf("unguarded ruleset = %q", rs)
+	}
+	if empty, _, _ := firewallRuleset(nil, host); empty != "table bridge bcd_instances\ndelete table bridge bcd_instances\n" {
 		t.Fatalf("empty ruleset = %q", empty)
+	}
+	if ll := eui64(net.HardwareAddr{0x52, 0x54, 0x00, 0x00, 0x00, 0x01}); ll != "fe80::5054:ff:fe00:1" {
+		t.Fatalf("eui64 = %s", ll)
 	}
 	if n := len(runtime.TapName("inst_"+strings.Repeat("x", 200), 99)); n > 15 {
 		t.Fatalf("tap names are %d bytes, more than IFNAMSIZ allows", n)
@@ -224,18 +242,30 @@ func TestFirewallReloadsAfterAFlush(t *testing.T) {
 	h.host.mu.Lock()
 	h.host.firewallGone = true
 	h.host.mu.Unlock()
+	// The check reloads the table itself (not a converge pass) and trusts addresses again after.
+	h.agent.checkFirewall(context.Background())
+	if loads() != 2 || !h.agent.spoofGuard.Load() {
+		t.Fatalf("after the check: %d loads, guard %v", loads(), h.agent.spoofGuard.Load())
+	}
+	// A reload that fails leaves addresses untrusted, and the next pass tries again.
+	h.host.mu.Lock()
+	h.host.firewallErr = errors.New("nft: busy")
+	h.host.mu.Unlock()
 	h.agent.checkFirewall(context.Background())
 	if h.agent.spoofGuard.Load() {
 		t.Fatal("addresses stayed trusted without the table")
 	}
 	h.host.mu.Lock()
-	h.host.firewallGone = false
+	h.host.firewallGone, h.host.firewallErr = false, nil
 	h.host.mu.Unlock()
 	deadline := time.Now().Add(5 * time.Second)
-	for loads() < 2 || !h.agent.spoofGuard.Load() {
+	for loads() < 3 || !h.agent.spoofGuard.Load() {
 		if time.Now().After(deadline) {
 			t.Fatalf("the table was not loaded again (%d loads)", loads())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if countRules("chain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t\tiifname \"x\" drop\n\t\tip saddr 1.2.3.4 accept\n\t}") != 2 {
+		t.Fatal("countRules")
 	}
 }

@@ -19,7 +19,7 @@ func TestTransfersAreBoundedByProgress(t *testing.T) {
 		<-r.Context().Done() // then nothing
 	}))
 	defer stalled.Close()
-	ctx, watch, stop := withProgress(context.Background(), 200*time.Millisecond, time.Minute)
+	ctx, watch, stop := withProgress(context.Background(), 200*time.Millisecond, 1, time.Minute)
 	defer stop()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, stalled.URL, nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -33,12 +33,20 @@ func TestTransfersAreBoundedByProgress(t *testing.T) {
 		t.Fatalf("a stalled download ended with %v after %s", err, time.Since(started))
 	}
 
-	// Progress keeps it alive past the idle time.
-	ctx, watch, stop = withProgress(context.Background(), 100*time.Millisecond, time.Minute)
+	// Progress keeps it alive past the idle time...
+	ctx, watch, stop = withProgress(context.Background(), 100*time.Millisecond, 1, time.Minute)
 	defer stop()
 	slow := &slowReader{left: 6, every: 50 * time.Millisecond}
 	if _, err := io.Copy(io.Discard, progressReader{slow, watch}); err != nil || ctx.Err() != nil {
 		t.Fatalf("a moving transfer was cancelled: %v %v", err, ctx.Err())
+	}
+	// ...but a trickle below the minimum does not.
+	ctx, watch, stop = withProgress(context.Background(), 100*time.Millisecond, 1000, time.Minute)
+	defer stop()
+	trickle := &slowReader{left: 20, every: 30 * time.Millisecond}
+	_, _ = io.Copy(io.Discard, progressReader{trickle, watch})
+	if ctx.Err() == nil {
+		t.Fatal("a trickle below the minimum throughput kept the transfer alive")
 	}
 	if err := httpsOnly(httptest.NewRequest(http.MethodGet, "http://plain/x", nil), nil); err == nil || !strings.Contains(err.Error(), "non-https") {
 		t.Fatalf("a redirect to http = %v", err)

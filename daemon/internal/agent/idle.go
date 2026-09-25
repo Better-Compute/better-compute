@@ -5,34 +5,62 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
 // Long transfers (snapshot uploads and restores) are bounded by progress, not by size: one that
-// moves no bytes for transferIdle is cancelled, and none runs longer than transferMax, so a stalled
-// peer never pins a worker or the instances converger.
+// moves fewer than transferMinBytes in any transferIdle window is cancelled (a byte now and then
+// does not keep it alive), and none runs longer than transferMax, so a stalled or trickling peer
+// never pins a worker.
 const (
-	transferIdle = 2 * time.Minute
-	transferMax  = 6 * time.Hour
+	transferIdle     = 2 * time.Minute
+	transferMinBytes = 1 << 20
+	transferMax      = 6 * time.Hour
 )
 
-// watchdog cancels a context when touch has not been called for idle.
+// watchdog cancels a context when a window passes with less than its minimum of bytes moved.
 type watchdog struct {
-	timer *time.Timer
-	idle  time.Duration
+	moved  atomic.Int64
+	min    int64
+	cancel context.CancelFunc
+	stop   chan struct{}
 }
 
-// withProgress returns a context cancelled after max, or after idle without progress (touch).
-func withProgress(ctx context.Context, idle, max time.Duration) (context.Context, *watchdog, context.CancelFunc) {
+// withProgress returns a context cancelled after max, or after a window of idle moving fewer than
+// minBytes (counted by touch).
+func withProgress(ctx context.Context, idle time.Duration, minBytes int64, max time.Duration) (context.Context, *watchdog, context.CancelFunc) {
 	ctx, cancel := context.WithTimeoutCause(ctx, max, errors.New("the transfer took too long"))
-	w := &watchdog{idle: idle}
-	w.timer = time.AfterFunc(idle, cancel)
-	return ctx, w, func() { w.timer.Stop(); cancel() }
+	w := &watchdog{min: minBytes, cancel: cancel, stop: make(chan struct{})}
+	go func() {
+		t := time.NewTicker(idle)
+		defer t.Stop()
+		for {
+			select {
+			case <-w.stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if w.moved.Swap(0) < w.min {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	var once atomic.Bool
+	return ctx, w, func() {
+		if once.CompareAndSwap(false, true) {
+			close(w.stop)
+		}
+		cancel()
+	}
 }
 
-func (w *watchdog) touch() { w.timer.Reset(w.idle) }
+func (w *watchdog) touch(n int) { w.moved.Add(int64(n)) }
 
-// progressReader touches the watchdog on every read that moved bytes.
+// progressReader counts the bytes every read moves.
 type progressReader struct {
 	r io.Reader
 	w *watchdog
@@ -40,19 +68,15 @@ type progressReader struct {
 
 func (p progressReader) Read(b []byte) (int, error) {
 	n, err := p.r.Read(b)
-	if n > 0 {
-		p.w.touch()
-	}
+	p.w.touch(n)
 	return n, err
 }
 
-// touchWriter touches the watchdog on every write (a runtime producing a snapshot).
+// touchWriter counts the bytes a runtime producing a snapshot writes.
 type touchWriter struct{ w *watchdog }
 
 func (t touchWriter) Write(b []byte) (int, error) {
-	if len(b) > 0 {
-		t.w.touch()
-	}
+	t.w.touch(len(b))
 	return len(b), nil
 }
 

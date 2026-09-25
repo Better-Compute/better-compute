@@ -117,10 +117,14 @@ type Agent struct {
 	// spoofGuard: the instances' anti-spoofing rules are loaded (netpolicy.go); IMDS needs it.
 	spoofGuard atomic.Bool
 	// tableLoaded: the loaded ruleset defines the bcd_instances table (firewallLoop checks it is
-	// still there).
-	tableLoaded atomic.Bool
+	// still there, and loads lastFirewall again if not).
+	tableLoaded  atomic.Bool
+	lastFirewall atomic.Pointer[string]
 	// guarded maps the addresses the loaded rules bind to their instance's tap to that instance.
 	guarded map[string]string
+	// restores are the snapshot downloads running in the background (restoreFile).
+	restoresMu sync.Mutex
+	restores   map[string]*restoreFetch
 	// uploads are the snapshot files instance.snapshot is uploading (collectSnapshots keeps them).
 	uploads sync.Map
 	cache   *imageCache

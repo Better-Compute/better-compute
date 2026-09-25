@@ -149,7 +149,7 @@ type fakeHost struct {
 	firewallGone bool
 }
 
-func (h *fakeHost) CheckFirewall(context.Context) error {
+func (h *fakeHost) CheckFirewall(context.Context, int) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.firewallGone {

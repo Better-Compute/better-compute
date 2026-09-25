@@ -62,7 +62,11 @@ func TestSnapshotAndRestore(t *testing.T) {
 	wrong := sha256.Sum256([]byte("other"))
 	bad.RestoreFrom = &agentv1.ImageRef{Url: store.URL + "/snap", Sha256: wrong[:]}
 	s.push(desired(2, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web, clone, bad}}}))
-	status := s.next(t, "restored", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 2 }).GetStatus()
+	// Snapshots download in the background: the instances settle a pass or two later.
+	status := s.next(t, "restored", func(f *agentv1.AgentFrame) bool {
+		got := instanceStates(f.GetStatus())
+		return got["inst_clone"] == agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_RUNNING && got["inst_bad"] == agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR
+	}).GetStatus()
 	got := instanceStates(status)
 	if got["inst_clone"] != agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_RUNNING || got["inst_bad"] != agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR {
 		t.Fatalf("instances = %v", status.GetInstances())
@@ -84,7 +88,9 @@ func TestSnapshotAndRestore(t *testing.T) {
 	migrant.Image = nil
 	migrant.RestoreFrom = &agentv1.ImageRef{Url: store.URL + "/snap", Sha256: other[:]}
 	s.push(desired(3, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web, clone, migrant}}}))
-	status = s.next(t, "cpu mismatch", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 3 }).GetStatus()
+	status = s.next(t, "cpu mismatch", func(f *agentv1.AgentFrame) bool {
+		return instanceStates(f.GetStatus())["inst_migrant"] == agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR
+	}).GetStatus()
 	if instanceStates(status)["inst_migrant"] != agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR {
 		t.Fatalf("migrant = %v", status.GetInstances())
 	}
@@ -99,7 +105,9 @@ func TestSnapshotAndRestore(t *testing.T) {
 	plain.RestoreFrom = &agentv1.ImageRef{Url: "http://" + strings.TrimPrefix(store.URL, "https://") + "/snap", Sha256: sum[:]}
 	_ = os.Remove(restored)
 	s.push(desired(4, &agentv1.NodeSpec{Instances: &agentv1.InstancesSection{Instances: []*agentv1.InstanceSpec{web, plain}}}))
-	status = s.next(t, "clone dropped", func(f *agentv1.AgentFrame) bool { return f.GetStatus().GetAppliedGeneration() == 4 }).GetStatus()
+	status = s.next(t, "clone dropped", func(f *agentv1.AgentFrame) bool {
+		return instanceStates(f.GetStatus())["inst_plain"] == agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR
+	}).GetStatus()
 	if st := instanceStates(status)["inst_plain"]; st != agentv1.InstanceObservedState_INSTANCE_OBSERVED_STATE_ERROR {
 		t.Fatalf("a snapshot over http = %v", status.GetInstances())
 	}

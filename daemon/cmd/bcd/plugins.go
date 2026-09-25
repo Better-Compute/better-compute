@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,19 +22,27 @@ import (
 // pinLine is one line of the plugins' pins file (sha256sum format): "<sha256 hex>  <file name>".
 var pinLine = regexp.MustCompile(`^([0-9a-f]{64}) [ *]([A-Za-z0-9._-]+)$`)
 
-// Plugin uids when [plugins] user is unset: one per plugin in systemd's dynamic-user range.
+// Plugin uids when [plugins] user is unset: one per plugin in a block bcd keeps for itself at the
+// top of the 31-bit range systemd leaves unassigned (0x70000000-0x7FFFFFFE), clear of system users,
+// systemd's DynamicUser range (61184-65519) and container ranges.
 const (
-	pluginUIDBase  = 61184
-	pluginUIDCount = 65519 - 61184 + 1
+	pluginUIDBase  = 0x7FFE0000
+	pluginUIDCount = 0x10000
 )
 
+// uidInUse reports whether an account already has the uid (tests replace it).
+var uidInUse = func(uid uint32) bool {
+	_, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	return err == nil
+}
+
 // pluginUID is a plugin's own uid (and gid), stable across restarts: derived from its name, moved
-// on past any uid another plugin of this host already has.
+// on past any uid another plugin of this host or an account already has.
 func pluginUID(name string, taken map[uint32]bool) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(name))
 	uid := pluginUIDBase + h.Sum32()%pluginUIDCount
-	for taken[uid] {
+	for i := 0; i < pluginUIDCount && (taken[uid] || uidInUse(uid)); i++ {
 		uid = pluginUIDBase + (uid-pluginUIDBase+1)%pluginUIDCount
 	}
 	taken[uid] = true
@@ -100,7 +109,7 @@ func startPlugins(ctx context.Context, dir string, sandbox config.Plugins, log *
 		return nil
 	}
 	defer f.Close()
-	var plugins []*bcx.Plugin
+	var pins [][]string
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -112,6 +121,12 @@ func startPlugins(ctx context.Context, dir string, sandbox config.Plugins, log *
 			log.Warn("unreadable plugin pin line", "line", line)
 			continue
 		}
+		pins = append(pins, m)
+	}
+	// By name: a plugin's uid does not depend on where its line sits in the pins file.
+	sort.Slice(pins, func(i, j int) bool { return pins[i][2] < pins[j][2] })
+	var plugins []*bcx.Plugin
+	for _, m := range pins {
 		name := m[2]
 		o, err := sandboxOptions(sandbox, name, taken)
 		if err != nil {

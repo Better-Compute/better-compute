@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -40,9 +41,9 @@ type Host interface {
 	ResetGPU(ctx context.Context, uuid string) error
 	// ApplyFirewall loads an nftables ruleset (one transaction; the instances' network policies).
 	ApplyFirewall(ctx context.Context, ruleset string) error
-	// CheckFirewall reports whether bcd's table is still loaded (an nftables reload or a
-	// "flush ruleset" removes it).
-	CheckFirewall(ctx context.Context) error
+	// CheckFirewall reports whether bcd's table is still loaded with its rules (an nftables reload,
+	// "flush ruleset" or a flushed table or chain changes it): rules is how many bcd loaded.
+	CheckFirewall(ctx context.Context, rules int) error
 
 	// The ramdisk's operations (ramdisk.go, ramdisk_host.go).
 	SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (method string, verified bool, err error)
@@ -77,9 +78,9 @@ type RealHost struct {
 // FirewallFile is where a host under a fake root keeps the ruleset it was asked to load.
 const FirewallFile = "/run/bcd/instances.nft"
 
-// CheckFirewall lists bcd's table (nft list table bridge bcd_instances); a host under a fake root
-// checks its ruleset file.
-func (h *RealHost) CheckFirewall(ctx context.Context) error {
+// CheckFirewall lists bcd's table as JSON (nft -j list table bridge bcd_instances) and counts its
+// rules; a host under a fake root checks its ruleset file.
+func (h *RealHost) CheckFirewall(ctx context.Context, rules int) error {
 	if h.FirewallFunc != nil {
 		return nil
 	}
@@ -87,8 +88,24 @@ func (h *RealHost) CheckFirewall(ctx context.Context) error {
 		_, err := os.Stat(h.Path(FirewallFile))
 		return err
 	}
-	if out, err := exec.CommandContext(ctx, "nft", "list", "table", "bridge", firewallTable).CombinedOutput(); err != nil {
-		return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
+	out, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", "bridge", firewallTable).Output()
+	if err != nil {
+		return fmt.Errorf("nft: %v", err)
+	}
+	var listing struct {
+		Nftables []map[string]json.RawMessage `json:"nftables"`
+	}
+	if err := json.Unmarshal(out, &listing); err != nil {
+		return fmt.Errorf("nft -j: %w", err)
+	}
+	n := 0
+	for _, object := range listing.Nftables {
+		if _, ok := object["rule"]; ok {
+			n++
+		}
+	}
+	if n != rules {
+		return fmt.Errorf("the table holds %d rules, not the %d bcd loaded", n, rules)
 	}
 	return nil
 }

@@ -150,7 +150,7 @@ type Boot struct {
 // Plugins is how bcx plugins run ([plugins]).
 type Plugins struct {
 	// User is who they run as when bcd runs as root; empty (the default) gives each plugin its own
-	// uid in systemd's dynamic range (61184-65519), so no plugin can read another's memory.
+	// uid in a block bcd keeps (0x7FFE0000-0x7FFEFFFF), so no plugin can read another's memory.
 	User string
 	// Privileged names the plugins (comma-separated) that run as root without the seccomp filter:
 	// a runtime plugin that makes namespaces and mounts (Kata). Every other plugin is confined.

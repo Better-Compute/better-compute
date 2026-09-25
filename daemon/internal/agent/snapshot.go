@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	"github.com/better-compute/better-compute/daemon/internal/dispatch"
@@ -54,7 +55,7 @@ func (a *Agent) downloadVerified(ctx context.Context, rawURL string, digest []by
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	ctx, watch, stop := withProgress(ctx, transferIdle, transferMax)
+	ctx, watch, stop := withProgress(ctx, transferIdle, transferMinBytes, transferMax)
 	defer stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -127,7 +128,7 @@ func (a *Agent) runInstanceSnapshot(ctx context.Context, cmd dispatch.Command) (
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 	h := sha256.New()
-	ctx, watch, stop := withProgress(ctx, transferIdle, transferMax)
+	ctx, watch, stop := withProgress(ctx, transferIdle, transferMinBytes, transferMax)
 	defer stop()
 	cpu, err := rt.Snapshot(ctx, req.GetInstanceId(), req.GetIncludeMemory(), a.cpuModel(), io.MultiWriter(tmp, h, touchWriter{watch}))
 	if err != nil {
@@ -180,4 +181,48 @@ func (a *Agent) collectSnapshots(keep map[string]bool) {
 			}
 		}
 	}
+}
+
+// restoreFetch is one snapshot download in the background (restoreFile).
+type restoreFetch struct {
+	done bool
+	err  error
+	at   time.Time
+}
+
+// restoreRetry is how long a failed snapshot download is reported before it is tried again.
+const restoreRetry = time.Minute
+
+// restoreFile returns the verified local copy of a snapshot, downloading it in the background: the
+// instances converger never waits on a download (deletes and firewall loads go on meanwhile).
+// pending means a download is running; the converger is triggered again when it ends.
+func (a *Agent) restoreFile(rawURL string, digest []byte) (path string, pending bool, err error) {
+	dst := filepath.Join(a.snapshotDir(), hex.EncodeToString(digest))
+	if _, err := os.Stat(dst); err == nil {
+		return dst, false, nil
+	}
+	key := hex.EncodeToString(digest)
+	a.restoresMu.Lock()
+	defer a.restoresMu.Unlock()
+	if a.restores == nil {
+		a.restores = map[string]*restoreFetch{}
+	}
+	if f := a.restores[key]; f != nil {
+		if !f.done {
+			return "", true, nil
+		}
+		if f.err != nil && time.Since(f.at) < restoreRetry {
+			return "", false, f.err
+		}
+	}
+	f := &restoreFetch{at: time.Now()}
+	a.restores[key] = f
+	go func() {
+		_, err := a.downloadVerified(a.ctx, rawURL, digest)
+		a.restoresMu.Lock()
+		f.done, f.err, f.at = true, err, time.Now()
+		a.restoresMu.Unlock()
+		a.triggerConverge()
+	}()
+	return "", true, nil
 }

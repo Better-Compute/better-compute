@@ -42,7 +42,7 @@ type instancesConverger struct {
 // that failed to load (fail closed). Egress instances run without the rules, but the metadata
 // service stays off; a failed load is retried on the next pass.
 func (c *instancesConverger) enforceNetworkPolicies(ctx context.Context, specs []*agentv1.InstanceSpec) map[string]string {
-	ruleset, failed, guarded := firewallRuleset(specs)
+	ruleset, failed, guarded := firewallRuleset(specs, bridgeAddrs(specs))
 	if ruleset == c.firewall && !c.stale.Swap(false) {
 		return failed
 	}
@@ -60,6 +60,7 @@ func (c *instancesConverger) enforceNetworkPolicies(ctx context.Context, specs [
 	c.a.tableLoaded.Store(err == nil && strings.Contains(ruleset, "chain input"))
 	if err == nil {
 		c.firewall = ruleset
+		c.a.lastFirewall.Store(&ruleset)
 		return failed
 	}
 	c.a.log.Warn("instance firewall not loaded; the metadata service is off until it is", "error", err.Error())
@@ -207,7 +208,11 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 		}
 		var restore *runtime.Restore
 		if restoreFrom != nil && !exists {
-			path, err := c.a.downloadVerified(ctx, restoreFrom.GetUrl(), restoreFrom.GetSha256())
+			path, pending, err := c.a.restoreFile(restoreFrom.GetUrl(), restoreFrom.GetSha256())
+			if pending {
+				waiting = append(waiting, id)
+				continue
+			}
 			if err != nil {
 				specErrors[id] = "snapshot: " + err.Error()
 				continue
@@ -231,7 +236,7 @@ func (c *instancesConverger) apply(ctx context.Context, section *agentv1.Instanc
 	}
 	c.a.collectSnapshots(keep)
 	if len(waiting) > 0 {
-		return fmt.Errorf("waiting for the user data of %s", strings.Join(waiting, ", "))
+		return fmt.Errorf("waiting for the user data or snapshot of %s", strings.Join(waiting, ", "))
 	}
 	if len(specErrors) > 0 {
 		var msgs []string
