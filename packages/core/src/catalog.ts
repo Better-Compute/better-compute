@@ -524,7 +524,8 @@ group('sandboxes', 'vps', [
   ['get', 'read', 'sandboxes:read', 'sandbox', 'v0.5'],
   ['extend', 'mutation', 'sandboxes:update', 'sandbox', 'v0.5'],
   ['snapshot', 'mutation', 'sandboxes:update', 'sandbox', 'v0.5'],
-  ['exec', 'mutation', 'sandboxes:exec', 'sandbox', 'v0.5'],
+  // The tunnels module holds the exec-ticket issuer and the sandbox SSH CA (§3.7, §7.6).
+  ['exec', 'mutation', 'sandboxes:exec', 'sandbox', 'v0.5', { module: 'tunnels' }],
   ['delete', 'mutation', 'sandboxes:delete', 'sandbox', 'v0.5'],
 ]);
 group('sandboxTemplates', 'vps', [

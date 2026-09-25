@@ -390,10 +390,12 @@ describe('apiSurface (§9.2)', () => {
 
   it('assigns each group to the module and phase the plan names', () => {
     const modules: Record<string, string> = {};
-    // The one method another module contributes to a group: break-glass SSH certificates.
+    // Methods another module contributes to a group: break-glass SSH certificates, and sandbox exec
+    // (tickets and the sandbox SSH CA live in tunnels).
     const contributed: Record<string, string> = {
       'nodes.issueSshCert': 'tunnels',
       'nodes.revokeSshCert': 'tunnels',
+      'sandboxes.exec': 'tunnels',
     };
     for (const row of apiSurface) {
       const path = `${row.group}.${row.method}`;
