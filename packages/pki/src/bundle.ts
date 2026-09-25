@@ -196,9 +196,18 @@ export function execTicketIssuer(
  * --join-signing-pin`, rendered into its user data by provision): taken from the bundle, never from the unsigned
  * `/.well-known/better-compute`, whose pins only the control plane's Web PKI certificate vouches for.
  */
-export function bootstrapPins(bundle: PkiBundle): { servingCaPin: string; joinSigningPin: string } {
+export function bootstrapPins(bundle: PkiBundle): {
+  servingCaPin: string;
+  joinSigningPin: string;
+  joinEncryptionPin: string;
+} {
   const pins = pkiPins(bundle);
-  return { servingCaPin: pins.servingCaSpkiPin, joinSigningPin: pins.joinSigningKeyPin };
+  return {
+    servingCaPin: pins.servingCaSpkiPin,
+    joinSigningPin: pins.joinSigningKeyPin,
+    // The join token is sealed to this key: without its pin a forged document could swap it and replay the token.
+    joinEncryptionPin: pins.joinEncryptionKeyPin,
+  };
 }
 
 /**

@@ -10,6 +10,7 @@
 //   With it: JoinService (machines can join), the audit module (its checkpoint key), the gateway role.
 // - BETTER_COMPUTE_RELEASE_PINS: `sha256/…` pins of the bcd release keys (comma-separated). With them: the
 //   rollout module. BETTER_COMPUTE_DOWNLOADS_URL: where bcd binaries are served.
+// - BETTER_COMPUTE_BCD_URL / _SHA256: the bcd binary provisioned machines install (with the bundle's pins).
 // - BETTER_COMPUTE_GATEWAY_CERT / _KEY: `better-compute pki issue-gateway` output. With them (and the
 //   bundle): `host.gateway` over mTLS on BETTER_COMPUTE_GATEWAY_PORT (default 8443) in BETTER_COMPUTE_REGION.
 // - BETTER_COMPUTE_GATEWAY_URL (https://gw.example.com:8443) and optionally _SERVER_NAME: published in
@@ -40,7 +41,7 @@ import {
   runtimeObserver,
   standardMetrics,
 } from '@better-compute/observability';
-import { commandSigningOptions, type PkiBundle } from '@better-compute/pki';
+import { bootstrapPins, commandSigningOptions, type PkiBundle } from '@better-compute/pki';
 import { postgres, retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
@@ -105,8 +106,18 @@ export function everyModule(
     .map((pin) => pin.trim())
     .filter(Boolean);
   return [
-    // provision runs metal's workflows; metal contributes the verbs, steps and profiles.
-    provisionModule({ modules: [metalModule] }),
+    // provision runs metal's workflows; metal contributes the verbs, steps and profiles. Machines it installs join
+    // with the pins from the sealed bundle (`bcd join --serving-ca-pin … --join-signing-pin … --join-encryption-pin …`),
+    // never with pins read from the unsigned /.well-known document.
+    provisionModule({
+      modules: [metalModule],
+      userData: {
+        controlPlaneUrl: env.BETTER_COMPUTE_BASE_URL ?? 'http://localhost:3000',
+        ...(env.BETTER_COMPUTE_BCD_URL ? { bcdUrl: env.BETTER_COMPUTE_BCD_URL } : {}),
+        ...(env.BETTER_COMPUTE_BCD_SHA256 ? { bcdSha256: env.BETTER_COMPUTE_BCD_SHA256 } : {}),
+        ...(bundle ? { pins: bootstrapPins(bundle) } : {}),
+      },
+    }),
     metalModule,
     vps(),
     // The store's housekeeping: prunes the outbox and authz changes behind their cursors (every 5 min).

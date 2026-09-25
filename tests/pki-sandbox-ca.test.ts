@@ -38,6 +38,7 @@ describe('sandbox SSH CA', () => {
     expect(bootstrapPins(bundle)).toEqual({
       servingCaPin: pins.servingCaSpkiPin,
       joinSigningPin: pins.joinSigningKeyPin,
+      joinEncryptionPin: pins.joinEncryptionKeyPin,
     });
     expect(bootstrapPins(bundle).servingCaPin).toMatch(/^sha256\/[A-Za-z0-9+/]{43}=$/);
   });
