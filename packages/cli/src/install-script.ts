@@ -57,6 +57,12 @@ export interface InstallScriptOptions {
    * ([site] bmc_networks; local config, so the control plane cannot loosen it).
    */
   bmcNetworks?: readonly string[];
+  /**
+   * The WebSocket fallback (PLAN.md §7.1) for networks whose TLS-inspecting proxies break mTLS: bcd dials `url`
+   * (wss://…/v1/session) instead, proving its identity inside; `proxyCaPem` is the proxy's CA, trusted for the TLS
+   * connection only; `audience` the gateway's public host (default: the URL's).
+   */
+  websocket?: { url: string; audience?: string; proxyCaPem?: string };
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -68,6 +74,23 @@ const pinPattern = /^sha256\/[A-Za-z0-9+/]{43}=$/;
 const hexPattern = /^[0-9a-f]{64}$/;
 const base64urlPattern = /^[A-Za-z0-9_-]{43}$/;
 const safeUrlPattern = /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~\/-]*)?$/;
+
+/** One or more PEM certificates and nothing else (so the file can be embedded in the script verbatim). */
+const certificatesOnly = /^(-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n)+$/;
+
+/** Where the install script writes the WebSocket proxy's CA. */
+export const bcdProxyCaPath = '/etc/bcd/websocket-proxy-ca.pem';
+
+/** The [websocket] section: the fallback URL, the proxy CA file, the audience. */
+export function renderBcdWebSocketSection(ws: { url: string; audience?: string; proxyCaPem?: string }): string {
+  return [
+    '[websocket]',
+    `url = "${ws.url}"`,
+    ...(ws.proxyCaPem ? [`proxy_ca_file = "${bcdProxyCaPath}"`] : []),
+    ...(ws.audience ? [`audience = "${ws.audience}"`] : []),
+    '',
+  ].join('\n');
+}
 
 /** `10.20.0.0/16`, `fd00::/64`: an address and a prefix length that fits it. */
 function isCidr(value: string): boolean {
@@ -124,6 +147,15 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
     const sequence = options.update.sequence;
     if (sequence !== undefined && !(Number.isSafeInteger(sequence) && sequence >= 1))
       throw invalid('--release-sequence', 'must be a whole number of at least 1');
+  }
+  if (options.websocket) {
+    const ws = options.websocket;
+    if (!/^wss:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~\/-]*)?$/.test(ws.url))
+      throw invalid('--websocket-url', 'must be a wss:// URL of letters, digits and . - _ ~ /');
+    if (ws.audience !== undefined && !/^[A-Za-z0-9.-]{1,253}$/.test(ws.audience))
+      throw invalid('--websocket-audience', 'must be a host name');
+    if (ws.proxyCaPem !== undefined && !certificatesOnly.test(ws.proxyCaPem))
+      throw invalid('--proxy-ca-file', 'must hold PEM certificates and nothing else');
   }
   for (const cidr of options.bmcNetworks ?? []) if (!isCidr(cidr)) throw invalid('--bmc-networks', `has ${JSON.stringify(cidr)}, not a CIDR`);
   if (options.bmcNetworks && options.bmcNetworks.length === 0) throw invalid('--bmc-networks', 'lists no network');
@@ -362,6 +394,26 @@ fi
   sed -n '/^[[:space:]]*\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
 fi
 ${
+  options.websocket
+    ? `${
+        options.websocket.proxyCaPem
+          ? `# The TLS-inspecting proxy's CA (trusted for the WebSocket's TLS only; identity is proven inside).
+cat > ${bcdProxyCaPath}.new <<'BCD_PROXY_CA'
+${options.websocket.proxyCaPem}BCD_PROXY_CA
+chmod 0644 ${bcdProxyCaPath}.new
+mv -f ${bcdProxyCaPath}.new ${bcdProxyCaPath}
+`
+          : ''
+      }# The WebSocket fallback: a [websocket] section unless the operator's config already has one.
+if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*websocket[[:space:]]*\\]' /etc/bcd/config.toml.new; then
+  cat >> /etc/bcd/config.toml.new <<'BCD_WEBSOCKET'
+${renderBcdWebSocketSection(options.websocket)}BCD_WEBSOCKET
+else
+  printf 'bcd install: note: config.toml already has a [websocket] section; --websocket-url was not applied to it\\n' >&2
+fi
+`
+    : ''
+}${
   options.bmcNetworks
     ? `# A site agent's BMC networks: a [site] section unless the operator's config already has one.
 if ! grep -Eq '^[[:space:]]*\\[[[:space:]]*site[[:space:]]*\\]' /etc/bcd/config.toml.new; then

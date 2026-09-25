@@ -36,6 +36,7 @@ export {
   bcdServiceUnit,
   renderBcdPluginsSection,
   renderBcdSiteSection,
+  renderBcdWebSocketSection,
   renderBcdUpdateSection,
   checkInstallScriptOptions,
   renderBcdConfig,

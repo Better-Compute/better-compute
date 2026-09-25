@@ -363,6 +363,32 @@ describe('daemon install-script', () => {
     expect(checked.status).toBe(0);
   });
 
+  it('configures the WebSocket fallback, with the proxy CA written beside the config', async () => {
+    // (Only its form is checked here: PEM certificate blocks and nothing else.)
+    const pem = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ2E=\n-----END CERTIFICATE-----\n';
+    await writeFile(join(scratch, 'ws-ca.pem'), pem);
+    const script = (
+      await run([...base, '--websocket-url', 'wss://gw.eu.compute.test:443/v1/session', '--websocket-audience', 'gw.eu.compute.test', '--proxy-ca-file', 'ws-ca.pem'])
+    ).stdout;
+    expect(script).toContain(
+      '[websocket]\nurl = "wss://gw.eu.compute.test:443/v1/session"\nproxy_ca_file = "/etc/bcd/websocket-proxy-ca.pem"\naudience = "gw.eu.compute.test"\n',
+    );
+    expect(script).toContain(`cat > /etc/bcd/websocket-proxy-ca.pem.new <<'BCD_PROXY_CA'\n${pem}BCD_PROXY_CA`);
+    const shell = posixShell();
+    if (shell) {
+      const file = join(scratch, 'install-ws-check.sh');
+      await writeFile(file, script);
+      expect(spawnSync(shell, ['-n', file], { encoding: 'utf8' }).status).toBe(0);
+    }
+    expect(await run([...base, '--websocket-url', 'https://gw/v1/session'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
+    await writeFile(join(scratch, 'not-ca.pem'), `${pem}BCD_PROXY_CA\nrm -rf /\n`);
+    expect(await run([...base, '--websocket-url', 'wss://gw/v1/session', '--proxy-ca-file', 'not-ca.pem'])).toMatchObject({
+      ok: false,
+      code: 'INVALID_INPUT',
+    });
+    expect(await run([...base, '--proxy-ca-file', 'ws-ca.pem'])).toMatchObject({ ok: false, code: 'INVALID_ARGUMENT' });
+  });
+
   it('writes a site agent’s BMC networks ([site] bmc_networks) with --bmc-networks', async () => {
     const script = (await run([...base, '--bmc-networks', '10.20.0.0/16, fd00:bmc::/64'.replace('bmc', 'b0c')])).stdout;
     expect(script).toContain('[site]\nbmc_networks = "10.20.0.0/16,fd00:b0c::/64"\n');

@@ -199,6 +199,21 @@ export const daemonCommands = [
         description: 'Release keys that must have signed (default 1)',
       },
       plugins: { type: 'boolean', description: 'Prepare the node for bcx driver plugins ([plugins], the systemd drop-in)' },
+      'websocket-url': {
+        type: 'string',
+        value: 'URL',
+        description: 'Dial the gateway over WebSocket (wss://…/v1/session) behind TLS-inspecting proxies',
+      },
+      'websocket-audience': {
+        type: 'string',
+        value: 'HOST',
+        description: "The gateway's public host the WebSocket proof names (default: the URL's host)",
+      },
+      'proxy-ca-file': {
+        type: 'string',
+        value: 'PATH',
+        description: "The TLS-inspecting proxy's CA (PEM), trusted for the WebSocket's TLS only",
+      },
       'bmc-networks': {
         type: 'string',
         value: 'CIDRS',
@@ -234,6 +249,8 @@ export const daemonCommands = [
     validate(flags) {
       if ((flags.sha256 === undefined) === (flags['release-manifest'] === undefined))
         throw usageError('Give exactly one of --sha256 or --release-manifest');
+      if ((flags['websocket-audience'] !== undefined || flags['proxy-ca-file'] !== undefined) && !flags['websocket-url'])
+        throw usageError('--websocket-audience and --proxy-ca-file need --websocket-url');
       if (flags['release-sequence'] !== undefined && !flags['release-pins'])
         throw usageError('--release-sequence needs --release-pins: bcd self-updates only under release keys');
     },
@@ -284,6 +301,17 @@ export const daemonCommands = [
           y: string;
         },
         ...(flags['approver-set-sha256'] ? { approverSetSha256: flags['approver-set-sha256'] } : {}),
+        ...(flags['websocket-url']
+          ? {
+              websocket: {
+                url: flags['websocket-url'],
+                ...(flags['websocket-audience'] ? { audience: flags['websocket-audience'] } : {}),
+                ...(flags['proxy-ca-file']
+                  ? { proxyCaPem: (await readFile(path(flags['proxy-ca-file']), 'utf8')).replace(/\r\n/g, '\n') }
+                  : {}),
+              },
+            }
+          : {}),
         ...(flags['bmc-networks'] !== undefined
           ? {
               bmcNetworks: flags['bmc-networks']
