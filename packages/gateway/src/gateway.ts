@@ -37,6 +37,8 @@ import {
   type SpecRequest,
   type SignedTrustBundle,
   type StatusReport,
+  type WorkloadTokenRequest,
+  type WorkloadTokenResponse,
 } from '@better-compute/protocol';
 import { commandKindAllowed } from '@better-compute/pki';
 import type { GatewayServices } from '@better-compute/server';
@@ -283,6 +285,14 @@ const noopLog: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
 /** The one command kind a daemon below `proto_min` accepts (§7.6, UPGRADE_REQUIRED). */
 const upgradeKind = 'daemon.upgrade';
+
+/** `GatewayServices.workloadToken` (v0.5), optional: without it the gateway answers `unavailable`. */
+interface WorkloadTokenService {
+  workloadToken?(
+    request: WorkloadTokenRequest,
+    context?: { peerNodeId: string; gatewayId: string },
+  ): Promise<WorkloadTokenResponse>;
+}
 
 const roleNames: Partial<Record<WireRole, AgentRole>> = {
   [WireRole.NODE]: 'node',
@@ -810,6 +820,39 @@ export function createGateway(options: GatewayOptions): Gateway {
     );
   }
 
+  /**
+   * Workload identity (v0.5, §12.2/§13): a VPS host's IMDS asks for an instance's token. Relayed like
+   * a SecretRequest: the control plane checks node_sig and that the instance lives on this node, and
+   * seals the token to the request's one-time key, so the gateway only ever sees ciphertext.
+   */
+  function onWorkloadToken(session: Session, request: WorkloadTokenRequest) {
+    const refuse = (error: string) => {
+      if (!session.closed)
+        session.sink.send(frame({ case: 'workloadToken', value: { requestId: request.requestId, jwe: '', error } }));
+    };
+    // The lessee holds root on a tenant-controlled node: it could ask for any instance's identity.
+    if (session.peer.tenantControlled) return refuse('access-denied');
+    const services = options.services as GatewayServices & WorkloadTokenService;
+    if (!services.workloadToken) return refuse('unavailable');
+    services.workloadToken(request, { peerNodeId: session.nodeId, gatewayId: id }).then(
+      (response) => {
+        if (!session.closed) session.sink.send(frame({ case: 'workloadToken', value: response }));
+      },
+      (error: unknown) => {
+        const code = isComputeError(error) ? error.code : undefined;
+        refuse(
+          code === 'ACCESS_DENIED'
+            ? 'access-denied'
+            : code === 'NOT_FOUND' || code === 'INVALID_STATE'
+              ? 'not-bound'
+              : code === 'RATE_LIMITED'
+                ? 'rate-limited'
+                : 'unavailable',
+        );
+      },
+    );
+  }
+
   /** Sends a full spec to each session whose node moved past what it holds and was sent. */
   async function pushSpecs(candidates: Session[]): Promise<number> {
     const open = candidates.filter((session) => !session.closed && !session.upgradeRequired);
@@ -1165,6 +1208,8 @@ export function createGateway(options: GatewayOptions): Gateway {
               return await onSpecRequest(session, msg.value);
             case 'secretRequest':
               return onSecret(session, msg.value);
+            case 'workloadTokenRequest':
+              return onWorkloadToken(session, msg.value);
             default:
               // An unknown frame from a newer daemon: ignored (additive protocol, §7.6).
               return;

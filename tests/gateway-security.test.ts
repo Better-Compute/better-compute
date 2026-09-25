@@ -152,6 +152,59 @@ describe('report handlers', () => {
   });
 });
 
+describe('workload tokens (v0.5 IMDS relay)', () => {
+  let f: GatewayFixture;
+  beforeEach(async () => {
+    f = await gatewayFixture();
+  });
+  afterEach(() => f.close());
+
+  const request = (requestId: string) =>
+    agentFrame({
+      case: 'workloadTokenRequest',
+      value: { requestId, instanceId: 'inst_1', audience: 'https://vault.example', epk: new Uint8Array(65).fill(4) },
+    });
+  const services = () => f.services.services as typeof f.services.services & { workloadToken?: unknown };
+
+  it('relays the sealed answer with the call context, maps refusals, and answers unavailable without a broker', async () => {
+    const node = await f.addNode();
+    const { stream, handle } = await f.connect(node);
+    await handle.receive(request('r0'));
+    await expect.poll(() => stream.of('workloadToken')).toEqual([expect.objectContaining({ requestId: 'r0', error: 'unavailable' })]);
+
+    const seen: unknown[] = [];
+    services().workloadToken = async (req: { requestId: string }, context: unknown) => {
+      seen.push(context);
+      if (req.requestId === 'r2') throw new ComputeError('ACCESS_DENIED', 'no');
+      if (req.requestId === 'r3') throw new ComputeError('NOT_FOUND', 'no instance');
+      return { requestId: req.requestId, jwe: 'eyJhbGciOiJFQ0RILUVTK0EyNTZLVyJ9.sealed', error: '' };
+    };
+    stream.clear();
+    for (const id of ['r1', 'r2', 'r3']) await handle.receive(request(id));
+    await expect.poll(() => stream.of('workloadToken').length).toBe(3);
+    const answers = Object.fromEntries(stream.of('workloadToken').map((answer) => [answer.requestId, answer]));
+    expect(answers.r1).toMatchObject({ jwe: 'eyJhbGciOiJFQ0RILUVTK0EyNTZLVyJ9.sealed', error: '' });
+    expect(answers.r2).toMatchObject({ jwe: '', error: 'access-denied' });
+    expect(answers.r3).toMatchObject({ jwe: '', error: 'not-bound' });
+    expect(seen).toEqual(Array(3).fill({ peerNodeId: node, gatewayId: f.gateway.id }));
+  });
+
+  it('never asks for a token from a tenant-controlled node', async () => {
+    let calls = 0;
+    services().workloadToken = async () => {
+      calls++;
+      return { requestId: 'x', jwe: 'x', error: '' };
+    };
+    const node = await f.addNode();
+    const stream = new FakeStream();
+    const handle = f.gateway.open({ nodeId: node, role: 'node', tenantControlled: true }, stream);
+    await handle.receive(helloFrame(node));
+    await handle.receive(request('r1'));
+    expect(stream.of('workloadToken')).toEqual([expect.objectContaining({ requestId: 'r1', error: 'access-denied' })]);
+    expect(calls).toBe(0);
+  });
+});
+
 describe('tenant-controlled nodes', () => {
   let f: GatewayFixture;
   beforeEach(async () => {
