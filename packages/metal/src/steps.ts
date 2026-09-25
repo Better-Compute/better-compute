@@ -126,7 +126,8 @@ async function bmc(
 
 /** `bettercompute.site.v1.BmcOperationRequest` as proto3 JSON. */
 export function bmcOperationJson(
-  node: Pick<MetalNodeRow, 'bmc_driver' | 'bmc_address' | 'bmc_credentials' | 'bmc_tls_spki_sha256'>,
+  node: Pick<MetalNodeRow, 'bmc_driver' | 'bmc_address' | 'bmc_credentials' | 'bmc_tls_spki_sha256'> &
+    Partial<Pick<MetalNodeRow, 'bmc_driver_options'>>,
   operation: string,
   args: Record<string, Json>,
 ): Json {
@@ -137,7 +138,20 @@ export function bmcOperationJson(
     operation,
     argsJson: JSON.stringify(args),
     ...(node.bmc_tls_spki_sha256 ? { tlsSpkiSha256: Buffer.from(node.bmc_tls_spki_sha256, 'hex').toString('base64') } : {}),
+    // Canonical (sorted keys), so a payload-bound batch leaf over the same operation stays the same bytes.
+    ...(node.bmc_driver_options && Object.keys(node.bmc_driver_options).length ? { driverOptionsJson: canonicalJson(node.bmc_driver_options) } : {}),
   };
+}
+
+/** JSON with every object's keys sorted. */
+export function canonicalJson(value: Json): string {
+  const sorted = (v: Json): Json =>
+    Array.isArray(v)
+      ? v.map(sorted)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(Object.keys(v).sort().map((key) => [key, sorted((v as Record<string, Json>)[key]!)]))
+        : v;
+  return JSON.stringify(sorted(value));
 }
 
 const bootArch = (node: Pick<MetalNodeRow, 'arch' | 'uefi'>) =>

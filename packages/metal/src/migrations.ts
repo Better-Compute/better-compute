@@ -87,4 +87,12 @@ CREATE UNIQUE INDEX bmc_credential_versions_pending ON bmc_credential_versions (
 ALTER TABLE metal_nodes ADD COLUMN batch_id text;
 `,
   },
+  {
+    name: 'metal/0006_bmc_driver_options',
+    sql: `
+-- Per-BMC driver options set at enrollment (bmc.driverOptions, e.g. bcx-ipmi { "cipherSuite": 3 }): sent on
+-- every BMC operation as BmcOperationRequest.driver_options_json. Never credentials.
+ALTER TABLE metal_nodes ADD COLUMN bmc_driver_options jsonb CHECK (bmc_driver_options IS NULL OR jsonb_typeof(bmc_driver_options) = 'object');
+`,
+  },
 ]);

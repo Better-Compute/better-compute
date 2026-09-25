@@ -30,8 +30,10 @@ import {
   siteDriverKinds,
   type BmcDriverCapabilities,
 } from './capabilities.js';
+import { isIP } from 'node:net';
 import { metalPayloads } from './commands.js';
 import type { HardwareProfile } from './module-types.js';
+import { invalidateSiteProxyTargets } from './proxy-targets.js';
 import { stateProfile, unrescueProfile } from './profiles.js';
 import { metalWorkKind, unrescuePhase } from './reconcile.js';
 import { schemas } from './schemas.js';
@@ -70,8 +72,10 @@ export interface MetalNodeView {
   failedFrom?: string;
   maintenance: boolean;
   power: 'on' | 'off' | 'unknown';
-  bmc: { driver: string; address: string; credentialsSet: boolean };
+  bmc: { driver: string; address: string; credentialsSet: boolean; driverOptions?: Record<string, Json> };
   macs: string[];
+  /** The machine's own IPs (inspection or the operator). */
+  addresses: string[];
   workflowId?: string;
   lastError?: Json;
 }
@@ -84,8 +88,14 @@ export function metalNodeView(row: MetalNodeRow): MetalNodeView {
     provisionState: row.provision_state,
     maintenance: row.maintenance,
     power: row.power,
-    bmc: { driver: row.bmc_driver, address: row.bmc_address, credentialsSet: row.bmc_credentials !== null },
+    bmc: {
+      driver: row.bmc_driver,
+      address: row.bmc_address,
+      credentialsSet: row.bmc_credentials !== null,
+      ...(row.bmc_driver_options ? { driverOptions: row.bmc_driver_options } : {}),
+    },
     macs: row.macs,
+    addresses: row.addresses,
   };
   if (row.pool_id) view.poolId = row.pool_id;
   if (row.failed_from) view.failedFrom = row.failed_from;
@@ -104,8 +114,13 @@ export interface EnrollInput {
     /** A secret reference, or inline credentials stored at once and never echoed. */
     credentials: SecretRef | { username: string; password: string };
     tlsSpkiSha256?: string;
+    /** Options for the driver (e.g. bcx-ipmi `{ cipherSuite: 3 }`), sent with every BMC operation. */
+    driverOptions?: Record<string, Json>;
   };
+  /** PXE MACs; required with a driver that cannot report them (IPMI) in a pool with an agent. */
   macs?: string[];
+  /** The machine's own IPs (site.httpProxy targets of an agentless machine). */
+  addresses?: string[];
   productUuid?: string;
   arch?: 'x86_64' | 'arm64';
   uefi?: boolean;
@@ -198,8 +213,8 @@ function nodeInput(raw: unknown, extra: readonly string[] = []): MetalNodeInput 
 }
 
 function validateEnroll(raw: unknown): EnrollInput {
-  const input = object(raw, ['tenantId', 'siteId', 'poolId', 'bmc', 'macs', 'productUuid', 'arch', 'uefi', 'hardwareProfile']);
-  const bmc = object(input.bmc, ['address', 'driver', 'credentials', 'tlsSpkiSha256'], 'bmc');
+  const input = object(raw, ['tenantId', 'siteId', 'poolId', 'bmc', 'macs', 'addresses', 'productUuid', 'arch', 'uefi', 'hardwareProfile']);
+  const bmc = object(input.bmc, ['address', 'driver', 'credentials', 'tlsSpkiSha256', 'driverOptions'], 'bmc');
   let credentials: EnrollInput['bmc']['credentials'];
   if (typeof bmc.credentials === 'string') {
     if (!isSecretRef(bmc.credentials)) fail('bmc.credentials must be a secret:// reference or { username, password }');
@@ -227,6 +242,25 @@ function validateEnroll(raw: unknown): EnrollInput {
     const pin = bmc.tlsSpkiSha256.toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(pin)) fail('bmc.tlsSpkiSha256 must be 64 hex digits');
     out.bmc.tlsSpkiSha256 = pin;
+  }
+  if (bmc.driverOptions !== undefined) {
+    const options = bmc.driverOptions;
+    if (!options || typeof options !== 'object' || Array.isArray(options)) fail('bmc.driverOptions must be a JSON object');
+    if (Buffer.byteLength(JSON.stringify(options)) > 1024) fail('bmc.driverOptions must be at most 1 KiB of JSON');
+    // Credentials travel only as bmc.credentials (a secret ref), never in options the agent logs and relays.
+    const secretish = Object.keys(options as object).find((key) => /pass|secret|token|credential|user(name)?$|key$/i.test(key));
+    if (secretish) fail(`bmc.driverOptions.${secretish} looks like a credential: pass credentials in bmc.credentials`);
+    out.bmc.driverOptions = options as Record<string, Json>;
+  }
+  if (input.addresses !== undefined) {
+    if (!Array.isArray(input.addresses) || input.addresses.length > 16) fail('addresses must be a list of at most 16 IP addresses');
+    out.addresses = [
+      ...new Set(
+        input.addresses.map((address) =>
+          typeof address === 'string' && isIP(address) !== 0 ? address.toLowerCase() : fail(`${JSON.stringify(address)} is not an IP address`),
+        ),
+      ),
+    ];
   }
   if (input.macs !== undefined) {
     if (!Array.isArray(input.macs) || input.macs.length > 16) fail('macs must be a list of at most 16 MACs');
@@ -303,8 +337,8 @@ async function enroll(context: MethodContext, caps: Capabilities, input: EnrollI
     );
     await tx.query(
       `INSERT INTO metal_nodes (node_id, tenant_id, bmc_driver, bmc_address, bmc_credentials, bmc_tls_spki_sha256, macs,
-         product_uuid, arch, uefi, hardware_profile)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         product_uuid, arch, uefi, hardware_profile, bmc_driver_options, addresses)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)`,
       [
         id,
         input.tenantId,
@@ -317,8 +351,12 @@ async function enroll(context: MethodContext, caps: Capabilities, input: EnrollI
         input.arch ?? 'x86_64',
         input.uefi ?? true,
         profile ?? null,
+        input.bmc.driverOptions ? JSON.stringify(input.bmc.driverOptions) : null,
+        input.addresses ?? [],
       ],
     );
+    // An agentless machine's addresses are what the site's agents may reach for it (site.httpProxy).
+    if (input.addresses?.length && pool.agent === 'none') await invalidateSiteProxyTargets(tx, context.desired, input.siteId);
     await context.authz?.upsert(tx, {
       type: 'node',
       id,

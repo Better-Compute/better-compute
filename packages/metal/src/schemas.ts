@@ -53,6 +53,11 @@ const bmc = strictObject(
       pattern: '^[0-9A-Fa-f]{64}$',
       description: "SHA-256 of the BMC certificate's SubjectPublicKeyInfo, 64 hex digits, to pin its TLS",
     },
+    driverOptions: {
+      type: 'object',
+      description:
+        'Options for the BMC driver, sent with every BMC operation (e.g. bcx-ipmi { "cipherSuite": 3 } for old BMCs): a JSON object of at most 1 KiB, never credentials. The driver validates its keys',
+    },
   },
   ['address', 'driver', 'credentials'],
 );
@@ -73,7 +78,15 @@ export const schemas = {
         maxItems: 16,
         // Strings only, refused by the validator itself ("… is not a MAC address").
         items: { pattern: '^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$' },
-        description: "The node's MAC addresses (':' or '-' separated), for PXE and matching",
+        description:
+          "The node's PXE MAC addresses (':' or '-' separated). Required for a pool with an agent when the BMC driver cannot report them (IPMI)",
+      },
+      addresses: {
+        type: 'array',
+        maxItems: 16,
+        items: { type: 'string', maxLength: 45 },
+        description:
+          "The machine's own IP addresses, the only hosts site.httpProxy may reach for it (agentless pools); out-of-band inspection replaces them when it reports some",
       },
       productUuid: text(64, 'The SMBIOS product UUID'),
       arch: { enum: ['x86_64', 'arm64'], default: 'x86_64' },

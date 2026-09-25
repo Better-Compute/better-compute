@@ -162,6 +162,67 @@ describe('an IPMI machine on the simulated site', () => {
     expect(s.seen.some((c) => c.payload.operation === 'virtual-media.insert')).toBe(false);
   });
 
+  it('sends the enrolled driver options with every BMC operation, and refuses ones that are not a small object', async () => {
+    sim = await createMetalSim();
+    await sim.addSiteAgent(AGENT);
+    const s = sim;
+    const enrolled = await s.call('enroll', {
+      tenantId: 'root',
+      siteId: 'site_a',
+      poolId: 'pool_metal',
+      macs: ['52:54:00:aa:bb:06'],
+      bmc: { address: 'https://10.10.0.42', driver: 'ipmi', credentials: 'secret://root/bmc', driverOptions: { cipherSuite: 3 } },
+    });
+    expect(enrolled.bmc.driverOptions).toEqual({ cipherSuite: 3 });
+    await s.settle();
+    expect(await s.state(enrolled.nodeId)).toMatchObject({ provision_state: 'ready' });
+    const bmcCommands = s.seen.filter((c) => c.kind.startsWith('bmc.'));
+    expect(bmcCommands.length).toBeGreaterThan(3);
+    expect(new Set(bmcCommands.map((c) => c.payload.driverOptionsJson))).toEqual(new Set(['{"cipherSuite":3}']));
+
+    const bad = (driverOptions: unknown) =>
+      s.call('enroll', {
+        tenantId: 'root',
+        siteId: 'site_a',
+        poolId: 'pool_metal',
+        macs: ['52:54:00:aa:bb:07'],
+        bmc: { address: 'https://10.10.0.43', driver: 'ipmi', credentials: 'secret://root/bmc', driverOptions },
+      });
+    await expect(bad({ password: 'hunter2' })).rejects.toMatchObject({ code: 'INVALID_INPUT', message: expect.stringContaining('credential') });
+    await expect(bad({ blob: 'x'.repeat(2000) })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(bad([3])).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it("takes an agentless machine's addresses at enroll, for site.httpProxy, without PXE MACs", async () => {
+    sim = await createMetalSim();
+    await sim.addSiteAgent(AGENT);
+    await sim.db.query(
+      `INSERT INTO pools (id, owner_tenant_id, site_id, class, sharing, agent, policy, version)
+       VALUES ('pool_agentless', 'root', 'site_a', 'metal-host', 'exclusive', 'none', '{}', 1)`,
+    );
+    const enrolled = await sim.call('enroll', {
+      tenantId: 'root',
+      siteId: 'site_a',
+      poolId: 'pool_agentless',
+      addresses: ['10.30.1.7', '10.30.1.7', 'fd00::7'],
+      bmc: { address: 'https://10.10.0.44', driver: 'ipmi', credentials: 'secret://root/bmc' },
+    });
+    expect(enrolled.addresses).toEqual(['10.30.1.7', 'fd00::7']);
+    await sim.settle();
+    // The IPMI inspection reports no addresses: the enrolled ones stand.
+    const { rows } = await sim.db.query<{ addresses: string[] }>('SELECT addresses FROM metal_nodes WHERE node_id = $1', [enrolled.nodeId]);
+    expect(rows[0]!.addresses).toEqual(['10.30.1.7', 'fd00::7']);
+    await expect(
+      sim.call('enroll', {
+        tenantId: 'root',
+        siteId: 'site_a',
+        poolId: 'pool_agentless',
+        addresses: ['machine.example'],
+        bmc: { address: 'https://10.10.0.45', driver: 'ipmi', credentials: 'secret://root/bmc' },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
   it("checks a driver the table does not know against what the site's agents report", async () => {
     sim = await createMetalSim();
     await sim.addSiteAgent(AGENT);
