@@ -66,7 +66,8 @@
       "migrations": [
         "vps/0001_instances",
         "vps/0002_sealed_user_data",
-        "vps/0003_provider_bootstraps"
+        "vps/0003_provider_bootstraps",
+        "vps/0004_sandboxes"
       ]
     },
     {
@@ -120,6 +121,7 @@
     "vps.bootstraps",
     "vps.hosts",
     "vps.instances",
+    "vps.sandboxes",
     "vps.usage",
     "workflow"
   ]

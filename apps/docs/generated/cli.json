@@ -1571,7 +1571,7 @@
       "group": "PKI",
       "summary": "Rotate the command-signing root in three steps: add, switch, drop",
       "description": "pki rotate-command-root performs one step of a command-signing root rotation (PLAN.md §13) on the bundle and writes it back (sealed with BETTER_COMPUTE_SECRET when set). --stage add creates a new root and publishes it beside the current one (the trust bundle's version goes up); workers keep signing under the current root. Roll the bundle out to every process: daemons receive the new version in Welcome.trust. --stage switch, once every daemon holds that version, makes workers sign under the new root while the old one stays trusted. --stage drop, at least 24 hours later (worker keys live at most 24 h), removes the old root (version up again). Each step prints the roots and version daemons will trust.",
-      "usage": "better-compute pki rotate-command-root --stage STAGE [--pki PATH]",
+      "usage": "better-compute pki rotate-command-root --stage STAGE [--pki PATH] [--force]",
       "target": "none",
       "args": [],
       "flags": [
@@ -1589,6 +1589,11 @@
           "description": "The PKI bundle written by pki init",
           "env": "BETTER_COMPUTE_PKI",
           "default": ".better-compute/pki.json"
+        },
+        {
+          "flag": "--force",
+          "optional": true,
+          "description": "switch without checking that every connected daemon has the new trust version"
         },
         {
           "flag": "--format",

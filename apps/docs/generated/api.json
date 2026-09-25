@@ -1219,7 +1219,8 @@
                 "deleting",
                 "deleted",
                 "error",
-                "lost"
+                "lost",
+                "paused"
               ]
             },
             "poolId": {
@@ -1923,6 +1924,7 @@
                   "description": "The BMC address (host or URL)"
                 },
                 "driver": {
+                  "type": "string",
                   "pattern": "^[a-z][a-z0-9-]{0,63}$",
                   "description": "The BMC driver id, such as redfish"
                 },
@@ -1947,11 +1949,12 @@
                   "description": "A secret:// (or vault://, env://) reference, or inline { username, password } stored in the secret broker at once and never echoed"
                 },
                 "tlsSpkiSha256": {
+                  "type": "string",
                   "pattern": "^[0-9A-Fa-f]{64}$",
                   "description": "SHA-256 of the BMC certificate's SubjectPublicKeyInfo, 64 hex digits, to pin its TLS"
                 }
               },
-              "required": ["address", "credentials"],
+              "required": ["address", "driver", "credentials"],
               "additionalProperties": false,
               "description": "How to reach the node's BMC"
             },
@@ -2897,7 +2900,40 @@
         "phase": "v0.3",
         "module": "tunnels",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-z]{26,52}$",
+              "maxLength": 57
+            },
+            "publicKey": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Your OpenSSH public key line (Ed25519 or ECDSA P-256)"
+            },
+            "principal": {
+              "type": "string",
+              "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+              "default": "root",
+              "description": "The Unix account to log in as, one of the deployment's sshAccounts"
+            },
+            "ttlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 3600,
+              "default": 900
+            }
+          },
+          "required": ["tenantId", "nodeId", "publicKey"],
+          "additionalProperties": false
+        },
         "summary": "Issues a short-lived break-glass OpenSSH user certificate for one node, bound to the principal `<account>@<nodeId>`.",
         "description": "Issues a short-lived break-glass OpenSSH user certificate for one node, bound to the principal `<account>@<nodeId>`.\n\nDecided as `compute:nodes:ssh-root`. The method comes from the tunnels module (v0.3) and is `UNSUPPORTED` when no compute SSH CA is configured. It needs an MFA session by default (`ACCESS_DENIED` with reason `mfa-required`), and a session that ends within a minute is `ACCESS_DENIED`. `publicKey` must be an Ed25519 or ECDSA P-256 key, and `principal` (default `root`) one of the configured accounts; otherwise `INVALID_INPUT`.\n\nThe lifetime is `ttlSeconds` (60 to 3,600, default 900), never past the caller's session. Issuance is rate-limited per identity (20 per hour by default, then `RATE_LIMITED`). Every certificate is recorded and `node.ssh-cert.issued` is published."
       },
@@ -2912,9 +2948,81 @@
         "phase": "v0.3",
         "module": "tunnels",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-z]{26,52}$",
+              "maxLength": 57
+            },
+            "serial": {
+              "type": "string",
+              "pattern": "^[0-9]{1,20}$",
+              "description": "The certificate serial in decimal, as nodes.issueSshCert returned it"
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          "required": ["tenantId", "nodeId", "serial"],
+          "additionalProperties": false
+        },
         "summary": "Revokes a break-glass SSH certificate before it expires; the node's revocation list carries it from the next NodeSpec on.",
         "description": "Revokes a break-glass SSH certificate before it expires; the node's revocation list carries it from the next NodeSpec on.\n\nDecided as `compute:nodes:ssh-root` and hosted by the tunnels module (v0.3). Revoking again returns the same revocation. A serial not issued for this node is `NOT_FOUND`. Publishes `node.ssh-cert.revoked`."
+      },
+      {
+        "method": "listSshCerts",
+        "route": "POST /api/compute/nodes/listSshCerts",
+        "kind": "read",
+        "action": "compute:nodes:read",
+        "resource": null,
+        "alternatives": [],
+        "list": false,
+        "phase": null,
+        "module": "tunnels",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-z]{26,52}$",
+              "maxLength": 57
+            },
+            "includeExpired": {
+              "type": "boolean",
+              "default": false,
+              "description": "Also certificates past their expiry (kept one day)"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "nextCursor of the previous page"
+            }
+          },
+          "required": ["tenantId", "nodeId"],
+          "additionalProperties": false
+        },
+        "summary": "",
+        "description": ""
       }
     ]
   },
@@ -4855,8 +4963,88 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The template name, unique in the tenant, e.g. py-small"
+            },
+            "poolId": {
+              "type": "string",
+              "pattern": "^pool_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "A hosted (vps-host) pool offered to the tenant"
+            },
+            "flavor": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The flavor name, e.g. g1.small"
+            },
+            "imageId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$",
+              "maxLength": 200,
+              "description": "The image sandboxes boot"
+            },
+            "runtime": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,63}$",
+              "maxLength": 64,
+              "description": "Must be the pool's runtime (checked once, when the template is written)"
+            },
+            "userData": {
+              "type": "string",
+              "maxLength": 32768,
+              "description": "User data for every sandbox (at most 32 KiB), or secret://<tenantId>/<id> naming a secret of this tenant"
+            },
+            "defaultTtlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 2592000,
+              "description": "A sandbox’s lifetime unless it asks for one, in seconds (1 minute to 30 days)",
+              "default": 3600
+            },
+            "maxTtlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 2592000,
+              "description": "The longest lifetime a sandbox may have, extensions included, in seconds (1 minute to 30 days)",
+              "default": 86400
+            },
+            "warm": {
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 64,
+                  "description": "Warm instances kept ready (stopped) for fast creates"
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 64,
+                  "description": "Warm instances kept at most (default: min)"
+                }
+              },
+              "required": ["min"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["tenantId", "name", "poolId", "flavor", "imageId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -4870,8 +5058,20 @@
         "list": true,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -4885,8 +5085,26 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "templateId": {
+              "type": "string",
+              "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The sandbox template"
+            }
+          },
+          "required": ["tenantId", "templateId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -4900,8 +5118,74 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "templateId": {
+              "type": "string",
+              "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The sandbox template"
+            },
+            "flavor": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$",
+              "maxLength": 63,
+              "description": "The flavor name, e.g. g1.small"
+            },
+            "imageId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$",
+              "maxLength": 200,
+              "description": "The image sandboxes boot"
+            },
+            "userData": {
+              "type": ["string", "null"],
+              "maxLength": 32768,
+              "description": "New user data, or null to remove it"
+            },
+            "defaultTtlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 2592000,
+              "description": "A sandbox’s lifetime unless it asks for one, in seconds (1 minute to 30 days)"
+            },
+            "maxTtlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 2592000,
+              "description": "The longest lifetime a sandbox may have, extensions included, in seconds (1 minute to 30 days)"
+            },
+            "warm": {
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 64,
+                  "description": "Warm instances kept ready (stopped) for fast creates"
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 64,
+                  "description": "Warm instances kept at most (default: min)"
+                }
+              },
+              "required": ["min"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["tenantId", "templateId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -4915,8 +5199,26 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "templateId": {
+              "type": "string",
+              "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The sandbox template"
+            }
+          },
+          "required": ["tenantId", "templateId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -4938,8 +5240,51 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "templateId": {
+              "type": "string",
+              "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The sandbox template"
+            },
+            "ttlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 2592000,
+              "description": "The sandbox's lifetime (default: the template's defaultTtlSeconds), in seconds (1 minute to 30 days)"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "Scoped to (tenant, caller identity): a retry with the same key replays"
+            },
+            "wait": {
+              "type": "object",
+              "properties": {
+                "timeoutMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 30000,
+                  "description": "How long to hold the answer until the sandbox is ready"
+                }
+              },
+              "required": ["timeoutMs"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["tenantId", "templateId", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -4953,8 +5298,46 @@
         "list": true,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "scope": {
+              "enum": ["mine", "all"],
+              "default": "mine"
+            },
+            "deleted": {
+              "type": "boolean",
+              "default": false,
+              "description": "Include deleted sandboxes"
+            },
+            "templateId": {
+              "type": "string",
+              "pattern": "^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The sandbox template"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "cursor": {
+              "type": "string",
+              "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The last sandbox id of the previous page"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -4968,8 +5351,26 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "sandboxId": {
+              "type": "string",
+              "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox"
+            }
+          },
+          "required": ["tenantId", "sandboxId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -4983,8 +5384,36 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "sandboxId": {
+              "type": "string",
+              "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox"
+            },
+            "until": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 140737488355328,
+              "description": "The new expiry, epoch milliseconds (or by, not both)"
+            },
+            "by": {
+              "type": ["string", "integer"],
+              "description": "Added to the current expiry: 30m, 8h, or milliseconds (or until, not both)"
+            }
+          },
+          "required": ["tenantId", "sandboxId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       },
@@ -5028,8 +5457,26 @@
         "list": false,
         "phase": "v0.5",
         "module": "vps",
-        "status": "planned",
-        "input": null,
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "sandboxId": {
+              "type": "string",
+              "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "The sandbox"
+            }
+          },
+          "required": ["tenantId", "sandboxId"],
+          "additionalProperties": false
+        },
         "summary": "",
         "description": ""
       }
@@ -5538,7 +5985,40 @@
         "phase": "v0.3",
         "module": "tunnels",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128
+            },
+            "instanceId": {
+              "type": "string",
+              "pattern": "^inst_[0-9a-z]{26,52}$",
+              "maxLength": 57,
+              "description": "Exec, ssh or tcp into this instance; give exactly one of instanceId or nodeId"
+            },
+            "nodeId": {
+              "type": "string",
+              "pattern": "^node_[0-9a-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The console of this node"
+            },
+            "op": {
+              "enum": ["exec", "console", "ssh", "tcp"],
+              "description": "console for a node; exec, ssh or tcp for an instance"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "tcp only: the port to reach"
+            }
+          },
+          "required": ["tenantId", "op"],
+          "additionalProperties": false
+        },
         "summary": "Issues a single-use exec ticket, valid for 60 seconds, for a tunnel to an instance or a node; returns the ticket, the tunnel id, the node and the `path` (`tunnels/<ticket>`, relative to the API base path) the caller then opens.",
         "description": "Issues a single-use exec ticket, valid for 60 seconds, for a tunnel to an instance or a node; returns the ticket, the tunnel id, the node and the `path` (`tunnels/<ticket>`, relative to the API base path) the caller then opens.\n\n- Give exactly one of `instanceId` or `nodeId`. An instance takes `exec`, `ssh` or `tcp` (with a `port` from 1 to 65535) and is decided with `compute:instances:exec` on `compute-instance/{instanceId}`; a node takes `console` and is decided with `compute:nodes:console` on `compute-node/{nodeId}`. Any other combination is `INVALID_INPUT`.\n- `NOT_FOUND` when the instance is not the tenant's or is still a draft, or the node is outside the tenant's view. `UNSUPPORTED` for a provider instance, which has no node agent to tunnel through.\n- `INVALID_STATE` when the instance is not `running` or its node is not connected to a gateway.\n- `RATE_LIMITED` (with `retryAfterMs`) beyond the per-identity limit of each API replica, 10 tunnels per minute by default.\n- Emits `tunnel.issued`."
       }

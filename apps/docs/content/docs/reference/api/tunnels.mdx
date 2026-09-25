@@ -29,3 +29,13 @@ Issues a single-use exec ticket, valid for 60 seconds, for a tunnel to an instan
 - **Authorization:** `compute:instances:exec` @ `compute-instance` or `compute:nodes:console` @ `compute-node`
 - **Module:** `tunnels`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field        | Type                                   | Required | Constraints                                                |
+| ------------ | -------------------------------------- | -------- | ---------------------------------------------------------- |
+| `tenantId`   | string                                 | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `instanceId` | string                                 |          | at most 57 characters; matches `^inst_[0-9a-z]{26,52}$`    |
+| `nodeId`     | string                                 |          | at most 57 characters; matches `^node_[0-9a-z]{26,52}$`    |
+| `op`         | one of `exec`, `console`, `ssh`, `tcp` | yes      |                                                            |
+| `port`       | integer                                |          | 1-65535                                                    |

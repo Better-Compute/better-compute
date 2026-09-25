@@ -7,7 +7,7 @@ description: 'Nodes are machines that joined the control plane, as their tenant 
 
 Nodes are machines that joined the control plane, as their tenant sees them: a tenant sees the nodes the authorization projection holds for it. Every method except `list` is decided on `compute-node/{nodeId}`. Mutations take an optional `version`; when the node has moved past it, the call is `CONFLICT`. See [Operating nodes](/docs/guides/nodes/operating-nodes).
 
-All 13 methods are served by this release.
+All 14 methods are served by this release.
 
 | Method                              | Kind     | Authorization                                    | Phase | Status     |
 | ----------------------------------- | -------- | ------------------------------------------------ | ----- | ---------- |
@@ -24,6 +24,7 @@ All 13 methods are served by this release.
 | [`delete`](#delete)                 | mutation | `compute:nodes:delete` @ `compute-node`          | v0.2  | registered |
 | [`issueSshCert`](#issuesshcert)     | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | registered |
 | [`revokeSshCert`](#revokesshcert)   | mutation | `compute:nodes:ssh-root` @ `compute-node`        | v0.3  | registered |
+| [`listSshCerts`](#listsshcerts)     | read     | `compute:nodes:read`                             | —     | registered |
 
 ## list
 
@@ -288,6 +289,16 @@ The lifetime is `ttlSeconds` (60 to 3,600, default 900), never past the caller's
 - **Module:** `tunnels`
 - **Phase:** v0.3 (registered)
 
+**Input**
+
+| Field        | Type    | Required | Constraints                                                |
+| ------------ | ------- | -------- | ---------------------------------------------------------- |
+| `tenantId`   | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `nodeId`     | string  | yes      | at most 57 characters; matches `^node_[0-9a-z]{26,52}$`    |
+| `publicKey`  | string  | yes      | at most 4096 characters                                    |
+| `principal`  | string  |          | matches `^[a-z_][a-z0-9_-]{0,31}$`; default `"root"`       |
+| `ttlSeconds` | integer |          | 60-3600; default `900`                                     |
+
 ## revokeSshCert
 
 `POST /api/compute/nodes/revokeSshCert`
@@ -300,3 +311,31 @@ Decided as `compute:nodes:ssh-root` and hosted by the tunnels module (v0.3). Rev
 - **Authorization:** `compute:nodes:ssh-root` @ `compute-node`
 - **Module:** `tunnels`
 - **Phase:** v0.3 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `nodeId`   | string | yes      | at most 57 characters; matches `^node_[0-9a-z]{26,52}$`    |
+| `serial`   | string | yes      | matches `^[0-9]{1,20}$`                                    |
+| `reason`   | string |          | at most 500 characters                                     |
+
+## listSshCerts
+
+`POST /api/compute/nodes/listSshCerts`
+
+- **Kind:** read
+- **Authorization:** `compute:nodes:read`
+- **Module:** `tunnels`
+- **Phase:** not in PLAN.md §9.2 (registered)
+
+**Input**
+
+| Field            | Type    | Required | Constraints                                                |
+| ---------------- | ------- | -------- | ---------------------------------------------------------- |
+| `tenantId`       | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `nodeId`         | string  | yes      | at most 57 characters; matches `^node_[0-9a-z]{26,52}$`    |
+| `includeExpired` | boolean |          | default `false`                                            |
+| `limit`          | integer |          | 1-500; default `100`                                       |
+| `cursor`         | string  |          | at most 128 characters                                     |

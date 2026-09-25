@@ -7,15 +7,15 @@ description: 'The sandboxTemplates API group (vps): 5 methods.'
 
 Methods of the `sandboxTemplates` group, contributed by `vps`.
 
-0 of 5 methods are served by this release; the others are planned for the phase shown.
+All 5 methods are served by this release.
 
-| Method              | Kind     | Authorization                                           | Phase | Status  |
-| ------------------- | -------- | ------------------------------------------------------- | ----- | ------- |
-| [`create`](#create) | mutation | `compute:sandboxes:manage` @ `compute-tenant`           | v0.5  | planned |
-| [`list`](#list)     | read     | `compute:sandboxes:read` @ `compute-tenant` + items     | v0.5  | planned |
-| [`get`](#get)       | read     | `compute:sandboxes:read` @ `compute-sandbox-template`   | v0.5  | planned |
-| [`update`](#update) | mutation | `compute:sandboxes:manage` @ `compute-sandbox-template` | v0.5  | planned |
-| [`delete`](#delete) | mutation | `compute:sandboxes:manage` @ `compute-sandbox-template` | v0.5  | planned |
+| Method              | Kind     | Authorization                                           | Phase | Status     |
+| ------------------- | -------- | ------------------------------------------------------- | ----- | ---------- |
+| [`create`](#create) | mutation | `compute:sandboxes:manage` @ `compute-tenant`           | v0.5  | registered |
+| [`list`](#list)     | read     | `compute:sandboxes:read` @ `compute-tenant` + items     | v0.5  | registered |
+| [`get`](#get)       | read     | `compute:sandboxes:read` @ `compute-sandbox-template`   | v0.5  | registered |
+| [`update`](#update) | mutation | `compute:sandboxes:manage` @ `compute-sandbox-template` | v0.5  | registered |
+| [`delete`](#delete) | mutation | `compute:sandboxes:manage` @ `compute-sandbox-template` | v0.5  | registered |
 
 ## create
 
@@ -24,7 +24,24 @@ Methods of the `sandboxTemplates` group, contributed by `vps`.
 - **Kind:** mutation
 - **Authorization:** `compute:sandboxes:manage` @ `compute-tenant`
 - **Module:** `vps`
-- **Phase:** v0.5 (planned)
+- **Phase:** v0.5 (registered)
+
+**Input**
+
+| Field               | Type    | Required | Constraints                                                             |
+| ------------------- | ------- | -------- | ----------------------------------------------------------------------- |
+| `tenantId`          | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `name`              | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `poolId`            | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+| `flavor`            | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `imageId`           | string  | yes      | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
+| `runtime`           | string  |          | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`                 |
+| `userData`          | string  |          | at most 32768 characters                                                |
+| `defaultTtlSeconds` | integer |          | 60-2592000; default `3600`                                              |
+| `maxTtlSeconds`     | integer |          | 60-2592000; default `86400`                                             |
+| `warm`              | object  |          |                                                                         |
+| `warm.min`          | integer | yes      | 0-64                                                                    |
+| `warm.max`          | integer |          | 0-64                                                                    |
 
 ## list
 
@@ -33,7 +50,13 @@ Methods of the `sandboxTemplates` group, contributed by `vps`.
 - **Kind:** read
 - **Authorization:** `compute:sandboxes:read` @ `compute-tenant` + items
 - **Module:** `vps`
-- **Phase:** v0.5 (planned)
+- **Phase:** v0.5 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints                                                |
+| ---------- | ------ | -------- | ---------------------------------------------------------- |
+| `tenantId` | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
 
 ## get
 
@@ -42,7 +65,14 @@ Methods of the `sandboxTemplates` group, contributed by `vps`.
 - **Kind:** read
 - **Authorization:** `compute:sandboxes:read` @ `compute-sandbox-template`
 - **Module:** `vps`
-- **Phase:** v0.5 (planned)
+- **Phase:** v0.5 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `templateId` | string | yes      | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$` |
 
 ## update
 
@@ -51,7 +81,22 @@ Methods of the `sandboxTemplates` group, contributed by `vps`.
 - **Kind:** mutation
 - **Authorization:** `compute:sandboxes:manage` @ `compute-sandbox-template`
 - **Module:** `vps`
-- **Phase:** v0.5 (planned)
+- **Phase:** v0.5 (registered)
+
+**Input**
+
+| Field               | Type        | Required | Constraints                                                             |
+| ------------------- | ----------- | -------- | ----------------------------------------------------------------------- |
+| `tenantId`          | string      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `templateId`        | string      | yes      | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+| `flavor`            | string      |          | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `imageId`           | string      |          | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
+| `userData`          | string,null |          | at most 32768 characters                                                |
+| `defaultTtlSeconds` | integer     |          | 60-2592000                                                              |
+| `maxTtlSeconds`     | integer     |          | 60-2592000                                                              |
+| `warm`              | object      |          |                                                                         |
+| `warm.min`          | integer     | yes      | 0-64                                                                    |
+| `warm.max`          | integer     |          | 0-64                                                                    |
 
 ## delete
 
@@ -60,4 +105,11 @@ Methods of the `sandboxTemplates` group, contributed by `vps`.
 - **Kind:** mutation
 - **Authorization:** `compute:sandboxes:manage` @ `compute-sandbox-template`
 - **Module:** `vps`
-- **Phase:** v0.5 (planned)
+- **Phase:** v0.5 (registered)
+
+**Input**
+
+| Field        | Type   | Required | Constraints                                                       |
+| ------------ | ------ | -------- | ----------------------------------------------------------------- |
+| `tenantId`   | string | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `templateId` | string | yes      | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$` |

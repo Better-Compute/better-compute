@@ -66,14 +66,14 @@ Returns a page of the tenant's instances, newest first, with a `cursor` when mor
 
 **Input**
 
-| Field      | Type                                                                                                                                              | Required | Constraints                                                       |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
-| `tenantId` | string                                                                                                                                            | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
-| `scope`    | one of `mine`, `all`                                                                                                                              |          | default `"mine"`                                                  |
-| `state`    | one of `pending`, `scheduling`, `provisioning`, `starting`, `running`, `stopped`, `rebooting`, `resizing`, `deleting`, `deleted`, `error`, `lost` |          |                                                                   |
-| `poolId`   | string                                                                                                                                            |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
-| `limit`    | integer                                                                                                                                           |          | 1-200                                                             |
-| `cursor`   | string                                                                                                                                            |          | at most 57 characters; matches `^inst_[0-9a-z]{26,52}$`           |
+| Field      | Type                                                                                                                                                        | Required | Constraints                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `tenantId` | string                                                                                                                                                      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
+| `scope`    | one of `mine`, `all`                                                                                                                                        |          | default `"mine"`                                                  |
+| `state`    | one of `pending`, `scheduling`, `provisioning`, `starting`, `running`, `stopped`, `rebooting`, `resizing`, `deleting`, `deleted`, `error`, `lost`, `paused` |          |                                                                   |
+| `poolId`   | string                                                                                                                                                      |          | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$` |
+| `limit`    | integer                                                                                                                                                     |          | 1-200                                                             |
+| `cursor`   | string                                                                                                                                                      |          | at most 57 characters; matches `^inst_[0-9a-z]{26,52}$`           |
 
 ## get
 
