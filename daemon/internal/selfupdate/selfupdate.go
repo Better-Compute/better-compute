@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -237,6 +238,15 @@ func (s Slots) Swap(slot string) error {
 	return s.relink("current", slot)
 }
 
+// Revert points current back at slot and removes previous (a rollback): bcd-rollback.service then
+// has nothing to restore.
+func (s Slots) Revert(slot string) error {
+	if err := os.Remove(s.link("previous")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return s.relink("current", slot)
+}
+
 func (s Slots) relink(name, slot string) error {
 	return symlinkAtomic("bcd-"+slot, s.link(name))
 }
@@ -356,6 +366,57 @@ func SaveRecord(dataDir string, r Record) error {
 // Bare strips a leading "v" (release versions are compared without it).
 func Bare(version string) string { return strings.TrimPrefix(version, "v") }
 
+// Older reports whether semantic version a precedes b (a pre-release precedes its release). Versions
+// that do not parse are never older.
+func Older(a, b string) bool {
+	pa, oka := parseSemver(Bare(a))
+	pb, okb := parseSemver(Bare(b))
+	if !oka || !okb {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		if pa.core[i] != pb.core[i] {
+			return pa.core[i] < pb.core[i]
+		}
+	}
+	switch {
+	case pa.pre == pb.pre:
+		return false
+	case pa.pre == "":
+		return false
+	case pb.pre == "":
+		return true
+	}
+	return pa.pre < pb.pre
+}
+
+type semver struct {
+	core [3]uint64
+	pre  string
+}
+
+func parseSemver(v string) (semver, bool) {
+	var out semver
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		v, out.pre = v[:i], v[i+1:]
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		n, err := strconv.ParseUint(p, 10, 64)
+		if err != nil {
+			return out, false
+		}
+		out.core[i] = n
+	}
+	return out, true
+}
+
 var unitPath = regexp.MustCompile(`^/[A-Za-z0-9/._-]+$`)
 
 // RollbackUnits are bcd-rollback.service and the bcd.service drop-in that starts it when bcd
@@ -373,6 +434,8 @@ func RollbackUnits(dataDir string, s Slots) (map[string]string, error) {
 			"[Unit]\nDescription=Roll bcd back to its previous binary\n" +
 			"[Service]\nType=oneshot\n" +
 			"ExecCondition=/usr/bin/test -f " + pending + " -a -L " + dir + "/previous\n" +
+			// Only while a swap awaits its Welcome, never after a rollback.
+			"ExecCondition=/bin/grep -qF '\"state\":\"swapped\"' " + pending + "\n" +
 			"ExecStart=/bin/cp -P " + dir + "/previous " + dir + "/current.rollback\n" +
 			"ExecStart=/bin/mv -Tf " + dir + "/current.rollback " + dir + "/current\n" +
 			"ExecStart=/bin/systemctl reset-failed bcd.service\n" +

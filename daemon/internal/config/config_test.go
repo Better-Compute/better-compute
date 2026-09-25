@@ -192,13 +192,16 @@ func TestUpdateSection(t *testing.T) {
 	if pins, _ := cfg.Update.Pins(); err != nil || len(pins) != 0 || cfg.Update.Entrypoint != "/usr/local/bin/bcd" || cfg.Update.ReleaseThreshold != 1 {
 		t.Fatalf("defaults = %+v, %v", cfg.Update, err)
 	}
-	cfg, err = Parse([]byte(required() + "[update]\nrelease_pins = \"" + testPin + ", " + testPin + "\"\nrelease_threshold = 2\nentrypoint = \"/opt/bcd/bcd\"\n"))
-	if pins, _ := cfg.Update.Pins(); err != nil || len(pins) != 2 || cfg.Update.Entrypoint != "/opt/bcd/bcd" {
+	other := PinPrefix + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xcd}, 32))
+	cfg, err = Parse([]byte(required() + "[update]\nrelease_pins = \"" + testPin + ", " + other + ", " + testPin + "\"\nrelease_threshold = 2\nrelease_sequence = 12\nentrypoint = \"/opt/bcd/bcd\"\n"))
+	if pins, _ := cfg.Update.Pins(); err != nil || len(pins) != 2 || cfg.Update.Entrypoint != "/opt/bcd/bcd" || cfg.Update.ReleaseSequence != 12 {
 		t.Fatalf("update = %+v, %v", cfg.Update, err)
 	}
 	for _, bad := range []string{
 		"release_pins = \"sha256/short\"\n",
 		"release_pins = \"" + testPin + "\"\nrelease_threshold = 2\n",
+		"release_pins = \"" + testPin + "," + testPin + "\"\nrelease_threshold = 2\n", // one key, listed twice
+		"release_sequence = -1\n",
 		"release_threshold = 0\n",
 		"entrypoint = \"bcd\"\n",
 	} {

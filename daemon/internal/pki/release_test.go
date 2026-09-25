@@ -62,7 +62,7 @@ func TestVerifyReleaseManifestInterop(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The same pin twice is still one key.
-	if _, err := VerifyReleaseManifest([]byte(f.Signed), [][]byte{pins[0], pins[0]}, 2); !errors.Is(err, ErrRelease) {
+	if _, err := VerifyReleaseManifest([]byte(f.Signed), [][]byte{pins[0], pins[0]}, 2); err == nil || !strings.Contains(err.Error(), "1 distinct pins") {
 		t.Fatalf("a pin counted twice: %v", err)
 	}
 	if _, err := VerifyReleaseManifest([]byte(f.Signed), [][]byte{other}, 1); err == nil || !strings.Contains(err.Error(), "threshold") {

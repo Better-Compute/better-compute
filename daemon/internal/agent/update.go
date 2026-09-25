@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,10 @@ type UpdateOptions struct {
 	Threshold int
 	// Platform is the os-arch this build runs as (linux-amd64): the manifest artifact it takes.
 	Platform string
+	// Sequence is the release sequence this node starts from (the binary's embedded one, or config
+	// update.release_sequence): no manifest below it is taken. With none (0, a dev build) no version
+	// below the running one is.
+	Sequence int64
 	// AllowHTTP accepts http:// download URLs (a dev stack); the digest is checked either way.
 	AllowHTTP bool
 	// InstallUnits writes the rollback units (selfupdate.RollbackUnits) and reloads systemd; nil
@@ -204,7 +209,8 @@ func (a *Agent) rollBack(p *selfupdate.Pending, reason string) {
 	if err := selfupdate.SavePending(a.o.DataDir, p); err != nil {
 		a.log.Error("self-update: record the rollback", "error", err.Error())
 	}
-	if err := u.Slots.Swap(p.From); err != nil {
+	// Back to the old slot, and no previous: a later crash loop must not reinstate the failed binary.
+	if err := u.Slots.Revert(p.From); err != nil {
 		a.log.Error("self-update: swap back", "error", err.Error())
 		return
 	}
@@ -280,14 +286,20 @@ func (a *Agent) prepareUpgrade(ctx context.Context, sec *agentv1.DaemonSection) 
 		return nil, refuse("the manifest releases %s, not bcd", m.Product)
 	case selfupdate.Bare(m.Version) != target:
 		return nil, refuse("the manifest releases bcd %s, not %s", m.Version, target)
-	case m.Sequence < rec.Sequence:
-		return nil, refuse("release sequence %d is older than %d, which this node ran (rollback)", m.Sequence, rec.Sequence)
-	case !a.serverNow().Before(m.Expires()):
+	case m.Sequence < max(rec.Sequence, u.Sequence):
+		return nil, refuse("release sequence %d is older than %d, which this node ran or was installed at (rollback)", m.Sequence, max(rec.Sequence, u.Sequence))
+	case max(rec.Sequence, u.Sequence) == 0 && selfupdate.Older(target, running):
+		// Without a known floor (a build without an embedded sequence), never below its own version.
+		return nil, refuse("bcd %s is older than the running %s (rollback)", target, running)
+	case !time.Now().Before(m.Expires()) || !a.serverNow().Before(m.Expires()):
+		// Either clock past the expiry: neither the gateway nor the host clock alone can revive it.
 		return nil, refuse("the release manifest expired at %s", m.Expires().UTC().Format(time.RFC3339))
 	}
 	art, ok := m.Artifact(u.Platform, sec.GetSha256())
-	if !ok {
-		return nil, refuse("the manifest lists no %s binary with the section's sha256", u.Platform)
+	// The bare binary only (goreleaser's bcd_<version>_<os>_<arch>): pointed at an archive or an SBOM
+	// the swap could only fail, and the version would be blocked.
+	if want := "bcd_" + target + "_" + strings.ReplaceAll(u.Platform, "-", "_"); !ok || art.Name != want {
+		return nil, refuse("the manifest lists no %s with the section's sha256", want)
 	}
 	src, err := url.Parse(sec.GetUrl())
 	if err != nil || src.Host == "" || src.User != nil || !(src.Scheme == "https" || (u.AllowHTTP && src.Scheme == "http")) {

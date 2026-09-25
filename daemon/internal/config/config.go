@@ -185,14 +185,18 @@ type Update struct {
 	ReleasePins string
 	// ReleaseThreshold is how many distinct pinned keys must have signed a release (default 1).
 	ReleaseThreshold int64
+	// ReleaseSequence is the release this node was installed at (the install script's
+	// --release-sequence): no release manifest below it is taken (0: unknown).
+	ReleaseSequence int64
 	// Entrypoint is the path bcd.service starts (default /usr/local/bin/bcd); the first update makes
 	// it a symlink to <data_dir>/bin/current.
 	Entrypoint string
 }
 
-// Pins decodes ReleasePins.
+// Pins decodes ReleasePins, each distinct pin once (a pin listed twice is still one key).
 func (u Update) Pins() ([][]byte, error) {
 	var pins [][]byte
+	seen := map[string]bool{}
 	for _, p := range strings.Split(u.ReleasePins, ",") {
 		if p = strings.TrimSpace(p); p == "" {
 			continue
@@ -201,7 +205,10 @@ func (u Update) Pins() ([][]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("update.release_pins: %w", err)
 		}
-		pins = append(pins, digest)
+		if !seen[string(digest)] {
+			seen[string(digest)] = true
+			pins = append(pins, digest)
+		}
 	}
 	return pins, nil
 }
@@ -362,7 +369,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if c.Update.ReleaseThreshold < 1 || (len(releasePins) > 0 && c.Update.ReleaseThreshold > int64(len(releasePins))) || c.Update.ReleaseThreshold > 16 {
-		return fmt.Errorf("update.release_threshold must be between 1 and the number of release pins, got %d", c.Update.ReleaseThreshold)
+		return fmt.Errorf("update.release_threshold must be between 1 and the number of distinct release pins, got %d", c.Update.ReleaseThreshold)
+	}
+	if c.Update.ReleaseSequence < 0 {
+		return fmt.Errorf("update.release_sequence may not be negative, got %d", c.Update.ReleaseSequence)
 	}
 	if !path.IsAbs(c.Update.Entrypoint) {
 		return fmt.Errorf("update.entrypoint must be an absolute path, got %q", c.Update.Entrypoint)
@@ -431,6 +441,7 @@ var fields = []field{
 	{section: "plugins", key: "pids_max", kind: kindInt, set: func(c *Config, v value) { c.Plugins.PidsMax = v.num }},
 	{section: "update", key: "release_pins", kind: kindString, set: func(c *Config, v value) { c.Update.ReleasePins = v.str }},
 	{section: "update", key: "release_threshold", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseThreshold = v.num }},
+	{section: "update", key: "release_sequence", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseSequence = v.num }},
 	{section: "update", key: "entrypoint", kind: kindString, set: func(c *Config, v value) { c.Update.Entrypoint = v.str }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
@@ -503,6 +514,9 @@ func Render(c *Config) string {
 		// The installed OS takes releases signed by the same keys.
 		lines = append(lines, "", "[update]", "release_pins = "+q(c.Update.ReleasePins),
 			"release_threshold = "+strconv.FormatInt(c.Update.ReleaseThreshold, 10))
+		if c.Update.ReleaseSequence > 0 {
+			lines = append(lines, "release_sequence = "+strconv.FormatInt(c.Update.ReleaseSequence, 10))
+		}
 		if c.Update.Entrypoint != "" && c.Update.Entrypoint != Defaults().Update.Entrypoint {
 			lines = append(lines, "entrypoint = "+q(c.Update.Entrypoint))
 		}

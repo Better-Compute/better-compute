@@ -69,9 +69,10 @@ func (r *release) section() *agentv1.DaemonSection {
 // entrypoint (the first update adopts it).
 type updateNode struct {
 	*harness
-	dir   string
-	entry string
-	pins  [][]byte
+	dir      string
+	entry    string
+	pins     [][]byte
+	sequence int64
 }
 
 func newUpdateNode(t *testing.T, r *release) *updateNode {
@@ -96,6 +97,7 @@ func (n *updateNode) options(version string) func(*Options) {
 			Pins:       n.pins,
 			Threshold:  2,
 			Platform:   "linux-amd64",
+			Sequence:   n.sequence,
 			AllowHTTP:  true,
 			Deadline:   time.Second,
 		}
@@ -216,6 +218,10 @@ func TestSelfUpdateRollsBackWithoutWelcome(t *testing.T) {
 	if n.link(t, "current") != "bcd-a" {
 		t.Fatalf("current = %s after the rollback", n.link(t, "current"))
 	}
+	// review 9 LOW-7: nothing for bcd-rollback.service to reinstate.
+	if _, err := os.Lstat(filepath.Join(n.dir, "bin", "previous")); err == nil {
+		t.Fatal("previous still points at the failed slot")
+	}
 	s, _ = n.open()
 	st := daemonStatus(t, s, agentv1.SectionState_SECTION_STATE_FAILED)
 	if st.GetReason() != "UpdateFailed" || !strings.Contains(st.GetMessage(), "bcd 0.4.0 did not start") {
@@ -287,5 +293,33 @@ func TestSelfUpdateRefusesUnpinnedReleases(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(n.dir, "bin", "bcd-b")); err == nil {
 		t.Fatal("slot b was written")
+	}
+}
+
+// review 9 HIGH-1: the floor is the release the node was installed at (embedded or configured), not
+// only what it ran; without one, no version below the running binary's.
+func TestSelfUpdateRefusesOlderReleases(t *testing.T) {
+	r := loadRelease(t)
+	n := newUpdateNode(t, r)
+	n.gw.accept()
+	n.cancel()
+	<-n.done
+	n.sequence = 8 // installed from release 8; the fixture manifest is sequence 7
+	n.start(n.options("0.3.0"))
+	s, _ := n.open()
+	s.push(desired(1, &agentv1.NodeSpec{Daemon: r.section()}))
+	if st := daemonStatus(t, s, agentv1.SectionState_SECTION_STATE_FAILED); !strings.Contains(st.GetMessage(), "older than 8") {
+		t.Fatalf("daemon section = %v", st)
+	}
+	n.cancel()
+	<-n.done
+	n.sequence = 0 // a build without an embedded sequence, running 0.5.0
+	n.start(n.options("0.5.0"))
+	s, _ = n.open()
+	if st := daemonStatus(t, s, agentv1.SectionState_SECTION_STATE_FAILED); !strings.Contains(st.GetMessage(), "older than the running 0.5.0") {
+		t.Fatalf("daemon section = %v", st)
+	}
+	if r.requests != 0 {
+		t.Fatalf("%d downloads", r.requests)
 	}
 }

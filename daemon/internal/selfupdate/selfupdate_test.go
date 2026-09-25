@@ -124,10 +124,54 @@ func TestRollbackUnits(t *testing.T) {
 			t.Fatalf("unit lacks %q:\n%s", want, unit)
 		}
 	}
+	if !strings.Contains(unit, "ExecCondition=/bin/grep -qF '\"state\":\"swapped\"' /var/lib/bcd/upgrade.json") {
+		t.Fatalf("the unit does not require a pending swap:\n%s", unit)
+	}
 	if !strings.Contains(units["bcd.service.d/50-bcd-rollback.conf"], "OnFailure=bcd-rollback.service") {
 		t.Fatal("drop-in")
 	}
 	if _, err := RollbackUnits("/var/lib/bcd dir", s); err == nil {
 		t.Fatal("a path with a space went into a unit")
+	}
+}
+
+func TestOlder(t *testing.T) {
+	for _, c := range []struct {
+		a, b  string
+		older bool
+	}{
+		{"1.2.0", "1.10.0", true},
+		{"v1.9.0", "1.10.0", true},
+		{"2.0.0", "1.99.99", false},
+		{"1.0.0-rc.1", "1.0.0", true},
+		{"1.0.0", "1.0.0-rc.1", false},
+		{"1.0.0", "1.0.0", false},
+		{"dev", "1.0.0", false},
+	} {
+		if got := Older(c.a, c.b); got != c.older {
+			t.Errorf("Older(%s, %s) = %v", c.a, c.b, got)
+		}
+	}
+}
+
+func TestRevertDropsPrevious(t *testing.T) {
+	s, _ := newSlots(t)
+	if err := s.Adopt(s.Entrypoint, "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	v2 := []byte("v2")
+	sum := sha256.Sum256(v2)
+	if _, err := s.Stage(bytes.NewReader(v2), 2, sum[:], "2.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Swap("b")
+	if err := s.Revert("a"); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := s.Current(); cur != "a" {
+		t.Fatalf("current = %s", cur)
+	}
+	if prev, _ := s.Previous(); prev != "" {
+		t.Fatalf("previous = %s after a revert", prev)
 	}
 }

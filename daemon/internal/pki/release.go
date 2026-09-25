@@ -125,6 +125,21 @@ func VerifyReleaseManifest(signed []byte, pins [][]byte, threshold int) (*Releas
 		return nil, releaseError("malformed", "%v", err)
 	}
 	input := SigningInput(PurposeReleaseManifest, body)
+	// Each distinct pin counts once, however often it is configured.
+	var distinct [][]byte
+	for _, pin := range pins {
+		dup := false
+		for _, d := range distinct {
+			dup = dup || bytes.Equal(d, pin)
+		}
+		if !dup {
+			distinct = append(distinct, pin)
+		}
+	}
+	if threshold > len(distinct) {
+		return nil, fmt.Errorf("pki: release threshold %d with %d distinct pins", threshold, len(distinct))
+	}
+	pins = distinct
 	trusted := map[int]bool{}
 	for i, entry := range s.Signatures {
 		if i >= 16 {

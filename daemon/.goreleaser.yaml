@@ -28,7 +28,8 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{ .Version }}
+      # releaseSequence is the release manifest's sequence (the rollback floor a node starts from).
+      - -s -w -X main.version={{ .Version }} -X main.releaseSequence={{ envOrDefault "BCD_RELEASE_SEQUENCE" "0" }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
