@@ -25,7 +25,7 @@ const DETACH_GRACE_MS = 3_000;
 const FORWARD_MAX_CONNECTIONS = 16;
 
 /** The server's origin and API base path from --url; tunnels need a real server's WebSocket. */
-function tunnelEndpoint(context: CommandContext<any>): { origin: string; basePath: string } {
+export function tunnelEndpoint(context: CommandContext<any>): { origin: string; basePath: string } {
   const url = context.flags.url;
   if (!url)
     throw new CliError(

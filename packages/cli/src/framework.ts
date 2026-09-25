@@ -35,6 +35,11 @@ export interface CliIO {
   signal?: AbortSignal;
   /** The interactive terminal `console` and `exec` attach to (default: the process's own). */
   terminal?: CliTerminal;
+  /**
+   * Runs a program on this terminal (stdio inherited) and resolves with its exit status: the OpenSSH client
+   * `sandbox exec` runs. Default: `child_process.spawn`.
+   */
+  spawn?(command: string, args: readonly string[]): Promise<number>;
 }
 
 /** A terminal for interactive sessions: keys in, the remote program's output out. */

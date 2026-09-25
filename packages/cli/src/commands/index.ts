@@ -8,6 +8,7 @@ import { fleetCommands } from './fleet.js';
 import { iamSetupCommands } from './iam-setup.js';
 import { pkiCommands } from './pki.js';
 import { releaseCommands } from './release.js';
+import { sandboxCommands } from './sandbox.js';
 import { serveCommands } from './serve.js';
 import { setupCommands } from './setup.js';
 import { simCommands } from './sim.js';
@@ -25,6 +26,7 @@ export const builtinCommands: readonly CommandSpec<any>[] = [
   ...sshCommands,
   ...tunnelCommands,
   ...capacityCommands,
+  ...sandboxCommands,
   ...fleetCommands,
   ...pkiCommands,
   ...daemonCommands,

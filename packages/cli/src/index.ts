@@ -5,6 +5,7 @@
  * (or `BETTER_COMPUTE_DATABASE_URL`) or against a running server with `--url`. A port of
  * better-iam's `defineCommand` framework, so project commands and embedding hosts work the same.
  */
+import { spawn as spawnProcess } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -165,6 +166,13 @@ export function processIO(): CliIO {
       return Buffer.concat(chunks).toString('utf8');
     },
     terminal: processTerminal(),
+    spawn: (command, args) =>
+      new Promise<number>((resolve, reject) => {
+        const child = spawnProcess(command, [...args], { stdio: 'inherit' });
+        child.once('error', reject);
+        // A program ended by a signal reports 255, as ssh does for its own failures.
+        child.once('exit', (code) => resolve(code ?? 255));
+      }),
   };
 }
 
