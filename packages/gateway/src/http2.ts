@@ -27,6 +27,7 @@ import {
 import type { Gateway, PeerIdentity, SessionHandle, SessionSink } from './gateway.js';
 import type { TunnelStreamHandle } from './tunnels.js';
 import { certificateAuthenticate } from './identity.js';
+import { swapSecureContext, type TlsMaterial } from './tls-reload.js';
 import {
   frameMessage,
   grpcResponseHeaders,
@@ -88,6 +89,11 @@ export interface ServedGateway {
   port: number;
   /** Stops accepting, sends GOAWAY, and destroys sessions still open after `graceMs` (1 000). */
   close(graceMs?: number): Promise<void>;
+  /**
+   * Hot-reloads the serving certificate (§7.1; e.g. from `watchTlsFiles`): new handshakes get it,
+   * open sessions keep theirs. The rest of `tls` stays. Throws on a key that does not match.
+   */
+  setTls(material: TlsMaterial): void;
 }
 
 const spiffeNode = /^spiffe:\/\/[^/]+\/site\/([^/]+)\/node\/([^/]+)$/;
@@ -396,6 +402,7 @@ export async function serveGateway(
   return {
     server,
     port: (server.address() as AddressInfo).port,
+    setTls: (material) => swapSecureContext(server as Http2SecureServer, options.tls, material),
     close: (graceMs = 1_000) =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());

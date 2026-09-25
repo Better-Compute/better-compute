@@ -19,6 +19,7 @@ import { MAX_FRAME_BYTES, TunnelFrameSchema, type TunnelFrame } from '@better-co
 import type { Gateway, GatewayStatus } from './gateway.js';
 import { frameMessage, MessageDecoder } from './grpc.js';
 import { narrowsTunnels, type TunnelFilter, type TunnelHandle, type TunnelInfo } from './tunnels.js';
+import { swapSecureContext, type TlsMaterial } from './tls-reload.js';
 
 // The gateway's internal control API on `gateways.internal_url` (PLAN.md §8.1), HTTP/2 only, called
 // by api and worker processes over the internal CA's mTLS. Every call but tunnels is an
@@ -146,6 +147,8 @@ export interface ServedInternal {
   server: Http2Server | Http2SecureServer;
   port: number;
   close(): Promise<void>;
+  /** Hot-reloads the internal-CA certificate (and `ca`) for new connections; see `ServedGateway.setTls`. */
+  setTls(material: TlsMaterial): void;
 }
 
 async function readAll(stream: ServerHttp2Stream, limit: number): Promise<Buffer> {
@@ -305,6 +308,7 @@ export async function serveInternal(gateway: Gateway, options: ServeInternalOpti
   return {
     server,
     port: (server.address() as AddressInfo).port,
+    setTls: (material) => swapSecureContext(server as Http2SecureServer, options.tls, material),
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());

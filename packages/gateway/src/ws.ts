@@ -11,6 +11,7 @@ import type { Gateway, SessionHandle } from './gateway.js';
 import { frameMessage, GrpcCode, GrpcError, MessageDecoder, toGrpcError } from './grpc.js';
 import { WsConnection, wsAcceptKey } from './websocket.js';
 import { signGatewayProof, verifyAgentProof } from './ws-auth.js';
+import { swapSecureContext, type TlsMaterial } from './tls-reload.js';
 
 // The WebSocket fallback (PLAN.md §7.1, D4, v0.4): `wss://gw…/v1/session`, subprotocol
 // `bc.agent.v1`, the same length-prefixed AgentFrame/ServerFrame messages as the gRPC Session, for
@@ -164,6 +165,8 @@ export interface ServedGatewayWs {
   server: Server;
   port: number;
   close(): Promise<void>;
+  /** Hot-reloads the serving certificate for new connections; see `ServedGateway.setTls`. */
+  setTls(material: TlsMaterial): void;
 }
 
 /**
@@ -194,6 +197,8 @@ export async function serveGatewayWs(
   return {
     server,
     port: (server.address() as AddressInfo).port,
+    setTls: (material) =>
+      swapSecureContext(server as { setSecureContext?(options: object): void }, options.tls, material),
     close: () =>
       new Promise<void>((resolve) => {
         detach();
