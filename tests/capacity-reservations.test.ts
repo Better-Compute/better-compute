@@ -154,6 +154,7 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
     who?: Caller;
     api?: CapacityApi;
     admission?: MethodContext['admission'];
+    requestId?: string;
   } = {},
 ): Promise<unknown> {
   const definition = ((options.api ?? api)[group] as Record<string, CapacityApi[G][M]>)[
@@ -177,7 +178,7 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
     ({
       ...moduleContext(within(tx)),
       caller: who,
-      requestId: 'req_1',
+      requestId: options.requestId ?? 'req_1',
       ...(options.admission ? { admission: options.admission } : {}),
     }) as MethodContext;
   if (definition.admission) {
@@ -198,7 +199,7 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
     }
     // After an allowed decision, with no transaction open: a throw refuses, `denied` is not called.
     await definition.admission.check?.(
-      { ...moduleContext(db), caller: who, requestId: 'req_1' } as MethodContext,
+      { ...moduleContext(db), caller: who, requestId: options.requestId ?? 'req_1' } as MethodContext,
       input,
       (plan as { resource?: unknown }).resource,
     );
@@ -322,6 +323,7 @@ describe('capacityModule API surface', () => {
       'capacity/0002_lease_health',
       'capacity/0003_device_counts',
       'capacity/0004_mig_layouts',
+      'capacity/0005_extend_holds',
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       reservationWork,
@@ -879,6 +881,54 @@ describe('the reservation lifecycle', () => {
         idempotencyKey: 'x',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('decides one extend at a time: a concurrent one never replaces the duration being decided', async () => {
+    const created = (await call('reservations', 'create', create())) as Rsv;
+    const extend = api.reservations.extend as unknown as {
+      validate(raw: unknown): unknown;
+      handler(context: MethodContext, input: unknown): Promise<unknown>;
+      admission: {
+        prepare(context: MethodContext, input: unknown, tx: SqlTx): Promise<unknown>;
+        abandoned(context: MethodContext, input: unknown, tx: SqlTx, error: unknown): Promise<void>;
+      };
+    };
+    const as = (tx: SqlTx, requestId: string) =>
+      ({ ...moduleContext(within(tx)), caller, requestId }) as MethodContext;
+    const input = (by: string, key: string) =>
+      extend.validate({ tenantId: 'acme', reservationId: created.id, by, idempotencyKey: key });
+    const long = input('8h', 'long');
+    const short = input('1h', 'short');
+    recorded.pending = [];
+    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-b'), long, tx));
+    // A (short) must not overwrite B's (long) pending duration while B is decided.
+    await expect(
+      db.transaction((tx) => extend.admission.prepare(as(tx, 'req-a'), short, tx)),
+    ).rejects.toMatchObject({ code: 'CONFLICT', details: { reason: 'extend-in-flight' } });
+    await db.transaction((tx) => extend.admission.abandoned(as(tx, 'req-a'), short, tx, 'x'));
+    expect(recorded.pending).toHaveLength(1);
+    expect(recorded.pending[0]!.pending).toMatchObject({ durationHours: 10 });
+    const done = (await db.transaction((tx) => extend.handler(as(tx, 'req-b'), long))) as {
+      extended: boolean;
+    };
+    expect(done.extended).toBe(true);
+    expect(recorded.pending.at(-1)).toEqual({ id: created.id, pending: null });
+
+    // A stalled extend is taken over after a minute; its late transaction 2 then applies nothing.
+    const stalled = input('1h', 'stalled');
+    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-c'), stalled, tx));
+    await advance(61_000);
+    const next = input('2h', 'next');
+    await db.transaction((tx) => extend.admission.prepare(as(tx, 'req-d'), next, tx));
+    recorded.pending = [];
+    await expect(
+      db.transaction((tx) => extend.handler(as(tx, 'req-c'), stalled)),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await db.transaction((tx) => extend.admission.abandoned(as(tx, 'req-c'), stalled, tx, 'x'));
+    expect(recorded.pending).toEqual([]);
+    await db.transaction((tx) => extend.handler(as(tx, 'req-d'), next));
+    expect(recorded.pending.at(-1)).toEqual({ id: created.id, pending: null });
+    expect((await db.query(`SELECT 1 FROM capacity_extend_holds`)).rows).toEqual([]);
   });
 
   it('renews leases and releases a lapsed renewable reservation', async () => {

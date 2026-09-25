@@ -1698,6 +1698,7 @@ export async function prepareExtend(
       result: { reservation: await reservationView(tx, row), extended: false },
     };
   const gpuCount = wholeGpus(row.request.devices) * (row.request.gang?.size ?? 1);
+  await holdExtend(tx, row.id, context.requestId, context.clock.now());
   await context.authz.setPending(
     tx,
     { type: 'reservation', id: row.id, tenantId: row.tenantId },
@@ -1710,12 +1711,48 @@ export async function prepareExtend(
   return { status: 'decide', resource: { type: 'reservation', id: row.id } };
 }
 
-/** `reservations.extend` after a refusal: clear the pending change. */
+/**
+ * One extend at a time stages a reservation's pending change: the projection holds a single pending
+ * value, so a second extend overwriting it would have the first decided on the second's duration (a
+ * short one), then apply its own (a long one). Another request's hold older than `extendHoldMs` (its
+ * caller gave up between the transactions) is taken over.
+ */
+const extendHoldMs = 60_000;
+
+async function holdExtend(
+  tx: SqlTx,
+  reservationId: string,
+  requestId: string,
+  now: number,
+): Promise<void> {
+  const { rowCount } = await tx.query(
+    `INSERT INTO capacity_extend_holds AS h (reservation_id, request_id, held_at)
+     VALUES ($1, $2, $3::timestamptz)
+     ON CONFLICT (reservation_id) DO UPDATE SET request_id = EXCLUDED.request_id, held_at = EXCLUDED.held_at
+      WHERE h.request_id = EXCLUDED.request_id
+         OR h.held_at < EXCLUDED.held_at - make_interval(secs => $4::float8)`,
+    [reservationId, requestId, new Date(now).toISOString(), extendHoldMs / 1000],
+  );
+  if (rowCount === 0)
+    throw new ComputeError(
+      'CONFLICT',
+      `Another extend of reservation ${reservationId} is being decided; retry once it settles (a stalled one is taken over after ${extendHoldMs / 1000} s)`,
+      undefined,
+      { reservationId, reason: 'extend-in-flight', retryAfterSeconds: extendHoldMs / 1000 },
+    );
+}
+
+/** `reservations.extend` refused, or its handler threw: clear the pending change if it is still ours. */
 export async function denyPending(
   context: MethodContext,
   input: { tenantId: string; reservationId: string },
   tx: SqlTx,
 ): Promise<void> {
+  const { rowCount } = await tx.query(
+    `DELETE FROM capacity_extend_holds WHERE reservation_id = $1 AND request_id = $2`,
+    [input.reservationId, context.requestId],
+  );
+  if (rowCount === 0) return;
   await context.authz.setPending(
     tx,
     { type: 'reservation', id: input.reservationId, tenantId: input.tenantId },
@@ -1736,6 +1773,19 @@ export async function completeExtend(
   const row = await readReservation(tx, input.tenantId, input.reservationId, { lock: true });
   if (!row) throw new ComputeError('NOT_FOUND', `Reservation ${input.reservationId} not found`);
   const ref = { type: 'reservation', id: row.id, tenantId: row.tenantId };
+  // The decision was made on this request's pending change only while it held the reservation:
+  // after a takeover, IAM may have seen another request's.
+  const { rowCount: held } = await tx.query(
+    `DELETE FROM capacity_extend_holds WHERE reservation_id = $1 AND request_id = $2`,
+    [row.id, context.requestId],
+  );
+  if (held === 0)
+    throw new ComputeError(
+      'CONFLICT',
+      `Another extend of reservation ${row.id} took over while this one was decided; retry`,
+      undefined,
+      { reservationId: row.id, reason: 'extend-in-flight' },
+    );
   if (!extendable.includes(row.state) || !row.during) {
     await context.authz.setPending(tx, ref, null);
     throw new ComputeError('INVALID_STATE', `Reservation ${row.id} is ${row.state}`);

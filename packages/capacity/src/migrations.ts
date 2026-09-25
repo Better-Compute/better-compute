@@ -80,10 +80,27 @@ INSERT INTO capacity_device_counts (node_id, class, bookable, healthy)
 `,
 };
 
+/**
+ * The `reservations.extend` being decided on a reservation (§10.5): the authz projection holds one
+ * pending value per resource, so only the request holding this row may stage it. Its own table, not
+ * a column on core's `reservations`; gone with the reservation.
+ */
+export const extendHoldsMigration: Migration = {
+  name: 'capacity/0005_extend_holds',
+  sql: `
+CREATE TABLE capacity_extend_holds (
+  reservation_id text PRIMARY KEY REFERENCES reservations ON DELETE CASCADE,
+  request_id text NOT NULL,
+  held_at timestamptz NOT NULL
+);
+`,
+};
+
 /** The capacity module's migrations, in ledger order. */
 export const capacityMigrations: readonly Migration[] = Object.freeze([
   deviceLinksMigration,
   leaseHealthMigration,
   deviceCountsMigration,
   migLayoutsMigration,
+  extendHoldsMigration,
 ]);
