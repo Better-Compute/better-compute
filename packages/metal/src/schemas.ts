@@ -29,12 +29,12 @@ const text = (maxLength: number, description?: string): InputSchema => ({
 const powerActions = ['on', 'off', 'graceful-off', 'reset', 'graceful-restart', 'cycle', 'nmi'] satisfies PowerAction[];
 const wipeModes = ['none', 'quick', 'secure-erase', 'crypto-erase'] satisfies WipeMode[];
 
-// The validator reads `driver` and `tlsSpkiSha256` through String(...) and accepts upper-case hex,
-// so they carry no `type`; a missing `driver` is not refused by the validator either.
+// The validator accepts upper-case hex in the pin and `-` in MACs (it normalizes them).
 const bmc = strictObject(
   {
     address: text(512, 'The BMC address (host or URL)'),
     driver: {
+      type: 'string',
       pattern: '^[a-z][a-z0-9-]{0,63}$',
       description: 'The BMC driver id, such as redfish',
     },
@@ -49,11 +49,12 @@ const bmc = strictObject(
         'A secret:// (or vault://, env://) reference, or inline { username, password } stored in the secret broker at once and never echoed',
     },
     tlsSpkiSha256: {
+      type: 'string',
       pattern: '^[0-9A-Fa-f]{64}$',
       description: "SHA-256 of the BMC certificate's SubjectPublicKeyInfo, 64 hex digits, to pin its TLS",
     },
   },
-  ['address', 'credentials'],
+  ['address', 'driver', 'credentials'],
 );
 
 const node = strictObject({ tenantId, nodeId }, ['tenantId', 'nodeId']);
@@ -70,6 +71,7 @@ export const schemas = {
       macs: {
         type: 'array',
         maxItems: 16,
+        // Strings only, refused by the validator itself ("… is not a MAC address").
         items: { pattern: '^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$' },
         description: "The node's MAC addresses (':' or '-' separated), for PXE and matching",
       },
