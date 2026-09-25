@@ -157,6 +157,7 @@ describe('help and the manifest', () => {
       'ssh-cert',
       'console',
       'exec',
+      'forward',
       'reserve',
       'release',
       'extend',

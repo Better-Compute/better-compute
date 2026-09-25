@@ -205,7 +205,7 @@ function withMetricsRoute(host: HostConfig | undefined): HostConfig['http'] {
 }
 
 /** The process's stop signal: `io.signal`, or the first SIGINT/SIGTERM. */
-function stopSignal(signal: AbortSignal | undefined): { signal: AbortSignal; dispose(): void } {
+export function stopSignal(signal: AbortSignal | undefined): { signal: AbortSignal; dispose(): void } {
   if (signal) return { signal, dispose() {} };
   const controller = new AbortController();
   const stop = () => controller.abort();

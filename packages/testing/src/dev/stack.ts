@@ -62,7 +62,7 @@ import {
 import { FakeDaemon, type FakeDaemonOptions } from '../daemon/fake-daemon.js';
 import type { FakeKind } from '../daemon/kinds.js';
 import { runAgentJoin } from '../daemon/join.js';
-import type { TunnelConn } from '../daemon/tunnels.js';
+import type { FakeTunnelOptions, TunnelConn } from '../daemon/tunnels.js';
 import type { CloseInfo, FrameHandler } from '../frame-conn.js';
 import { fakeHardware, type FakeHardwareVariant } from '../fake-hw.js';
 import { fakeIam } from '../fake-iam.js';
@@ -203,11 +203,14 @@ export interface DevFleetOptions {
    */
   reports?: Partial<NonNullable<GatewayOptions['reports']>>;
   /** Options for every FakeDaemon (default reconnect backoff 100 ms → 5 s). */
-  daemon?: Partial<Omit<FakeDaemonOptions, 'nodeId' | 'scheduler' | 'dial' | 'hardware'>>;
+  daemon?: Partial<Omit<FakeDaemonOptions, 'nodeId' | 'scheduler' | 'dial' | 'hardware' | 'tunnels'>> & {
+    /** What runs in each tunnel (default `echoShell`); the fleet dials the Tunnel streams. */
+    tunnels?: Omit<FakeTunnelOptions, 'dial'>;
+  };
   /**
    * Interactive tunnels (§7.6): the control plane's exec-ticket issuer (`ComputeOptions.tunnels.issuer`).
    * The gateway verifies its tickets and serves its control API on loopback h2c (for the api's relay);
-   * every FakeDaemon answers OpenTunnel with its echo shell. `jtiCache` is the gateway's single-use record of
+   * every FakeDaemon answers OpenTunnel with its echo shell (or `daemon.tunnels.program`). `jtiCache` is the gateway's single-use record of
    * tickets (default: its own in-memory cache); a fresh one per test plays a failover gateway that never saw
    * a ticket, which only the daemon's own check can then refuse.
    */
@@ -470,6 +473,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
   // The gateway advertises its control API in its directory row at start, so its port is chosen first.
   const internalPort = options.tunnels ? await freePort() : undefined;
   const tunnelIssuer = options.tunnels?.issuer;
+  const { tunnels: tunnelProgram, ...daemonOptions } = options.daemon ?? {};
   try {
     gateway = createGateway({
       ...(tunnelIssuer
@@ -616,6 +620,8 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
     const ready = gateway!;
     return {
       tunnels: {
+        // `daemon.tunnels.program` (and its jti cache) stay; the dial is always the fleet's.
+        ...tunnelProgram,
         dial: (tunnelId) => {
           const identity = joined.get(nodeId);
           if (!identity || revocations.has(identity.serial)) return undefined;
@@ -687,7 +693,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         joined.set(nodeId, { siteId, serial });
         const daemon = new FakeDaemon({
           backoff: { minMs: 100, maxMs: 5_000 },
-          ...options.daemon,
+          ...daemonOptions,
           nodeId,
           hardware,
           // The key its certificate certifies: attested results (wipes, diagnostics) are node-signed.
@@ -725,7 +731,7 @@ export async function attachDevFleet(options: DevFleetOptions): Promise<DevFleet
         joined.set(nodeId, { siteId, serial });
         const daemon = new FakeDaemon({
           backoff: { minMs: 100, maxMs: 5_000 },
-          ...options.daemon,
+          ...daemonOptions,
           nodeId,
           role: AgentRole.SITE,
           hardware,
@@ -807,6 +813,8 @@ export interface DevStack extends DevFleet {
   rootTenantId: string;
   /** A root administrator's credential. */
   root: Credential;
+  /** The exec-ticket issuer tunnel tickets come from: a host mounting `handleTunnel` verifies them with it. */
+  tunnelIssuer: ExecTicketIssuer;
   /** Stops the fleet, the workers and the store, in that order. */
   close(): Promise<void>;
 }
@@ -903,5 +911,13 @@ export async function createDevStack(options: DevStackOptions = {}): Promise<Dev
     await close().catch(() => {});
     throw error;
   }
-  return { ...fleet, compute, database, rootTenantId: iam.rootTenantId, root: iam.root, close };
+  return {
+    ...fleet,
+    compute,
+    database,
+    rootTenantId: iam.rootTenantId,
+    root: iam.root,
+    tunnelIssuer: tunnels.issuer,
+    close,
+  };
 }
