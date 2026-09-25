@@ -98,6 +98,8 @@ async function bmc(
     kind,
     payload: bmcOperationJson(node, operation, args),
     ...(key ? { key } : {}),
+    // Any site agent can reach the BMC: after a failover, what the old agent did stands (§8.5).
+    reroutable: true,
   });
   return bmcResult(outcome).result;
 }

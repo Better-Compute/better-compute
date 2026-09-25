@@ -18,6 +18,46 @@ export interface AwaitCommandOptions {
   key?: string;
   /** How long the command may live; defaults to the step's remaining time. */
   timeoutMs?: number;
+  /**
+   * `nodeId` is one of several interchangeable agents: the site agents of its site (§8.5, BMC
+   * operations). A command this step attempt already sent under the same key to another of them is
+   * reused if it succeeded or may still be running there, and moved to `nodeId` while it was never
+   * delivered, so a site agent failover never runs a step's command twice.
+   */
+  reroutable?: boolean;
+}
+
+interface KeyedCommand {
+  id: string;
+  node_id: string;
+  state: string;
+  reason: string | null;
+  result: Uint8Array | null;
+  attested: boolean;
+}
+
+const inFlightStates = ['dispatched', 'acked', 'running'];
+
+/** The command a reroutable step command resolves to, after moving undelivered copies (see `reroutable`). */
+async function rerouted(tx: SqlTx, context: StepContext, nodeId: string, key: string): Promise<KeyedCommand | undefined> {
+  const { rows } = await tx.query<KeyedCommand>(
+    `SELECT c.id, c.node_id, c.state, c.reason, c.result, c.attested
+       FROM nodes agent JOIN commands c ON c.node_id = agent.id AND c.idempotency_key = $2
+      WHERE agent.site_id = (SELECT site_id FROM nodes WHERE id = $1) AND (agent.role = 'site' OR agent.id = $1)
+      ORDER BY c.seq DESC`,
+    [nodeId, key],
+  );
+  const succeeded = rows.find((row) => row.state === 'succeeded');
+  if (succeeded) return succeeded;
+  const mine = rows.find((row) => row.node_id === nodeId);
+  if (mine) return mine;
+  // Still in flight on the agent that went away: its outcome is unknown, so wait for it (it settles
+  // when that agent's journal comes back, or expires).
+  const inFlight = rows.find((row) => inFlightStates.includes(row.state));
+  if (inFlight) return inFlight;
+  for (const row of rows) if (row.state === 'pending') await context.commands.cancel(tx, row.id);
+  // A copy that failed elsewhere fails the step as it would have there; cancelled copies are moved.
+  return rows.find((row) => row.state !== 'pending' && row.state !== 'cancelled');
 }
 
 export interface CommandOutcome {
@@ -41,11 +81,15 @@ export function stepCommandKey(context: Pick<StepContext, 'idempotencyKey' | 'at
 export async function awaitCommand(context: StepContext, options: AwaitCommandOptions): Promise<CommandOutcome> {
   const key = stepCommandKey(context, options.key);
   const outcome = await context.sql.transaction(async (tx) => {
-    const { rows } = await tx.query<{ id: string; state: string; reason: string | null; result: Uint8Array | null; attested: boolean }>(
-      'SELECT id, state, reason, result, attested FROM commands WHERE node_id = $1 AND idempotency_key = $2',
-      [options.nodeId, key],
-    );
-    const existing = rows[0];
+    let existing: KeyedCommand | undefined;
+    if (options.reroutable) existing = await rerouted(tx, context, options.nodeId, key);
+    else {
+      const { rows } = await tx.query<KeyedCommand>(
+        'SELECT id, node_id, state, reason, result, attested FROM commands WHERE node_id = $1 AND idempotency_key = $2',
+        [options.nodeId, key],
+      );
+      existing = rows[0];
+    }
     if (existing) return existing;
     const now = await tx.query<{ now: Date }>('SELECT compute_now() AS now');
     await context.commands.enqueue(tx, {

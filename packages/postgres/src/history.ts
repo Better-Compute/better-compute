@@ -206,8 +206,9 @@ export async function dropEmptyHistoryPartitions(
 /**
  * Detaches one month partition, leaving it as a standalone table of the same name to export and drop
  * (an operator's archival step, e.g. for audit months past their retention). Its rows leave every
- * read at once, including audit verification: archive only months whose checkpoints are archived too.
- * Refuses the default partition and the current or a future month.
+ * read at once, including audit verification: for `audit_events`, run `markAuditArchived(sql, { month })`
+ * from @better-compute/audit first, so verify reports that month's checkpoints as archived rather than
+ * failed. Refuses the default partition and the current or a future month.
  */
 export async function detachHistoryPartition(
   tx: SqlTx,

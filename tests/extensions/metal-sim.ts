@@ -58,6 +58,10 @@ export interface SimMachine {
   pendingBios: Record<string, string>;
   /** The RAID volumes' levels, as the storage controller reports them. */
   raid: string[];
+  /** Powered on for PXE and still asking for DHCP (`pxe: 'boot-server'`). */
+  pxeWaiting?: boolean;
+  /** The site agent whose boot entry the machine booted from. */
+  bootedBy?: string;
 }
 
 /** The firmware every simulated machine ships with. */
@@ -75,6 +79,12 @@ export interface MetalSimOptions {
   reconcilers?: readonly Reconciler[];
   /** metal()'s hardware profiles (BIOS settings, RAID layouts). */
   hardwareProfiles?: Record<string, HardwareProfile>;
+  /**
+   * How a machine PXE-boots. `instant` (default): the ramdisk is up as soon as the power cycle ran.
+   * `boot-server`: the machine retries DHCP until the live holder of its site's `site:<id>:boot`
+   * lease (a connected, running site agent) holds a boot entry for its MAC; `pxeTick()` checks.
+   */
+  pxe?: 'instant' | 'boot-server';
 }
 
 /** A stable, locally unique PXE MAC per machine. */
@@ -180,6 +190,8 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     /** false: the ramdisk sends its wipe result unsigned. */
     attestWipe: true,
     siteAgentDown: false,
+    /** Site agents that died: they answer nothing and serve no boot entries. */
+    downAgents: new Set<string>(),
     dropNextResults: 0,
     /** The daemon's wipe reports a disk it could not verify; with `forgeWipe` the gateway rewrites it as verified. */
     failWipeReadBack: false,
@@ -266,6 +278,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     for (const command of rows) {
       const agentIsSite = command.kind.startsWith('bmc.') || command.kind.startsWith('boot.prepare') || command.kind === 'boot.cleanUp';
       if (agentIsSite && faults.siteAgentDown) continue;
+      if (faults.downAgents.has(command.node_id)) continue;
       const payload = JSON.parse(new TextDecoder().decode(command.body)) as Record<string, any>;
       const args = typeof payload.argsJson === 'string' ? (JSON.parse(payload.argsJson) as Record<string, any>) : {};
       seen.push({ id: command.id, kind: command.kind, node: command.node_id, payload, args });
@@ -338,7 +351,8 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
             // Pending BIOS settings take effect on this boot (unless the firmware ignores them).
             if (!faults.biosIgnored) Object.assign(m.bios, m.pendingBios);
             m.pendingBios = {};
-            if (m.bootDevice === 'pxe') await connect(target, 'ramdisk', `ramdisk-${command.id}`);
+            if (m.bootDevice === 'pxe' && options.pxe === 'boot-server') m.pxeWaiting = true;
+            else if (m.bootDevice === 'pxe') await connect(target, 'ramdisk', `ramdisk-${command.id}`);
             else if (m.bootDevice === 'cd') {
               const boot = options.install?.(target, m);
               if (boot) await connect(target, 'node', boot);
@@ -385,6 +399,37 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     return answered;
   }
 
+  /**
+   * One DHCP retry of every machine waiting to PXE-boot (`pxe: 'boot-server'`): it boots the ramdisk
+   * when the live holder of its site's boot lease is up and holds an unexpired boot entry for its MAC.
+   * Returns the machines that booted, with the agent that served them.
+   */
+  async function pxeTick(): Promise<{ nodeId: string; servedBy: string }[]> {
+    const booted: { nodeId: string; servedBy: string }[] = [];
+    for (const [nodeId, m] of machines) {
+      if (!m.pxeWaiting || m.power !== 'on') continue;
+      // The sim stores payloads as proto3 JSON text: the entry's MAC and expiry are in the body.
+      const { rows } = await db.query<{ agent: string }>(
+        `SELECT DISTINCT l.owner AS agent FROM nodes target
+           JOIN leases l ON l.name = 'site:' || target.site_id || ':boot' AND l.expires_at > compute_now()
+           JOIN node_sessions s ON s.node_id = l.owner AND s.connected_at IS NOT NULL
+             AND (s.disconnected_at IS NULL OR s.connected_at > s.disconnected_at)
+           JOIN commands c ON c.node_id = l.owner AND c.kind = 'boot.prepareRamdisk' AND c.state = 'succeeded'
+          WHERE target.id = $1
+            AND convert_from(c.body, 'UTF8')::jsonb->>'mac' = $2
+            AND (convert_from(c.body, 'UTF8')::jsonb->>'notAfter')::timestamptz > compute_now()`,
+        [nodeId, macOf(nodeId)],
+      );
+      const served = rows.find((row) => !faults.downAgents.has(row.agent));
+      if (!served) continue;
+      m.pxeWaiting = false;
+      m.bootedBy = served.agent;
+      await connect(nodeId, 'ramdisk', `ramdisk-pxe-${served.agent}-${++sessionEpoch}`);
+      booted.push({ nodeId, servedBy: served.agent });
+    }
+    return booted;
+  }
+
   /** Runs agents and reconcilers until nothing moves (at most `rounds`). */
   async function settle(rounds = 300): Promise<void> {
     const signal = new AbortController().signal;
@@ -413,6 +458,6 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       )
     ).rows[0]!;
 
-  return { db, context, api, provision, bareMetal, queue, events, seen, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, settle, call, state, close: () => db.close() };
+  return { db, context, api, provision, bareMetal, queue, events, seen, faults, tokens, tokenRequests, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, pxeTick, settle, call, state, close: () => db.close() };
 }
 export type MetalSim = Awaited<ReturnType<typeof createMetalSim>>;
