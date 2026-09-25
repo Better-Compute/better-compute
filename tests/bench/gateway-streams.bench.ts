@@ -1,8 +1,9 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, fork } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { connect, type ClientHttp2Session, type ClientHttp2Stream } from 'node:http2';
 import { cpus, totalmem } from 'node:os';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 import { create, type MessageInitShape } from '@bufbuild/protobuf';
 import { timestampFromMs } from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
@@ -51,8 +52,9 @@ import {
 //
 // Knobs: BENCH_GW_SESSIONS (5000), BENCH_GW_DURATION_MS (60000 after the ramp), BENCH_GW_COMMANDS_PER_S (50,
 // §8.6), BENCH_GW_STREAMS_PER_CONNECTION (100), BENCH_GW_HEARTBEAT_MS (10000), BENCH_GW_STORM (1; 0 skips
-// the storm), BENCH_GW_GATE=1 to fail the run when the gate is missed on Postgres. The load generator
-// shares this process, so RSS and event-loop numbers include it: only a split run is a gate result.
+// the storm), BENCH_GW_TLS=1 (mTLS), BENCH_GW_SPLIT=1 (the gateway in its own process; needs built
+// packages), BENCH_GW_GATE=1 to fail the run when the gate is missed on Postgres. Without SPLIT the load
+// generator shares the gateway's process, so RSS and event-loop numbers include it.
 
 const postgresUrl = process.env.BETTER_COMPUTE_POSTGRES_URL;
 const sessions = Number(process.env.BENCH_GW_SESSIONS ?? 5_000);
@@ -63,6 +65,9 @@ const commandsPerSecond = Number(process.env.BENCH_GW_COMMANDS_PER_S ?? 50);
 const tls = process.env.BENCH_GW_TLS === '1';
 const streamsPerConnection = tls ? 1 : Number(process.env.BENCH_GW_STREAMS_PER_CONNECTION ?? 100);
 const heartbeatMs = Number(process.env.BENCH_GW_HEARTBEAT_MS ?? 10_000);
+// The gateway and its store in a child process (bench/gateway-streams/host.mjs, built packages), so
+// the RSS and event-loop numbers exclude this load generator.
+const split = process.env.BENCH_GW_SPLIT === '1';
 const storm = process.env.BENCH_GW_STORM !== '0';
 const TENANT = 'tenant-bench';
 const SITE = 'site_bench';
@@ -368,40 +373,199 @@ async function startGateway(db: SqlExecutor, pki?: BenchPki): Promise<{ gateway:
   return { gateway, served };
 }
 
+/** Epoch milliseconds, sub-millisecond, comparable across the bench's processes. */
+const now = () => performance.timeOrigin + performance.now();
+
+/**
+ * The gateway side of a run: in this process, or in a child (`BENCH_GW_SPLIT=1`,
+ * bench/gateway-streams/host.mjs) so that its RSS and event-loop delay are the gateway's alone.
+ */
+interface Host {
+  port(): number;
+  /** Enqueues one command and pokes; `t0` is the commit time (`now()`). */
+  enqueue(nodeId: string, notAfterMs: number): Promise<{ commandId: string; t0: number }>;
+  measure(on: boolean): Promise<void>;
+  sessions(): Promise<number>;
+  /** A fresh gateway on a new port; the old one keeps serving until `killOld`. */
+  takeover(): Promise<void>;
+  killOld(): Promise<void>;
+  query<T>(sql: string): Promise<T[]>;
+  stop(): Promise<{ rssMax: number; rssLast: number; heapMax: number; loopP99: number; loopMax: number }>;
+}
+
+async function inProcessHost(ids: string[], pki: BenchPki | undefined): Promise<Host> {
+  const db: SqlExecutor = postgresUrl ? postgres({ url: postgresUrl }) : pglite();
+  await db.migrate();
+  await seed(db, ids);
+  let current = await startGateway(db, pki);
+  let old: typeof current | undefined;
+  const loop = monitorEventLoopDelay({ resolution: 10 });
+  const rss: number[] = [];
+  const heap: number[] = [];
+  let sampler: ReturnType<typeof setInterval> | undefined;
+  return {
+    port: () => current.served.port,
+    async enqueue(nodeId, notAfterMs) {
+      const commandId = await enqueue(db, nodeId, notAfterMs);
+      const t0 = now();
+      current.gateway.poke();
+      return { commandId, t0 };
+    },
+    async measure(on) {
+      if (on) {
+        loop.enable();
+        sampler = setInterval(() => {
+          const memory = process.memoryUsage();
+          rss.push(memory.rss);
+          heap.push(memory.heapUsed);
+        }, 1_000);
+      } else {
+        loop.disable();
+        clearInterval(sampler);
+      }
+    },
+    sessions: async () => current.gateway.sessions().length,
+    async takeover() {
+      old = current;
+      current = await startGateway(db, pki);
+    },
+    async killOld() {
+      await old!.served.close(0);
+      await old!.gateway.stop();
+    },
+    query: async <T>(sql: string) => (await db.query<T & Record<string, unknown>>(sql)).rows as T[],
+    async stop() {
+      await current.gateway.stop();
+      await current.served.close(500);
+      await db.close();
+      return {
+        rssMax: Math.max(0, ...rss),
+        rssLast: rss.at(-1) ?? 0,
+        heapMax: Math.max(0, ...heap),
+        loopP99: loop.percentile(99) / 1e6,
+        loopMax: loop.max / 1e6,
+      };
+    },
+  };
+}
+
+async function childHost(ids: string[], pki: BenchPki | undefined): Promise<Host> {
+  const child = fork(fileURLToPath(new URL('../../bench/gateway-streams/host.mjs', import.meta.url)), [], {
+    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+    execArgv: ['--max-old-space-size=4096'],
+  });
+  type Reply = Record<string, any> & { type: string };
+  const waiting = new Map<string, (reply: Reply) => void>();
+  let nextId = 0;
+  let failure: Error | undefined;
+  child.on('message', (reply: Reply) => {
+    if (reply.type === 'error') {
+      failure = new Error(`gateway host: ${reply.message}`);
+      for (const resolve of waiting.values()) resolve(reply);
+      return;
+    }
+    const key = reply.id !== undefined ? `${reply.type}:${reply.id}` : reply.type;
+    const resolve = waiting.get(key);
+    if (resolve) {
+      waiting.delete(key);
+      resolve(reply);
+    }
+  });
+  const ask = (message: Record<string, unknown>, replyType: string, withId = false): Promise<Reply> => {
+    const id = withId ? String(nextId++) : undefined;
+    return new Promise((resolve, reject) => {
+      waiting.set(id !== undefined ? `${replyType}:${id}` : replyType, (reply) =>
+        reply.type === 'error' || failure ? reject(failure ?? new Error(String(reply.message))) : resolve(reply),
+      );
+      child.send(id !== undefined ? { ...message, id } : message);
+    });
+  };
+  await new Promise<void>((resolve) => waiting.set('loaded', () => resolve()));
+  let port = (
+    await ask(
+      {
+        type: 'start',
+        sessions,
+        heartbeatMs,
+        ids,
+        siteId: SITE,
+        tenantId: TENANT,
+        ...(postgresUrl ? { postgresUrl } : {}),
+        ...(pki
+          ? {
+              tls: {
+                key: pki.serving.key,
+                cert: pki.serving.cert,
+                caPem: toPem(pki.nodeCa),
+                nodeCaDer: Buffer.from(pki.nodeCa).toString('base64'),
+                trustDomain: TRUST_DOMAIN,
+              },
+            }
+          : {}),
+      },
+      'ready',
+    )
+  ).port as number;
+  return {
+    port: () => port,
+    async enqueue(nodeId, notAfterMs) {
+      const reply = await ask({ type: 'enqueue', nodeId, notAfterMs }, 'enqueued', true);
+      return { commandId: reply.commandId as string, t0: reply.t0 as number };
+    },
+    measure: async (on) => void child.send({ type: 'measure', on }),
+    sessions: async () => (await ask({ type: 'sessions' }, 'sessions', true)).count as number,
+    async takeover() {
+      port = (await ask({ type: 'takeover' }, 'takeover-ready')).port as number;
+    },
+    killOld: async () => void (await ask({ type: 'kill-old' }, 'killed')),
+    query: async <T>(sql: string) => (await ask({ type: 'query', sql }, 'rows', true)).rows as T[],
+    async stop() {
+      const reply = await ask({ type: 'stop' }, 'stopped');
+      return {
+        rssMax: reply.memory.rssMax,
+        rssLast: reply.memory.rssLast,
+        heapMax: reply.memory.heapMax,
+        loopP99: reply.loop.p99,
+        loopMax: reply.loop.max,
+      };
+    },
+  };
+}
+
 describe('gateway-streams gate', () => {
   it(`holds ${sessions} sessions at ${heartbeatMs / 1000} s heartbeats, dispatches within budget and survives a reconnect storm`, async () => {
     const adapter = postgresUrl ? 'postgres' : 'pglite';
-    const db: SqlExecutor = postgresUrl ? postgres({ url: postgresUrl }) : pglite();
-    await db.migrate();
     const run = newId('req').slice(-8);
     const ids = Array.from({ length: sessions }, (_, i) => `node_bench_${run}_${i}`);
-    await seed(db, ids);
     const pki = tls ? await benchPki(ids) : undefined;
+    const host = split ? await childHost(ids, pki) : await inProcessHost(ids, pki);
 
-    let current = await startGateway(db, pki);
-    const retired: { gateway: Gateway; served: ServedGateway }[] = [];
     const clients = new Map<string, ClientHttp2Session>();
     const clientFor = (index: number) => () => {
-      const key = `${current.served.port}:${Math.floor(index / streamsPerConnection)}`;
+      const key = `${host.port()}:${Math.floor(index / streamsPerConnection)}`;
       let client = clients.get(key);
       if (!client || client.destroyed || client.closed) {
         const own = pki?.nodes.get(ids[index]!);
         client =
           pki && own
-            ? connect(`https://127.0.0.1:${current.served.port}`, {
+            ? connect(`https://127.0.0.1:${host.port()}`, {
                 ca: pki.servingCaPem,
                 key: own.key,
                 cert: own.cert,
                 servername: SERVER_NAME,
                 minVersion: 'TLSv1.3',
               })
-            : connect(`http://127.0.0.1:${current.served.port}`);        client.on('error', () => {});
+            : connect(`http://127.0.0.1:${host.port()}`);
+        client.on('error', () => {});
         clients.set(key, client);
       }
       return client;
     };
 
+    // Commit time per command; with a split host a command can reach its daemon before the enqueue
+    // reply reaches this process, so early arrivals wait here for their commit time.
     const sentAt = new Map<string, number>();
+    const arrivedAt = new Map<string, number>();
     const latencies: number[] = [];
     let replays = 0;
     let established = 0;
@@ -417,9 +581,9 @@ describe('gateway-streams gate', () => {
             if (replay) replays++;
             const t0 = sentAt.get(commandId);
             if (t0 !== undefined) {
-              latencies.push(performance.now() - t0);
+              latencies.push(now() - t0);
               sentAt.delete(commandId);
-            }
+            } else if (!replay) arrivedAt.set(commandId, now());
           },
           onEstablished() {
             if (stormStart) back.push(performance.now() - stormStart);
@@ -431,16 +595,8 @@ describe('gateway-streams gate', () => {
     const rampDeadline = performance.now() + Math.max(120_000, sessions * 20);
     while (established < sessions && performance.now() < rampDeadline) await sleep(250);
 
-    // Steady state: commands at a fixed rate, memory and event-loop delay sampled.
-    const loop = monitorEventLoopDelay({ resolution: 10 });
-    loop.enable();
-    const rss: number[] = [];
-    const heap: number[] = [];
-    const sampler = setInterval(() => {
-      const memory = process.memoryUsage();
-      rss.push(memory.rss);
-      heap.push(memory.heapUsed);
-    }, 1_000);
+    // Steady state: commands at a fixed rate; the gateway process samples memory and event-loop delay.
+    await host.measure(true);
     let enqueued = 0;
     let enqueueErrors = 0;
     const drive = async (forMs: number) => {
@@ -449,10 +605,13 @@ describe('gateway-streams gate', () => {
       let next = performance.now();
       while (performance.now() < until) {
         const daemon = daemons[Math.floor(Math.random() * daemons.length)]!;
-        void enqueue(db, daemon.nodeId, Date.now() + 10 * 60_000).then(
-          (id) => {
-            sentAt.set(id, performance.now());
-            current.gateway.poke();
+        void host.enqueue(daemon.nodeId, Date.now() + 10 * 60_000).then(
+          ({ commandId, t0 }) => {
+            const early = arrivedAt.get(commandId);
+            if (early !== undefined) {
+              latencies.push(early - t0);
+              arrivedAt.delete(commandId);
+            } else sentAt.set(commandId, t0);
             enqueued++;
           },
           () => enqueueErrors++,
@@ -463,23 +622,19 @@ describe('gateway-streams gate', () => {
     };
     await drive(durationMs);
     await sleep(2_000);
-    clearInterval(sampler);
-    loop.disable();
+    await host.measure(false);
     const steadyLatencies = [...latencies];
-    const heldAfterSteady = current.gateway.sessions().length;
+    const heldAfterSteady = await host.sessions();
     const steadyCloses = daemons.reduce((sum, daemon) => sum + daemon.unexpectedCloses, 0);
 
     // The storm: a fresh gateway comes up, the old one's transport dies with commands in flight.
     let stormResult: Record<string, unknown> | undefined;
     if (storm) {
-      const old = current;
-      current = await startGateway(db, pki);
+      await host.takeover();
       const driving = drive(15_000);
       await sleep(1_000);
       stormStart = performance.now();
-      await old.served.close(0);
-      await old.gateway.stop();
-      retired.push(old);
+      await host.killOld();
       const stormDeadline = performance.now() + 180_000;
       while (back.length < sessions && performance.now() < stormDeadline) await sleep(250);
       await driving;
@@ -488,12 +643,12 @@ describe('gateway-streams gate', () => {
       let open = Infinity;
       while (open > 0 && performance.now() < settleDeadline) {
         await sleep(500);
-        const { rows } = await db.query<{ n: number }>(
+        const rows = await host.query<{ n: number }>(
           `SELECT count(*)::int AS n FROM commands WHERE state <> 'succeeded'`,
         );
         open = Number(rows[0]!.n);
       }
-      const { rows: states } = await db.query<{ state: string; n: number }>(
+      const states = await host.query<{ state: string; n: number }>(
         'SELECT state, count(*)::int AS n FROM commands GROUP BY state ORDER BY state',
       );
       const backSorted = [...back].sort((a, b) => a - b);
@@ -510,7 +665,11 @@ describe('gateway-streams gate', () => {
       };
     }
 
-    const maxRss = Math.max(...rss);
+    stopping = true;
+    for (const daemon of daemons) daemon.close();
+    for (const client of clients.values()) client.destroy();
+    const measured = await host.stop();
+    const maxRss = measured.rssMax;
     const dispatch = stats(steadyLatencies);
     const result = {
       suite: 'gateway-streams',
@@ -530,7 +689,8 @@ describe('gateway-streams gate', () => {
         storm,
       },
       ...(pki ? { certificatesIssuedMs: pki.issueMs } : {}),
-      loadGeneratorInProcess: true,
+      // Split: memory and event-loop numbers are the gateway process's alone.
+      loadGeneratorInProcess: !split,
       ramp: {
         established,
         ms: Math.round(rampMs || performance.now() - rampStart),
@@ -544,9 +704,9 @@ describe('gateway-streams gate', () => {
         enqueueErrors,
         dispatched: steadyLatencies.length,
         dispatchMs: dispatch,
-        rssMiB: { max: Math.round(maxRss / 2 ** 20), last: Math.round((rss.at(-1) ?? 0) / 2 ** 20) },
-        heapMiB: { max: Math.round(Math.max(...heap) / 2 ** 20) },
-        eventLoopDelayMs: { p99: Math.round(loop.percentile(99) / 1e6), max: Math.round(loop.max / 1e6) },
+        rssMiB: { max: Math.round(maxRss / 2 ** 20), last: Math.round(measured.rssLast / 2 ** 20) },
+        heapMiB: { max: Math.round(measured.heapMax / 2 ** 20) },
+        eventLoopDelayMs: { p99: Math.round(measured.loopP99), max: Math.round(measured.loopMax) },
       },
       storm: stormResult,
       closeReasons: Object.fromEntries([...closeReasons].sort((a, b) => b[1] - a[1])),
@@ -560,13 +720,6 @@ describe('gateway-streams gate', () => {
     };
     result.gate.met =
       result.gate.sessions && result.gate.dispatchP99 && result.gate.rss && result.gate.durationAtLeast30Min;
-
-    stopping = true;
-    for (const daemon of daemons) daemon.close();
-    for (const client of clients.values()) client.destroy();
-    await current.gateway.stop();
-    await current.served.close(500);
-    await db.close();
 
     const dir = new URL('../../bench/gateway-streams/results/', import.meta.url);
     mkdirSync(dir, { recursive: true });
