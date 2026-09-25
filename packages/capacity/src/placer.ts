@@ -16,6 +16,7 @@ import { blockingReasons, dedicatedTaint, schedulableSqlTolerating } from './eli
 import { assertGang, chooseGang, maxGangSize, planGangs } from './gang.js';
 import {
   choosePlan,
+  missingNodeLabel,
   planPlacement,
   summarizeRejections,
   type NodePlan,
@@ -24,7 +25,14 @@ import {
 import type { PoolIndex } from './pool-index.js';
 import { applyRollupDelta, rollupResource } from './rollup.js';
 import { planFromShortlist, shortlistable, shortlistPlan } from './shortlist.js';
-import { loadNodeViews, lockPool, readImageCachedNodes, readPool, type PoolRow } from './store.js';
+import {
+  loadNodeViews,
+  lockPool,
+  readImageCachedNodes,
+  readNodeLabels,
+  readPool,
+  type PoolRow,
+} from './store.js';
 
 export interface InlinePlacerOptions {
   /** Placement attempts before the request goes `pending` (PLAN.md §10.3: ≤3). */
@@ -159,6 +167,12 @@ async function commitPlan(
       [plan.nodeId, pool.id, [dedicatedTaint(request.tenantId)]],
     );
     if (node.rows.length === 0) return conflict(`${plan.nodeId} is no longer schedulable`);
+    // Planned on plain reads: a requested label may have gone since (a downgraded daemon's capability).
+    if (hasNodeLabels(request)) {
+      const labels = (await readNodeLabels(tx, [plan.nodeId])).get(plan.nodeId) ?? {};
+      const missing = missingNodeLabel(request.nodeLabels, labels);
+      if (missing !== undefined) return conflict(`${plan.nodeId}: ${missing}`);
+    }
 
     const atoms = plan.atoms;
     const classes = new Map<string, string>();
@@ -526,6 +540,9 @@ function indexPlanner(
 }
 
 /** Whether a request can go through `commitPlansBulk`: one node, devices only. */
+const hasNodeLabels = (request: PlacementRequest) =>
+  Object.keys(request.nodeLabels ?? {}).length > 0;
+
 export function bulkCommittable(request: PlacementRequest): boolean {
   return (
     request.gang === undefined &&
@@ -599,6 +616,13 @@ export async function commitPlansBulk(
       [nodeIds, pool.id, tolerated],
     );
     const reasonsOf = new Map(nodes.rows.map((row) => [row.id, row.no_schedule_reasons ?? []]));
+    // Planned on the index: a requested label may have gone since.
+    const labelsOf = items.some((item) => hasNodeLabels(item.request))
+      ? await readNodeLabels(
+          tx,
+          nodes.rows.map((row) => row.id),
+        )
+      : undefined;
     const schedulableFor = (nodeId: string, tenantId: string) => {
       const reasons = reasonsOf.get(nodeId);
       return reasons !== undefined && blockingReasons(reasons, tenantId).length === 0;
@@ -613,8 +637,13 @@ export async function commitPlansBulk(
 
     const allocationIds = new Map<number, string>();
     items.forEach((item, index) => {
+      const missing =
+        labelsOf && hasNodeLabels(item.request)
+          ? missingNodeLabel(item.request.nodeLabels, labelsOf.get(item.plan.nodeId) ?? {})
+          : undefined;
       if (!schedulableFor(item.plan.nodeId, item.request.tenantId))
         failed.set(index, `${item.plan.nodeId} is no longer schedulable`);
+      else if (missing !== undefined) failed.set(index, `${item.plan.nodeId}: ${missing}`);
       else if (!item.plan.atoms.every((atom) => classes.has(atom)))
         failed.set(index, `an atom on ${item.plan.nodeId} turned unhealthy or unbookable`);
       else allocationIds.set(index, ids('alloc'));

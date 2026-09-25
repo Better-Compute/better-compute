@@ -1808,6 +1808,9 @@ export async function completeExtend(
     await context.authz.setPending(tx, ref, null);
     return { reservation: await reservationView(tx, row), extended: false };
   }
+  // Pools before devices (§10 lock order): without the pool lock, a gang's extend updating d1 then
+  // d2 and a batch commit inserting d2 then d1 wait on each other's uncommitted bookings.
+  await lockPool(tx, row.poolId);
   const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: row.id });
   const savepoint = 'capacity_extend_reservation';
   await tx.query(`SAVEPOINT ${savepoint}`);

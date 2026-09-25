@@ -755,6 +755,27 @@ describe('rollups and eligibility SQL', () => {
     expect(outcome.acme).toMatchObject({ status: 'placed', allocations: [{ nodeId: 'node_d' }] });
     expect([...outcome.bulk.failed.values()]).toEqual(['node_d is no longer schedulable']);
   });
+
+  it('re-checks requested node labels at commit (a label gone since the plan)', async () => {
+    const devices = await addNode('node_l', { gpus: 1 });
+    // The plan wanted a label the node no longer carries (its daemon was downgraded, say).
+    const bulk = await db.transaction(async (tx) =>
+      commitPlansBulk(tx, (await readPool(tx, 'pool_1'))!, [
+        {
+          request: request(1, { nodeLabels: { 'bc.dev/cap.instance.network-policy': '*' } }),
+          plan: { nodeId: 'node_l', atoms: [devices[0]!], resources: {}, score: 1, scores: {} },
+        },
+      ]),
+    );
+    expect([...bulk.failed.values()]).toEqual([
+      expect.stringContaining('bc.dev/cap.instance.network-policy'),
+    ]);
+    expect(await bookings()).toEqual([]);
+    // Inline: nothing carries the label, so nothing is placed.
+    expect(
+      await place(request(1, { nodeLabels: { 'bc.dev/cap.instance.network-policy': '*' } })),
+    ).toMatchObject({ status: 'pending' });
+  });
 });
 
 describe('archived pools', () => {
