@@ -95,5 +95,18 @@ CREATE TABLE ip_leases (
 `,
 };
 
+/**
+ * Hosted instances' user data reaches the host only as a `secret://` ref it fetches through the
+ * broker (§6 "Secrets"): vps seals the rendered cloud-config at admission and deletes it with the
+ * instance. `user_data_sealed` tells a ref vps made from one the tenant brought.
+ */
+export const vpsSealedUserDataMigration: Migration = {
+  name: 'vps/0002_sealed_user_data',
+  sql: `ALTER TABLE instances ADD COLUMN user_data_sealed bool NOT NULL DEFAULT false;`,
+};
+
 /** The VPS module's migrations, in ledger order. */
-export const vpsMigrations: readonly Migration[] = Object.freeze([vpsBaseMigration]);
+export const vpsMigrations: readonly Migration[] = Object.freeze([
+  vpsBaseMigration,
+  vpsSealedUserDataMigration,
+]);

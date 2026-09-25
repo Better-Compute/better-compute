@@ -18,6 +18,7 @@ import {
   type Logger,
   type MethodContext,
   type ModuleContext,
+  type SecretBroker,
   type SecretResolver,
   type SqlTx,
 } from '@better-compute/core';
@@ -84,6 +85,11 @@ export interface InstanceDeps {
   runtime: string;
   /** Runtimes hosted pools may run, with their traits (default: `runtime` with its built-in traits). */
   runtimes?: ReadonlyMap<string, RuntimeTraits>;
+  /**
+   * Seals hosted instances' rendered user data (`ModuleContext.secrets`), so the host can fetch it
+   * through the broker. Without it, hosted instances boot without their keys and user data.
+   */
+  broker?: SecretBroker;
 }
 
 // --- Input --------------------------------------------------------------------------------------
@@ -99,6 +105,15 @@ export interface CreateInstanceInput {
   desiredState: 'running' | 'stopped';
   idempotencyKey: string;
 }
+
+/** User data that starts like a URI (`secret://…`, `vault://…`, `env://…`) is a reference, not content. */
+const uriLike = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+/** `secret://<tenantId>/<id>` (the local sealed store's refs). */
+const secretRefPattern = /^secret:\/\/([^/]+)\/([^/]+)$/;
+
+/** Whether `userData` is a `secret://` ref (sealed by vps, or brought by the tenant). */
+export const isSecretRef = (userData: string | undefined): userData is `secret://${string}` =>
+  userData !== undefined && secretRefPattern.test(userData);
 
 export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   const input = object(raw, [
@@ -122,6 +137,13 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
     (typeof input.userData !== 'string' || input.userData.length > 32_768)
   )
     fail('userData must be a string of at most 32 KiB');
+  const tenantId = tenant(input.tenantId);
+  // A ref is released to the host running this instance (§6 "Secrets"): only the caller's own.
+  if (typeof input.userData === 'string' && uriLike.test(input.userData)) {
+    const ref = secretRefPattern.exec(input.userData);
+    if (!ref || ref[1] !== tenantId)
+      fail(`userData as a reference must be secret://${tenantId}/<id>, a secret of this tenant`);
+  }
   if (
     input.desiredState !== undefined &&
     input.desiredState !== 'running' &&
@@ -129,7 +151,7 @@ export function parseCreateInstance(raw: unknown): CreateInstanceInput {
   )
     fail('desiredState must be running or stopped');
   const result: CreateInstanceInput = {
-    tenantId: tenant(input.tenantId),
+    tenantId,
     poolId: id(input.poolId, 'pool', 'poolId'),
     flavor: name(input.flavor, 'flavor'),
     imageId: input.imageId,
@@ -221,6 +243,7 @@ interface RawInstance {
   image: VpsImage | string | null;
   ssh_keys: string[];
   user_data: string | null;
+  user_data_sealed: boolean;
   runtime: string;
   draft: boolean;
   state: InstanceState;
@@ -254,7 +277,10 @@ export interface InstanceRow {
   imageId: string;
   image?: VpsImage;
   sshKeys: string[];
+  /** The tenant's user data, or a `secret://` ref to it (hosted pools). */
   userData?: string;
+  /** `userData` is a ref vps sealed from the rendered cloud-config (deleted with the instance). */
+  userDataSealed: boolean;
   runtime: string;
   draft: boolean;
   state: InstanceState;
@@ -288,6 +314,7 @@ function toRow(raw: RawInstance): InstanceRow {
     shape: json(raw.flavor),
     imageId: raw.image_id,
     sshKeys: raw.ssh_keys ?? [],
+    userDataSealed: raw.user_data_sealed === true,
     runtime: raw.runtime,
     draft: raw.draft,
     state: raw.state,
@@ -314,7 +341,7 @@ function toRow(raw: RawInstance): InstanceRow {
 }
 
 const columns = `i.id, i.tenant_id, i.pool_id, i.project_id, i.flavor_id, i.flavor, i.image_id, i.image,
-  i.ssh_keys, i.user_data, i.runtime, i.draft, i.state, i.desired_state, i.node_id, i.allocation_id,
+  i.ssh_keys, i.user_data, i.user_data_sealed, i.runtime, i.draft, i.state, i.desired_state, i.node_id, i.allocation_id,
   i.provider_account_id, i.external_id, i.addresses, i.reported_state, i.quota_charged,
   i.owner_identity_id, i.agent_id, i.delegation_id, i.idempotency_key,
   encode(i.request_hash, 'hex') AS request_hash, i.conditions, i.version, p.class AS pool_class`;
@@ -489,6 +516,43 @@ function shapeOf(flavor: FlavorRecord): InstanceShape {
   };
   if (flavor.offerId !== undefined) shape.offerId = flavor.offerId;
   return shape;
+}
+
+/** Cloud-init for an instance: the tenant's keys, or the tenant's own user data. No join tokens, ever. */
+export function renderUserData(row: Pick<InstanceRow, 'id' | 'sshKeys' | 'userData'>): string {
+  if (row.userData !== undefined) return row.userData;
+  const keys = row.sshKeys.map((key) => `  - ${JSON.stringify(key)}`).join('\n');
+  return `#cloud-config\nhostname: ${row.id.replaceAll('_', '-').slice(0, 63)}\n${
+    keys ? `ssh_authorized_keys:\n${keys}\n` : ''
+  }`;
+}
+
+/**
+ * Hosted pools: seals the rendered cloud-config and keeps only its `secret://` ref, which the host
+ * fetches through the broker for this instance's allocation (the spec never carries user data).
+ * A tenant's own ref is kept as it is.
+ */
+async function sealUserData(deps: InstanceDeps, tx: SqlTx, row: InstanceRow): Promise<InstanceRow> {
+  if (!deps.broker || isSecretRef(row.userData)) return row;
+  const ref = await deps.broker.put(row.tenantId, renderUserData(row));
+  await tx.query(`UPDATE instances SET user_data = $2, user_data_sealed = true WHERE id = $1`, [
+    row.id,
+    ref,
+  ]);
+  return { ...row, userData: ref, userDataSealed: true };
+}
+
+/** Deletes the user data vps sealed for a deleted instance (best effort: the ref dies with the row). */
+export async function dropSealedUserData(deps: InstanceDeps, row: InstanceRow): Promise<void> {
+  if (!row.userDataSealed || !isSecretRef(row.userData) || !deps.broker?.delete) return;
+  try {
+    await deps.broker.delete(row.userData);
+  } catch (error) {
+    deps.log.warn('vps: could not delete sealed user data', {
+      instanceId: row.id,
+      error: String((error as Error)?.message ?? error),
+    });
+  }
 }
 
 // --- Admission -----------------------------------------------------------------------------------
@@ -821,6 +885,7 @@ export async function completeCreateInstance(
   if (!row) throw new ComputeError('NOT_FOUND', `Instance ${instanceId} not found`);
   if (!row.draft) return instanceView(row);
   let next = await moveInstance(tx, row, 'schedule', 'scheduling', { draft: false });
+  if (next.poolClass === 'vps-host') next = await sealUserData(deps, tx, next);
   if (next.poolClass === 'provider') {
     const demand = instanceDemand(next.shape);
     await chargeQuota(tx, next.tenantId, next.poolId, demand);

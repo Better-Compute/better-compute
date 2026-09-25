@@ -14,10 +14,13 @@ import {
 import { refundQuota } from '@better-compute/capacity';
 import { readAccount } from './accounts.js';
 import {
+  dropSealedUserData,
   instanceWork,
+  isSecretRef,
   moveInstance,
   publishInstance,
   readInstance,
+  renderUserData,
   scheduleHosted,
   scheduleRetryMs,
   updateInstance,
@@ -86,6 +89,7 @@ async function finishDeletion(
   await deps.authz.remove(tx, { type: 'instance', id: row.id, tenantId: row.tenantId });
   if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
   await publishInstance(deps, tx, deleted, 'instance.deleted');
+  await dropSealedUserData(deps, row);
   return deleted;
 }
 
@@ -234,15 +238,6 @@ function callContext(deps: InstanceDeps, idempotencyKey: string, signal: AbortSi
   return { idempotencyKey, signal, clock: deps.clock, secrets: deps.secrets, log: deps.log };
 }
 
-/** Cloud-init for provider instances: the tenant's keys, or the tenant's own user data. No join tokens, ever. */
-export function renderUserData(row: Pick<InstanceRow, 'id' | 'sshKeys' | 'userData'>): string {
-  if (row.userData !== undefined) return row.userData;
-  const keys = row.sshKeys.map((key) => `  - ${JSON.stringify(key)}`).join('\n');
-  return `#cloud-config\nhostname: ${row.id.replaceAll('_', '-').slice(0, 63)}\n${
-    keys ? `ssh_authorized_keys:\n${keys}\n` : ''
-  }`;
-}
-
 type ProviderAction =
   | { kind: 'create' }
   | { kind: 'get' }
@@ -317,7 +312,10 @@ async function reconcileProvider(
         {
           offerId: row.shape.offerId,
           image: row.imageId,
-          userData: renderUserData(row),
+          // A tenant's secret:// ref (checked to be its own at create) is resolved for the provider.
+          userData: isSecretRef(row.userData)
+            ? await deps.secrets.resolve(row.userData)
+            : renderUserData(row),
           name: row.id,
         },
         context,

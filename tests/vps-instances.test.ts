@@ -389,7 +389,10 @@ describe('vps() API surface', () => {
           kind: definition.kind,
         });
       }
-    expect(module.migrations!.map((migration) => migration.name)).toEqual(['vps/0001_instances']);
+    expect(module.migrations!.map((migration) => migration.name)).toEqual([
+      'vps/0001_instances',
+      'vps/0002_sealed_user_data',
+    ]);
     expect(module.requires).toEqual(['capacity']);
     expect(() => vps({ runtimes: [] })).toThrow(ComputeError);
     expect(() => vps({ providers: [fakeCloud, fakeCloud] })).toThrow(/twice/);

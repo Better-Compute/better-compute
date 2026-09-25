@@ -241,6 +241,7 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
       runtime: runtimes[0]!,
       runtimes: runtimeTable,
     };
+    if (typeof context.secrets?.put === 'function') deps.broker = context.secrets;
     if (options.images) deps.images = options.images;
     return deps;
   };
