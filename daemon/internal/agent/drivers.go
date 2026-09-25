@@ -43,8 +43,8 @@ type HostedDriver struct {
 	Host     DriverHost
 }
 
-// DriversOf lists the drivers of started plugins.
-func DriversOf(plugins []*bcx.Plugin) []HostedDriver {
+// DriversOf lists the drivers of the supervised plugins.
+func DriversOf(plugins []*bcx.Supervised) []HostedDriver {
 	var out []HostedDriver
 	for _, p := range plugins {
 		for _, m := range p.Drivers {

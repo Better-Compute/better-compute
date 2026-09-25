@@ -34,6 +34,8 @@ type Plugin struct {
 	dir    string
 	http   *http.Client
 	once   sync.Once
+	// done is closed when the process has exited.
+	done chan struct{}
 }
 
 // StartOptions configure Start.
@@ -115,7 +117,11 @@ func Start(ctx context.Context, name, path string, o StartOptions) (*Plugin, err
 		os.RemoveAll(dir)
 		return nil, err
 	}
-	p := &Plugin{Name: name, cmd: cmd, dir: dir}
+	p := &Plugin{Name: name, cmd: cmd, dir: dir, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(p.done)
+	}()
 	timeout := o.HandshakeTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -182,11 +188,14 @@ func (p *Plugin) Close() {
 		}
 		if p.cmd != nil && p.cmd.Process != nil {
 			killGroup(p.cmd)
-			_ = p.cmd.Wait()
+			<-p.done
 		}
 		_ = os.RemoveAll(p.dir)
 	})
 }
+
+// Done is closed when the plugin's process has exited (a crash, or Close).
+func (p *Plugin) Done() <-chan struct{} { return p.done }
 
 // Error is a driver's own failure (DriverError).
 type Error struct {

@@ -97,8 +97,9 @@ func sandboxOptions(c config.Plugins, name string, taken map[uint32]bool) (bcx.S
 
 // startPlugins runs the bcx driver plugins of dir (PLAN.md §5.5): every plugin named in dir/pins,
 // each only if its binary's sha256 is its pin, sandboxed as sandboxOptions says. A plugin that fails
-// to start is logged and skipped. dir and pins are root-owned, like config.toml.
-func startPlugins(ctx context.Context, dir string, sandbox config.Plugins, log *slog.Logger) []*bcx.Plugin {
+// to start is logged and skipped; one that exits later is started again (bcx.Supervise). dir and
+// pins are root-owned, like config.toml.
+func startPlugins(ctx context.Context, dir string, sandbox config.Plugins, log *slog.Logger) []*bcx.Supervised {
 	if dir == "" {
 		return nil
 	}
@@ -131,7 +132,7 @@ func startPlugins(ctx context.Context, dir string, sandbox config.Plugins, log *
 	}
 	// By name: a plugin's uid does not depend on where its line sits in the pins file.
 	sort.Slice(pins, func(i, j int) bool { return pins[i][2] < pins[j][2] })
-	var plugins []*bcx.Plugin
+	var plugins []*bcx.Supervised
 	for _, m := range pins {
 		name := m[2]
 		o, err := sandboxOptions(sandbox, name, taken)
@@ -143,7 +144,10 @@ func startPlugins(ctx context.Context, dir string, sandbox config.Plugins, log *
 			log.Warn("privileged plugin: root, no seccomp filter", "plugin", name)
 		}
 		o.Sha256, o.Stderr = m[1], os.Stderr
-		p, err := bcx.Start(ctx, name, filepath.Join(dir, name), o)
+		path := filepath.Join(dir, name)
+		p, err := bcx.Supervise(ctx, name, func(ctx context.Context) (*bcx.Plugin, error) {
+			return bcx.Start(ctx, name, path, o)
+		}, func(msg string, args ...any) { log.Warn(msg, args...) })
 		if err != nil {
 			log.Error("plugin did not start", "plugin", name, "error", err.Error())
 			continue

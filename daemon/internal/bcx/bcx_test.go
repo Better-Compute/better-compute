@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +40,8 @@ func (echoPlugin) Invoke(_ context.Context, req *connect.Request[driverv1.Invoke
 	case "probe":
 		// What a denied system call answers in this process (the sandbox test).
 		return out.Send(&driverv1.InvokeResponse{Msg: &driverv1.InvokeResponse_ResultJson{ResultJson: `"` + probeDenied() + `"`}})
+	case "crash":
+		os.Exit(3)
 	case "probe-ns":
 		return out.Send(&driverv1.InvokeResponse{Msg: &driverv1.InvokeResponse_ResultJson{ResultJson: `"` + probeNamespaces() + `"`}})
 	}
@@ -135,5 +138,47 @@ func TestHandshakeRoundTrip(t *testing.T) {
 		if _, err := ParseHandshake(bad); err == nil {
 			t.Errorf("parsed %q", bad)
 		}
+	}
+}
+
+// A plugin that dies is started again (re-verified), and serves again.
+func TestSupervisedPluginRestarts(t *testing.T) {
+	exe, pin := selfPin(t)
+	var logs []string
+	var mu sync.Mutex
+	s, err := Supervise(context.Background(), "echo", func(ctx context.Context) (*Plugin, error) {
+		return Start(ctx, "echo", exe, StartOptions{Sha256: pin, Env: []string{"BCX_TEST_PLUGIN=1"}, Stderr: os.Stderr})
+	}, func(msg string, _ ...any) {
+		mu.Lock()
+		logs = append(logs, msg)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if _, err := s.Invoke(ctx, &driverv1.InvokeRequest{DriverId: "echo", Kind: "power", Operation: "crash"}, nil); err == nil {
+		t.Fatal("the crashing operation answered")
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		result, err := s.Invoke(ctx, &driverv1.InvokeRequest{DriverId: "echo", Kind: "power", Operation: "setPower", ArgsJson: "{}"}, nil)
+		if err == nil && strings.Contains(result, "setPower") {
+			break
+		}
+		var de *Error
+		if err != nil && !(errors.As(err, &de) && de.Retryable) && time.Now().After(deadline) {
+			t.Fatalf("after the crash: %q, %v", result, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the plugin was not restarted")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(strings.Join(logs, "|"), "plugin restarted") {
+		t.Fatalf("logs = %v", logs)
 	}
 }

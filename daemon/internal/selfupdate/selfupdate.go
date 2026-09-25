@@ -127,6 +127,22 @@ func (s Slots) Adopt(exe, version string) error {
 		if err := s.relink("current", "a"); err != nil {
 			return err
 		}
+	} else if fi, err := os.Lstat(s.Entrypoint); err == nil && fi.Mode().IsRegular() {
+		// The slots exist but the entrypoint is a plain file again: an install script replaced the
+		// binary (mv -f). That file is what runs: it becomes the current slot, so relinking the
+		// entrypoint never falls back to the older binary the slot held.
+		f, err := os.Open(s.Entrypoint)
+		if err != nil {
+			return err
+		}
+		_, err = s.write(cur, f, -1, nil)
+		f.Close()
+		if err != nil {
+			return err
+		}
+		if err := s.setVersion(cur, version); err != nil {
+			return err
+		}
 	}
 	return s.linkEntrypoint()
 }

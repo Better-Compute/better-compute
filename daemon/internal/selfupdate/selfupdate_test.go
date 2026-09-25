@@ -175,3 +175,25 @@ func TestRevertDropsPrevious(t *testing.T) {
 		t.Fatalf("previous = %s after a revert", prev)
 	}
 }
+
+// An install script's upgrade replaces the entrypoint symlink with a plain file (mv -f): the next
+// update adopts that file, never the older binary the current slot held.
+func TestAdoptAfterScriptReinstall(t *testing.T) {
+	s, _ := newSlots(t)
+	if err := s.Adopt(s.Entrypoint, "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(s.Entrypoint)
+	if err := os.WriteFile(s.Entrypoint, []byte("v1.5 from the script"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Adopt(s.Entrypoint, "1.5.0"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(s.Entrypoint); string(b) != "v1.5 from the script" {
+		t.Fatalf("through the entrypoint: %q", b)
+	}
+	if target, _ := os.Readlink(s.Entrypoint); target != filepath.Join(s.Dir, "current") || s.Versions()["a"] != "1.5.0" {
+		t.Fatalf("entrypoint -> %q, versions %v", target, s.Versions())
+	}
+}
