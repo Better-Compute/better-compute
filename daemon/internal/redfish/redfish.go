@@ -43,18 +43,29 @@ type Client struct {
 	manager  string
 }
 
-// New builds a client for address ("10.20.0.5", "https://bmc.example" or a URL), pinned to pin
-// (the SHA-256 of the BMC certificate's SPKI) when set.
+// New builds a client for address, pinned to pin (the SHA-256 of the BMC certificate's SPKI) when
+// set. The address is a host ("10.20.0.5", "bmc.example:8443"), an https:// or redfish:// URL, or
+// such a URL naming one system of a multi-system service (a chassis manager, sushy-tools in front
+// of libvirt): "https://192.168.122.1:8000/redfish/v1/Systems/<uuid>". Without a system path the
+// service's first system is used.
 func New(address, username, password string, pin []byte) (*Client, error) {
 	if !strings.Contains(address, "://") {
 		address = "https://" + address
 	}
 	u, err := url.Parse(address)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fail("invalid-address", "BMC address %q", address)
 	}
-	if u.Scheme != "https" {
+	if u.Scheme != "https" && u.Scheme != "redfish" {
 		return nil, fail("invalid-address", "BMCs are reached over https only")
+	}
+	system := strings.TrimRight(u.Path, "/")
+	switch {
+	case system == "" || system == "/redfish/v1":
+		system = ""
+	case strings.HasPrefix(system, "/redfish/v1/Systems/") && !strings.Contains(strings.TrimPrefix(system, "/redfish/v1/Systems/"), "/") && !strings.Contains(system, ".."):
+	default:
+		return nil, fail("invalid-address", "a BMC address path must name a system (/redfish/v1/Systems/<id>), got %q", u.Path)
 	}
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if len(pin) > 0 {
@@ -68,6 +79,7 @@ func New(address, username, password string, pin []byte) (*Client, error) {
 	}
 	return &Client{
 		base:     "https://" + u.Host,
+		system:   system,
 		username: username,
 		password: password,
 		http: &http.Client{
@@ -89,6 +101,11 @@ func checkPin(cert *x509.Certificate, pin []byte) error {
 
 // call makes one request and decodes a JSON answer into out (when non-nil).
 func (c *Client) call(ctx context.Context, method, path string, body any, out any) error {
+	// Paths come from the BMC's own answers (@odata.id): only absolute paths on this BMC, never
+	// another host ("@evil.example/..." would turn the base into userinfo) or a scheme.
+	if !strings.HasPrefix(path, "/redfish/v1") || strings.ContainsAny(path, "@?#\\ \t\r\n") || strings.Contains(path, "..") {
+		return fail("bmc-error", "the BMC answered with a resource path outside /redfish/v1: %q", path)
+	}
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -175,8 +192,24 @@ func (c *Client) systemPath(ctx context.Context) (string, error) {
 	return c.system, nil
 }
 
+// managerPath is the manager of the system (its Links.ManagedBy), else the service's first manager.
 func (c *Client) managerPath(ctx context.Context) (string, error) {
 	if c.manager == "" {
+		sys, err := c.systemPath(ctx)
+		if err != nil {
+			return "", err
+		}
+		var s struct {
+			Links struct {
+				ManagedBy []struct {
+					ID string `json:"@odata.id"`
+				} `json:"ManagedBy"`
+			} `json:"Links"`
+		}
+		if err := c.call(ctx, http.MethodGet, sys, nil, &s); err == nil && len(s.Links.ManagedBy) > 0 && s.Links.ManagedBy[0].ID != "" {
+			c.manager = s.Links.ManagedBy[0].ID
+			return c.manager, nil
+		}
 		p, err := c.first(ctx, "/redfish/v1/Managers")
 		if err != nil {
 			return "", err

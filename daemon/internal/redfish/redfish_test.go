@@ -152,3 +152,92 @@ func TestRedfishOperations(t *testing.T) {
 		t.Fatal("a plain-http BMC was accepted")
 	}
 }
+
+// A service with several systems (sushy-tools over libvirt, a chassis manager): the address names
+// the system, and virtual media goes to that system's manager.
+func TestRedfishAddressNamesTheSystem(t *testing.T) {
+	var mu sync.Mutex
+	var resets, inserted []string
+	mux := http.NewServeMux()
+	write := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(v) }
+	mux.HandleFunc("GET /redfish/v1/Systems", func(w http.ResponseWriter, _ *http.Request) {
+		write(w, map[string]any{"Members": []map[string]string{{"@odata.id": "/redfish/v1/Systems/a"}, {"@odata.id": "/redfish/v1/Systems/b"}}})
+	})
+	for _, id := range []string{"a", "b"} {
+		mux.HandleFunc("GET /redfish/v1/Systems/"+id, func(w http.ResponseWriter, _ *http.Request) {
+			write(w, map[string]any{"PowerState": "On", "UUID": "UUID-" + id, "Links": map[string]any{"ManagedBy": []map[string]string{{"@odata.id": "/redfish/v1/Managers/m" + id}}}})
+		})
+		mux.HandleFunc("POST /redfish/v1/Systems/"+id+"/Actions/ComputerSystem.Reset", func(http.ResponseWriter, *http.Request) {
+			mu.Lock()
+			resets = append(resets, id)
+			mu.Unlock()
+		})
+		mux.HandleFunc("GET /redfish/v1/Managers/m"+id+"/VirtualMedia", func(w http.ResponseWriter, _ *http.Request) {
+			write(w, map[string]any{"Members": []map[string]string{{"@odata.id": "/redfish/v1/Managers/m" + id + "/VirtualMedia/Cd"}}})
+		})
+		mux.HandleFunc("GET /redfish/v1/Managers/m"+id+"/VirtualMedia/Cd", func(w http.ResponseWriter, _ *http.Request) {
+			write(w, map[string]any{"MediaTypes": []string{"CD"}})
+		})
+		mux.HandleFunc("POST /redfish/v1/Managers/m"+id+"/VirtualMedia/Cd/Actions/VirtualMedia.InsertMedia", func(http.ResponseWriter, *http.Request) {
+			mu.Lock()
+			inserted = append(inserted, id)
+			mu.Unlock()
+		})
+	}
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+	pin := sha256.Sum256(srv.Certificate().RawSubjectPublicKeyInfo)
+	ctx := context.Background()
+
+	address := "redfish://" + strings.TrimPrefix(srv.URL, "https://") + "/redfish/v1/Systems/b"
+	c, err := New(address, "admin", "pw", pin[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := c.Do(ctx, "inspect.inspect", nil); err != nil || r["productUuid"] != "uuid-b" {
+		t.Fatalf("inspect = %v, %v", r, err)
+	}
+	if _, err := c.Do(ctx, "power.setPower", map[string]any{"action": "reset"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Do(ctx, "virtual-media.insert", map[string]any{"url": "https://cache/x.iso"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(resets) != 1 || resets[0] != "b" || len(inserted) != 1 || inserted[0] != "b" {
+		t.Fatalf("resets %v, media %v; want system b and its manager", resets, inserted)
+	}
+	// Without a path, the first system.
+	first, _ := New(srv.URL, "admin", "pw", pin[:])
+	if r, err := first.Do(ctx, "inspect.inspect", nil); err != nil || r["productUuid"] != "uuid-a" {
+		t.Fatalf("first system = %v, %v", r, err)
+	}
+	for _, bad := range []string{
+		srv.URL + "/redfish/v1/Managers/ma",
+		srv.URL + "/redfish/v1/Systems/a/../../x",
+		srv.URL + "/other",
+		"https://user:pw@10.0.0.1",
+		srv.URL + "/redfish/v1/Systems/a?x=1",
+	} {
+		if _, err := New(bad, "a", "b", nil); err == nil {
+			t.Errorf("address %q was accepted", bad)
+		}
+	}
+}
+
+// Resource paths come from the BMC's answers; one pointing elsewhere is never followed.
+func TestRedfishRefusesForeignResourcePaths(t *testing.T) {
+	var hits sync.Map
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /redfish/v1/Systems", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"Members": []map[string]string{{"@odata.id": "@evil.example/redfish/v1/Systems/1"}}})
+	})
+	mux.HandleFunc("/", func(_ http.ResponseWriter, r *http.Request) { hits.Store(r.URL.Path, true) })
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+	pin := sha256.Sum256(srv.Certificate().RawSubjectPublicKeyInfo)
+	c, _ := New(srv.URL, "admin", "pw", pin[:])
+	var e *Error
+	if _, err := c.Do(context.Background(), "power.getPower", nil); !errors.As(err, &e) || e.Code != "bmc-error" || !strings.Contains(e.Message, "outside /redfish/v1") {
+		t.Fatalf("foreign path: %v", err)
+	}
+}
