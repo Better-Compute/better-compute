@@ -7,6 +7,7 @@ import { nodesApi, type NodesApi } from './nodes.js';
 import { projectsApi, type ProjectsApi } from './projects.js';
 import { sitesApi, type SitesApi } from './sites.js';
 import { usageApi, type UsageApi } from './usage.js';
+import { mergeGroups, serverV02Groups, type ServerV02Api, type ServerV02Options } from './v02.js';
 
 export type { Page } from './common.js';
 export type {
@@ -50,14 +51,17 @@ export type {
 export type { CreateSiteInput, GetSiteInput, ListSitesInput, SitesApi } from './sites.js';
 export type { ListUsageInput, UsageApi, UsageWindow } from './usage.js';
 
-/** The server's own v0.1 groups of PLAN.md §9.2 (module `server`), besides `system`. */
+export type { ServerV02Api, ServerV02Options } from './v02.js';
+
+/** The server's own groups of PLAN.md §9.2 (module `server`), besides `system`: v0.1 and v0.2. */
 export type ServerApi = ProjectsApi &
   SitesApi &
   JoinTokensApi &
   NodesApi &
   CommandsApi &
   UsageApi &
-  EventsApi;
+  EventsApi &
+  ServerV02Api;
 
 export interface ServerGroupsOptions {
   /** The IAM resource type prefix (`compute-`), for the list recipe's per-item checks. */
@@ -68,6 +72,10 @@ export interface ServerGroupsOptions {
   listRetryDelayMs?: number;
   /** How join tokens are minted (default: 32 random bytes, `bcjt_<id>.<secret>`). */
   joinTokens?: JoinTokenMinter;
+  /** Where `secrets.put` keeps values; without one, `secrets.*` answer UNAVAILABLE. */
+  secrets?: ServerV02Options['secrets'];
+  /** The registered drivers, for `drivers.list`. */
+  drivers?: ServerV02Options['drivers'];
 }
 
 /** Builds the server's groups; handlers reach the ports through each call's `MethodContext`. */
@@ -77,13 +85,21 @@ export function serverGroups(options: ServerGroupsOptions): ServerApi {
     caches: options.caches,
     ...(options.listRetryDelayMs === undefined ? {} : { retryDelayMs: options.listRetryDelayMs }),
   });
-  return {
-    ...projectsApi(lists),
-    ...sitesApi(lists),
-    ...joinTokensApi(options.joinTokens),
-    ...nodesApi(lists),
-    ...commandsApi(),
-    ...usageApi(),
-    ...eventsApi(),
-  };
+  // v0.2 methods join the v0.1 `sites` and `nodes` groups: merged method by method.
+  return mergeGroups(
+    {
+      ...projectsApi(lists),
+      ...sitesApi(lists),
+      ...joinTokensApi(options.joinTokens),
+      ...nodesApi(lists),
+      ...commandsApi(),
+      ...usageApi(),
+      ...eventsApi(),
+    },
+    serverV02Groups({
+      ...(options.joinTokens ? { joinTokens: options.joinTokens } : {}),
+      ...(options.secrets ? { secrets: options.secrets } : {}),
+      ...(options.drivers ? { drivers: options.drivers } : {}),
+    }),
+  );
 }

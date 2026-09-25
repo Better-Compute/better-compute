@@ -22,6 +22,7 @@ import {
   type SqlExecutor,
 } from '@better-compute/core';
 import type { CapacityModuleOptions } from '@better-compute/capacity';
+import { localSealedSecretStore } from '@better-compute/pki';
 import type { JoinCrypto } from './join/crypto.js';
 import type { TunnelsOptions } from './tunnels/module.js';
 import { anchoredClock } from './runtime/clock.js';
@@ -186,6 +187,13 @@ export interface ResolvedOptions {
   capacity: CapacityModuleOptions;
   /** JoinService's keys and node CA, when configured. */
   join?: JoinCrypto;
+  /**
+   * The secret stores behind `ctx.secrets` and the `secrets` group: `secrets`, or by default
+   * `sealed_secrets` in the compute database under the deployment secret (`sealedSecrets`).
+   */
+  secretStores: readonly SecretStore[];
+  /** Whether the default sealed store is in use, so its migration (`pki/0001_sealed_secrets`) runs. */
+  sealedSecrets: boolean;
   /** Runs `hook` once the current transaction of `database` commits (best effort). */
   afterCommit(hook: CommitHook): void;
   /** Whether the caller runs inside a transaction of `database`. */
@@ -302,6 +310,16 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
   }
   const log = options.log ?? defaultLogger;
   const hooks = withCommitHooks(options.database, log);
+  const configuredStores = options.secrets ?? [];
+  if (!Array.isArray(configuredStores)) throw invalid('secrets must be a list of secret stores');
+  for (const store of configuredStores) {
+    requireMethods(store, 'secrets[]', ['put', 'resolve', 'delete']);
+    if (!Array.isArray(store.schemes) || !store.schemes.length)
+      throw invalid(`secret store ${String(store.id)} serves no scheme`);
+  }
+  const secretStores: readonly SecretStore[] = configuredStores.length
+    ? configuredStores
+    : [localSealedSecretStore({ sql: hooks.database, keys: options.secret })];
 
   return {
     database: hooks.database,
@@ -321,6 +339,8 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     ports,
     capacity,
     ...(join ? { join } : {}),
+    secretStores,
+    sealedSecrets: configuredStores.length === 0,
     afterCommit: hooks.afterCommit,
     inTransaction: hooks.inTransaction,
   };

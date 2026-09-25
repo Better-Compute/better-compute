@@ -57,19 +57,27 @@ export type ComputeApi<
 > = CallableApi<CoreGroups & ModuleApis<M>> & { plugins: PluginsApi<P> };
 
 /**
- * The server's own groups, registered before the built-in modules: `system`, then the v0.1 groups
- * of module `server` in §9.2. `extra` is for tests (join-token minting, list retry delay).
+ * The server's own groups, registered before the built-in modules: `system`, then the v0.1 and
+ * v0.2 groups of module `server` in §9.2 (`secrets` over the resolved stores; `drivers` from the
+ * host's registry). `extra` is for tests (join-token minting, list retry delay).
  */
 export function coreGroups(
   options: ResolvedOptions,
-  host: { info(): ServerInfo; selfCheck(): Promise<SelfCheckReport> },
+  host: {
+    info(): ServerInfo;
+    selfCheck(): Promise<SelfCheckReport>;
+    drivers?: ServerGroupsOptions['drivers'];
+  },
   extra: Partial<Pick<ServerGroupsOptions, 'joinTokens' | 'listRetryDelayMs'>> = {},
 ): SystemApi & ServerApi {
+  const [secrets] = options.secretStores;
   return {
     ...systemApi(host),
     ...serverGroups({
       typePrefix: options.typePrefix,
       caches: cachesFor(options, { now: () => options.clock.now() }),
+      ...(secrets ? { secrets } : {}),
+      ...(host.drivers ? { drivers: host.drivers } : {}),
       ...extra,
     }),
   };

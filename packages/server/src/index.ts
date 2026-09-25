@@ -12,10 +12,12 @@ import {
   type ComputeModule,
   type ComputePlugin,
   type Credential,
+  type DriverDefinition,
   type ModuleContext,
 } from '@better-compute/core';
 import { capacityModule } from '@better-compute/capacity';
 import { inventoryModule } from '@better-compute/inventory';
+import { sealedSecretsMigration } from '@better-compute/pki';
 import { coreGroups, type ComputeApi, type ComputeCaches } from './api.js';
 import { createModuleContext } from './context.js';
 import { createHttp } from './http.js';
@@ -179,6 +181,8 @@ export function betterCompute<
     }),
     inventoryModule,
     capacityModule(resolved.capacity),
+    // The default secret store's table (`sealed_secrets`, owned by pki's migration).
+    ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
     ...(options.tunnels ? [tunnelsModule(options.tunnels)] : []),
     ...(options.modules ?? []),
   ];
@@ -186,10 +190,16 @@ export function betterCompute<
   let context: ModuleContext | undefined;
   let selfCheck: (() => Promise<SelfCheckReport>) | undefined;
 
-  const registry = createRegistry({
+  const registry: Registry = createRegistry({
     core: coreGroups(resolved, {
       info: () => serverInfo(resolved.basePath),
       selfCheck: () => selfCheck!(),
+      // Read at call time, once the registry exists.
+      drivers: () =>
+        registry.extensions.filter(
+          (extension): extension is DriverDefinition =>
+            (extension as { extension?: unknown }).extension === 'driver',
+        ),
     }),
     commandKinds: builtinCommandKinds,
     modules,
@@ -203,7 +213,11 @@ export function betterCompute<
       ...(options.sinks?.events ?? []),
       ...(options.sinks?.audit ?? []),
     ],
-    context: (view) => (context = createModuleContext(resolved, view, runtime.ports(view))),
+    context: (view) =>
+      (context = createModuleContext(resolved, view, runtime.ports(view), [
+        ...modules,
+        ...plugins,
+      ])),
   });
   const moduleContext = context!;
   const hosted: readonly ComputeModule[] = [...modules, ...plugins];
@@ -297,6 +311,8 @@ export function betterCompute<
       log: resolved.log,
       // `security.join.refused` lands in the root tenant unless a verified token names another.
       rootTenantId: resolved.rootTenantId,
+      // The secret broker (SecretRequest → JWE) over the same stores as `ctx.secrets`.
+      secrets: resolved.secretStores,
     }),
     initialize,
     async start(startOptions = {}) {

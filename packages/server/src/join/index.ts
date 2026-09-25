@@ -11,6 +11,8 @@ export type {
 export { gatewayReportHandlers } from './gateway-reports.js';
 export type { GatewayReportContext, GatewayReportHandlers } from './gateway-reports.js';
 export { createGatewayServices } from './gateway-services.js';
+export { createSecretBroker, maxSecretTtlSeconds } from './secret-broker.js';
+export type { SecretBrokerOptions, SecretBrokerPort } from './secret-broker.js';
 export type { GatewayServices, GatewayServicesInput } from './gateway-services.js';
 export {
   claimedHardwareKey,

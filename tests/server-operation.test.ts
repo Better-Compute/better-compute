@@ -122,6 +122,8 @@ const serverPaths = [
   'sites/list',
   'sites/get',
   'sites/create',
+  'sites/update',
+  'sites/delete',
   'joinTokens/create',
   'joinTokens/list',
   'joinTokens/revoke',
@@ -135,11 +137,21 @@ const serverPaths = [
   'nodes/taint',
   'nodes/adopt',
   'nodes/revokeIdentity',
+  'nodes/delete',
   'commands/run',
   'commands/get',
   'commands/list',
   'usage/list',
   'events/list',
+  // v0.2 (tests/server-groups-*).
+  'joinRequests/list',
+  'joinRequests/approve',
+  'joinRequests/reject',
+  'siteTokens/create',
+  'siteTokens/revoke',
+  'secrets/put',
+  'secrets/delete',
+  'drivers/list',
 ];
 
 /** The built-in capacity module's groups (§9.2 module `capacity`), right after `inventory`. */
@@ -206,6 +218,8 @@ describe('betterCompute()', () => {
       'node-controllers',
       'inventory',
       'capacity',
+      // The default secret store's table, when no `secrets` are configured.
+      'pki',
       'extras',
       'acme',
     ]);
@@ -242,11 +256,12 @@ describe('betterCompute()', () => {
     expect(compute.registry.method('plugins/acme/widgets/poke')!.row).toBeUndefined();
     expect(compute.registry.actions.has('compute:acme:poke')).toBe(true);
     expect(compute.registry.actions.has('compute:reservations:create')).toBe(true);
-    // The built-in capacity module's migrations come first, then the plugin's.
+    // The built-in capacity module's migrations come first, then the sealed secrets, then the plugin's.
     const migrations = compute.registry.migrations.map((migration) => migration.name);
     expect(migrations[0]).toBe('capacity/0001_device_links');
     expect(migrations.at(-1)).toBe('acme/0001_widgets');
-    expect(migrations.slice(0, -1).every((name) => name.startsWith('capacity/'))).toBe(true);
+    expect(migrations.at(-2)).toBe('pki/0001_sealed_secrets');
+    expect(migrations.slice(0, -2).every((name) => name.startsWith('capacity/'))).toBe(true);
     expect(compute.registry.hasModule('inventory')).toBe(true);
     expect(compute.registry.hasModule('capacity')).toBe(true);
     expect(compute.registry.hasModule('metal')).toBe(false);
@@ -263,8 +278,10 @@ describe('betterCompute()', () => {
     expect(Object.keys(compute.api).sort()).toEqual([
       'capacity',
       'commands',
+      'drivers',
       'events',
       'inventory',
+      'joinRequests',
       'joinTokens',
       'nodes',
       'plugins',
@@ -272,6 +289,8 @@ describe('betterCompute()', () => {
       'projects',
       'quotas',
       'reservations',
+      'secrets',
+      'siteTokens',
       'sites',
       'system',
       'usage',
@@ -962,9 +981,11 @@ describe('lifecycle and later-phase placeholders', () => {
     expect((await failure(() => compute.gatewayServices.join({} as never))).code).toBe(
       'INVALID_CONFIG',
     );
-    expect((await failure(() => compute.gatewayServices.secret({} as never))).message).toBe(
-      'The secret broker arrives in v0.2',
-    );
+    // The secret broker runs over the default sealed store (tests/server-secret-broker); an
+    // unsigned request is refused in the answer, never with a value.
+    const refused = await compute.gatewayServices.secret({} as never);
+    expect(refused.error).toBeTruthy();
+    expect(refused.jwe ?? '').toBe('');
     // The authz projection reads authz_projection by primary key (tests/server-runtime-authz).
     await compute.initialize();
     expect(await compute.authz.get('compute-pool', 'p', ACME)).toBeUndefined();
