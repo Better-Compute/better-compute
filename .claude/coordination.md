@@ -319,6 +319,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - MEDIUM-4 manifest expiry must use local OR server time; LOW-5 artifact name + a local clear-failed; LOW-6 dedupe
         pins; LOW-7 no `previous` after a rollback: all [6a20b8].
       - Decision: release pins and approver-set pins come only from install-time config, never the well-known.
+      - ALL CLOSED: bcd 7ac5609, 9b56c7d, da474d0 ([site] bmc_networks, [update] release_sequence); pki/CLI bb91a99,
+        588e135, 8fe1fb8, f0cf592; server 8bfe10c, ea0d880. Open: install-script --bmc-networks ([402c97]); bcd SIGTERM
+        exit in e2e ([6a20b8]).
     - Ramdisk image mount: REDUCED. ext* is written with debugfs, never mounted (1ae1789). The xfs/btrfs/vfat
       fallbacks and the Ignition boot partition remain ([6a20b8]).
       - proto: 525c199, 4f11548;
