@@ -4,30 +4,30 @@ import { useEffect, useRef, useState } from 'react';
 import { cx } from '@/utils/cx';
 
 /**
- * The Sandboxes chapter's panel: an isolated VPS instance from flavor to deletion. Checked against the code:
- * - flavors are vCPU, memory, disk and 0-16 GPUs (packages/vps/src/flavors.ts);
- * - the lifecycle is core's instance state table (packages/core/src/states.ts) walked by the vps.instances
- *   reconciler;
- * - the guest gets no join token, no bcd and no IAM key, user data is sealed and released only to the instance's
- *   own tenant, and exec goes through tunnels.open decided as compute:instances:exec (guides/vps/instances.mdx);
- * - runtime isolation is a runtime trait: vm, microvm or container.
- * The lifecycle strip steps through the states on a timer and holds while pointed at.
+ * The Sandboxes channel: templates, and one sandbox from admission to expiry. Checked against the code
+ * (packages/vps/src/sandboxes.ts): templates name a hosted pool, a flavor and an image, with TTL bounds (default 1 h,
+ * max 24 h) and a warm pool {min, max}; sandbox states are starting, ready, failed, deleting and deleted; create
+ * decides on the draft, then claims the template's oldest warm instance or schedules a new one; the TTL starts at
+ * admission; extend moves expiresAt within maxTtlSeconds; the vps.sandboxes reconciler publishes sandbox.ready and,
+ * at expiry, sandbox.expired before an ordinary instance delete. The guest gets no join token, no bcd and no IAM
+ * key, and user data is sealed to its tenant (guides/vps/instances.mdx). The strip steps on a timer and holds while
+ * pointed at.
  */
 
-const flavors = [
-  { name: 'sbx.small', vcpu: 2, memory: 4, disk: 20, gpus: 0 },
-  { name: 'sbx.large', vcpu: 8, memory: 32, disk: 80, gpus: 0 },
-  { name: 'g1.h100x1', vcpu: 16, memory: 120, disk: 200, gpus: 1 },
+const templates = [
+  { name: 'ci-runner', flavor: 'sbx.small · 2 vCPU · 4 GiB', ttl: '30 min / 24 h', warm: 4 },
+  { name: 'notebook', flavor: 'sbx.large · 8 vCPU · 32 GiB', ttl: '1 h / 24 h', warm: 1 },
+  { name: 'gpu-eval', flavor: 'g1.h100x1 · 16 vCPU · 1 GPU', ttl: '1 h / 8 h', warm: 0 },
 ];
 
 const states = [
-  { state: 'pending', note: 'admitted: one IAM decision on the draft' },
-  { state: 'scheduling', note: 'the placer picks a host with free vCPUs' },
-  { state: 'provisioning', note: 'image cached, user data sealed as secret://' },
-  { state: 'starting', note: 'the host runtime boots the guest' },
-  { state: 'running', note: 'exec through a single-use tunnel ticket' },
-  { state: 'deleting', note: 'allocation, IP lease and sealed user data released' },
-  { state: 'deleted', note: 'instance.deleted; nothing left on the host' },
+  { state: 'admitted', note: 'one IAM decision on the draft, budget checked' },
+  { state: 'starting', note: 'a warm instance claimed, or a new one scheduled' },
+  { state: 'ready', note: 'sandbox.ready: its instance is running' },
+  { state: 'extended', note: 'expiresAt moved, within the template’s max TTL' },
+  { state: 'expired', note: 'sandbox.expired at expiresAt' },
+  { state: 'deleting', note: 'an ordinary instance delete, allocation released' },
+  { state: 'deleted', note: 'sandbox.deleted; the warm pool refills' },
 ];
 
 const guarantees = [
@@ -38,7 +38,7 @@ const guarantees = [
 ];
 
 export function SandboxPanel() {
-  const [index, setIndex] = useState(4);
+  const [index, setIndex] = useState(2);
   const [held, setHeld] = useState(false);
   const heldRef = useRef(held);
   heldRef.current = held;
@@ -61,24 +61,25 @@ export function SandboxPanel() {
     >
       <div className="border-b border-separator-border lg:col-span-4 lg:border-e lg:border-b-0">
         <p className="border-b border-separator-border px-4 py-2 text-[0.6875rem] tracking-[0.06em] text-text-tertiary uppercase">
-          Flavors
+          Templates
         </p>
         <ul className="flex flex-col">
-          {flavors.map((flavor) => (
+          {templates.map((template) => (
             <li
-              key={flavor.name}
+              key={template.name}
               className="flex flex-col gap-1 border-b border-separator-border px-4 py-3 last:border-b-0"
             >
-              <span className="text-text-primary">{flavor.name}</span>
-              <span className="flex flex-wrap gap-x-3 text-text-secondary">
-                <span>
-                  <span className="text-signal">{flavor.vcpu}</span> vCPU
+              <span className="flex items-center justify-between gap-2">
+                <span className="text-text-primary">{template.name}</span>
+                <span className="flex items-center gap-1" title={`${template.warm} warm`}>
+                  {Array.from({ length: 4 }, (_, i) => (
+                    <span key={i} className="led" data-on={i < template.warm} />
+                  ))}
                 </span>
-                <span>{flavor.memory} GiB</span>
-                <span>{flavor.disk} GiB disk</span>
-                <span className={flavor.gpus ? 'text-text-primary' : undefined}>
-                  {flavor.gpus ? `${flavor.gpus} GPU (VFIO)` : 'no GPU'}
-                </span>
+              </span>
+              <span className="text-text-secondary">{template.flavor}</span>
+              <span className="text-text-tertiary">
+                TTL {template.ttl} · warm <span className="text-signal">{template.warm}</span>
               </span>
             </li>
           ))}
@@ -87,7 +88,7 @@ export function SandboxPanel() {
 
       <div className="flex flex-col border-b border-separator-border lg:col-span-4 lg:border-e lg:border-b-0">
         <p className="flex items-center justify-between border-b border-separator-border px-4 py-2 text-[0.6875rem] tracking-[0.06em] text-text-tertiary uppercase">
-          <span>inst_7Q2M · lifecycle</span>
+          <span>sbx_7Q2M · lifecycle</span>
           <span className={held ? 'text-text-secondary' : 'text-signal'}>
             {held ? 'held' : 'live'}
           </span>

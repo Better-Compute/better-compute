@@ -252,11 +252,12 @@ PLAN.md stops spending in three layers, and all three work today:
 1. **In the decision.** The `StopWhenOverBudget` statement of the [gpu-user policy](/docs/guides/iam/policies)
    denies new reservations, extensions and instances once `principal.spendExceeded` is true, meaning an enforced
    Better IAM budget covering the caller is spent. It costs nothing extra: Better IAM evaluates it inside the one
-   decision. It also names `compute:sandboxes:create` and `compute:sandboxes:update` for the planned v0.5
-   [sandboxes](/docs/guides/vps/sandboxes), which nothing serves yet.
+   decision. It also names `compute:sandboxes:create` and `compute:sandboxes:update`, so new
+   [sandboxes](/docs/guides/vps/sandboxes) and sandbox extensions stop too.
 2. **Per pool, before admission.** [`reservations.create`](/docs/reference/api/reservations#create),
-   [`reservations.extend`](/docs/reference/api/reservations#extend) and
-   [`instances.create`](/docs/reference/api/instances#create) run capacity's `budgetAdmissionCheck` as their
+   [`reservations.extend`](/docs/reference/api/reservations#extend),
+   [`instances.create`](/docs/reference/api/instances#create) and
+   [`sandboxes.create`](/docs/reference/api/sandboxes#create) (on the template's pool) run capacity's `budgetAdmissionCheck` as their
    [`MethodAdmission.check`](/docs/extending/methods#admission-the-request-as-a-resource), after the IAM decision
    with no transaction open. It calls Better IAM's `billing.check` through
    `IamPort.billingCheck({ tenantId, identityId }, credential)` when the pool's policy sets

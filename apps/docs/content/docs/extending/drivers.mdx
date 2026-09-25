@@ -52,9 +52,10 @@ each kind is data: a binding on the node, inherited from its pool's hardware pro
 <Callout type="warn" title="What runs today">
 - **Declarations work.** `defineDriver`, the driver kinds, `drivers.list`, hardware profiles and per-node bindings are
   implemented and tested.
-- **The built-in drivers do not run yet.** Redfish, IPMI and vendor BMCs (through bmclib), iPXE, image streaming and
-  kexec run inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2 modes, which are not written yet (both exit 2
-  with `NOT_IMPLEMENTED`; only bcd's node agent exists).
+- **The built-in drivers run in bcd, partly.** They live inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
+  modes, which are written but not released. Redfish, PXE and iPXE, image streaming and kexec are there; IPMI and
+  the vendor BMCs through bmclib are not, and nor are BIOS, RAID and firmware updates through Redfish. See
+  [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
   instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
 - **bcx works in TypeScript.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to end, with
@@ -207,7 +208,7 @@ A binding is a driver id, or `{ driver, config }` when the binding carries confi
 3. Per-node overrides.
 
 The result is stored on the node (`nodes.drivers`) and served in its NodeSpec. `metal.enroll` checks only that
-`bmc.driver` is a well-formed id; PLAN.md has bindings validated against the registry, which is not done yet. The
+`bmc.driver` is present and a well-formed id string; PLAN.md has bindings validated against the registry, which is not done yet. The
 hardware profile also carries the BIOS settings and RAID layout that commissioning applies (drafts until v0.5); see
 [profiles and images](/docs/guides/bare-metal/profiles-and-images).
 
@@ -238,13 +239,15 @@ module profile binds `power.getPower` and `power.setPower` to a bcx plugin's dri
 (`power.setPower`, `media.insert`, ...) are registered control-plane steps that relay typed commands instead; see
 [workflows](/docs/guides/bare-metal/workflows).
 
-## BMCs through bmclib on the site agent
+## BMCs on the site agent
 
 The control plane never dials into a site. Metal's BMC steps run in the control plane, where the node's BMC address and
 credential reference are, and send one `BmcOperationRequest` (`driver`, `address`, `credentialsRef`, `operation`,
 `argsJson`, optional `tlsSpkiSha256`) to the site's agent under a kind such as `bmc.query`, `bmc.boot`,
-`bmc.power`, `bmc.rotate` or `bmc.firmware`. The site agent fetches the credential by reference, runs `<concern>.<operation>` on the named driver
-through bmclib (Redfish, IPMI and vendor BMCs), and answers a `BmcOperationResult`. A new BMC family therefore means a
+`bmc.power`, `bmc.rotate` or `bmc.firmware`. The site agent fetches the credential by reference, runs `<concern>.<operation>` on the named driver,
+and answers a `BmcOperationResult`. PLAN.md drives BMCs through bmclib (Redfish, IPMI and vendor BMCs); `bcd site`
+today has its own Redfish client only and answers any other driver `unsupported-driver` (see
+[Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)). A new BMC family therefore means a
 driver the site agent can run: built into `bcd site`, or, from v0.5, a bcx plugin next to it. The command kinds and
 credential handling are on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 

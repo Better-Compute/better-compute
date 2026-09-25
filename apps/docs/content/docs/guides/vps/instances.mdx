@@ -5,7 +5,7 @@ metaTitle: VPS instances and their lifecycle
 icon: Server
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go']
+sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'tests/vps-sandboxes.test.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go']
 ---
 
 An <Term id="instance">instance</Term> is a VM in a VPS <Term id="pool">pool</Term>. You ask for one with a
@@ -16,6 +16,10 @@ pool.
 
 This page assumes you registered `vps()` and have a VPS pool with at least one flavor; see [VPS](/docs/guides/vps)
 and [flavors](/docs/guides/vps/flavors).
+
+Some instances belong to [sandboxes](/docs/guides/vps/sandboxes): the instance a sandbox drives, and the warm
+instances a sandbox template keeps ready. Those can be read but not moved with the methods on this page; see
+[sandbox and warm instances](#sandbox-and-warm-instances).
 
 ## Create an instance
 
@@ -197,10 +201,11 @@ instance instead of failing with `CONFLICT`. The MCP `create_instance` tool send
 
 ## Read and list
 
-[instances.get](/docs/reference/api/instances#get) returns one instance of the tenant, deleted ones included. Drafts
-and other tenants' instances are `NOT_FOUND`.
+[instances.get](/docs/reference/api/instances#get) returns one instance of the tenant, deleted ones included, and
+sandbox and warm instances too. Drafts and other tenants' instances are `NOT_FOUND`.
 
-[instances.list](/docs/reference/api/instances#list) returns `{ items, cursor? }`, newest first:
+[instances.list](/docs/reference/api/instances#list) returns `{ items, cursor? }`, newest first. It lists the
+instances sandboxes drive, but never the warm instances of sandbox templates:
 
 <TypeTable
   type={{
@@ -221,6 +226,8 @@ and other tenants' instances are `NOT_FOUND`.
 instance at once, before anything has happened, and wakes the reconciler; a hosted instance's node also gets a new
 NodeSpec. Watch `state`, or the `instance.*` [events](/docs/guides/events), to see the change land.
 
+- `start`, `stop` and `delete` (and `resize`) on a sandbox's instance or a warm instance are `INVALID_STATE`; see
+  [sandbox and warm instances](#sandbox-and-warm-instances).
 - `start` or `stop` on an instance that is being deleted is `INVALID_STATE`.
 - `start` on an instance in `error` that has a host or a provider machine retries it: it moves to `starting` and the
   runtime or provider is asked again. An instance that failed before it was placed stays in `error`; delete it and
@@ -228,6 +235,9 @@ NodeSpec. Watch `state`, or the `instance.*` [events](/docs/guides/events), to s
 - `delete` is idempotent. A deleted instance stays readable with `state: 'deleted'`; deleting it again returns it.
 - Deletion releases everything the instance held: the capacity allocation, the IP lease and the quota, and its
   authorization row.
+- When the IAM tenant is deleted, `vps().tenantDeleted` drops the tenant's drafts and sets every live instance,
+  sandboxes' and warm ones included, to `desiredState: 'deleted'` (up to 100 per call), answering `SYNC_AGAIN` until
+  all are `deleted`. Hosted instances hold inline allocations, which capacity's own teardown does not reach.
 
 A hosted instance is `deleted` only once its runtime has dropped it: the next complete report from the host no
 longer lists it. If the host is `lost`, or the instance was never placed, deletion finishes without waiting. A
@@ -250,13 +260,44 @@ shrinkage. It is all or nothing: if the host lacks room, the quota charge is und
 | Code                   | When                                                                         |
 | ---------------------- | ---------------------------------------------------------------------------- |
 | `UNSUPPORTED`          | The instance is in a provider pool, or the new flavor has a different GPU count. |
-| `INVALID_STATE`        | The instance is not stopped (both `state` and `desiredState`), or holds no allocation. |
+| `INVALID_STATE`        | The instance is not stopped (both `state` and `desiredState`), holds no allocation, or belongs to a sandbox or a warm pool. |
 | `NOT_FOUND`            | The flavor is missing or archived.                                           |
 | `QUOTA_EXCEEDED`       | The growth does not fit the tenant's quota.                                  |
 | `CAPACITY_UNAVAILABLE` | The host has no room; `details.resource` names what ran out.                 |
 
 The instance passes through `resizing` and is `stopped` again when the call returns, with its policy attributes
 updated. See [flavors](/docs/guides/vps/flavors) for how shapes become claims.
+
+## Sandbox and warm instances
+
+[Sandboxes](/docs/guides/vps/sandboxes) (v0.5) are built on instances, and migration `vps/0004_sandboxes` marks the
+instances they own with two columns, never both set:
+
+| Column | The instance is | Created by |
+| --- | --- | --- |
+| `instances.sandbox_id` | The one instance a sandbox drives | `sandboxes.create` (a cold create), or a warm claim that moves it here |
+| `instances.warm_template_id` | A warm instance of a sandbox template, not claimed yet | The `vps.sandboxes` reconciler, owned by the template's author |
+
+Such an instance is admitted, placed, charged to quota, addressed, metered and deleted exactly like one from
+`instances.create`, but only its sandbox or its template moves it. `instances.start`, `stop`, `resize` and `delete`
+refuse it with `INVALID_STATE` ("Instance … is managed by sandbox …" or "… is a warm instance of sandbox template
+…"); use `sandboxes.delete` or `sandboxTemplates.update` instead. `instances.get` returns both kinds, and
+`instances.list` returns a sandbox's instance but hides warm instances. The `Instance` view does not name the sandbox;
+the sandbox's `instanceId` points the other way. The instance events vps publishes for them carry `data.sandboxId`
+or `data.warmTemplateId`.
+
+`tunnels.open` does not consult either column: a sandbox's instance takes `exec`, `ssh` and `tcp` tunnels like any
+other hosted instance once it is `running`, decided as `compute:instances:exec` on the instance, whose owner is the
+sandbox's owner. A warm instance is `paused` or `stopped`, so a tunnel to it is `INVALID_STATE`.
+
+### Paused instances
+
+`paused` is an instance state and a desired state (v0.5): vCPUs stopped, memory resident, the host and allocation
+kept. No API method asks for it; only warm pools do, on runtimes whose `RuntimeTraits.pause` is true. The lifecycle
+converges it like the other settled states: from `provisioning` it walks through `starting` and `running`, then
+pauses (`pause`); from `paused` it resumes to `running` (`resume`) or stops. A host reports it as
+`InstanceObservedState.PAUSED`, and a `lost` instance can recover to `paused`. A runtime without `pause` treats a
+desired `paused` as `stopped`, and vps never asks one for it: warm pools on such runtimes stay `stopped`.
 
 ## The reconciler
 
@@ -306,14 +347,17 @@ instance's own tenant. The guest gets no join token, no `bcd` and no IAM key.
 From the reports, the reconciler moves the instance:
 
 - When the reported state equals `desiredState`, it walks `state` there: `provisioning` to `starting` to `running`,
-  or `running` to `stopped` and back. Each step publishes `instance.<state>`.
+  `running` to `stopped` and back, or `running` to `paused` and back for warm instances. Each step publishes
+  `instance.<state>`.
 - A reported `error` moves it to `error` with a `RuntimeError` condition and publishes `instance.failed`.
 - While the report and `desiredState` disagree, it waits and looks again in 10 seconds.
 
 <Callout type="warn" title="The host side is not written yet">
-bcd's node agent is built and tested but not released, and it has no VM runtime and no `instances` converger: a
-non-empty `instances` section is reported `SectionUnsupported`. It can send a node-signed `SecretRequest` and open
-the sealed answer, but nothing in bcd asks for user data until the runtime exists. The TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
+bcd's node agent is built and tested but not released. It has the `instances` converger (the FakeHypervisor's
+rules, user data fetched with a `SecretRequest` bound to the allocation, every domain in its status reports), but a
+real host build has no runtime yet, so a non-empty `instances` section fails with `this host runs no instance
+runtime` and no VM boots on real hardware. Only fakehw builds run instances, on a file-backed stand-in runtime named
+`libvirt-kvm`; see [delivery](/docs/daemon/delivery#instances). The TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
 user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway
 with it.
 </Callout>
@@ -350,7 +394,8 @@ instance `lost`, and the reconciler stops polling it; delete it to refund its qu
 The gateway hands each node's coalesced `StatusReport` to `instanceStatusHandler`, inside its ingest transaction. The
 report's `instances` lists every VM the host's runtimes hold, managed or not:
 
-- States map from `InstanceObservedState`: `RUNNING`, `STOPPED` and `ERROR`. `UNSPECIFIED` entries are skipped.
+- States map from `InstanceObservedState`: `RUNNING`, `STOPPED`, `PAUSED` and `ERROR`. `UNSPECIFIED` entries are
+  skipped.
 - Only instances placed on the reporting node are touched, so one node can never move another node's instances.
 - Reported addresses are added to the instance's `addresses`.
 - With `instancesComplete: true` the list is the whole inventory: a placed instance missing from it is marked
@@ -393,7 +438,7 @@ A host becomes `lost` only when its `vps-host` pool sets `policy.lostAfter`: the
 the instance moves to `lost` and `instance.lost` is published with the `nodeId`. The reconciler then looks every 60
 seconds:
 
-- If the node reconnects and reports the instance `running` or `stopped`, it recovers to that state
+- If the node reconnects and reports the instance `running`, `stopped` or `paused`, it recovers to that state
   (`instance.recovered`).
 - If the pool's policy has `recreateOnHostLoss: true`, the instance releases its allocation and IP lease, goes back to
   `scheduling` (`instance.recreating`) and is placed again, on a host that is still schedulable, where it boots
@@ -415,20 +460,22 @@ interface RuntimeDriver {
   reboot(instanceId: string): Promise<void>;
   remove(instanceId: string): Promise<void>; // an absent instance counts as removed
   console?(instanceId: string): Promise<DuplexStream>; // the serial console, for tunnels
-  // v0.5 seams for the planned sandboxes: warm pools and snapshots
+  // v0.5, for sandboxes: warm pools and (planned) snapshots
   pause?(instanceId: string): Promise<void>; // vCPUs stopped, memory resident
   resume?(instanceId: string): Promise<void>;
   snapshot?(instanceId: string, target: RuntimeSnapshotTarget): Promise<RuntimeSnapshotResult>;
 }
 ```
 
-`pause`, `resume` and `snapshot` are optional seams for the planned v0.5
-[sandboxes](/docs/guides/vps/sandboxes#runtime-and-events). They go with the `paused` instance state and
-`InstanceSpec.restoreFrom`, which exist in core and the protocol but which `vps()` does not drive yet: no API method
-pauses, resumes or snapshots an instance in this release. A runtime without `pause` treats a desired `paused` as
-`stopped`.
+`pause` and `resume` serve [sandbox warm pools](/docs/guides/vps/sandboxes#warm-pools): a runtime that implements
+them sets `pause: true` in its `RuntimeTraits`, and `builtinRuntimeTraits` does so for `libvirt-kvm`,
+`cloud-hypervisor` and `firecracker` (not `containerd`). vps then keeps warm instances `paused` on that runtime; see
+[paused instances](#paused-instances). `snapshot` and `InstanceSpec.restoreFrom` are seams for sandbox snapshots,
+which are planned: no API method snapshots an instance in this release.
 
-`libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet.
+`libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet:
+bcd's `instances` converger drives them through its `Runtime` interface, and today only fakehw builds provide one, a
+file-backed stand-in named `libvirt-kvm`.
 Out-of-process runtimes (a Kata runtime as a bcx plugin, selected by pools) are planned for v0.5; see
 [drivers](/docs/extending/drivers). `vps({ runtimes })` only names the ids: the first one is recorded on every new
 hosted instance and sent in its spec.
@@ -440,7 +487,9 @@ daemon advertises in `Hello`; see [placement](/docs/guides/capacity/placement#el
 
 ## Events
 
-Instance events have subject `instance/<id>` and carry `state`, `desiredState` and `poolId`:
+Instance events have subject `instance/<id>` and carry `state`, `desiredState` and `poolId` (plus `sandboxId` or
+`warmTemplateId` for [sandbox and warm instances](#sandbox-and-warm-instances), and `reason: 'tenant deleted'` on
+`instance.deleting` during a tenant teardown):
 
 | Event                                                           | When                                                  |
 | --------------------------------------------------------------- | ----------------------------------------------------- |
@@ -470,9 +519,11 @@ only when the deployment configures tunnels. See [tunnels](/docs/guides/access/t
 A hosted instance can prove who it is to a third party (Better IAM's `sts/assumeRoleWithWebIdentity`, a cloud STS)
 with a short-lived OIDC token, `sub = "t:<tenantId>:instance:<instanceId>"`, that it fetches from its host's
 metadata service (IMDS). This is v0.5 and optional: the control plane half is built and tested end to end against
-the FakeDaemon (`tests/e2e/imds.test.ts`). `bcd` has the host's session half (`RequestWorkloadToken`: a node-signed
-`WorkloadTokenRequest` with a one-time key, the sealed answer opened and checked against the instance and request
-id), but no IMDS: no metadata server listens for instances yet, so nothing calls it.
+the FakeDaemon (`tests/e2e/imds.test.ts`). `bcd node` has both host halves: the session half (`RequestWorkloadToken`:
+a node-signed `WorkloadTokenRequest` with a one-time key, the sealed answer opened and checked against the instance
+and request id) and the metadata service, served on `[imds] listen` in its `config.toml` (for example
+`169.254.169.254:80` on the instances' bridge). It resolves the caller as the running instance whose address is the
+request's source. Since only fakehw builds of bcd run instances yet, no real VM reaches it; its Go tests cover it.
 
 ```mermaid
 sequenceDiagram

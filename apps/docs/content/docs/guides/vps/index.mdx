@@ -5,10 +5,10 @@ metaTitle: VPS instances with vps()
 icon: Instance
 status: beta
 packages: ['@better-compute/vps', '@better-compute/provider-hetzner', '@better-compute/provider-proxmox']
-sources: ['packages/vps/README.md', 'packages/vps/src/module.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/status.ts', 'packages/core/src/states.ts', 'daemon/internal/converge/converge.go', 'examples/shared/compose.ts', 'PLAN.md']
+sources: ['packages/vps/README.md', 'packages/vps/src/module.ts', 'packages/vps/src/sandboxes.ts', 'packages/vps/src/tenancy.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/status.ts', 'packages/core/src/states.ts', 'daemon/internal/converge/converge.go', 'examples/shared/compose.ts', 'PLAN.md']
 ---
 
-import { Cloud, Network, Server, SlidersHorizontal } from '@/lib/icons';
+import { Box, Cloud, Network, Server, SlidersHorizontal } from '@/lib/icons';
 
 Some of your capacity is best sold as whole machines, and some as virtual machines: a tenant wants a 2 vCPU box with
 an SSH key for a build agent, or an 8 vCPU VM with one L40S passed through, without renting a whole server. Other
@@ -113,12 +113,18 @@ Registering the module adds:
 
 - the `instances`, `flavors` and `providerAccounts` API groups
   ([instances](/docs/reference/api/instances), [flavors](/docs/reference/api/flavors),
-  [providerAccounts](/docs/reference/api/provider-accounts));
+  [providerAccounts](/docs/reference/api/provider-accounts)), and the v0.5 `sandboxes` and `sandboxTemplates` groups
+  ([sandboxes](/docs/reference/api/sandboxes), [sandboxTemplates](/docs/reference/api/sandbox-templates)) for
+  [sandboxes](/docs/guides/vps/sandboxes) on hosted pools;
 - the migrations `vps/0001_instances`, with the tables `flavors`, `provider_accounts`, `instances`, `ip_pools` and
-  `ip_leases`, `vps/0002_sealed_user_data` (`instances.user_data_sealed`) and `vps/0003_provider_bootstraps`
-  (`provider_bootstraps`, for [bootstrapping provider machines](/docs/extending/providers#bootstrapping-machines));
-- the `vps.instances` reconciler, woken through the <Term id="work-queue">work queue</Term> by every change, and
-  the `vps.usage` job, which meters hosted instances every 5 minutes;
+  `ip_leases`, `vps/0002_sealed_user_data` (`instances.user_data_sealed`), `vps/0003_provider_bootstraps`
+  (`provider_bootstraps`, for [bootstrapping provider machines](/docs/extending/providers#bootstrapping-machines))
+  and `vps/0004_sandboxes` (the tables `sandbox_templates` and `sandboxes`, the columns `instances.sandbox_id` and
+  `instances.warm_template_id`, and `paused` as a desired state);
+- the `vps.instances` reconciler, woken through the <Term id="work-queue">work queue</Term> by every change, the
+  `vps.sandboxes` reconciler (every 15 seconds: sandbox expiry, sandbox events and warm pools), and the `vps.usage`
+  job, which meters hosted instances every 5 minutes;
+- a `tenantDeleted` hook that deletes every instance of a deleted IAM tenant, sandboxes' and warm ones included;
 - an `instances` section in the <Term id="nodespec">NodeSpec</Term> of each hosted node;
 - the `runtime` driver kind, merged into `DriverKinds` of `@better-compute/core` when you import the package;
 - `doctor` findings for hosted pools: `vps.pools.runtime` (a runtime the deployment does not list),
@@ -193,15 +199,16 @@ stateDiagram-v2
 
 Every state except `deleted` and `deleting` can move to `deleting`, and most can move to `error` and `lost`. The
 full table is `instanceStateTable` in `@better-compute/core`. `rebooting` is in the table, but no API method enters
-it in this release.
+it in this release. `paused` (v0.5: `running` to `paused` by `pause`, back by `resume`) is used only by the warm
+pools of [sandboxes](/docs/guides/vps/sandboxes#warm-pools); see [paused instances](/docs/guides/vps/instances#paused-instances).
 
 The API returns the `Instance` view:
 
 <TypeTable
   type={{
     id: { type: 'string', description: 'inst_ followed by 52 characters, derived from the tenant, the caller and the idempotency key.', required: true },
-    state: { type: 'InstanceState', description: 'pending, scheduling, provisioning, starting, running, stopped, rebooting, resizing, deleting, deleted, error or lost.', required: true },
-    desiredState: { type: "'running' | 'stopped' | 'deleted'", description: 'What the reconciler converges toward.', required: true },
+    state: { type: 'InstanceState', description: 'pending, scheduling, provisioning, starting, running, stopped, rebooting, resizing, deleting, deleted, error, lost or (warm sandbox instances) paused.', required: true },
+    desiredState: { type: "'running' | 'stopped' | 'paused' | 'deleted'", description: "What the reconciler converges toward. Only sandbox warm pools ask for 'paused'.", required: true },
     flavor: { type: 'string', description: 'The flavor name the instance was admitted with.', required: true },
     imageId: { type: 'string', description: 'The image as the caller named it.', required: true },
     sshKeys: { type: 'string[]', description: 'The OpenSSH public keys from the request.', required: true },
@@ -234,19 +241,24 @@ allocation, IP lease, scalar claim or quota). What runs the VMs on a host is not
 | `vps.instances` reconciler, IPAM, `vps.usage` metering      | Shipped.                                                                                                                                                                                                                |
 | `hetzner-cloud` provider                                    | Shipped in `@better-compute/provider-hetzner`, tested against an in-memory emulator of the Hetzner Cloud API.                                                                                                           |
 | `proxmox` provider                                          | Shipped in `@better-compute/provider-proxmox` (PLAN.md scheduled it for v0.5), tested against an in-memory PVE emulator.                                                                                                |
-| Host runtimes `libvirt-kvm` and `cloud-hypervisor`          | Planned for bcd (v0.3). The `RuntimeDriver` contract and the protocol messages exist; bcd's node agent is built but not released, and it has no `instances` converger or runtime yet (a non-empty section is `SectionUnsupported`). |
+| Host runtimes `libvirt-kvm` and `cloud-hypervisor`          | Planned for bcd (v0.3). The `RuntimeDriver` contract and the protocol messages exist; bcd's node agent is built but not released. It has the `instances` converger, but only fakehw builds have a runtime (a file-backed stand-in); a real host build has none, so a non-empty section fails and no VM boots on real hardware. |
 | Runtimes as out-of-process plugins (Kata, and others)       | Planned for v0.5 with bcx.                                                                                                                                                                                              |
 | Single-tenant container runtimes                            | Planned for v0.3; the `RuntimeTraits` contract describes them, nothing enforces single tenancy yet.                                                                                                                     |
 | Interactive access (exec, SSH, TCP through a tunnel)        | `tunnels.open` with an `instanceId`, decided as `compute:instances:exec`: hosted instances only, and only when the deployment configures tunnels. The API reference lists it as planned. See [tunnels](/docs/guides/access/tunnels). |
-| Per-instance metadata service and workload identity         | v0.5, optional. The control plane half (the workload broker, the session frames, the issuer and its published JWKS) is built and tested against the FakeDaemon's metadata service; bcd has no IMDS yet. See [workload identity](/docs/guides/vps/instances#workload-identity). |
+| Sandboxes (`sandboxes`, `sandboxTemplates`)                 | v0.5: served. Templates, TTL expiry, warm pools of paused instances, the instance guard, tenant teardown (`tests/vps-sandboxes.test.ts`). Snapshots, exec, template `env` and `network` are planned. Like every hosted instance, a sandbox needs a host runtime. See [sandboxes](/docs/guides/vps/sandboxes). |
+| Per-instance metadata service and workload identity         | v0.5, optional. The control plane half (the workload broker, the session frames, the issuer and its published JWKS) is built and tested against the FakeDaemon's metadata service; bcd serves the same contract on `[imds] listen`, for instances of its fakehw stand-in runtime only so far. See [workload identity](/docs/guides/vps/instances#workload-identity). |
 
 The TypeScript `FakeDaemon` in `@better-compute/testing` speaks the real protocol for the simulator and
-`better-compute dev --sim N`, but it does not emulate a VM runtime: it never reports instances. The tests emulate
-hosts by calling `reportInstances` directly.
+`better-compute dev --sim N`. As a VPS host it runs a `FakeHypervisor` (domains, overlays, NoCloud seeds, pause and
+resume), which is how `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway. The unit
+suites, `tests/vps-sandboxes.test.ts` among them, emulate hosts by calling `reportInstances` directly.
 
 <Cards>
   <Card title="Instances" href="/docs/guides/vps/instances" icon={<Server />}>
     Create, start, stop, resize and delete; the reconciler, host reports, orphans and lost hosts.
+  </Card>
+  <Card title="Sandboxes" href="/docs/guides/vps/sandboxes" icon={<Box />}>
+    Templates, a time-to-live, warm pools of paused instances, and the instance each sandbox drives.
   </Card>
   <Card title="Flavors" href="/docs/guides/vps/flavors" icon={<SlidersHorizontal />}>
     Named shapes per pool, and how they become claims, quota and provider offers.

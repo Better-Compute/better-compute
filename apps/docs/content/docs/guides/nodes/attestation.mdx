@@ -18,6 +18,11 @@ sources:
   - packages/core/src/extension.ts
   - packages/provision/src/join-resolvers.ts
   - tests/pki-attestors-join.test.ts
+  - tests/pki-attestors-vectors.test.ts
+  - daemon/internal/agent/bootserver.go
+  - daemon/internal/agent/bootserver_test.go
+  - daemon/cmd/bcd/ramdisk.go
+  - daemon/internal/agent/join.go
 ---
 
 A join token proves that someone with access to your API wanted a machine to join. That is enough for a server
@@ -174,6 +179,21 @@ commissioning command kinds, `discoveryAllowedKinds` by default: `inventory.refr
 | `hardwareKey(claims)` | none | The trusted hardware key requests are keyed on; without one they key on site and MAC. |
 | `pendingTtlSeconds` | 86,400 | How long a pending request waits for a decision. |
 | `retryAfterSeconds` | 30 | When the ramdisk retries a deferred join. |
+
+### Both halves in bcd
+
+bcd produces this evidence on both sides. `bcd site` signs one assertion for every iPXE script its boot server
+renders, while it holds the boot lease: the site id, its own node id, the lease epoch, the MAC, the IP (from iPXE's
+query, else the connection), the product UUID (from iPXE, else the boot entry), the workflow, `issued_at` in server
+time, and a `not_after` of at most 15 minutes and never past the boot entry's, signed by its node key under purpose
+`discovery-assertion`. It fetches the machine's discovery token with a `SecretRequest` bound to the workflow and puts
+both on the ramdisk's kernel command line (`bc.token`, `bc.assertion`). `bcd ramdisk` reads them back, seals the
+token to the pinned JoinService key and sends `Join` with attestor `discovery`, role `ramdisk`, the serialized
+`SignedDiscoveryAssertion` as the attestation, and its hardware claims (MACs, product UUID). A deferral is retried
+with the same CSR. The Go tests check the assertion's fields and signature, and the TypeScript vectors pin the
+signing input, but no test yet joins a real `bcd ramdisk` through this attestor. See
+[the boot server](/docs/guides/bare-metal/sites#the-boot-server-in-bcd-site) and
+[the ramdisk](/docs/daemon/install#the-ramdisk).
 
 ## cloud-iid
 

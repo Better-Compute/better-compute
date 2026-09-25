@@ -48,10 +48,12 @@ agents that touch hardware are modes of the Go daemon `bcd`, and both exist but 
 `bcd site` runs BMC operations over Redfish (other BMC drivers answer `unsupported-driver`),
 `site.httpProxy`, boot entries and the pre-warmed image cache. While it holds the site boot lease it
 answers PXE and UEFI HTTP boot for prepared machines: proxy DHCP (it never hands out addresses),
-TFTP for the iPXE builds, and iPXE scripts over HTTP(S). `bcd ramdisk` runs `disk.wipe`, `deploy.image`, `boot.kexec`
-and `diag.dcgm`, and joins with the boot parameters on its kernel command line. The test suite
+TFTP for the iPXE builds, and iPXE scripts over plain HTTP. `bcd ramdisk` runs `disk.wipe`, `deploy.image`, `boot.kexec`
+and `diag.dcgm`, and joins with the boot parameters on its kernel command line. bcd is not released, only its Go
+unit tests run these modes, and nothing has run them against the control plane or a real machine; the iPXE builds
+and the ramdisk image (a kernel and initramfs with `bcd` and its tools) are yours to supply. The test suite
 still drives the whole lifecycle with simulated site agents and ramdisks
-(`tests/extensions/metal-sim.ts`).
+(`tests/extensions/metal-sim.ts`). See [what bcd does today](/docs/daemon#what-bcd-does-today).
 </Callout>
 
 ## Register the module

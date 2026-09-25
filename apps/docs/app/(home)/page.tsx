@@ -79,9 +79,9 @@ export default function HomePage() {
     {
       id: 'sandboxes',
       label: 'Sandboxes',
-      title: 'Isolated VMs, from flavor to teardown',
+      title: 'Isolated VMs, from template to teardown',
       claim:
-        'A sandbox is an instance with its own VM: sized by a flavor, admitted like a reservation, reached only through single-use tunnel tickets, and gone without a trace when deleted.',
+        'A sandbox is started from a template, claimed from a warm pool when one is waiting, admitted like a reservation, and deleted when its TTL runs out. Underneath it is an instance with its own VM, reached only through single-use tunnel tickets.',
       href: '/docs/guides/vps/sandboxes',
       linkLabel: 'Sandboxes',
       stage: <SandboxPanel />,

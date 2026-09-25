@@ -33,6 +33,9 @@ sources:
   - tests/gateway-tunnels.test.ts
   - tests/pki-access.test.ts
   - daemon/internal/agent/tunnels.go
+  - daemon/internal/agent/conn.go
+  - packages/gateway/src/store.ts
+  - packages/postgres/src/migrations/0024_session_capabilities.ts
   - daemon/internal/agent/pty_linux.go
   - daemon/internal/pki/tickets.go
   - daemon/internal/journal/bolt.go
@@ -68,12 +71,14 @@ sequenceDiagram
   end
 ```
 
-<Callout type="warn" title="Node consoles work in bcd; instance tunnels wait for the VM runtime">
+<Callout type="warn" title="Node consoles work in bcd; instance tunnels need a VM runtime">
   Every half is implemented and tested, including the daemon's (steps 8 and 9) in the Go `bcd`, which is built but
   not released. `tests/e2e/bcd.test.ts` opens a node console through the api's relay, the gateway and a real bcd, and
-  the shell's exit status comes back. bcd has no VM runtime yet, so an `exec` ticket for an instance closes at once
-  with exit status 127; see [the node half](#the-node-half). The TypeScript FakeDaemon answers every op with an echo
-  shell, so tunnels also open end to end in the tests and in `better-compute dev --sim N`.
+  the shell's exit status comes back. bcd dials instance `ssh` and `tcp` tunnels to the instance's own address, but
+  only a host that runs an instance runtime advertises `tunnel.instance-dial`, and today only fakehw builds have one;
+  on a real host build `tunnels.open` refuses instance `ssh` and `tcp` tunnels outright, and `exec` into an instance
+  closes at once with exit status 127. See [the node half](#the-node-half). The TypeScript FakeDaemon answers every
+  op with an echo shell, so tunnels also open end to end in the tests and in `better-compute dev --sim N`.
 </Callout>
 
 ## Turn tunnels on
@@ -233,6 +238,10 @@ It refuses what cannot be tunneled:
 | An unknown instance, a draft, another tenant's instance, or a node the tenant cannot see | `NOT_FOUND` |
 | A provider instance, which has no node agent to tunnel through | `UNSUPPORTED` |
 | An instance that is not `running`, or a node that is not connected to a gateway | `INVALID_STATE` |
+| An instance `ssh` or `tcp` tunnel whose node's current session does not advertise the `tunnel.instance-dial` capability (`node_sessions.capabilities`, from `Hello`) | `UNSUPPORTED` with `details: { reason: 'daemon-capability', capability }` |
+
+The capability check exists because a daemon that cannot dial the instance's own address would reach the host's
+loopback services instead. `exec` and node consoles do not need it.
 
 The result carries the ticket and where to use it:
 
@@ -487,15 +496,28 @@ A refused ticket opens nothing: bcd logs `tunnel refused` with the reason, and t
 10 seconds, exactly as if the node had not answered. A node without a pinned JWKS refuses every ticket, and at most
 16 tunnels are open at once.
 
-| Op | What bcd runs |
-| --- | --- |
-| `console` | A login shell (`/bin/bash -l`, or `/bin/sh -l`) as root in `/`, on a pseudo-terminal opened through `/dev/ptmx` without cgo. `resize` sets the window size, a hang-up sends `SIGHUP` to the shell's process group, and `closed` carries the shell's exit status |
-| `exec` | Without an instance in the ticket, the same shell. Into an instance, nothing: the tunnel closes with exit status 127 until bcd has an instances runtime |
-| `ssh` | A TCP connection to the node's own sshd on `127.0.0.1:22` |
-| `tcp` | A TCP connection to the ticket's `port` on `127.0.0.1` |
+A ticket that names an instance (`inst`) must reach that instance and nothing of the host, whose loopback (its sshd,
+admin ports, other tenants' forwards) is off limits to a tenant. So bcd runs different programs for node and instance
+tickets. When a program cannot start, the tunnel opens and closes at once with exit status 127 and the reason.
 
-`tunnels.open` issues `ssh` and `tcp` only for instances, and bcd has no VM runtime yet, so on a bcd host the
-`console` op is the one that is used today.
+| Op | Node ticket | Instance ticket |
+| --- | --- | --- |
+| `console` | A login shell (`/bin/bash -l`, or `/bin/sh -l`) as root in `/`, on a pseudo-terminal opened through `/dev/ptmx` without cgo. `resize` sets the window size, a hang-up sends `SIGHUP` to the shell's process group, and `closed` carries the shell's exit status | Refused: it needs a guest agent |
+| `exec` | Refused: `exec` is into an instance; a host shell is `console`, decided as `compute:nodes:console` | Refused: it needs a guest agent |
+| `ssh` | A TCP connection to the node's own sshd on `127.0.0.1:22` | A TCP connection to port 22 of the instance's own address |
+| `tcp` | A TCP connection to the ticket's `port` on `127.0.0.1` | A TCP connection to the ticket's `port` on the instance's own address |
+
+For an instance ticket bcd looks the instance up in its runtimes. It must be a running domain that bcd manages on
+this host (a stopped instance or one on another host is refused), and bcd dials the first of its reported addresses
+that is not loopback, link-local, multicast, unspecified or an address of the host itself, so an instance ticket
+never reaches the host.
+
+`tunnels.open` issues `ssh`, `tcp` and `exec` only for instances and `console` only for nodes. The API guards instance
+`ssh` and `tcp` with a capability: the node's current session must advertise `tunnel.instance-dial` in its `Hello`
+(stored in `node_sessions.capabilities`; see [sessions](/docs/daemon/sessions#hello)), or `tunnels.open` answers
+`UNSUPPORTED` before any ticket is minted. bcd advertises it only when it runs an instance runtime, which today means
+a fakehw build; on a real host build `console` is the only op that runs. An instance `exec` needs no capability, and
+bcd refuses it as above.
 
 ## The web terminal
 

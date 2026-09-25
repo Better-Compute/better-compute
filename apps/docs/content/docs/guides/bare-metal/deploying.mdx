@@ -16,6 +16,10 @@ sources:
   - packages/metal/src/profiles.ts
   - packages/metal/src/reconcile.ts
   - packages/pki/src/attestors/provisioned.ts
+  - daemon/internal/agent/ramdisk.go
+  - daemon/internal/agent/ramdisk_host.go
+  - daemon/internal/agent/site.go
+  - daemon/internal/redfish/redfish.go
   - PLAN.md
 ---
 
@@ -28,10 +32,12 @@ from a per-machine ISO, and Talos on machines that never run `bcd`. Each follows
 control plane learns it is up.
 
 <Callout type="warn" title="Status">
-None of these run on real hardware yet: they need `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
-modes, which are not written (only its node agent is). The Ubuntu and Talos walkthroughs run in the test suite against simulated site
-agents and machines (`tests/extensions/`), and the emulated-site configuration is checked to load
-and pass `better-compute doctor`.
+None of these has run on real hardware or VMs yet. They need `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
+modes, which are now written (see [what the ramdisk does](#what-the-ramdisk-does) and
+[the boot server](/docs/guides/bare-metal/sites#the-boot-server-in-bcd-site)) but not released, and tested only by
+the Go unit tests. The Ubuntu and Talos walkthroughs run in the test suite against simulated site agents and
+machines (`tests/extensions/`), and the emulated-site configuration is checked to load and pass
+`better-compute doctor`.
 </Callout>
 
 ## Adopt or PXE
@@ -68,7 +74,8 @@ A deployment that provisions metal needs, beyond the usual control plane:
 `examples/emulated-site` stands in for a rack: QEMU/KVM virtual machines are the servers,
 `sushy-emulator` gives each a Redfish BMC over libvirt, and a `bcd site` agent on the libvirt bridge
 runs proxy DHCP, iPXE and the image cache. It needs Linux with `/dev/kvm`, QEMU, libvirt, sushy-tools
-and a `bcd` build. Its configuration registers one hardware profile:
+and a `bcd` build, plus the iPXE builds and a ramdisk image, which the repository does not build. Nobody has run
+it end to end yet. Its configuration registers one hardware profile:
 
 ```ts title="examples/emulated-site/better-compute.config.ts"
 export const hardwareProfiles = {
@@ -111,8 +118,16 @@ better-compute api pools.create tenantId=root siteId=site_… class=metal-host \
   policy:='{"hardwareProfile":"emulated-redfish"}'
 ```
 
-Join a site agent on the `bc-site` network with the site token (`BCD_JOIN_TOKEN=bcjt_… bcd join`,
-then `bcd site --config /etc/bcd/config.toml`). It becomes the site's boot server.
+Join a site agent on the `bc-site` network with the site token (`BCD_JOIN_TOKEN=bcjt_… bcd join --role site`,
+then `bcd site --config /etc/bcd/config.toml`). Its `config.toml` needs a `[boot]` section with `proxy_dhcp`, `tftp`
+and `tftp_root` (the iPXE builds), `server_ip` and `url` on the bridge, and the ramdisk's `kernel` and `initrd`; see
+[installing bcd](/docs/daemon/install#a-site-agent). It becomes the site's boot server once the SiteBoot controller
+gives it the lease.
+
+One limit of `bcd site` matters here: its Redfish client uses only the host of each BMC address and drives the first
+system behind it (see [Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)). With one
+`sushy-emulator` serving both VMs, as above, both enrollments would drive the same first system, so this walkthrough
+cannot pass against today's `bcd site` as written.
 </Step>
 <Step>
 ### Register the image and the profile
@@ -188,6 +203,21 @@ agent, disk and diagnostics work to the machine's ramdisk:
 The deploy then sends `deploy.image` (the catalog source, digest, format and compression, plus a
 reference to the rendered user data) and `boot.kexec`. The user data travels only as a reference, and
 the deploy's ramdisk boot gets its own discovery token.
+
+### What the ramdisk does
+
+`bcd ramdisk` runs these kinds (`daemon/internal/agent/ramdisk.go`) under metal's names. Disks are named by WWN,
+else serial, never by kernel name, since kernel names are not stable across boots.
+
+| Kind | What bcd does |
+| --- | --- |
+| `disk.wipe` | The listed disks, or every non-removable one. `quick` (the default) zeroes the first and last MiB of each disk, where partition tables (with the GPT backup), filesystem, LVM, RAID and ZFS signatures live, and reads them back. `secure-erase` and `crypto-erase` use the drive's own command: `nvme format --ses=1` or `--ses=2` for NVMe, the ATA security erase through `hdparm` for SATA (no crypto erase there), else `blkdiscard --secure`. The result lists each disk's method and whether it was verified; a disk that was not wiped and verified fails the whole command (`wipe-unverified`), so `ready` rests on a verified wipe. A listed disk that is missing is `disk-missing` |
+| `deploy.image` | Picks the root disk from the hint (WWN, serial, device, or a minimum size; otherwise the smallest non-removable disk of at least 4 GiB), streams the image from the site cache by digest when `bc.cache` is set, else from its source URL, through SHA-256 (of the stored bytes) and gzip or zstd straight onto the disk, then re-reads the partition table. A digest mismatch zeroes the disk's ends again (`checksum-mismatch`), so a substituted image never boots. qcow2 is refused (`unsupported-format`). User data is fetched with a `SecretRequest` bound to the step and written as a cloud-init NoCloud seed on the root filesystem, or as Ignition's `config.ign` on the partition labelled `boot` |
+| `boot.kexec` | Journals `running{boot_id}`, loads the installed kernel and initrd from the root disk (the given paths, `/boot/vmlinuz`, or the newest `vmlinuz-*` with its initrd) with `root=UUID=<root> ro` plus the extra arguments, and runs `systemctl kexec` (or `kexec -e`). Self-terminating: it completes when the installed OS rejoins |
+| `diag.dcgm` | `dcgmi diag -r <level> -j` (levels 1 to 4, default 1), for the listed GPUs or all; `Pass` and `Skip` pass, anything else fails with its warnings as the message. Attested, so the result is node-signed |
+
+`inventory.refresh`, `diag.nvml` and `logs.collect` run in the ramdisk too. Under the `fakehw` build these act on
+disk image files, so the Go tests run the same logic on sparse multi-terabyte files.
 
 ## Walkthrough: Ubuntu autoinstall over virtual media
 
@@ -354,6 +384,14 @@ beyond talking to the machine itself, with `INVALID_INPUT`, before a command exi
 - Methods `GET`, `POST`, `PUT` and `DELETE`, with a timeout from 1 to 60 seconds (30 by default).
 
 A redirect is `DRIVER_ERROR` rather than followed, and so is a response over 1 MiB.
+
+`bcd site` enforces its own limits on each request, whatever the command says, and fails anything else with
+`forbidden-target`: `http` or `https` without credentials; `GET`, `POST`, `PUT` or `DELETE`; a host that resolves only
+to site-internal addresses (private, CGNAT `100.64.0.0/10` or unique-local; never loopback, link-local and so metadata
+services, multicast or public addresses), with the connection made to the address it checked, never a second lookup;
+no redirects; a timeout of at most a minute (30 seconds by default); the pinned SPKI when given; secret headers
+fetched with a `SecretRequest`. It truncates the response at 1 MiB and says so. It does not yet check the address
+against the target node's own addresses; the control plane's check above does.
 
 ## Release and retire
 

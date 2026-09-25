@@ -12,7 +12,8 @@ Better Compute tracks GPU and CPU capacity: what hardware exists, what is free, 
 set of GPUs to a few vCPUs and GiB of memory. The database referees every booking, so a GPU or a vCPU can never be
 given to two holders at once. It also makes machines useful: you can adopt a server that is already running, deploy
 an image to a bare machine over PXE, or run isolated VMs, as VPS or as [sandboxes](/docs/guides/vps/sandboxes), on
-your own hosts or on a provider's. Today a sandbox is a VPS instance; a dedicated sandbox API is planned for v0.5.
+your own hosts or on a provider's. A sandbox is a hosted VPS instance with a template, a time-to-live and an optional
+warm pool, served by the `sandboxes` and `sandboxTemplates` API groups of `vps()`.
 
 It is a library, not a hosted service. You construct the control plane with `betterCompute()` in your own process,
 on your own PostgreSQL, the same way you construct Better IAM with `betterIam()`:
@@ -180,15 +181,17 @@ plane for later phases has already landed; what is still open is mostly the Go d
 | v0.2 | Metal | Workflow engine, `metal()`, images and profiles, site tokens, join requests, write-only secrets, FleetConfig, XID health and remediation, node-signed attested results | `bcd site` and `bcd ramdisk`; emulation CI on real QEMU machines |
 | v0.3 | VPS and access | `vps()` with hosted and provider pools, the Hetzner provider, tunnels (including bcd's node half) and break-glass SSH (including bcd's `access` converger), webhooks and the SSE stream, MCP tools, delegated confirmation | The daemon's VM runtimes in bcd |
 | v0.4 | Scale and HA | Pool-lease placer, gateway WebSocket fallback, signed releases and rollouts, remote IAM mode, Merkle audit checkpoints, metrics | 10,000-node runs, `bcd helper`, daemon self-update |
-| v0.5 | GPU depth and ecosystem | Gang, calendar and spot reservations, MIG and time-slice atoms, dedicated-root metal, TPM attestor, the bcx driver SDK (draft), the Proxmox provider, the console kit; the sandbox catalog rows (actions, resource types, method table) and runtime seams (paused instances, snapshot restore) | Real-hardware MIG tests; the `sandboxes` API itself (templates, TTL, warm pools, snapshots) |
+| v0.5 | GPU depth and ecosystem | Gang, calendar and spot reservations, MIG and time-slice atoms, dedicated-root metal, TPM attestor, the bcx driver SDK (draft), the Proxmox provider, the console kit; sandboxes (templates, TTL expiry, warm pools of paused instances, the instance guard) and the snapshot seams | Real-hardware MIG tests; sandbox snapshots and exec, and the sandboxes exit test |
 | v1.0 | Freeze | Nothing yet | API and protocol freeze, security review, npm publication after Better IAM publishes |
 
 The daemon deserves a note. `daemon/` holds the Go module, and its v0.1 node agent works: `bcd join`, `bcd node`,
 `bcd status`, `bcd doctor` and `bcd version`, with the bbolt journal, the `devices` and `access` convergers, five
 command kinds (including `gpu.reset`), tunnels, XID and host-pressure reporting, and sealed secret and workload-token
 requests. `tests/e2e/bcd.test.ts` runs it against a real control plane and gateway. It is not released (no
-binaries have been published), NVML is still a stub, and `bcd site`, `bcd ramdisk` and `bcd sim` exit 2 with
-`NOT_IMPLEMENTED`. The TypeScript `FakeDaemon` in `@better-compute/testing` covers the rest, and it is what joins in
+binaries have been published), and NVML is still a stub. `bcd site` (Redfish BMC operations, proxy DHCP, TFTP, iPXE
+and the image cache) and `bcd ramdisk` (wipes, image streaming, kexec, DCGM) are written and covered by Go unit tests
+only; the `instances` converger runs only on fake-hardware builds; `bcd sim` exits 2 with `NOT_IMPLEMENTED`. The
+TypeScript `FakeDaemon` in `@better-compute/testing` covers the rest, and it is what joins in
 `better-compute dev --sim N`, the simulator and most test suites. See [what bcd does today](/docs/daemon#what-bcd-does-today)
 and the [roadmap](/docs/reference/roadmap) for each phase's exit tests.
 

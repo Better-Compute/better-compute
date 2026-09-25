@@ -204,9 +204,10 @@ policy `gpu-user` that `better-compute iam setup` prints includes
 
 Every create and extend is decided by Better IAM, so once a tenant's spend passes its budget no new
 reservation, extension or instance is allowed. Reservations and instances that are already running continue.
-The two sandbox actions are there for the planned v0.5 sandboxes (`sandboxes:update` covers `extend` and
-`snapshot`); nothing serves them yet. On top of the decision, `reservations.create`, `reservations.extend` and
-`instances.create` run a per-pool budget check after it (`budgetAdmissionCheck`): when the pool's `policy.admission.budgetCheck` is `'meter'`, or the tenant's
+The two sandbox actions cover [sandboxes](/docs/guides/vps/sandboxes): `sandboxes.create`, and `sandboxes.extend`
+under `sandboxes:update` (which will also cover the planned `snapshot`). On top of the decision,
+`reservations.create`, `reservations.extend`, `instances.create` and `sandboxes.create` run a per-pool budget check
+after it (`budgetAdmissionCheck`): when the pool's `policy.admission.budgetCheck` is `'meter'`, or the tenant's
 offering has `onBudgetExceeded: 'stop-new'` or `'drain'`, they call Better IAM's `billing.check` and refuse a
 spent budget with [`SPEND_LIMIT_REACHED`](/docs/reference/errors#spend_limit_reached) (402). On an exceeded
 budget alert, `serve`'s default IAM handler also publishes `quota.budget-exceeded` for `notify`, `stop-new` and

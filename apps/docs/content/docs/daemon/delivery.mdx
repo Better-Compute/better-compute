@@ -31,6 +31,12 @@ sources:
   - daemon/internal/agent/access.go
   - daemon/internal/agent/gpureset.go
   - daemon/internal/agent/kinds.go
+  - daemon/internal/agent/site.go
+  - daemon/internal/agent/bootserver.go
+  - daemon/internal/agent/cache.go
+  - daemon/internal/agent/instances.go
+  - daemon/internal/runtime/runtime.go
+  - packages/metal/src/commands.ts
   - tests/e2e/bcd.test.ts
   - .claude/coordination.md
   - PLAN.md
@@ -117,9 +123,11 @@ The daemon stores the last full spec, its hash and its signature in the journal,
 a retryable failure keeps the section `PROGRESSING` and it is retried on the next pass. A section the daemon has no
 converger for converges trivially when empty and is `UNSUPPORTED` otherwise, which counts as terminal, with
 condition `SectionUnsupported` (reason: the field number) so the rest of the spec still converges. bcd applies the
-rule with `converge.Run`. It has convergers for `devices`, `access` and `telemetry` (which accepts the section;
-bcd's own OTLP exporter is not written), so in bcd today a non-empty `host`, `instances`, `daemon` or `site` section
-is `UNSUPPORTED`, and so is a section number it does not know. The FakeDaemon, in turn, converges `instances` and
+rule with `converge.Run`. It has convergers for `devices`, `access`, `instances` (below), `telemetry` (which accepts
+the section; bcd's own OTLP exporter is not written) and `site` (the boot lease the boot server obeys, and the
+`cache_images` the site agent pulls into its image cache: the section stays `PROGRESSING` while images warm and
+`FAILED` for an image whose bytes do not match its digest). So in bcd today a non-empty `host` or `daemon` section is
+`UNSUPPORTED`, and so is a section number it does not know. The FakeDaemon, in turn, converges `instances` and
 `daemon` when its options enable them but has no `access` converger.
 
 The daemon reports progress in `StatusReport`: observed and applied generation, the spec hash, one
@@ -150,8 +158,36 @@ The `access` section carries what sshd and the tunnel code on the node trust. bc
 this node's own principals (`<account>@<nodeId>` only) and a KRL of the revoked serials into `/etc/ssh`, plus a
 drop-in that points sshd at them, and reloads sshd only when that drop-in changes; an empty section removes all of
 it. It also keeps the exec-ticket JWKS, which every `OpenTunnel` is verified against, and takes a new one on every
-pass, even when no file changes. See
+pass, even when no file changes. Because the CA keys and principals become lines of sshd's files, bcd refuses rather
+than strips anything that could add a line: a CA key or principal with a control character, a CA key that is not
+exactly one OpenSSH public key, or a principal with whitespace makes the whole spec invalid, signed or not, and it is
+not applied (the converger checks again and fails terminally). See
 [break-glass SSH](/docs/guides/access/ssh#what-the-node-needs) and [tunnels](/docs/guides/access/tunnels#the-node-half).
+
+### Instances
+
+The `instances` section is the whole set of VMs and containers a VPS host should run. bcd's converger (on node
+agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHypervisor` rules:
+
+- A domain bcd created that no spec names is removed, and so is one whose desired state is `DELETED`. A domain bcd
+  did not create is never touched, only reported, so the control plane can flag it as a leak.
+- User data is never in the spec: bcd fetches it with a `SecretRequest` bound to the instance's allocation before it
+  defines the domain. A refusal fails that instance; an unavailable broker keeps the section `PROGRESSING`.
+- Desired states are `RUNNING`, `PAUSED` (a resume is not a boot) and `STOPPED`. After a host reboot the runtime's
+  domains are stopped and the next pass starts the ones that should run.
+- An unknown runtime, a bad image, refused user data or a start beyond the host's capacity fails only that instance
+  (`ERROR` with its message); the section is then `FAILED` with reason `InstanceFailed`.
+- On a host with a runtime, every status report lists everything the runtimes hold in `StatusReport.instances`,
+  with `instances_complete`.
+- `restore_from` boots a new instance from a snapshot instead of an image. bcd downloads it to
+  `data_dir/snapshots/<sha256>` and verifies it first; a missing digest, a mismatch, another runtime, or a memory
+  snapshot from another CPU model fails that instance. The `instance.snapshot` command writes one: the runtime
+  captures the disk (and with `include_memory` the memory state), and bcd hashes it and uploads it to a presigned
+  https URL.
+
+Only fakehw builds have a runtime: a file-backed stand-in named `libvirt-kvm` whose domains outlive the process and
+honor vCPU and memory limits. A host build has none yet (`libvirt-kvm` and `cloud-hypervisor` are not written), so a
+non-empty section fails with `this host runs no instance runtime` and no VM boots on real hardware.
 
 ## Commands
 
@@ -224,14 +260,43 @@ signature is refused even when the lane has no credit.
 
 | Lane | Gateway credits | Daemon workers | For |
 | --- | --- | --- | --- |
-| `control` | 8 | 4 | Short, latency-sensitive work: diagnostics, inventory, reboots, resets |
-| `provision` | 4 | 2 | Provisioning steps: wipe, deploy, kexec (v0.2) |
+| `control` | 8 | 4 | Short, latency-sensitive work: diagnostics, inventory, reboots, resets, BMC operations, kexec |
+| `provision` | 4 | 2 | Long provisioning work: disk wipes, image writes, DCGM diagnostics (v0.2) |
 | `bulk` | 2 | 1 | Large transfers and slow jobs: log collection, image pre-warm |
 
 Credits bound the commands admitted at once, running or waiting for a worker; workers bound the ones running. Each
 lane has a fixed worker pool, never a goroutine per command, and a per-resource lock (a GPU UUID, a disk, an
 allocation) keeps two lanes from acting on the same device at once. A command holds its credit from acceptance until
 its result is journaled.
+
+### Kinds by lane
+
+These are the kinds bcd registers (`daemon/internal/agent/kinds.go` and `site.go`), with the lanes, roles and flags
+of `commandKinds` in `@better-compute/protocol`, `metalCommandKinds` in `@better-compute/metal` and
+`instanceSnapshotKind` in `@better-compute/vps`. A kind outside
+the agent's role is `UNSUPPORTED`.
+
+| Lane | Kind | Roles | Flags |
+| --- | --- | --- | --- |
+| `control` | `inventory.refresh` | node, site, ramdisk | retry-safe |
+| `control` | `diag.nvml` | node, ramdisk | retry-safe, attested |
+| `control` | `gpu.reset` | node | attested, destructive |
+| `control` | `node.reboot` | node, site | retry-safe, self-terminating, destructive |
+| `control` | `bmc.query`, `bmc.boot` | site | retry-safe |
+| `control` | `bmc.power`, `bmc.firmware`, `bmc.storage` | site | destructive |
+| `control` | `bmc.rotate` | site | attested |
+| `control` | `site.httpProxy` | site | |
+| `control` | `boot.prepareRamdisk`, `boot.cleanUp` | site | retry-safe |
+| `control` | `boot.kexec` | ramdisk | self-terminating |
+| `provision` | `disk.wipe` | ramdisk | attested, destructive |
+| `provision` | `deploy.image` | ramdisk | destructive |
+| `provision` | `diag.dcgm` | ramdisk, node | retry-safe, attested |
+| `bulk` | `logs.collect` | node, site, ramdisk | retry-safe |
+| `bulk` | `instance.snapshot` | node | none (not retry-safe) |
+
+What each metal kind does on the agent is on [BMC drivers](/docs/guides/bare-metal/bmc#redfish-in-bcd-site),
+[sites](/docs/guides/bare-metal/sites#the-boot-server-in-bcd-site) and
+[deploying](/docs/guides/bare-metal/deploying#what-the-ramdisk-does).
 
 ### Results and acknowledgements
 
@@ -252,7 +317,9 @@ The CommandSweeper, a singleton, runs every 5 seconds: a `pending` command past 
 `dispatched`, `acked` or `running` one past `not_after` plus its kind's timeout becomes `failed` with reason
 `timeout`. For self-terminating kinds the timeout covers the rejoin window. The built-in timeouts are 2 minutes for
 `diag.nvml` and `inventory.refresh`, 5 for `gpu.reset`, and 15 for `logs.collect` and `node.reboot`; an unregistered
-kind gets 15 minutes.
+kind gets 15 minutes. Metal registers its own: 1 minute for `site.httpProxy`, 2 for `bmc.query`, `bmc.boot`,
+`boot.prepareRamdisk` and `boot.cleanUp`, 5 for `bmc.power` and `bmc.rotate`, 15 for `boot.kexec`, an hour for
+`bmc.firmware`, `bmc.storage`, `diag.dcgm` and `deploy.image`, and 6 hours for `disk.wipe`.
 
 ### Cancel
 
@@ -288,7 +355,8 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   as v0.1 allows. The daemon's own kind table decides which kinds require a signature, never a flag the body could
   carry: destructive kinds from v0.2, all kinds from v0.4. bcd enforces nothing until its trust bundle holds
   command-signing roots; from then on a present signature is always checked and its destructive kinds
-  (`gpu.reset`, `node.reboot`) require one.
+  (`gpu.reset`, `node.reboot`, `bmc.power`, `bmc.firmware`, `bmc.storage`, `disk.wipe`, `deploy.image`) require
+  one.
 - **Signed desired state.** Specs have the same envelope under purpose `desired-state`. With
   `pki.commandSigning`, the NodeSpec controller signs each new generation's `DesiredStateBody` with the worker key
   (`CommandSigner.signDesiredState`) in the transaction that bumps the generation, and every bump rewrites both
@@ -299,8 +367,8 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   unsigned spec with a high generation would freeze all later ones; `'access'` for a control plane that signs only
   access changes; refusals in `specRejections`). bcd implements the `'always'` rule: once it holds command-signing
   roots, a spec without a valid signature is logged and not applied.
-- **Attested results.** For attested kinds (`diag.*`, `gpu.reset`, and later `wipe`, `deploy.*`, `firmware.*`) the
-  node signs `CommandUpdate.node_sig` over the command id, the state and the SHA-256 of the result, and allocation
+- **Attested results.** For attested kinds (`diag.nvml`, `diag.dcgm`, `gpu.reset`, `disk.wipe`, and `bmc.rotate`
+  signed by the site agent) the node signs `CommandUpdate.node_sig` over the command id, the state and the SHA-256 of the result, and allocation
   reports travel as node-signed `AttestedReport`s. Workers verify them against `node_certs` before any state
   transition; the gateway never judges or strips them. With `attestedBindings` (on by default with
   `pki.commandSigning`), a reservation goes active only on the node's own signed `AllocationBound`; see
@@ -367,8 +435,9 @@ journal first (`journal.Resolve`):
 
 At start, `journal.Recover` settles the entries whose outcome needs no server input (`rebooted` and `interrupted`)
 so they go out in `Hello.unacked_results`; retry-safe entries wait for the server to redeliver them, so a
-re-execution passes the `not_after` and `min_generation` checks again. `wipe`, `deploy.*`, `firmware.*` and
-`gpu.reset` are not retry-safe. `journal.Sweep` deletes done entries older than 7 days, and accepted or running
+re-execution passes the `not_after` and `min_generation` checks again. `disk.wipe`, `deploy.image`, `boot.kexec`,
+`bmc.power`, `bmc.rotate`, `bmc.firmware`, `bmc.storage`, `site.httpProxy`, `instance.snapshot` and `gpu.reset` are not
+retry-safe. `journal.Sweep` deletes done entries older than 7 days, and accepted or running
 entries that an earlier process left and nothing redelivered within those 7 days (the server has long expired them);
 entries of the running process are never swept.
 

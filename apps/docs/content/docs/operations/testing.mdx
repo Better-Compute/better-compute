@@ -19,6 +19,7 @@ sources:
   - packages/testing/src/sim/cold-start.ts
   - tests/sim/cold-start.test.ts
   - tests/nightly/cold-start.nightly.ts
+  - bench/cold-start/README.md
   - packages/testing/src/realtime/harness.ts
   - packages/testing/src/realtime/fleet.ts
   - packages/iam/src/testing.ts
@@ -34,6 +35,13 @@ sources:
   - scripts/daemon-test.mjs
   - scripts/daemon-fixtures.mjs
   - tests/e2e/bcd.test.ts
+  - daemon/internal/agent/site_test.go
+  - daemon/internal/agent/bootserver_test.go
+  - daemon/internal/agent/ramdisk_test.go
+  - daemon/internal/agent/cache_test.go
+  - daemon/internal/redfish/redfish_test.go
+  - daemon/internal/pxe/pxe_test.go
+  - tests/e2e/bcd-vps.test.ts
   - packages/testing/src/dev/stack.ts
   - docs/development.md
   - package.json
@@ -242,6 +250,23 @@ node scripts/daemon-test.mjs --build-bcd              # also writes daemon/bin/b
 | `--build-bcd` | Also build the fakehw `bcd` for linux/amd64 |
 | `packages...` | Go package patterns (default `./...`) |
 
+**Site agent, ramdisk and instances.** The site agent and ramdisk have Go tests only; no end-to-end or interop suite
+runs `bcd site` or `bcd ramdisk` against the control plane yet (a VPS host has one, below). The agent tests drive a real `Agent` over a scripted
+session (`newHarness`), answering its `SecretRequest`s with sealed JWEs:
+
+| Test | Checks |
+| --- | --- |
+| `internal/agent` `TestSiteBMCAndBootEntries` | A BMC that does not answer succeeds with `ok: false` and `unreachable`; the credential is fetched for the workflow step; another driver is `unsupported-driver`; boot entries persist, lapse and are removed by `boot.cleanUp`; the site kinds are refused on a node |
+| `TestHTTPProxyRefusesTargetsOutsideTheSite` | Loopback, the metadata address, a public address and `ftp://` fail `forbidden-target`; private, CGNAT and ULA addresses are site addresses |
+| `TestParseCredentialForms` | JSON and bare-password BMC credentials, with the username fallback |
+| `TestBootServerRendersARamdiskScript` | 503 without the lease, 404 for an unknown MAC, then a script whose kernel line `bootparams.Parse` reads back, with the discovery token fetched once and an assertion signed by the agent's key at the lease epoch; 503 again once the gateway has been silent past the lease TTL |
+| `TestDiskWipeQuickVerifies`, `TestDeployImageStreamsAndChecksTheDigest`, `TestPickRootDiskAndDCGM`, `TestPartitionsAndBootFiles` | Quick wipes zero and verify both ends of sparse fake disks and are node-signed; a gzip image lands byte for byte with its user data; a wrong digest fails `checksum-mismatch` and leaves the disk's ends zeroed; root-disk choice, DCGM parsing, `lsblk` parsing and kernel lookup |
+| `TestSiteCacheWarmsAndServes`, `TestDeployImageFromTheSiteCache` | The image cache pulls `cache_images`, verifies them by digest and serves `/cache/<sha256>`; `deploy.image` takes the image from the cache |
+| `TestInstancesConverger` | The `instances` converger over the fake runtime |
+| `internal/redfish` `TestRedfishOperations` | Every operation against a fake Redfish service over TLS pinned by SPKI; after a rotation the old password is `auth-failed`; an unknown operation is `unsupported`; a wrong pin and a plain-http BMC are refused |
+| `internal/pxe` `TestProxyDHCPAnswersPreparedMachines`, `TestTFTPServesFilesUnderItsRoot` | On real loopback UDP sockets: PXE firmware of a prepared MAC gets `ipxe.efi` with the client's UUID and architecture read, iPXE gets the chain URL, an unprepared MAC gets no answer; TFTP serves a file from its root |
+| `internal/bootparams` `TestRenderParseRoundTrip`, `cmd/bcd` `TestRamdiskNeedsBootParameters` | The kernel command line round-trips; `bcd ramdisk` without its parameters exits 2 |
+
 **End to end.** `tests/e2e/bcd.test.ts` runs the real binary (linux/amd64, fakehw, `BCD_FAKEHW_SEED=41`) against
 `createDevStack({ externalTls })`: the dev stack's mTLS listener with a dev serving CA, which the test pins in a
 generated `config.toml` together with the join keys, `gateway_server_name = "gw.dev.local"` and a data directory
@@ -256,8 +281,13 @@ under `/tmp`. It checks that:
   real shell in bcd: `echo hi-$((6*7))` answers `hi-42`, and `exit 5` comes back as exit code 5;
 - `node.reboot` completes `SUCCEEDED` from the next boot, with the new boot id recorded in `node_sessions`.
 
-On Linux the suite runs in `pnpm test` whenever Go is installed; it builds the binary first. On Windows it is opt-in:
-it needs `BCD_E2E=1`, a WSL distribution, and Go at `C:\Program Files\Go\bin` (or an existing
+`tests/e2e/bcd-vps.test.ts` runs the same fakehw binary as a VPS host: bcd joins a `vps-host` pool over the dev
+stack's mTLS listener, `instances.create` places an instance on it, the `instances` converger defines and starts it
+on the file-backed `libvirt-kvm` stand-in, `StatusReport.instances` carries it and the vps module moves it to
+`running`, and `instances.delete` removes the domain from the host. It has the same gating.
+
+On Linux the suites run in `pnpm test` whenever Go is installed; they build the binary first. On Windows they are
+opt-in: they need `BCD_E2E=1`, a WSL distribution, and Go at `C:\Program Files\Go\bin` (or an existing
 `daemon/bin/bcd-linux-amd64`). bcd runs in WSL through `wsl -e`, never a shell, and reaches the gateway at WSL's
 default route. `BCD_E2E_LOG=1` streams bcd's log to standard error.
 
@@ -393,7 +423,17 @@ spent in each part of the loop.
 | Where | Size |
 | --- | --- |
 | `tests/sim/cold-start.test.ts` | 24 nodes, in CI: boot and power cycle each within 3 simulated minutes, nothing marked unreachable |
-| `tests/nightly/cold-start.nightly.ts` (`pnpm sim:nightly`) | `COLD_START_NODES` (default 10,000), `COLD_START_GATEWAYS` (3), `COLD_START_SPREAD_MS` (30,000), `COLD_START_SEED` (`1`); writes a report to `COLD_START_OUT` (default `bench/cold-start/results`). About 15 minutes of wall time at 10k nodes on a desktop |
+| `tests/nightly/cold-start.nightly.ts` (`pnpm sim:nightly`) | `COLD_START_NODES` (default 10,000), `COLD_START_GATEWAYS` (3), `COLD_START_SPREAD_MS` (30,000), `COLD_START_SEED` (`1`); writes a report to `COLD_START_OUT` (default `bench/cold-start/results`). The recorded 10k run took 641 s of wall time on a 64-vCPU workstation |
+
+The recorded 10k run (`bench/cold-start/README.md`) was ready at 80 simulated seconds: every node connected by
+30 s (p99 29.7 s, bound by the power-on spread), adopted by 79 s and schedulable at 80 s, and every node was back
+40 s after the power cycle, with 0 unreachable marks and 0 invariant violations. Run it alone with:
+
+```bash
+COLD_START_NODES=10000 node node_modules/vitest/vitest.mjs run --config vitest.nightly.config.ts tests/nightly/cold-start.nightly.ts
+```
+
+See [scaling](/docs/operations/scaling#cold-start) for the 1k and 10k results side by side.
 
 ## Real-time harnesses
 

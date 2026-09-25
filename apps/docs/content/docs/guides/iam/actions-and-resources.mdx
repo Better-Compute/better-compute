@@ -45,8 +45,8 @@ resource, it calls compute's <Term id="resolver">resolver</Term>, which answers 
 | `compute-image` | An OS or ramdisk image | | | `visibility`, `verified` |
 | `compute-profile` | A provisioning profile | | | |
 | `compute-provider-account` | An account with an external capacity provider | | | |
-| `compute-sandbox` | A sandbox (v0.5, planned): a VPS instance with a template and a lifetime, decided while it is still a draft | `compute-pool` | | `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `fromSnapshot`, `warm` |
-| `compute-sandbox-template` | A tenant's sandbox template (v0.5, planned): pool, flavor, image, runtime, TTL bounds, warm pool | | | |
+| `compute-sandbox` | A [sandbox](/docs/guides/vps/sandboxes) (v0.5): a VPS instance with a template and a lifetime, decided while it is still a draft | `compute-pool` | | `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `fromSnapshot`, `warm` (vps writes all but `fromSnapshot`, which waits for snapshot restore) |
+| `compute-sandbox-template` | A tenant's sandbox template (v0.5): pool, flavor, image, runtime, TTL bounds, warm pool | | | |
 
 Besides a row's attributes, every resolved resource carries `ownerId` when the row has an owner, and the prefixed
 `parentType` and `parentId` of its parent. Better IAM turns the parent into `resource.parentRelations`, so a
@@ -225,6 +225,8 @@ bridge, allowing each only when granted.
 | [`nodes.revokeIdentity`](/docs/reference/api/nodes#revokeidentity) | `compute:nodes:revoke-identity` | `compute-node` | v0.1 |
 | [`nodes.delete`](/docs/reference/api/nodes#delete) | `compute:nodes:delete` | `compute-node` | v0.2 |
 | [`nodes.issueSshCert`](/docs/reference/api/nodes#issuesshcert) | `compute:nodes:ssh-root` | `compute-node` | v0.3 |
+| [`nodes.revokeSshCert`](/docs/reference/api/nodes#revokesshcert) | `compute:nodes:ssh-root` | `compute-node` | v0.3 |
+| [`nodes.listSshCerts`](/docs/reference/api/nodes#listsshcerts) | `compute:nodes:read` | `compute-node` | v0.3 |
 | [`inventory.get`](/docs/reference/api/inventory#get) | `compute:nodes:read` | `compute-node` | v0.1 |
 | [`inventory.history`](/docs/reference/api/inventory#history) | `compute:nodes:read` | `compute-node` | v0.2 |
 | [`inventory.diff`](/docs/reference/api/inventory#diff) | `compute:nodes:read` | `compute-node` | v0.2 |
@@ -333,18 +335,18 @@ bridge, allowing each only when granted.
 | [`providerAccounts.offers`](/docs/reference/api/provider-accounts#offers) | `compute:providers:read` | `compute-provider-account` | v0.3 |
 | [`providerAccounts.update`](/docs/reference/api/provider-accounts#update) | `compute:providers:manage` | `compute-provider-account` | v0.3 |
 | [`providerAccounts.delete`](/docs/reference/api/provider-accounts#delete) | `compute:providers:manage` | `compute-provider-account` | v0.3 |
-| [`sandboxes.create`](/docs/reference/api/sandboxes#create) | `compute:sandboxes:create` | `compute-sandbox` (the draft) | v0.5, planned |
-| [`sandboxes.list`](/docs/reference/api/sandboxes#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5, planned |
-| [`sandboxes.get`](/docs/reference/api/sandboxes#get) | `compute:sandboxes:read` | `compute-sandbox` | v0.5, planned |
-| [`sandboxes.extend`](/docs/reference/api/sandboxes#extend) | `compute:sandboxes:update` | `compute-sandbox` | v0.5, planned |
+| [`sandboxes.create`](/docs/reference/api/sandboxes#create) | `compute:sandboxes:create` | `compute-sandbox` (the draft) | v0.5 |
+| [`sandboxes.list`](/docs/reference/api/sandboxes#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |
+| [`sandboxes.get`](/docs/reference/api/sandboxes#get) | `compute:sandboxes:read` | `compute-sandbox` | v0.5 |
+| [`sandboxes.extend`](/docs/reference/api/sandboxes#extend) | `compute:sandboxes:update` | `compute-sandbox` | v0.5 |
 | [`sandboxes.snapshot`](/docs/reference/api/sandboxes#snapshot) | `compute:sandboxes:update` | `compute-sandbox` | v0.5, planned |
 | [`sandboxes.exec`](/docs/reference/api/sandboxes#exec) | `compute:sandboxes:exec` | `compute-sandbox` | v0.5, planned |
-| [`sandboxes.delete`](/docs/reference/api/sandboxes#delete) | `compute:sandboxes:delete` | `compute-sandbox` | v0.5, planned |
-| [`sandboxTemplates.create`](/docs/reference/api/sandbox-templates#create) | `compute:sandboxes:manage` | `compute-tenant` | v0.5, planned |
-| [`sandboxTemplates.list`](/docs/reference/api/sandbox-templates#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5, planned |
-| [`sandboxTemplates.get`](/docs/reference/api/sandbox-templates#get) | `compute:sandboxes:read` | `compute-sandbox-template` | v0.5, planned |
-| [`sandboxTemplates.update`](/docs/reference/api/sandbox-templates#update) | `compute:sandboxes:manage` | `compute-sandbox-template` | v0.5, planned |
-| [`sandboxTemplates.delete`](/docs/reference/api/sandbox-templates#delete) | `compute:sandboxes:manage` | `compute-sandbox-template` | v0.5, planned |
+| [`sandboxes.delete`](/docs/reference/api/sandboxes#delete) | `compute:sandboxes:delete` | `compute-sandbox` | v0.5 |
+| [`sandboxTemplates.create`](/docs/reference/api/sandbox-templates#create) | `compute:sandboxes:manage` | `compute-tenant` | v0.5 |
+| [`sandboxTemplates.list`](/docs/reference/api/sandbox-templates#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |
+| [`sandboxTemplates.get`](/docs/reference/api/sandbox-templates#get) | `compute:sandboxes:read` | `compute-sandbox-template` | v0.5 |
+| [`sandboxTemplates.update`](/docs/reference/api/sandbox-templates#update) | `compute:sandboxes:manage` | `compute-sandbox-template` | v0.5 |
+| [`sandboxTemplates.delete`](/docs/reference/api/sandbox-templates#delete) | `compute:sandboxes:manage` | `compute-sandbox-template` | v0.5 |
 
 ### Fleet and rollouts
 

@@ -16,6 +16,8 @@ sources:
   - bench/realtime-spine/results
   - bench/multi-gateway/README.md
   - bench/multi-gateway/results
+  - bench/cold-start/README.md
+  - bench/cold-start/results
   - packages/core/src/shard.ts
   - packages/server/src/options.ts
   - packages/server/src/runtime/index.ts
@@ -62,7 +64,7 @@ never share a host with the process they measure.
 | IAM lane | v0.1 | Embedded better-iam on adapter-postgres sustains 50 or more admissions/s (about 150 lock acquisitions/s) with lock wait below 50%; record the ceiling; below 200 admissions/s, propose R1 (D18) | not run: it needs Postgres |
 | Placements | v0.1 | Placements/s recorded | 35.7/s inline, 1k nodes, PGlite (see below) |
 | Place to active | v0.1 | p99 below 2 s with 1k FakeDaemons in the real-time harness | 1.02 s at 5/s in the first runs; 101 to 191 ms at 5/s and 176 ms at 10/s in later runs |
-| Cold start | v0.4 | 10k nodes in under 3 min | simulated time only: 24 nodes pass in CI (`runColdStart`); the 10k nightly has no recorded result; not measured on the wall clock |
+| Cold start | v0.4 | 10k nodes in under 3 min | simulated time only (`runColdStart`, 3 gateways, PGlite): 10k nodes all connected, adopted and schedulable at 80 s (connected p99 29.7 s, bound by the 30 s power-on spread), all back 40 s after a power cycle, 0 unreachable marks, 0 violations; not measured on the wall clock or on Postgres |
 | Gateway kill | v0.4 | Recovery under 60 s, 0 false unreachable marks, 0 duplicate executions | 10k nodes, 3 gateways, in simulated time: re-home p99 13.25 s, 0 invariant violations |
 | Placements at scale | v0.4 | 200 or more placements/s | pool-lease end to end on PGlite: 1,092/s at 1k nodes; 464/s at 10k nodes in the latest recorded run (see below) |
 | Commands | v0.4 | p99 below 1.5 s with polling only | ack p99 378 ms at 100 commands/s on 1k nodes, PGlite |
@@ -194,6 +196,23 @@ simulated time, then kills one gateway without disconnect writes or a lease rele
 The gate (p99 below 60 s) holds at 10k. Re-homing grows with the fleet because a third of the nodes redial at once
 into two gateways, whose handshake buckets and Hello transactions pace them. I1, I2, I5 and I8 held afterwards: no
 command ran twice.
+
+### Cold start
+
+`bench/cold-start` runs `runColdStart` with 3 real gateways and the real control plane on PGlite, in simulated time
+(see [testing](/docs/operations/testing#cold-start)). Every node powers on within a 30 s spread; the fleet is ready
+when every node is connected, adopted (after its `diag.nvml` acceptance) and schedulable. Then every gateway dies
+for 10 s and every node reboots.
+
+| Nodes | Connected p99 / all | Adopted p99 / all ready | Power cycle, all back | Unreachable | Violations | Wall |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1,000 (`workerPasses` 1) | 29.8 s / 30.0 s | 79 s / 80 s | 40 s | 0 | 0 | 73 s |
+| 10,000 | 29.7 s / 30.0 s | 79 s / 80 s | 40 s | 0 | 0 | 641 s |
+
+The gate (under 3 minutes) holds at 10k with room to spare. Connection is bound by the power-on spread, and
+adoption takes the same time at 1k and 10k (p50 55 s): it is paced by the acceptance command and the node pass,
+not by throughput. Invariants I1 to I5 and I8 held. Of the 10k run's wall time, 327 s went to the reconcilers and
+46 s to the gateways' jobs, both on the one PGlite. The run does not measure Postgres CPU, the separate v0.4 gate.
 
 ## How each tier scales
 

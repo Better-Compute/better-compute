@@ -8,8 +8,9 @@ import { ResourceSwitch, type ResourcePane } from './resource-switch';
  * The three kinds of capacity, each with the calls that book it. Checked against the code: reservations.create's
  * validated input (packages/capacity/src/reservations.ts: devices, topology 'any' | 'nvlink-all', duration in ms,
  * binding), flavors (packages/vps/src/flavors.ts: vcpu 1-1024, memoryGiB, diskGiB, gpus 0-16), instances.create
- * (packages/vps), and tunnels.open (packages/server/src/tunnels/module.ts: instances take exec, ssh or tcp and get a
- * single-use `ticket`).
+ * (packages/vps), and sandboxTemplates.create / sandboxes.create / sandboxes.extend (packages/vps/src/sandboxes.ts:
+ * template name, pool, flavor, image, TTL bounds, warm {min, max}; create takes templateId, ttlSeconds, wait
+ * {timeoutMs ≤ 30 s}; extend takes exactly one of until or by).
  */
 const panes: (Omit<ResourcePane, 'code'> & { source: string })[] = [
   {
@@ -73,31 +74,35 @@ const vm = await client.instances.create({
     label: 'Sandbox',
     unit: 'isolated VMs',
     summary:
-      'Run untrusted code in its own VM. Nothing of the platform runs inside the guest, user data is sealed to its tenant, and access goes through single-use tunnel tickets. Today a sandbox is a VPS instance; a sandboxes API with templates, lifetimes, warm pools of paused VMs and snapshots is planned for v0.5.',
+      'Run untrusted code in its own VM, started from a template and deleted when its time is up. A template keeps warm instances ready, so a sandbox is claimed instead of cold-booted. Nothing of the platform runs inside the guest. The API is built and tested against simulated hosts; the VM runtime on bcd is not built yet, and snapshots and exec are planned.',
     specs: [
-      ['Isolation', 'vm, microvm or container trait'],
+      ['Started from', 'a template: pool, flavor, image'],
+      ['Lifetime', 'TTL from admission, extendable'],
+      ['Warm pool', 'warm.min instances kept ready'],
       ['Inside', 'no join token, no bcd, no IAM key'],
-      ['Access', 'exec, ssh, tcp via tunnels.open'],
-      ['Status', 'instances: beta · sandboxes API: v0.5'],
     ],
     href: '/docs/guides/vps/sandboxes',
     linkLabel: 'Sandboxes',
-    source: `const sandbox = await client.instances.create({
-  tenantId,
+    source: `const template = await compute.api.sandboxTemplates.create(cred, {
+  tenantId: 'acme',
+  name: 'ci-runner',
   poolId: 'pool_cpu',
   flavor: 'sbx.small',
   imageId: 'ubuntu-24.04',
-  idempotencyKey: \`sandbox-\${jobId}\`,
+  maxTtlSeconds: 86_400,
+  warm: { min: 4 }, // four instances booted and waiting
 });
 
-const { ticket } = await client.tunnels.open({
-  tenantId,
-  instanceId: sandbox.id,
-  op: 'exec', // or 'ssh', or 'tcp' with a port
+const sandbox = await client.sandboxes.create({
+  tenantId: 'acme',
+  templateId: template.id,
+  ttlSeconds: 1800, // deleted 30 minutes after admission
+  idempotencyKey: \`job-\${jobId}\`,
+  wait: { timeoutMs: 20_000 },
 });
+// { id: 'sbx_…', state: 'ready', warm: true, instanceId, expiresAt }
 
-// …run the job through the tunnel, then tear it down:
-await client.instances.delete({ tenantId, instanceId: sandbox.id });`,
+await client.sandboxes.extend({ tenantId: 'acme', sandboxId: sandbox.id, by: '30m' });`,
   },
 ];
 

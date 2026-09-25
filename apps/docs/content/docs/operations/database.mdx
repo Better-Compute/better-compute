@@ -167,7 +167,7 @@ Migrations run in registration order:
 | `iam` | `0001_successors` |
 | `provision` | `0001_workflows`, `0002_images`, `0003_workflow_owner`, `0004_gated_mig_layout` |
 | `metal` | `0001_nodes`, `0002_addresses`, `0003_tenant_root`, `0004_bmc_credentials` |
-| `vps` | `0001_instances`, `0002_sealed_user_data`, `0003_provider_bootstraps` |
+| `vps` | `0001_instances`, `0002_sealed_user_data`, `0003_provider_bootstraps`, `0004_sandboxes` (`sandbox_templates`, `sandboxes`, `instances.sandbox_id` and `warm_template_id`, and `paused` allowed in `instances.desired_state`) |
 | `events` | `0001_webhooks`, `0002_delivery_retention` |
 | `fleet` | `0001_names`, `0002_applied` |
 | `rollout` | `0001_rollouts` |

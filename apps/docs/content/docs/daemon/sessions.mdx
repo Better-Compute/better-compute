@@ -14,6 +14,9 @@ sources:
   - packages/postgres/src/migrations/0008_session_versions.ts
   - packages/postgres/src/migrations/0016_duplicate_identity.ts
   - packages/postgres/src/migrations/0023_session_trust_version.ts
+  - packages/postgres/src/migrations/0024_session_capabilities.ts
+  - packages/server/src/tunnels/module.ts
+  - daemon/internal/agent/tunnels.go
   - packages/server/src/controllers/liveness.ts
   - packages/testing/src/daemon/fake-daemon.ts
   - daemon/internal/session/session.go
@@ -88,8 +91,23 @@ itself (see `bench/gateway-streams`).
 
 bcd builds it from the journal (the rules of `session.NewHello`): done results not yet acked, and entries of the
 current daemon process that are not done. After a daemon restart the process is new, so `running_command_ids` is
-empty and the crash rules below apply instead. On a node with GPUs, bcd advertises the capabilities `cdi` and
-`nvml` and the driver `nvidia`.
+empty and the crash rules below apply instead.
+
+`capabilities` are free-form names the daemon claims for itself. The gateway writes them, as sent in each `Hello`,
+to `node_sessions.capabilities` (migration `core/0024_session_capabilities`): only names matching
+`[a-z0-9][a-z0-9._-]{0,63}`, de-duplicated, sorted, at most 64. A daemon that stops advertising a capability loses it
+at its next session. The API reads the column to refuse what the connected daemon cannot do safely:
+
+| Capability | Checked by | Means |
+| --- | --- | --- |
+| `tunnel.instance-dial` | `tunnels.open` | The daemon dials an instance's own address for instance `ssh` and `tcp` tunnels. Without it those tunnels are `UNSUPPORTED` with details `{ reason: 'daemon-capability', capability }`; `exec` and node consoles are not affected |
+
+On a node with GPUs, bcd advertises the capabilities `cdi` and `nvml` and the driver `nvidia`, and a node agent
+lists each instance runtime it runs as a driver of kind `runtime` (only `libvirt-kvm`, the file-backed stand-in of
+fakehw builds, today). A node agent that runs an instance runtime also advertises `tunnel.instance-dial`, because
+it then dials an instance ticket to the instance's own address, never the host's (see
+[tunnels](/docs/guides/access/tunnels#the-node-half)); a host build, which has no runtime yet, does not. The FakeDaemon
+advertises it when its tunnels are configured.
 
 ### The Hello transaction
 
@@ -105,7 +123,7 @@ One transaction, fenced by the gateway's lease, does everything the reconnect pr
    ```sql
    UPDATE node_sessions SET gateway_id = $gw, session_id = $s, session_epoch = session_epoch + 1,
      boot_id = $boot, journal_id = $journal, role = $role, daemon_version = $v, proto_max = $max,
-     trust_version = $trust,
+     trust_version = $trust, capabilities = $caps,
      acked_event_seq = CASE WHEN journal_id IS DISTINCT FROM $journal THEN 0 ELSE acked_event_seq END,
      connected_at = compute_now(), last_seen = compute_now(), disconnected_at = NULL
    WHERE node_id = $node
@@ -161,14 +179,20 @@ unacked events and its latest status. It evaluates every `not_after` in server t
 advanced at every `Welcome` and heartbeat; a `Welcome` whose `server_time` lies more than 5 minutes before the mark
 ends the session ("server time went backwards"). Otherwise a gateway could set the daemon's clock back into an
 expired worker certificate's window and replay old signed commands. bcd and the FakeDaemon both enforce it, and bcd
-also keeps the mark in `identity.json` so that a lost journal does not reset it. A `trust` bundle is accepted only
+also keeps the mark in `identity.json` so that a lost journal does not reset it. A `Welcome` inside the 5-minute
+allowance is accepted, but it never moves the daemon's working clock back: both take the latest of the `Welcome`'s
+time, the stored mark and the clock the process already runs on. Otherwise a gateway could reconnect "a few minutes
+earlier" and replay an expired command, or a tunnel ticket whose `jti` was already pruned; bcd also keeps spent
+ticket ids 5 minutes past their expiry. A `trust` bundle is accepted only
 when it verifies under the pinned join-signing key and its version is newer than the one held.
 
 The daemon acknowledges a newly applied bundle in its next `StatusReport` (`trust_version`), not at the next
 reconnect. The gateway stores the `Hello` value in `node_sessions.trust_version` as is, even when it is lower than
 before (a restored disk), and a status report only ever raises it; `pki rotate-command-root --stage switch` waits
-until every connected node holds the new version (see [PKI](/docs/operations/pki)). bcd and the FakeDaemon send the
-version in `Hello` and in every status report.
+until every connected node holds the new version (see [PKI](/docs/operations/pki)). Both daemons send the version in
+`Hello`. The FakeDaemon repeats it in every status report; bcd sets it only in the first report it sends after
+applying a newer bundle and leaves it 0 (unchanged) otherwise, which spares the gateway a `node_sessions` update per
+report.
 
 ## Epochs and fencing
 

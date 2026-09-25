@@ -2,7 +2,7 @@
   {
     "id": "sandbox",
     "term": "Sandbox",
-    "definition": "An isolated place to run untrusted code. In Better Compute it is a VPS instance: its own VM sized by a flavor of vCPUs, memory, disk and optional GPUs, with no platform secrets inside and access only through audited tunnels. A `sandboxes` API with templates, lifetimes, warm pools and snapshots is planned for v0.5 and not served yet.",
+    "definition": "An isolated place to run untrusted code, served by `sandboxes.create`: one hosted VPS instance made from a per-tenant template (pool, flavor, image), with a time-to-live after which it is deleted, and optionally claimed from the template's warm pool of paused (or stopped) instances. Instance methods refuse a sandbox's instance. Snapshots and exec are planned.",
     "href": "/docs/guides/vps/sandboxes"
   },
   {
@@ -50,7 +50,7 @@
   {
     "id": "bcd",
     "term": "bcd",
-    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. Its v0.1 node agent (`bcd join`, `bcd node`, `bcd status`) is built and tested end to end but not released; the `site`, `ramdisk` and `sim` modes are not written, and the TypeScript `FakeDaemon` stands in for them.",
+    "definition": "The Better Compute daemon: one Go binary that runs on servers (`node`), site agents (`site`) and inside the PXE ramdisk (`ramdisk`), dials out to a gateway, runs commands and converges its NodeSpec. None of it is released. Its v0.1 node agent (`bcd join`, `bcd node`, `bcd status`) is tested end to end; `bcd site` and `bcd ramdisk` are written and covered by Go unit tests only; `bcd sim` and real VM runtimes are not written, and the TypeScript `FakeDaemon` stands in where bcd is missing.",
     "href": "/docs/daemon"
   },
   {
@@ -368,7 +368,7 @@
   {
     "id": "ramdisk",
     "term": "Ramdisk",
-    "definition": "The PXE-booted initramfs in which bcd runs as `bcd ramdisk` to inspect, burn in, wipe and image a machine. Its certificate lasts at most 2 hours and allows only the commissioning command kinds.",
+    "definition": "The PXE-booted initramfs in which bcd runs as `bcd ramdisk` to inspect, burn in, wipe and image a machine. It takes the gateway, pins, a single-use discovery token and the site agent's signed assertion from its kernel command line, joins with the `discovery` attestor, and keeps its identity in tmpfs, so every boot is a new one. Its certificate lasts at most 2 hours and allows only the commissioning command kinds (`disk.wipe`, `deploy.image`, `boot.kexec`, `diag.*`, `inventory.refresh`, `logs.collect`).",
     "href": "/docs/guides/bare-metal/deploying"
   },
   {
@@ -428,7 +428,7 @@
   {
     "id": "site-agent",
     "term": "Site agent",
-    "definition": "bcd running as `bcd site` on a site's provisioning and BMC networks, stored as a node with `role: 'site'`. It relays BMC operations, serves network boot while it holds the site's boot lease, and caches images.",
+    "definition": "bcd running as `bcd site` on a site's provisioning and BMC networks, stored as a node with `role: 'site'` and joined with a site token. It runs BMC operations (Redfish only today) and `site.httpProxy`, serves network boot (proxy DHCP, TFTP, iPXE scripts with signed discovery assertions) only to prepared machines while it holds the site's boot lease, and keeps a digest-verified image cache for the site's ramdisks.",
     "href": "/docs/guides/bare-metal/sites"
   },
   {

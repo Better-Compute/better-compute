@@ -310,6 +310,10 @@ Reconcilers from the built-in modules, for reference:
 | `rollout` | rollout | `none` | `all` every `30s` |
 | `audit.checkpoint` | audit | `none` | `checkpoint` every `1h` |
 | `iam.inbox`, `iam.reconcile`, `iam.usage` | iam | `none` | `2s`, `5m`, `1h` |
+| `vps.instances`, `vps.bootstraps` | vps | `none` | edge-triggered, with `notBefore` wake-ups |
+| `vps.hosts` | vps | `none` | `all` every `30s` (`vps({ hostSyncEvery })`) |
+| `vps.sandboxes` | vps | `none` | `all` every `15s`: sandbox expiry, `sandbox.ready` and `sandbox.deleted`, warm pools |
+| `vps.usage` | vps | `none` | `all` every `5m` |
 
 All but `capacity.placer` run in the `controllers` role. Tests and the simulator step them without timers:
 `await compute.jobs['acme.widgets'].tick()` runs one batch.
@@ -454,4 +458,4 @@ export const acmeWidgets = () =>
 
 The built-in hooks: `capacity` ends the tenant's reservations, withdraws offers to it and archives the pools it
 owns; `provision` aborts its workflows, soft deletes its private images and profiles and revokes its image
-signers; `metal` retires every machine it owns.
+signers; `metal` retires every machine it owns; `vps` deletes its instances through the ordinary lifecycle.

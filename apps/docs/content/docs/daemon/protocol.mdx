@@ -31,6 +31,12 @@ sources:
   - daemon/internal/agent/requests.go
   - daemon/internal/agent/tunnels.go
   - daemon/internal/pki/secrets.go
+  - daemon/internal/agent/site.go
+  - daemon/internal/agent/bootserver.go
+  - daemon/internal/agent/ramdisk.go
+  - daemon/cmd/bcd/ramdisk.go
+  - packages/metal/src/commands.ts
+  - packages/gateway/src/store.ts
   - daemon/buf.gen.yaml
   - scripts/daemon-proto-gen.mjs
   - tests/e2e/bcd.test.ts
@@ -130,7 +136,9 @@ never from a frame. `Join` also carries the hardware claims, the attestor name (
 `x509pop`, `provisioned` and `discovery` in v0.2; `cloud-iid` in v0.3; `tpm` in v0.5), attestor evidence, the
 daemon version and the role. A `JoinResponseBody` may carry a `JoinDeferral` (v0.2) instead of a certificate: the
 daemon then sends `Join` again with the same CSR, after `retry_after_seconds` or with its answer to a challenge.
-The join flow is described in [joining nodes](/docs/guides/nodes/joining).
+The join flow is described in [joining nodes](/docs/guides/nodes/joining). bcd sends `join-token` (for `bcd join`,
+as role `node` or `site`) and `discovery` (for `bcd ramdisk`, as role `ramdisk`, with the site agent's serialized
+`SignedDiscoveryAssertion` as the evidence); it answers no attestor challenge yet.
 
 PLAN.md places JoinService and the secret broker in the api, behind internal mTLS. The gateway consumes them as a
 port, `GatewayServices` (`join`, `renew`, `secret`, `trustBundle`), so the gateway package never imports the
@@ -147,7 +155,7 @@ send frames as they need to.
 | `heartbeat` | Free lane credits, coarse load, applied generation; inventory hashes on every 10th |
 | `update` | A `CommandUpdate`: acked, running, or a terminal outcome |
 | `events` | An `EventBatch` of journaled events for one `journal_id` |
-| `status` | A `StatusReport`: observed and applied generation, section states, conditions; from v0.3 the hosted instances and `pressure` (`HostPressure`: CPU, memory and I/O PSI "some" avg10 and CPU steal); `trust_version` once the daemon applied a newer trust bundle mid-session (0 means unchanged; bcd sets it in every report) |
+| `status` | A `StatusReport`: observed and applied generation, section states, conditions; from v0.3 the hosted instances and `pressure` (`HostPressure`: CPU, memory and I/O PSI "some" avg10 and CPU steal); `trust_version` once the daemon applied a newer trust bundle mid-session (0 means unchanged; bcd sets it only in the first report after the change, the FakeDaemon in every report) |
 | `inventory` | One `InventorySection`: the canonical encoding of a section and its SHA-256 |
 | `spec_request` | Asks for a full `DesiredState` |
 | `secret_request` | Asks for one secret, sealed to a one-time key (v0.2) |
@@ -184,8 +192,10 @@ bcd builds the request and opens the answer in `daemon/internal/pki/secrets.go` 
 `OpenSecretResponse`): the JWE has `typ` `bcsecret+jwe` and must be bound to the same reference and request id and
 unexpired, and a refusal surfaces its error code. The agent matches answers by request id on the session that sent
 the request, waits at most 10 seconds and ignores an answer to nothing. The Go tests check both directions against
-fixtures produced by `@better-compute/pki`. No bcd feature sends a `SecretRequest` yet; the VM runtime (user data)
-and ramdisk deploys will.
+fixtures produced by `@better-compute/pki`. These bcd features send one: a site agent's BMC operations (the
+credential, and for `bmc.rotate` the new one) and `site.httpProxy` secret headers, bound to the command's workflow
+step; its boot server's discovery tokens, bound to the boot entry's workflow; the ramdisk's `deploy.image` user data,
+bound to the step; and a VPS host's instance user data, bound to the instance's allocation.
 
 ### Workload tokens (v0.5)
 
@@ -197,8 +207,8 @@ gateway relays it to `GatewayServices.workloadToken` outside the frame queue, an
 `not-bound`, `disabled`, `audience`, `rate-limited`, `access-denied` or `unavailable`. A gateway without the service
 answers `unavailable`, and a tenant-controlled session always gets `access-denied`. bcd implements the host's half
 the same way as secrets (`NewWorkloadTokenRequest`, `OpenWorkloadTokenResponse`, a `bcworkload+jwe` answer bound to
-the instance and the request id), but it has no metadata service to call it yet. See
-[workload identity](/docs/guides/vps/instances#workload-identity).
+the instance and the request id), and its metadata service (`[imds] listen`) calls it for the running instance that
+holds the request's source address. See [workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels (v0.3)
 
@@ -248,7 +258,7 @@ part  = uint32_be(len(bytes)) || bytes
 | `workload-token` | node key | `[request_id, instance_id, audience, epk]` (v0.5) |
 | `renew-pop` | current node key | `[sha256(csr), node_id, client_time]` |
 | `x509pop` | node key of a possibly expired certificate | `[sha256(csr), node_id, client_time]` |
-| `discovery-assertion` | site agent node key | `[SignedDiscoveryAssertion.body]` |
+| `discovery-assertion` | site agent node key (`bcd site`, one per iPXE script it serves) | `[SignedDiscoveryAssertion.body]` |
 
 Worker keys chain to the command-signing roots of the `TrustBundle` the daemon received in `JoinResponse`, and a
 newer bundle arrives in `Welcome.trust`, signed by the pinned JoinService key. The daemon accepts a bundle only
@@ -274,7 +284,9 @@ Refusals that end a stream use gRPC status codes:
 
 **Negotiation.** `Hello` carries `proto_min`, `proto_max`, `daemon_version` and `capabilities`. The gateway picks
 the highest version inside both ranges (`negotiateProtocolVersion`) and returns it in `Welcome.protocol_version`,
-along with its own capabilities. Today both sides speak exactly version 1 (`PROTOCOL_VERSION = { min: 1, max: 1 }`
+along with its own capabilities. It also stores the daemon's capabilities as `node_sessions.capabilities`, so the API
+can refuse what an old daemon cannot do safely: `tunnels.open` opens an instance `ssh` or `tcp` tunnel only when the
+node advertises `tunnel.instance-dial` (see [sessions](/docs/daemon/sessions#hello)). Today both sides speak exactly version 1 (`PROTOCOL_VERSION = { min: 1, max: 1 }`
 in TypeScript, `ProtoMin` and `ProtoMax` in Go). When the ranges do not overlap, the daemon is below the server's
 minimum: `Welcome.upgrade_required` is set, no desired state or command other than `daemon.upgrade` is sent, and
 the FakeDaemon and bcd reject anything else `UNSUPPORTED`. bcd has no `daemon.upgrade` kind yet, so an upgrade-only
@@ -303,8 +315,11 @@ freeze them. Within the frozen packages, change is absorbed at every level:
 ## Built-in command kinds
 
 `commands.proto` holds the payloads and results of the v0.1 kinds, and `commandKinds` in `@better-compute/protocol`
-holds their flags; the daemon's dispatcher must carry the same table. Later kinds (`diag.dcgm`, `wipe`, `deploy.*`,
-`boot.kexec`, `driver.invoke`, `daemon.upgrade`) add their own messages.
+holds their flags; the daemon's dispatcher must carry the same table. Later kinds add their own messages: the
+ramdisk's `diag.dcgm`, `disk.wipe`, `deploy.image` and `boot.kexec` in `bettercompute.agent.v1`, the site agent's
+`bmc.*`, `site.httpProxy`, `boot.prepareRamdisk` and `boot.cleanUp` in `bettercompute.site.v1` (their flags are
+`metalCommandKinds` in `@better-compute/metal`, and bcd implements them), then `driver.invoke` and `daemon.upgrade`,
+which bcd does not.
 
 | Kind | Lane | Retry-safe | Self-terminating | Attested | Destructive | Roles |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -314,4 +329,5 @@ holds their flags; the daemon's dispatcher must carry the same table. Later kind
 | `node.reboot` | control | yes | yes | no | yes | node, site |
 | `gpu.reset` | control | no | no | yes | yes | node |
 
-Module kinds and timeouts are in [command kinds](/docs/reference/command-kinds).
+Metal's kinds, by lane, are in [delivery](/docs/daemon/delivery#kinds-by-lane); every module kind and its timeout
+is in [command kinds](/docs/reference/command-kinds).

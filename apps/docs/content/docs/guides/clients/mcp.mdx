@@ -21,8 +21,9 @@ sources:
 ---
 
 `@better-compute/mcp` turns the compute API into [Model Context Protocol](https://modelcontextprotocol.io) tools, so
-an AI agent can find GPU capacity, reserve and release GPUs, create, stop, start and delete VPS instances (the
-[sandboxes](/docs/guides/vps/sandboxes) of today), look at a node and run a diagnostic. It is built for
+an AI agent can find GPU capacity, reserve and release GPUs, create, stop, start and delete VPS instances, look at a
+node and run a diagnostic. There are no tools for [sandboxes](/docs/guides/vps/sandboxes) yet; an agent calls the
+`sandboxes` API directly. It is built for
 the v0.3 goal "an agent reserves via MCP with human confirmation, retrying with the same key", and the end-to-end
 test `tests/mcp-e2e-confirmation.test.ts` runs exactly that against a real server and an embedded Better IAM.
 

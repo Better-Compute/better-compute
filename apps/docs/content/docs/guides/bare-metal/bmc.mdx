@@ -8,6 +8,7 @@ sources:
   - packages/metal/README.md
   - packages/metal/src/kinds.ts
   - packages/metal/src/api.ts
+  - packages/metal/src/schemas.ts
   - packages/metal/src/steps.ts
   - packages/metal/src/commands.ts
   - packages/metal/src/bmc-rotation.ts
@@ -20,6 +21,9 @@ sources:
   - tests/metal-driver-kinds.test.ts
   - tests/metal-bmc-rotation.test.ts
   - tests/metal-lifecycle.test.ts
+  - daemon/internal/agent/site.go
+  - daemon/internal/redfish/redfish.go
+  - daemon/internal/redfish/redfish_test.go
   - PLAN.md
 ---
 
@@ -72,9 +76,10 @@ export const redfish = defineDriver({
 
 The built-in drivers (Redfish, IPMI and vendor BMCs through bmclib, PXE, iPXE and UEFI HTTP boot,
 image streaming and kexec) run inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2 modes.
-Today `bcd site` drives Redfish BMCs only: IPMI and the vendor BMCs through bmclib are not built, and an operation
-for another driver answers `unsupported-driver`. Out-of-process drivers in any language arrive with bcx and
-`@better-compute/driver-sdk` in v0.5. See [drivers](/docs/extending/drivers).
+Today `bcd site` drives Redfish BMCs only, with the operations in [Redfish in bcd site](#redfish-in-bcd-site): IPMI
+and the vendor BMCs through bmclib are not built, and an operation for another driver answers `unsupported-driver`.
+Out-of-process drivers in any language arrive with bcx and `@better-compute/driver-sdk` in v0.5. See
+[drivers](/docs/extending/drivers).
 
 ## How BMC operations run
 
@@ -104,13 +109,48 @@ are all on the `control` lane and accepted only by agents with role `site`:
 | `bmc.power` | `power.setPower`, `metal.power` | no | destructive | 5m |
 | `bmc.rotate` | `metal.rotateBmcCredential` | no | attested by the site agent | 5m |
 | `bmc.firmware` | firmware reflash | no | destructive | 1h |
+| `bmc.storage` | `raid.apply` (a v0.5 draft) | no | destructive | 1h |
 | `boot.prepareRamdisk` | boot entries for a PXE boot | yes | none | 2m |
 | `boot.cleanUp` | removing a node's boot entries | yes | none | 2m |
 | `site.httpProxy` | one HTTP request to an agentless machine | no | none | 1m |
 
 A power cycle is not idempotent, so `bmc.power` is never retried blindly. From v0.2 agents refuse
 destructive kinds that lack a worker signature over the command body, so a compromised gateway
-cannot forge one. See [security](/docs/operations/security).
+cannot forge one. bcd does so once its trust bundle holds command-signing roots. See
+[security](/docs/operations/security).
+
+## Redfish in bcd site
+
+`bcd site` answers every `bmc.*` kind with its Redfish client (`daemon/internal/redfish`). For each command it
+fetches the credential with a `SecretRequest` bound to the command's workflow step, reads it as the enrolled
+`{ username, password }` JSON or as a bare password (with the step's `username` argument as the account; the same
+fallback fills a JSON without a username), and runs the operation:
+
+| Operation | Redfish request | Result |
+| --- | --- | --- |
+| `power.getPower` | `GET` the first `ComputerSystem` | `{ power: 'on' \| 'off' \| 'unknown' }` |
+| `power.setPower` | `POST .../Actions/ComputerSystem.Reset` with the `ResetType` of [power](#power) | `{}` |
+| `management.setBootDevice` | `PATCH` the system's `Boot`: `BootSourceOverrideTarget` `Pxe`, `UefiHttp`, `Hdd` or `Cd` for `pxe`, `http`, `disk` and `cd`; `Once`, or `Continuous` when `persistent`; `UEFI`, or `Legacy` when `uefi` is false | `{}` |
+| `virtual-media.insert`, `virtual-media.eject` | `InsertMedia` (an http(s) image URL) or `EjectMedia` on the first manager's first virtual media device that takes a CD or DVD | `{}` |
+| `inspect.inspect` | the system and its `EthernetInterfaces` | `macs`, `ipAddresses`, `manufacturer`, `model`, `serialNumber`, `productUuid`, `power` |
+| `firmware.components` | `UpdateService/FirmwareInventory` | `components: [{ id, name, version }]` |
+| `management.rotateCredential` | `PATCH` the `AccountService` account with the new password (fetched by `newCredentialRef`), then a login with it | `{ verified }` |
+
+- **Transport.** HTTPS with basic authentication only; a plain-http address is refused (`invalid-address`). With
+  `tlsSpkiSha256` the BMC's certificate must match that SPKI hash, since BMCs mostly present self-signed
+  certificates; without it the system roots verify it. Redirects are never followed, and a request times out after
+  60 seconds.
+- **The address.** Only the host of `bmc.address` is used. The client drives the first member of
+  `/redfish/v1/Systems` and of `/redfish/v1/Managers`, so one BMC endpoint that serves several systems (an emulator
+  such as sushy-tools with several VMs) is driven as its first system.
+- **Failures.** A BMC that refuses or fails does not fail the command: it succeeds with `ok: false` and a stable
+  `errorCode`, as the FakeDaemon's fake site answers. The codes are `unreachable` (including a pin mismatch),
+  `auth-failed` (401 or 403), `unsupported` (404, 405, or an operation the client does not have), `bmc-error`,
+  `invalid-args`, `invalid-address`, `credentials-unavailable` and `unsupported-driver`.
+- **Not built.** `bios.getSettings`, `bios.applySettings`, `firmware.update`, `raid.applyLayout` and
+  `raid.getLayout` answer `unsupported`, so the BIOS, RAID and firmware-reflash steps fail against a real BMC.
+- **Rotation.** `bmc.rotate` is attested: bcd signs its result with the site agent's node key, which is what the
+  worker checks before promoting the new password.
 
 ## Enrolling a machine
 
@@ -151,6 +191,10 @@ const node = await compute.api.metal.enroll(credential, {
     hardwareProfile: { type: 'string', description: "Overrides the pool's policy.hardwareProfile for this node." },
   }}
 />
+
+`bmc.driver`, `bmc.tlsSpkiSha256` and every entry of `macs` must be JSON strings: a missing driver,
+`true`, or a number for the pin or a MAC is `INVALID_INPUT`, never coerced to text. The pin may use
+upper-case hex and a MAC `-` separators; both are stored lower case, MACs with `:`.
 
 The first workflow, `metal-enroll`, proves the credentials work (`power.getPower`) and inspects the
 machine out of band (`inspect.oob`), recording the PXE MACs, SMBIOS UUID and IP addresses the BMC
@@ -244,7 +288,10 @@ sequenceDiagram
 1. The worker generates a 20-character password with upper case, lower case, a digit and a symbol
    (no quotes, backslashes or look-alike characters), stores it in the secret store, and records a
    `pending` version in `bmc_credential_versions`. The enrollment credential is recorded first as
-   version 1, `current`.
+   version 1, `current`. The new secret keeps the enrollment shape, `{ username, password }` JSON,
+   so everything that resolves the reference still gets the account name: the username is the
+   step's `username` argument, else the one in the current credential (resolved on the server). A
+   bare password is stored only when neither names a username.
 2. `bmc.rotate` sends only references. The site agent fetches the new value, applies it through the
    driver's `management.rotateCredential`, logs in with it, and signs the result.
 3. Only a result signed by a `site` certificate that says `verified: true` promotes the version:

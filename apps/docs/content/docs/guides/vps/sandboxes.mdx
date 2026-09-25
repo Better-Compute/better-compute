@@ -1,321 +1,446 @@
 ---
 title: Sandboxes
-description: Run isolated CPU or GPU sandboxes as VPS instances today, how to size and open them, and the sandboxes API planned for v0.5.
+description: Short-lived isolated VMs from per-tenant templates, with a time-to-live, warm pools of paused instances and one IAM decision per sandbox.
 metaTitle: Sandboxes on CPU and GPU capacity
 icon: Box
 status: beta
-packages: ['@better-compute/vps', '@better-compute/capacity', '@better-compute/server']
+packages: ['@better-compute/vps', '@better-compute/core', '@better-compute/capacity', '@better-compute/server']
 sources:
-  - packages/vps/src/flavors.ts
-  - packages/vps/src/instances.ts
-  - packages/vps/src/runtime.ts
-  - packages/core/src/states.ts
-  - packages/core/src/catalog.ts
-  - packages/server/src/tunnels/module.ts
-  - packages/capacity/src/pipeline.ts
-  - packages/mcp/src/tools.ts
-  - packages/mcp/src/server.ts
+  - packages/vps/src/sandboxes.ts
   - packages/vps/src/module.ts
-  - packages/vps/src/hosts.ts
+  - packages/vps/src/schemas.ts
+  - packages/vps/src/instances.ts
+  - packages/vps/src/lifecycle.ts
+  - packages/vps/src/runtime.ts
+  - packages/vps/src/status.ts
+  - packages/vps/src/tenancy.ts
+  - packages/vps/src/usage.ts
+  - packages/core/src/catalog.ts
+  - packages/core/src/states.ts
   - packages/iam/src/setup.ts
-  - packages/cli/src/commands/tunnel.ts
-  - packages/core/src/domain.ts
-  - proto/bettercompute/agent/v1/session.proto
-  - proto/bettercompute/agent/v1/commands.proto
+  - packages/events/src/catalog.ts
+  - packages/server/src/tunnels/module.ts
+  - daemon/internal/converge/converge.go
+  - tests/vps-sandboxes.test.ts
   - PLAN.md
 ---
 
 import { Cpu, Instance, KeyRound, Route } from '@/lib/icons';
 
 A sandbox is a short-lived, isolated place to run code you do not fully trust: a build, a test suite, an AI agent's
-tool call, a customer's notebook. Better Compute runs sandboxes as <Term id="instance">VPS instances</Term>. Each one
-is its own VM, sized by a <Term id="flavor">flavor</Term> of vCPUs, memory and disk, with or without GPUs, and it goes
-through the same admission, quotas, metering and audit trail as a GPU reservation.
+tool call, a customer's notebook. In Better Compute a sandbox is one hosted <Term id="instance">VPS instance</Term>
+made from a per-tenant **template**, with a **lifetime** after which it is deleted, and optionally started from a
+**warm pool** of instances the template keeps booted. It has no placement, quota or tenancy path of its own: the
+instance it drives is admitted, placed, charged, addressed, metered and deleted exactly as one from
+`instances.create`, so the guarantees of [instances](/docs/guides/vps/instances) hold unchanged. It is its own VM
+sized by a <Term id="flavor">flavor</Term>, with no <Term id="join-token">join token</Term>, no `bcd` and no IAM key
+inside, and its boot data sealed through the secret broker.
 
-<Callout type="info" title="What exists today, and what is planned">
-Today a sandbox is an instance, created with `instances.create` and removed with `instances.delete`. The control
-plane for instances is built and tested (v0.3, beta). Provider pools run the VMs on Hetzner Cloud or Proxmox VE. The
-hosted runtimes that run VMs on your own servers, `libvirt-kvm` and `cloud-hypervisor`, are planned inside bcd for
-v0.3 and are not built yet, and a Kata runtime plugin is planned for v0.5.
+`vps()` serves two API groups for it (v0.5, beta): [sandboxTemplates](/docs/reference/api/sandbox-templates) and
+[sandboxes](/docs/reference/api/sandboxes). Migration `vps/0004_sandboxes` adds their tables, and the `vps.sandboxes`
+reconciler expires sandboxes and keeps warm pools filled.
 
-A dedicated `sandboxes` API is decided (D24 in PLAN.md) and planned for v0.5, layered on `vps()`: templates, a
-time-to-live, warm pools, snapshots and exec over short-lived SSH certificates. So far only its catalog entries (the
-actions, the two resource types and the method rows, all marked planned) and its runtime seams (paused instances,
-restore from a snapshot, the snapshot command's messages) exist; no sandbox method is served. See
-[the planned sandboxes API](#the-planned-sandboxes-api) and the [roadmap](/docs/reference/roadmap#sandboxes).
+<Callout type="warn" title="The control plane is done; the host runtime is not">
+Sandboxes run only on hosted (`vps-host`) pools, and a hosted instance is booted by a runtime inside `bcd` on its
+host. bcd now has the `instances` converger, but a real host build has no runtime yet (`libvirt-kvm` and
+`cloud-hypervisor` are not written): a non-empty `instances` section fails with `this host runs no instance runtime`,
+and the host sends no instance reports. So VMs still do not boot on real hardware: a sandbox's instance is placed
+and holds its allocation and IP lease, but never boots, and the sandbox stays `starting`. Only fakehw builds of bcd
+run instances, on a file-backed stand-in runtime. The tests drive everything
+against emulated host reports (`tests/vps-sandboxes.test.ts`), and the TypeScript FakeDaemon's `FakeHypervisor`
+implements `pause`, `resume` and restore for the end-to-end suites. See [where sandboxes run today](#where-sandboxes-run-today).
 </Callout>
 
-## Why a VM
+## What is built and what is not
 
-A sandbox has to hold up when the code inside is hostile. An instance gives it these properties, each enforced in the
-control plane:
-
-| Property | How |
+| Built (v0.5) | Planned, not served |
 | --- | --- |
-| Its own kernel | A VM (or microVM) per instance. Each runtime declares its isolation as a trait, `vm`, `microvm` or `container`, and a container pool must be single-tenant (`doctor` warns `vps.pools.single-tenant` otherwise). |
-| Nothing of the platform inside | The guest gets no <Term id="join-token">join token</Term>, no `bcd` and no IAM key. No platform agent ever runs in a tenant VM. |
-| Tenant-bound boot data | User data is rendered at admission, sealed through the secret broker and kept only as a `secret://` reference. The host fetches it with a node-signed request, and the broker releases it only to the instance's own tenant. |
-| Bounded resources | The flavor's `vcpu`, `memoryGiB` and `diskGiB` are claimed on the host and charged to the tenant's quota; GPUs are whole atoms passed through VFIO, never overcommitted. |
-| Audited access | Exec, SSH and TCP port forwards go through a single-use <Term id="exec-ticket">exec ticket</Term> from `tunnels.open`, decided as `compute:instances:exec`. |
-| Clean teardown | Deleting releases the allocation, the IP lease and the sealed user data, and publishes `instance.deleted`. |
+| `sandboxTemplates.create`, `list`, `get`, `update`, `delete` | `sandboxes.snapshot` and restoring with `create({ fromSnapshot })` |
+| `sandboxes.create`, `list`, `get`, `extend`, `delete` | `sandboxes.exec` (a tunnel ticket plus a short-lived SSH certificate) |
+| TTL expiry by the `vps.sandboxes` reconciler, as an ordinary instance delete | Template `env` (`secret://` references) and `network` (`egress`, `none`, `private`) |
+| Warm pools, `paused` when the runtime can pause and `stopped` otherwise | The `vps.sandbox.warm` meter for idle warm capacity |
+| The instance guard: instance methods refuse sandbox and warm instances | The `sandbox.snapshot.ready` event (and, a gap today, `sandbox.*` in the events catalog) |
+| Tenant teardown of templates, sandboxes and warm instances | MCP tools for sandboxes, and `tests/e2e/sandboxes.test.ts` (the v0.5 exit) |
 
-## Size sandboxes with flavors
+The generated reference lists 12 methods: the 10 on the left are registered, and `snapshot` and `exec` are planned.
 
-A flavor is a named shape in one pool: 1 to 1024 vCPUs, 1 to 16,384 GiB of memory, 1 to 65,536 GiB of disk, and 0 to
-16 GPUs. CPU-only sandboxes use `gpus: 0` (the default), in a pool that needs no GPU model.
+## Templates
 
-```ts title="flavors.ts"
-await compute.api.flavors.create(cred, {
-  tenantId: 'root',
-  poolId: sandboxPool,
-  name: 'sbx.small',
-  vcpu: 2,
-  memoryGiB: 4,
-  diskGiB: 20,
+A template belongs to one tenant and fixes what its sandboxes run. Create one with
+[sandboxTemplates.create](/docs/reference/api/sandbox-templates#create) (`compute:sandboxes:manage` on the tenant):
+
+```ts title="template.ts"
+const template = await client.sandboxTemplates.create({
+  tenantId: 'acme',
+  name: 'py-small',
+  poolId: sandboxPool, // a hosted (vps-host) pool offered to the tenant
+  flavor: 'sbx.small',
+  imageId: 'ubuntu-24.04',
+  userData: '#cloud-config\n…', // optional
+  defaultTtlSeconds: 1800, // default 3600
+  maxTtlSeconds: 7200, // default 86400
+  warm: { min: 2, max: 4 }, // default: no warm pool
 });
-
-await compute.api.flavors.create(cred, {
-  tenantId: 'root',
-  poolId: gpuSandboxPool,
-  name: 'g1.h100x1',
-  vcpu: 16,
-  memoryGiB: 120,
-  diskGiB: 200,
-  gpus: 1,
-});
+// { id: 'sbxt_…', runtime: 'cloud-hypervisor', warm: { min: 2, max: 4 }, version: 1, … }
 ```
 
-On a hosted pool, capacity places the flavor on one host: a host fits when `allocated + claim` stays within
-`floor(allocatable × ratio)` for every scalar, where `ratio` is that host's overcommit for CPU and memory. The same
-shape counts against the tenant's quota, and hosted instances are metered as `vps.vcpu.hours`,
-`vps.memory.gib.hours` and, for GPU flavors, `gpu.<model>.hours`. A host's capacity comes from its inventory, less a
-reserve for the host itself; see [flavors](/docs/guides/vps/flavors) for the details.
+<TypeTable
+  type={{
+    name: { type: 'string', description: "1 to 63 of a-z 0-9 . _ -, starting with a letter or digit; unique among the tenant's live templates (CONFLICT otherwise). A deleted template's name is free again.", required: true },
+    poolId: { type: 'string', description: 'A vps-host pool the tenant owns or is offered, not archived. A provider pool is INVALID_INPUT: sandboxes run on hosted pools.', required: true },
+    flavor: { type: 'string', description: 'A flavor of that pool, not archived (NOT_FOUND otherwise).', required: true },
+    imageId: { type: 'string', description: 'Resolved with vps({ images }) for the tenant (NOT_FOUND when it does not resolve; INVALID_CONFIG without images).', required: true },
+    runtime: { type: 'string', description: "Optional. When given it must equal the pool's runtime (INVALID_INPUT otherwise). The template always stores the pool's runtime, checked once here.", default: "the pool's" },
+    userData: { type: 'string', description: 'At most 32 KiB of cloud-init, or secret://<tenantId>/<id> for a secret of this tenant; any other URI is INVALID_INPUT. update takes null to remove it.' },
+    defaultTtlSeconds: { type: 'number', description: 'A sandbox lifetime when create gives none. 60 s to 30 days.', default: '3600' },
+    maxTtlSeconds: { type: 'number', description: 'The longest lifetime, extensions included. 60 s to 30 days, at least defaultTtlSeconds.', default: 'max(86400, defaultTtlSeconds)' },
+    warm: { type: '{ min: number; max?: number }', description: 'Warm instances to keep, 0 to 64 each; max defaults to min and must be at least min.', default: '{ min: 0, max: 0 }' },
+  }}
+/>
 
-## Start a sandbox
+The checks are those of a hosted `instances.create`: the pool must be visible to the tenant, its runtime must boot
+the image's format and pass through the flavor's GPUs. Unknown fields are `INVALID_INPUT`, so `env` and `network`,
+which PLAN.md section 3.7 describes, are refused until they are built.
+
+[update](/docs/reference/api/sandbox-templates#update) changes the flavor, image, user data, TTL bounds or warm pool
+and raises `version`; the pool, name and runtime stay, and a new flavor or image is checked again, including that the
+pool still runs the template's runtime. Existing sandboxes keep their instances, and warm instances already created
+stay claimable with the shape they were made with.
+[delete](/docs/reference/api/sandbox-templates#delete) hides the template from `get`, `list`, `update` and
+`sandboxes.create` and frees its name; its sandboxes live on until they end, and the reconciler deletes its warm
+instances. [list](/docs/reference/api/sandbox-templates#list) returns the tenant's live templates ordered by name,
+and [get](/docs/reference/api/sandbox-templates#get) one of them. None of these publishes an event.
+
+## Create a sandbox
 
 ```ts title="sandbox.ts"
-const sandbox = await client.instances.create({
+const sandbox = await client.sandboxes.create({
+  tenantId: 'acme',
+  templateId: template.id,
+  ttlSeconds: 900, // default: the template's defaultTtlSeconds
+  idempotencyKey: `job-${jobId}`,
+  wait: { timeoutMs: 20_000 }, // optional: hold the answer until it leaves 'starting' (at most 30 s)
+});
+// { id: 'sbx_…', state: 'ready', instanceId: 'inst_…', warm: true, expiresAt: 1790000000000, … }
+```
+
+The same call is `POST /api/compute/sandboxes/create`, or
+`better-compute api sandboxes.create tenantId=acme templateId=sbxt_… idempotencyKey=job-42` from the CLI. See
+[sandboxes.create](/docs/reference/api/sandboxes#create).
+
+### How a create is admitted
+
+A sandbox is admitted like an instance: it exists as a <Term id="draft">draft</Term> before anyone decides on it.
+
+<Steps>
+<Step>
+
+### Transaction 1: the draft
+
+The sandbox id (`sbx_` and 52 characters) derives from the tenant, the caller's identity and the idempotency key. An
+admitted sandbox with that id is returned as it is (a replay); a different request under the same key is `CONFLICT`
+with `details.sandboxId`. `wait` is not part of the compared request. vps reads the template (`NOT_FOUND` when it is
+missing or deleted), bounds `ttlSeconds` by its `maxTtlSeconds` (`INVALID_INPUT`), checks that its flavor still
+exists (`INVALID_STATE`), and writes the draft and its authorization row.
+
+</Step>
+<Step>
+
+### The decision
+
+Better IAM decides `compute:sandboxes:create` on `compute-sandbox/<draft id>`. The row's parent is the template's
+pool, its owner is the caller, and it carries `templateId`, `vcpu`, `memoryGiB`, `gpus` (the template's flavor),
+`ttlSeconds` and `warm` (true when the template keeps a warm pool). A refusal deletes the draft; an agent under
+[delegated confirmation](/docs/guides/iam/delegated-confirmation) gets `CONFIRMATION_REQUIRED` and retries with the
+same key. After an allow, the pool's budget check runs outside any transaction, as for `instances.create`: a spent
+Better IAM budget answers `SPEND_LIMIT_REACHED` and keeps the draft. See
+[budgets](/docs/guides/iam/billing-and-usage#budgets).
+
+</Step>
+<Step>
+
+### Transaction 2: claim or create
+
+vps looks for the template's oldest warm instance that has settled (`stopped` or `paused`, not being deleted) with
+`FOR UPDATE SKIP LOCKED`, so concurrent creates never wait on each other. A claimed instance moves to the sandbox:
+its owner becomes the caller, `desiredState` becomes `running`, and `instance.starting` is published. Nothing new is
+placed or charged; it was placed and charged when it was warmed. Without a claimable instance, vps creates one from
+the template and schedules it with the decision's admission context, exactly like a hosted `instances.create`:
+placement, quota (`QUOTA_EXCEEDED`), an IP lease (`CAPACITY_UNAVAILABLE`) and sealed user data. When no host fits it
+waits in `scheduling` and the sandbox stays `starting`.
+
+The TTL starts here, at admission: `expiresAt` is now plus `ttlSeconds`, whether the instance was warm or cold, so
+boot time counts against it. `sandbox.created` is published with `warm` and `expiresAt`.
+
+</Step>
+</Steps>
+
+`wait: { timeoutMs }` makes the call async-with-wait: the server re-reads the sandbox until it leaves `starting` and
+answers with the last read when the time runs out, which is not an error. The answer's `warm` says which path was
+taken. A template whose warm instances have not settled yet (still `provisioning`) gets a cold create.
+
+A policy can bound what callers start, for example short CPU-only sandboxes:
+
+```json title="policy statement"
+{
+  "sid": "ShortCpuSandboxes",
+  "effect": "allow",
+  "actions": ["compute:sandboxes:create", "compute:sandboxes:update"],
+  "resources": ["compute-sandbox/*"],
+  "conditions": {
+    "NumericLessThanEquals": { "resource.ttlSeconds": 3600, "resource.gpus": 0 }
+  }
+}
+```
+
+## The sandbox
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'sbx_ and 52 characters.', required: true },
+    state: { type: "'starting' | 'ready' | 'failed' | 'deleting' | 'deleted'", description: 'Derived from the instance: ready while it runs, failed in error or lost, deleting once delete or expiry asked, deleted when the instance is gone; starting otherwise.', required: true },
+    instanceState: { type: 'InstanceState', description: "The instance's own state.", required: true },
+    instanceId: { type: 'string', description: 'The instance it drives.', required: true },
+    templateId: { type: 'string', description: 'The template it was made from.', required: true },
+    poolId: { type: 'string', description: "The template's pool.", required: true },
+    addresses: { type: 'string[]', description: "The instance's addresses.", required: true },
+    nodeId: { type: 'string', description: 'The host it is placed on.' },
+    ttlSeconds: { type: 'number', description: 'The lifetime: as asked, then from createdAt to the new expiry after an extend.', required: true },
+    expiresAt: { type: 'number', description: 'Epoch ms; deleted then unless extended.', required: true },
+    warm: { type: 'boolean', description: "Claimed from the template's warm pool.", required: true },
+    readyAt: { type: 'number', description: 'When the reconciler first saw the instance run.' },
+    expiredAt: { type: 'number', description: 'Set when the sandbox ended by reaching expiresAt.' },
+    ownerIdentityId: { type: 'string', description: 'Who created it; list defaults to these.', required: true },
+    idempotencyKey: { type: 'string', description: 'The key of the create.', required: true },
+    createdAt: { type: 'number', description: 'Epoch ms.', required: true },
+  }}
+/>
+
+```mermaid
+stateDiagram-v2
+  [*] --> starting: sandboxes.create (warm claim or cold create)
+  starting --> ready: instance running (sandbox.ready)
+  starting --> failed: instance error or lost
+  ready --> failed: instance error or lost
+  starting --> deleting: sandboxes.delete, or expiry (sandbox.expired)
+  ready --> deleting: sandboxes.delete, or expiry (sandbox.expired)
+  failed --> deleting: sandboxes.delete, or expiry (sandbox.expired)
+  deleting --> deleted: instance deleted (sandbox.deleted)
+  deleted --> [*]
+```
+
+A `failed` sandbox is not replaced; it ends with its TTL or a delete. If its pool sets `recreateOnHostLoss`, a lost
+instance is recreated like any other and the sandbox goes back to `starting`.
+
+## Read, extend and delete
+
+- [get](/docs/reference/api/sandboxes#get) returns one sandbox of the tenant, deleted ones included; drafts and other
+  tenants' sandboxes are `NOT_FOUND`.
+- [list](/docs/reference/api/sandboxes#list) returns `{ items, cursor? }`, newest first. `scope` is `mine` (the
+  default, the caller's own) or `all`, and each item is then checked for `compute:sandboxes:read`. Deleted sandboxes
+  appear only with `deleted: true`; `templateId` filters by template; `limit` is 1 to 200 (default 50), and `cursor`
+  is the last sandbox id of the previous page.
+- [extend](/docs/reference/api/sandboxes#extend) moves `expiresAt` later. Give exactly one of `until` (the new expiry,
+  epoch ms) or `by` (added to the current expiry: `30m`, `8h`, `7d`, or milliseconds, at most 30 days). It is decided
+  as `compute:sandboxes:update` with a pending `ttlSeconds` equal to the whole lifetime after the change, counted from
+  `createdAt`, so a policy that caps `ttlSeconds` caps extensions too and cannot be bypassed in small steps. The
+  handler then refuses a lifetime above the template's `maxTtlSeconds` (`INVALID_INPUT`), even for a template deleted
+  since. An `until` not later than the current expiry returns the sandbox unchanged without a decision; a repeated
+  `by` extends again. A sandbox being deleted is `INVALID_STATE`. It publishes `sandbox.extended`.
+- [delete](/docs/reference/api/sandboxes#delete) marks the sandbox `deleting`, sets its instance's `desiredState` to
+  `deleted` (publishing `instance.deleting` with `sandboxId`) and wakes the reconciler. It is idempotent. The
+  `vps.instances` reconciler releases the allocation, IP lease, quota and sealed user data as for any instance.
+
+```ts
+await client.sandboxes.extend({ tenantId: 'acme', sandboxId: sandbox.id, by: '30m' });
+await client.sandboxes.delete({ tenantId: 'acme', sandboxId: sandbox.id });
+```
+
+## The reconciler
+
+`vps.sandboxes` runs every 15 seconds (`shardBy: 'none'`, one worker at a time), and `sandboxes.delete` wakes it.
+Each pass does four things:
+
+1. **Expiry.** Up to 100 sandboxes whose `expiresAt` has passed and whose deletion has not started are locked with
+   `SKIP LOCKED`. Each gets `expiredAt`, publishes `sandbox.expired`, and then goes through an ordinary instance delete,
+   the same as `sandboxes.delete`. A sandbox can outlive its `expiresAt` by up to one period.
+2. **Ready.** A sandbox whose instance is `running` for the first time gets `readyAt` and publishes `sandbox.ready`.
+3. **Deleted.** A sandbox whose instance is `deleted` (or gone) is marked deleted, leaves the authorization
+   projection and publishes `sandbox.deleted` with `expired` telling whether expiry ended it.
+4. **Warm pools**, below.
+
+### Warm pools
+
+For each live template with `warm.min > 0`, the reconciler keeps `warm.min` warm instances. It creates at most 4 per
+template per pass, each in its own transaction, owned by the template's author (`instances.warm_template_id` set).
+Each is placed and charged to the tenant's quota when it is created, like any instance, and publishes
+`instance.created` with `warmTemplateId`. Refills are best effort: a quota refusal, a flavor or image that is gone,
+or no fitting host stops that template's refill for the pass, logs `vps: warm sandbox instance not created`, and the
+next pass tries again.
+
+A warm instance's `desiredState` depends on the runtime its template stores:
+
+| Runtime `RuntimeTraits.pause` | Warm instance | A claim then |
+| --- | --- | --- |
+| `true` (`libvirt-kvm`, `cloud-hypervisor`, `firecracker` in `builtinRuntimeTraits`) | Booted, then `paused`: vCPUs stopped, memory resident | Resumes it (`paused` to `running`) |
+| absent or `false` (`containerd`, or a runtime you declare without it) | `stopped` | Starts it (`stopped` to `starting` to `running`) |
+
+The lifecycle walks a paused warm instance `provisioning`, `starting`, `running`, then `paused` as the host reports
+each; it becomes claimable only once it is `paused` (or `stopped`). See
+[paused instances](/docs/guides/vps/instances#paused-instances).
+
+Instances beyond `warm.max`, and all instances of a deleted template, are drained: set to `desiredState: 'deleted'`,
+newest first, since claims take the oldest. Warm instances are hidden from `instances.list`, refused by instance
+methods, and metered by `vps.usage` like any hosted instance; the dedicated `vps.sandbox.warm` meter PLAN.md describes
+is not built.
+
+## The instance behind a sandbox
+
+`instances.sandbox_id` marks the instance a sandbox drives and `instances.warm_template_id` a warm one; never both.
+
+- `instances.start`, `stop`, `resize` and `delete` refuse both with `INVALID_STATE` ("managed by sandbox …" or "is a
+  warm instance of sandbox template …"). Only the sandbox and its template move them.
+- `instances.get` returns both; `instances.list` shows a sandbox's instance and hides warm instances.
+- Everything else is the instance's: placement, quota, IPAM, sealed user data, host loss and recreation, the leak
+  diff, `vps.usage` metering, and [workload identity](/docs/guides/vps/instances#workload-identity) when the pool
+  enables it.
+
+See [sandbox and warm instances](/docs/guides/vps/instances#sandbox-and-warm-instances).
+
+## Run code inside
+
+`sandboxes.exec` is planned. Until then, open a <Term id="tunnel">tunnel</Term> to the sandbox's instance: the
+instance guard does not cover `tunnels.open`, which only needs the instance `running` and its node connected.
+
+```ts
+const { ticket } = await client.tunnels.open({ tenantId: 'acme', instanceId: sandbox.instanceId, op: 'exec' });
+```
+
+It is decided as `compute:instances:exec` on `compute-instance/<instanceId>`, whose owner is the sandbox's owner.
+`ssh` and `tcp` (with a `port`) need a host daemon advertising `tunnel.instance-dial`. From a terminal,
+`better-compute exec --instance …` and `better-compute forward --instance … --port 8888` do the same; see
+[tunnels](/docs/guides/access/tunnels) and [the CLI](/docs/guides/clients/cli#interactive-access). The instance
+behind a sandbox is created without SSH keys, so for `ssh` put your public key into the template's `userData`. bcd
+dials instance `ssh` and `tcp` tunnels to the instance's own address and advertises `tunnel.instance-dial` only when
+it runs an instance runtime (today a fakehw build's stand-in); it refuses `exec` into a guest, which needs a guest
+agent. The FakeDaemon answers every op in tests.
+
+## Events
+
+Sandbox events have subject `sandbox/<id>` and carry `templateId`, `instanceId` and `poolId`:
+
+| Event | When | Extra `data` |
+| --- | --- | --- |
+| `sandbox.created` | `create` admitted it | `warm`, `expiresAt` |
+| `sandbox.ready` | Its instance first ran | `warm` |
+| `sandbox.extended` | `extend` moved the expiry | `expiresAt` |
+| `sandbox.expired` | The reconciler found `expiresAt` passed | `expiresAt` |
+| `sandbox.deleted` | Its instance is gone | `expired` |
+
+The instance publishes its own `instance.*` events alongside, with `sandboxId` or `warmTemplateId` in `data`.
+`sandbox.*` is in the events catalog, so webhooks can subscribe to it like any other family. The catalog also
+declares `sandbox.snapshot.ready` and `sandbox.snapshot.failed` for the planned snapshots. See
+[event types](/docs/guides/events#event-types).
+
+## Authorization
+
+| Method | Action | Decided on |
+| --- | --- | --- |
+| `sandboxTemplates.create` | `compute:sandboxes:manage` | `compute-tenant` |
+| `sandboxTemplates.list` | `compute:sandboxes:read` | `compute-tenant` + items |
+| `sandboxTemplates.get` | `compute:sandboxes:read` | `compute-sandbox-template` |
+| `sandboxTemplates.update`, `delete` | `compute:sandboxes:manage` | `compute-sandbox-template` |
+| `sandboxes.create` | `compute:sandboxes:create` | `compute-sandbox` (the draft) |
+| `sandboxes.list` | `compute:sandboxes:read` | `compute-tenant` + items |
+| `sandboxes.get` | `compute:sandboxes:read` | `compute-sandbox` |
+| `sandboxes.extend` | `compute:sandboxes:update` | `compute-sandbox` |
+| `sandboxes.delete` | `compute:sandboxes:delete` | `compute-sandbox` |
+| `sandboxes.snapshot` (planned) | `compute:sandboxes:update` | `compute-sandbox` |
+| `sandboxes.exec` (planned) | `compute:sandboxes:exec` | `compute-sandbox` |
+
+A `compute-sandbox` has the pool as its parent, so pool relations apply. The catalog also declares `fromSnapshot` on
+it, which nothing writes until restore exists. The example `StopWhenOverBudget` statement denies
+`compute:sandboxes:create` and `compute:sandboxes:update` once the caller's budget is spent. See
+[actions and resources](/docs/guides/iam/actions-and-resources) and [policies](/docs/guides/iam/policies).
+
+## Tenant teardown
+
+When an IAM tenant is deleted, the built-in `tenancy` reconciler calls `vps().tenantDeleted` until it answers `DONE`.
+In one transaction per call it deletes the tenant's templates (their warm pools drain), marks its open sandboxes
+`deleting`, drops sandbox and instance drafts, and sets up to 100 live instances, sandboxes' and warm ones included, to
+`desiredState: 'deleted'`, each publishing `instance.deleting` with `reason: 'tenant deleted'`. It answers
+`SYNC_AGAIN` until every instance of the tenant is `deleted`; the `vps.sandboxes` reconciler then publishes each
+sandbox's `sandbox.deleted`. See [tenancy](/docs/guides/iam/tenancy).
+
+## Where sandboxes run today
+
+| Layer | State |
+| --- | --- |
+| API, admission, TTL, warm pools, guard, teardown | Built and tested against PGlite with emulated host reports (`tests/vps-sandboxes.test.ts`, 10 tests) |
+| Paused instances in the lifecycle and host reports | Built: `desiredState: 'paused'`, `InstanceObservedState.PAUSED`, `RuntimeTraits.pause` |
+| FakeDaemon `FakeHypervisor` | Boots then pauses on a desired `PAUSED`, resumes without a reboot, verifies `restoreFrom`, snapshots deterministically |
+| Runtimes in bcd (`libvirt-kvm`, `cloud-hypervisor`) | Not written. bcd's `instances` converger exists and runs on fakehw builds over a file-backed stand-in runtime; a real host build has no runtime |
+| Provider pools | Not allowed for sandboxes |
+
+On a real host running today's bcd (a host build, which has no runtime), a sandbox's instance is placed but never
+reported, so it stays `provisioning` and the sandbox `starting`. Expiry and `delete` still set it to `deleting`, but a hosted instance finishes deleting only when
+a complete host report no longer lists it or the host is declared `lost`.
+
+## Not built yet
+
+These parts of PLAN.md section 3.7 are planned and not served:
+
+- **Snapshots.** `sandboxes.snapshot` would send the host an `instance.snapshot` command whose runtime writes disk
+  (and optionally memory) state to a presigned URL as a tenant-private snapshot image; `create({ fromSnapshot })`
+  would boot from it through `InstanceSpec.restoreFrom` on a host with the same runtime and `bc.dev/cpu.model`. The
+  protocol messages (`InstanceSnapshotRequest`, `InstanceSnapshotResult`, `restore_from`) and
+  `RuntimeDriver.snapshot` exist; the method, the command kind and the images do not. `create` refuses
+  `fromSnapshot` as an unknown field.
+- **Exec.** `sandboxes.exec` would return a tunnel ticket and a short-lived SSH certificate from a tenant sandbox CA
+  that templates trust, with SDK helpers for commands and files. Use tunnels on the instance meanwhile.
+- **Template `env` and `network`**, and the **`vps.sandbox.warm`** meter.
+- **The exit test** `tests/e2e/sandboxes.test.ts`: 500 sandboxes expiring on emulated hosts with no leaks, a warm
+  claim without a placement, a snapshot round trip, a refused cross-tenant snapshot, and the instance guard.
+
+See the [roadmap](/docs/reference/roadmap#sandboxes).
+
+## Lower level: instances directly
+
+Anything a sandbox does not cover yet, such as provider pools or a VM without a lifetime, is an instance:
+
+```ts
+const vm = await client.instances.create({
   tenantId: 'acme',
   poolId: sandboxPool,
   flavor: 'sbx.small',
   imageId: 'ubuntu-24.04',
-  idempotencyKey: `sandbox-${jobId}`,
-  wait: { timeoutMs: 20_000 }, // hold the answer until it runs or fails (at most 30 s)
+  sshKeys: ['ssh-ed25519 AAAA… ci@runner'],
+  idempotencyKey: `vm-${jobId}`,
+  wait: { timeoutMs: 20_000 },
 });
-// { id: 'inst_…', state: 'running', desiredState: 'running', … }
-// or, when the wait runs out first: state 'scheduling', 'provisioning' or 'starting'
+// … and delete it yourself: instances have no time-to-live.
+await client.instances.delete({ tenantId: 'acme', instanceId: vm.id });
 ```
 
-`wait` makes the call async-with-wait: the server re-reads the instance until it leaves `pending`, `scheduling`,
-`provisioning` and `starting`, and answers with the last read when `timeoutMs` passes; a timeout is not an error.
-Without `wait` the answer comes back at once, `provisioning` in a hosted pool or `scheduling` in a provider pool. See
-[waiting for the instance](/docs/guides/vps/instances#waiting-for-the-instance).
-
-The call is one IAM decision on the draft (`compute:instances:create`), so policies can bound what a caller may start:
-the flavor's vCPUs, memory and GPUs, the pool, the image and whether it is verified. An agent working under a
-delegated session can be held back for a person's confirmation, like any other admission; see
-[delegated confirmation](/docs/guides/iam/delegated-confirmation). After the decision the pool's budget check runs,
-as for reservations: when the pool sets `admission.budgetCheck: 'meter'` or the tenant's offer stops new work over
-budget, a spent Better IAM budget answers `SPEND_LIMIT_REACHED` and keeps the draft for a later retry with the same
-key. See [budgets](/docs/guides/iam/billing-and-usage#budgets).
-
-The instance then walks the state table as the `vps.instances` reconciler converges it:
-
-```mermaid
-stateDiagram-v2
-  [*] --> pending: instances.create
-  pending --> scheduling
-  scheduling --> provisioning: placed on a host
-  provisioning --> starting
-  starting --> running
-  running --> stopped: instances.stop
-  stopped --> running: instances.start
-  running --> deleting: instances.delete
-  stopped --> deleting: instances.delete
-  deleting --> deleted
-  deleted --> [*]
-```
-
-Watch it with [events](/docs/guides/events/watch) (`instance.running`, `instance.failed`, `instance.deleted`) rather
-than polling. The full table, including `error`, `lost` and recreation after a host loss, is in
-[instances](/docs/guides/vps/instances).
-
-## Run code inside
-
-A sandbox has no API of its own inside it. To run something, open a tunnel into it: `exec` for a command session,
-`ssh`, or `tcp` with a `port` to reach a service the sandbox listens on (`console` is for nodes, not instances):
-
-```ts
-const { ticket } = await client.tunnels.open({ tenantId: 'acme', instanceId: sandbox.id, op: 'exec' });
-```
-
-The ticket is single-use and valid for 60 seconds, bound to that instance's node, and re-verified by the daemon. Tunnels work
-for hosted instances whose node is connected; provider instances answer `UNSUPPORTED`, because no platform agent runs
-next to them (use SSH keys from `instances.create` there). See [tunnels](/docs/guides/access/tunnels).
-
-From a terminal, `better-compute exec --instance …` opens a shell, and `better-compute forward --instance … --port
-8888` forwards a local port to a port of the sandbox, one `tcp` tunnel per connection, like `ssh -L`; see
-[the CLI](/docs/guides/clients/cli#interactive-access). Instance `tcp` and `ssh` tunnels need a host daemon that
-advertises `tunnel.instance-dial`; without it `tunnels.open` answers `UNSUPPORTED`.
-
-For code that must call other services as the sandbox, a hosted instance can fetch a short-lived workload identity
-token from its host's metadata service; see [workload identity](/docs/guides/vps/instances#workload-identity).
-
-## Tear it down
-
-```ts
-await client.instances.delete({ tenantId: 'acme', instanceId: sandbox.id });
-```
-
-`delete` sets `desiredState: 'deleted'`. The reconciler stops the VM, removes it through the runtime (or the
-provider), releases the allocation and the IP lease, deletes the sealed user data and publishes `instance.deleted`.
-A sandbox that must not outlive its job is deleted by the caller: instances have no time-to-live. The planned
-sandboxes API adds one (below).
-
-## Let an agent manage sandboxes
-
-The [MCP server](/docs/guides/clients/mcp) gives AI agents the whole lifecycle as tools, each calling the instance
-method as the agent: `create_instance` (`instances.create`, with an idempotency key and delegated confirmation, and
-waiting up to `waitSeconds`, default 20, for the instance to start),
-`list_instances` (its own by default, or `scope: 'all'`), `get_instance`, `start_instance`, `stop_instance` and
-`delete_instance`. The MCP gate lets any authenticated agent call the last five; compute decides each on the instance
-itself, so an agent can only touch sandboxes its policies allow. `stop_instance` and `delete_instance` are marked
-destructive, so many MCP hosts ask the person before calling them. Running code inside a sandbox is not an MCP tool:
-agents open [tunnels](/docs/guides/access/tunnels) through the API.
+It is decided as `compute:instances:create`, runs in a hosted or a provider pool, and the
+[MCP server](/docs/guides/clients/mcp) exposes it to agents as `create_instance` and friends, which have no sandbox
+counterparts yet. See [instances](/docs/guides/vps/instances).
 
 ## Sandboxes and GPU reservations
 
 Both come out of the same pools and the same database, so neither can take what the other holds:
 
-| | GPU reservation | Sandbox (instance) |
+| | GPU reservation | Sandbox |
 | --- | --- | --- |
 | What you get | GPU atoms on a node, as CDI devices for your own workload manager | A VM with its own kernel, vCPUs, memory, disk and optional GPUs |
-| Booked by | `reservations.create` | `instances.create` |
-| Time | A window (`duration`), extendable | Open-ended until deleted |
-| Who runs code | Your scheduler on the node (Kubernetes, Slurm, containerd) | The guest, reached through tunnels or SSH |
+| Booked by | `reservations.create` | `sandboxes.create` |
+| Time | A window (`duration`), extendable | A TTL from the template, extendable up to `maxTtlSeconds` |
+| Who runs code | Your scheduler on the node (Kubernetes, Slurm, containerd) | The guest, reached through tunnels |
 | Isolation | The node's, per workload | A VM per sandbox; nothing of the platform inside |
-
-## The planned sandboxes API
-
-<Callout type="warn" title="Planned for v0.5, not built">
-Everything in this section is the design in PLAN.md (section 3.7, the section 9.2 row, the v0.5 deliverable and
-exit), decided as D24. None of it runs yet. What is in the code today:
-
-- the catalog: the `compute-sandbox` and `compute-sandbox-template` resource types, the `compute:sandboxes:*`
-  actions, the `sandboxes` and `sandboxTemplates` method rows (phase v0.5, planned), and the `StopWhenOverBudget`
-  example statement naming `compute:sandboxes:create` and `compute:sandboxes:update`;
-- the runtime and protocol seams described under [runtime and events](#runtime-and-events): the `paused` instance
-  state, `restoreFrom`, the `instance.snapshot` messages and the optional `RuntimeDriver` methods, which the
-  FakeDaemon's fake hypervisor implements for tests.
-
-No sandbox method is registered, no sandbox table exists, and names below may still change.
-</Callout>
-
-A sandbox will be a VPS instance with a template, a lifetime and a fast start, and it has no placement or tenancy
-path of its own. `sandboxes.create({ tenantId, templateId, ttl?, fromSnapshot?, idempotencyKey })` writes a
-`sandboxes` row plus the `instances` row it drives (`instances.sandbox_id`), so admission, quota, IPAM, tunnels,
-IMDS, usage and the leak diff are the instance's. Instance item methods on a sandbox's instance are refused with
-`INVALID_STATE` ("managed by sandbox …"); only `instances.get` and `instances.list` work on it.
-
-```mermaid
-flowchart TD
-  C["sandboxes.create"] --> D["Draft: one decision on compute-sandbox/(draft id)"]
-  D -->|denied| X["ACCESS_DENIED"]
-  D -->|allowed| W{"Template keeps a warm pool?"}
-  W -->|"a warm instance is free"| K["Claim it: FOR UPDATE SKIP LOCKED, new owner, TTL starts, desiredState running"]
-  W -->|"none free, or no warm pool"| N["Cold create through the instance lifecycle"]
-  K --> R["sandbox.ready"]
-  N --> R
-  R --> E["expires_at passes"]
-  E --> Z["sandbox.expired, then an ordinary instance delete"]
-```
-
-### Templates
-
-Templates (`sandbox_templates`) belong to a tenant and hold:
-
-| Field | Meaning |
-| --- | --- |
-| `poolId`, `flavor`, `imageId` | Where and what to run. The pool must be offered to the tenant; creating a template checks the flavor and runtime against the pool once |
-| `runtime` | `cloud-hypervisor` by default. Any `microvm` or `vm` runtime is allowed, and containers only on `singleTenant` pools, as for instances |
-| `userData` | The template's cloud-init |
-| `env` | `secret://` references, resolved by the secret broker for the sandbox's own tenant only |
-| `network` | `egress` (default), `none` or `private` |
-| `defaultTtl`, `maxTtl` | The lifetime bounds |
-| `warm: { min, max }` | The warm pool |
-
-### Lifetime, warm pools and snapshots
-
-- **Lifetime.** `expires_at` is set when the row is created. `sandboxes.extend` moves it within `maxTtl` and the pool
-  policy's bound, as a reservation's `extend` does. The `vps.sandboxes` reconciler deletes an expired sandbox
-  through the instance lifecycle (`desiredState: 'deleted'`), so expiry is an ordinary delete: bookings refunded,
-  overlay removed, IP released. `sandbox.expired` is published first.
-- **Warm pools.** For each template with `warm.min > 0`, the reconciler keeps `min` instances created, booted and
-  then `paused` (or `stopped` when the runtime cannot pause), owned by the template's tenant. `sandboxes.create`
-  still takes its own admission decision, and only after an allow claims the oldest warm instance in the same
-  transaction; on a miss it falls back to a cold create. Warm instances count against the tenant's quota when they
-  are created, so a claim charges nothing new. They are metered as `vps.sandbox.warm` so operators can price idle
-  capacity, and refills are rate-limited per pool.
-- **Snapshots.** `sandboxes.snapshot` sends the host the `instance.snapshot` command: the runtime writes disk and
-  memory state, and the daemon uploads it to a presigned URL as an image of `kind: 'snapshot'`, private to the
-  sandbox's tenant, never promotable, with its sha256 stored. `create({ fromSnapshot })` restores it on a host with
-  the same runtime and `bc.dev/cpu.model` (a placement `nodeLabels` constraint), because memory state needs matching
-  CPU features. Snapshots are deleted with the sandbox unless `keep: true`, and restoring another tenant's snapshot
-  fails the image visibility check.
-
-### Exec and files without an agent in the guest
-
-No platform agent runs inside a tenant VM, and sandboxes keep that rule. `sandboxes.exec` will return a tunnel ticket
-and a short-lived SSH certificate signed by the tenant's sandbox CA, which templates trust through
-`TrustedUserCAKeys` in the user data they render. The SDK's `sandbox.exec(cmd)`, `files.put` and `files.get` ride
-that SSH session through the tunnel, and the serial console stays as the fallback.
-
-### Runtime and events
-
-The runtime and protocol pieces have landed ahead of the API, all additive:
-
-| Piece | What it is |
-| --- | --- |
-| `paused` | A new `InstanceState` and `InstanceDesiredState` (proto `INSTANCE_DESIRED_STATE_PAUSED` and `INSTANCE_OBSERVED_STATE_PAUSED`, both 4): vCPUs stopped, memory resident. The state table adds the verbs `pause` (`running` to `paused`) and `resume` (`paused` to `running`); a paused instance can also stop, fail, be deleted or be lost, and a lost one can recover to `paused` |
-| `InstanceSpec.restoreFrom` | `{ url, sha256, imageId }` (proto `restore_from = 12`, an `ImageRef`): boot from a snapshot instead of `image`. The host verifies the sha256 and fails the instance on a runtime or CPU model mismatch |
-| `InstanceSnapshotRequest` / `InstanceSnapshotResult` | The `instance.snapshot` command's messages: `instance_id`, a presigned `upload_url` with `upload_headers`, `image_id`, `include_memory`; the result carries `uploaded_bytes`, `sha256`, `runtime` and `cpu_model`. State goes to the presigned URL, as for `logs.collect`, never over the session. The command is bulk lane and not retry-safe |
-| `RuntimeDriver.pause?`, `resume?`, `snapshot?(instanceId, { uploadUrl, uploadHeaders?, includeMemory })` | Optional runtime methods; `snapshot` returns `{ uploadedBytes, sha256, cpuModel? }`. `RuntimeInstanceStatus.state` may be `paused` |
-
-A runtime without `pause` treats `paused` as `stopped` (a warm pool then warms to `stopped`), and one without
-`snapshot` fails the command with `UNSUPPORTED`. Still to come from the sandboxes work: the vps lifecycle and status
-mapping for `paused`, registering the `instance.snapshot` kind, and the database check on `desired_state`. The events
-will be `sandbox.created`, `sandbox.ready`, `sandbox.expired`, `sandbox.deleted` and `sandbox.snapshot.ready`.
-
-### Authorization
-
-The catalog already holds the planned rows, so policies can be written against them now:
-
-| Method | Action | Decided on |
-| --- | --- | --- |
-| `sandboxes.create` | `compute:sandboxes:create` | `compute-sandbox/(draft id)`, with `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `fromSnapshot` and `warm` |
-| `sandboxes.list` | `compute:sandboxes:read` | `compute-tenant`, owner-scoped like `instances.list` |
-| `sandboxes.get` | `compute:sandboxes:read` | `compute-sandbox` |
-| `sandboxes.extend`, `sandboxes.snapshot` | `compute:sandboxes:update` | `compute-sandbox` |
-| `sandboxes.exec` | `compute:sandboxes:exec` | `compute-sandbox` |
-| `sandboxes.delete` | `compute:sandboxes:delete` | `compute-sandbox` |
-| `sandboxTemplates.create` | `compute:sandboxes:manage` | `compute-tenant` |
-| `sandboxTemplates.list` | `compute:sandboxes:read` | `compute-tenant` + items |
-| `sandboxTemplates.get` | `compute:sandboxes:read` | `compute-sandbox-template` |
-| `sandboxTemplates.update`, `sandboxTemplates.delete` | `compute:sandboxes:manage` | `compute-sandbox-template` |
-
-A `compute-sandbox` has the pool as its parent, like an instance, so pool relations apply. See
-[actions and resources](/docs/guides/iam/actions-and-resources) and the generated
-[sandboxes](/docs/reference/api/sandboxes) and [sandboxTemplates](/docs/reference/api/sandbox-templates) pages.
-
-### The v0.5 exit
-
-`tests/e2e/sandboxes.test.ts` closes the deliverable: 500 sandboxes expire on emulated hosts with the same zero-leak
-diff as the v0.3 churn; a warm claim reaches `ready` without a placement; a snapshot round trip restores memory
-state; another tenant's snapshot is refused; and instance methods on a sandbox's instance are refused.
 
 <Cards>
   <Card title="Instances" href="/docs/guides/vps/instances" icon={<Instance />}>
-    The lifecycle, reports, lost hosts, runtimes and workload identity.
+    The lifecycle, paused instances, the sandbox guard, runtimes and workload identity.
   </Card>
   <Card title="Flavors" href="/docs/guides/vps/flavors" icon={<Cpu />}>
     Shapes, scalar claims, overcommit, quota and metering.
@@ -324,6 +449,6 @@ state; another tenant's snapshot is refused; and instance methods on a sandbox's
     Exec, SSH and TCP through single-use tickets.
   </Card>
   <Card title="Policies" href="/docs/guides/iam/policies" icon={<KeyRound />}>
-    Bound what callers may start with conditions on the draft.
+    Bound sandbox shapes and lifetimes with conditions on the draft.
   </Card>
 </Cards>

@@ -366,7 +366,9 @@ Lifecycle changes emit events with subject `reservation/<id>` and `state` and `p
 `reason`: `release`, `expired`, `lease-lapsed` or `preempted`), `reservation.cancelled`,
 `reservation.failed`, `reservation.awaiting-confirmation`, `reservation.expired`,
 `reservation.repaired`, `reservation.preempting`, `reservation.preempted`, `reservation.reassigned` (an
-offboarded owner's reservation handed to the successor; see [IAM events](/docs/guides/iam#iam-events-compute-reacts-to)) and
+offboarded owner's reservation handed to the successor, with `reservationId`, `from`, `to` and `reason`; it
+has its own row in the event catalog and `webhooks.eventTypes`; see
+[IAM events](/docs/guides/iam#iam-events-compute-reacts-to)) and
 `reservation.binding-rejected` (with `allocationId`, `nodeId` and `reason`; see
 [attested bindings](#attested-bindings)). Subscribe with
 [webhooks](/docs/guides/events/webhooks) or [watch](/docs/guides/events/watch).

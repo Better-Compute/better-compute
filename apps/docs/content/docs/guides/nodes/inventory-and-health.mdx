@@ -198,7 +198,7 @@ Inventory also writes node labels with source `inventory`, the way NVIDIA's GPU 
 `os.kernel` and `kvm.available`. A label whose GPUs disagree reads `mixed`. `nodes.label` cannot overwrite them.
 `cpu.model` is the reported model with trademark marks dropped and every other run of characters outside
 `A-Z a-z 0-9 . _` turned into `-` (`AMD EPYC 9654 96-Core Processor` reads `AMD-EPYC-9654-96-Core-Processor`);
-sandbox memory snapshots restore only on hosts with an equal value.
+sandbox memory snapshots, which are planned, are to restore only on hosts with an equal value.
 
 The gateway writes one more kind at every `Hello`: each driver the daemon advertises in `Hello.drivers` becomes
 the label `bc.dev/driver.<id>=<version>` with source `system` (a missing version reads `unknown`; ids outside
@@ -312,9 +312,10 @@ eight-GPU machine, while a GPU that fell off the bus usually needs a reboot of t
   `NVRM: Xid (PCI:0000:18:00): 79, ...`. It normalizes the bus id to NVML's form (`00000000:18:00.0`), finds the GPU
   with that bus id in its inventory, and raises condition `Xid79` (status `TRUE`, `device_id` the GPU's UUID, the
   driver's text as the message), one per XID and GPU. The status report goes out at once, and the condition stays in
-  every later report. An XID for a bus id the inventory does not know is only logged. bcd keeps these conditions in
-  memory for the life of its process, so they end with the reboot that follows (and also with a restart of bcd
-  itself, since it reads the kernel log from its end).
+  every later report. An XID for a bus id the inventory does not know is only logged. bcd keeps these conditions for
+  the rest of the boot: they are stored with the boot id in `data_dir/faults.json` (mode 0600), so a restart of bcd
+  in the same boot reports them again even though it reads the kernel log from its end, while the first start after
+  a reboot finds another boot id and drops them. The reboot that remediation runs therefore clears them.
 - **Remediation.** Node-level faults queue the `health` reconciler of the provision module. It waits until
   the node holds no live allocation, then runs a `node.reboot` workflow (`Xid79`, `Xid95`) or a GPU reset
   (`RowRemapPending`; bcd's `gpu.reset` refuses a GPU that still has a live hold, see

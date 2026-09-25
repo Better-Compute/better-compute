@@ -117,7 +117,8 @@ identity in-band.
 
 1. loads the configuration and resolves the `host` export;
 2. runs `compute.initialize()` (migrations, registry checks, module start) unless `--no-migrate`;
-3. installs the IAM event handlers when `host.iam` is set;
+3. installs the IAM event handlers when `host.iam` is set (give it `readTenants: iamTenantReader(iam, { credential })`
+   so a tenant suspension or deletion reaches the whole subtree; see [tenancy](/docs/guides/iam/tenancy#the-iam-reaction));
 4. starts the worker roles with `compute.start({ roles })`;
 5. starts the gateway role: `createGateway`, the revocation feed, the mTLS listener, and the WebSocket and internal
    listeners when configured;

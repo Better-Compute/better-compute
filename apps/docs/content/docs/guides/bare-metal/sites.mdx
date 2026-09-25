@@ -17,6 +17,13 @@ sources:
   - tests/server-groups-site-tokens.test.ts
   - tests/metal-dev-site.test.ts
   - tests/metal-discovery-token.test.ts
+  - daemon/cmd/bcd/site.go
+  - daemon/internal/agent/site.go
+  - daemon/internal/agent/bootserver.go
+  - daemon/internal/agent/cache.go
+  - daemon/internal/pxe/dhcp.go
+  - daemon/internal/pxe/tftp.go
+  - daemon/internal/bootparams/bootparams.go
   - PLAN.md
 ---
 
@@ -68,17 +75,18 @@ A site agent is `bcd` running in `site` mode on a machine next to the fleet, one
 the control plane it is a node like any other: a `nodes` row with `role = 'site'`, no pool, a
 `site` certificate and a session through the gateway. It runs the site's commands:
 
-| Duty | When |
-| --- | --- |
-| Proxy DHCP, so booting machines find the iPXE binary without replacing your DHCP server | only while holding the boot lease |
-| TFTP and iPXE scripts over HTTPS, one per machine being booted | only while holding the boot lease |
-| Vouching for ramdisks that PXE-booted from it (signed discovery assertions) | only while holding the boot lease |
-| A range-capable image cache that ramdisks stream from | always |
-| BMC access (Redfish, IPMI, vendor drivers) on the management network | always |
+| Duty | When | In `bcd site` today |
+| --- | --- | --- |
+| Proxy DHCP, so booting machines find the iPXE binary without replacing your DHCP server | only while holding the boot lease | yes, with `[boot] proxy_dhcp` |
+| TFTP and iPXE scripts, one per machine being booted | only while holding the boot lease | yes: read-only TFTP for the iPXE builds, scripts over plain HTTP |
+| Vouching for ramdisks that PXE-booted from it (signed discovery assertions) | only while holding the boot lease | yes |
+| An image cache that ramdisks stream from | always | yes, by digest (`GET /cache/<sha256>`) |
+| BMC access (Redfish, IPMI, vendor drivers) on the management network | always | Redfish only |
 
 The command kinds it accepts are role-restricted to `site`: `bmc.query`, `bmc.boot`, `bmc.power`,
-`bmc.rotate`, `bmc.firmware`, `boot.prepareRamdisk`, `boot.cleanUp` and `site.httpProxy`. Their
-payloads are messages of `bettercompute.site.v1`, which stays a draft package until v0.2 closes. See
+`bmc.rotate`, `bmc.firmware`, `bmc.storage`, `boot.prepareRamdisk`, `boot.cleanUp` and `site.httpProxy`, plus
+the shared `inventory.refresh`, `logs.collect` and `node.reboot`. Their payloads are messages of
+`bettercompute.site.v1`, which stays a draft package until v0.2 closes. See
 [BMC drivers and credentials](/docs/guides/bare-metal/bmc) and the
 [command kinds reference](/docs/reference/command-kinds).
 
@@ -95,10 +103,12 @@ the section merges field by field (see [NodeSpec sections](/docs/extending/modul
 `bcd site` exists, and its contracts are in `proto/bettercompute/site/v1`. It runs BMC operations over
 Redfish (other drivers answer `unsupported-driver`), `site.httpProxy` and boot entries. While it holds the boot lease,
 its boot server answers prepared machines only: proxy DHCP (boot server and file, never an address), TFTP for the iPXE
-builds, iPXE scripts and discovery assertions over HTTP(S). Its cache pre-warms `cacheImages`, serves them to the site's
-ramdisks by digest and reports them in its `images` inventory section, which becomes the site's `image_locations`. The
-dev stack joins site agents as FakeDaemons with role `site` (`createDevStack().joinSite()`), and the metal
-test suite answers site commands with a simulated agent.
+builds, iPXE scripts and discovery assertions over plain HTTP (see [the boot server](#the-boot-server-in-bcd-site)).
+Its cache pre-warms `cacheImages`, serves them to the site's ramdisks by digest and reports them in its `images`
+inventory section, which becomes the site's `image_locations`. bcd is not released, and only its Go unit tests run
+these parts (against a fake Redfish BMC, a scripted session and real sockets): no test runs `bcd site` against the
+control plane, and no real site has run it. The dev stack joins site agents as FakeDaemons with role `site`
+(`createDevStack().joinSite()`), and the metal test suite answers site commands with a simulated agent.
 </Callout>
 
 ## Enroll site agents with site tokens
@@ -127,7 +137,9 @@ const minted = await compute.api.siteTokens.create(credential, {
 - Both publish security events: `security.site-token.created` and `security.site-token.revoked`.
 
 The agent joins through the same Join RPC as any daemon (see [joining nodes](/docs/guides/nodes/joining)),
-and JoinService issues it a 24-hour certificate with role `site`.
+and JoinService issues it a 24-hour certificate with role `site`. With bcd that is
+`BCD_JOIN_TOKEN=bcjt_... bcd join --role site`, then `bcd site`; see
+[installing bcd](/docs/daemon/install#a-site-agent).
 
 ## One active boot server per site
 
@@ -198,6 +210,65 @@ sequenceDiagram
 - A token is minted only when its entry's command is first sent, not on every poll, and the cleanup
   step `boot.cleanUp` removes the entries and deletes the stored tokens.
 - A machine with no known MAC fails with `INVALID_STATE`: inspect it out of band first.
+
+### The boot server in bcd site
+
+`bcd site` keeps the boot entries it receives in `data_dir/boot-entries.json`, keyed by MAC, so a restart keeps
+answering; `boot.cleanUp` drops a workflow's entries (or the listed MACs), and lapsed entries are dropped on their
+own. With a `[boot]` section in its config (see [installing bcd](/docs/daemon/install#a-site-agent)) it serves them
+in three stages:
+
+```mermaid
+sequenceDiagram
+  participant M as Machine firmware
+  participant D as Site DHCP server
+  participant S as bcd site
+  M->>D: DHCP DISCOVER (PXEClient)
+  D-->>M: an address
+  S-->>M: proxy DHCP: boot server and iPXE file, no address
+  M->>S: TFTP undionly.kpxe or ipxe.efi
+  M->>S: DHCP again, now as iPXE
+  S-->>M: proxy DHCP: /boot/chain.ipxe
+  M->>S: GET /boot/ipxe?mac=&uuid=&ip=
+  S->>S: SecretRequest for the discovery token, sign the assertion
+  S-->>M: iPXE script: kernel, initrd, bc.* parameters
+```
+
+1. **Proxy DHCP** (UDP 67 and 4011, `proxy_dhcp = true`) answers `PXEClient` and `HTTPClient` requests beside your
+   DHCP server and never hands out an address. It reads the MAC, the client architecture (option 93) and whether the
+   client is iPXE already. Firmware gets the iPXE build for its architecture from TFTP at `server_ip`:
+   `undionly.kpxe` for BIOS, `ipxe.efi` for x86-64 UEFI, `ipxe-arm64.efi` for arm64 UEFI. UEFI HTTP boot clients get
+   the same build as a URL, `<url>/boot/files/<file>`. iPXE itself gets `<url>/boot/chain.ipxe`, which chains to
+   `/boot/ipxe` with its MAC, SMBIOS UUID and IP.
+2. **TFTP** (`tftp`, `tftp_root`) is read-only, octet mode, with block size and transfer size negotiation, and serves
+   nothing outside its root. You supply the iPXE builds.
+3. **`GET /boot/ipxe`** renders the machine's script: the site's ramdisk `kernel` and `initrd`, and on the kernel
+   command line the `bc.*` boot parameters `bcd ramdisk` joins with (the gateway, pins and join key, the machine's
+   discovery token and a signed assertion, and `bc.cache` when `url` is set), then `cmdline`.
+
+Proxy DHCP answers, and `/boot/ipxe` renders a script, only when both hold:
+
+- the MAC has a live boot entry; an unknown machine gets no proxy DHCP answer and a 404 script that exits, so it
+  falls through to its next boot device;
+- the agent is the active boot server: its `site` section says it holds the lease at a non-zero epoch, and it has
+  heard from the gateway within the lease TTL (15 seconds when the section gives none). A partitioned agent fences
+  itself this way; its `/boot/ipxe` answers 503 with a script that waits 10 seconds and reboots.
+
+The discovery token is fetched with a `SecretRequest` bound to the entry's workflow the first time the machine asks
+for its script and reused if it asks again; while it is not available the script waits and retries. Each script
+carries a fresh `DiscoveryAssertion` (the site, this agent's node id, the lease epoch, the MAC, the IP from the query
+or the connection, the product UUID from the query or the entry, the workflow, `issued_at` in server time, and a
+`not_after` at most 15 minutes out and never past the entry's), signed by the agent's node key under purpose
+`discovery-assertion`.
+
+The image cache is served by the same HTTP server at `GET /cache/<sha256 hex>`, digest paths only, whether or not
+the agent holds the lease. The agent pulls every `cacheImages` entry of its `site` section in the background into
+`data_dir/cache/<sha256>`, and a copy becomes visible only after its bytes match the digest. The `site` section
+stays `PROGRESSING` while images warm and fails for an image whose bytes do not match. With `[boot] cache_max_bytes` set, each pass trims the cache to that budget, least
+recently used first, and never evicts an image the section still names (the pools' pre-warm images plus every image
+a deploy at the site is streaming). A ramdisk booted with
+`bc.cache` tries the cache first for `deploy.image` and falls back to the image's source URL; the digest is checked
+on the stream either way, so a cache can never substitute an image.
 
 ### The discovery attestor
 

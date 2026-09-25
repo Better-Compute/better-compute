@@ -138,12 +138,14 @@ writes a type outside the catalog.
 | `pool.*` | `pool/{id}` | capacity | `pool.created`, `pool.updated`, `pool.offered`, `pool.unoffered`, `pool.archived` |
 | `quota.updated` | `pool/{id}` | capacity | `quota.updated` |
 | `reservation.*` | `reservation/{id}` | capacity | `reservation.placed`, `pending`, `queued`, `binding`, `active`, `extended`, `preempting`, `preempted`, `repaired`, `failed`, `cancelled`, `expired`, `awaiting-confirmation`, `binding-rejected`, and one per state change |
+| `reservation.reassigned` | `reservation/{id}` | capacity | An offboarded identity's reservation moved to its successor: `{ reservationId, from, to, reason }` |
 | `node.*` | `node/{id}` | server | `node.joined`, `node.acceptance.started`, `node.acceptance.failed`, `node.adopted`, `node.connected`, `node.disconnected`, `node.unreachable`, `node.lost`, `node.status`, `node.cordoned`, `node.uncordoned`, `node.draining`, `node.drained`, `node.labeled`, `node.tainted`, `node.adopting`, `node.deleted`, `node.command.queued`, `node.command.cancel-requested`, `node.report-failed`, `node.ssh-cert.issued`, `node.ssh-cert.revoked` |
 | `node.inventory.changed`, `node.gpu.*`, `node.mig.*`, `node.disk.*`, `node.driver.*` | `node/{id}` | inventory | `node.gpu.added`, `node.gpu.missing`, `node.mig.layout.changed`, `node.disk.replaced`, `node.driver.changed`; `node.mig.scheduled`, `node.mig.granted` and `node.mig.applied` from capacity's MIG layout gate; also `node.condition.changed` from the hygiene sweep and host pressure (within `node.*`) |
 | `node.enrolled`, `node.provision.*` | `node/{id}` | metal | `node.provision.<state>` for each provisioning transition |
 | `command.settled` | `command/{id}` | gateway | A command reached a terminal state |
 | `workflow.*` | `workflow/{id}` | provision | `workflow.created`, `started`, `paused`, `resumed`, `retried`, `cancelled`, and one per state |
 | `instance.*` | `instance/{id}` | vps | `instance.created`, `scheduled`, `provisioning`, `starting`, `stopping`, `resized`, `deleting`, `deleted`, `failed`, `lost`, `recovered`, `recreating`, `orphaned` |
+| `sandbox.*` | `sandbox/{id}` | vps | `sandbox.created`, `ready`, `extended`, `expired`, `deleted`; `sandbox.snapshot.ready` / `failed` are declared for the planned snapshots; see [sandbox events](/docs/guides/vps/sandboxes#events) |
 | `fleet.*` | `fleet/{id}` | fleet | `fleet.drifted`, `fleet.converged` |
 | `rollout.*` | `rollout/{id}` | rollout | `rollout.started`, `paused`, `resumed`, `aborted`, `completed` |
 | `tunnel.*` | `tunnel/{id}` | server | `tunnel.issued` |

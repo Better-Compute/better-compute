@@ -27,6 +27,8 @@ sources:
   - packages/iam/src/tenants.ts
   - packages/cli/src/dev-sim.ts
   - tests/iam-tenant-reader.test.ts
+  - packages/vps/src/tenancy.ts
+  - packages/iam/README.md
 ---
 
 import { Coins, Layers, ListChecks } from '@/lib/icons';
@@ -239,7 +241,21 @@ export const host = defineHost(async () => ({
 ```
 
 `iamTenantReader(iam, { credential, maxTenants? })` uses only `tenants.get` and `tenants.listChildren`, so `iam` can
-be `betterIam()`'s result or anything with those two methods:
+be either of:
+
+- **Embedded:** `betterIam()`'s result (`TenantReaderHost`); the credential is the first argument of each call.
+- **Remote:** a Better IAM HTTP client, `createIamClient()` from `@better-iam/client` (`TenantReaderClient`); the
+  credential goes into each call's headers. A credential IAM refuses fails the read; it never reads as `missing`.
+
+```ts title="Remote mode"
+import { createIamClient } from '@better-iam/client';
+
+const readTenants = iamTenantReader(createIamClient({ baseURL: 'https://iam.example.com' }), {
+  credential: rootCredential,
+});
+```
+
+Either way:
 
 - `credential` is a root credential (compute's service account in the IAM root tenant), or a function returning
   one: only root reads suspended and deleted tenants and every tenant's children.
@@ -269,13 +285,45 @@ bridge.setHandlers({
 
 - `readTenants(tenantId)` returns `{ tenantId, status }` for the tenant acted on and its descendants, with `status`
   one of `active`, `pending`, `suspended`, `deleted` or `missing` (IAM no longer knows it). A suspension or
-  deletion cascades to descendants, and the audit event names only the tenant acted on, so the handler re-reads
-  the subtree instead of trusting the event. `suspended` maps to `suspended`; `deleted` and `missing` map to
+  deletion cascades to descendants, and the audit event names only the tenant acted on, so compute re-reads the
+  subtree instead of trusting the event. `suspended` maps to `suspended`; `deleted` and `missing` map to
   `deleted`; anything else is `active`.
-- Without `readTenants`, only `iam:tenants:delete` is applied, and only to the named tenant; an update changes
-  nothing.
-- Each change publishes `tenant.state-changed` (`tenantId`, `state`, `previous`, `reason`) on `tenant/{id}`, in the
-  inbox transaction. A replay changes nothing, and a tenant reactivated in IAM becomes `active` again.
+- Without a reader, only `iam:tenants:delete` is applied, and only to the named tenant; an update changes nothing,
+  and the reconciler logs a warning for each subtree it could not re-read.
+- Each change publishes `tenant.state-changed` (`tenantId`, `state`, `previous`, `reason`) on `tenant/{id}`. A
+  replay changes nothing, and a tenant reactivated in IAM becomes `active` again.
+
+### No IAM call in the inbox transaction
+
+The handler runs inside the IAM inbox's drain transaction, which holds its inbox rows `FOR UPDATE`, so it makes no
+IAM call there. It only writes SQL:
+
+1. On `iam:tenants:delete`, the named tenant is recorded as `deleted` at once, no IAM read needed, and refused from
+   that commit on.
+2. On every update and delete, it queues the key `sync:<tenantId>` for the `tenancy` reconciler, and it hands
+   `readTenants` to `compute.tenants.setReader()`.
+
+The reconciler then reads the subtree through the reader outside any transaction (`syncTenantStates`) and applies
+it in a transaction of its own (reason `iam:tenants:sync`). When IAM cannot answer, the read throws and the key is
+retried with back-off: a suspension or deletion is delayed while IAM is down, never dropped, and compute never
+fails open. As a backstop, a periodic `resync` key re-reads the whole tree from the root tenant every 15 minutes
+(reason `iam:tenants:resync`).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as IAM inbox
+  participant H as tenantStateHandler
+  participant R as tenancy reconciler
+  participant I as Better IAM
+  B->>H: iam:tenants:update or delete (in the drain transaction)
+  H->>H: delete: record the named tenant as deleted
+  H->>R: enqueue sync:tenantId
+  R->>I: readTenants(tenantId), outside any transaction
+  I-->>R: the subtree with effective statuses
+  R->>R: apply the states in its own transaction
+  Note over R,I: IAM down: the read throws, the key is retried with back-off
+```
 
 ### What the envelope refuses
 
@@ -307,12 +355,13 @@ a lost work item. When every hook answers `DONE` in one pass, the reconciler set
 | `capacity` | Unstarted reservations cancelled, started ones released now (bookings and quota back); offers to the tenant withdrawn (quotas zeroed, `pool.unoffered` to the owner); pools it owns archived, with every offer withdrawn (`pool.archived`), while other tenants' live bookings there run to their end; its idle quota rows deleted. A dedicated-root lease is released this way too. |
 | `provision` | Active workflows aborted (their cleanup still runs); private images and profiles soft deleted with their authz rows; image signers revoked. Images it promoted to public stay, for the tenants that deploy them. |
 | `metal` | Every bare-metal node it owns retired, one legal transition per sweep: `ready`, `adopted`, `enrolling` and `failed` retire at once; `deployed` and `rescued` machines are released (wiped) first; a machine mid-workflow is aborted (it fails with `TENANT_DELETED`), then retired; `releasing` and `retiring` machines finish first. |
+| `vps` | Admission drafts dropped; every live instance set to `desiredState: 'deleted'` (100 per pass, `instance.deleting` with reason `tenant deleted`) and torn down through the ordinary lifecycle: runtime teardown, inline allocation released, IP freed, quota refunded. `SYNC_AGAIN` until every instance is `deleted`. |
 
 <Callout type="warn" title="Not torn down yet">
-Only `capacity`, `provision` and `metal` implement `tenantDeleted` in this release. A deleted tenant's VPS
-instances, its non-metal `tenant-owned` nodes and its sites are not released by the teardown; the gate only stops
-the tenant from reaching them. Their VMs cannot mint workload identity tokens meanwhile: the workload broker refuses
-a suspended or deleted tenant's instances with `disabled`. Plugins release their own state through the same hook; see
+Only `capacity`, `provision`, `metal` and `vps` implement `tenantDeleted` in this release. A deleted tenant's
+non-metal `tenant-owned` nodes and its sites are not released by the teardown; the gate only stops the tenant from
+reaching them. While its instances wait for teardown, their VMs cannot mint workload identity tokens: the workload
+broker refuses a suspended or deleted tenant's instances with `disabled`. Plugins release their own state through the same hook; see
 [modules](/docs/extending/modules#tenantdeleted).
 </Callout>
 

@@ -118,16 +118,17 @@ breaking. PLAN.md §5.1 keeps every `define*` helper **experimental until v1.0**
 | Reconcilers, command kinds, NodeSpec sections, migrations | Built, with the v0.1 worker runtime. |
 | Scheduler plugins | Built: filters, scorers, atom pickers and admission hooks run in both placers. |
 | Sinks | Built: event sinks on OutboxDispatch with durable cursors and dead letters; audit sinks on the built-in `audit-sinks` module. Usage sinks are refused with `INVALID_CONFIG` (usage goes to IAM billing through the bridge); see [sinks](/docs/extending/sinks#usage). Sinks and scheduler plugins a module lists in `extensions` run like those in the options. |
-| Attestors | Built: `join-token`, `x509pop`, `provisioned`, `discovery`, `cloud-iid` and `tpm` are all `defineAttestor` values. bcd produces only `join-token` joins; its producers for the others are not written. |
-| Drivers, steps, profiles | Built in TypeScript (`metal`, `provision`). bcd runs only its five built-in node kinds; the site-agent and ramdisk modes that run driver operations and steps are not written. |
+| Attestors | Built: `join-token`, `x509pop`, `provisioned`, `discovery`, `cloud-iid` and `tpm` are all `defineAttestor` values. bcd produces `join-token` joins, and `discovery` joins from `bcd ramdisk` with its site agent's signed assertion; its producers for the others are not written. |
+| Drivers, steps, profiles | Built in TypeScript (`metal`, `provision`). bcd runs the metal command kinds that steps send (Redfish BMC operations, boot entries and `site.httpProxy` on `bcd site`; wipes, image writes, kexec and DCGM on `bcd ramdisk`), not released and tested by Go unit tests only; it loads no driver plugins. |
 | Providers | Built: `hetzner` and `proxmox` provider packages, checked by `providerConformanceCases()`. |
 | bcx out-of-process drivers | A v0.5 draft. `@better-compute/driver-sdk` works for TypeScript plugins; the proto is unstable until v0.5 ships. |
 
 <Callout type="warn" title="The daemon half is mostly missing">
 Several extension points end in a command that a <Term id="bcd">bcd</Term> agent runs: driver operations on a site
-agent, steps on a ramdisk, NodeSpec sections on a node. The Go daemon's v0.1 node agent is built and tested (not
-released), but it converges only the `devices` section, runs only `inventory.refresh`, `diag.nvml`, `logs.collect`
-and `node.reboot`, and has no site-agent or ramdisk mode. The TypeScript `FakeDaemon` in `@better-compute/testing`
+agent, steps on a ramdisk, NodeSpec sections on a node. The Go daemon's node agent is built and tested end to end,
+and its site-agent and ramdisk modes are written with Go unit tests; none of it is released. It converges the
+`devices`, `access`, `instances` (over a fakehw stand-in runtime only) and `site` sections and runs its built-in and
+metal kinds, but no `host` or `daemon` section, no `driver.invoke` and no bcx plugin. The TypeScript `FakeDaemon` in `@better-compute/testing`
 speaks the real protocol and runs the other paths in tests and in `better-compute dev --sim N`. See
 [what bcd does today](/docs/daemon#what-bcd-does-today).
 </Callout>

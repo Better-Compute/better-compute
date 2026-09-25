@@ -46,10 +46,14 @@ the best worked examples of the contracts on the other pages of this section.
 | Emulated site | v0.2 | a hardware profile, the whole metal lifecycle | `examples/emulated-site` | configuration checked; needs Linux, KVM and a `bcd` build to run |
 
 <Callout type="warn" title="No real hardware yet">
-Every metal walkthrough needs `bcd site` and `bcd ramdisk`, the v0.2 modes of the Go daemon, which are not written:
-bcd's node agent is built and tested, but those two modes exit 2 with `NOT_IMPLEMENTED`. The tests answer their commands with simulated site agents and machines, or with a
-FakeDaemon site agent over the real gateway. PLAN.md's pass criterion for walkthrough 1, "a sushy-tools VM reaches
-`deployed`", has not been met.
+Every metal walkthrough needs `bcd site`, and all but the agentless Talos one need `bcd ramdisk`. Both modes of the Go
+daemon are now written and answer every command these walkthroughs send, except BIOS, RAID and firmware updates
+through the BMC, but they are not released and only their Go unit tests run them. No walkthrough runs against them
+yet: the tests answer the commands with simulated site agents and machines, or with a FakeDaemon site agent over
+the real gateway. Running one for real also needs what the repository does not provide (iPXE builds, a ramdisk
+image, a KVM host), and the emulated site hits a limit of bcd's Redfish client, which drives only the first system
+behind a BMC address. PLAN.md's pass criterion for walkthrough 1, "a sushy-tools VM reaches `deployed`", has not
+been met. See [what bcd does today](/docs/daemon#what-bcd-does-today).
 </Callout>
 
 Run them all from the repository root:
@@ -200,7 +204,11 @@ export const hardwareProfiles = {
 ```
 
 A pool that names it in `policy.hardwareProfile` drives the emulated BMCs through commission, deploy, release and
-retire. The run needs Linux with `/dev/kvm`, QEMU, libvirt, sushy-tools and a `bcd` build, so none of it runs in CI.
+retire. The run needs Linux with `/dev/kvm`, QEMU, libvirt, sushy-tools and a `bcd` build, plus iPXE builds for the
+site agent's TFTP root and a ramdisk kernel and initramfs with `bcd ramdisk` in it, so none of it runs in CI. As
+written it would not pass against today's `bcd site`: one `sushy-emulator` serves both VMs, and bcd's Redfish client
+uses only the host of a BMC address and drives the first system behind it (see
+[Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)).
 What CI checks, in `tests/examples-smoke.test.ts`, is that the configuration loads, migrates on PGlite and passes
 `better-compute doctor` with no error findings (on an unconfigured machine it reports `iam.not-configured`).
 

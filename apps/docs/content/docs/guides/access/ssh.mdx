@@ -257,6 +257,41 @@ issue, and the reconciler logs a warning. This is deliberate: break-glass access
 part of one.
 </Callout>
 
+## Who has access
+
+`nodes.listSshCerts` answers who holds, or held, break-glass access to a node: the certificates issued for it
+through the tenant, newest first. It is decided as `compute:nodes:read` on the node, not `ssh-root`, because it is
+audit information that the node's `node.ssh-cert.issued` and `node.ssh-cert.revoked` events already show to the same
+readers (see [the reference](/docs/reference/api/nodes#listsshcerts)).
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: 'The tenant that issued the certificates.', required: true },
+    nodeId: { type: 'string', description: 'The node (node_...).', required: true },
+    includeExpired: {
+      type: 'boolean',
+      description: 'Also certificates past their expiry. Records are kept a day after expiry, then dropped.',
+      default: 'false',
+    },
+    limit: { type: 'number', description: 'Page size, 1 to 500.', default: '100' },
+    cursor: { type: 'string', description: 'The nextCursor of the previous page.' },
+  }}
+/>
+
+It answers `{ items, nextCursor? }`. Each item carries `serial`, `nodeId`, `identityId` (who asked for it),
+`principal`, `keyId`, `issuedAt`, `expiresAt` and `state`: `active`, `expired` or `revoked`. A revoked item adds
+`revokedAt`, `revokedBy` (an identity, or `iam` for a revocation driven by IAM) and `revokeReason`. The list never
+returns the certificate or any key. Without `includeExpired`, revoked certificates that have not yet expired are
+still listed.
+
+Pages are keyed on `(issuedAt, serial)`, so a page boundary never drops or repeats a certificate. A node the tenant
+cannot see is `NOT_FOUND`; a malformed cursor is `INVALID_INPUT`. Like `issueSshCert`, the method is added to the
+`nodes` group at run time, so call it by path:
+
+```bash
+better-compute api nodes.listSshCerts tenantId=root nodeId=node_01jzq3v0m6y8x7w5t4s3r2p1na includeExpired:=true
+```
+
 ## What the node needs
 
 The node must trust the CA for user certificates, accept only its own principals and honour the revocation list.
@@ -313,4 +348,5 @@ asks you to sign in again with a second factor instead of showing the error.
 | Revoking certificates on `binding:deactivate` | Shipped as `serve`'s default IAM `binding` handler |
 | Revoking certificates on offboarding, expiry, deletion and session revocation | Shipped as `serve`'s default `identity` and `sessions` handlers |
 | Re-deciding live certificates every minute (`tunnels.ssh-certificates-reauthorize`) | Shipped; IAM unreachable keeps a certificate until it expires |
+| `nodes.listSshCerts`: who holds or held a certificate for a node, with its state | Shipped |
 | Rotating the SSH CA | No rotation flow; `access.sshCaPublicKeys` lists only the current key |

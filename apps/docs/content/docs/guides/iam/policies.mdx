@@ -157,7 +157,7 @@ await iam.api.bindings.create(orgOwner, {
 | `ReserveBoundedH100` | Creating a reservation when the draft asks for H100s in the listed regions, at most 8 GPUs for at most 72 hours, in a pool where the member holds `user`, and the tenant has the `compute.h100` flag |
 | `OwnReservations` | Reading and releasing the member's own reservations. `${principal.id}` is a Better IAM policy variable. |
 | `BoundedExtend` | Extending the member's own reservations while the total stays within 72 hours |
-| `StopWhenOverBudget` | Denies new reservations, extensions and instances once an enforced Better IAM budget covering the member is spent, and already names the planned v0.5 sandbox create and update (extend, snapshot) actions |
+| `StopWhenOverBudget` | Denies new reservations, extensions and instances once an enforced Better IAM budget covering the member is spent, and new sandboxes and sandbox extensions (`compute:sandboxes:create` and `compute:sandboxes:update`, which will also cover the planned `snapshot`) |
 | `SessionJwtForCompute`, `AssertToCompute` | What Better IAM checks before it mints a session JWT whose audience includes compute |
 
 `BoundedExtend` cannot be bypassed by extending in small steps. Before deciding, `reservations.extend` writes the
@@ -225,11 +225,13 @@ the rows carry today:
 | `compute-node` | `region`, `gpuCount`, `lifecycle` (the provision state), `trust`, and `gpuModel` when the node is in a pool with one | The parent is the pool |
 | `compute-site` | `region`, `kind`, and `iamRegion` when set | |
 | `compute-project` | none | `ownerId` is the creator |
+| `compute-sandbox` | `templateId`, `vcpu`, `memoryGiB` and `gpus` (the template's flavor), `ttlSeconds` (the lifetime asked for; during `sandboxes.extend`, the pending total from creation to the new expiry), and `warm` (true when the template keeps a warm pool, `warm.min > 0`) | `ownerId` is the requesting identity; the parent is the template's pool |
+| `compute-sandbox-template` | none | `ownerId` is the template's author |
 
 A reservation's `gpuCount` counts whole GPUs only; fractional requests show up in `gpuSlices`. The catalog also
 declares `gpuMemoryGb` on pools and `dedicatedTo` on nodes, which no row carries yet, so a condition on them
-never matches. The same holds for the planned v0.5 `compute-sandbox` type (`templateId`, `vcpu`, `memoryGiB`,
-`gpus`, `ttlSeconds`, `fromSnapshot`, `warm`): it is in the catalog, but nothing writes sandbox rows yet. Rows
+never matches. The same holds for `fromSnapshot` on `compute-sandbox`: it waits for snapshot restore, which is not
+built. Rows
 written by `metal` verbs carry `provisionState`, `poolId` and `siteId` instead of the node
 controller's attributes.
 

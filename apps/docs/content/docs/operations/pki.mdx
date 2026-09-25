@@ -392,7 +392,8 @@ The host asks for a token over its session with a `WorkloadTokenRequest` signed 
 the instance and the expiry). `createWorkloadTokenRequest` and `openWorkloadTokenResponse` are the host's half,
 `openWorkloadTokenRequest`, `sealWorkloadTokenResponse` and `refuseWorkloadTokenRequest` the broker's. bcd carries
 the host's half in Go (`NewWorkloadTokenRequest` and `OpenWorkloadTokenResponse` in `daemon/internal/pki`, checked
-against fixtures the TypeScript side produces), but no metadata service calls it yet. What the broker checks is in
+against fixtures the TypeScript side produces), and its metadata service (`daemon/internal/imds`) calls it; only
+fakehw builds of bcd run instances to serve so far. What the broker checks is in
 [VPS instances](/docs/guides/vps/instances#workload-identity).
 
 ## Rotation and expiry

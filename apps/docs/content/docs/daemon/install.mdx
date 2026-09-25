@@ -11,11 +11,17 @@ sources:
   - daemon/internal/config/config.go
   - daemon/cmd/bcd/main.go
   - daemon/cmd/bcd/agent.go
+  - daemon/cmd/bcd/site.go
+  - daemon/cmd/bcd/ramdisk.go
+  - daemon/internal/bootparams/bootparams.go
+  - daemon/internal/agent/bootserver.go
+  - daemon/internal/agent/ramdisk_host.go
   - daemon/internal/agent/join.go
   - daemon/internal/agent/state.go
   - daemon/internal/journal/bolt.go
   - daemon/internal/journal/journal.go
   - .github/workflows/daemon.yml
+  - .github/workflows/release.yml
   - scripts/daemon-test.mjs
   - daemon/internal/journal/rules.go
   - daemon/.goreleaser.yaml
@@ -38,8 +44,8 @@ The script generator (`better-compute daemon install-script`) is built and teste
 `GET {basePath}/downloads/bcd/{version}/linux-{arch}` route it fetches from (see [serving the
 binaries](#serving-the-binaries)). bcd itself is built and tested: `bcd join` and `bcd node` work, and
 `tests/e2e/bcd.test.ts` runs them against a real gateway (see [the overview](/docs/daemon#what-bcd-does-today)). But
-bcd is not released: no goreleaser run has produced the bare binaries and digests the script pins, and no test yet
-runs the script itself on a host. You can build a binary from `daemon/` and serve it yourself; otherwise
+bcd is not released: the release workflow exists, but no tag has been released, so there are no published bare
+binaries and digests for the script to pin, and no test yet runs the script itself on a host. You can build a binary from `daemon/` and serve it yourself; otherwise
 `better-compute dev --sim N` shows nodes joining through the same protocol with the TypeScript FakeDaemon. See
 [local development](/docs/operations/local-development).
 </Callout>
@@ -243,6 +249,8 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `[log] json` | no | `true` | JSON lines |
 | `gateway_server_name` | no | | The name the gateway certificate must carry when `gateway_url` names an IP address (an L4 balancer, a dev stack reached from WSL) |
 | `dev_insecure_h2c` | no | `false` | Allows an `http://` `gateway_url` (cleartext HTTP/2 to a dev gateway). Only fakehw builds accept it; the host build refuses to start |
+| `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
+| `[boot] ...` | no | | A site agent's boot server; see [site agents](#a-site-agent) |
 
 A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKeyInfo, the form HPKP and
 `curl --pinnedpubkey` use. `bcd doctor` warns when the file is readable or writable by anyone but its owner.
@@ -340,6 +348,86 @@ bcd join reads the join token from BCD_JOIN_TOKEN or stdin, never from arguments
 The node then opens its session (see [sessions](/docs/daemon/sessions)) and appears as `adopting`. Tokens,
 attestors, refusals and certificates are covered in [joining nodes](/docs/guides/nodes/joining).
 
+## Site agents and the ramdisk
+
+The install script sets up nodes only: it joins with role `node` and its unit runs `bcd node`. The other two agent
+modes use the same binary but are set up differently.
+
+### A site agent
+
+A <Term id="site-agent">site agent</Term> reads the same `config.toml` and `join-encryption.jwk`, joins with a
+[site token](/docs/guides/bare-metal/sites#enroll-site-agents-with-site-tokens) and runs `bcd site`:
+
+```bash
+BCD_JOIN_TOKEN=bcjt_... bcd join --role site --config /etc/bcd/config.toml
+bcd site --config /etc/bcd/config.toml
+```
+
+`bcd site` refuses a data directory whose identity has another role. Without a `[boot]` section it runs BMC
+operations, `site.httpProxy` and boot entries but serves no PXE machine (it logs a warning). With one, it also runs
+the boot server:
+
+```toml title="/etc/bcd/config.toml (site agent)"
+gateway_url = "https://gw.eu.example.com"
+site = "site_01k5w..."
+serving_ca_spki_pin = "sha256/..."
+join_signing_key_pin = "sha256/..."
+join_encryption_key_pin = "sha256/..."
+
+[boot]
+listen = "0.0.0.0:8080"
+url = "http://10.20.0.2:8080"
+kernel = "http://10.20.0.2:8080/ramdisk/vmlinuz"
+initrd = "http://10.20.0.2:8080/ramdisk/initrd"
+cmdline = "console=ttyS0,115200"
+server_ip = "10.20.0.2"
+proxy_dhcp = true
+tftp = ":69"
+tftp_root = "/srv/bcd/ipxe"
+```
+
+| `[boot]` key | Meaning |
+| --- | --- |
+| `listen` | The HTTP address of the boot server; empty turns the boot server off. Without `join-encryption.jwk` beside the config `bcd site` exits 1, and without `kernel` and `initrd` the boot server stops with an error |
+| `url` | How machines reach the boot server. iPXE chains to it, and the ramdisks it boots get `<url>/cache` as their image cache |
+| `kernel`, `initrd` | The URLs of the site's ramdisk kernel and initramfs, which iPXE fetches |
+| `cmdline` | Appended to every ramdisk's kernel command line |
+| `server_ip` | The agent's IPv4 address on the provisioning network: the proxy DHCP server id and TFTP next-server |
+| `proxy_dhcp` | `true` answers PXE and UEFI HTTP boot clients on UDP 67 and 4011, beside the site's own DHCP server, which keeps handing out addresses |
+| `tftp`, `tftp_root` | The TFTP server's UDP address and the directory of iPXE builds it serves: `undionly.kpxe` (BIOS), `ipxe.efi` (x86-64 UEFI), `ipxe-arm64.efi` (arm64 UEFI) |
+| `cache_max_bytes` | The image cache's byte budget (0, the default, is unbounded): least recently used images are evicted first, never one the `site` section's `cache_images` still names |
+
+`proxy_dhcp` and `tftp` need `server_ip` and `url`, or `bcd site` exits 2. The iPXE builds and the ramdisk kernel and
+initramfs are yours to supply: the repository builds neither. Ports 67, 69 and 4011 are privileged, and the unit the
+install script writes keeps `bcd` to a capability set without `CAP_NET_BIND_SERVICE`, so a site agent needs its own
+unit. What the boot server answers, and when, is on [sites](/docs/guides/bare-metal/sites#the-boot-server-in-bcd-site).
+
+### The ramdisk
+
+`bcd ramdisk` is not installed. It runs inside the PXE ramdisk the site agent boots, and takes everything from the
+kernel command line the site agent rendered into the machine's iPXE script, so it has no `config.toml`:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--cmdline` | `/proc/cmdline` | Where to read the `bc.*` boot parameters |
+| `--data-dir` | `/run/bcd` | The key, identity and journal, on tmpfs: every ramdisk boot is a new identity |
+
+| Boot parameter | Meaning |
+| --- | --- |
+| `bc.gateway` | The gateway URL (an `http://` one only in fakehw builds) |
+| `bc.server_name` | Optional: the name the gateway certificate carries |
+| `bc.cache` | Optional: the site image cache, tried before an image's source |
+| `bc.site` | The site id |
+| `bc.pins` | The serving CA, join signing and join encryption pins, comma-separated |
+| `bc.jwk` | The JoinService encryption key's public JWK, base64url; refused unless it matches its pin |
+| `bc.token` | The machine's single-use, MAC-bound `discovery` join token |
+| `bc.assertion` | The site agent's `SignedDiscoveryAssertion`, base64url |
+
+A missing parameter exits 2. The ramdisk joins with the `discovery` attestor as role `ramdisk` (see
+[attestation](/docs/guides/nodes/attestation#discovery)), logs JSON, then runs the agent until the machine kexecs
+into its installed OS or powers off. Its image needs `bcd` plus the tools its kinds call: `nvme-cli`, `hdparm`,
+util-linux (`blkdiscard`, `blockdev`, `lsblk`, `mount`), `udevadm`, `kexec-tools` and, for `diag.dcgm`, `dcgmi`.
+
 ## Upgrades
 
 ### Before v0.4: rerun the script
@@ -398,9 +486,12 @@ bcd is configured to build with goreleaser from `daemon/` (`.goreleaser.yaml`) f
 cgo and `zig cc` because go-nvml will load `libnvidia-ml`. A release produces
 `bcd_<version>_linux_{amd64,arm64}.tar.gz`, each with a `.sha256`, and the bare binaries
 `bcd_<version>_linux_{amd64,arm64}`. The bare binary is what the install script downloads, what a signed release
-manifest lists and what self-update verifies. Publishing is disabled in the configuration until the release workflow
-exists, and no release has been cut: CI (`.github/workflows/daemon.yml`) only vets, tests and runs
-`goreleaser check`.
+manifest lists and what self-update verifies. goreleaser also writes an SPDX SBOM per archive (syft) and a keyless
+cosign signature and certificate for every artifact. `.github/workflows/release.yml` runs it on a `v*` tag (or a
+dispatch naming one), appends everything to that tag's GitHub release, and adds SLSA level 3 provenance
+(`bcd.intoto.jsonl`) from the generic SLSA generator. No tag has been released yet; CI
+(`.github/workflows/daemon.yml`) vets, tests and runs `goreleaser check`, and a local snapshot build is
+`goreleaser release --snapshot --clean --skip=sign,sbom`.
 
 Until then a binary comes from a plain `go build` in `daemon/`. The development and test builds are cross-compiled
 without cgo (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`); `node scripts/daemon-test.mjs --build-bcd` writes the fake
