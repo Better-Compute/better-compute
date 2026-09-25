@@ -1351,7 +1351,7 @@ export const computeResourceTypes = (p = 'compute-') => ({
   [`${p}sandbox`]: { parent: `${p}pool`, actions: a('sandboxes', 'create', 'read', 'update', 'exec', 'delete'),
                      attributes: { templateId: 'string', vcpu: 'number', memoryGiB: 'number', gpus: 'number', ttlSeconds: 'number', fromSnapshot: 'string', warm: 'boolean' } },
   [`${p}sandbox-template`]: { actions: a('sandboxes', 'read', 'manage') },
-  [`${p}sandbox-snapshot`]: { actions: a('sandboxes', 'read', 'delete'),       // owner = who took it; may outlive its sandbox
+  [`${p}sandbox-snapshot`]: { actions: a('sandboxes', 'read', 'delete'),       // owner = the sandbox's owner, whoever took it; may outlive its sandbox
                      attributes: { sandboxId: 'string', templateId: 'string', includeMemory: 'boolean' } },
 }) satisfies Record<string, ResourceTypeDefinition>;
 
