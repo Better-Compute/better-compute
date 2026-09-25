@@ -205,6 +205,18 @@ show it.
   written. Without a broker, env and a `secret://` user data that vps would have to render are
   `INVALID_CONFIG`.
 
+- **IAM reactions (§12.8).** The host calls these from the iam bridge's inbox handlers, in the
+  inbox transaction, next to capacity's reservation reactions. Both are level-triggered.
+  - `withdrawAgentSandboxes(tx, context, { tenantId, agentId | delegationId | allAgents, reason })`
+    handles an agent suspended or a delegation revoked. It deletes the open sandboxes they created,
+    after `sandbox.withdrawn { reason }`. A sandbox is the agent's own workspace, so unlike a started
+    reservation it does not run on. Kept snapshots stay.
+  - `reassignSandboxes(tx, context, { tenantId, identityId, successorId?, reason })` handles an owner
+    who is gone. With a successor, it moves the owner's open sandboxes and their instances, their
+    snapshots, and the templates they wrote (with their warm instances) to the successor, authz rows
+    included (`sandbox.reassigned`). Without one, it deletes the owner's open sandboxes; their
+    templates and kept snapshots stay for the tenant's administrators.
+
 ## Tenant teardown (§12.8)
 
 `tenantDeleted` removes the tenant's vps state:

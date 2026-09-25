@@ -27,11 +27,13 @@ import {
   instanceSpecs,
   instanceWork,
   meterInstances,
+  reassignSandboxes,
   reportInstances,
   sandboxWork,
   setIpPool,
   vps,
   vpsMigrations,
+  withdrawAgentSandboxes,
   type VpsApi,
 } from '@better-compute/vps';
 
@@ -1630,6 +1632,131 @@ describe('template env', () => {
       env: {},
     })) as { env: Record<string, string> };
     expect(updated.env).toEqual({});
+  });
+});
+
+describe('IAM reactions (§12.8)', () => {
+  const agent: Caller = { ...alice, agentId: 'agt_1', delegationId: 'dlg_1' };
+  const react = <T>(fn: (tx: SqlTx, context: ModuleContext) => Promise<T>) =>
+    db.transaction((tx) => fn(tx, moduleContext(db)));
+  const states = async () =>
+    Object.fromEntries(
+      (
+        await db.query<{ id: string; deleting: boolean }>(
+          `SELECT id, deleting_at IS NOT NULL AS deleting FROM sandboxes WHERE NOT draft`,
+        )
+      ).rows.map((row) => [row.id, row.deleting]),
+    );
+
+  it('delete the sandboxes a suspended agent or a revoked delegation created, and nothing else', async () => {
+    const template = await createTemplate();
+    const byAgent = await createSandbox(template.id, { idempotencyKey: 'agent' }, agent);
+    const byAlice = await createSandbox(template.id, { idempotencyKey: 'alice' });
+    expect(
+      await react((tx, context) =>
+        withdrawAgentSandboxes(tx, context, {
+          tenantId: 'acme',
+          delegationId: 'dlg_other',
+          reason: 'delegation:revoke',
+        }),
+      ),
+    ).toEqual({ deleted: [], reassigned: [] });
+    expect(
+      await react((tx, context) =>
+        withdrawAgentSandboxes(tx, context, {
+          tenantId: 'acme',
+          agentId: 'agt_1',
+          reason: 'agent:suspend',
+        }),
+      ),
+    ).toEqual({ deleted: [byAgent.id], reassigned: [] });
+    expect(await states()).toEqual({ [byAgent.id]: true, [byAlice.id]: false });
+    expect(recorded.events.find((event) => event.type === 'sandbox.withdrawn')).toMatchObject({
+      subject: `sandbox/${byAgent.id}`,
+      data: { reason: 'agent:suspend' },
+    });
+    const { rows } = await db.query<{ desired_state: string }>(
+      `SELECT desired_state FROM instances WHERE id = $1`,
+      [byAgent.instanceId],
+    );
+    expect(rows[0]!.desired_state).toBe('deleted');
+    // Level-triggered: a replay (or the whole tenant's agents) finds nothing else open.
+    expect(
+      await react((tx, context) =>
+        withdrawAgentSandboxes(tx, context, {
+          tenantId: 'acme',
+          allAgents: true,
+          reason: 'agent:suspend-all',
+        }),
+      ),
+    ).toEqual({ deleted: [], reassigned: [] });
+  });
+
+  it("move an offboarded owner's sandboxes, snapshots and templates to the successor", async () => {
+    const template = await createTemplate({ warm: { min: 1 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const sandbox = await createSandbox(template.id, { idempotencyKey: 'mine', ttlSeconds: 600 });
+    expect(sandbox.warm).toBe(true);
+    await reconcileSandboxes();
+    await db.query(
+      `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
+                                      include_memory, keep, state, command_id, url, owner_identity_id, version)
+       VALUES ('snap_kept', 'acme', $1, $2, $3, 'node', 'cloud-hypervisor', true, true, 'ready', 'cmd', 'u',
+               'usr_alice', 1)`,
+      [sandbox.id, template.id, sandbox.instanceId],
+    );
+    recorded.authz = [];
+    const result = await react((tx, context) =>
+      reassignSandboxes(tx, context, {
+        tenantId: 'acme',
+        identityId: 'usr_alice',
+        successorId: 'usr_bob',
+        reason: 'identity:offboard',
+      }),
+    );
+    expect(result).toEqual({ deleted: [], reassigned: [sandbox.id] });
+    expect(await getSandbox(sandbox.id)).toMatchObject({ ownerIdentityId: 'usr_bob' });
+    const owners = await db.query<{ id: string; owner_identity_id: string }>(
+      `SELECT id, owner_identity_id FROM instances WHERE state <> 'deleted'`,
+    );
+    expect(owners.rows.every((row) => row.owner_identity_id === 'usr_bob')).toBe(true);
+    const owned = Object.fromEntries(
+      recorded.authz.map((row) => [`${row.type}/${row.id}`, row.ownerId]),
+    );
+    expect(owned).toMatchObject({
+      [`sandbox/${sandbox.id}`]: 'usr_bob',
+      [`instance/${sandbox.instanceId}`]: 'usr_bob',
+      'sandbox-snapshot/snap_kept': 'usr_bob',
+      [`sandbox-template/${template.id}`]: 'usr_bob',
+    });
+    expect(Object.keys(owned).filter((key) => key.startsWith('instance/'))).toHaveLength(
+      owners.rows.length,
+    );
+    expect(
+      recorded.events.find((event) => event.type === 'sandbox.reassigned')?.data,
+    ).toMatchObject({ from: 'usr_alice', to: 'usr_bob', reason: 'identity:offboard' });
+    // Bob can restore it now: restores are owner-only.
+    const snapshot = await db.query<{ owner_identity_id: string }>(
+      `SELECT owner_identity_id FROM sandbox_snapshots WHERE id = 'snap_kept'`,
+    );
+    expect(snapshot.rows[0]!.owner_identity_id).toBe('usr_bob');
+  });
+
+  it('delete an owner’s open sandboxes when nobody succeeds them', async () => {
+    const template = await createTemplate();
+    const mine = await createSandbox(template.id, { idempotencyKey: 'mine' });
+    const bobs = await createSandbox(template.id, { idempotencyKey: 'bobs' }, bob);
+    expect(
+      await react((tx, context) =>
+        reassignSandboxes(tx, context, {
+          tenantId: 'acme',
+          identityId: 'usr_alice',
+          reason: 'identity:delete',
+        }),
+      ),
+    ).toEqual({ deleted: [mine.id], reassigned: [] });
+    expect(await states()).toEqual({ [mine.id]: true, [bobs.id]: false });
   });
 });
 

@@ -1718,7 +1718,7 @@ export async function listSandboxes(
 
 /** Asks the sandbox's instance to go away (idempotent); the sandbox reconciler finishes the rest. */
 async function deleteSandboxInstance(
-  deps: InstanceDeps,
+  deps: Pick<InstanceDeps, 'events' | 'work' | 'desired'>,
   tx: SqlTx,
   raw: RawSandbox,
 ): Promise<void> {
@@ -1732,7 +1732,7 @@ async function deleteSandboxInstance(
 
 /** `sandboxes.delete`: deletes the instance through its lifecycle; idempotent. */
 export async function deleteSandbox(
-  deps: InstanceDeps,
+  deps: Pick<InstanceDeps, 'clock' | 'events' | 'work' | 'desired'>,
   tx: SqlTx,
   ref: SandboxRef,
 ): Promise<Sandbox> {
@@ -1745,6 +1745,209 @@ export async function deleteSandbox(
   await deleteSandboxInstance(deps, tx, raw);
   await deps.work.enqueue(tx, sandboxWork, 'all');
   return sandboxView((await readSandbox(tx, raw.id))!);
+}
+
+/** What the §12.8 sandbox reactions need: a ModuleContext has it all. */
+export type SandboxReactionDeps = Pick<
+  InstanceDeps,
+  'clock' | 'events' | 'work' | 'desired' | 'authz'
+>;
+
+export interface SandboxReactionResult {
+  /** Sandboxes asked to go. */
+  deleted: string[];
+  /** Sandboxes whose owner changed. */
+  reassigned: string[];
+}
+
+/** Open sandboxes of a tenant matching `where` (on `s`, parameters from `$2`), locked. */
+async function openSandboxes(
+  tx: SqlTx,
+  tenantId: string,
+  where: string,
+  params: unknown[],
+): Promise<RawSandbox[]> {
+  const { rows } = await tx.query<RawSandbox>(
+    `SELECT ${sandboxColumns} FROM ${sandboxFrom}
+      WHERE s.tenant_id = $1 AND NOT s.draft AND s.deleting_at IS NULL AND ${where}
+      ORDER BY s.id FOR UPDATE OF s`,
+    [tenantId, ...params],
+  );
+  return rows;
+}
+
+async function withdrawSandboxes(
+  deps: SandboxReactionDeps,
+  tx: SqlTx,
+  rows: readonly RawSandbox[],
+  data: Record<string, Json>,
+): Promise<string[]> {
+  for (const raw of rows) {
+    await publishSandbox(deps, tx, raw, 'sandbox.withdrawn', data);
+    await deleteSandbox(deps, tx, { tenantId: raw.tenant_id, sandboxId: raw.id });
+  }
+  return rows.map((raw) => raw.id);
+}
+
+/**
+ * An agent suspended (`agentId`), every agent of the tenant suspended (`allAgents`), or a delegation
+ * revoked (`delegationId`) (§12.8): the open sandboxes they created are deleted, after
+ * `sandbox.withdrawn { reason }`. Unlike a started reservation, which runs on, a sandbox is the
+ * agent's own workspace (its code runs there, reached by exec), so it does not outlive the agent's
+ * standing. Kept snapshots stay. The filter is capacity's `withdrawAgentReservations` one (the iam
+ * bridge's `AgentStreamFilter`); a filter naming nothing does nothing. Level-triggered: a replay finds
+ * nothing open.
+ */
+export async function withdrawAgentSandboxes(
+  tx: SqlTx,
+  deps: SandboxReactionDeps,
+  filter: {
+    tenantId: string;
+    agentId?: string;
+    delegationId?: string;
+    allAgents?: boolean;
+    reason: string;
+  },
+): Promise<SandboxReactionResult> {
+  const rows = filter.delegationId
+    ? await openSandboxes(tx, filter.tenantId, 's.delegation_id = $2', [filter.delegationId])
+    : filter.agentId
+      ? await openSandboxes(tx, filter.tenantId, 's.agent_id = $2', [filter.agentId])
+      : filter.allAgents
+        ? await openSandboxes(tx, filter.tenantId, 's.agent_id IS NOT NULL', [])
+        : [];
+  return {
+    deleted: await withdrawSandboxes(deps, tx, rows, { reason: filter.reason }),
+    reassigned: [],
+  };
+}
+
+/**
+ * An owner offboarded, expired or deleted (§12.8). With a `successorId`, their open sandboxes (and
+ * those sandboxes' instances), their snapshots and the templates they wrote (with their warm
+ * instances) move to the successor, whose authz rows then name them owner (`sandbox.reassigned`).
+ * Without one, their open sandboxes are deleted (`sandbox.withdrawn`): nobody is left to reach them,
+ * and restores are owner-only. Their templates and kept snapshots stay for the tenant's
+ * administrators.
+ */
+export async function reassignSandboxes(
+  tx: SqlTx,
+  deps: SandboxReactionDeps,
+  input: { tenantId: string; identityId: string; successorId?: string; reason: string },
+): Promise<SandboxReactionResult> {
+  if (!input.identityId) return { deleted: [], reassigned: [] };
+  const rows = await openSandboxes(tx, input.tenantId, 's.owner_identity_id = $2', [
+    input.identityId,
+  ]);
+  const successor = input.successorId;
+  if (!successor || successor === input.identityId)
+    return {
+      deleted: await withdrawSandboxes(deps, tx, rows, { reason: input.reason }),
+      reassigned: [],
+    };
+
+  const reown = async (instanceId: string) => {
+    const { rowCount } = await tx.query(
+      `UPDATE instances SET owner_identity_id = $2, version = version + 1
+        WHERE id = $1 AND owner_identity_id = $3`,
+      [instanceId, successor, input.identityId],
+    );
+    const row = rowCount > 0 ? await readInstance(tx, instanceId) : undefined;
+    if (!row || row.state === 'deleted') return;
+    await deps.authz.upsert(tx, {
+      type: 'instance',
+      id: row.id,
+      tenantId: row.tenantId,
+      attributes: instanceAttributes(row.shape, row.imageId, row.image?.verified ?? false),
+      parentType: 'pool',
+      parentId: row.poolId,
+      ownerId: successor,
+    });
+  };
+
+  const reassigned: string[] = [];
+  for (const raw of rows) {
+    await tx.query(
+      `UPDATE sandboxes SET owner_identity_id = $2, version = version + 1 WHERE id = $1`,
+      [raw.id, successor],
+    );
+    const template = await readTemplate(tx, raw.tenant_id, raw.template_id, { deleted: true });
+    const flavor = template
+      ? await readFlavorByName(tx, template.poolId, template.flavor)
+      : undefined;
+    await deps.authz.upsert(tx, {
+      type: 'sandbox',
+      id: raw.id,
+      tenantId: raw.tenant_id,
+      attributes:
+        template && flavor
+          ? sandboxAttributes(
+              template,
+              flavor,
+              Number(raw.ttl_seconds),
+              raw.from_snapshot ?? undefined,
+            )
+          : { templateId: raw.template_id, ttlSeconds: Number(raw.ttl_seconds) },
+      parentType: 'pool',
+      parentId: raw.pool_id,
+      ownerId: successor,
+    });
+    await reown(raw.instance_id);
+    await publishSandbox(deps, tx, raw, 'sandbox.reassigned', {
+      from: input.identityId,
+      to: successor,
+      reason: input.reason,
+    });
+    reassigned.push(raw.id);
+  }
+
+  // Their snapshots: restores are owner-only, so the successor can boot them.
+  const snapshots = await tx.query<{
+    id: string;
+    sandbox_id: string;
+    template_id: string;
+    include_memory: boolean;
+  }>(
+    `UPDATE sandbox_snapshots SET owner_identity_id = $3, version = version + 1
+      WHERE tenant_id = $1 AND owner_identity_id = $2 AND state <> 'deleted'
+      RETURNING id, sandbox_id, template_id, include_memory`,
+    [input.tenantId, input.identityId, successor],
+  );
+  for (const snapshot of snapshots.rows)
+    await deps.authz.upsert(tx, {
+      type: 'sandbox-snapshot',
+      id: snapshot.id,
+      tenantId: input.tenantId,
+      attributes: {
+        sandboxId: snapshot.sandbox_id,
+        templateId: snapshot.template_id,
+        includeMemory: snapshot.include_memory,
+      },
+      ownerId: successor,
+    });
+
+  // Their templates, and the warm instances made as them (claims hand those to the claimer).
+  const templates = await tx.query<{ id: string }>(
+    `UPDATE sandbox_templates SET created_by = $3, version = version + 1
+      WHERE tenant_id = $1 AND created_by = $2 AND NOT deleted RETURNING id`,
+    [input.tenantId, input.identityId, successor],
+  );
+  for (const { id: templateId } of templates.rows) {
+    await deps.authz.upsert(tx, {
+      type: 'sandbox-template',
+      id: templateId,
+      tenantId: input.tenantId,
+      attributes: {},
+      ownerId: successor,
+    });
+    const warm = await tx.query<{ id: string }>(
+      `SELECT id FROM instances WHERE warm_template_id = $1 AND owner_identity_id = $2
+         AND state <> 'deleted' ORDER BY id FOR UPDATE`,
+      [templateId, input.identityId],
+    );
+    for (const { id: instanceId } of warm.rows) await reown(instanceId);
+  }
+  return { deleted: [], reassigned };
 }
 
 function extendedExpiry(raw: RawSandbox, input: ExtendSandboxInput): number {

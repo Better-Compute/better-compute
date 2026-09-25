@@ -1082,7 +1082,11 @@ async function lockOwned(tx: SqlTx, ref: InstanceRef): Promise<InstanceRow> {
   return row;
 }
 
-export async function wake(deps: InstanceDeps, tx: SqlTx, row: InstanceRow): Promise<void> {
+export async function wake(
+  deps: Pick<InstanceDeps, 'desired' | 'work'>,
+  tx: SqlTx,
+  row: InstanceRow,
+): Promise<void> {
   if (row.nodeId) await deps.desired.invalidate(tx, row.nodeId);
   await deps.work.enqueue(tx, instanceWork, row.id);
 }
