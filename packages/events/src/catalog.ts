@@ -42,6 +42,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     description: 'A tenant quota on a pool changed',
   },
   {
+    type: 'quota.budget-exceeded',
+    subject: 'pool/{id}',
+    module: 'capacity',
+    description:
+      "A tenant's IAM budget was spent and the pool offer's onBudgetExceeded applied (notify, stop-new or drain)",
+  },
+  {
     type: 'reservation.*',
     subject: 'reservation/{id}',
     module: 'capacity',
