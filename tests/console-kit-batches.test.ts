@@ -20,6 +20,7 @@ function requester(pages: { items: { leafIndex: number; subject: string; kind: s
       calls.push({ path, input });
       if (path === 'commandBatches/list') return { items: [{ batchId: BATCH, state: 'pending' }] };
       if (path === 'commandBatches/scope') return pages[page++] ?? { items: [] };
+      if (path === 'commandBatches/members') return { items: [{ commandId: 'cmd_1', nodeId: 'node_a', subject: 'node_a', kind: 'disk.wipe', state: 'pending', awaitingApproval: true }] };
       return { batchId: BATCH, state: path === 'commandBatches/cancel' ? 'cancelled' : 'pending' };
     },
   } as unknown as ComputeRequester;
@@ -43,12 +44,15 @@ describe('batches view', () => {
       { kind: 'bmc.power', subjects: ['bmc:node_site/10.0.0.7'], unbound: 0 },
     ]);
     expect(scopeByKind([{ leafIndex: 0, subject: 'node_a', kind: 'disk.wipe', payloadSha256: '' }])[0]).toMatchObject({ unbound: 1 });
+    const members = await view.members(BATCH, { state: 'pending' });
+    expect(members.items[0]).toMatchObject({ commandId: 'cmd_1', awaitingApproval: true });
     await view.cancel(BATCH);
     expect(calls.map((call) => [call.path, call.input])).toEqual([
       ['commandBatches/list', { tenantId: 'org_acme', state: 'pending', limit: 100 }],
       ['commandBatches/list', { tenantId: 'org_acme', limit: 100 }],
       ['commandBatches/scope', { tenantId: 'org_acme', batchId: BATCH, limit: 5_000 }],
       ['commandBatches/scope', { tenantId: 'org_acme', batchId: BATCH, limit: 5_000, cursor: 2 }],
+      ['commandBatches/members', { tenantId: 'org_acme', batchId: BATCH, limit: 100, state: 'pending' }],
       ['commandBatches/cancel', { tenantId: 'org_acme', batchId: BATCH }],
       ['commandBatches/list', { tenantId: 'org_acme', limit: 100 }],
     ]);

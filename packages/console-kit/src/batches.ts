@@ -35,6 +35,18 @@ export interface BatchScopeItem {
   payloadSha256?: string;
 }
 
+/** A command enqueued into a batch (commandBatches.members). */
+export interface BatchMemberRow {
+  commandId: string;
+  nodeId: string;
+  subject: string;
+  kind: string;
+  state: string;
+  reason?: string;
+  /** Held until the batch is approved. */
+  awaitingApproval?: true;
+}
+
 /** A batch's scope for display: subjects by kind, in order; `unbound` counts leaves that admit any payload. */
 export function scopeByKind(
   items: readonly BatchScopeItem[],
@@ -73,6 +85,8 @@ export interface BatchesView extends ValueResource<{ items: BatchRow[]; next?: s
    * when the listing stopped early: over `max`, or a page that did not advance (never shown as complete).
    */
   scope(batchId: string, max?: number): Promise<{ items: BatchScopeItem[]; truncated: boolean }>;
+  /** The commands enqueued into the batch, a page at a time (commandBatches.members). */
+  members(batchId: string, options?: { state?: string; cursor?: string }): Promise<{ items: BatchMemberRow[]; next?: string }>;
   /** Ends a pending batch: none of its commands run (compute:batches:approve). */
   cancel(batchId: string): Promise<BatchRow>;
 }
@@ -118,6 +132,14 @@ export function createBatchesView(
         cursor = page.next;
       }
     },
+    members: (batchId, memberOptions = {}) =>
+      api.$request<{ items: BatchMemberRow[]; next?: string }>('commandBatches/members', {
+        tenantId,
+        batchId,
+        limit: 100,
+        ...(memberOptions.state ? { state: memberOptions.state } : {}),
+        ...(memberOptions.cursor ? { cursor: memberOptions.cursor } : {}),
+      }),
     async cancel(batchId) {
       const row = await api.$request<BatchRow>('commandBatches/cancel', { tenantId, batchId });
       await list.refresh().catch(() => undefined);

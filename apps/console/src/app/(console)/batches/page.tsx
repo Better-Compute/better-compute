@@ -7,6 +7,7 @@ import {
   describeSubject,
   scopeByKind,
   timeLeft,
+  type BatchMemberRow,
   type BatchRow,
   type BatchScopeItem,
   type BatchState,
@@ -26,7 +27,13 @@ export default function BatchesPage() {
   const view = useMemo(() => createBatchesView(api, { tenantId }), [api, tenantId]);
   const state = useStore(view);
   const [filter, setFilter] = useState<BatchState | 'all'>('pending');
-  const [open, setOpen] = useState<{ batch: BatchRow; scope: BatchScopeItem[]; truncated: boolean }>();
+  const [open, setOpen] = useState<{
+    batch: BatchRow;
+    scope: BatchScopeItem[];
+    truncated: boolean;
+    members: BatchMemberRow[];
+    moreMembers: boolean;
+  }>();
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
@@ -52,8 +59,12 @@ export default function BatchesPage() {
   };
   const show = (batchId: string) =>
     act(async () => {
-      const [batch, scope] = await Promise.all([view.detail(batchId), view.scope(batchId)]);
-      setOpen({ batch, scope: scope.items, truncated: scope.truncated });
+      const [batch, scope, members] = await Promise.all([
+        view.detail(batchId),
+        view.scope(batchId),
+        view.members(batchId),
+      ]);
+      setOpen({ batch, scope: scope.items, truncated: scope.truncated, members: members.items, moreMembers: members.next !== undefined });
     });
 
   return (
@@ -186,6 +197,40 @@ export default function BatchesPage() {
                   </li>
                 ))}
               </ul>
+            </>
+          )}
+          {open.members.length > 0 && (
+            <>
+              <h4>Commands</h4>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Command</th>
+                    <th>Node</th>
+                    <th>Kind</th>
+                    <th>State</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {open.members.map((member) => (
+                    <tr key={member.commandId}>
+                      <td>
+                        <code>{member.commandId}</code>
+                      </td>
+                      <td>
+                        <code>{describeSubject(member.subject)}</code>
+                        {member.subject !== member.nodeId && <div className="muted">via {member.nodeId}</div>}
+                      </td>
+                      <td>{member.kind}</td>
+                      <td>
+                        {member.awaitingApproval ? 'held for approval' : member.state}
+                        {member.reason ? <div className="muted">{member.reason}</div> : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {open.moreMembers && <p className="muted">The first 100 commands are shown.</p>}
             </>
           )}
           <p className="muted">
