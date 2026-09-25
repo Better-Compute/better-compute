@@ -18,7 +18,11 @@
     {
       "name": "capacity",
       "groups": ["capacity", "pools", "quotas", "reservations"],
-      "migrations": ["capacity/0001_device_links", "capacity/0002_lease_health"]
+      "migrations": [
+        "capacity/0001_device_links",
+        "capacity/0002_lease_health",
+        "capacity/0003_device_counts"
+      ]
     },
     {
       "name": "pki",
@@ -47,7 +51,11 @@
     {
       "name": "vps",
       "groups": ["flavors", "instances", "providerAccounts"],
-      "migrations": ["vps/0001_instances", "vps/0002_sealed_user_data"]
+      "migrations": [
+        "vps/0001_instances",
+        "vps/0002_sealed_user_data",
+        "vps/0003_provider_bootstraps"
+      ]
     },
     {
       "name": "events",
@@ -67,7 +75,7 @@
     {
       "name": "audit",
       "groups": [],
-      "migrations": ["audit/0001_checkpoints"]
+      "migrations": ["audit/0001_checkpoints", "audit/0002_archives"]
     }
   ],
   "jobs": [
@@ -91,6 +99,7 @@
     "outbox-dispatch",
     "rollout",
     "site-boot",
+    "vps.bootstraps",
     "vps.hosts",
     "vps.instances",
     "vps.usage",

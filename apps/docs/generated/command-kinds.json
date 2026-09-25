@@ -154,6 +154,17 @@
     "payload": "bettercompute.agent.v1.WipeRequest"
   },
   {
+    "kind": "driver.invoke",
+    "lane": "provision",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": true,
+    "timeout": "10m",
+    "roles": ["node", "site", "ramdisk"],
+    "payload": "bettercompute.agent.v1.DriverInvokeRequest"
+  },
+  {
     "kind": "gpu.reset",
     "lane": "control",
     "retrySafe": false,

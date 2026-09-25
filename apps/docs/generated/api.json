@@ -1365,6 +1365,20 @@
         "status": "registered",
         "summary": "",
         "description": ""
+      },
+      {
+        "method": "bootstrap",
+        "route": "POST /api/compute/providerAccounts/bootstrap",
+        "kind": "mutation",
+        "action": "compute:providers:manage",
+        "resource": "compute-provider-account",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.3",
+        "module": "vps",
+        "status": "registered",
+        "summary": "",
+        "description": ""
       }
     ]
   },

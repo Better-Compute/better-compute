@@ -364,6 +364,127 @@
       ]
     },
     {
+      "name": "auth login",
+      "aliases": [],
+      "group": "Access",
+      "summary": "Save a token for later commands (checked with system.whoami)",
+      "description": "auth login reads an IAM session token, API key or session JWT from standard input (or BETTER_COMPUTE_TOKEN), checks it with system.whoami against the deployment (--url, or the configuration in process; --no-verify skips the check), and saves it under --profile in better-compute's credentials file (BETTER_COMPUTE_CREDENTIALS, else %APPDATA%\\better-compute or ~/.config/better-compute), written owner-only. Token commands then use it when BETTER_COMPUTE_TOKEN is unset and no better-iam session is saved. A session that better-iam's own CLI saved (better-iam login) is used without this step.",
+      "usage": "better-compute auth login [--profile NAME] [--no-verify] [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--profile",
+          "value": "NAME",
+          "optional": true,
+          "description": "The saved profile (default: the current one, else default)",
+          "env": "BETTER_COMPUTE_PROFILE"
+        },
+        {
+          "flag": "--no-verify",
+          "optional": true,
+          "description": "Save without calling system.whoami"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": [
+        "better-compute auth login --url https://compute.example.com < token.txt",
+        "BETTER_COMPUTE_TOKEN=biam_key_… better-compute auth login --profile ci --no-verify"
+      ]
+    },
+    {
+      "name": "auth status",
+      "aliases": [],
+      "group": "Access",
+      "summary": "Show which credential token commands use (never the token)",
+      "description": "auth status says where token commands get their credential, in PLAN §9.3's order: BETTER_COMPUTE_TOKEN, else better-iam's saved session (better-iam login, when @better-iam/cli is installed), else better-compute's saved profile. It lists the saved profiles without their tokens.",
+      "usage": "better-compute auth status [--profile NAME]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--profile",
+          "value": "NAME",
+          "optional": true,
+          "description": "The saved profile (default: the current one, else default)",
+          "env": "BETTER_COMPUTE_PROFILE"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute auth status"]
+    },
+    {
+      "name": "auth logout",
+      "aliases": [],
+      "group": "Access",
+      "summary": "Forget a saved profile's token",
+      "description": "auth logout removes a profile from better-compute's credentials file (the current one by default). It does not revoke the session in better-iam: run better-iam logout for that.",
+      "usage": "better-compute auth logout [--profile NAME]",
+      "target": "none",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--profile",
+          "value": "NAME",
+          "optional": true,
+          "description": "The saved profile (default: the current one, else default)",
+          "env": "BETTER_COMPUTE_PROFILE"
+        },
+        {
+          "flag": "--format",
+          "value": "FORMAT",
+          "optional": true,
+          "description": "Output as json (indented, default), compact (one line), or table",
+          "choices": ["json", "compact", "table"]
+        },
+        {
+          "flag": "--query",
+          "value": "PATH",
+          "optional": true,
+          "description": "Print only part of the result, e.g. protocol.max or findings[].check (strings print raw)"
+        }
+      ],
+      "examples": ["better-compute auth logout", "better-compute auth logout --profile ci"]
+    },
+    {
       "name": "reserve",
       "aliases": [],
       "group": "Capacity",
