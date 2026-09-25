@@ -11,6 +11,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isComputeError } from '@better-compute/core';
 import { builtinCommands } from './commands/index.js';
+import { embedCommands, type EmbedOptions, type PortableCommandSpec } from './embed.js';
 import { CliError, errorCode, usageCodes } from './errors.js';
 import {
   createCliProgram,
@@ -99,6 +100,7 @@ export {
 export { hostFindings } from './host/findings.js';
 export { mountTunnels, type HostTunnelsConfig, type TunnelMount } from './host/tunnels.js';
 export { watchAuthorizer, type WatchAuthorizerOptions } from './host/watch.js';
+export { argvOf, embedCommands, type EmbedOptions, type PortableCommandSpec } from './embed.js';
 export {
   computeCredentialsPath,
   createComputeProfileStore,
@@ -170,6 +172,18 @@ const program = createCliProgram(builtinCommands, version, processIO);
  */
 export function createCli(options?: CreateCliOptions): Cli {
   return program(options);
+}
+
+/**
+ * Every built-in compute command as a spec of another framework (PLAN.md §9.3), so an embedding host ships one
+ * binary: `createCli({ commands: computeCommands(defineCommand) })` with better-iam's `createCli` and
+ * `defineCommand` gives `better-iam compute-reserve …`, `better-iam compute-api …` and so on.
+ */
+export function computeCommands<T>(
+  define: (spec: PortableCommandSpec) => T,
+  options?: EmbedOptions & { cli?: CreateCliOptions },
+): T[] {
+  return embedCommands(define, program(options?.cli), options);
 }
 
 const defaultCli = program();
