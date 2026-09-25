@@ -26,24 +26,27 @@ func collectInventory() (*inventory.NodeInventory, error) {
 // newRuntimes: libvirt-kvm when virsh is installed (a VPS host), its GPUs' PCI addresses from the
 // inventory for VFIO; a host without libvirt runs no instances.
 func newRuntimes(dataDir, _ string) []runtime.Runtime {
-	if _, err := exec.LookPath("virsh"); err != nil {
-		return nil
-	}
-	return []runtime.Runtime{&runtime.Libvirt{
-		Dir: filepath.Join(dataDir, "libvirt"),
-		GPUAddress: func(id string) (string, bool) {
-			inv, err := collectInventory()
-			if err != nil || inv == nil || inv.Gpus == nil {
-				return "", false
-			}
-			for _, g := range inv.Gpus.Gpus {
-				if g.Uuid == id {
-					return pciAddress(g.PciBusId)
-				}
-			}
+	gpuAddress := func(id string) (string, bool) {
+		inv, err := collectInventory()
+		if err != nil || inv == nil || inv.Gpus == nil {
 			return "", false
-		},
-	}}
+		}
+		for _, g := range inv.Gpus.Gpus {
+			if g.Uuid == id {
+				return pciAddress(g.PciBusId)
+			}
+		}
+		return "", false
+	}
+	// Each runtime whose tools are installed: libvirt-kvm (virsh) and cloud-hypervisor.
+	var out []runtime.Runtime
+	if _, err := exec.LookPath("virsh"); err == nil {
+		out = append(out, &runtime.Libvirt{Dir: filepath.Join(dataDir, "libvirt"), GPUAddress: gpuAddress})
+	}
+	if _, err := exec.LookPath("cloud-hypervisor"); err == nil {
+		out = append(out, &runtime.CloudHypervisor{Dir: filepath.Join(dataDir, "cloud-hypervisor"), GPUAddress: gpuAddress})
+	}
+	return out
 }
 
 // newSimHost: simulated machines exist only in fakehw builds.

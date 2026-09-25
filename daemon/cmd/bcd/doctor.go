@@ -16,7 +16,8 @@ import (
 
 type doctorCheck struct{ status, check, detail string }
 
-// toolChecks: what a VPS host needs besides KVM. libvirt-kvm drives virsh and qemu-img and builds
+// toolChecks: what a VPS host needs besides KVM. libvirt-kvm drives virsh, cloud-hypervisor its
+// VMM through systemd-run; both use qemu-img and build
 // NoCloud seeds with genisoimage or xorriso; the instance firewall (anti-spoofing, network
 // policies) needs nft, and without it the metadata service and instance dials stay off.
 func toolChecks(lookPath func(string) (string, error)) []doctorCheck {
@@ -28,11 +29,24 @@ func toolChecks(lookPath func(string) (string, error)) []doctorCheck {
 		}
 		return "", false
 	}
-	path, ok := have("virsh")
-	if !ok {
-		return []doctorCheck{{"warn", "libvirt", "no virsh: this host runs no libvirt-kvm instances"}}
+	var out []doctorCheck
+	virsh, libvirt := have("virsh")
+	ch, cloudHypervisor := have("cloud-hypervisor")
+	if !libvirt && !cloudHypervisor {
+		return []doctorCheck{{"warn", "libvirt", "neither virsh nor cloud-hypervisor: this host runs no VPS instances"}}
 	}
-	out := []doctorCheck{{"ok", "libvirt", path}}
+	if libvirt {
+		out = append(out, doctorCheck{"ok", "libvirt", virsh})
+	}
+	if cloudHypervisor {
+		out = append(out, doctorCheck{"ok", "cloud-hypervisor", ch})
+		if _, err := os.Stat("/usr/share/cloud-hypervisor/CLOUDHV.fd"); err != nil {
+			out = append(out, doctorCheck{"warn", "cloud-hypervisor", "no firmware at /usr/share/cloud-hypervisor/CLOUDHV.fd: its instances cannot boot"})
+		}
+		if _, ok := have("systemd-run"); !ok {
+			out = append(out, doctorCheck{"fail", "cloud-hypervisor", "no systemd-run: its VMMs cannot outlive bcd"})
+		}
+	}
 	if path, ok := have("qemu-img"); ok {
 		out = append(out, doctorCheck{"ok", "qemu-img", path})
 	} else {

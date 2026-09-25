@@ -32,6 +32,9 @@ func TestDoctorToolChecks(t *testing.T) {
 	if s := status(toolChecks(look("virsh"))); s["qemu-img"] != "fail" || s["seed"] != "fail" || s["nftables"] != "fail" {
 		t.Fatalf("virsh alone = %v", s)
 	}
+	if s := status(toolChecks(look("cloud-hypervisor", "systemd-run", "qemu-img", "xorriso", "nft"))); s["cloud-hypervisor"] == "" || s["libvirt"] != "" || s["qemu-img"] != "ok" {
+		t.Fatalf("a cloud-hypervisor host = %v", s)
+	}
 }
 
 func TestPCIAddress(t *testing.T) {
