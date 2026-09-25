@@ -15,6 +15,7 @@ export * from './attestor.js';
 export * from './attestors/index.js';
 export * from './audit.js';
 export * from './bundle.js';
+export * from './quorum.js';
 export * from './ca.js';
 export * from './csr.js';
 export {

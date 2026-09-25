@@ -38,6 +38,14 @@ export interface TrustBundleInput {
   version: bigint | number;
   /** DER roots certifying worker command-signing keys (empty in v0.1). */
   commandSigningRoots?: readonly Uint8Array[];
+  /**
+   * (v1.0 quorum, §13) Operator approver keys, the approvals a destructive batch needs, per-size tiers, and the
+   * unbatched destructive commands a daemon runs per hour (break-glass only; 0 recommended).
+   */
+  approverKeys?: readonly { kid: string; spkiDer: Uint8Array }[];
+  approverThreshold?: number;
+  quorumTiers?: readonly { maxScopeSize: number; threshold: number }[];
+  unbatchedDestructivePerHour?: number;
 }
 
 export interface JoinResponseInput {
@@ -58,6 +66,10 @@ function trustBundle(input: TrustBundleInput | undefined): TrustBundle {
   return create(TrustBundleSchema, {
     version: BigInt(input?.version ?? 0),
     commandSigningRoots: [...(input?.commandSigningRoots ?? [])],
+    approverKeys: (input?.approverKeys ?? []).map((key) => ({ kid: key.kid, spkiDer: key.spkiDer })),
+    approverThreshold: input?.approverThreshold ?? 0,
+    quorumTiers: (input?.quorumTiers ?? []).map((tier) => ({ ...tier })),
+    unbatchedDestructivePerHour: input?.unbatchedDestructivePerHour ?? 0,
   });
 }
 
