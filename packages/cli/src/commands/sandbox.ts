@@ -41,6 +41,68 @@ function seconds(value: string, flag: string): number {
   return ms / 1000;
 }
 
+const templateArg = [{ name: 'template', description: 'The template id (sbxt_…)', required: true }];
+
+function templateId(args: string[]): string {
+  const id = args[0]!;
+  if (!/^sbxt_[0-9a-z]{26,52}$/.test(id)) throw usageError(`${id} is not a sandbox template id (sbxt_…)`);
+  return id;
+}
+
+/** The template fields both create and update take, from flags (only those given). */
+async function templateFields(
+  given: object,
+  path: (value: string) => string,
+): Promise<Record<string, unknown>> {
+  const flags = given as Record<string, unknown>;
+  const fields: Record<string, unknown> = {};
+  if (flags.flavor) fields.flavor = flags.flavor;
+  if (flags.image) fields.imageId = flags.image;
+  if (flags['user-data']) fields.userData = await readFile(path(String(flags['user-data'])), 'utf8');
+  if (flags['default-ttl']) fields.defaultTtlSeconds = seconds(String(flags['default-ttl']), 'default-ttl');
+  if (flags['max-ttl']) fields.maxTtlSeconds = seconds(String(flags['max-ttl']), 'max-ttl');
+  if (flags['warm-min'] !== undefined || flags['warm-max'] !== undefined) {
+    if (flags['warm-min'] === undefined) throw usageError('--warm-max needs --warm-min');
+    fields.warm = {
+      min: flags['warm-min'],
+      ...(flags['warm-max'] !== undefined ? { max: flags['warm-max'] } : {}),
+    };
+  }
+  if (flags.env) {
+    // NAME=secret://<tenant>/<id>, comma-separated: the values are secret references, never secrets.
+    const env: Record<string, string> = {};
+    for (const pair of String(flags.env).split(',').map((item) => item.trim()).filter(Boolean)) {
+      const at = pair.indexOf('=');
+      if (at <= 0) throw usageError(`--env ${pair}: use NAME=secret://<tenant>/<id>`);
+      env[pair.slice(0, at)] = pair.slice(at + 1);
+    }
+    fields.env = env;
+  }
+  if (flags.network) fields.network = flags.network;
+  return fields;
+}
+
+const templateFlags = {
+  flavor: { type: 'string', value: 'NAME', description: 'The instance flavor (the pool offers it)' },
+  image: { type: 'string', value: 'ID', description: 'The image' },
+  'user-data': { type: 'string', value: 'FILE', description: 'cloud-init user data for every sandbox, from a file' },
+  'default-ttl': { type: 'string', value: 'DURATION', description: 'Default lifetime: 30m, 2h' },
+  'max-ttl': { type: 'string', value: 'DURATION', description: 'Longest lifetime a sandbox may be given or extended to' },
+  'warm-min': { type: 'integer', value: 'N', min: 0, max: 100, description: 'Warm instances kept ready' },
+  'warm-max': { type: 'integer', value: 'N', min: 0, max: 100, description: 'At most this many warm instances' },
+  env: {
+    type: 'string',
+    value: 'NAME=REF,…',
+    description: 'Environment from secret references: NAME=secret://<tenant>/<id>, comma-separated',
+  },
+  network: {
+    type: 'string',
+    value: 'MODE',
+    choices: ['egress', 'private', 'none'],
+    description: 'What sandboxes may reach (default egress)',
+  },
+} as const;
+
 export const sandboxCommands = [
   defineCommand({
     name: 'sandbox create',
@@ -278,6 +340,72 @@ export const sandboxCommands = [
         await rm(dir, { recursive: true, force: true });
       }
       if (status !== 0) throw new RemoteExitError(status, 'ssh');
+    },
+  }),
+  defineCommand({
+    name: 'sandbox-template create',
+    group: 'Sandboxes',
+    summary: 'Create a sandbox template for the tenant (sandboxTemplates.create)',
+    description:
+      "sandbox-template create defines what `sandbox create --template` starts: --pool, --flavor and --image (and the pool's --runtime), the default and longest lifetimes, a warm pool kept ready (--warm-min/--warm-max), user data from a file, environment variables from secret references and the network mode. Decided as compute:sandboxes:manage on the tenant.",
+    target: 'token',
+    flags: {
+      tenant: tenantFlag,
+      name: { type: 'string', value: 'NAME', required: true, description: 'The template name' },
+      pool: { type: 'string', value: 'ID', required: true, description: 'The pool its instances run in (pool_…)' },
+      runtime: { type: 'string', value: 'ID', description: "The pool's runtime driver (checked against it)" },
+      ...templateFlags,
+    },
+    examples: [
+      'better-compute sandbox-template create --name python --pool pool_01k5w… --flavor small --image img_01k5w… --warm-min 2 --max-ttl 4h',
+    ],
+    async run({ flags, path, api }) {
+      if (!flags.flavor || !flags.image) throw usageError('Pass --flavor and --image');
+      return (await api()).call('sandboxTemplates/create', {
+        tenantId: flags.tenant,
+        name: flags.name,
+        poolId: flags.pool,
+        ...(flags.runtime ? { runtime: flags.runtime } : {}),
+        ...(await templateFields(flags, path)),
+      });
+    },
+  }),
+  defineCommand({
+    name: 'sandbox-template update',
+    group: 'Sandboxes',
+    summary: 'Change a sandbox template (sandboxTemplates.update)',
+    description:
+      'sandbox-template update changes only the fields given; --no-user-data removes the user data. Sandboxes already running keep what they started with; the warm pool is refilled from the new definition.',
+    target: 'token',
+    args: templateArg,
+    flags: {
+      tenant: tenantFlag,
+      ...templateFlags,
+      'no-user-data': { type: 'boolean', description: 'Remove the user data' },
+    },
+    examples: ['better-compute sandbox-template update sbxt_01k5w… --warm-min 4 --image img_01k5w…'],
+    async run({ flags, args, path, api }) {
+      if (flags['no-user-data'] && flags['user-data']) throw usageError('Pass --user-data or --no-user-data, not both');
+      const fields = await templateFields(flags, path);
+      if (flags['no-user-data']) fields.userData = null;
+      if (!Object.keys(fields).length) throw usageError('Nothing to change: pass at least one field flag');
+      return (await api()).call('sandboxTemplates/update', {
+        tenantId: flags.tenant,
+        templateId: templateId(args),
+        ...fields,
+      });
+    },
+  }),
+  defineCommand({
+    name: 'sandbox-template delete',
+    group: 'Sandboxes',
+    summary: 'Delete a sandbox template (sandboxTemplates.delete)',
+    target: 'token',
+    args: templateArg,
+    flags: { tenant: tenantFlag },
+    examples: ['better-compute sandbox-template delete sbxt_01k5w…'],
+    async run({ flags, args, api }) {
+      return (await api()).call('sandboxTemplates/delete', { tenantId: flags.tenant, templateId: templateId(args) });
     },
   }),
   defineCommand({

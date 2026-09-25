@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createCli, type CliIO } from '@better-compute/cli';
 
@@ -5,7 +8,7 @@ import { createCli, type CliIO } from '@better-compute/cli';
 // remote transport talks to a recording fetch, so the request bodies (the contract with the API) are checked.
 
 const SBX = 'sbx_01k5w000000000000000000abc';
-const TEMPLATE = 'sbxt_01k5w00000000000000000abc';
+const TEMPLATE = 'sbxt_01k5w000000000000000000abc';
 
 function recorder() {
   const calls: { path: string; body: Record<string, unknown> }[] = [];
@@ -62,6 +65,45 @@ describe('sandbox commands', () => {
       { path: 'sandboxes/delete', body: { tenantId: 'org_acme', sandboxId: SBX } },
       { path: 'sandboxTemplates/list', body: { tenantId: 'org_acme' } },
     ]);
+  });
+
+  it('manages templates: create, update (only the fields given), delete', async () => {
+    const { calls, run } = recorder();
+    const dir = await mkdtemp(join(tmpdir(), 'bc-sbxt-'));
+    await writeFile(join(dir, 'init.yaml'), '#cloud-config\npackages: [python3]\n');
+    await run([
+      'sandbox-template', 'create', '--name', 'python', '--pool', 'pool_01k5w000000000000000000abc',
+      '--flavor', 'small', '--image', 'img_01k5w0000000000000000000abc', '--warm-min', '2', '--warm-max', '4',
+      '--default-ttl', '30m', '--max-ttl', '4h', '--network', 'private',
+      '--env', 'API_KEY=secret://org_acme/sec_1, DB=secret://org_acme/sec_2',
+      '--user-data', join(dir, 'init.yaml'),
+    ]);
+    await run(['sandbox-template', 'update', TEMPLATE, '--warm-min', '4', '--no-user-data']);
+    await run(['sandbox-template', 'delete', TEMPLATE]);
+    expect(calls).toEqual([
+      {
+        path: 'sandboxTemplates/create',
+        body: {
+          tenantId: 'org_acme',
+          name: 'python',
+          poolId: 'pool_01k5w000000000000000000abc',
+          flavor: 'small',
+          imageId: 'img_01k5w0000000000000000000abc',
+          userData: '#cloud-config\npackages: [python3]\n',
+          defaultTtlSeconds: 1800,
+          maxTtlSeconds: 14_400,
+          warm: { min: 2, max: 4 },
+          env: { API_KEY: 'secret://org_acme/sec_1', DB: 'secret://org_acme/sec_2' },
+          network: 'private',
+        },
+      },
+      { path: 'sandboxTemplates/update', body: { tenantId: 'org_acme', templateId: TEMPLATE, warm: { min: 4 }, userData: null } },
+      { path: 'sandboxTemplates/delete', body: { tenantId: 'org_acme', templateId: TEMPLATE } },
+    ]);
+    await expect(run(['sandbox-template', 'update', TEMPLATE])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(run(['sandbox-template', 'update', TEMPLATE, '--warm-max', '3'])).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
   });
 
   it('refuses malformed input before calling', async () => {
