@@ -19,6 +19,7 @@ import {
 import { cachesFor, publicCaches, type ComputeCaches } from './caches.js';
 import { checkPlan, createComposites, outsideComposite, type CompositeCall } from './composite.js';
 import { createListRecipe, readOnlyExecutor, runsOutsideTransaction } from './list.js';
+import { createTenantGate, type TenantGate } from './tenancy/tenancy.js';
 import type { ResolvedOptions } from './options.js';
 import {
   actionPattern,
@@ -256,10 +257,14 @@ export function createOperations(
   options: ResolvedOptions,
   context: ModuleContext,
   registry?: Pick<Registry, 'method'>,
+  gate?: TenantGate,
 ): Operations {
   const { database, iam, rootTenantId, typePrefix, acceptIamCookie, clock, log } = options;
   const caches = cachesFor(options, { now: () => clock.now() });
   const lists = createListRecipe({ typePrefix, caches });
+  // §12.8: suspended tenants change nothing, deleted ones reach nothing (root exempt). The tenancy module
+  // loads and refreshes the gate; an unstarted one (unit harnesses) refuses nothing.
+  const tenantGate = gate ?? createTenantGate({ sql: database, rootTenantId: rootTenantId ?? '' });
 
   /**
    * §3.4 step 7 for a refused admission: a delegated session whose delegation holds the action back
@@ -493,6 +498,7 @@ export function createOperations(
       // §3.4 step 3: before compute's database or any decision, so an outsider learns nothing and
       // puts no traffic on the tenant's audit chain.
       preCheck(caller, tenantId, inputTenant);
+      await tenantGate.check(caller, [tenantId, inputTenant], mutation);
 
       const contextFor = (
         sql: SqlExecutor,

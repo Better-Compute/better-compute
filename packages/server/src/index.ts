@@ -34,6 +34,7 @@ import {
 } from './runtime/index.js';
 import { createSelfCheck, type SelfCheckReport } from './self-check.js';
 import { createSiteBootModule } from './site-boot-module.js';
+import { createTenancyModule, createTenantGate } from './tenancy/tenancy.js';
 import { createAuditSinksModule } from './audit-sinks-module.js';
 import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
@@ -43,7 +44,13 @@ export { configOptions, defineConfig } from './define.js';
 export type { ComputeConfigContext, ComputeConfigFactory } from './define.js';
 export { maxBodyBytes } from './http.js';
 export { workerRoles } from './options.js';
-export type { ComputeOptions, IamJob, WorkerObserver, WorkerOptions, WorkerRole } from './options.js';
+export type {
+  ComputeOptions,
+  IamJob,
+  WorkerObserver,
+  WorkerOptions,
+  WorkerRole,
+} from './options.js';
 export type { ReconcileRun } from './runtime/reconcilers.js';
 export {
   anchoredClock,
@@ -86,6 +93,20 @@ export * from './audit-sinks-module.js';
 export { bcdArtifact, type DownloadsOptions } from './downloads.js';
 export { supportBundleKey, type SupportBundlesOptions } from './api/commands.js';
 export { siteBootLeaseName, siteBootTtlSeconds, tickSiteBoot } from './controllers/site-boot.js';
+export {
+  applyTenantStates,
+  createTenantGate,
+  tearDownTenant,
+  tenancyModuleName,
+  tenancyWorkKind,
+  tenantStateHandler,
+  tenantStatesMigration,
+  type IamTenantStatus,
+  type TenantEventLike,
+  type TenantGate,
+  type TenantState,
+  type TenantStateHandlerOptions,
+} from './tenancy/tenancy.js';
 export type { SiteBootState } from './controllers/site-boot.js';
 export * from './tunnels/index.js';
 
@@ -157,6 +178,11 @@ export interface BetterCompute<
   registry: Registry;
   /** Drops cached authentications and read decisions; the IAM bridge calls it on inbox events. */
   caches: ComputeCaches;
+  /**
+   * The envelope's tenant gate (§12.8): `invalidate()` makes this process reload suspended and deleted tenants
+   * before its next call (`tenantStateHandler` does it after a change; other processes refresh every 5 s).
+   */
+  tenants: { invalidate(): void };
   /** The authorization projection: one primary-key read (the IAM bridge keeps the memory copy). */
   authz: AuthzProjection;
   /** Reports configuration and storage problems; only reads. */
@@ -183,6 +209,15 @@ export function betterCompute<
 >(options: ComputeOptions<M, P>): BetterCompute<M, P> {
   const resolved = resolveOptions(options);
   const runtime = createRuntime(resolved);
+  // The envelope's §12.8 tenant gate, loaded and refreshed by the tenancy module.
+  const tenantGate = createTenantGate({
+    sql: resolved.database,
+    rootTenantId: resolved.rootTenantId ?? '',
+    onError: (error) =>
+      resolved.log.warn('Reloading suspended tenants failed; retrying', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+  });
   // The built-ins first: the node controllers, then the two always-on modules (P10's exception).
   const modules: readonly ComputeModule[] = [
     createNodesModule({
@@ -195,6 +230,8 @@ export function betterCompute<
     createSiteBootModule(),
     inventoryModule,
     capacityModule(resolved.capacity),
+    // §12.8 tenants: suspended/deleted states, the teardown of deleted tenants (every module's tenantDeleted).
+    createTenancyModule({ modules: () => hosted, gate: tenantGate }),
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
     ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
     ...(options.tunnels ? [tunnelsModule(options.tunnels)] : []),
@@ -245,7 +282,7 @@ export function betterCompute<
     modules: [...hosted, { name: 'runtime', selfCheck: async () => runtime.findings() }],
     context: moduleContext,
   });
-  const operations = createOperations(resolved, moduleContext, registry);
+  const operations = createOperations(resolved, moduleContext, registry, tenantGate);
   const http = createHttp({ options: resolved, registry, operations });
 
   const api: Record<string, unknown> = {};
@@ -359,6 +396,7 @@ export function betterCompute<
     context: moduleContext,
     registry,
     caches: operations.caches,
+    tenants: Object.freeze({ invalidate: () => tenantGate.invalidate() }),
     authz: Object.freeze({
       get: (type: string, id: string, tenantId: string) => runtime.authzRow(type, id, tenantId),
     }),

@@ -203,6 +203,7 @@ describe('betterCompute()', () => {
         'selfCheck',
         'start',
         'stop',
+        'tenants',
       ].sort(),
     );
     expect(database.log).toEqual([]);
@@ -222,6 +223,7 @@ describe('betterCompute()', () => {
       'site-boot',
       'inventory',
       'capacity',
+      'tenancy',
       // The default secret store's table, when no `secrets` are configured.
       'pki',
       'extras',
@@ -260,12 +262,13 @@ describe('betterCompute()', () => {
     expect(compute.registry.method('plugins/acme/widgets/poke')!.row).toBeUndefined();
     expect(compute.registry.actions.has('compute:acme:poke')).toBe(true);
     expect(compute.registry.actions.has('compute:reservations:create')).toBe(true);
-    // The built-in capacity module's migrations come first, then the sealed secrets, then the plugin's.
+    // The built-in capacity module's migrations come first, then tenancy's, the sealed secrets, then the plugin's.
     const migrations = compute.registry.migrations.map((migration) => migration.name);
     expect(migrations[0]).toBe('capacity/0001_device_links');
     expect(migrations.at(-1)).toBe('acme/0001_widgets');
     expect(migrations.at(-2)).toBe('pki/0001_sealed_secrets');
-    expect(migrations.slice(0, -2).every((name) => name.startsWith('capacity/'))).toBe(true);
+    expect(migrations.at(-3)).toBe('tenancy/0001_tenant_states');
+    expect(migrations.slice(0, -3).every((name) => name.startsWith('capacity/'))).toBe(true);
     expect(compute.registry.hasModule('inventory')).toBe(true);
     expect(compute.registry.hasModule('capacity')).toBe(true);
     expect(compute.registry.hasModule('metal')).toBe(false);

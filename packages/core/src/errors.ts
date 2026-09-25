@@ -32,6 +32,11 @@ export const errorCodes = [
    * gateway, remote IAM); nothing was changed, retry after `retryAfterMs`.
    */
   'UNAVAILABLE',
+  /**
+   * The IAM tenant is suspended (its mutations are refused) or deleted (everything is refused) (§12.8
+   * `iam:tenants:update|delete`); root callers are exempt.
+   */
+  'TENANT_SUSPENDED',
 ] as const;
 export type ErrorCode = (typeof errorCodes)[number];
 
@@ -65,6 +70,7 @@ export const defaultStatus: Readonly<Record<ErrorCode, number>> = {
   MISSING_DEPENDENCY: 500,
   CONFIG_DRIFT: 409,
   UNAVAILABLE: 503,
+  TENANT_SUSPENDED: 403,
 };
 
 /** The `error` member of a failed response: `{ error: { code, message, retryAfterMs?, details? } }`. */

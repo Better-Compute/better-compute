@@ -30,6 +30,13 @@ export const eventCatalog: readonly EventFamily[] = Object.freeze([
     description: 'Projects created, changed and archived (project.archived: { projectId, name })',
   },
   {
+    type: 'tenant.*',
+    subject: 'tenant/{id}',
+    module: 'server',
+    description:
+      'IAM tenant mirrored as suspended, deleted or active again (tenant.state-changed: { tenantId, state, previous, reason }); a deleted tenant fully released by every module (tenant.torn-down)',
+  },
+  {
     type: 'pool.*',
     subject: 'pool/{id}',
     module: 'capacity',

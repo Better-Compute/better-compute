@@ -1118,6 +1118,12 @@ export interface ComputeModule<Name extends string = string, A extends ApiGroups
   start?(context: ModuleContext): Promise<void>;
   /** Awaited by `stop()`, in reverse registration order. */
   stop?(): Promise<void>;
+  /**
+   * The IAM tenant was deleted (§12.8): release what the module holds for it (reservations, offers, instances).
+   * The built-in `tenancy` reconciler calls it until every module answers `DONE` (a `SYNC_AGAIN` is retried
+   * about every 30 s), then records the teardown and publishes `tenant.torn-down`. Must be idempotent.
+   */
+  tenantDeleted?(context: ModuleContext, tenantId: string): Promise<'DONE' | 'SYNC_AGAIN'>;
 }
 
 /** Declares a module; the name and API types are kept literal for `betterCompute<M, P>()`. */

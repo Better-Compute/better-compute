@@ -37,6 +37,7 @@ describe('error codes', () => {
       MISSING_DEPENDENCY: 500,
       CONFIG_DRIFT: 409,
       UNAVAILABLE: 503,
+      TENANT_SUSPENDED: 403,
     };
     expect(defaultStatus).toEqual(expected);
     expect([...errorCodes].sort()).toEqual(Object.keys(expected).sort());
