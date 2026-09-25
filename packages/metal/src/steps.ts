@@ -3,6 +3,7 @@ import {
   field,
   manifest,
   type Json,
+  type SecretRef,
   type SqlTx,
   type StepContext,
   type StepDefinition,
@@ -18,7 +19,16 @@ import {
   type CommandOutcome,
 } from '@better-compute/provision';
 import { isIP } from 'node:net';
-import { nodeSignedResults } from './attestation.js';
+import { nodeSignedResults, pkiNodeSignatureCheck } from './attestation.js';
+import {
+  addPendingCredential,
+  failCredential,
+  generateBmcPassword,
+  markPurged,
+  pendingCredential,
+  promoteCredential,
+  purgeableCredentials,
+} from './bmc-rotation.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
@@ -41,6 +51,8 @@ export const acceptIngestedAttestation: AttestationVerifier = async (_tx, outcom
 
 export interface MetalStepOptions {
   verifyAttestation?: AttestationVerifier;
+  /** Verifies site-agent-signed results (`bmc.rotate`); default: pki, role `site`. */
+  verifySiteAttestation?: AttestationVerifier;
 }
 
 function requireNode(context: StepContext): string {
@@ -153,6 +165,7 @@ async function ramdiskConnected(context: StepContext, nodeId: string): Promise<b
 /** Every metal step, configured. */
 export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
   const verify = options.verifyAttestation ?? nodeSignedResults();
+  const verifySite = options.verifySiteAttestation ?? nodeSignedResults(pkiNodeSignatureCheck({ roles: ['site'] }));
 
   const getPower = defineStep({
     id: 'power.getPower',
@@ -509,6 +522,72 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     },
   });
 
+  /** Two-phase BMC password rotation (bmc-rotation.ts); a failure keeps the old password current. */
+  const rotateBmcCredential = defineStep({
+    id: 'metal.rotateBmcCredential',
+    runsOn: 'control-plane',
+    relays: ['site'],
+    timeout: '10m',
+    retrySafe: true,
+    input: manifest({ username: field.string().optional() }),
+    async run(input, context) {
+      const node = await metalNode(context);
+      const previousRef = node.bmc_credentials;
+      if (!previousRef) throw new ComputeError('INVALID_STATE', `Node ${node.node_id} has no BMC credentials`);
+      if (!context.secrets) throw new ComputeError('INVALID_CONFIG', 'metal.rotateBmcCredential needs the secret broker');
+      // A retry picks up the pending version, whose password the BMC may already have.
+      let pending = await pendingCredential(context.sql, node.node_id);
+      if (!pending) {
+        const ref = await context.secrets.put(node.tenant_id, generateBmcPassword());
+        pending = await context.sql.transaction((tx) => addPendingCredential(tx, node.node_id, ref, previousRef));
+      }
+      const fail = async (error: ComputeError) => {
+        await context.sql.transaction((tx) =>
+          failCredential(tx, node.node_id, pending!, {
+            code: error.code,
+            message: error.message,
+            ...(error.details ? { details: error.details as Json } : {}),
+          }),
+        );
+        throw error;
+      };
+      let outcome: CommandOutcome;
+      try {
+        outcome = await awaitCommand(context, {
+          nodeId: await siteAgent(context, node.node_id),
+          kind: 'bmc.rotate',
+          payload: bmcOperationJson(node, 'management.rotateCredential', {
+            newCredentialRef: pending.ref,
+            ...(input.username ? { username: input.username } : {}),
+          }),
+        });
+      } catch (error) {
+        if (error instanceof ComputeError && error.code === 'DRIVER_ERROR') return fail(error);
+        throw error; // not ready yet, or the engine's own errors
+      }
+      let verified = false;
+      try {
+        verified = (bmcResult(outcome).result as Record<string, Json>).verified === true;
+      } catch (error) {
+        return fail(error as ComputeError);
+      }
+      if (!verified) return fail(new ComputeError('DRIVER_ERROR', 'The site agent could not log in with the new BMC credential'));
+      if (!(await verifySite(context.sql, outcome, context)))
+        return fail(new ComputeError('DRIVER_ERROR', 'The rotation result is not signed by the site agent'));
+      await context.sql.transaction((tx) => promoteCredential(tx, node.node_id, pending!, previousRef));
+      // The old secrets go once nothing queued still names them.
+      const purgeable = await purgeableCredentials(context.sql, node.node_id);
+      let purged = 0;
+      if (context.secrets.delete)
+        for (const old of purgeable) {
+          await context.secrets.delete(old.ref as SecretRef);
+          await markPurged(context.sql, node.node_id, old.version);
+          purged++;
+        }
+      return { version: pending.version, rotated: true, purged };
+    },
+  });
+
   /** The lease is over: a new identity generation, platform trust, no lease. */
   const exitTenantRoot = defineStep({
     id: 'metal.exitTenantRoot',
@@ -547,6 +626,7 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     kexec,
     revokeIdentity,
     fenceTenant,
+    rotateBmcCredential,
     firmwareCheck,
     exitTenantRoot,
   ];

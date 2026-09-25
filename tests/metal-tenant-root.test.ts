@@ -119,6 +119,7 @@ describe('a dedicated-root lease', () => {
     expect(teardown.rows.map((row) => row.action)).toEqual([
       'power.setPower',
       'metal.fenceTenant',
+      'metal.rotateBmcCredential',
       'metal.ensureRamdisk',
       'disk.wipe',
       'diag.dcgm',
@@ -140,6 +141,24 @@ describe('a dedicated-root lease', () => {
     expect(JSON.stringify(row.last_error)).toContain('bios');
     // Still tenant-root: only a completed teardown clears it.
     expect(row).toMatchObject({ tenant_root: true, trust: 'tenant-controlled' });
+  });
+
+  it('rotates the BMC password the lessee may have seen, and quarantines when it cannot', async () => {
+    const node = await readyNode();
+    const first = await lease(node);
+    await endLease(node, first.allocation);
+    expect((await sim.state(node)).provision_state).toBe('ready');
+    const { rows } = await sim.db.query<{ state: string }>('SELECT state FROM bmc_credential_versions WHERE node_id = $1 ORDER BY version', [node]);
+    expect(rows.map((row) => row.state)).toEqual(['superseded', 'current']);
+
+    const second = await lease(node);
+    sim.faults.rotateRejected = true;
+    try {
+      await endLease(node, second.allocation);
+    } finally {
+      sim.faults.rotateRejected = false;
+    }
+    expect(await sim.state(node)).toMatchObject({ provision_state: 'failed', failed_from: 'releasing', maintenance: true });
   });
 
   it("never lets the lessee's own identity attest the wipe that ends its lease", async () => {

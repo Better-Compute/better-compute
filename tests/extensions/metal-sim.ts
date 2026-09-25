@@ -48,6 +48,8 @@ export interface SimMachine {
   power: 'on' | 'off';
   /** What the BMC reports for firmware.components. */
   firmware: Record<string, string>;
+  /** The BMC account password once rotated; before that any credential is accepted. */
+  bmcPassword?: string;
 }
 
 /** The firmware every simulated machine ships with. */
@@ -138,6 +140,9 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     async resolve(ref: string) {
       return secretsStore.get(ref) ?? '';
     },
+    async delete(ref: string) {
+      secretsStore.delete(ref);
+    },
   };
   const base = { sql: db, work, events: eventLog, commands, pki, secrets, requestId: 'req_sim', iam: { rootTenantId: 'root' } };
   const context = { ...base, workflows: provision.workflowEngine(base as never) } as unknown as ModuleContext & MethodContext;
@@ -158,12 +163,16 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     foreignSigner: false,
     /** Results are signed with this key instead of the ramdisk's (e.g. a lessee's node-tenant key). */
     signWith: undefined as KeyObject | undefined,
+    /** BMC rotation: the BMC refuses the new password; or takes it but the login with it fails; or the site agent does not sign. */
+    rotateRejected: false,
+    rotateLoginFails: false,
+    rotateUnsigned: false,
   };
   // Node keys and certificates from a node CA, as JoinService issues them: every ramdisk boot joins
   // with a fresh key (role ramdisk), so revoking an identity generation never outlives a reboot.
   const nodeCa = createNodeCa({});
   const nodeKeys = new Map<string, KeyObject>();
-  async function issueNodeCert(nodeId: string, role: 'ramdisk' | 'node' | 'node-tenant'): Promise<KeyObject> {
+  async function issueNodeCert(nodeId: string, role: 'ramdisk' | 'node' | 'node-tenant' | 'site'): Promise<KeyObject> {
     const key = generateP256KeyPair().privateKey;
     const issued = await nodeCa.sign(createCsr(key), {
       usage: 'client',
@@ -207,6 +216,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       [id, siteId],
     );
     await connect(id, 'site', `site-${id}`);
+    await issueNodeCert(id, 'site');
   }
 
   function machineOf(nodeId: string): SimMachine {
@@ -235,7 +245,26 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
         : undefined;
       const target = byBmc ?? payload.nodeId ?? command.node_id;
       let result = new Uint8Array();
+      // A BMC whose password was rotated accepts only that password (the ref the site agent resolves).
+      const bmcAuthFails =
+        command.kind.startsWith('bmc.') && machineOf(target).bmcPassword !== undefined && secretsStore.get(payload.credentialsRef) !== machineOf(target).bmcPassword;
+      if (bmcAuthFails) command.kind = 'bmc.denied';
       switch (command.kind) {
+        case 'bmc.denied':
+          result = toBinary(site.BmcOperationResultSchema, create(site.BmcOperationResultSchema, { ok: false, errorCode: 'auth', message: 'authentication failed' }));
+          break;
+        case 'bmc.rotate': {
+          const m = machineOf(target);
+          if (faults.rotateRejected) {
+            result = toBinary(site.BmcOperationResultSchema, create(site.BmcOperationResultSchema, { ok: false, errorCode: 'policy', message: 'password rejected by the BMC' }));
+            break;
+          }
+          // The site agent fetches the new value (SecretRequest → JWE), applies it, then logs in with it.
+          const next = secretsStore.get(args.newCredentialRef);
+          if (next) m.bmcPassword = next;
+          result = bmcResult({ verified: Boolean(next) && !faults.rotateLoginFails });
+          break;
+        }
         case 'bmc.query':
           result = bmcResult(
             payload.operation === 'inspect.inspect'
@@ -290,7 +319,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       }
       // The node signs attested results (`CommandUpdate.node_sig`); the gateway stores what it relays.
       let signature: { kid: string; sig: Uint8Array } | undefined;
-      if (attested.has(command.kind) && (command.kind !== 'disk.wipe' || faults.attestWipe)) {
+      if (attested.has(command.kind) && (command.kind !== 'disk.wipe' || faults.attestWipe) && !(command.kind === 'bmc.rotate' && faults.rotateUnsigned)) {
         const key = faults.signWith ?? (faults.foreignSigner ? outsider : await nodeKey(command.node_id));
         signature = signCommandUpdate(key, { commandId: command.id, state: CommandState.SUCCEEDED, result });
       }

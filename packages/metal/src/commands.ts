@@ -27,7 +27,8 @@ export const metalPayloads = Object.freeze({
  * Metal's command kinds.
  * - Site agent: `bmc.query` (power state, OOB inspection), `bmc.boot` (boot device, virtual
  *   media), `bmc.power` (power actions: destructive, not retry-safe, since a cycle is not
- *   idempotent), `boot.prepareRamdisk`, `boot.cleanUp`.
+ *   idempotent), `bmc.rotate` (a new BMC password, attested by the site agent),
+ *   `boot.prepareRamdisk`, `boot.cleanUp`.
  * - Ramdisk: `diag.dcgm` (attested), `disk.wipe` (attested, destructive), `deploy.image`
  *   (destructive), `boot.kexec` (self-terminating: completes on rejoin).
  */
@@ -39,6 +40,17 @@ export const metalCommandKinds: readonly CommandKindSpec[] = Object.freeze([
     lane: 'control',
     retrySafe: false,
     destructive: true,
+    timeout: '5m',
+    roles: ['site'],
+    payload: metalPayloads.bmcOperation,
+  },
+  // Sets a new BMC password (the args name its secret ref; the site agent fetches the value as a
+  // JWE) and logs in with it. The site agent signs the result: rotation flips only on its word.
+  {
+    kind: 'bmc.rotate',
+    lane: 'control',
+    retrySafe: false,
+    attested: true,
     timeout: '5m',
     roles: ['site'],
     payload: metalPayloads.bmcOperation,

@@ -110,11 +110,11 @@ export const retireOobProfile = defineProfile({
 });
 
 // Tenant-root teardown (§13, v0.5): after a dedicated-root lease, always BMC-driven from the site
-// agent. Power off; revoke the tenant's identity before anything can report; boot the
+// agent. Power off; revoke the tenant's identity before anything can report; rotate the BMC
+// password (the tenant may have learned it; a failed rotation fails the teardown); boot the
 // platform-signed ramdisk; attested secure erase; GPU reset and ECC check (DCGM level 1); firmware
 // against the pool baseline (drift fails with maintenance on, a quarantine); a new identity
-// generation and platform trust; power off; then `ready`. BMC password rotation is per vendor
-// (verify) and not a step yet.
+// generation and platform trust; power off; then `ready`.
 
 /** releasing → ready after a dedicated-root lease. */
 export const tenantRootReleaseProfile = defineProfile({
@@ -125,6 +125,7 @@ export const tenantRootReleaseProfile = defineProfile({
   steps: [
     { use: 'power.setPower', with: { action: 'off' } },
     { use: 'metal.fenceTenant' },
+    { use: 'metal.rotateBmcCredential' },
     { use: 'metal.ensureRamdisk' },
     { use: 'disk.wipe', with: { mode: 'secure-erase' } },
     { use: 'diag.dcgm', with: { level: 1 } },
@@ -144,6 +145,7 @@ export const tenantRootReleaseOobProfile = defineProfile({
   steps: [
     { use: 'power.setPower', with: { action: 'off' } },
     { use: 'metal.fenceTenant' },
+    { use: 'metal.rotateBmcCredential' },
     { use: 'media.eject', onFailure: 'continue' },
     { use: 'metal.firmwareCheck' },
     { use: 'metal.exitTenantRoot' },

@@ -19,9 +19,11 @@ export type NodeSignatureCheck = (
 
 /**
  * The default check: pki's `verifyNodeStatement` over `node_certs` (the key the kid names, of that
- * node, not revoked, within validity plus pki's offline grace). `now` defaults to the system clock.
+ * node, not revoked, within validity plus pki's offline grace), from a certificate of one of `roles`
+ * (default ramdisk and node). `now` defaults to the system clock.
  */
-export function pkiNodeSignatureCheck(options: { now?: () => number } = {}): NodeSignatureCheck {
+export function pkiNodeSignatureCheck(options: { now?: () => number; roles?: readonly string[] } = {}): NodeSignatureCheck {
+  const roles = options.roles ?? ['ramdisk', 'node'];
   return async (tx, statement) => {
     const signature = { $typeName: 'bettercompute.common.v1.Signature', kid: statement.kid, sig: statement.sig } as Signature;
     try {
@@ -31,8 +33,9 @@ export function pkiNodeSignatureCheck(options: { now?: () => number } = {}): Nod
         now: options.now?.() ?? Date.now(),
       });
       // A lessee's OS holds a node-tenant certificate for this very node (§13): it must never be
-      // able to vouch for the wipe that ends its own lease. Only platform identities attest.
-      return verified.role === 'ramdisk' || verified.role === 'node';
+      // able to vouch for the wipe that ends its own lease. Only platform identities attest, and
+      // each result only through the roles that produce it (site agents attest BMC rotations).
+      return roles.includes(verified.role);
     } catch {
       return false;
     }

@@ -91,6 +91,12 @@ export interface PowerDriver {
 /** Boot-device selection through the BMC. */
 export interface ManagementDriver {
   setBootDevice(device: BootDevice, options: BootDeviceOptions): Promise<void>;
+  /**
+   * Sets the BMC account's password (Redfish AccountService, or the vendor's way), then proves it by
+   * logging in with it. Vendor rules (length, character classes, lockouts) are the driver's to meet
+   * or reject. Runs on the site agent (`bmc.rotate`), which fetches `newPassword` as a JWE.
+   */
+  rotateCredential?(newPassword: string, options?: { username?: string }): Promise<{ verified: boolean }>;
 }
 
 /** Network boot on the site agent holding the boot lease: PXE, iPXE, UEFI HTTP. */

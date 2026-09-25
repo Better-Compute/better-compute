@@ -56,4 +56,27 @@ ALTER TABLE metal_nodes ADD COLUMN tenant_root bool NOT NULL DEFAULT false;
 CREATE UNIQUE INDEX metal_nodes_lease ON metal_nodes (lease_allocation_id) WHERE lease_allocation_id IS NOT NULL;
 `,
   },
+  {
+    name: 'metal/0004_bmc_credentials',
+    sql: `
+-- BMC credential rotation (PLAN.md §3.5, §13), two-phase: a new version starts pending, and becomes
+-- current only after the site agent applied it and logged in with it (a node-signed result). The old
+-- version stays current until then. Only refs are stored; values live sealed in the SecretStore.
+-- A failed version keeps its ref: the BMC may hold it if the result was lost after the change.
+CREATE TABLE bmc_credential_versions (
+  node_id text NOT NULL REFERENCES nodes,
+  version int NOT NULL CHECK (version >= 1),
+  ref text NOT NULL,
+  state text NOT NULL CHECK (state IN ('pending', 'current', 'superseded', 'failed')),
+  error jsonb,
+  created_at timestamptz NOT NULL DEFAULT compute_now(),
+  verified_at timestamptz,
+  -- When a superseded version's secret was deleted from the store (never while a command names it).
+  purged_at timestamptz,
+  PRIMARY KEY (node_id, version)
+);
+CREATE UNIQUE INDEX bmc_credential_versions_current ON bmc_credential_versions (node_id) WHERE state = 'current';
+CREATE UNIQUE INDEX bmc_credential_versions_pending ON bmc_credential_versions (node_id) WHERE state = 'pending';
+`,
+  },
 ]);
