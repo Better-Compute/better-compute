@@ -408,7 +408,9 @@ export function remoteIam(options: RemoteIamOptions): RemoteIam {
     },
     billingCheck: (input, credential?: Credential) =>
       mapped(async () => {
-        // HTTP billing.check checks the credential's own spend in its own tenant: the caller's when given.
+        // HTTP billing.check decides for input.tenantId, for the credential's identity: the caller's when given.
+        // Without one (a reconciler), the root service account's: root is an ancestor of every tenant and holds no
+        // budgets of its own there, so the named tenant's enforced budgets decide, as embedded mode's check does.
         const verdict = await (
           await client()
         ).billing.check(

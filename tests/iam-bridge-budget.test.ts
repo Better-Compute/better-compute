@@ -135,6 +135,59 @@ describe('identityEndOf', () => {
   });
 });
 
+describe('billingCheck without a caller (a reconciler, e.g. warm pools)', () => {
+  const open: EmbeddedTestIam[] = [];
+  afterEach(async () => {
+    for (const item of open.splice(0)) await item.close();
+  });
+
+  // Embedded, and remote (HTTP billing.check under compute's root service credential): the named tenant's enforced
+  // budgets decide, never root's.
+  it.each(['embedded', 'remote'] as const)('answers for input.tenantId (%s)', async (mode) => {
+    const t = await createEmbeddedTestIam({ inbox: 'memory', mode });
+    open.push(t);
+    const root = t.root.credential;
+    await t.iam.api.billing.createMeter(root, {
+      tenantId: t.root.tenantId,
+      key: 'gpu.h100.hours',
+      name: 'H100 hours',
+      unit: 'hour',
+    });
+    await t.iam.api.billing.setPrice(root, {
+      tenantId: t.root.tenantId,
+      meter: 'gpu.h100.hours',
+      price: { model: 'per-unit', unitAmount: 2 },
+    });
+    const budget = await t.iam.api.billing.createBudget(t.acme.owner, {
+      tenantId: t.acme.tenantId,
+      name: 'GPU monthly',
+      amount: 20,
+      thresholds: [100],
+      forecastAlerts: false,
+      enforce: true,
+    } as never);
+    const record = (quantity: number, key: string) =>
+      t.iam.billing.record({
+        tenantId: t.acme.tenantId,
+        meter: 'gpu.h100.hours',
+        quantity,
+        idempotencyKey: key,
+      } as never);
+    // $36 of an enforced $20 (IAM caches a budget's standing briefly, so this is the first check).
+    await record(6, 'u1');
+    await record(6, 'u2');
+    await record(6, 'u3');
+    expect(await t.port.billingCheck({ tenantId: t.acme.tenantId })).toMatchObject({
+      allowed: false,
+      blockedBy: { budgetId: budget.budgetId },
+    });
+    // Another tenant's check is not acme's.
+    expect(await t.port.billingCheck({ tenantId: t.other.tenantId })).toMatchObject({
+      allowed: true,
+    });
+  });
+});
+
 describe('budgetAlertHandler on better-iam', () => {
   let db: SqlExecutor;
   const open: EmbeddedTestIam[] = [];
