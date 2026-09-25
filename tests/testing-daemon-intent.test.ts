@@ -300,7 +300,12 @@ describe('FakeDaemon signed intent', () => {
         roots: [authority.certificate],
         version: 1n,
         trustSigner: { publicKey: joinKey.publicKey },
-        quorum: { approverKeys: approvers.map((a) => a.key), threshold: 2, unbatchedPerHour: 1 },
+        quorum: {
+          approverKeys: approvers.map((a) => a.key),
+          threshold: 2,
+          unbatchedPerHour: 1,
+          trustDomain: 'compute.test',
+        },
       },
       // A destructive kind that does not reboot the node (node.reboot would end the session).
       kinds: {
@@ -317,7 +322,9 @@ describe('FakeDaemon signed intent', () => {
       return create(BatchApprovalSchema, {
         ...input,
         notAfter: timestampFromMs(input.notAfter),
-        signatures: signers.map((i) => signBatchApproval(input, approvers[i]!.privateKey)),
+        signatures: signers.map((i) =>
+          signBatchApproval({ ...input, trustDomain: 'compute.test' }, approvers[i]!.privateKey),
+        ),
       });
     };
     const sendBatched = (

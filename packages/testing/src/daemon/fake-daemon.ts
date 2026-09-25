@@ -1,4 +1,4 @@
-import type { KeyObject } from 'node:crypto';
+import { createHash, type KeyObject } from 'node:crypto';
 import { create, equals, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { timestampFromMs, timestampMs } from '@bufbuild/protobuf/wkt';
 import { isComputeError } from '@better-compute/core';
@@ -196,6 +196,8 @@ export interface FakeDaemonOptions {
      * `unbatchedPerHour` times per rolling hour (else UNBATCHED_LIMIT; default 0).
      */
     quorum?: FakeQuorumTrust;
+    /** The deployment's trust domain (JoinResponseBody.trust_domain), for a quorum a Welcome bundle brings. */
+    trustDomain?: string;
   };
   /**
    * A VPS host (v0.3): the `instances` section is converged on a fake hypervisor (options, or one
@@ -317,6 +319,8 @@ export type Verdict = { reject: string } | { defer: true } | { accept: true };
 /** The quorum part of a TrustBundle, as the daemon enforces it. */
 export interface FakeQuorumTrust {
   approverKeys: readonly ApproverKey[];
+  /** The deployment's trust domain approvals are signed for (JoinResponseBody.trust_domain). */
+  trustDomain: string;
   threshold: number;
   tiers?: readonly { maxScopeSize: number; threshold: number }[];
   unbatchedPerHour?: number;
@@ -1071,6 +1075,8 @@ export class FakeDaemon {
               threshold: bundle.approverThreshold,
               tiers: bundle.quorumTiers.map((tier) => ({ maxScopeSize: tier.maxScopeSize, threshold: tier.threshold })),
               unbatchedPerHour: bundle.unbatchedDestructivePerHour,
+              // The deployment's own trust domain (absent: every approval fails, closed).
+              trustDomain: this.quorum?.trustDomain ?? this.options.intent.trustDomain ?? '',
             }
           : undefined;
         this.log('trust.updated', { version: Number(bundle.version), roots: bundle.commandSigningRoots.length });
@@ -1194,12 +1200,22 @@ export class FakeDaemon {
         // The subject comes from the signed body: this node for its own kinds, the BMC or proxied node a site
         // agent acts on for relayed ones (precheck has already required body.nodeId to be this node).
         const subject = batchSubject(body);
-        verifyBatchCommand({ batchId: body.batchId, subject, kind: body.kind }, command.batchApproval, command.batchProof, {
-          approverKeys: quorum.approverKeys,
-          threshold: quorum.threshold,
-          ...(quorum.tiers ? { tiers: quorum.tiers } : {}),
-          now,
-        });
+        // The leaf may bind this exact payload (its digest) or any payload of the kind.
+        const payloadSha256 = body.payload
+          ? new Uint8Array(createHash('sha256').update(body.payload.value).digest())
+          : undefined;
+        verifyBatchCommand(
+          { batchId: body.batchId, subject, kind: body.kind, payloadSha256 },
+          command.batchApproval,
+          command.batchProof,
+          {
+            approverKeys: quorum.approverKeys,
+            threshold: quorum.threshold,
+            ...(quorum.tiers ? { tiers: quorum.tiers } : {}),
+            now,
+            trustDomain: quorum.trustDomain,
+          },
+        );
         this.batchVerdicts.delete(body.id);
       } catch (error) {
         this.batchVerdicts.set(body.id, 'BATCH_UNAPPROVED');

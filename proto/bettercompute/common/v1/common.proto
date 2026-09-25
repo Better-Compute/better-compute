@@ -59,11 +59,19 @@ message TrustBundle {
   // fleet-wide, so any unbatched allowance lets a compromised worker touch every node once:
   // fleet-wide limits come from the approvers (see quorum_tiers), never from this cap.
   uint32 unbatched_destructive_per_hour = 5;
-  // Thresholds by batch size, most specific first: a batch with scope_size ≤ max_scope_size needs
-  // `threshold` distinct approver signatures; above every tier, approver_threshold. Small batches can
-  // then be approved by a rate-limited auto-approver (one approver key held by a service outside
-  // api/worker, which is the fleet-wide counter), while large ones need k people.
+  // Thresholds by batch size, ascending max_scope_size with non-decreasing thresholds: a batch with
+  // scope_size ≤ max_scope_size needs `threshold` distinct approver signatures (the first tier that
+  // covers it); above every tier, approver_threshold. Small batches can then be approved by a
+  // rate-limited auto-approver (one approver key held by a service outside api/worker, which is the
+  // fleet-wide counter), while large ones need k people.
   repeated QuorumTier quorum_tiers = 6;
+  // (v1.0) The quorum fields (3-6) are signed by the approvers themselves, not only by the join key
+  // the control plane holds: k-of-the-CURRENT-set signatures, purpose "approver-set", parts
+  // [uint64_be(version), sha256(approver set input)] (see protocol's approverSetInput). A daemon
+  // that holds approver keys accepts a bundle that changes any quorum field, removal included, only
+  // with these signatures by its current set at its current threshold. A daemon without keys takes
+  // the first set as-is: that only adds restrictions.
+  repeated Signature approver_set_signatures = 7;
 }
 
 message QuorumTier {

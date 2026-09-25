@@ -458,13 +458,21 @@ type TrustBundle struct {
 	// fleet-wide, so any unbatched allowance lets a compromised worker touch every node once:
 	// fleet-wide limits come from the approvers (see quorum_tiers), never from this cap.
 	UnbatchedDestructivePerHour uint32 `protobuf:"varint,5,opt,name=unbatched_destructive_per_hour,json=unbatchedDestructivePerHour,proto3" json:"unbatched_destructive_per_hour,omitempty"`
-	// Thresholds by batch size, most specific first: a batch with scope_size ≤ max_scope_size needs
-	// `threshold` distinct approver signatures; above every tier, approver_threshold. Small batches can
-	// then be approved by a rate-limited auto-approver (one approver key held by a service outside
-	// api/worker, which is the fleet-wide counter), while large ones need k people.
-	QuorumTiers   []*QuorumTier `protobuf:"bytes,6,rep,name=quorum_tiers,json=quorumTiers,proto3" json:"quorum_tiers,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Thresholds by batch size, ascending max_scope_size with non-decreasing thresholds: a batch with
+	// scope_size ≤ max_scope_size needs `threshold` distinct approver signatures (the first tier that
+	// covers it); above every tier, approver_threshold. Small batches can then be approved by a
+	// rate-limited auto-approver (one approver key held by a service outside api/worker, which is the
+	// fleet-wide counter), while large ones need k people.
+	QuorumTiers []*QuorumTier `protobuf:"bytes,6,rep,name=quorum_tiers,json=quorumTiers,proto3" json:"quorum_tiers,omitempty"`
+	// (v1.0) The quorum fields (3-6) are signed by the approvers themselves, not only by the join key
+	// the control plane holds: k-of-the-CURRENT-set signatures, purpose "approver-set", parts
+	// [uint64_be(version), sha256(approver set input)] (see protocol's approverSetInput). A daemon
+	// that holds approver keys accepts a bundle that changes any quorum field, removal included, only
+	// with these signatures by its current set at its current threshold. A daemon without keys takes
+	// the first set as-is: that only adds restrictions.
+	ApproverSetSignatures []*Signature `protobuf:"bytes,7,rep,name=approver_set_signatures,json=approverSetSignatures,proto3" json:"approver_set_signatures,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *TrustBundle) Reset() {
@@ -535,6 +543,13 @@ func (x *TrustBundle) GetUnbatchedDestructivePerHour() uint32 {
 func (x *TrustBundle) GetQuorumTiers() []*QuorumTier {
 	if x != nil {
 		return x.QuorumTiers
+	}
+	return nil
+}
+
+func (x *TrustBundle) GetApproverSetSignatures() []*Signature {
+	if x != nil {
+		return x.ApproverSetSignatures
 	}
 	return nil
 }
@@ -810,14 +825,15 @@ const file_bettercompute_common_v1_common_proto_rawDesc = "" +
 	"\tSignature\x12\x10\n" +
 	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x10\n" +
 	"\x03sig\x18\x02 \x01(\fR\x03sig\x12\x14\n" +
-	"\x05chain\x18\x03 \x03(\fR\x05chain\"\xe2\x02\n" +
+	"\x05chain\x18\x03 \x03(\fR\x05chain\"\xbe\x03\n" +
 	"\vTrustBundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x122\n" +
 	"\x15command_signing_roots\x18\x02 \x03(\fR\x13commandSigningRoots\x12I\n" +
 	"\rapprover_keys\x18\x03 \x03(\v2$.bettercompute.common.v1.ApproverKeyR\fapproverKeys\x12-\n" +
 	"\x12approver_threshold\x18\x04 \x01(\rR\x11approverThreshold\x12C\n" +
 	"\x1eunbatched_destructive_per_hour\x18\x05 \x01(\rR\x1bunbatchedDestructivePerHour\x12F\n" +
-	"\fquorum_tiers\x18\x06 \x03(\v2#.bettercompute.common.v1.QuorumTierR\vquorumTiers\"P\n" +
+	"\fquorum_tiers\x18\x06 \x03(\v2#.bettercompute.common.v1.QuorumTierR\vquorumTiers\x12Z\n" +
+	"\x17approver_set_signatures\x18\a \x03(\v2\".bettercompute.common.v1.SignatureR\x15approverSetSignatures\"P\n" +
 	"\n" +
 	"QuorumTier\x12$\n" +
 	"\x0emax_scope_size\x18\x01 \x01(\rR\fmaxScopeSize\x12\x1c\n" +
@@ -903,13 +919,14 @@ var file_bettercompute_common_v1_common_proto_goTypes = []any{
 var file_bettercompute_common_v1_common_proto_depIdxs = []int32{
 	8, // 0: bettercompute.common.v1.TrustBundle.approver_keys:type_name -> bettercompute.common.v1.ApproverKey
 	7, // 1: bettercompute.common.v1.TrustBundle.quorum_tiers:type_name -> bettercompute.common.v1.QuorumTier
-	5, // 2: bettercompute.common.v1.SignedTrustBundle.signature:type_name -> bettercompute.common.v1.Signature
-	0, // 3: bettercompute.common.v1.DriverManifest.runs_on:type_name -> bettercompute.common.v1.RunsOn
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	5, // 2: bettercompute.common.v1.TrustBundle.approver_set_signatures:type_name -> bettercompute.common.v1.Signature
+	5, // 3: bettercompute.common.v1.SignedTrustBundle.signature:type_name -> bettercompute.common.v1.Signature
+	0, // 4: bettercompute.common.v1.DriverManifest.runs_on:type_name -> bettercompute.common.v1.RunsOn
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_bettercompute_common_v1_common_proto_init() }

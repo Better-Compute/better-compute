@@ -42,6 +42,8 @@ import {
   batchApprovalSigningInput,
   batchLeafInput,
   batchNodeInput,
+  approverSetInput,
+  approverSetSigningInput,
 } from '@better-compute/protocol';
 import type { SigningPurpose } from '@better-compute/protocol';
 
@@ -350,6 +352,19 @@ const secretRequest = {
   allocationId: '',
   epk,
 };
+// The quorum fields of a trust bundle, deliberately out of kid order (the canonical bytes sort them).
+const approverSet = {
+  approverKeys: [
+    { kid: 'zz-second', spkiDer: filled(91, 0x22) },
+    { kid: 'aa-first', spkiDer: filled(91, 0x11) },
+  ],
+  approverThreshold: 2,
+  quorumTiers: [
+    { maxScopeSize: 5, threshold: 1 },
+    { maxScopeSize: 100, threshold: 2 },
+  ],
+  unbatchedDestructivePerHour: 0,
+};
 const signingVectors: {
   name: string;
   purpose: SigningPurpose;
@@ -405,13 +420,21 @@ const signingVectors: {
       filled(32, 0xab),
       be(4, 412n),
       new Uint8Array([...be(8, clientTime.seconds), ...be(4, BigInt(clientTime.nanos))]),
+      utf8('compute.acme.test'),
     ],
     built: batchApprovalSigningInput({
       batchId: 'batch_01k5w000000000000000000001',
       scopeRoot: filled(32, 0xab),
       scopeSize: 412,
       notAfter: clientTime,
+      trustDomain: 'compute.acme.test',
     }),
+  },
+  {
+    name: 'approver-set',
+    purpose: 'approver-set',
+    parts: [be(8, 7n), digest(approverSetInput(approverSet))],
+    built: approverSetSigningInput({ version: 7n, setSha256: digest(approverSetInput(approverSet)) }),
   },
   {
     name: 'renew-pop',
@@ -429,14 +452,28 @@ const signingVectors: {
 // each leaf's proof as sibling hashes from the bottom. pki and bcd must reproduce batch-scope.json.
 const sha256 = (bytes: Uint8Array) => new Uint8Array(createHash('sha256').update(bytes).digest());
 const batchId = 'batch_01k5w000000000000000000001';
+// Subjects: a node's own id, a BMC behind a site agent (site-qualified), and a payload-bound leaf.
 const scopeEntries = [
-  { nodeId: 'node_01k5w000000000000000000003', kind: 'disk.wipe' },
-  { nodeId: 'node_01k5w000000000000000000001', kind: 'disk.wipe' },
-  { nodeId: 'node_01k5w000000000000000000002', kind: 'deploy.image' },
+  { subject: 'node_01k5w000000000000000000003', kind: 'disk.wipe', payloadSha256: '' },
+  {
+    subject: 'bmc:node_01k5w0000000000000000000s1/10.0.0.5',
+    kind: 'bmc.power',
+    payloadSha256: '',
+  },
+  {
+    subject: 'node_01k5w000000000000000000002',
+    kind: 'deploy.image',
+    payloadSha256: hex(digest('deploy image payload')),
+  },
 ];
 function batchScope() {
   const leaves = scopeEntries
-    .map((entry) => ({ ...entry, hash: sha256(batchLeafInput(batchId, entry.nodeId, entry.kind)) }))
+    .map((entry) => ({
+      ...entry,
+      hash: sha256(
+        batchLeafInput(batchId, entry.subject, entry.kind, fromHex(entry.payloadSha256)),
+      ),
+    }))
     .sort((a, b) => Buffer.compare(a.hash, b.hash));
   const proofs = leaves.map(() => [] as Uint8Array[]);
   let level = leaves.map((leaf, index) => ({ hash: leaf.hash, members: [index] }));
@@ -463,9 +500,12 @@ function batchScope() {
     root: hex(level[0]!.hash),
     leaves: leaves.map((leaf, index) => ({
       index,
-      nodeId: leaf.nodeId,
+      subject: leaf.subject,
       kind: leaf.kind,
-      leafInput: hex(batchLeafInput(batchId, leaf.nodeId, leaf.kind)),
+      payloadSha256: leaf.payloadSha256,
+      leafInput: hex(
+        batchLeafInput(batchId, leaf.subject, leaf.kind, fromHex(leaf.payloadSha256)),
+      ),
       hash: hex(leaf.hash),
       siblings: proofs[index]!.map(hex),
     })),
@@ -548,10 +588,21 @@ describe('protocol golden vectors', () => {
       expect(siblings).toEqual([]);
       expect(hex(hash)).toBe(scope.root);
     }
-    // Layout checks: tags, length prefixes, 32-byte digests only.
+    // Layout checks: tags, length prefixes (an unbound payload is lp(empty)), 32-byte digests only.
     expect(batchLeafInput('b', 'n', 'k')).toEqual(
-      new Uint8Array([0, 0, 0, 0, 1, 98, 0, 0, 0, 1, 110, 0, 0, 0, 1, 107]),
+      new Uint8Array([0, 0, 0, 0, 1, 98, 0, 0, 0, 1, 110, 0, 0, 0, 1, 107, 0, 0, 0, 0]),
     );
+    expect(() => batchLeafInput('b', 'n', 'k', filled(31, 1))).toThrow(/32 bytes or empty/);
+    // The approver set's canonical bytes sort keys by kid: order in the bundle does not matter.
+    expect(hex(approverSetInput(approverSet))).toBe(
+      hex(
+        approverSetInput({
+          ...approverSet,
+          approverKeys: [...approverSet.approverKeys].reverse(),
+        }),
+      ),
+    );
+    expect(approverSetInput(approverSet).slice(0, 4)).toEqual(new Uint8Array([0, 0, 0, 2]));
     expect(batchNodeInput(filled(32, 1), filled(32, 2))[0]).toBe(1);
     expect(() => batchNodeInput(filled(31, 1), filled(32, 2))).toThrow(/32-byte/);
   });

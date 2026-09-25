@@ -128,6 +128,7 @@ export {
   maxBatchLeaves,
   quorumConfigOf,
   quorumMigration,
+  quorumPayloadMigration,
   quorumModuleName,
   quorumWorkKind,
   type ApproveBatchInput,
@@ -275,7 +276,9 @@ export function betterCompute<
     }),
     // §13 v1.0 destructive-batch quorum: batches, `commandBatches`, the expiry sweep (always on, so
     // the command queue can batch; approvals are needed only with `pki.approvers`).
-    createQuorumModule({ quorum: quorumConfigOf(resolved.trustBundle) }),
+    createQuorumModule({
+      quorum: quorumConfigOf(resolved.trustBundle, resolved.join?.trustDomain),
+    }),
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
     ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
     ...(options.tunnels

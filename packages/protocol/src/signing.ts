@@ -42,9 +42,14 @@ export type SigningPurpose =
   | 'x509pop'
   /**
    * Operator approver key (v1.0 quorum, §13); parts [batch_id, scope_root,
-   * uint32_be(scope_size), timestamp(not_after)].
+   * uint32_be(scope_size), timestamp(not_after), trust_domain].
    */
-  | 'batch-approval';
+  | 'batch-approval'
+  /**
+   * Operator approver key of the CURRENT set (v1.0 quorum, §13): a change of the trust bundle's
+   * quorum fields; parts [uint64_be(version), sha256(approverSetInput(...))].
+   */
+  | 'approver-set';
 
 const PREFIX = 'bettercompute.v1/';
 const utf8 = new TextEncoder();
@@ -136,19 +141,69 @@ export const workloadTokenRequestSigningInput = (
     request.epk,
   ]);
 
-/** Signing input of a `BatchApproval` signature: what k operators approve (v1.0 quorum, §13). */
+/**
+ * Signing input of a `BatchApproval` signature: what k operators approve (v1.0 quorum, §13). The
+ * trust domain binds it to one deployment: every verifier supplies its own.
+ */
 export const batchApprovalSigningInput = (approval: {
   batchId: string;
   scopeRoot: Uint8Array;
   scopeSize: number;
   notAfter: Timestamp;
-}): Uint8Array =>
-  signingInput('batch-approval', [
+  trustDomain: string;
+}): Uint8Array => {
+  if (!approval.trustDomain)
+    throw new ProtocolError('INVALID_SIGNING_INPUT', 'a batch approval names its trust domain');
+  return signingInput('batch-approval', [
     utf8.encode(approval.batchId),
     digest('scopeRoot', approval.scopeRoot),
     uint32(approval.scopeSize),
     timestamp(approval.notAfter),
+    utf8.encode(approval.trustDomain),
   ]);
+};
+
+/** The quorum fields of a TrustBundle (3-6), as `approverSetInput` canonicalizes them. */
+export interface ApproverSetFields {
+  approverKeys: readonly { kid: string; spkiDer: Uint8Array }[];
+  approverThreshold: number;
+  quorumTiers: readonly { maxScopeSize: number; threshold: number }[];
+  unbatchedDestructivePerHour: number;
+}
+
+/**
+ * The canonical bytes of a trust bundle's quorum fields (hashed with SHA-256 by the caller for the
+ * "approver-set" signature):
+ * `uint32(n) ‖ (lp(kid) ‖ lp(spki_der))* by kid ascending ‖ uint32(threshold) ‖ uint32(m) ‖
+ * (uint32(max_scope_size) ‖ uint32(threshold))* in order ‖ uint32(unbatched_destructive_per_hour)`.
+ */
+export function approverSetInput(fields: ApproverSetFields): Uint8Array {
+  const keys = [...fields.approverKeys].sort((a, b) => (a.kid < b.kid ? -1 : a.kid > b.kid ? 1 : 0));
+  const chunks: Uint8Array[] = [uint32(keys.length)];
+  for (const key of keys)
+    chunks.push(lengthPrefixed(utf8.encode(key.kid)), lengthPrefixed(key.spkiDer));
+  chunks.push(uint32(fields.approverThreshold), uint32(fields.quorumTiers.length));
+  for (const tier of fields.quorumTiers)
+    chunks.push(uint32(tier.maxScopeSize), uint32(tier.threshold));
+  chunks.push(uint32(fields.unbatchedDestructivePerHour));
+  const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+/** Signing input of an `approver_set_signatures` entry: the new version and its set's digest. */
+export const approverSetSigningInput = (input: {
+  version: bigint;
+  setSha256: Uint8Array;
+}): Uint8Array => {
+  const version = new Uint8Array(8);
+  new DataView(version.buffer).setBigUint64(0, input.version);
+  return signingInput('approver-set', [version, digest('setSha256', input.setSha256)]);
+};
 
 /** `uint32_be(len) ‖ bytes`. */
 function lengthPrefixed(value: Uint8Array): Uint8Array {
@@ -160,12 +215,24 @@ function lengthPrefixed(value: Uint8Array): Uint8Array {
 
 /**
  * The bytes a batch scope leaf hashes (SHA-256 by the caller): `0x00 ‖ lp(batch_id) ‖ lp(subject)
- * ‖ lp(kind)`. Leaves are ordered by their hash; see `BatchApproval` in session.proto. `subject` is
- * what the command acts on: the node id for kinds a node runs on itself, `bmc:<address>` for
- * site-relayed BMC kinds, `node:<target_node_id>` for `site.httpProxy`.
+ * ‖ lp(kind) ‖ lp(payload_sha256)`. Leaves are ordered by their hash; see `BatchApproval` in
+ * session.proto. `subject` is what the command acts on: the node id for kinds a node runs on
+ * itself, `bmc:<site agent node id>/<address>` for site-relayed BMC kinds, `node:<target_node_id>`
+ * for `site.httpProxy`. `payloadSha256` is SHA-256 of the payload's value (32 bytes), or empty for
+ * "any payload of this kind".
  */
-export function batchLeafInput(batchId: string, subject: string, kind: string): Uint8Array {
-  const parts = [batchId, subject, kind].map((part) => lengthPrefixed(utf8.encode(part)));
+export function batchLeafInput(
+  batchId: string,
+  subject: string,
+  kind: string,
+  payloadSha256: Uint8Array = new Uint8Array(0),
+): Uint8Array {
+  if (payloadSha256.byteLength !== 0 && payloadSha256.byteLength !== 32)
+    throw new ProtocolError('INVALID_SIGNING_INPUT', 'payloadSha256 is 32 bytes or empty');
+  const parts = [
+    ...[batchId, subject, kind].map((part) => lengthPrefixed(utf8.encode(part))),
+    lengthPrefixed(payloadSha256),
+  ];
   const out = new Uint8Array(1 + parts.reduce((sum, part) => sum + part.byteLength, 0));
   let offset = 1; // out[0] = 0x00, the leaf tag
   for (const part of parts) {

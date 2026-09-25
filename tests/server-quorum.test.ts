@@ -7,12 +7,15 @@ import {
   batchScope,
   createApproverKey,
   createCommandSigningAuthority,
+  createNodeCa,
+  createSigningKey,
+  generateP256KeyPair,
   signBatchApproval,
   verifyBatchApproval,
   verifyBatchProof,
 } from '@better-compute/pki';
 import { BatchApprovalSchema, BatchProofSchema } from '@better-compute/protocol';
-import { betterCompute, createCommandBatch, quorumConfigOf } from '@better-compute/server';
+import { betterCompute, createCommandBatch, pkiJoinCrypto, quorumConfigOf } from '@better-compute/server';
 import { fakeIam } from '@better-compute/testing';
 import { ACME, options } from './support/server.js';
 
@@ -23,6 +26,7 @@ import { ACME, options } from './support/server.js';
 
 const T0 = Date.UTC(2026, 8, 25, 12);
 const TOKEN = 'op-token';
+const TRUST_DOMAIN = 'compute.test';
 let db: SqlExecutor | undefined;
 afterEach(async () => {
   await db?.close();
@@ -42,6 +46,13 @@ async function setup() {
     clock,
     pki: {
       commandSigning: createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) }),
+      // JoinService: its trust domain is a signed part of every approval.
+      join: pkiJoinCrypto({
+        trustDomain: TRUST_DOMAIN,
+        nodeCa: createNodeCa({ clock: manualClock(T0 - 60_000) }),
+        signingKey: createSigningKey({ clock: manualClock(T0 - 60_000) }),
+        encryptionKey: generateP256KeyPair().privateKey,
+      }),
       approvers: {
         keys: approvers.map((approver) => approver.key.spkiDer),
         threshold: 2,
@@ -91,6 +102,7 @@ async function setup() {
         scopeRoot: new Uint8Array(Buffer.from(view.scopeRoot, 'hex')),
         scopeSize: view.scopeSize,
         notAfter: view.notAfter,
+        trustDomain: TRUST_DOMAIN,
       },
       approvers[i]!.privateKey,
     );
@@ -101,8 +113,9 @@ async function setup() {
 
 const scope = [
   { subject: 'node_a', kind: 'disk.wipe' },
-  { subject: 'bmc:10.0.0.11', kind: 'bmc.power' },
-  { subject: 'bmc:10.0.0.12', kind: 'bmc.power' },
+  // A BMC subject names the site agent that drives it (review #6 H2).
+  { subject: 'bmc:node_agent/10.0.0.11', kind: 'bmc.power' },
+  { subject: 'bmc:node_agent/10.0.0.12', kind: 'bmc.power' },
 ];
 
 describe('commandBatches (v1.0 quorum, §13)', () => {
@@ -159,6 +172,7 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
         scopeRoot: new Uint8Array(Buffer.from(view.scopeRoot, 'hex')),
         scopeSize: 3,
         notAfter: view.notAfter,
+        trustDomain: TRUST_DOMAIN,
       },
       outsider.privateKey,
     );
@@ -206,6 +220,7 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
         threshold: 2,
         tiers: s.quorum!.tiers,
         now: T0,
+        trustDomain: TRUST_DOMAIN,
       }).sort(),
     ).toEqual([s.approvers[0]!.key.kid, s.approvers[2]!.key.kid].sort());
     const released = await db!.query<{ due: boolean }>(

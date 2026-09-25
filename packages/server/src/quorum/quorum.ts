@@ -92,11 +92,27 @@ CREATE TABLE command_batch_approvals (
 `,
 };
 
+/**
+ * quorum/0002 (review #6): a leaf binds (subject, kind, payload digest), where an empty digest
+ * means "any payload of this kind" (a payload built later), so the scope table keys on all three.
+ */
+export const quorumPayloadMigration: Migration = {
+  name: 'quorum/0002_payload_digest',
+  sql: `
+ALTER TABLE command_batch_scope ADD COLUMN payload_sha256 bytea NOT NULL DEFAULT '\\x';
+ALTER TABLE command_batch_scope DROP CONSTRAINT command_batch_scope_pkey;
+ALTER TABLE command_batch_scope ADD PRIMARY KEY (batch_id, subject, kind, payload_sha256);
+ALTER TABLE command_batch_members ADD COLUMN payload_sha256 bytea NOT NULL DEFAULT '\\x';
+`,
+};
+
 /** The quorum a deployment publishes in its trust bundle (`pki.approvers`). */
 export interface QuorumConfig {
   approverKeys: readonly ApproverKey[];
   threshold: number;
   tiers: readonly { maxScopeSize: number; threshold: number }[];
+  /** The deployment's trust domain, a signed part of every approval (JoinService's). */
+  trustDomain?: string | undefined;
 }
 
 /** The trust bundle's quorum fields as a config; undefined when no approver keys are published. */
@@ -108,12 +124,14 @@ export function quorumConfigOf(
         quorumTiers?: readonly { maxScopeSize: number; threshold: number }[];
       }
     | undefined,
+  trustDomain?: string,
 ): QuorumConfig | undefined {
   if (!bundle?.approverKeys?.length || !bundle.approverThreshold) return undefined;
   return {
     approverKeys: bundle.approverKeys,
     threshold: bundle.approverThreshold,
     tiers: bundle.quorumTiers ?? [],
+    ...(trustDomain ? { trustDomain } : {}),
   };
 }
 
@@ -124,8 +142,10 @@ export interface CommandBatchView {
   tenantId: string;
   reason: string;
   state: BatchState;
-  /** Hex SHA-256 Merkle root of the (subject, kind) leaves. */
+  /** Hex SHA-256 Merkle root of the (subject, kind, payload) leaves. */
   scopeRoot: string;
+  /** The trust domain approvers sign with (a signed part of every approval); absent without one. */
+  trustDomain?: string;
   scopeSize: number;
   /** Distinct approver signatures needed; 0 when the deployment has no quorum. */
   requiredApprovals: number;
@@ -195,12 +215,15 @@ export async function createCommandBatch(
       input.createdBy ?? null,
     ],
   );
+  const hexOf = (digest: Uint8Array | undefined) => Buffer.from(digest ?? []).toString('hex');
   const leaves = new Map<string, BatchScopeEntry>();
-  for (const entry of input.scope) leaves.set(`${entry.subject}\0${entry.kind}`, entry);
+  for (const entry of input.scope)
+    leaves.set(`${entry.subject}\0${entry.kind}\0${hexOf(entry.payloadSha256)}`, entry);
   const rows = [...leaves.values()].map((entry) => {
-    const proof = scope.proofOf(entry.subject, entry.kind)!;
+    const proof = scope.proofOf(entry.subject, entry.kind, entry.payloadSha256)!;
     return {
       ...entry,
+      payload: hexOf(entry.payloadSha256),
       index: proof.index,
       proof: Buffer.from(
         encodeMessage(BatchProofSchema, {
@@ -215,13 +238,15 @@ export async function createCommandBatch(
   for (let start = 0; start < rows.length; start += 5_000) {
     const chunk = rows.slice(start, start + 5_000);
     await tx.query(
-      `INSERT INTO command_batch_scope (batch_id, subject, kind, leaf_index, proof)
-       SELECT $1, v.subject, v.kind, v.leaf_index, decode(v.proof, 'hex')
-         FROM unnest($2::text[], $3::text[], $4::int[], $5::text[]) AS v(subject, kind, leaf_index, proof)`,
+      `INSERT INTO command_batch_scope (batch_id, subject, kind, payload_sha256, leaf_index, proof)
+       SELECT $1, v.subject, v.kind, decode(v.payload, 'hex'), v.leaf_index, decode(v.proof, 'hex')
+         FROM unnest($2::text[], $3::text[], $4::text[], $5::int[], $6::text[])
+              AS v(subject, kind, payload, leaf_index, proof)`,
       [
         batchId,
         chunk.map((row) => row.subject),
         chunk.map((row) => row.kind),
+        chunk.map((row) => row.payload),
         chunk.map((row) => row.index),
         chunk.map((row) => row.proof),
       ],
@@ -267,7 +292,11 @@ async function readBatch(
   return row;
 }
 
-async function batchView(tx: Pick<SqlTx, 'query'>, row: BatchRow): Promise<CommandBatchView> {
+async function batchView(
+  tx: Pick<SqlTx, 'query'>,
+  row: BatchRow,
+  trustDomain?: string,
+): Promise<CommandBatchView> {
   const approvals = await tx.query<{ kid: string; at: Date | string; approved_by: string | null }>(
     'SELECT kid, at, approved_by FROM command_batch_approvals WHERE batch_id = $1 ORDER BY at, kid',
     [row.id],
@@ -283,6 +312,7 @@ async function batchView(tx: Pick<SqlTx, 'query'>, row: BatchRow): Promise<Comma
     reason: row.reason,
     state: row.state,
     scopeRoot: Buffer.from(row.scope_root).toString('hex'),
+    ...(trustDomain ? { trustDomain } : {}),
     scopeSize: Number(row.scope_size),
     requiredApprovals: Number(row.required),
     notAfter: ms(row.not_after),
@@ -426,6 +456,7 @@ export function commandBatchesApi(options: {
   quorum?: QuorumConfig | undefined;
 }): CommandBatchesApi {
   const quorum = options.quorum;
+  const trustDomain = quorum?.trustDomain;
   // Decided on the tenant (the envelope adds the deployment's type prefix).
   const tenant = (input: { tenantId: string }) => ({ type: 'tenant', id: input.tenantId });
 
@@ -437,7 +468,7 @@ export function commandBatchesApi(options: {
         resource: tenant,
         validate: (raw) => parseRef(raw),
         handler: async (context, input) =>
-          batchView(context.sql, await readBatch(context.sql, input.tenantId, input.batchId)),
+          batchView(context.sql, await readBatch(context.sql, input.tenantId, input.batchId), trustDomain),
       }),
       list: defineMethod<ListBatchesInput, { items: CommandBatchView[]; next?: string }>({
         action: 'compute:batches:read',
@@ -469,13 +500,16 @@ export function commandBatchesApi(options: {
           );
           const page = rows.slice(0, limit);
           const items = [];
-          for (const row of page) items.push(await batchView(context.sql, row));
+          for (const row of page) items.push(await batchView(context.sql, row, trustDomain));
           return rows.length > limit ? { items, next: page.at(-1)!.id } : { items };
         },
       }),
       scope: defineMethod<
         BatchScopeInput,
-        { items: { leafIndex: number; subject: string; kind: string }[]; next?: number }
+        {
+          items: { leafIndex: number; subject: string; kind: string; payloadSha256: string }[];
+          next?: number;
+        }
       >({
         action: 'compute:batches:read',
         kind: 'read',
@@ -498,15 +532,18 @@ export function commandBatchesApi(options: {
             leaf_index: number;
             subject: string;
             kind: string;
+            payload_sha256: Uint8Array;
           }>(
-            `SELECT leaf_index, subject, kind FROM command_batch_scope
+            `SELECT leaf_index, subject, kind, payload_sha256 FROM command_batch_scope
               WHERE batch_id = $1 AND leaf_index >= $2 ORDER BY leaf_index LIMIT $3`,
             [input.batchId, input.cursor ?? 0, limit + 1],
           );
+          // payloadSha256 '' = the leaf admits any payload of its kind (flag it to approvers).
           const items = rows.slice(0, limit).map((row) => ({
             leafIndex: Number(row.leaf_index),
             subject: row.subject,
             kind: row.kind,
+            payloadSha256: Buffer.from(row.payload_sha256).toString('hex'),
           }));
           return rows.length > limit ? { items, next: Number(rows[limit]!.leaf_index) } : { items };
         },
@@ -536,6 +573,11 @@ export function commandBatchesApi(options: {
             throw new ComputeError('INVALID_STATE', `Batch ${row.id} is ${row.state}`);
           if (!quorum?.approverKeys.length || Number(row.required) === 0)
             throw new ComputeError('INVALID_STATE', `Batch ${row.id} needs no approvals`);
+          if (!trustDomain)
+            throw new ComputeError(
+              'INVALID_CONFIG',
+              'Approvals are signed for the trust domain: configure pki.join (JoinService)',
+            );
           const given = signature(
             input.signature.kid,
             new Uint8Array(Buffer.from(input.signature.sig, 'base64url')),
@@ -545,6 +587,7 @@ export function commandBatchesApi(options: {
             approverKeys: quorum.approverKeys,
             threshold: 1,
             now,
+            trustDomain,
           });
           await tx.query(
             `INSERT INTO command_batch_approvals (batch_id, kid, sig, approved_by)
@@ -566,6 +609,7 @@ export function commandBatchesApi(options: {
               threshold: quorum.threshold,
               tiers: quorum.tiers,
               now,
+              trustDomain,
             });
           } catch {
             complete = false;
@@ -595,7 +639,7 @@ export function commandBatchesApi(options: {
               },
             });
           }
-          return batchView(tx, await readBatch(tx, input.tenantId, input.batchId));
+          return batchView(tx, await readBatch(tx, input.tenantId, input.batchId), trustDomain);
         },
       }),
       cancel: defineMethod<BatchRef, CommandBatchView>({
@@ -609,7 +653,7 @@ export function commandBatchesApi(options: {
           if (row.state !== 'pending')
             throw new ComputeError('INVALID_STATE', `Batch ${row.id} is ${row.state}`);
           await endBatch(tx, context, row, 'cancelled');
-          return batchView(tx, await readBatch(tx, input.tenantId, input.batchId));
+          return batchView(tx, await readBatch(tx, input.tenantId, input.batchId), trustDomain);
         },
       }),
     },
@@ -644,7 +688,7 @@ export function createQuorumModule(options: {
   return Object.freeze(
     defineModule<typeof quorumModuleName, CommandBatchesApi>({
       name: quorumModuleName,
-      migrations: [quorumMigration],
+      migrations: [quorumMigration, quorumPayloadMigration],
       api: () => commandBatchesApi(options),
       reconcilers: [expiryReconciler()],
       // A deleted tenant's pending batches end, and their held commands with them.

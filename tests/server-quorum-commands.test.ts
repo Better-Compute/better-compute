@@ -3,9 +3,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { manualClock, shardOf, type SqlExecutor } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
-import { createApproverKey, createCommandSigningAuthority, signBatchApproval } from '@better-compute/pki';
+import {
+  createApproverKey,
+  createCommandSigningAuthority,
+  createNodeCa,
+  createSigningKey,
+  generateP256KeyPair,
+  signBatchApproval,
+} from '@better-compute/pki';
 import { CommandBodySchema } from '@better-compute/protocol';
-import { betterCompute } from '@better-compute/server';
+import { betterCompute, pkiJoinCrypto } from '@better-compute/server';
 import { fakeIam } from '@better-compute/testing';
 import { ACME, OTHER, options } from './support/server.js';
 
@@ -32,6 +39,13 @@ async function setup(withApprovers: boolean) {
     clock,
     pki: {
       commandSigning: createCommandSigningAuthority({ clock: manualClock(T0 - 60_000) }),
+      // JoinService: its trust domain is a signed part of every approval.
+      join: pkiJoinCrypto({
+        trustDomain: 'compute.test',
+        nodeCa: createNodeCa({ clock: manualClock(T0 - 60_000) }),
+        signingKey: createSigningKey({ clock: manualClock(T0 - 60_000) }),
+        encryptionKey: generateP256KeyPair().privateKey,
+      }),
       ...(withApprovers
         ? { approvers: { keys: approvers.map((approver) => approver.key.spkiDer), threshold: 1 } }
         : {}),
@@ -104,6 +118,7 @@ describe('CommandQueue batches (v1.0 quorum, §13)', () => {
         scopeRoot: new Uint8Array(Buffer.from(view.scopeRoot, 'hex')),
         scopeSize: view.scopeSize,
         notAfter: view.notAfter,
+        trustDomain: view.trustDomain,
       },
       s.approvers[0]!.privateKey,
     );

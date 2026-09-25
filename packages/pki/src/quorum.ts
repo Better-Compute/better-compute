@@ -46,9 +46,11 @@ export function createApproverKey(): { privateKey: KeyObject; key: ApproverKey }
 }
 
 export interface BatchScopeEntry {
-  /** What the command acts on (see batchSubject): a node id, `bmc:<address>` or `node:<target node id>`. */
+  /** What the command acts on (see batchSubject): a node id, `bmc:<site agent>/<address>` or `node:<target node id>`. */
   subject: string;
   kind: string;
+  /** SHA-256 of the exact payload (the Any's value), binding the leaf to that operation; absent: any payload. */
+  payloadSha256?: Uint8Array | undefined;
 }
 
 /** The kinds a site agent runs against a machine's BMC: their subject is `bmc:` + the BMC address. */
@@ -66,7 +68,9 @@ export function batchSubject(body: { nodeId: string; kind: string; payload?: Any
     const request = body.payload && anyUnpack(body.payload, site.BmcOperationRequestSchema);
     if (!request) throw bad('is not a BmcOperationRequest');
     if (!request.address) throw bad('names no BMC address');
-    return `bmc:${request.address}`;
+    if (!body.nodeId) throw bad('comes from no site agent');
+    // BMC addresses are site-local: the site agent that runs it is part of the subject.
+    return `bmc:${body.nodeId}/${request.address}`;
   }
   if (body.kind === 'site.httpProxy') {
     const request = body.payload && anyUnpack(body.payload, site.HttpProxyRequestSchema);
@@ -84,11 +88,17 @@ export interface BatchScope {
   root: Uint8Array;
   /** Leaves (distinct (subject, kind) pairs). */
   size: number;
-  /** The proof a command for `(subject, kind)` carries; undefined when it is not in the batch. */
-  proofOf(subject: string, kind: string): { index: number; siblings: Uint8Array[] } | undefined;
+  /** The proof a command for `(subject, kind, payload)` carries; undefined when it is not in the batch. */
+  proofOf(
+    subject: string,
+    kind: string,
+    payloadSha256?: Uint8Array,
+  ): { index: number; siblings: Uint8Array[] } | undefined;
 }
 
-const entryKey = (subject: string, kind: string) => `${subject}\u0000${kind}`;
+const noPayload = new Uint8Array(0);
+const entryKey = (subject: string, kind: string, payloadSha256: Uint8Array = noPayload) =>
+  `${subject}\u0000${kind}\u0000${Buffer.from(payloadSha256).toString('hex')}`;
 
 /**
  * Builds the scope tree of a batch: one leaf per distinct (subject, kind), ordered by leaf hash, inner nodes
@@ -97,10 +107,13 @@ const entryKey = (subject: string, kind: string) => `${subject}\u0000${kind}`;
 export function batchScope(batchId: string, entries: readonly BatchScopeEntry[]): BatchScope {
   if (!batchId) throw new ComputeError('INVALID_INPUT', 'A batch needs an id');
   const seen = new Map<string, BatchScopeEntry>();
-  for (const entry of entries) seen.set(entryKey(entry.subject, entry.kind), entry);
+  for (const entry of entries) seen.set(entryKey(entry.subject, entry.kind, entry.payloadSha256), entry);
   if (seen.size === 0) throw new ComputeError('INVALID_INPUT', 'A batch has at least one command');
   const leaves = [...seen.values()]
-    .map((entry) => ({ ...entry, hash: sha256(batchLeafInput(batchId, entry.subject, entry.kind)) }))
+    .map((entry) => ({
+      ...entry,
+      hash: sha256(batchLeafInput(batchId, entry.subject, entry.kind, entry.payloadSha256 ?? noPayload)),
+    }))
     .sort((a, b) => Buffer.compare(a.hash, b.hash));
   const proofs = leaves.map(() => [] as Uint8Array[]);
   let level = leaves.map((leaf, index) => ({ hash: leaf.hash, members: [index] }));
@@ -119,13 +132,15 @@ export function batchScope(batchId: string, entries: readonly BatchScopeEntry[])
     }
     level = next;
   }
-  const indexOf = new Map(leaves.map((leaf, index) => [entryKey(leaf.subject, leaf.kind), index]));
+  const indexOf = new Map(
+    leaves.map((leaf, index) => [entryKey(leaf.subject, leaf.kind, leaf.payloadSha256), index]),
+  );
   return {
     batchId,
     root: level[0]!.hash,
     size: leaves.length,
-    proofOf(subject, kind) {
-      const index = indexOf.get(entryKey(subject, kind));
+    proofOf(subject, kind, payloadSha256) {
+      const index = indexOf.get(entryKey(subject, kind, payloadSha256));
       return index === undefined ? undefined : { index, siblings: proofs[index]!.map((hash) => hash.slice()) };
     },
   };
@@ -136,6 +151,8 @@ export function verifyBatchProof(input: {
   batchId: string;
   subject: string;
   kind: string;
+  /** Absent or empty: the leaf binds no payload. */
+  payloadSha256?: Uint8Array | undefined;
   proof: Pick<BatchProof, 'index' | 'siblings'>;
   root: Uint8Array;
   size: number;
@@ -143,7 +160,7 @@ export function verifyBatchProof(input: {
   const { proof, size } = input;
   if (!Number.isInteger(size) || size < 1 || !Number.isInteger(proof.index) || proof.index >= size) return false;
   if (input.root.length !== 32 || proof.siblings.some((sibling) => sibling.length !== 32)) return false;
-  let hash = sha256(batchLeafInput(input.batchId, input.subject, input.kind));
+  let hash = sha256(batchLeafInput(input.batchId, input.subject, input.kind, input.payloadSha256 ?? noPayload));
   let index = proof.index;
   let width = size;
   let next = 0;
@@ -169,6 +186,8 @@ export interface BatchApprovalInput {
   scopeRoot: Uint8Array;
   scopeSize: number;
   notAfter: number;
+  /** The deployment's trust domain (JoinResponseBody.trust_domain): the approval admits commands of that deployment only. */
+  trustDomain: string;
 }
 
 const signingInputOf = (approval: BatchApprovalInput) => ({
@@ -176,6 +195,7 @@ const signingInputOf = (approval: BatchApprovalInput) => ({
   scopeRoot: approval.scopeRoot,
   scopeSize: approval.scopeSize,
   notAfter: timestampFromMs(approval.notAfter),
+  trustDomain: approval.trustDomain,
 });
 
 /** One approver's signature over a batch (what `better-compute batch approve` produces). */
@@ -185,7 +205,13 @@ export function signBatchApproval(approval: BatchApprovalInput, privateKey: KeyO
   const sig = signPurpose(
     privateKey,
     'batch-approval',
-    batchApprovalParts(approval.batchId, approval.scopeRoot, approval.scopeSize, timestampFromMs(approval.notAfter)),
+    batchApprovalParts(
+      approval.batchId,
+      approval.scopeRoot,
+      approval.scopeSize,
+      timestampFromMs(approval.notAfter),
+      approval.trustDomain,
+    ),
   );
   return create(SignatureSchema, { kid, sig });
 }
@@ -199,13 +225,15 @@ function batchApprovalParts(
   scopeRoot: Uint8Array,
   scopeSize: number,
   notAfter: { seconds: bigint; nanos: number },
+  trustDomain: string,
 ): Uint8Array[] {
+  if (!trustDomain) throw new ComputeError('INVALID_INPUT', 'A batch approval names its trust domain');
   const size = new Uint8Array(4);
   new DataView(size.buffer).setUint32(0, scopeSize);
   const time = new Uint8Array(12);
   new DataView(time.buffer).setBigInt64(0, notAfter.seconds);
   new DataView(time.buffer).setInt32(8, notAfter.nanos);
-  return [new TextEncoder().encode(batchId), scopeRoot, size, time];
+  return [new TextEncoder().encode(batchId), scopeRoot, size, time, new TextEncoder().encode(trustDomain)];
 }
 
 /** Approvals a batch of `size` needs: the first tier that covers it, else the threshold. */
@@ -224,6 +252,8 @@ export interface VerifyBatchApprovalOptions {
   tiers?: readonly { maxScopeSize: number; threshold: number }[];
   /** Server time, epoch ms. */
   now: number;
+  /** The verifier's own trust domain: approvals signed for another deployment count for nothing. */
+  trustDomain: string;
 }
 
 /**
@@ -243,7 +273,13 @@ export function verifyBatchApproval(
   const required = requiredApprovals(approval.scopeSize, options.threshold, options.tiers);
   if (!(required >= 1)) throw deny('no-threshold');
   const keys = new Map(options.approverKeys.map((key) => [key.kid, key]));
-  const parts = batchApprovalParts(approval.batchId, approval.scopeRoot, approval.scopeSize, approval.notAfter);
+  const parts = batchApprovalParts(
+    approval.batchId,
+    approval.scopeRoot,
+    approval.scopeSize,
+    approval.notAfter,
+    options.trustDomain,
+  );
   const approvers = new Set<string>();
   for (const signature of approval.signatures) {
     const key = keys.get(signature.kid);
@@ -262,7 +298,7 @@ export function verifyBatchApproval(
  * ACCESS_DENIED (BATCH_UNAPPROVED on the wire).
  */
 export function verifyBatchCommand(
-  command: { batchId: string; subject: string; kind: string },
+  command: { batchId: string; subject: string; kind: string; payloadSha256?: Uint8Array | undefined },
   approval: BatchApproval | undefined,
   proof: BatchProof | undefined,
   options: VerifyBatchApprovalOptions,
@@ -272,14 +308,19 @@ export function verifyBatchCommand(
   if (!approval || !proof) throw deny('no-approval');
   if (approval.batchId !== command.batchId) throw deny('other-batch');
   verifyBatchApproval(approval, options);
-  const inScope = verifyBatchProof({
-    batchId: command.batchId,
-    subject: command.subject,
-    kind: command.kind,
-    proof,
-    root: approval.scopeRoot,
-    size: approval.scopeSize,
-  });
+  // The agent does not know whether the approvers bound this leaf to the payload: the proof may walk
+  // from the bound leaf (this command's payload digest) or from the unbound one (any payload).
+  const walk = (payloadSha256: Uint8Array | undefined) =>
+    verifyBatchProof({
+      batchId: command.batchId,
+      subject: command.subject,
+      kind: command.kind,
+      payloadSha256,
+      proof,
+      root: approval.scopeRoot,
+      size: approval.scopeSize,
+    });
+  const inScope = (command.payloadSha256?.length ? walk(command.payloadSha256) : false) || walk(undefined);
   if (!inScope) throw deny('not-in-scope');
 }
 

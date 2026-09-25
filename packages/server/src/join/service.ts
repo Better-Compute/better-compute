@@ -733,6 +733,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
           })),
           approverThreshold: bundle?.approverThreshold ?? 0,
           unbatchedDestructivePerHour: bundle?.unbatchedDestructivePerHour ?? 0,
+          approverSetSignatures: [],
           quorumTiers: (bundle?.quorumTiers ?? []).map((tier) => ({
             $typeName: 'bettercompute.common.v1.QuorumTier' as const,
             maxScopeSize: tier.maxScopeSize,

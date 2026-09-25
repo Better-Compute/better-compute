@@ -2196,22 +2196,30 @@ func (x *Command) GetBatchProof() *BatchProof {
 }
 
 // k-of-n operator approval of a batch of destructive commands (PLAN.md §13). The scope is a Merkle
-// tree (RFC 6962 style, SHA-256) with one leaf per (subject, kind), leaves ordered by their hash
-// (bytewise ascending, duplicates removed):
+// tree (RFC 6962 style, SHA-256) with one leaf per (subject, kind, payload), leaves ordered by their
+// hash (bytewise ascending, duplicates removed):
 //
-//	leaf = H(0x00 ‖ lp(batch_id) ‖ lp(subject) ‖ lp(kind)),  node = H(0x01 ‖ left ‖ right),
+//	leaf = H(0x00 ‖ lp(batch_id) ‖ lp(subject) ‖ lp(kind) ‖ lp(payload_sha256)),
+//	node = H(0x01 ‖ left ‖ right),
 //
+// with lp(x) = uint32_be(len(x)) ‖ x, and an odd node promoted unchanged to the next level.
 // The subject is what the command acts on, computed by the executing agent from the signed body:
 //   - kinds a node runs on itself (disk.wipe, deploy.image, node.reboot, gpu.reset, boot.kexec…):
 //     the command's node_id;
-//   - site-relayed BMC kinds (bmc.*): "bmc:" + BmcOperationRequest.address, the BMC acted on, so an
-//     approval naming N machines lets the site agent act on exactly those N BMCs and no other;
-//   - site.httpProxy: "node:" + its target_node_id.
+//   - site-relayed BMC kinds (bmc.*): "bmc:" + <the executing site agent's node_id> + "/" +
+//     BmcOperationRequest.address, the BMC acted on. BMC addresses are site-local (10.0.0.5 exists
+//     at every site), so the site is part of the subject: an approval for site A never admits a
+//     command at site B;
+//   - site.httpProxy: "node:" + its target_node_id (global ids).
 //
-// (The golden batch-scope.json uses node ids as subjects; the layout is the same.)
-// with lp(x) = uint32_be(len(x)) ‖ x, and an odd node promoted unchanged to the next level.
+// payload_sha256 is SHA-256 of the command's payload (CommandBody.payload.value), binding the leaf
+// to exactly that operation (image, firmware, power action), or EMPTY for "any payload of this kind"
+// where the payload is built later (approvers see unbound leaves flagged). Daemons run each leaf at
+// most once per batch.
 // Signing purpose "batch-approval", parts [batch_id, scope_root, uint32_be(scope_size),
-// int64_be(not_after.seconds) ‖ int32_be(not_after.nanos)].
+// int64_be(not_after.seconds) ‖ int32_be(not_after.nanos), trust_domain]. The trust domain (the
+// deployment's, JoinResponseBody.trust_domain) is supplied by each verifier from its own config, so
+// an approval for staging never admits a command in production, even with shared approver keys.
 type BatchApproval struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	BatchId   string                 `protobuf:"bytes,1,opt,name=batch_id,json=batchId,proto3" json:"batch_id,omitempty"`
