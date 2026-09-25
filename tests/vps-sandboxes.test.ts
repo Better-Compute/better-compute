@@ -2461,6 +2461,9 @@ describe('exec trust', () => {
         ).rows[0]!;
       // Until the guest confirms this very bundle, it still answers to its source's principal.
       expect((await principal()).principal).toBe(source.instanceId);
+      const view = async (id: string) => (await getSandbox(id)) as { identityRebound?: boolean };
+      expect((await view(restored.id)).identityRebound).toBe(false);
+      expect((await view(source.id)).identityRebound).toBeUndefined();
       const report = (identityReboundRef: string) =>
         db.transaction((tx) =>
           reportInstances(tx, moduleContext(db).work, rows[0]!.node_id, [
@@ -2471,6 +2474,7 @@ describe('exec trust', () => {
       expect((await principal()).principal).toBe(source.instanceId);
       await report(ref);
       expect(await principal()).toEqual({ principal: restored.instanceId, host_certified: true });
+      expect((await view(restored.id)).identityRebound).toBe(true);
     } finally {
       broker = undefined;
     }

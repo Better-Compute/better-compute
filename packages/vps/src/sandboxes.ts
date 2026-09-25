@@ -874,6 +874,12 @@ export interface Sandbox {
   expiredAt?: number;
   /** The snapshot it was restored from. */
   fromSnapshot?: string;
+  /**
+   * A memory restore given its own guest identity: whether the host installed it. Until then the
+   * guest answers to its source's, and `sandboxes.exec` refuses while that identity is shared
+   * (`restore-shares-identity`). Absent when there is nothing to install.
+   */
+  identityRebound?: boolean;
   /** Its snapshots, newest first (`sandboxes.get` only). */
   snapshots?: SandboxSnapshot[];
 }
@@ -1013,6 +1019,8 @@ interface RawSandbox {
   agent_id: string | null;
   delegation_id: string | null;
   extending_request: string | null;
+  /** NULL: no own identity to install (not a memory restore, or no exec); else whether it is in. */
+  identity_rebound: boolean | null;
 }
 
 const ms = (column: string) => `(extract(epoch FROM ${column}) * 1000)::float8`;
@@ -1022,7 +1030,9 @@ const sandboxColumns = `s.id, s.tenant_id, s.template_id, s.pool_id, s.instance_
   ${ms('s.deleted_at')} AS deleted_ms, s.owner_identity_id, s.idempotency_key,
   encode(s.request_hash, 'hex') AS request_hash, s.version, ${ms('s.created_at')} AS created_ms,
   i.state AS instance_state, i.addresses, i.node_id, s.from_snapshot, s.agent_id, s.delegation_id,
-  s.extending_request`;
+  s.extending_request,
+  CASE WHEN i.identity_rebind_ref IS NULL THEN NULL
+       ELSE i.identity_rebound_ref IS NOT DISTINCT FROM i.identity_rebind_ref END AS identity_rebound`;
 const sandboxFrom = `sandboxes s LEFT JOIN instances i ON i.id = s.instance_id`;
 
 async function readSandbox(
@@ -1069,6 +1079,8 @@ export function sandboxView(raw: RawSandbox): Sandbox {
   if (raw.ready_ms !== null) view.readyAt = Number(raw.ready_ms);
   if (raw.expired_ms !== null) view.expiredAt = Number(raw.expired_ms);
   if (raw.from_snapshot !== null) view.fromSnapshot = raw.from_snapshot;
+  if (raw.identity_rebound !== null && raw.identity_rebound !== undefined)
+    view.identityRebound = raw.identity_rebound;
   return view;
 }
 
