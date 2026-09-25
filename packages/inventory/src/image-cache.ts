@@ -8,6 +8,12 @@ import { CachedImageState, type ImagesSection } from '@better-compute/protocol';
 
 export type CachedImageStateName = 'ready' | 'pulling' | 'evicting';
 
+/**
+ * provision's site-cache reconciler (key: site id): it derives `image_locations` from the site
+ * agents' `node_image_cache` rows. Inventory queues it when a site agent's cache changes.
+ */
+export const siteCacheWorkKind = 'provision.site-cache';
+
 export interface CachedImageRow {
   sha256: string;
   imageId: string | null;

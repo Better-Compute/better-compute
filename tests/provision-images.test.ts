@@ -13,6 +13,7 @@ import {
   resolveImageRef,
   revokeImageSigner,
   siteCacheImagesFor,
+  syncSiteImageLocations,
   touchImageLocation,
   verifyImageForUse,
   type ProvisionApi,
@@ -258,6 +259,35 @@ describe('site cache pre-warm (§11.5)', () => {
     const spec = await provisionModule().nodeSpec!({ sql: db } as never, { id: AGENT, role: 'site' } as never);
     expect(spec.site).toEqual({ cacheImages: [{ url: team!.source, sha256: team!.sha256, format: 'raw' }] });
     expect((await provisionModule().nodeSpec!({ sql: db } as never, { id: AGENT, role: 'host' } as never)).site).toBeUndefined();
+  });
+
+  it("derives the site's image_locations from its site agents' caches", async () => {
+    const team = (await resolveImageRef(db, 'ten_a', 'team-os@2026.09'))!;
+    const cache = (state: string) =>
+      db.query(
+        `INSERT INTO node_image_cache (node_id, sha256, image_id, ref, state, size_bytes)
+         VALUES ($1, decode($2, 'hex'), NULL, $3, $4, 1024)
+         ON CONFLICT (node_id, sha256) DO UPDATE SET state = EXCLUDED.state`,
+        [AGENT, team.sha256, team.source, state],
+      );
+    const location = async () =>
+      (await db.query<{ state: string }>(`SELECT state FROM image_locations WHERE image_id = $1 AND site_id = 'site_w'`, [team.id])).rows[0]?.state;
+    await cache('pulling');
+    expect(await db.transaction((tx) => syncSiteImageLocations(tx, 'site_w'))).toEqual({ upserted: 1, removed: 0 });
+    expect(await location()).toBe('pulling');
+    await cache('ready');
+    await db.transaction((tx) => syncSiteImageLocations(tx, 'site_w'));
+    expect(await location()).toBe('ready');
+    expect(await imagesCachedAt(db, 'site_w')).toContain(team.id);
+    // Unchanged: nothing written.
+    expect(await db.transaction((tx) => syncSiteImageLocations(tx, 'site_w'))).toEqual({ upserted: 0, removed: 0 });
+    // Evicted from every agent: the location goes, unless a deploy pinned it.
+    await db.query(`DELETE FROM node_image_cache WHERE node_id = $1`, [AGENT]);
+    await db.transaction((tx) => touchImageLocation(tx, team.id, 'site_w', true));
+    expect((await db.transaction((tx) => syncSiteImageLocations(tx, 'site_w'))).removed).toBe(0);
+    await db.transaction((tx) => touchImageLocation(tx, team.id, 'site_w', false));
+    expect((await db.transaction((tx) => syncSiteImageLocations(tx, 'site_w'))).removed).toBe(1);
+    expect(await location()).toBeUndefined();
   });
 
   it('invalidates the site agents whose pools pre-warm an image when it is registered or promoted', async () => {

@@ -22,6 +22,8 @@ import {
 import { driverInvokeKind, stepRegistry } from './expand.js';
 import { provisionFindings } from './findings.js';
 import { teardownTenantProvisioning } from './tenancy.js';
+import { syncSiteImageLocations } from './site-cache.js';
+import { siteCacheWorkKind } from '@better-compute/inventory';
 import { provisionMigrations } from './migrations.js';
 import type { ImageSignatureVerifier } from './images.js';
 import { profileSource } from './profiles.js';
@@ -120,6 +122,15 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
     run: (context: ReconcileContext, key: string) =>
       reconcileWorkflows(context, { ...engineOptions, signal: context.signal, stepContext: context }, key),
   };
+  // A site's image_locations follow its site agents' caches (inventory queues the site).
+  const siteCache: Reconciler = {
+    name: siteCacheWorkKind,
+    shardBy: 'none',
+    async run(context: ReconcileContext, siteId: string) {
+      await context.sql.transaction((tx) => syncSiteImageLocations(tx, siteId));
+      return 'DONE';
+    },
+  };
 
   // The engine resolves every step and profile, but provision registers only its own: the modules
   // passed in register theirs themselves, and the registry refuses an extension registered twice.
@@ -144,6 +155,7 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
     reconcilers: remediation
       ? [
           reconciler,
+          siteCache,
           {
             name: healthWorkKind,
             shardBy: 'node' as const,
@@ -153,7 +165,7 @@ export function provisionModule(options: ProvisionOptions = {}): ProvisionModule
             },
           },
         ]
-      : [reconciler],
+      : [reconciler, siteCache],
     api: (context: ModuleContext) =>
       provisionApi(context, { ...engineOptions, moduleProfiles, ...(options.imageVerifier ? { imageVerifier: options.imageVerifier } : {}) }),
   });

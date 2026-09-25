@@ -39,6 +39,42 @@ export async function siteCacheImagesFor(
 }
 
 /**
+ * Derives a site's `image_locations` from what its site agents' caches hold (their `images`
+ * inventory sections, stored per node in `node_image_cache`): a catalog image whose digest a live
+ * site agent holds is at the site, `ready` if any agent has it ready, else `pulling` or `evicting`.
+ * Locations no agent holds any more go, unless a deploy pinned them. Inventory queues this
+ * (`provision.site-cache`, key = site id) whenever a site agent's cache changes. Returns the rows
+ * written and removed.
+ */
+export async function syncSiteImageLocations(tx: SqlTx, siteId: string): Promise<{ upserted: number; removed: number }> {
+  const { rows } = await tx.query<{ upserted: string; removed: string }>(
+    `WITH cache AS (
+       SELECT i.id AS image_id,
+              CASE WHEN bool_or(c.state = 'ready') THEN 'ready' WHEN bool_or(c.state = 'pulling') THEN 'pulling' ELSE 'evicting' END AS state,
+              max(c.size_bytes) AS size_bytes
+         FROM nodes agent
+         JOIN node_image_cache c ON c.node_id = agent.id
+         JOIN images i ON i.sha256 = encode(c.sha256, 'hex') AND i.deleted_at IS NULL
+        WHERE agent.site_id = $1 AND agent.role = 'site' AND agent.deleted_at IS NULL
+        GROUP BY i.id),
+     up AS (
+       INSERT INTO image_locations (image_id, site_id, state, size_bytes)
+       SELECT image_id, $1, state, size_bytes FROM cache
+       ON CONFLICT (image_id, site_id) DO UPDATE SET state = EXCLUDED.state, size_bytes = EXCLUDED.size_bytes,
+         updated_at = compute_now()
+       WHERE (image_locations.state, image_locations.size_bytes) IS DISTINCT FROM (EXCLUDED.state, EXCLUDED.size_bytes)
+       RETURNING 1),
+     gone AS (
+       DELETE FROM image_locations l
+        WHERE l.site_id = $1 AND NOT l.pinned AND NOT EXISTS (SELECT 1 FROM cache WHERE cache.image_id = l.image_id)
+       RETURNING 1)
+     SELECT (SELECT count(*) FROM up)::text AS upserted, (SELECT count(*) FROM gone)::text AS removed`,
+    [siteId],
+  );
+  return { upserted: Number(rows[0]?.upserted ?? 0), removed: Number(rows[0]?.removed ?? 0) };
+}
+
+/**
  * Invalidates the NodeSpec of every site agent whose site has a pool naming `ref` in
  * `policy.prewarmImages` (after an image is registered or promoted, its pre-warm lists change).
  */

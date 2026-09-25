@@ -10,7 +10,7 @@ import {
 } from '@better-compute/core';
 import { INVENTORY_SECTIONS, type InventorySectionName } from '@better-compute/protocol';
 import { devicesFromGpus, planDevices, poolSharing, type GpuSharing, type StoredDevice } from './devices.js';
-import { applyImageCache } from './image-cache.js';
+import { applyImageCache, siteCacheWorkKind } from './image-cache.js';
 import { diffInventory } from './diff.js';
 import { hardwareKey } from './hardware-key.js';
 import {
@@ -282,6 +282,8 @@ export interface ApplyInventoryOptions {
 interface NodeRow {
   id: string;
   owner_tenant_id: string;
+  site_id: string;
+  role: string;
   pool_id: string | null;
   no_schedule_reasons: string[];
   hardware_key: Uint8Array | null;
@@ -313,7 +315,7 @@ export async function applyInventory(
     // Two statements on purpose: the node row first, then its inventory row (the lock order the
     // gateway's Hello follows too; one joined statement could take them the other way round).
     const nodes = await tx.query<NodeRow>(
-      `SELECT n.id, n.owner_tenant_id, n.pool_id, n.no_schedule_reasons, n.hardware_key,
+      `SELECT n.id, n.owner_tenant_id, n.site_id, n.role, n.pool_id, n.no_schedule_reasons, n.hardware_key,
               n.hardware_key_trusted, p.gpu_model, p.policy, p.sharing
          FROM nodes n LEFT JOIN pools p ON p.id = n.pool_id
         WHERE n.id = $1 FOR UPDATE OF n`,
@@ -375,7 +377,10 @@ export async function applyInventory(
     const { healthChanged, ...devices } = await applyDevices(tx, nodeId, sections, poolSharing(node.sharing, node.policy));
     if (options.work && healthChanged) await wakeStartedReservations(tx, options.work, nodeId);
     await applyLabels(tx, nodeId, sections);
-    await applyImageCache(tx, nodeId, sections.images);
+    const cache = await applyImageCache(tx, nodeId, sections.images);
+    // A site agent's cache is its site's image cache: provision derives `image_locations` from it.
+    if (options.work && node.role === 'site' && (cache.upserted > 0 || cache.removed > 0))
+      await options.work.enqueue(tx, siteCacheWorkKind, node.site_id);
 
     // Hardware key: trusted keys are unique. A second node with the same trusted key is a
     // DuplicateIdentity (a cloned disk image, or a reclaimed board): this node keeps the key

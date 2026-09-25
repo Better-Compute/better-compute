@@ -105,6 +105,31 @@ describe('the images section', () => {
     expect(await cached(node)).toEqual([]);
   });
 
+  it("queues provision's site-cache sync when a site agent's cache changes", async () => {
+    const agent = 'node_0000000000000000000000img9';
+    await db.query(
+      `INSERT INTO nodes (id, site_id, owner_tenant_id, role, provision_state, maintenance, cordoned,
+         connectivity, trust, generation, observed_generation, next_cmd_seq, identity_gen, shard, version)
+       VALUES ($1, 'site_a', 'ten_root', 'site', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 0, 0, 1)`,
+      [agent],
+    );
+    const queued: string[] = [];
+    const recording: WorkQueue = {
+      async enqueue(_tx, kind, key) {
+        queued.push(`${kind}:${key}`);
+      },
+    };
+    const hashes = (sections: Partial<Record<InventorySectionName, Uint8Array>>) =>
+      Object.fromEntries(Object.entries(sections).map(([name, bytes]) => [name, sha256Hex(bytes!)]));
+    const sections = { system: encode.system('SA'), images: encode.images(image('ubuntu', CachedImageState.READY, 'img_ubuntu')) };
+    const requested = await db.transaction((tx) => recordInventoryHashes(tx, recording, agent, hashes(sections)));
+    for (const name of requested)
+      await db.transaction((tx) => ingestInventorySection(tx, recording, agent, { section: name, content: sections[name as 'system']!, sha256: sha256Hex(sections[name as 'system']!) }));
+    queued.length = 0;
+    await applyInventory(db, agent, { work: recording });
+    expect(queued).toContain('provision.site-cache:site_a');
+  });
+
   it('answers the scorer with ready images of usable nodes only', async () => {
     const warm = 'node_0000000000000000000000img2';
     const pulling = 'node_0000000000000000000000img3';

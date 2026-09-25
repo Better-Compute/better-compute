@@ -553,6 +553,7 @@ describe('provisionModule', () => {
     ]);
     expect(module.reconcilers!.map((r) => [r.name, r.shardBy])).toEqual([
       ['workflow', 'node'],
+      ['provision.site-cache', 'none'],
       ['health', 'node'],
     ]);
     expect(module.engineOptions.steps.get('wait.agentJoined')).toBeDefined();
