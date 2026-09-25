@@ -28,6 +28,7 @@ import {
   metalMigrations,
   metalWorkKind,
   reconcileMetalNode,
+  type HardwareProfile,
   type MetalApi,
 } from '@better-compute/metal';
 import {
@@ -52,6 +53,11 @@ export interface SimMachine {
   firmware: Record<string, string>;
   /** The BMC account password once rotated; before that any credential is accepted. */
   bmcPassword?: string;
+  /** BIOS attributes in effect, and those set to apply on the next boot. */
+  bios: Record<string, string>;
+  pendingBios: Record<string, string>;
+  /** The RAID volumes' levels, as the storage controller reports them. */
+  raid: string[];
 }
 
 /** The firmware every simulated machine ships with. */
@@ -67,6 +73,8 @@ export interface MetalSimOptions {
   migrations?: readonly Migration[];
   /** Their reconcilers: `settle()` runs queued work of these kinds too. */
   reconcilers?: readonly Reconciler[];
+  /** metal()'s hardware profiles (BIOS settings, RAID layouts). */
+  hardwareProfiles?: Record<string, HardwareProfile>;
 }
 
 /** A stable, locally unique PXE MAC per machine. */
@@ -83,7 +91,7 @@ export const simNodeId = (n: number) =>
 export async function createMetalSim(options: MetalSimOptions = {}) {
   const db: SqlExecutor = pglite();
   // metal's default verifier: the stored node_sig, checked by pki against node_certs.
-  const bareMetal = metal();
+  const bareMetal = metal(options.hardwareProfiles ? { hardwareProfiles: options.hardwareProfiles } : {});
   const provision = provisionModule({
     modules: [bareMetal, ...(options.modules ?? [])],
     steps: [...(options.steps ?? [])],
@@ -186,6 +194,8 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     rotateUnsigned: false,
     /** A firmware flash reports success but the component keeps its old version. */
     flashFails: false,
+    /** The BIOS drops pending settings at boot. */
+    biosIgnored: false,
   };
   // Node keys and certificates from a node CA, as JoinService issues them: every ramdisk boot joins
   // with a fresh key (role ramdisk), so revoking an identity generation never outlives a reboot.
@@ -240,7 +250,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
 
   function machineOf(nodeId: string): SimMachine {
     let m = machines.get(nodeId);
-    if (!m) machines.set(nodeId, (m = { bootDevice: 'disk', mounted: '', power: 'off', firmware: { ...simFirmware } }));
+    if (!m) machines.set(nodeId, (m = { bootDevice: 'disk', mounted: '', power: 'off', firmware: { ...simFirmware }, bios: { BootMode: 'Legacy', SriovGlobalEnable: 'Disabled' }, pendingBios: {}, raid: [] }));
     return m;
   }
   const bmcResult = (value: unknown) =>
@@ -272,6 +282,11 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
         case 'bmc.denied':
           result = toBinary(site.BmcOperationResultSchema, create(site.BmcOperationResultSchema, { ok: false, errorCode: 'auth', message: 'authentication failed' }));
           break;
+        case 'bmc.storage': {
+          machineOf(target).raid = (args.volumes as { level: string }[]).map((volume) => volume.level);
+          result = bmcResult({});
+          break;
+        }
         case 'bmc.firmware': {
           // The site agent writes the image; a bad flash leaves the old version in place.
           if (!faults.flashFails) machineOf(target).firmware[args.component] = args.version;
@@ -296,7 +311,11 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
               ? { macs: [macOf(target)] }
               : payload.operation === 'firmware.components'
                 ? { components: Object.entries(machineOf(target).firmware).map(([id, version]) => ({ id, version })) }
-                : { power: machineOf(target).power },
+                : payload.operation === 'bios.getSettings'
+                  ? { settings: machineOf(target).bios }
+                  : payload.operation === 'raid.getLayout'
+                    ? { volumes: machineOf(target).raid.map((level) => ({ level })) }
+                    : { power: machineOf(target).power },
           );
           break;
         case 'bmc.boot': {
@@ -304,6 +323,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
           if (payload.operation === 'management.setBootDevice') m.bootDevice = args.device;
           if (payload.operation === 'virtual-media.insert') m.mounted = args.url;
           if (payload.operation === 'virtual-media.eject') m.mounted = '';
+          if (payload.operation === 'bios.applySettings') Object.assign(m.pendingBios, args.settings);
           result = bmcResult({});
           break;
         }
@@ -315,6 +335,9 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
             await disconnect(target);
           } else if (['cycle', 'on', 'reset'].includes(args.action)) {
             m.power = 'on';
+            // Pending BIOS settings take effect on this boot (unless the firmware ignores them).
+            if (!faults.biosIgnored) Object.assign(m.bios, m.pendingBios);
+            m.pendingBios = {};
             if (m.bootDevice === 'pxe') await connect(target, 'ramdisk', `ramdisk-${command.id}`);
             else if (m.bootDevice === 'cd') {
               const boot = options.install?.(target, m);

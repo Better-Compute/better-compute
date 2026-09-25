@@ -32,6 +32,7 @@ import {
 } from './bmc-rotation.js';
 import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
+import type { HardwareProfile } from './module-types.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
 
 // Metal's workflow steps (PLAN.md §3.5, §11.3). Most are control-plane steps that build a command
@@ -54,6 +55,8 @@ export interface MetalStepOptions {
   verifyAttestation?: AttestationVerifier;
   /** Verifies site-agent-signed results (`bmc.rotate`); default: pki, role `site`. */
   verifySiteAttestation?: AttestationVerifier;
+  /** The hardware profiles nodes name (`metal_nodes.hardware_profile`): BIOS settings, RAID layout. */
+  hardwareProfiles?: Readonly<Record<string, HardwareProfile>>;
 }
 
 function requireNode(context: StepContext): string {
@@ -75,7 +78,7 @@ async function siteAgent(context: StepContext, nodeId: string): Promise<string> 
 /** A BMC operation relayed to the site agent (`BmcOperationRequest`). */
 async function bmc(
   context: StepContext,
-  kind: 'bmc.query' | 'bmc.boot' | 'bmc.power' | 'bmc.firmware',
+  kind: 'bmc.query' | 'bmc.boot' | 'bmc.power' | 'bmc.firmware' | 'bmc.storage',
   operation: string,
   args: Record<string, Json>,
   key?: string,
@@ -583,6 +586,92 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     },
   });
 
+  // BIOS and RAID from the node's hardware profile (§3.5 commissioning, v0.5 drafts). A profile
+  // without them makes these steps no-ops that send nothing.
+  const profileOf = (node: MetalNodeRow): HardwareProfile | undefined =>
+    node.hardware_profile ? options.hardwareProfiles?.[node.hardware_profile] : undefined;
+  const settingsOf = (result: Json): Record<string, string> => {
+    const settings = (result as Record<string, Json>)?.settings;
+    return settings && typeof settings === 'object' && !Array.isArray(settings)
+      ? Object.fromEntries(Object.entries(settings).map(([key, value]) => [key, String(value)]))
+      : {};
+  };
+
+  /** Sets the BIOS attributes that differ from the profile; they take effect on the next boot. */
+  const biosApply = defineStep({
+    id: 'bios.apply',
+    runsOn: 'control-plane',
+    relays: ['site'],
+    timeout: '5m',
+    retrySafe: true,
+    input: manifest({}),
+    async run(_input, context): Promise<Json> {
+      const want = profileOf(await metalNode(context))?.bios;
+      if (!want || Object.keys(want).length === 0) return { skipped: true };
+      const current = settingsOf(await bmc(context, 'bmc.query', 'bios.getSettings', {}, 'read'));
+      const changes = Object.fromEntries(Object.entries(want).filter(([key, value]) => current[key] !== value));
+      if (Object.keys(changes).length === 0) return { changed: [] };
+      await bmc(context, 'bmc.boot', 'bios.applySettings', { settings: changes }, 'apply');
+      // Settings apply on the next boot: power off, so the next ramdisk boot (ensureRamdisk) is a real
+      // one rather than the ramdisk inspection left running.
+      await bmc(context, 'bmc.power', 'power.setPower', { action: 'off' }, 'power-off');
+      await context.sql.query(`UPDATE nodes SET power = 'off' WHERE id = $1`, [requireNode(context)]);
+      return { changed: Object.keys(changes).sort(), pendingReboot: true };
+    },
+  });
+
+  /** After a boot: every profile setting must read back exactly, or the machine is not commissioned. */
+  const biosVerify = defineStep({
+    id: 'bios.verify',
+    runsOn: 'control-plane',
+    relays: ['site'],
+    timeout: '5m',
+    retrySafe: true,
+    input: manifest({}),
+    async run(_input, context): Promise<Json> {
+      const want = profileOf(await metalNode(context))?.bios;
+      if (!want || Object.keys(want).length === 0) return { skipped: true };
+      const current = settingsOf(await bmc(context, 'bmc.query', 'bios.getSettings', {}));
+      const drift = Object.entries(want)
+        .filter(([key, value]) => current[key] !== value)
+        .map(([setting, expected]) => ({ setting, expected, found: current[setting] ?? null }));
+      if (drift.length)
+        throw new ComputeError('DRIVER_ERROR', `BIOS settings did not take: ${drift.map((d) => d.setting).join(', ')}`, undefined, {
+          code: 'BIOS_DRIFT',
+          drift,
+        });
+      return { verified: Object.keys(want).length };
+    },
+  });
+
+  /** Builds the profile's RAID layout (destroys the volumes' data: commissioning, before the wipe). */
+  const raidApply = defineStep({
+    id: 'raid.apply',
+    runsOn: 'control-plane',
+    relays: ['site'],
+    timeout: '1h',
+    retrySafe: false,
+    input: manifest({}),
+    async run(_input, context): Promise<Json> {
+      const layout = profileOf(await metalNode(context))?.raid;
+      if (!layout || layout.volumes.length === 0) return { skipped: true };
+      const volumes = layout.volumes.map((volume) => ({
+        level: volume.level,
+        ...(volume.sizeGiB === undefined ? {} : { sizeGiB: volume.sizeGiB }),
+        ...(volume.disks ? { disks: [...volume.disks] } : {}),
+      }));
+      await bmc(context, 'bmc.storage', 'raid.applyLayout', { volumes }, 'apply');
+      const read = (await bmc(context, 'bmc.query', 'raid.getLayout', {}, 'read')) as Record<string, Json>;
+      const levels = Array.isArray(read.volumes) ? read.volumes.map((v) => String((v as Record<string, Json>)?.level)) : [];
+      const wanted = volumes.map((v) => v.level);
+      if (levels.length !== wanted.length || levels.some((level, i) => level !== wanted[i]))
+        throw new ComputeError('DRIVER_ERROR', `The RAID layout reads back as [${levels.join(', ')}], not [${wanted.join(', ')}]`, undefined, {
+          code: 'RAID_MISMATCH',
+        });
+      return { volumes: wanted };
+    },
+  });
+
   /** Two-phase BMC password rotation (bmc-rotation.ts); a failure keeps the old password current. */
   const rotateBmcCredential = defineStep({
     id: 'metal.rotateBmcCredential',
@@ -690,5 +779,8 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     rotateBmcCredential,
     firmwareCheck,
     exitTenantRoot,
+    biosApply,
+    biosVerify,
+    raidApply,
   ];
 }

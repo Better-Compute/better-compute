@@ -43,7 +43,7 @@ export function metal(options: MetalOptions = {}): ComputeModule<'metal', MetalA
       name: 'metal',
       requires: ['provision'],
       migrations: [...metalMigrations],
-      extensions: metalSteps(options.verifyAttestation ? { verifyAttestation: options.verifyAttestation } : {}),
+      extensions: metalSteps({ hardwareProfiles, ...(options.verifyAttestation ? { verifyAttestation: options.verifyAttestation } : {}) }),
       profiles: [...metalProfiles],
       commandKinds: [...metalCommandKinds],
       reconcilers: [reconciler],

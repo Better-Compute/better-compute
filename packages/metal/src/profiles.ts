@@ -24,14 +24,22 @@ export const inspectProfile = defineProfile({
   cleanup: [{ use: 'boot.cleanUp' }],
 });
 
-/** commissioning → ready: DCGM level 2, a quick wipe, then power off (§3.5 step 3). */
+/**
+ * commissioning → ready (§3.5 step 3): the hardware profile's BIOS settings and RAID layout (no-ops
+ * without them), DCGM level 2, a quick wipe, then power off. BIOS settings take effect on the ramdisk
+ * boot and are checked after it.
+ */
 export const commissionProfile = defineProfile({
   id: 'metal-commission',
-  version: 1,
+  // v2: BIOS and RAID from the hardware profile.
+  version: 2,
   target: 'metal',
-  description: 'Burn in, wipe and power off',
+  description: 'Configure, burn in, wipe and power off',
   steps: [
+    { use: 'bios.apply' },
+    { use: 'raid.apply' },
     { use: 'metal.ensureRamdisk' },
+    { use: 'bios.verify' },
     { use: 'diag.dcgm', with: { level: 2 } },
     { use: 'disk.wipe', with: { mode: 'quick' } },
     { use: 'power.setPower', with: { action: 'off' } },
