@@ -92,6 +92,7 @@ export {
   defaultFakeKinds,
   fakeDiagNvml,
   fakeGpuReset,
+  fakeInstanceSnapshot,
   fakeInventoryRefresh,
   fakeLogsCollect,
   fakeNodeReboot,

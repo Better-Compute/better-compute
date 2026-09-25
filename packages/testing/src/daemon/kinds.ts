@@ -1,16 +1,21 @@
 import { createHash } from 'node:crypto';
 import { create } from '@bufbuild/protobuf';
+import { anyUnpack } from '@bufbuild/protobuf/wkt';
 import { redactSecrets } from '@better-compute/pki';
 import {
   AgentRole,
   DiagNvmlResultSchema,
   GpuResetResultSchema,
   INVENTORY_SECTIONS,
+  InstanceSnapshotRequestSchema,
+  InstanceSnapshotResultSchema,
   InventoryRefreshResultSchema,
   Lane,
   LogsCollectResultSchema,
+  MAX_COMMAND_BODY_BYTES,
   commandKinds,
   encodeCommandResult,
+  encodeMessage,
   isInventorySectionName,
   unpackCommandPayload,
   type CommandBody,
@@ -18,6 +23,7 @@ import {
   type CommandPayload,
 } from '@better-compute/protocol';
 import type { EncodedSection, FakeHardware } from '../fake-hw.js';
+import type { FakeSnapshot } from './instances.js';
 
 /** Test knobs a FakeDaemon's handlers read; change them at any time. */
 export interface FakeDaemonKnobs {
@@ -56,6 +62,11 @@ export interface FakeKindContext {
   assignedDevices(): ReadonlySet<string>;
   /** Stores an upload in the fake object store (logs.collect). */
   upload(url: string, bytes: Uint8Array): void;
+  /**
+   * (v0.5) Captures a managed instance's state on this host's fake hypervisor (`instance.snapshot`);
+   * absent on hosts without one. Throws for an unknown or failed instance.
+   */
+  snapshot?(instanceId: string, includeMemory: boolean): FakeSnapshot;
 }
 
 /** A command outcome a handler returns. */
@@ -271,6 +282,47 @@ export const fakeGpuReset: FakeKind = {
       })),
     });
     return { outcome: 'succeeded', result: encodeCommandResult('gpu.reset', result) };
+  },
+};
+
+/**
+ * instance.snapshot (v0.5, sandboxes §3.7; a vps module kind, not a built-in): captures the
+ * instance on the host's fake hypervisor, "uploads" it to the presigned URL (the fake object store)
+ * and reports `InstanceSnapshotResult` with the host CPU model for memory snapshots. A VPS host
+ * (`instances` given) runs it; others answer `unsupported`. Not retry-safe.
+ */
+export const fakeInstanceSnapshot: FakeKind = {
+  lane: Lane.BULK,
+  roles: [AgentRole.NODE],
+  durationMs: 3_000,
+  run(ctx) {
+    const request = ctx.body.payload && anyUnpack(ctx.body.payload, InstanceSnapshotRequestSchema);
+    if (!request) return invalid(new Error('instance.snapshot takes an InstanceSnapshotRequest'));
+    if (!request.uploadUrl.startsWith('https://'))
+      return invalid(new Error('upload_url must be a presigned https URL'));
+    if (!ctx.snapshot)
+      return { outcome: 'failed', code: 'unsupported', message: 'no instances runtime on this host' };
+    let captured: FakeSnapshot;
+    try {
+      captured = ctx.snapshot(request.instanceId, request.includeMemory);
+    } catch (error) {
+      return {
+        outcome: 'failed',
+        code: 'instance-missing',
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+    ctx.upload(request.uploadUrl, captured.bytes);
+    const result = create(InstanceSnapshotResultSchema, {
+      uploadedBytes: BigInt(captured.bytes.byteLength),
+      sha256: Uint8Array.from(Buffer.from(captured.sha256, 'hex')),
+      runtime: captured.runtime,
+      cpuModel: request.includeMemory ? (ctx.hardware.inventory.cpu?.model ?? '') : '',
+    });
+    return {
+      outcome: 'succeeded',
+      result: encodeMessage(InstanceSnapshotResultSchema, result, MAX_COMMAND_BODY_BYTES),
+    };
   },
 };
 

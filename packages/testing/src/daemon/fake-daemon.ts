@@ -106,6 +106,7 @@ import {
   DEFAULT_CREDITS,
   DEFAULT_WORKERS,
   defaultFakeKinds,
+  fakeInstanceSnapshot,
   type FakeDaemonKnobs,
   type FakeKind,
   type FakeKindContext,
@@ -396,6 +397,9 @@ export class FakeDaemon {
         : options.instances
           ? new FakeHypervisor(options.instances)
           : undefined;
+    // A VPS host runs the vps module's `instance.snapshot` (sandboxes, v0.5) unless told otherwise.
+    if (this.hypervisor && !Object.hasOwn(options.kinds ?? {}, 'instance.snapshot'))
+      this.kinds.set('instance.snapshot', fakeInstanceSnapshot);
   }
 
   // ---- observation ------------------------------------------------------------------------------
@@ -1730,6 +1734,12 @@ export class FakeDaemon {
       sendInventory: (sections) => this.sendInventory(sections),
       assignedDevices: () => this.assignedDevices(),
       upload: (url, bytes) => this.uploads.set(url, bytes),
+      ...(this.hypervisor
+        ? {
+            snapshot: (instanceId: string, includeMemory: boolean) =>
+              this.hypervisor!.snapshot(instanceId, includeMemory),
+          }
+        : {}),
     };
   }
 
