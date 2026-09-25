@@ -8,6 +8,7 @@ import {
   transition,
   type AdmissionPlan,
   type AuthzAttributes,
+  type AuthzRow,
   type Clock,
   type Condition,
   type DeviceClass,
@@ -19,6 +20,7 @@ import {
   type MethodContext,
   type ModuleContext,
   type NodeBindingSpec,
+  type Operation,
   type PlacementContext,
   type Allocation,
   type PlacementOutcome,
@@ -371,6 +373,37 @@ export async function readReservation(
   return rows[0] ? toReservation(rows[0]) : undefined;
 }
 
+/**
+ * A tenant's reservations in `states` created by `by` (an identity as owner, an agent, or a
+ * delegation), oldest first, locked `FOR UPDATE` in id order: what an IAM reaction (an agent
+ * suspended, an owner offboarded) walks. `by: {}` selects the tenant's in `states`.
+ */
+export async function readReservationsBy(
+  tx: SqlTx,
+  tenantId: string,
+  states: readonly ReservationState[],
+  by: { ownerIdentityId?: string; agentId?: string; delegationId?: string; anyAgent?: boolean },
+): Promise<ReservationRow[]> {
+  const { rows } = await tx.query<RawReservation>(
+    `SELECT ${reservationColumns} FROM reservations
+      WHERE tenant_id = $1 AND state = ANY($2::text[])
+        AND ($3::text IS NULL OR owner_identity_id = $3)
+        AND ($4::text IS NULL OR agent_id = $4)
+        AND ($5::text IS NULL OR delegation_id = $5)
+        AND (NOT $6 OR agent_id IS NOT NULL)
+      ORDER BY id FOR UPDATE`,
+    [
+      tenantId,
+      [...states],
+      by.ownerIdentityId ?? null,
+      by.agentId ?? null,
+      by.delegationId ?? null,
+      by.anyAgent === true,
+    ],
+  );
+  return rows.map(toReservation);
+}
+
 async function readReservationById(
   tx: SqlTx,
   id: string,
@@ -383,10 +416,58 @@ async function readReservationById(
   return rows[0] ? toReservation(rows[0]) : undefined;
 }
 
-/** The public view: the row plus the `hold` binding once a node reported it. */
+/**
+ * The async operation behind a reservation (§9.1 async-with-wait), the same under both placers:
+ * - `running`: queued for its pool-lease batch, the only state worth waiting on;
+ * - `pending`: not placeable now (`Unschedulable`, retried every 30 s) or awaiting a person;
+ * - `succeeded`: placed, and everything after it;
+ * - `failed`: failed, denied, cancelled or expired, with the reason.
+ * A `wait` stops as soon as the state is not `running`, so an inline create (placed or
+ * Unschedulable at once) and a pool-lease create answer a waiting client alike.
+ */
+export function reservationOperation(
+  row: Pick<ReservationRow, 'id' | 'state' | 'conditions'>,
+): Operation {
+  const id = row.id;
+  const condition = (type: string) => row.conditions.find((entry) => entry.type === type);
+  switch (row.state) {
+    case 'draft':
+      return { id, state: 'running' };
+    case 'pending':
+      return { id, state: condition('Queued') ? 'running' : 'pending' };
+    case 'awaiting-confirmation':
+      return { id, state: 'pending' };
+    case 'placed':
+    case 'binding':
+    case 'active':
+    case 'releasing':
+    case 'released':
+      return { id, state: 'succeeded' };
+    case 'failed': {
+      const why = condition('Unschedulable') ?? condition('BindTimeout');
+      return {
+        id,
+        state: 'failed',
+        error: { code: 'CAPACITY_UNAVAILABLE', message: why?.message ?? why?.reason ?? 'failed' },
+      };
+    }
+    case 'denied':
+      return { id, state: 'failed', error: { code: 'ACCESS_DENIED', message: 'Access denied' } };
+    case 'cancelled':
+      return { id, state: 'failed', error: { code: 'INVALID_STATE', message: 'cancelled' } };
+    case 'expired':
+      return {
+        id,
+        state: 'failed',
+        error: { code: 'INVALID_STATE', message: 'the confirmation request expired' },
+      };
+  }
+}
+
+/** The public view: the row plus the `hold` binding once a node reported it, and its operation. */
 export async function reservationView(tx: SqlTx, row: ReservationRow): Promise<Reservation> {
   const { requestHash: _hash, ...reservation } = row;
-  const view: Reservation = { ...reservation };
+  const view: Reservation = { ...reservation, operation: reservationOperation(row) };
   if (row.state === 'active' || row.state === 'binding') {
     const { rows } = await tx.query<{ node_id: string; binding: Json | string | null }>(
       `SELECT node_id, binding FROM allocations
@@ -618,7 +699,7 @@ export interface PlacementOptions {
 }
 
 async function publish(
-  deps: ReservationDeps,
+  deps: Pick<ReservationDeps, 'events'>,
   tx: SqlTx,
   row: ReservationRow,
   type: string,
@@ -1284,7 +1365,7 @@ export function isNodeBinding(row: Pick<ReservationRow, 'request'>): boolean {
 
 /** Wakes metal's node reconciler for every node of a node-binding reservation. */
 async function wakeMetal(
-  deps: ReservationDeps,
+  deps: Pick<ReservationDeps, 'work'>,
   tx: SqlTx,
   allocations: readonly { nodeId: string }[],
 ): Promise<void> {
@@ -1329,7 +1410,7 @@ export async function completeCreate(
 async function releaseBookings(
   tx: SqlTx,
   row: ReservationRow,
-  deps: ReservationDeps,
+  deps: Pick<ReservationDeps, 'desired' | 'work'>,
 ): Promise<AllocationRecord[]> {
   const allocations = await readOwnerAllocations(tx, { kind: 'reservation', id: row.id });
   for (const allocation of allocations) {
@@ -1410,6 +1491,62 @@ export async function cancelReservation(
   await publish(deps, tx, cancelled, 'reservation.cancelled');
   await wakePendingReservations(tx, deps.work, row.poolId);
   return reservationView(tx, cancelled);
+}
+
+/**
+ * Cancels a reservation that has not started, on the system's behalf (an IAM reaction: an agent
+ * suspended or a delegation revoked, an owner offboarded, a budget drained): `pending`, `placed`
+ * and `awaiting-confirmation` ones are cancelled with their bookings and quota given back (a parked
+ * request was never charged) and `reservation.cancelled { reason }`; started and terminal ones are
+ * returned unchanged, for the caller's policy. The caller holds the row lock
+ * (`readReservation(…, { lock: true })`). Idempotent.
+ */
+export async function cancelPendingReservation(
+  deps: Pick<ReservationDeps, 'events' | 'work' | 'desired'>,
+  tx: SqlTx,
+  row: ReservationRow,
+  reason: string,
+): Promise<ReservationRow> {
+  if (row.state !== 'pending' && row.state !== 'placed' && row.state !== 'awaiting-confirmation')
+    return row;
+  const charged = row.state !== 'awaiting-confirmation';
+  if (charged) {
+    await refundQuota(tx, row.tenantId, row.poolId, quotaDemand(row.request));
+    await releaseBookings(tx, row, deps);
+  }
+  const cancelled = await move(tx, row, 'cancel');
+  await publish(deps, tx, cancelled, 'reservation.cancelled', { reason });
+  if (charged) await wakePendingReservations(tx, deps.work, row.poolId);
+  return cancelled;
+}
+
+/**
+ * A reservation's authz projection row (§12.3) as `reservations.create` writes it, owned by
+ * `ownerId` (default the current owner): re-upsert it after moving a reservation to another owner.
+ */
+export async function reservationAuthzRow(
+  tx: SqlTx,
+  row: ReservationRow,
+  ownerId: string = row.ownerIdentityId,
+): Promise<AuthzRow> {
+  const { rows } = await tx.query<{ gpu_model: string | null; region: string }>(
+    `SELECT p.gpu_model, s.region FROM pools p JOIN sites s ON s.id = p.site_id WHERE p.id = $1`,
+    [row.poolId],
+  );
+  const pool = rows[0];
+  return {
+    type: 'reservation',
+    id: row.id,
+    tenantId: row.tenantId,
+    attributes: reservationAttributes(
+      row.request,
+      { ...(pool?.gpu_model ? { gpuModel: pool.gpu_model } : {}), region: pool?.region ?? '' },
+      requestedDuration(row),
+    ),
+    parentType: 'pool',
+    parentId: row.poolId,
+    ownerId,
+  };
 }
 
 /** `reservations.release` (allowed): see `endReservation`. */

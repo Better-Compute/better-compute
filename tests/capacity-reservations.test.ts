@@ -21,8 +21,11 @@ import {
   capacityModule,
   createCapacityPort,
   deviceAssignments,
+  cancelPendingReservation,
   markAllocationBound,
   placeablePending,
+  readReservationsBy,
+  reservationAuthzRow,
   markAllocationFailed,
   markAllocationReleased,
   meterReservations,
@@ -425,6 +428,83 @@ describe('reservations.create', () => {
       conditions: [],
       during: { start: T0 + 60_000, end: T0 + 60_000 + 2 * HOUR },
     });
+  });
+
+  it('reports each reservation’s async operation (§9.1): succeeded, pending, running, failed', async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+    const placed = (await call('reservations', 'create', create({ idempotencyKey: 'op1' }))) as Rsv;
+    expect(placed.operation).toEqual({ id: placed.id, state: 'succeeded' });
+    const big = (await call(
+      'reservations',
+      'create',
+      create({ devices: [{ class: 'gpu', count: 64 }], idempotencyKey: 'op2' }),
+    )) as Rsv;
+    expect(big.operation).toEqual({ id: big.id, state: 'pending' });
+    const queued = (await call('reservations', 'create', create({ idempotencyKey: 'op3' }), {
+      api: capacityModule({ placer: 'pool-lease' }).api!(moduleContext(db)) as CapacityApi,
+    })) as Rsv;
+    expect(queued.operation).toEqual({ id: queued.id, state: 'running' });
+    const cancelled = (await call('reservations', 'cancel', {
+      tenantId: 'acme',
+      reservationId: big.id,
+    })) as Rsv;
+    expect(cancelled.operation).toMatchObject({
+      state: 'failed',
+      error: { code: 'INVALID_STATE' },
+    });
+  });
+
+  it('cancels unstarted reservations on the system’s behalf, and selects them by agent (IAM reactions)', async () => {
+    await db.query(`UPDATE quota_usage SET max = 100`);
+    const agent = {
+      ...caller,
+      identityKind: 'agent' as const,
+      agentId: 'agt_1',
+      delegationId: 'dlg_1',
+    };
+    const byAgent = (await call('reservations', 'create', create({ idempotencyKey: 'ag1' }), {
+      who: agent,
+    })) as Rsv;
+    const mine = (await call('reservations', 'create', create({ idempotencyKey: 'me1' }))) as Rsv;
+    const deps = { ...moduleContext(db) } as unknown as Parameters<
+      typeof cancelPendingReservation
+    >[0];
+    await db.transaction(async (tx) => {
+      const rows = await readReservationsBy(tx, 'acme', ['pending', 'placed'], {
+        agentId: 'agt_1',
+      });
+      expect(rows.map((row) => row.id)).toEqual([byAgent.id]);
+      expect(
+        (await readReservationsBy(tx, 'acme', ['placed'], { anyAgent: true })).map((r) => r.id),
+      ).toEqual([byAgent.id]);
+      const cancelled = await cancelPendingReservation(deps, tx, rows[0]!, 'agent suspended');
+      expect(cancelled.state).toBe('cancelled');
+      // Idempotent, and started or terminal ones come back unchanged.
+      expect((await cancelPendingReservation(deps, tx, cancelled, 'again')).state).toBe(
+        'cancelled',
+      );
+      const authz = await reservationAuthzRow(tx, rows[0]!, 'usr_successor');
+      expect(authz).toMatchObject({
+        type: 'reservation',
+        id: byAgent.id,
+        parentId: poolId,
+        ownerId: 'usr_successor',
+        attributes: { gpuCount: 2 },
+      });
+    });
+    expect(recorded.events.filter((event) => event.type === 'reservation.cancelled')).toEqual([
+      expect.objectContaining({ data: expect.objectContaining({ reason: 'agent suspended' }) }),
+    ]);
+    // The quota and the bookings came back; the owner's own reservation is untouched.
+    const { rows } = await db.query(
+      `SELECT 1 FROM allocations WHERE owner_id = $1 AND released_at IS NULL`,
+      [byAgent.id],
+    );
+    expect(rows).toEqual([]);
+    expect(
+      ((await call('reservations', 'get', { tenantId: 'acme', reservationId: mine.id })) as Rsv)
+        .state,
+    ).toBe('placed');
   });
 
   it('finds pending reservations an offline solver could place (I7)', async () => {
