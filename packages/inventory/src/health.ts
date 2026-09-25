@@ -254,6 +254,10 @@ async function isQuarantined(tx: SqlTx, deviceId: string): Promise<boolean> {
  * was removed.
  */
 export async function clearDeviceHealth(tx: SqlTx, deviceId: string, reason?: string): Promise<boolean> {
+  // The node row first, as every device writer does (node → devices → capacity's per-class counts
+  // trigger): a GPU cleared here while clearNodeFaults works through the node's other GPUs would
+  // otherwise deadlock on the counts row.
+  await tx.query('SELECT 1 FROM nodes WHERE id = (SELECT node_id FROM devices WHERE id = $1) FOR UPDATE', [deviceId]);
   const removed = await tx.query('DELETE FROM device_health WHERE device_id = $1 AND ($2::text IS NULL OR reason = $2)', [
     deviceId,
     reason ?? null,
