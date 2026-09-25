@@ -337,12 +337,13 @@ describe('flushUsageWindows', () => {
           finding.count,
         ]);
       expect(await checks()).toEqual([]);
-      // A window that ended 2 h ago, still in this month (skipped in a month's first hours, when it is not).
+      // A window that ended 3 h ago, still in this month (skipped in a month's first hours, when it is not). Not
+      // 2 h: "stale" is strictly older than 2 h, and two statements can share one clock tick.
       const now = new Date();
       const intoMonthHours =
         (now.getTime() - Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)) / 3_600_000;
-      if (intoMonthHours > 4) {
-        await window(3, 'idn_alice');
+      if (intoMonthHours > 5) {
+        await window(4, 'idn_alice');
         expect(await checks()).toEqual([['iam.usage-backlog', 'warning', 1]]);
       }
       // A window of last month: IAM's closePeriod will refuse it.
