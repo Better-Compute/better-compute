@@ -34,9 +34,9 @@ export interface FleetState {
   pools: (Required<Pick<FleetPool, 'ownerQuota' | 'policy' | 'offers'>> &
     FleetPool & { id: string; siteId: string; providerAccountId?: string })[];
   flavors: (FleetFlavor & { poolId: string })[];
-  /** Every field filled in (runtime, TTL bounds, warm); `userData` only when set. */
-  sandboxTemplates: (Required<Omit<FleetSandboxTemplate, 'userData'>> &
-    Pick<FleetSandboxTemplate, 'userData'> & {
+  /** Every field filled in (runtime, TTL bounds, warm, network); `userData` and `env` only when set. */
+  sandboxTemplates: (Required<Omit<FleetSandboxTemplate, 'userData' | 'env'>> &
+    Pick<FleetSandboxTemplate, 'userData' | 'env'> & {
       id: string;
       poolId: string;
       warm: { min: number; max: number };
@@ -223,9 +223,11 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
         max_ttl_seconds: number;
         warm_min: number;
         warm_max: number;
+        env: unknown;
+        network: 'egress' | 'private' | 'none';
       }>(
         `SELECT id, name, pool_id, flavor, image_id, runtime, user_data, default_ttl_seconds,
-                max_ttl_seconds, warm_min, warm_max
+                max_ttl_seconds, warm_min, warm_max, env, network
            FROM sandbox_templates WHERE tenant_id = $1 AND NOT deleted ORDER BY name`,
         [tenantId],
       )
@@ -242,6 +244,10 @@ export async function readFleetState(tx: SqlTx, tenantId: string): Promise<Fleet
       defaultTtlSeconds: Number(row.default_ttl_seconds),
       maxTtlSeconds: Number(row.max_ttl_seconds),
       warm: { min: Number(row.warm_min), max: Number(row.warm_max) },
+      network: row.network,
+      ...(Object.keys((parse(row.env) ?? {}) as object).length
+        ? { env: parse(row.env) as Record<string, string> }
+        : {}),
     }));
   else missing.push('sandbox_templates');
 

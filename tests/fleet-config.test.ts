@@ -389,6 +389,7 @@ describe('sandbox templates (v0.5, PLAN §3.7)', () => {
         defaultTtlSeconds: 3600,
         maxTtlSeconds: 7200,
         warm: { min: 0, max: 2 },
+        network: 'egress',
       },
     ]);
     // Server-filled fields (runtime, the default TTL) are not drift; the export plans to nothing.
@@ -398,10 +399,11 @@ describe('sandbox templates (v0.5, PLAN §3.7)', () => {
     const next = withTemplate();
     next.sandboxTemplates![0]!.warm = { min: 1, max: 3 };
     next.sandboxTemplates![0]!.imageId = 'ubuntu-26.04';
+    next.sandboxTemplates![0]!.network = 'private';
     const planned = await plan(next);
     expect(planned.changes.find((change) => change.kind === 'sandboxTemplate')).toMatchObject({
       action: 'update',
-      fields: ['imageId', 'warm'],
+      fields: ['imageId', 'network', 'warm'],
     });
     expect(planned.calls).toEqual([
       {
@@ -410,10 +412,18 @@ describe('sandbox templates (v0.5, PLAN §3.7)', () => {
           tenantId: 'root',
           templateId: expect.stringMatching(/^sbxt_/),
           imageId: 'ubuntu-26.04',
+          network: 'private',
           warm: { min: 1, max: 3 },
         },
       },
     ]);
+    // env is planned as a whole map (applying it needs the secret broker, absent here).
+    const withEnv = withTemplate();
+    withEnv.sandboxTemplates![0]!.env = { TOKEN: 'secret://root/sec_1' };
+    expect((await plan(withEnv)).calls[0]).toMatchObject({
+      path: 'sandboxTemplates/update',
+      input: { env: { TOKEN: 'secret://root/sec_1' } },
+    });
     await apply(next, { planHash: planned.planHash });
     expect((await plan(next)).calls).toEqual([]);
   });
@@ -449,6 +459,13 @@ describe('sandbox templates (v0.5, PLAN §3.7)', () => {
     expect(bad({ ...ok, maxTtlSeconds: 10 })).toThrow(/maxTtlSeconds must be an integer/);
     expect(bad({ ...ok, warm: { min: 65 } })).toThrow(/warm\.min/);
     expect(bad({ ...ok, pool: 'Bad Pool' })).toThrow(/pool is not in the expected form/);
+    expect(bad({ ...ok, env: { TOKEN: 'plaintext' } })).toThrow(
+      /env\.TOKEN is not in the expected form/,
+    );
+    expect(bad({ ...ok, env: { 'bad-name': 'secret://root/x' } })).toThrow(
+      /is not a variable name/,
+    );
+    expect(bad({ ...ok, network: 'open' })).toThrow(/must be egress, private or none/);
     expect(() => validateFleetConfig({ version: 1, sandboxTemplates: [ok, ok] })).toThrow(
       /repeats "ci"/,
     );

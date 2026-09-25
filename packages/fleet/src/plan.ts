@@ -408,6 +408,8 @@ export async function planFleet(
             ? { maxTtlSeconds: template.maxTtlSeconds }
             : {}),
           ...(template.warm !== undefined ? { warm: template.warm } : {}),
+          ...(template.env !== undefined ? { env: template.env } : {}),
+          ...(template.network !== undefined ? { network: template.network } : {}),
         },
       });
       continue;
@@ -425,11 +427,17 @@ export async function planFleet(
       'userData',
       'defaultTtlSeconds',
       'maxTtlSeconds',
+      'network',
     ] as const)
       if (template[field] !== undefined && current[field] !== template[field]) {
         mutable.push(field);
         update[field] = template[field];
       }
+    // env is replaced as a whole map by update.
+    if (template.env !== undefined && !same(current.env ?? {}, template.env)) {
+      mutable.push('env');
+      update.env = template.env;
+    }
     if (template.warm !== undefined) {
       const warm = { min: template.warm.min, max: template.warm.max ?? template.warm.min };
       if (!same(current.warm, warm)) {

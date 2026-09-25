@@ -35,6 +35,10 @@ export interface FleetSandboxTemplate {
   defaultTtlSeconds?: number;
   maxTtlSeconds?: number;
   warm?: { min: number; max?: number };
+  /** Environment variables as `secret://<tenant>/<id>` refs only (written to /etc/sandbox/env). */
+  env?: Record<string, string>;
+  /** What the sandbox's NICs may reach (default egress). */
+  network?: 'egress' | 'private' | 'none';
 }
 
 export interface FleetSite {
@@ -296,6 +300,8 @@ export function validateFleetConfig(value: unknown): FleetConfig {
           'defaultTtlSeconds',
           'maxTtlSeconds',
           'warm',
+          'env',
+          'network',
         ],
         path,
       );
@@ -328,6 +334,21 @@ export function validateFleetConfig(value: unknown): FleetConfig {
         only(warm, ['min', 'max'], `${path}.warm`);
         result.warm = { min: int(warm.min, `${path}.warm.min`, 0, 64) };
         if (warm.max !== undefined) result.warm.max = int(warm.max, `${path}.warm.max`, 0, 64);
+      }
+      if (template.env !== undefined) {
+        const env = record(template.env, `${path}.env`);
+        result.env = {};
+        for (const [name, ref] of Object.entries(env)) {
+          if (!/^[A-Z_][A-Z0-9_]{0,63}$/.test(name))
+            fail(`${path}.env.${name}`, 'is not a variable name (A-Z, 0-9, _)');
+          // Values are references, never secrets: the document is safe to commit.
+          result.env[name] = string(ref, `${path}.env.${name}`, /^secret:\/\/[^/\s]+\/[^/\s]+$/);
+        }
+      }
+      if (template.network !== undefined) {
+        if (!['egress', 'private', 'none'].includes(template.network as string))
+          fail(`${path}.network`, 'must be egress, private or none');
+        result.network = template.network as FleetSandboxTemplate['network'];
       }
       return result;
     },
