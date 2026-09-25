@@ -338,6 +338,10 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - Next for [6a20b8]: update.swap, so self-update works in helper mode.
     - Instance serial consoles over tunnels.open (798e710, compute:instances:exec; sandbox instances refused).
     - bcx-ipmi on site agents: downloads route (97b2ac2) plus install-script --install-plugins (adf2ae9).
+      - OPEN product gap: an IPMI machine fails metal-enroll, because inspect.oob is a concern bcx-ipmi doesn't serve.
+        Virtual media, firmware and the other Redfish-only concerns block the deploy flows on IPMI.
+      - Decision: bcx-ipmi gets a minimal ipmitool inspect ([6a20b8]); metal profiles become capability-aware
+        ([f02367]): optional steps skipped, required ones FAILED_PRECONDITION early, PXE deploy without virtual media.
     - Security review 12 ([402c97] over cloud-hypervisor 2598f0a), 2 HIGH, FIXED in 933c51b (both runtimes: images
       checked with an explicit format and refused with a backing or data file; taps persistent and bridged plus an
       nft backstop; the VMM unit confined; M1-M3 and L1-L7 too). bcd e2e 11/11. The original findings:
