@@ -257,7 +257,10 @@ A gateway holds no CA and no signing key. A compromised one can delay, drop or r
   `AllocationBound`; an unsigned, foreign-signed or replayed report is rejected (`reservation.binding-rejected`),
   and a forged re-report of an active binding marks it lost instead of replacing it;
 - forge intent: commands and NodeSpecs are signed by worker keys the daemon verifies; the gateway relays the stored
-  signed spec bytes verbatim.
+  signed spec bytes verbatim;
+- open a tunnel of its own: the daemon verifies every exec ticket again against the JWKS pinned in its NodeSpec and
+  its own `jti` set (bcd keeps it in its journal), and requires the ticket's `sid` to be the tunnel it is asked to
+  open.
 
 Signed commands and specs and attested bindings all come with `pki.commandSigning` on the server. Daemons require
 signatures for destructive kinds from v0.2 and for all kinds from v0.4, and for specs that change `access` from v0.2

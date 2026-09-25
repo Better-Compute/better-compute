@@ -5,7 +5,7 @@ metaTitle: VPS instances and their lifecycle
 icon: Server
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts']
+sources: ['packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/vps/src/status.ts', 'packages/vps/src/runtime.ts', 'packages/vps/src/input.ts', 'packages/core/src/states.ts', 'packages/server/src/controllers/nodespec.ts', 'packages/server/src/tunnels/module.ts', 'packages/server/src/operations.ts', 'proto/bettercompute/agent/v1/session.proto', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/requests.go']
 ---
 
 An <Term id="instance">instance</Term> is a VM in a VPS <Term id="pool">pool</Term>. You ask for one with a
@@ -82,6 +82,7 @@ better-compute api instances.create tenantId=acme poolId=pool_01jz… flavor=g1.
     desiredState: { type: "'running' | 'stopped'", description: 'Where the instance should end up.', default: "'running'" },
     projectId: { type: 'string', description: 'A prj_ id, for usage tags and policies.' },
     idempotencyKey: { type: 'string', description: '1 to 128 of letters, digits and . _ : -. Retrying with the same key returns the same instance.', required: true },
+    wait: { type: '{ timeoutMs: number }', description: '0 to 30000. Holds the answer until the instance has started or failed; see waiting for the instance below. Not part of the request hash.' },
   }}
 />
 
@@ -115,6 +116,13 @@ owner is the caller, and it carries the attributes policies can test: `vcpu`, `m
 `imageVerified` and `projectId`. A refusal deletes the draft, so a later retry is decided afresh. An agent under
 [delegated confirmation](/docs/guides/iam/delegated-confirmation) gets `CONFIRMATION_REQUIRED` and retries with the
 same key once a person approves.
+
+Still outside any transaction, the pool's budget check runs, the same `budgetAdmissionCheck` as for
+[reservations](/docs/guides/capacity/reservations): when the pool's policy sets `admission.budgetCheck: 'meter'`, or
+the tenant's offer has `onBudgetExceeded: 'stop-new'` or `'drain'`, it calls Better IAM's `billing.check` for the
+caller, and a spent budget answers [`SPEND_LIMIT_REACHED`](/docs/reference/errors#spend_limit_reached). The draft
+stays, so the same key is decided again once the budget's window resets. See
+[budgets](/docs/guides/iam/billing-and-usage#budgets).
 
 </Step>
 <Step>
@@ -156,6 +164,7 @@ A policy can bound what tenants create, for example only small VMs from signed i
 | `CONFLICT`              | The idempotency key was used for a different request.                                                                                |
 | `ACCESS_DENIED`         | Better IAM refused. The draft is gone.                                                                                               |
 | `CONFIRMATION_REQUIRED` | A delegated session needs a person to approve.                                                                                       |
+| `SPEND_LIMIT_REACHED`   | The pool checks budgets and a Better IAM budget covering the caller is spent. The draft stays.                                      |
 | `QUOTA_EXCEEDED`        | The tenant's quota in the pool is too small. `details` names `resource`, `requested`, `max` and `used`.                             |
 | `CAPACITY_UNAVAILABLE`  | Hosted pool: the pool's IP range has no free address.                                                                                |
 | `INVALID_CONFIG`        | Hosted pool, but `vps()` was registered without `images`.                                                                            |
@@ -165,6 +174,26 @@ Every resource an instance uses needs a quota row in the pool: `vcpu`, `memoryGi
 flavors. [pools.offer](/docs/reference/api/pools#offer) sets them for a tenant. A pool's owner gets only a `gpu`
 quota by default, so give the owner `ownerQuota` for the scalar resources before it creates instances in its own
 pool. See [quotas and usage](/docs/guides/capacity/quotas-and-usage).
+
+### Waiting for the instance
+
+`create` is async-with-wait (PLAN.md section 9.1). Without `wait` it answers as soon as transaction 2 commits, with
+the instance in `scheduling` or `provisioning`. With `wait: { timeoutMs }` the server holds the answer while the
+instance is `pending`, `scheduling`, `provisioning` or `starting`, re-reading its row in read-only transactions
+(backing off from 50 ms to 1 s), and returns as soon as it reaches any other state (`running`, `stopped`, `error`,
+…), `timeoutMs` passes (at most 30 seconds), or the request is aborted. A timeout is not an error: the answer is the
+instance as last read.
+
+```ts
+const instance = await client.instances.create({ ...input, wait: { timeoutMs: 20_000 } });
+if (instance.state !== 'running') {
+  // Still starting, or failed: read it again later with instances.get, or watch instance.* events.
+}
+```
+
+`wait` is kept out of the request hash, so a retry with the same key and a different `wait` replays the stored
+instance instead of failing with `CONFLICT`. The MCP `create_instance` tool sends `wait` from its `waitSeconds`
+(default 20).
 
 ## Read and list
 
@@ -283,9 +312,8 @@ From the reports, the reconciler moves the instance:
 
 <Callout type="warn" title="The host side is not written yet">
 bcd's node agent is built and tested but not released, and it has no VM runtime and no `instances` converger: a
-non-empty `instances` section is reported `SectionUnsupported`. It also never sends `SecretRequest`, so it cannot
-fetch user data. The
-TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
+non-empty `instances` section is reported `SectionUnsupported`. It can send a node-signed `SecretRequest` and open
+the sealed answer, but nothing in bcd asks for user data until the runtime exists. The TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
 user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway
 with it.
 </Callout>
@@ -387,8 +415,18 @@ interface RuntimeDriver {
   reboot(instanceId: string): Promise<void>;
   remove(instanceId: string): Promise<void>; // an absent instance counts as removed
   console?(instanceId: string): Promise<DuplexStream>; // the serial console, for tunnels
+  // v0.5 seams for the planned sandboxes: warm pools and snapshots
+  pause?(instanceId: string): Promise<void>; // vCPUs stopped, memory resident
+  resume?(instanceId: string): Promise<void>;
+  snapshot?(instanceId: string, target: RuntimeSnapshotTarget): Promise<RuntimeSnapshotResult>;
 }
 ```
+
+`pause`, `resume` and `snapshot` are optional seams for the planned v0.5
+[sandboxes](/docs/guides/vps/sandboxes#runtime-and-events). They go with the `paused` instance state and
+`InstanceSpec.restoreFrom`, which exist in core and the protocol but which `vps()` does not drive yet: no API method
+pauses, resumes or snapshots an instance in this release. A runtime without `pause` treats a desired `paused` as
+`stopped`.
 
 `libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet.
 Out-of-process runtimes (a Kata runtime as a bcx plugin, selected by pools) are planned for v0.5; see
@@ -432,7 +470,9 @@ only when the deployment configures tunnels. See [tunnels](/docs/guides/access/t
 A hosted instance can prove who it is to a third party (Better IAM's `sts/assumeRoleWithWebIdentity`, a cloud STS)
 with a short-lived OIDC token, `sub = "t:<tenantId>:instance:<instanceId>"`, that it fetches from its host's
 metadata service (IMDS). This is v0.5 and optional: the control plane half is built and tested end to end against
-the FakeDaemon (`tests/e2e/imds.test.ts`); `bcd` has no IMDS and does not send `WorkloadTokenRequest` yet.
+the FakeDaemon (`tests/e2e/imds.test.ts`). `bcd` has the host's session half (`RequestWorkloadToken`: a node-signed
+`WorkloadTokenRequest` with a one-time key, the sealed answer opened and checked against the instance and request
+id), but no IMDS: no metadata server listens for instances yet, so nothing calls it.
 
 ```mermaid
 sequenceDiagram
@@ -459,8 +499,9 @@ sequenceDiagram
   gets the token sealed to a one-time key, so the gateway only relays ciphertext.
 - **The broker mints only when** the request is signed by the node's current certificate of role `node` (never
   `node-tenant`, a ramdisk, a site agent or a kind-restricted certificate) naming the session's node; the instance
-  is live, placed on that node, with its live allocation there; its pool has `policy.workloadIdentity: true`; the
-  audience is the issuer's default or a configured one; the request id is new; and the instance is within its rate
+  is live, placed on that node, with its live allocation there; its pool has `policy.workloadIdentity: true`; its
+  tenant is neither suspended nor deleted (otherwise `disabled`, recorded with the reason `tenant-suspended` or
+  `tenant-deleted`); the audience is the issuer's default or a configured one; the request id is new; and the instance is within its rate
   (30 tokens a minute by default). Tokens live at most 15 minutes.
 - **Refusals are answers**, not errors: `not-bound`, `disabled`, `audience`, `rate-limited`, `access-denied` or
   `unavailable`. Each one publishes `security.workload.refused` (rate-limited per reason); each token issued writes

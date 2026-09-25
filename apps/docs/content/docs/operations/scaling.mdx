@@ -25,6 +25,10 @@ sources:
   - packages/capacity/src/placer.ts
   - packages/capacity/src/shortlist.ts
   - packages/capacity/src/migrations.ts
+  - packages/capacity/src/pool-index.ts
+  - packages/capacity/src/reservations.ts
+  - packages/testing/src/sim/cold-start.ts
+  - tests/bench/placements.bench.ts
   - packages/gateway/src/store.ts
   - packages/inventory/src/store.ts
   - packages/postgres/src/pglite.ts
@@ -58,9 +62,9 @@ never share a host with the process they measure.
 | IAM lane | v0.1 | Embedded better-iam on adapter-postgres sustains 50 or more admissions/s (about 150 lock acquisitions/s) with lock wait below 50%; record the ceiling; below 200 admissions/s, propose R1 (D18) | not run: it needs Postgres |
 | Placements | v0.1 | Placements/s recorded | 35.7/s inline, 1k nodes, PGlite (see below) |
 | Place to active | v0.1 | p99 below 2 s with 1k FakeDaemons in the real-time harness | 1.02 s at 5/s in the first runs; 101 to 191 ms at 5/s and 176 ms at 10/s in later runs |
-| Cold start | v0.4 | 10k nodes in under 3 min | not measured on the wall clock |
+| Cold start | v0.4 | 10k nodes in under 3 min | simulated time only: 24 nodes pass in CI (`runColdStart`); the 10k nightly has no recorded result; not measured on the wall clock |
 | Gateway kill | v0.4 | Recovery under 60 s, 0 false unreachable marks, 0 duplicate executions | 10k nodes, 3 gateways, in simulated time: re-home p99 13.25 s, 0 invariant violations |
-| Placements at scale | v0.4 | 200 or more placements/s | 1,092/s at 1k nodes and 161/s at 10k nodes, pool-lease with set-based commits, PGlite |
+| Placements at scale | v0.4 | 200 or more placements/s | pool-lease end to end on PGlite: 1,092/s at 1k nodes; 464/s at 10k nodes in the latest recorded run (see below) |
 | Commands | v0.4 | p99 below 1.5 s with polling only | ack p99 378 ms at 100 commands/s on 1k nodes, PGlite |
 | Postgres CPU | v0.4 | below 50% at 10k nodes and 100k GPUs on the reference Postgres | not measured |
 
@@ -106,7 +110,26 @@ commands succeeded. RSS includes the in-process load generator, and h2c leaves o
 
 End to end through the pool-lease worker's `placeQueued` (reservation rows, an event and a work-queue write each):
 224/s one reservation at a time at 1k nodes; with set-based commits (one bookings insert, one allocations insert and
-one reservations update per batch), 1,092/s at 1k nodes and 161/s at 10k nodes. The shortlist
+one reservations update per batch), 1,092/s at 1k nodes and 161/s at 10k nodes. Batches that rank a pool once per
+request shape were measured at about 500/s at 10k nodes when they landed, and the latest recorded 10k run has 464/s
+(640 placements, `bench/placements/results`).
+
+Two later changes keep the pool lock short at 10k nodes; their numbers come from the changes' own PGlite runs at
+10k nodes and are not in `bench/placements/results` yet:
+
+- **The index is loaded before the lock.** A batch first claims its queued reservation rows (`FOR UPDATE SKIP
+  LOCKED`), then loads or checks out the pool's index, and only then takes the pool row lock for planning and the
+  guarded commits, which catch any booking committed in between. Rebuilding the index no longer holds the lock that
+  inline placements on the same pool (instances, gangs, BookingRepair) wait for: lock held p90 went from 875 ms to
+  138 ms. The benchmark's `lockHeldMs` for `placeQueued` now measures the lock itself, from the pool's `FOR UPDATE`
+  to the commit.
+- **The index loads devices lazily.** `PoolIndex.load` reads per-class counts from `capacity_device_counts`, the
+  booked devices with their bookings, and which nodes have link rows. Full device rows and link matrices are read
+  per node the first time a placement view asks for that node, so a shortlist reads a handful of nodes and only
+  gangs and the whole-pool fallback read everything. Index load p90 went from about 1 s to 256 ms, `placeQueued`
+  to about 1,058 placements/s, and lock held p90 to 60 ms.
+
+The shortlist
 (`packages/capacity/src/shortlist.ts`) ranks nodes in SQL and plans only the best 48, and it is exact: when a node
 outside the shortlist could reach the top N, the placer plans the whole pool. It reads per-node device totals from
 `capacity_device_counts` (migration `capacity/0003_device_counts`), which a row trigger on `devices` keeps exact,

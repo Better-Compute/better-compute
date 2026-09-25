@@ -28,6 +28,9 @@ sources:
   - daemon/internal/agent/commands.go
   - daemon/internal/agent/spec.go
   - daemon/internal/agent/devices.go
+  - daemon/internal/agent/access.go
+  - daemon/internal/agent/gpureset.go
+  - daemon/internal/agent/kinds.go
   - tests/e2e/bcd.test.ts
   - .claude/coordination.md
   - PLAN.md
@@ -57,7 +60,7 @@ idempotent `plan(desired, observed)` and `apply`:
 | `host` | Host configuration units (driver, container toolkit, MIG layout, fabric manager, sysctl), each a config driver id and canonical JSON | v0.2 |
 | `devices` | Device assignments: allocation, reservation, binding, devices, extra env lines | v0.1 |
 | `instances` | VPS instances with their runtime, size, image, NICs and GPUs | v0.3 |
-| `access` | The exec-ticket JWKS, SSH CA keys and principals, revoked certificate serials; empty in v0.1 | v0.3 |
+| `access` | The exec-ticket JWKS, SSH CA keys and principals, revoked certificate serials; filled when `tunnels` is configured | v0.3 |
 | `telemetry` | The OTLP endpoint, export interval, resource attributes and a secret reference for headers | v0.1 |
 | `daemon` | The self-update target: version, URL, SHA-256, signature | v0.4 |
 | `site` | The site agent's boot lease state and `cache_images`, the images its cache pre-warms (`url`, `sha256`, `format`; the agent re-verifies each digest before serving it); draft, site agents only | v0.2 |
@@ -114,9 +117,10 @@ The daemon stores the last full spec, its hash and its signature in the journal,
 a retryable failure keeps the section `PROGRESSING` and it is retried on the next pass. A section the daemon has no
 converger for converges trivially when empty and is `UNSUPPORTED` otherwise, which counts as terminal, with
 condition `SectionUnsupported` (reason: the field number) so the rest of the spec still converges. bcd applies the
-rule with `converge.Run`. It has convergers for `devices` and `telemetry` (which accepts the section; bcd's own OTLP
-exporter is not written), so in bcd today a non-empty `host`, `instances`, `access`, `daemon` or `site` section is
-`UNSUPPORTED`, and so is a section number it does not know.
+rule with `converge.Run`. It has convergers for `devices`, `access` and `telemetry` (which accepts the section;
+bcd's own OTLP exporter is not written), so in bcd today a non-empty `host`, `instances`, `daemon` or `site` section
+is `UNSUPPORTED`, and so is a section number it does not know. The FakeDaemon, in turn, converges `instances` and
+`daemon` when its options enable them but has no `access` converger.
 
 The daemon reports progress in `StatusReport`: observed and applied generation, the spec hash, one
 `SectionStatus` per section (`CONVERGED`, `PROGRESSING`, `FAILED`, `UNSUPPORTED`, with the generation, a reason and
@@ -139,6 +143,15 @@ FakeDaemon both implement this converger: bcd writes the CDI spec and env file i
 holds back from `/etc/cdi` on every pass, supports the `hold` binding and GPUs only (anything else fails with
 `unsupported-binding` or `unsupported-device`), and signs `AllocationBound` and `AllocationReleased` with the node
 key. `tests/e2e/bcd.test.ts` binds and releases a 2-GPU reservation through it.
+
+### Break-glass SSH and tunnel keys
+
+The `access` section carries what sshd and the tunnel code on the node trust. bcd's converger writes the CA keys,
+this node's own principals (`<account>@<nodeId>` only) and a KRL of the revoked serials into `/etc/ssh`, plus a
+drop-in that points sshd at them, and reloads sshd only when that drop-in changes; an empty section removes all of
+it. It also keeps the exec-ticket JWKS, which every `OpenTunnel` is verified against, and takes a new one on every
+pass, even when no file changes. See
+[break-glass SSH](/docs/guides/access/ssh#what-the-node-needs) and [tunnels](/docs/guides/access/tunnels#the-node-half).
 
 ## Commands
 
@@ -249,6 +262,22 @@ settles it. The daemon stops between actions and never hides a completed side ef
 deferred is reported `CANCELLED`, while one whose side effect has started reports its real outcome. A real outcome
 always wins over a late cancel.
 
+### gpu.reset and live holds
+
+`gpu.reset` (control lane, destructive, attested, not retry-safe, node role only) resets the GPUs listed in
+`gpu_uuids`, after a release or for remediation such as XID 63. bcd checks the list before touching anything:
+
+- an empty list fails `invalid-payload`;
+- a GPU that still has a live CDI hold from the `devices` section fails the whole command `gpu-busy`, so a reset
+  never pulls a GPU from under a running workload;
+- a GPU the inventory does not know comes back `reset: false` with the message `unknown GPU`.
+
+Each remaining GPU is reset with `nvidia-smi --gpu-reset -i <uuid>`; a failure is that GPU's `message`. bcd then
+collects a fresh inventory and marks each reset GPU `healthy` unless it shows uncorrectable volatile ECC errors or a
+pending or failed row remap. NVML is not wired yet, so on a real host the inventory carries no ECC or row-remap data
+and every GPU that reset reads `healthy`; the fake HGX node of the `fakehw` build does carry them. The FakeDaemon's
+`fakeGpuReset` (opt in with its `kinds` option) follows the same checks.
+
 ### Signed commands and attested results
 
 Two signatures keep a compromised gateway, which can delay, drop or read frames, from forging intent or results:
@@ -258,8 +287,8 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   configured, and sends the matching trust bundle in `JoinResponse` and `Welcome`; without it commands go unsigned,
   as v0.1 allows. The daemon's own kind table decides which kinds require a signature, never a flag the body could
   carry: destructive kinds from v0.2, all kinds from v0.4. bcd enforces nothing until its trust bundle holds
-  command-signing roots; from then on a present signature is always checked and its destructive kind
-  (`node.reboot`) requires one.
+  command-signing roots; from then on a present signature is always checked and its destructive kinds
+  (`gpu.reset`, `node.reboot`) require one.
 - **Signed desired state.** Specs have the same envelope under purpose `desired-state`. With
   `pki.commandSigning`, the NodeSpec controller signs each new generation's `DesiredStateBody` with the worker key
   (`CommandSigner.signDesiredState`) in the transaction that bumps the generation, and every bump rewrites both
@@ -306,7 +335,7 @@ FakeDaemon mirrors them rule for rule.
 | `events` | Unacked events |
 | `spec` | The last full spec, its hash and its signature |
 | `certs` | The certificate chain and the command-signing trust bundle (bcd keeps these in `identity.json` beside the journal) |
-| exec tickets | The `jti` set of tickets already used (planned with tunnels; not in bcd yet) |
+| exec tickets | The `jti` of every exec ticket already used, kept until the ticket expires (at most 10,000; a full set refuses new tickets) |
 
 The server time mark is the highest server time the daemon has seen (on `Welcome` and every heartbeat). It only
 moves forward, and a `Welcome` whose `server_time` is more than 5 minutes before it is refused, so a gateway cannot

@@ -2,7 +2,7 @@
   {
     "id": "sandbox",
     "term": "Sandbox",
-    "definition": "An isolated place to run untrusted code. In Better Compute it is a VPS instance: its own VM sized by a flavor of vCPUs, memory, disk and optional GPUs, with no platform secrets inside and access only through audited tunnels. A dedicated sandbox API is not built.",
+    "definition": "An isolated place to run untrusted code. In Better Compute it is a VPS instance: its own VM sized by a flavor of vCPUs, memory, disk and optional GPUs, with no platform secrets inside and access only through audited tunnels. A `sandboxes` API with templates, lifetimes, warm pools and snapshots is planned for v0.5 and not served yet.",
     "href": "/docs/guides/vps/sandboxes"
   },
   {
@@ -176,7 +176,7 @@
   {
     "id": "fake-daemon",
     "term": "FakeDaemon",
-    "definition": "The TypeScript implementation of the daemon side of the protocol in `@better-compute/testing`, with the same journal rules, acceptance checks and lanes as bcd. It runs in tests, the fleet simulator and `better-compute dev --sim N`, and covers what bcd does not implement yet: tunnels, VM hosts, site agents, self-update and the WebSocket fallback.",
+    "definition": "The TypeScript implementation of the daemon side of the protocol in `@better-compute/testing`, with the same journal rules, acceptance checks and lanes as bcd. It runs in tests, the fleet simulator and `better-compute dev --sim N`, and covers what bcd does not implement yet: VM hosts and their metadata service, site agents, self-update and the WebSocket fallback.",
     "href": "/docs/operations/testing"
   },
   {

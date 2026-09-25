@@ -227,8 +227,8 @@ scorer when either would do.
 
 | | `inline` (default) | `pool-lease` (v0.4) |
 | --- | --- | --- |
-| Runs | In the admission transaction, pool row locked only for the commit | In the `capacity.placer` reconciler (`shardBy: 'pool'`, worker role `scheduler`), batches of at most 64 |
-| Plans from | The SQL shortlist or every node of the pool | An in-memory index of the pool (`PoolIndex`), kept across batches |
+| Runs | In the admission transaction, pool row locked only for the commit | In the `capacity.placer` reconciler (`shardBy: 'pool'`, worker role `scheduler`), batches of at most 64; the pool row is locked only after the batch's rows and the index are loaded |
+| Plans from | The SQL shortlist or every node of the pool | An in-memory index of the pool (`PoolIndex`), kept across batches for up to 5 s while the pool row is unchanged. It loads counts and bookings up front and each node's full devices and links the first time a placement looks at that node |
 | Plugins | `admit`, filters, pickers, scorers | `admit` at create; filters, pickers and scorers in each batch |
 
 Instances, gangs and BookingRepair always place inline. Both placers run the same `planPlacement` with the same

@@ -31,6 +31,12 @@ sources:
   - packages/gateway/src/store.ts
   - packages/server/src/tunnels/module.ts
   - packages/postgres/src/migrations/0002_base.ts
+  - packages/postgres/src/migrations/0023_session_trust_version.ts
+  - proto/bettercompute/agent/v1/session.proto
+  - daemon/internal/agent/conn.go
+  - daemon/internal/pki/tickets.go
+  - daemon/internal/pki/secrets.go
+  - tests/pki-rotation.test.ts
   - examples/shared/compose.ts
   - PLAN.md
 ---
@@ -312,7 +318,7 @@ Rotating the root takes three steps, gated on the fleet:
 
 1. add the new root beside the old one (`pki.commandSigningRoots`) and bump `pki.trustVersion`; workers still sign
    under the old root;
-2. once every daemon has acknowledged that version, switch `pki.commandSigning` to the new root;
+2. once every connected daemon reports that version, switch `pki.commandSigning` to the new root;
 3. once nothing is signed under the old root any more, remove it and bump the version again.
 
 `better-compute pki rotate-command-root --stage add|switch|drop` runs one step on the bundle and writes it back
@@ -326,10 +332,23 @@ better-compute pki rotate-command-root --stage switch  # workers sign under the 
 better-compute pki rotate-command-root --stage drop    # the old root is no longer trusted; version up again
 ```
 
-A step out of order is `INVALID_STATE`, and `doctor` reminds you of a rotation left half done (`pki.rotation`). The
-command does not check which trust version the fleet acknowledged; `addTrustRoot`, `trustVersionAcknowledged` and
-`removeTrustRoot` in `better-compute/pki` implement those gates for your own tooling. In production the design keeps
-this root in KMS or Vault transit; the bundle form is for development and small deployments.
+A step out of order is `INVALID_STATE`, and `doctor` reminds you of a rotation left half done (`pki.rotation`).
+
+Every daemon reports the trust bundle version it holds: `Hello.trust_version` at session start, and
+`StatusReport.trust_version` again once it applies a newer bundle from `Welcome.trust` mid-session, so the
+acknowledgment does not wait for a reconnect. bcd and the FakeDaemon both send it. The gateway records it as
+`node_sessions.trust_version` (`core/0023_session_trust_version`; a status report only ever raises it). The
+`--stage switch` step reads that column and refuses with `INVALID_STATE` while any connected node is behind, naming a
+few (`1 of 2 connected node(s) have not applied it (node_old at 1)`), since those nodes would reject every command
+signed under the new root. Connected means a session on a gateway, not ended, seen within the last 2 minutes; a node
+that connects later gets the current bundle in `Welcome` before any command. The check needs the deployment's
+configuration or `BETTER_COMPUTE_DATABASE_URL` and refuses without either; `--force` skips it. While a rotation is
+in progress, the `pki.rotation` finding of `doctor` and the support bundle says how many connected nodes already have
+the new version. `addTrustRoot`, `trustVersionAcknowledged` and `removeTrustRoot` in `better-compute/pki` implement
+the same gates for your own tooling.
+
+In production the design keeps this root in KMS or Vault transit; the bundle form is for development and small
+deployments.
 
 ## Exec tickets and the SSH CA
 
@@ -371,8 +390,10 @@ keys, and you pass the issuer as `betterCompute({ workloadIdentity: { issuer } }
 The host asks for a token over its session with a `WorkloadTokenRequest` signed by its node key (purpose
 `workload-token`), and the answer is sealed to a one-time key (JWE `typ: bcworkload+jwe`, binding the request id,
 the instance and the expiry). `createWorkloadTokenRequest` and `openWorkloadTokenResponse` are the host's half,
-`openWorkloadTokenRequest`, `sealWorkloadTokenResponse` and `refuseWorkloadTokenRequest` the broker's. What the
-broker checks is in [VPS instances](/docs/guides/vps/instances#workload-identity).
+`openWorkloadTokenRequest`, `sealWorkloadTokenResponse` and `refuseWorkloadTokenRequest` the broker's. bcd carries
+the host's half in Go (`NewWorkloadTokenRequest` and `OpenWorkloadTokenResponse` in `daemon/internal/pki`, checked
+against fixtures the TypeScript side produces), but no metadata service calls it yet. What the broker checks is in
+[VPS instances](/docs/guides/vps/instances#workload-identity).
 
 ## Rotation and expiry
 

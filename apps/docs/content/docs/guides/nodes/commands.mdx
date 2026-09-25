@@ -17,6 +17,8 @@ sources:
   - packages/pki/README.md
   - proto/bettercompute/agent/v1/session.proto
   - apps/docs/generated/command-kinds.json
+  - packages/provision/src/remediation.ts
+  - daemon/internal/agent/gpureset.go
 ---
 
 A <Term id="command">command</Term> is a one-shot action on one node: run a diagnostic, re-send inventory,
@@ -48,6 +50,11 @@ command from the API. It accepts an allowlist of kinds; any other kind is `UNSUP
 bcd runs all four. Its `diag.nvml` works from the collected GPU inventory, since NVML is not wired in yet: it checks
 that the GPUs are visible (and the expected count), and the ECC and row-remap checks can only fail on data the
 inventory carries (on a real host today it carries none). Its `node.reboot` goes through `systemctl reboot`.
+
+bcd also runs `gpu.reset`, which `commands.run` does not accept: the provision module's remediation sends it for
+`RowRemapPending` once no allocation is live. bcd refuses the whole command `gpu-busy` while any listed GPU still has
+a live hold, resets the others with `nvidia-smi --gpu-reset`, and reports per GPU whether the reset worked and whether
+a fresh inventory shows it healthy. See [delivery](/docs/daemon/delivery#gpureset-and-live-holds).
 
 ```ts
 const command = await client.commands.run({

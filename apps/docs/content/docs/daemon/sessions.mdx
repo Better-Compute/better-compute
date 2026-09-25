@@ -13,6 +13,7 @@ sources:
   - packages/postgres/src/migrations/0002_base.ts
   - packages/postgres/src/migrations/0008_session_versions.ts
   - packages/postgres/src/migrations/0016_duplicate_identity.ts
+  - packages/postgres/src/migrations/0023_session_trust_version.ts
   - packages/server/src/controllers/liveness.ts
   - packages/testing/src/daemon/fake-daemon.ts
   - daemon/internal/session/session.go
@@ -83,6 +84,7 @@ itself (see `bench/gateway-streams`).
 | `running_command_ids` | Commands this daemon process still has accepted or running |
 | `last_event_seq` | The highest event sequence written in this journal |
 | `inventory_hashes` | Inventory section name to the SHA-256 of its content |
+| `trust_version` | The version of the command-signing trust bundle the daemon holds and verifies with (0 for none) |
 
 bcd builds it from the journal (the rules of `session.NewHello`): done results not yet acked, and entries of the
 current daemon process that are not done. After a daemon restart the process is new, so `running_command_ids` is
@@ -103,6 +105,7 @@ One transaction, fenced by the gateway's lease, does everything the reconnect pr
    ```sql
    UPDATE node_sessions SET gateway_id = $gw, session_id = $s, session_epoch = session_epoch + 1,
      boot_id = $boot, journal_id = $journal, role = $role, daemon_version = $v, proto_max = $max,
+     trust_version = $trust,
      acked_event_seq = CASE WHEN journal_id IS DISTINCT FROM $journal THEN 0 ELSE acked_event_seq END,
      connected_at = compute_now(), last_seen = compute_now(), disconnected_at = NULL
    WHERE node_id = $node
@@ -160,6 +163,12 @@ ends the session ("server time went backwards"). Otherwise a gateway could set t
 expired worker certificate's window and replay old signed commands. bcd and the FakeDaemon both enforce it, and bcd
 also keeps the mark in `identity.json` so that a lost journal does not reset it. A `trust` bundle is accepted only
 when it verifies under the pinned join-signing key and its version is newer than the one held.
+
+The daemon acknowledges a newly applied bundle in its next `StatusReport` (`trust_version`), not at the next
+reconnect. The gateway stores the `Hello` value in `node_sessions.trust_version` as is, even when it is lower than
+before (a restored disk), and a status report only ever raises it; `pki rotate-command-root --stage switch` waits
+until every connected node holds the new version (see [PKI](/docs/operations/pki)). bcd and the FakeDaemon send the
+version in `Hello` and in every status report.
 
 ## Epochs and fencing
 
@@ -316,6 +325,7 @@ One row per node, inserted by JoinService with epoch 0 and owned by the gateways
 | `connected_at`, `disconnected_at` | Set by `Hello` and by the disconnect write |
 | `daemon_version`, `proto_max` | From `Hello`; read by rollouts (migration `core/0008_session_versions`) |
 | `duplicate_hellos`, `duplicate_since` | Duplicate-`Hello` count in the current window, for the quarantine (migration `core/0016_duplicate_identity`) |
+| `trust_version` | The trust bundle version the daemon reported in `Hello` or a later `StatusReport`; read by the command-root switch (migration `core/0023_session_trust_version`) |
 
 Routing is always this join at dispatch time, never a column copied onto commands, so a reconnect needs no rewrite
 and a command enqueued during a reconnect cannot be stranded. See [delivery](/docs/daemon/delivery).

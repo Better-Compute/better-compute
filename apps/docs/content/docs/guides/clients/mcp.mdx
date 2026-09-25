@@ -204,6 +204,11 @@ domain) and `selector` (up to 32 `{ key, op, values }` expressions with `In`, `N
 pool the call returns once the reservation is placed or the wait runs out; see
 [waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement).
 
+`create_instance` takes `poolId`, `flavor` and `imageId`, and optionally `sshKeys`, an `idempotencyKey` and
+`waitSeconds` (0 to 30, default 20), which it sends as `wait: { timeoutMs }`: the call returns once the instance is running or has
+failed, or the wait runs out, so the agent does not have to poll `get_instance`; see
+[waiting for the instance](/docs/guides/vps/instances#waiting-for-the-instance).
+
 The instance tools take one `instanceId` (`inst_…`), except `list_instances`. They pass it to compute as is, with the
 caller's tenant: `stop_instance` is a graceful shutdown that keeps the disk and addresses, `start_instance` runs a
 stopped instance again, and `delete_instance` removes the instance and its disk for good. Unlike `create_instance`,

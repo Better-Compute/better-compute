@@ -252,9 +252,11 @@ PLAN.md stops spending in three layers, and all three work today:
 1. **In the decision.** The `StopWhenOverBudget` statement of the [gpu-user policy](/docs/guides/iam/policies)
    denies new reservations, extensions and instances once `principal.spendExceeded` is true, meaning an enforced
    Better IAM budget covering the caller is spent. It costs nothing extra: Better IAM evaluates it inside the one
-   decision.
-2. **Per pool, before admission.** [`reservations.create`](/docs/reference/api/reservations#create) and
-   [`reservations.extend`](/docs/reference/api/reservations#extend) run capacity's `budgetAdmissionCheck` as their
+   decision. It also names `compute:sandboxes:create` and `compute:sandboxes:update` for the planned v0.5
+   [sandboxes](/docs/guides/vps/sandboxes), which nothing serves yet.
+2. **Per pool, before admission.** [`reservations.create`](/docs/reference/api/reservations#create),
+   [`reservations.extend`](/docs/reference/api/reservations#extend) and
+   [`instances.create`](/docs/reference/api/instances#create) run capacity's `budgetAdmissionCheck` as their
    [`MethodAdmission.check`](/docs/extending/methods#admission-the-request-as-a-resource), after the IAM decision
    with no transaction open. It calls Better IAM's `billing.check` through
    `IamPort.billingCheck({ tenantId, identityId }, credential)` when the pool's policy sets
@@ -269,7 +271,7 @@ PLAN.md stops spending in three layers, and all three work today:
    amount, window) and acts only on an exceeded budget, an `actual` alert at 100% or more. `serve`'s default
    handler then applies capacity's `applyBudgetPolicy`: every offer to the tenant with an `onBudgetExceeded`
    publishes `quota.budget-exceeded`, and `drain` also cancels the tenant's unstarted reservations in that pool.
-   `stop-new` and `drain` also refuse new admissions through the per-pool check above. Offers
+   `stop-new` and `drain` also refuse new reservations and instances through the per-pool check above. Offers
    inherited through `includeDescendants` are not covered, because compute does not know the tenant tree: offer
    the budgeted tenant directly.
 

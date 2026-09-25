@@ -24,6 +24,9 @@ sources:
   - tests/server-tenancy.test.ts
   - packages/cli/src/host/iam.ts
   - packages/cli/src/host/config.ts
+  - packages/iam/src/tenants.ts
+  - packages/cli/src/dev-sim.ts
+  - tests/iam-tenant-reader.test.ts
 ---
 
 import { Coins, Layers, ListChecks } from '@/lib/icons';
@@ -220,29 +223,46 @@ CREATE TABLE compute_tenant_states (
 The rows are written by the `tenant` reaction of the IAM inbox, on `iam:tenants:update` and `iam:tenants:delete`.
 The server ships the handler, `tenantStateHandler`, and `better-compute serve` installs it as the default `tenant`
 reaction when the configuration's host sets `host.iam`. Give it `host.iam.readTenants` so suspensions and
-deletions cascade (anything but a function is `INVALID_CONFIG`):
+deletions cascade (anything but a function is `INVALID_CONFIG`). `iamTenantReader` from `@better-compute/iam`
+builds one over a Better IAM instance or client:
 
 ```ts title="better-compute.config.ts"
+import { iamTenantReader } from '@better-compute/iam';
+
 export const host = defineHost(async () => ({
   iam: {
     bridge,
-    // The tenant and every tenant below it, as IAM reports them now.
-    readTenants: async (tenantId: string) => readSubtreeFromIam(tenantId),
+    // The tenant and every tenant below it, with effective statuses, read as root.
+    readTenants: iamTenantReader(iam, { credential: rootCredential }),
   },
 }));
 ```
+
+`iamTenantReader(iam, { credential, maxTenants? })` uses only `tenants.get` and `tenants.listChildren`, so `iam` can
+be `betterIam()`'s result or anything with those two methods:
+
+- `credential` is a root credential (compute's service account in the IAM root tenant), or a function returning
+  one: only root reads suspended and deleted tenants and every tenant's children.
+- Each status is the tenant's **effective** one, the worst of its own and its ancestors' (`active` < `pending` <
+  `suspended` < `deleted` < `missing`). Better IAM writes a deletion into every descendant's own status, but a
+  suspension only into its decisions, so a child of a suspended tenant reads as `suspended` here.
+- A tenant IAM no longer knows is `missing`. A subtree larger than `maxTenants` (default 10,000) is refused with
+  `INVALID_STATE`.
+
+`better-compute dev --sim` with the embedded Better IAM wires `iamTenantReader` in by itself, so suspending or
+deleting a tenant there reaches its whole subtree.
 
 `host.iam.handlers.tenant` replaces the default. A server you build yourself adds the handler to what it gives
 `bridge.setHandlers()`, which replaces the whole set:
 
 ```ts title="compute.server.ts"
+import { iamTenantReader } from '@better-compute/iam';
 import { tenantStateHandler } from '@better-compute/server';
 
 bridge.setHandlers({
   ...handlers, // agent, identity, sessions, ...
   tenant: tenantStateHandler(compute, {
-    // The tenant and every tenant below it, as IAM reports them now.
-    readTenants: async (tenantId) => readSubtreeFromIam(tenantId),
+    readTenants: iamTenantReader(iam, { credential: rootCredential }),
   }),
 });
 ```
@@ -271,7 +291,9 @@ The gate checks the caller's tenant and the tenants the call acts in; the error'
 `state`. Root-tenant callers are exempt, so the platform can still act in a suspended tenant. The gate answers from
 memory: each process loads the non-active states at start and reloads them every 5 seconds, and the process that
 applied a change reloads before its next call (`compute.tenants.invalidate()`). Another process may therefore
-admit a suspended tenant's mutation for up to 5 seconds.
+admit a suspended tenant's mutation for up to 5 seconds. A reload that fails is reported once per run of failures,
+not every 5 seconds, and the timer stops once the store is closed (a one-shot CLI command closes it without
+stopping compute).
 
 ### Teardown of a deleted tenant
 
@@ -289,7 +311,8 @@ a lost work item. When every hook answers `DONE` in one pass, the reconciler set
 <Callout type="warn" title="Not torn down yet">
 Only `capacity`, `provision` and `metal` implement `tenantDeleted` in this release. A deleted tenant's VPS
 instances, its non-metal `tenant-owned` nodes and its sites are not released by the teardown; the gate only stops
-the tenant from reaching them. Plugins release their own state through the same hook; see
+the tenant from reaching them. Their VMs cannot mint workload identity tokens meanwhile: the workload broker refuses
+a suspended or deleted tenant's instances with `disabled`. Plugins release their own state through the same hook; see
 [modules](/docs/extending/modules#tenantdeleted).
 </Callout>
 

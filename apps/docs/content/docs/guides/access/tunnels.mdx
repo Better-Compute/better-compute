@@ -32,6 +32,11 @@ sources:
   - tests/server-tunnels.test.ts
   - tests/gateway-tunnels.test.ts
   - tests/pki-access.test.ts
+  - daemon/internal/agent/tunnels.go
+  - daemon/internal/agent/pty_linux.go
+  - daemon/internal/pki/tickets.go
+  - daemon/internal/journal/bolt.go
+  - tests/e2e/bcd.test.ts
 ---
 
 A <Term id="tunnel">tunnel</Term> is a two-way byte stream between a caller and something on a node: a shell in an
@@ -63,11 +68,12 @@ sequenceDiagram
   end
 ```
 
-<Callout type="warn" title="The node half is not in bcd yet">
-  The api, pki and gateway halves are implemented and tested. The daemon half (steps 8 and 9) is not in the Go
-  `bcd`: it is built and tested, but ignores `OpenTunnel`. The TypeScript FakeDaemon implements it (ticket check
-  against the spec's JWKS and its own `jti` set, `sid` equal to the tunnel id, then the `Tunnel` stream with `opened`
-  first), so tunnels open end to end in the tests and in `better-compute dev --sim N`, against an echo shell.
+<Callout type="warn" title="Node consoles work in bcd; instance tunnels wait for the VM runtime">
+  Every half is implemented and tested, including the daemon's (steps 8 and 9) in the Go `bcd`, which is built but
+  not released. `tests/e2e/bcd.test.ts` opens a node console through the api's relay, the gateway and a real bcd, and
+  the shell's exit status comes back. bcd has no VM runtime yet, so an `exec` ticket for an instance closes at once
+  with exit status 127; see [the node half](#the-node-half). The TypeScript FakeDaemon answers every op with an echo
+  shell, so tunnels also open end to end in the tests and in `better-compute dev --sim N`.
 </Callout>
 
 ## Turn tunnels on
@@ -461,6 +467,36 @@ gateway, or one that takes longer than 10 seconds, is `UNAVAILABLE`. When the ca
 5 seconds to report its exit status. See [the gateway](/docs/daemon/gateway) and
 [the protocol](/docs/daemon/protocol).
 
+## The node half
+
+bcd answers `OpenTunnel` itself and trusts nothing the gateway says about the ticket
+(`daemon/internal/agent/tunnels.go`, `daemon/internal/pki/tickets.go`):
+
+1. `pki.VerifyExecTicket`, the Go port of `verifyExecTicket`, checks the header `typ` `bc-exec+jwt`, ES256 under the
+   key with the ticket's `kid` in the JWKS pinned by its NodeSpec (`access.exec_ticket_jwks_json`, kept by the
+   [access converger](/docs/guides/access/ssh#what-the-node-needs)), `aud` `node:<its own id>`, a lifetime of at most
+   60 s that is neither in the future nor expired (5 s leeway, against server time), a known op, and a `sid` and a
+   `jti`. Tickets that `@better-compute/pki` issues are interop fixtures of the Go tests.
+2. The `jti` goes into the journal (at most 10,000 live ids, expired ones pruned), so a restart does not forget a
+   spent ticket. A known `jti`, or a full set, is refused as `replayed`.
+3. The ticket's `sid` must equal the tunnel id in `OpenTunnel`, so a gateway cannot reuse a ticket for another
+   stream.
+4. bcd dials the `Tunnel` RPC, sends `opened` first, and starts the program for the op.
+
+A refused ticket opens nothing: bcd logs `tunnel refused` with the reason, and the gateway's open times out after
+10 seconds, exactly as if the node had not answered. A node without a pinned JWKS refuses every ticket, and at most
+16 tunnels are open at once.
+
+| Op | What bcd runs |
+| --- | --- |
+| `console` | A login shell (`/bin/bash -l`, or `/bin/sh -l`) as root in `/`, on a pseudo-terminal opened through `/dev/ptmx` without cgo. `resize` sets the window size, a hang-up sends `SIGHUP` to the shell's process group, and `closed` carries the shell's exit status |
+| `exec` | Without an instance in the ticket, the same shell. Into an instance, nothing: the tunnel closes with exit status 127 until bcd has an instances runtime |
+| `ssh` | A TCP connection to the node's own sshd on `127.0.0.1:22` |
+| `tcp` | A TCP connection to the ticket's `port` on `127.0.0.1` |
+
+`tunnels.open` issues `ssh` and `tcp` only for instances, and bcd has no VM runtime yet, so on a bcd host the
+`console` op is the one that is used today.
+
 ## The web terminal
 
 The console (`apps/console`) has a terminal on every instance (`/instances/<id>/terminal`, decided as
@@ -503,5 +539,7 @@ production, without the key file, tunnels are off. See [the console](/docs/guide
 | Tunnel lifetime | 12 h at most |
 | WebSocket message | 1 MiB at most; ping every 30 s |
 | Node open timeout (gateway) | 10 s |
+| Tunnels open at once on one bcd node | 16 |
+| Spent ticket ids a bcd node remembers | 10,000, until each expires |
 | Exit status grace after the caller hangs up | 5 s |
 | TCP ports | 1 to 65535, instances only |

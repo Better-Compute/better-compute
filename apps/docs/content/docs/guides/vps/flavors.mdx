@@ -5,7 +5,7 @@ metaTitle: VPS flavors and instance shapes
 icon: SlidersHorizontal
 status: beta
 packages: ['@better-compute/vps', '@better-compute/capacity']
-sources: ['packages/vps/src/flavors.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/usage.ts', 'packages/vps/src/module.ts', 'packages/capacity/src/bookings.ts', 'packages/capacity/src/placer.ts', 'packages/capacity/src/shortlist.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/provision/src/profile.ts', 'packages/fleet/README.md', 'tests/vps-instances.test.ts']
+sources: ['packages/vps/src/flavors.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/usage.ts', 'packages/vps/src/module.ts', 'packages/vps/src/hosts.ts', 'packages/capacity/src/bookings.ts', 'packages/capacity/src/placer.ts', 'packages/capacity/src/shortlist.ts', 'packages/postgres/src/migrations/0002_base.ts', 'packages/provision/src/profile.ts', 'packages/fleet/README.md', 'tests/vps-instances.test.ts']
 ---
 
 Tenants should not have to know how many vCPUs a host has or what a provider calls its server types. A
@@ -72,11 +72,19 @@ A host fits when, for every scalar, `allocated + claim <= floor(allocatable × r
 `ratio` is the overcommit: with `allocatable` 16 vCPU and `ratio` 2, a host takes 32 vCPUs of flavors. GPUs are never
 overcommitted. A host with no row for a scalar the flavor asks for is not a candidate.
 
-<Callout type="warn" title="Host scalars are not filled in automatically yet">
-In this release nothing derives a VPS host's `node_resources` rows from its inventory, and the pool's
-`policy.overcommit` is not applied to `ratio`. The tests and the churn acceptance write the rows directly. Until
-inventory fills them, a hosted pool has no candidate hosts unless you do the same.
-</Callout>
+The `vps.hosts` work (every 30 seconds, `vps({ hostSyncEvery })`) derives those rows from each host's applied
+inventory, for nodes of `vps-host` pools that are not `tenant-controlled`:
+
+| Scalar | `allocatable` |
+| --- | --- |
+| `vcpu` | logical CPUs (`cpu.threads`) minus the reserve |
+| `memoryGiB` | installed memory in whole GiB minus the reserve |
+| `diskGiB` | non-removable disks in whole GiB minus the reserve |
+
+The reserve is what a host keeps for itself, `vps({ hostReserve })`, by default 2 vCPU, 8 GiB and 100 GiB. `ratio` is
+the pool's `policy.overcommit[resource]` (default 1, clamped to 0.1 to 100). Rows are written only when they change,
+and a shrinking host never drops `allocatable` below what is already allocated. Until a host has reported inventory
+it has no rows and is not a candidate; `doctor` warns `vps.hosts.capacity` for adopted hosts in that state.
 
 The same shape is what the instance counts against the tenant's quota in the pool: `vcpu`, `memoryGiB`, `diskGiB`,
 and `gpu` when `gpus` is above 0. The placement charges it, and deleting the instance returns it. See

@@ -8,7 +8,7 @@ import { cx } from '@/utils/cx';
  * The modules as units in a rack, straight from the generated registry (generated/modules.json, written by
  * scripts/generate.mjs from a control plane with every module registered): each unit's API groups and migration
  * count. The server registers the built-in ones itself; the rest are injected through `modules`. The sandboxes unit
- * is decided (PLAN.md D24) but not built, so its LED is dark.
+ * (PLAN.md §3.7, a v0.5 deliverable layered on vps()) is planned but not built, so its LED is dark.
  */
 const builtIn = new Set(['node-controllers', 'site-boot', 'inventory', 'capacity', 'pki']);
 
@@ -40,7 +40,7 @@ export function ModuleRack() {
     name: 'sandboxes',
     groups: [],
     migrations: 0,
-    kind: 'planned · D24',
+    kind: 'planned · v0.5',
     href: '/docs/guides/vps/sandboxes',
     planned: true,
   });
@@ -92,7 +92,11 @@ export function ModuleRack() {
                   {unit.name}
                 </span>
                 <span className="hidden min-w-0 truncate font-mono text-caption-1-regular text-text-secondary sm:block">
-                  {unit.groups.length ? unit.groups.join(' · ') : unit.planned ? 'templates · TTL · snapshots · warm pools' : 'no API group'}
+                  {unit.groups.length
+                    ? unit.groups.join(' · ')
+                    : unit.planned
+                      ? 'sandboxes · sandboxTemplates (planned)'
+                      : 'no API group'}
                 </span>
                 <span className="text-end font-mono text-[0.6875rem] tracking-[0.04em] text-text-tertiary uppercase">
                   {unit.kind}

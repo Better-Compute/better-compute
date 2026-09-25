@@ -20,6 +20,8 @@ sources:
   - apps/console/src/components/ssh-cert-panel.tsx
   - 'apps/console/src/app/(console)/nodes/[nodeId]/page.tsx'
   - daemon/internal/converge/converge.go
+  - daemon/internal/agent/access.go
+  - daemon/internal/agent/host.go
   - tests/server-tunnels.test.ts
   - tests/pki-access.test.ts
 ---
@@ -236,7 +238,7 @@ Revocation also happens without a call, the same way (the serial joins the node'
 
 | Trigger | Revokes | Where |
 | --- | --- | --- |
-| A Better IAM role activation ends (`binding:deactivate`) | The holder's live certificates in that tenant | `serve`'s default IAM `binding` handler |
+| A Better IAM role activation ends (`binding:deactivate`) | The holder's live certificates in every tenant (an inherited binding reaches child tenants). A revocation that does not name its holder in `metadata.identityId` revokes nothing and is left to the re-decision | `serve`'s default IAM `binding` handler |
 | The identity is offboarded, expires or is deleted (or the `IamReconcile` backstop finds it gone) | Every certificate it holds, in every tenant, before its streams close; an update such as a rename keeps them | `serve`'s default `identity` handler |
 | The identity's sessions are revoked (`auth:session:revoke`, `auth:session:revoke-others`, `identity:revoke-sessions`) | Every certificate it holds, since the event does not say which session ended; issue a new one from a live session | `serve`'s default `sessions` handler |
 | A re-decision says no | That certificate, with reason `access-withdrawn` | The `tunnels.ssh-certificates-reauthorize` reconciler |
@@ -259,20 +261,39 @@ part of one.
 
 The node must trust the CA for user certificates, accept only its own principals and honour the revocation list.
 The control plane sends all three in NodeSpec `access` (`sshCaPublicKeys`, `sshPrincipals`, `sshRevokedSerials`),
-but nothing applies them yet: `bcd` has no `access` converger, so it and the FakeDaemon both report a non-empty
-`access` section as `SectionUnsupported`. Until the daemon does it, configure sshd yourself with the
-`sshCaPublicKey` that `better-compute pki show` prints:
+and bcd's `access` converger (`daemon/internal/agent/access.go`) turns them into sshd configuration:
+
+| File | Content |
+| --- | --- |
+| `/etc/ssh/sshd_config.d/10-better-compute.conf` | The drop-in below |
+| `/etc/ssh/bc_ca.pub` | The CA public keys, one per line |
+| `/etc/ssh/bc_principals/<account>` | This node's principals for that account, `<account>@<nodeId>`, one per line |
+| `/etc/ssh/bc_krl` | An OpenSSH KRL revoking `sshRevokedSerials` under every CA key |
 
 ```text title="/etc/ssh/sshd_config.d/10-better-compute.conf"
-TrustedUserCAKeys /etc/ssh/better-compute-ca.pub
-AuthorizedPrincipalsFile /etc/ssh/better-compute-principals/%u
+# Written by bcd from NodeSpec access (break-glass SSH certificates). Do not edit.
+TrustedUserCAKeys /etc/ssh/bc_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/bc_principals/%u
+RevokedKeys /etc/ssh/bc_krl
 ```
 
-Put `root@<nodeId>` (one line per account in `sshAccounts`) in `/etc/ssh/better-compute-principals/root`. Without an
-`AuthorizedPrincipalsFile`, sshd would only accept a principal equal to the account name, which these node-bound
-certificates never carry. To honour revocations by hand, build a KRL from the revoked serials with `ssh-keygen -k`
-and point `RevokedKeys` at it. Logging in as `root` also needs `PermitRootLogin` to allow key logins; its default,
-`prohibit-password`, does.
+- **Only this node's principals.** A principal for another node, or one whose account is empty or contains `/`,
+  `\`, `.` or whitespace, is never written, so a certificate for one node cannot open another that trusts the same CA.
+  Without an `AuthorizedPrincipalsFile`, sshd would accept only a principal equal to the account name, which these
+  certificates never carry.
+- **A native KRL.** bcd encodes the KRL itself (OpenSSH's `PROTOCOL.krl`, a certificate-serial section per CA key,
+  `krl_version` set to the spec generation). With no revoked serials it is a valid empty KRL. The Go tests check the
+  file with `ssh-keygen -Q` when it is installed.
+- **Reloads only when needed.** sshd reads the CA, principals and KRL files at each login, so a new revocation takes
+  effect without a reload. bcd runs `systemctl reload-or-restart` on `ssh`, then `sshd`, only when the drop-in
+  itself is written or removed.
+- **Empty removes everything.** An empty or absent `access` section removes every file bcd wrote, so the node
+  stops trusting the CA when the control plane stops sending it. Stale principal files are removed on every pass.
+
+The FakeDaemon has no such converger and still reports a non-empty `access` section as `SectionUnsupported`. On a
+node without bcd, configure sshd the same way by hand with the `sshCaPublicKey` that `better-compute pki show`
+prints, and build the KRL with `ssh-keygen -k`. Logging in as `root` also needs `PermitRootLogin` to allow key
+logins; its default, `prohibit-password`, does.
 
 ## In the console
 
@@ -287,8 +308,8 @@ asks you to sign in again with a second factor instead of showing the error.
 | --- | --- |
 | `nodes.issueSshCert` with MFA, TTL at most 1 h and never past the session, node-bound principal, `permit-pty` only, recorded, rate-limited | Shipped when `tunnels.ssh` is set |
 | The CA key, principals and revoked serials in NodeSpec `access` | Shipped |
-| Nodes applying them automatically | Not yet: needs the daemon's `access` converger |
-| `nodes.revokeSshCert` and the node's KRL (`access.sshRevokedSerials`) | Shipped in the control plane; sshd enforces it only once the node applies it |
+| Nodes applying them automatically | In bcd's `access` converger (built and tested, bcd not released yet); not in the FakeDaemon |
+| `nodes.revokeSshCert` and the node's KRL (`access.sshRevokedSerials`) | Shipped in the control plane; bcd writes the KRL that sshd enforces |
 | Revoking certificates on `binding:deactivate` | Shipped as `serve`'s default IAM `binding` handler |
 | Revoking certificates on offboarding, expiry, deletion and session revocation | Shipped as `serve`'s default `identity` and `sessions` handlers |
 | Re-deciding live certificates every minute (`tunnels.ssh-certificates-reauthorize`) | Shipped; IAM unreachable keeps a certificate until it expires |

@@ -129,7 +129,7 @@ for in each mode.
     },
     admission: {
       type: "{ budgetCheck?: 'none' | 'meter' }",
-      description: "'meter': reservations.create and extend call IAM billing.check after the decision and refuse a spent budget with SPEND_LIMIT_REACHED. An offer's onBudgetExceeded stop-new or drain turns the same check on.",
+      description: "'meter': reservations.create, reservations.extend and instances.create call IAM billing.check after the decision and refuse a spent budget with SPEND_LIMIT_REACHED. An offer's onBudgetExceeded stop-new or drain turns the same check on.",
     },
   }}
 />
@@ -138,7 +138,7 @@ The placer reads the overcommit ratio stored on each `node_resources` row, not t
 vps module fills those rows from `overcommit`: for `vps-host` pools, its `vps.hosts` work writes
 `vcpu`, `memoryGiB` and `diskGiB` from each host's inventory with the pool's ratio (default 1, clamped
 to 0.1 to 100); on other pool classes the field has no effect. `admission.budgetCheck: 'meter'` adds a Better IAM
-`billing.check` to every reservation admission in the pool, on top of the IAM policy described in
+`billing.check` to every reservation and instance admission in the pool, on top of the IAM policy described in
 [quotas and usage](/docs/guides/capacity/quotas-and-usage).
 
 ## Create a pool

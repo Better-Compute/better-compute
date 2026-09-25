@@ -73,12 +73,12 @@ const vm = await client.instances.create({
     label: 'Sandbox',
     unit: 'isolated VMs',
     summary:
-      'Run untrusted code in its own VM. Nothing of the platform runs inside the guest, user data is sealed to its tenant, and access goes through single-use tunnel tickets. Today a sandbox is a VPS instance; a dedicated sandbox API with templates, TTLs, snapshots and warm pools is being built.',
+      'Run untrusted code in its own VM. Nothing of the platform runs inside the guest, user data is sealed to its tenant, and access goes through single-use tunnel tickets. Today a sandbox is a VPS instance; a sandboxes API with templates, lifetimes, warm pools of paused VMs and snapshots is planned for v0.5.',
     specs: [
       ['Isolation', 'vm, microvm or container trait'],
       ['Inside', 'no join token, no bcd, no IAM key'],
       ['Access', 'exec, ssh, tcp via tunnels.open'],
-      ['Status', 'instances: beta · sandbox API: planned'],
+      ['Status', 'instances: beta · sandboxes API: v0.5'],
     ],
     href: '/docs/guides/vps/sandboxes',
     linkLabel: 'Sandboxes',

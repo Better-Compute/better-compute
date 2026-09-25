@@ -25,6 +25,9 @@ sources:
   - proto/bettercompute/agent/v1/inventory.proto
   - daemon/internal/inventory/collect.go
   - daemon/internal/agent/kinds.go
+  - daemon/internal/agent/healthwatch.go
+  - daemon/internal/agent/gpureset.go
+  - daemon/internal/health/health.go
 ---
 
 Placement can only book what the control plane knows a node has, and should only book it on hardware that
@@ -62,6 +65,10 @@ bcd's `inventory.Collector` reads procfs and sysfs without cgo. It fills `system
 ECC counters, row remapping, MIG state or NVLinks, and there is no `bmc` section. It collects when the process
 starts (so after every boot) and whenever `inventory.refresh` or `diag.nvml` asks for a rescan; the event-driven and
 12-hour rescans are not built. The fakehw build reports the full fake HGX board instead.
+
+Without NVML, bcd still sees XIDs: it follows the kernel log (`/dev/kmsg`) and reports each one as a condition, and
+it samples host pressure every 30 seconds. See [XID events](#health-quarantines-and-remediation) and
+[host pressure](#host-pressure).
 </Callout>
 
 ## How inventory travels
@@ -280,6 +287,11 @@ createGateway({ reports: { status: [xidStatusHandler, hostPressureStatusHandler(
 `hostPressureStatusHandler({ thresholds })` takes other raise thresholds (`cpu`, `steal`, `memory`, `io`). In
 tests, `FakeDaemon.setPressure()` puts a `HostPressure` into every status report.
 
+bcd reports real values (`daemon/internal/health`). Every 30 seconds it reads the `some avg10` line of
+`/proc/pressure/cpu`, `memory` and `io`, and computes CPU steal from the `cpu` line of `/proc/stat` as the share of
+CPU time stolen since the previous sample (0 on the first). It puts the sample into its latest `StatusReport` and
+sends that report again. A kernel without PSI yields no `pressure` at all, so no pressure condition is raised.
+
 ## Health, quarantines and remediation
 
 Not every fault should take a whole node away. A GPU with a double-bit ECC error is one bad atom on an
@@ -293,9 +305,17 @@ eight-GPU machine, while a GPU that fell off the bus usually needs a reboot of t
   gateway's `xidStatusHandler` installed (`createGateway({ reports: { ...gatewayReportHandlers, status:
   xidStatusHandler } })`), each one goes through `recordXid`. XIDs without a policy (13, 31, 43, 45 and other
   application faults) are only recorded as events.
+- **XIDs in bcd.** bcd follows `/dev/kmsg` from its end and parses driver lines of the form
+  `NVRM: Xid (PCI:0000:18:00): 79, ...`. It normalizes the bus id to NVML's form (`00000000:18:00.0`), finds the GPU
+  with that bus id in its inventory, and raises condition `Xid79` (status `TRUE`, `device_id` the GPU's UUID, the
+  driver's text as the message), one per XID and GPU. The status report goes out at once, and the condition stays in
+  every later report. An XID for a bus id the inventory does not know is only logged. bcd keeps these conditions in
+  memory for the life of its process, so they end with the reboot that follows (and also with a restart of bcd
+  itself, since it reads the kernel log from its end).
 - **Remediation.** Node-level faults queue the `health` reconciler of the provision module. It waits until
   the node holds no live allocation, then runs a `node.reboot` workflow (`Xid79`, `Xid95`) or a GPU reset
-  (`RowRemapPending`). Runs share the pool's disruption budget (`policy.disruptionBudget`, 5% of the pool and
+  (`RowRemapPending`; bcd's `gpu.reset` refuses a GPU that still has a live hold, see
+  [delivery](/docs/daemon/delivery#gpureset-and-live-holds)). Runs share the pool's disruption budget (`policy.disruptionBudget`, 5% of the pool and
   at least one node, together with workflows and rollouts), and a circuit breaker pauses remediation for a pool
   when more than 10% of its nodes turned unhealthy within 10 minutes (`pool.remediation.paused`). A successful
   reboot clears the XID conditions and their quarantines; a GPU reset is confirmed by the next inventory. A

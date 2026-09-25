@@ -27,6 +27,10 @@ sources:
   - packages/postgres/src/migrations/0008_session_versions.ts
   - daemon/internal/session/session.go
   - daemon/internal/transport/transport.go
+  - daemon/internal/agent/conn.go
+  - daemon/internal/agent/requests.go
+  - daemon/internal/agent/tunnels.go
+  - daemon/internal/pki/secrets.go
   - daemon/buf.gen.yaml
   - scripts/daemon-proto-gen.mjs
   - tests/e2e/bcd.test.ts
@@ -139,11 +143,11 @@ send frames as they need to.
 
 | AgentFrame (daemon to gateway) | Purpose |
 | --- | --- |
-| `hello` | Identity, versions, journal cursors, inventory hashes |
+| `hello` | Identity, versions, journal cursors, inventory hashes, and `trust_version`: the trust bundle version the daemon holds (0 for none) |
 | `heartbeat` | Free lane credits, coarse load, applied generation; inventory hashes on every 10th |
 | `update` | A `CommandUpdate`: acked, running, or a terminal outcome |
 | `events` | An `EventBatch` of journaled events for one `journal_id` |
-| `status` | A `StatusReport`: observed and applied generation, section states, conditions; from v0.3 the hosted instances and `pressure` (`HostPressure`: CPU, memory and I/O PSI "some" avg10 and CPU steal) |
+| `status` | A `StatusReport`: observed and applied generation, section states, conditions; from v0.3 the hosted instances and `pressure` (`HostPressure`: CPU, memory and I/O PSI "some" avg10 and CPU steal); `trust_version` once the daemon applied a newer trust bundle mid-session (0 means unchanged; bcd sets it in every report) |
 | `inventory` | One `InventorySection`: the canonical encoding of a section and its SHA-256 |
 | `spec_request` | Asks for a full `DesiredState` |
 | `secret_request` | Asks for one secret, sealed to a one-time key (v0.2) |
@@ -176,6 +180,13 @@ reference is bound to the agent's current step or allocation, and answers with a
 `unavailable`. Gateways see ciphertext only. A session whose certificate is tenant-controlled always gets
 `access-denied`.
 
+bcd builds the request and opens the answer in `daemon/internal/pki/secrets.go` (`NewSecretRequest`,
+`OpenSecretResponse`): the JWE has `typ` `bcsecret+jwe` and must be bound to the same reference and request id and
+unexpired, and a refusal surfaces its error code. The agent matches answers by request id on the session that sent
+the request, waits at most 10 seconds and ignores an answer to nothing. The Go tests check both directions against
+fixtures produced by `@better-compute/pki`. No bcd feature sends a `SecretRequest` yet; the VM runtime (user data)
+and ramdisk deploys will.
+
 ### Workload tokens (v0.5)
 
 A VPS host's metadata service gets a hosted instance's workload identity token the same way:
@@ -184,7 +195,9 @@ default, `epk` is a fresh P-256 key used once, and `node_sig` (purpose `workload
 gateway relays it to `GatewayServices.workloadToken` outside the frame queue, and the answer is
 `WorkloadTokenResponse{request_id, jwe, expires_at, error}`: a compact JWE of the token to `epk`, or an `error` of
 `not-bound`, `disabled`, `audience`, `rate-limited`, `access-denied` or `unavailable`. A gateway without the service
-answers `unavailable`, and a tenant-controlled session always gets `access-denied`. See
+answers `unavailable`, and a tenant-controlled session always gets `access-denied`. bcd implements the host's half
+the same way as secrets (`NewWorkloadTokenRequest`, `OpenWorkloadTokenResponse`, a `bcworkload+jwe` answer bound to
+the instance and the request id), but it has no metadata service to call it yet. See
 [workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels (v0.3)
@@ -193,8 +206,9 @@ answers `unavailable`, and a tenant-controlled session always gets `access-denie
 seconds, with a single-use `jti`, audience `node:<id>`, a `sid` and an `op`. The gateway verifies it before asking,
 and the daemon verifies it again against the JWKS in its NodeSpec `access` section and its own `jti` set. The
 daemon's first `TunnelFrame` is `opened`; then `data` on channel 0 (stdin and stdout, or the byte stream) or 1
-(stderr), `resize` with rows and columns, and `closed` with an exit code. Limits and re-authorization are in
-[tunnels](/docs/guides/access/tunnels).
+(stderr), `resize` with rows and columns, and `closed` with an exit code. bcd refuses a ticket by opening nothing,
+so the gateway's open times out; it runs at most 16 tunnels at once. What it runs for each op, limits and
+re-authorization are in [tunnels](/docs/guides/access/tunnels#the-node-half).
 
 ## Message size bounds
 

@@ -190,7 +190,7 @@ reports, command traffic, joins, gateway jobs and reconcilers make no IAM call. 
 | A list page | One coarse decision, then at most one `authorizeMany` per 50 items |
 | A feature flag | One `features.isEnabled` per tenant and key on a cache miss, never one per admission |
 
-A resolver hit inside IAM's locked transaction does no I/O. A reservation admission costs one more call,
+A resolver hit inside IAM's locked transaction does no I/O. A reservation or instance admission costs one more call,
 `billingCheck`, when its pool's policy sets `admission.budgetCheck: 'meter'` or the tenant's offer reacts to a
 spent budget with `stop-new` or `drain` (see [Billing and usage](/docs/guides/iam/billing-and-usage#budgets)).
 
@@ -247,7 +247,7 @@ built in: remembering `successorId` from `identity:offboard`, and invalidating t
 | `identity` | Drops the identity's cached authentications. For an owner gone for good (offboarded, expired, deleted, or found so by the `IamReconcile` backstop), `identityEndOf` finds the successor (from the event, or the one remembered in `iam_successors`) and `reassignReservations` hands its live reservations to it (`reservation.reassigned`); without a successor its unstarted reservations are cancelled. Its break-glass SSH certificates are revoked in every tenant, then its streams and tunnels close |
 | `sessions` | Clears the authentication cache. When an identity's own sessions are revoked, it revokes the identity's break-glass SSH certificates (the event does not say which session ended) and re-authorizes its tunnels at once |
 | `authz` | Drops read-decision and flag caches |
-| `binding` | On `binding:deactivate`, revokes the holder's live SSH certificates in the tenant (`node.ssh-cert.revoked`, the serial joins the node's KRL) and has every gateway re-check the holder's tunnels |
+| `binding` | On `binding:deactivate`, revokes the holder's live SSH certificates in every tenant, including child tenants reached through an inherited binding (`node.ssh-cert.revoked`, the serial joins the node's KRL), and has every gateway re-check the holder's tunnels. The holder is the actor only when they ended their own activation; a revocation must name its holder in `metadata.identityId`, and one that does not is reported through `onError` and left to the per-minute re-authorization, so an administrator's own certificates are never taken for the holder's |
 | `budget` | `budgetAlertHandler(applyBudgetPolicy)`: for an exceeded budget, each offer to the tenant publishes `quota.budget-exceeded`, and `drain` also cancels the tenant's unstarted reservations in that pool |
 | `tenant` | The server's `tenantStateHandler`: mirrors suspended and deleted tenants into `compute_tenant_states`, publishes `tenant.state-changed`, reloads the envelope's tenant gate and schedules a deleted tenant's teardown. With `host.iam.readTenants` a suspension or deletion cascades to the subtree; without it only a deletion of the named tenant applies. See [tenancy](/docs/guides/iam/tenancy#suspended-and-deleted-tenants) |
 

@@ -119,7 +119,7 @@ breaking. PLAN.md §5.1 keeps every `define*` helper **experimental until v1.0**
 | Scheduler plugins | Built: filters, scorers, atom pickers and admission hooks run in both placers. |
 | Sinks | Built: event sinks on OutboxDispatch with durable cursors and dead letters; audit sinks on the built-in `audit-sinks` module. Usage sinks are refused with `INVALID_CONFIG` (usage goes to IAM billing through the bridge); see [sinks](/docs/extending/sinks#usage). Sinks and scheduler plugins a module lists in `extensions` run like those in the options. |
 | Attestors | Built: `join-token`, `x509pop`, `provisioned`, `discovery`, `cloud-iid` and `tpm` are all `defineAttestor` values. bcd produces only `join-token` joins; its producers for the others are not written. |
-| Drivers, steps, profiles | Built in TypeScript (`metal`, `provision`). bcd runs only the four v0.1 node kinds; the site-agent and ramdisk modes that run driver operations and steps are not written. |
+| Drivers, steps, profiles | Built in TypeScript (`metal`, `provision`). bcd runs only its five built-in node kinds; the site-agent and ramdisk modes that run driver operations and steps are not written. |
 | Providers | Built: `hetzner` and `proxmox` provider packages, checked by `providerConformanceCases()`. |
 | bcx out-of-process drivers | A v0.5 draft. `@better-compute/driver-sdk` works for TypeScript plugins; the proto is unstable until v0.5 ships. |
 

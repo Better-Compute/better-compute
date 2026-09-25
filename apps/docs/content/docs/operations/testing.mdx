@@ -16,6 +16,9 @@ sources:
   - packages/testing/src/sim/invariants.ts
   - packages/testing/src/sim/control-plane.ts
   - packages/testing/src/sim/nightly.ts
+  - packages/testing/src/sim/cold-start.ts
+  - tests/sim/cold-start.test.ts
+  - tests/nightly/cold-start.nightly.ts
   - packages/testing/src/realtime/harness.ts
   - packages/testing/src/realtime/fleet.ts
   - packages/iam/src/testing.ts
@@ -221,7 +224,9 @@ Application Control may refuse locally built executables, it cross-compiles each
 linux/amd64 into `daemon/bin/tests/` and runs it inside WSL from the package directory, so `testdata` paths resolve.
 The pki tests read `daemon/internal/pki/testdata/interop.json`, which `node scripts/daemon-fixtures.mjs` writes with
 `@better-compute/pki` (a node certificate, a signed `JoinResponse`, a sealed JWE, signed commands, specs and a trust
-bundle), so Go is checked against the TypeScript implementation byte for byte.
+bundle, an exec ticket, and secret and workload-token exchanges), so Go is checked against the TypeScript
+implementation byte for byte. The tunnel tests run a shell on a real pseudo-terminal (a resize is seen by `stty`),
+and the `access` tests check the generated KRL with `ssh-keygen -Q` when `ssh-keygen` is installed.
 
 ```bash
 node scripts/daemon-test.mjs                          # every package
@@ -247,6 +252,8 @@ under `/tmp`. It checks that:
 - `inventory.refresh` succeeds;
 - a 2-GPU reservation turns active on a node-signed `AllocationBound` (checked by `pkiAllocationBindingCheck`), its
   CDI hold appears under the fake root, and it disappears on release;
+- a node console opened with `tunnels.open` (op `console`) through the dev stack's tunnel relay and gateway reaches a
+  real shell in bcd: `echo hi-$((6*7))` answers `hi-42`, and `exit 5` comes back as exit code 5;
 - `node.reboot` completes `SUCCEEDED` from the next boot, with the new boot id recorded in `node_sessions`.
 
 On Linux the suite runs in `pnpm test` whenever Go is installed; it builds the binary first. On Windows it is opt-in:
@@ -338,6 +345,7 @@ ticks.
 | `restricted` | The last `count` nodes join with a certificate that allows only `allowedKinds` |
 | `modules` | Extra control-plane modules, ticked with the rest |
 | `gateway` | Extra gateway options, such as lease timings |
+| `workerPasses` | Batches each control-plane job may run per simulator tick while it keeps finding work, as a real worker loops without sleeping (default 1) |
 
 The rig offers `run(ms)`, `api(fn)`, `killGateway(i)`, `reviveGateway(i)`, `stallGateway(i, stalled)`,
 `pauseWorkers(paused)`, `revokeNode(nodeId)`, `homeOf(nodeId)`, `serialOf(nodeId)` and `invariants()`, which reads
@@ -368,6 +376,24 @@ the end. Defaults: seeds `1,2,3`, chaos `light,heavy`, 16 nodes, 3 gateways, 60 
 `bench/sim-nightly/results`. A CI-sized night (4 nodes, 2 gateways, 6 minutes) runs in `tests/sim/nightly.test.ts`;
 both check I7 through `invariants`.
 The v0.4 exit asks for every section 15 scenario green on three consecutive nights.
+
+### Cold start
+
+`runColdStart({ seed, nodes?, gateways?, startSpreadMs?, limitMs?, settleMs?, restart?, restartDownMs?, stepMs?,
+workerPasses? })` is the v0.4 "10k cold start in 3 minutes" scenario on the control-plane simulator. The fleet powers
+on at random times within `startSpreadMs` (default 30 s) behind `gateways` (default 3) gateways; each node's first
+session (`node.connected`) and its adoption (`node.adopted`) are timed from power-on, in simulated time, from the
+outbox. The run is ready when every node is connected, adopted and schedulable, and it must be ready within
+`limitMs` (default 3 minutes). With `restart` (default true) every gateway then goes down and every node
+power-cycles, and the way back is timed the same way. The invariants I1 to I5 and I8 are checked at the end, and a
+`node.unreachable` mark during boot fails the run. Defaults: 100 nodes and `workerPasses` 10. The report has
+per-phase latency summaries, `unreachableMarks`, `schedulable`, the violations and `wall.loops`, the wall time
+spent in each part of the loop.
+
+| Where | Size |
+| --- | --- |
+| `tests/sim/cold-start.test.ts` | 24 nodes, in CI: boot and power cycle each within 3 simulated minutes, nothing marked unreachable |
+| `tests/nightly/cold-start.nightly.ts` (`pnpm sim:nightly`) | `COLD_START_NODES` (default 10,000), `COLD_START_GATEWAYS` (3), `COLD_START_SPREAD_MS` (30,000), `COLD_START_SEED` (`1`); writes a report to `COLD_START_OUT` (default `bench/cold-start/results`). About 15 minutes of wall time at 10k nodes on a desktop |
 
 ## Real-time harnesses
 

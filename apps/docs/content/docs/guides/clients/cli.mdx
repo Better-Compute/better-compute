@@ -40,7 +40,7 @@ Every command declares a target, and the target decides what it needs:
 
 | Target | Needs | Commands |
 | --- | --- | --- |
-| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `console`, `exec`, `ssh-cert`, `fleet export/plan/status/apply`, `auth login` |
+| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
 | `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `audit check-proof` |
 
@@ -165,12 +165,13 @@ or `gpuProduct` match. See [reservations](/docs/guides/capacity/reservations).
 
 ## Interactive access
 
-Three commands in the `Access` group open a shell from your terminal, decided like any other call as the token's
-identity:
+Four commands in the `Access` group reach a node or an instance from your terminal, decided like any other call as
+the token's identity:
 
 ```bash
 better-compute console --url https://compute.example.com --tenant acme --node node_01k5w…
 better-compute exec --url https://compute.example.com --tenant acme --instance inst_01k5w…
+better-compute forward --url https://compute.example.com --tenant acme --instance inst_01k5w… --port 5432
 better-compute ssh-cert --tenant acme --node node_01k5w… && ssh -i ~/.ssh/id_ed25519 root@10.0.0.5
 ```
 
@@ -183,6 +184,15 @@ better-compute ssh-cert --tenant acme --node node_01k5w… && ssh -i ~/.ssh/id_e
 - The terminal is in raw mode until the remote program exits: every key goes to the remote, Ctrl-C included, and
   the window size follows resizes. **Ctrl-]** detaches. The command exits with the remote program's status, as ssh
   does, and with 255 when the tunnel itself breaks (`REMOTE_EXIT`).
+- **`forward`** (`--instance`, `--port` 1 to 65535) works like `ssh -L`: it listens on `--bind` (default
+  `127.0.0.1`) at `--local-port` (default the same as `--port`; `0` picks a free one) and forwards each accepted
+  connection to that port of the running instance through a `tcp` tunnel of its own, a fresh `tunnels.open` per
+  connection decided as `compute:instances:exec`. It runs until Ctrl-C. The token is resolved before anything
+  listens, and it needs `--url` like `console` and `exec`. A connection that cannot be opened is closed with a note;
+  the tunnel has no half-close, so a client that ends its side ends the connection. A `--bind` other than loopback
+  lets anyone who reaches that address use your access. Instance `tcp` and `ssh` tunnels open only when the node's
+  daemon advertises the `tunnel.instance-dial` capability in its `Hello`; otherwise `tunnels.open` answers
+  `UNSUPPORTED` with `details.reason: 'daemon-capability'`.
 - **`ssh-cert`** sends your own public key (`--key`, default `~/.ssh/id_ed25519.pub`, else `id_ecdsa.pub`) to
   `nodes.issueSshCert` and writes the node-bound certificate beside it as `<key>-cert.pub`, where `ssh -i <key>`
   finds it. `--account` (default `root`) is the Unix account and `--minutes` (default 15, 1 to 60) the validity,
@@ -297,7 +307,7 @@ exit non-zero with the error's code:
 | --- | --- |
 | `MISSING_ENV` | a token command with no credential: no `BETTER_COMPUTE_TOKEN` and no saved session or profile |
 | `CONFIG_NOT_FOUND` | no configuration found, and no `--url` or `BETTER_COMPUTE_DATABASE_URL` |
-| `UNAUTHENTICATED`, `ACCESS_DENIED`, `CONFIRMATION_REQUIRED`, … | the API's own codes, from the server; see [errors](/docs/reference/errors) |
+| `UNAUTHENTICATED`, `ACCESS_DENIED`, `CONFIRMATION_REQUIRED`, … | the API's own codes, from the server; see [errors](/docs/reference/errors). `TENANT_SUSPENDED` also prints a hint: the tenant is suspended or deleted in IAM, and an administrator of a parent tenant can reactivate it |
 | `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
 | `AUDIT_TAMPERED`, `INVALID_PROOF`, `AUDIT_KEY_MISSING`, `PKI_NOT_FOUND` | audit verification outcomes |
 | `DOCTOR_FINDINGS` | `doctor --strict` found an error or warning |

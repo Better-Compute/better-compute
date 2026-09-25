@@ -170,6 +170,10 @@ const validate = describedBy(
 );
 ```
 
+Every built-in method carries a schema. `tests/input-schema-agreement.test.ts` composes every module, fails on any
+registered method without `validate.jsonSchema`, and checks that each schema agrees with its validator on required,
+unknown, enum and string fields.
+
 ## The method context
 
 The handler's `MethodContext` is the [module context](/docs/extending/modules#the-module-context) plus the call:
@@ -257,8 +261,10 @@ After the mutation commits (plain or admitted, and on a replay too), the envelop
 false and the input asks for a positive `wait.timeoutMs`, it calls `refresh` in read-only transactions, backing off
 from 50 ms to 1 s, until `done`, the timeout (at most 30 seconds, wall clock) or the request's abort, and answers the
 last output. A timeout is not an error: the output itself must say the work is still pending, as a reservation's
-`operation.state: 'running'` does. `reservations.create` is the built-in user; see
-[waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement). The registry refuses (`INVALID_CONFIG`)
+`operation.state: 'running'` does. `reservations.create` and `instances.create` are the built-in users; see
+[waiting for placement](/docs/guides/capacity/reservations#waiting-for-placement) and
+[waiting for the instance](/docs/guides/vps/instances#waiting-for-the-instance). Keep `wait` out of the request hash
+your idempotency check compares, as both do, so a retry with a different wait replays. The registry refuses (`INVALID_CONFIG`)
 a `poll` on a method that is not a mutation, or one without both functions.
 
 ## Composite methods

@@ -11,6 +11,15 @@ sources:
   - daemon/cmd/bcd/main.go
   - daemon/cmd/bcd/agent.go
   - daemon/cmd/bcd/status.go
+  - daemon/cmd/bcd/doctor.go
+  - daemon/internal/agent/access.go
+  - daemon/internal/agent/tunnels.go
+  - daemon/internal/agent/requests.go
+  - daemon/internal/agent/gpureset.go
+  - daemon/internal/agent/healthwatch.go
+  - daemon/internal/health/health.go
+  - daemon/internal/pki/tickets.go
+  - daemon/internal/pki/secrets.go
   - daemon/cmd/bcd/hardware_host.go
   - daemon/cmd/bcd/hardware_fakehw.go
   - daemon/internal/agent/agent.go
@@ -56,9 +65,10 @@ never running a side effect twice, and never dropping a device assignment becaus
 The v0.1 node agent is implemented: `bcd join`, `bcd node`, `bcd status`, `bcd doctor` and `bcd version` work, and
 `tests/e2e/bcd.test.ts` runs the Linux binary (fake-hardware build) against a real control plane and gateway over
 mTLS. bcd is not released: no goreleaser run has published a binary, so the install script has nothing to download
-yet. `bcd site`, `bcd ramdisk` and `bcd sim` still exit 2 with `NOT_IMPLEMENTED`, and tunnels, VM runtimes,
-self-update and the WebSocket fallback are missing (see [what bcd does today](#what-bcd-does-today)). The TypeScript
-`FakeDaemon` covers those in tests, the simulator and `better-compute dev --sim N`.
+yet. `bcd site`, `bcd ramdisk` and `bcd sim` still exit 2 with `NOT_IMPLEMENTED`, and VM runtimes (with the
+metadata service), NVML, self-update and the WebSocket fallback are missing (see
+[what bcd does today](#what-bcd-does-today)). The TypeScript `FakeDaemon` covers those in tests, the simulator and
+`better-compute dev --sim N`.
 </Callout>
 
 ## Where bcd sits
@@ -112,7 +122,7 @@ Beside the modes, bcd has four local commands, all of which work:
 | --- | --- |
 | `bcd join` | Joins the fleet with a join token read from `BCD_JOIN_TOKEN` or standard input, never from arguments. It seals the token to the key in `join-encryption.jwk` next to the config (refused unless it matches `join_encryption_key_pin`), verifies the signed `JoinResponse`, writes `node.key` and `identity.json` under `data_dir`, and prints `joined as <node> (site <site>, role <role>)` |
 | `bcd status` | Asks the running node agent over its root-only unix socket (`--socket`, default `/run/bcd/bcd.sock`; `--json` for JSON) for its node, site and role, boot, session epoch and clock offset, applied and observed generations with each section's state, running and deferred commands, the event backlog, certificate expiry, trust bundle version and whether signed intent is enforced |
-| `bcd doctor` | Checks the configuration file, NVML and the hardware backend |
+| `bcd doctor` | Checks the configuration file, NVML, the hardware backend, `/dev/kvm`, IOMMU units, a TCP connection to the gateway and the node's identity |
 | `bcd version` | Prints the version, platform, Go version and build tags |
 
 Exit codes are 0 for success, 1 for a failure and 2 for a usage error or a command that is not implemented yet. bcd
@@ -124,17 +134,23 @@ bcd join: takes no positional arguments
 bcd join reads the join token from BCD_JOIN_TOKEN or stdin, never from arguments
 ```
 
-`bcd doctor` prints one line per check, with a status of `ok`, `warn`, `fail` or `skip`. NVML is still a stub, so it
-always warns, and the host checks are still skipped:
+`bcd doctor` prints one line per check, with a status of `ok`, `warn` or `fail`. NVML is still a stub, so that check
+always warns:
 
 ```text
 ok    config    /etc/bcd/config.toml: gateway https://gw.eu-1.example.com, site fsn1
 warn  nvml      nvml: not available in this build
 ok    hardware  host: 8 GPUs, … inventory sections hashed
-skip  host      IOMMU, KVM, clock and gateway reachability checks arrive in v0.1
+ok    kvm       /dev/kvm present
+ok    iommu     16 IOMMU units
+ok    gateway   gw.eu-1.example.com:443 reachable in 4ms
+ok    identity  node node_01k5w… (site fsn1, role node), certificate valid for 14h12m0s
 ```
 
-It also warns when `config.toml` is readable by anyone but its owner, and exits 1 when any check fails.
+A missing `/dev/kvm` or IOMMU is a warning (the host cannot run VPS instances, or pass GPUs through to them), and so
+is a node that has not joined. A gateway that does not accept a TCP connection within 5 seconds, or an expired node
+certificate, is a failure. It also warns when `config.toml` is readable by anyone but its owner, and exits 1 when any
+check fails. There is no clock check yet.
 
 ## What bcd does today
 
@@ -143,13 +159,16 @@ It also warns when `config.toml` is readable by anyone but its owner, and exits 
 | Area | Implemented | Missing |
 | --- | --- | --- |
 | Identity | Join with a sealed `join-token`, a retried deferral with the same CSR, `JoinResponse` verification (pinned signer, CSR binding, leaf key, SPIFFE id, role); renewal at 60% of the lifetime with proof of possession and a new key | TPM keys (the key is a 0600 `node.key` file), attestor challenges, the `.well-known` key fallback |
-| Transport | gRPC over HTTP/2 with connect-go, TLS 1.3 pinned to the serving CA's SPKI (never system roots), mTLS with the node certificate, HTTP/2 pings every 20 s; `gateway_server_name` for a gateway reached by IP | The WebSocket fallback |
-| Session | Hello from the journal, Welcome (epoch, event ack, clock offset, requested sections, signed trust bundle), heartbeats with lane credits (inventory hashes every 10th), `Ack`, `Cancel`, `Drain`, `RevocationNotice`, full-jitter redial; a Welcome more than 5 minutes before the server time mark is refused | `OpenTunnel`, `SecretRequest`, `WorkloadTokenRequest` (ignored or never sent) |
-| Journal | bbolt, every write fsynced; the command rules, results with their `boot_id`, the `cancelled` outcome, the TTL sweep; a corrupt file is moved aside | |
-| Commands | `inventory.refresh`, `diag.nvml`, `logs.collect` (redacted bundle to a presigned https URL), `node.reboot` (self-terminating); the acceptance order; signed commands verified once the trust bundle holds command-signing roots; attested results node-signed | `gpu.reset`, `daemon.upgrade`, `driver.invoke` and every v0.2+ kind (answered `UNSUPPORTED`) |
-| Desired state | Full specs and patches, signature checks with command-signing roots, stored and enforced offline; `devices` (CDI holds and env files, node-signed `AllocationBound` and `AllocationReleased`, `AllocationFailed`); `telemetry` accepted | `host`, `instances`, `access`, `daemon` and `site` converge only when empty, else `SectionUnsupported` |
-| Inventory | `inventory.Collector` from procfs and sysfs without cgo: DMI, UEFI and Secure Boot, TPM presence, CPU and NUMA, memory, disks, NICs with SR-IOV and RDMA, NVIDIA GPUs from `/proc/driver/nvidia`, OS, cgroups, KVM, IOMMU | NVML (`internal/nvml` returns `ErrNotBuilt`), so no ECC, row-remap or XID data on a real host; netlink |
-| Local | `bcd status` over the unix socket | `doctor` and `support-bundle` against the running agent |
+| Transport | gRPC over HTTP/2 with connect-go (`Join`, `Renew`, `Session`, `Tunnel`), TLS 1.3 pinned to the serving CA's SPKI (never system roots), mTLS with the node certificate, HTTP/2 pings every 20 s; `gateway_server_name` for a gateway reached by IP | The WebSocket fallback |
+| Session | Hello from the journal (with the trust bundle version it holds), Welcome (epoch, event ack, clock offset, requested sections, signed trust bundle), heartbeats with lane credits (inventory hashes every 10th), `Ack`, `Cancel`, `Drain`, `RevocationNotice`, `OpenTunnel`, secret and workload-token answers, full-jitter redial; a Welcome more than 5 minutes before the server time mark is refused; a newer trust bundle is acknowledged in the next `StatusReport` | |
+| Journal | bbolt, every write fsynced; the command rules, results with their `boot_id`, the `cancelled` outcome, the TTL sweep, spent exec-ticket ids; a corrupt file is moved aside | |
+| Commands | `inventory.refresh`, `diag.nvml`, `logs.collect` (redacted bundle to a presigned https URL), `gpu.reset` (refuses a GPU with a live hold, reads health back), `node.reboot` (self-terminating); the acceptance order; signed commands verified once the trust bundle holds command-signing roots; attested results node-signed | `daemon.upgrade`, `driver.invoke` and every v0.2+ kind (answered `UNSUPPORTED`) |
+| Desired state | Full specs and patches, signature checks with command-signing roots, stored and enforced offline; `devices` (CDI holds and env files, node-signed `AllocationBound` and `AllocationReleased`, `AllocationFailed`); `access` (break-glass SSH: the sshd drop-in, CA, node-bound principals and a KRL; the exec-ticket JWKS); `telemetry` accepted | `host`, `instances`, `daemon` and `site` converge only when empty, else `SectionUnsupported` |
+| Tunnels | `OpenTunnel` with the exec ticket re-verified against the pinned JWKS and the journaled `jti` set; `console` on a real pseudo-terminal, `ssh` and `tcp` to loopback ports; at most 16 at once | `exec` into an instance (no instances runtime) |
+| Secrets and workload tokens | `SecretRequest` and `WorkloadTokenRequest`, node-signed, answered with a JWE to a fresh one-time P-256 key, matched by request id within 10 s | A caller: the instances runtime (user data, the metadata service) and ramdisk deploys will send them; bcd has no IMDS |
+| Health | NVIDIA XIDs from `/dev/kmsg` as `Xid<n>` device conditions for the rest of the boot; PSI pressure and CPU steal every 30 s in `StatusReport.pressure` | NVML events, EDAC, SMART |
+| Inventory | `inventory.Collector` from procfs and sysfs without cgo: DMI, UEFI and Secure Boot, TPM presence, CPU and NUMA, memory, disks, NICs with SR-IOV and RDMA, NVIDIA GPUs from `/proc/driver/nvidia`, OS, cgroups, KVM, IOMMU | NVML (`internal/nvml` returns `ErrNotBuilt`), so no ECC or row-remap data on a real host; netlink |
+| Local | `bcd status` over the unix socket; `bcd doctor`'s host checks (KVM, IOMMU, gateway reachability, identity) | `doctor` and `support-bundle` against the running agent; a clock check |
 
 ## Outbound only
 
@@ -175,13 +194,14 @@ Other limits already hold in the design regardless of the split:
 
 - **Keys.** PLAN.md keeps the node key in the TPM when there is one; bcd today always keeps it in a 0600 file under
   `/var/lib/bcd` and never exports it. It signs only statements of the form "this node says": the mTLS handshake,
-  renewal proofs of possession, attested results and (once implemented) secret requests.
+  renewal proofs of possession, attested results, allocation reports, and secret and workload-token requests.
 - **Allowlists.** Each role accepts only its own command kinds; anything else is rejected `UNSUPPORTED`.
 - **Bounds.** A command body is at most 1 MiB and a desired-state body at most 4 MiB. The journal is capped at 64
   MiB and 10,000 unacked events.
-- **Secrets.** Commands carry references, never values. The design fetches a value sealed to a fresh one-time key,
-  keeps it in memory only, and zeroes it after use; bcd does not send `SecretRequest` yet. `logs.collect` redacts
-  tokens, JWTs, private keys and URL passwords from its bundle before the upload.
+- **Secrets.** Commands carry references, never values. bcd fetches a value with a node-signed `SecretRequest` and
+  opens the answer, a JWE sealed to a fresh one-time key, only for that request id; the design keeps the value in
+  memory only and zeroes it after use. No bcd feature asks for a secret yet (the users are the VM runtime and ramdisk
+  deploys). `logs.collect` redacts tokens, JWTs, private keys and URL passwords from its bundle before the upload.
 
 ## Inside bcd
 
@@ -191,13 +211,14 @@ concern. Its third-party modules are connect-go, protobuf and bbolt; go-nvml is 
 | Package | What | State |
 | --- | --- | --- |
 | `cmd/bcd` | subcommands and flags | `join`, `node`, `status`, `doctor`, `version` work; `site`, `ramdisk`, `sim` exit 2 |
-| `internal/agent` | the node agent: join, session, dispatcher, the `devices` converger, the four kinds, renewal, status | done for v0.1 |
+| `internal/agent` | the node agent: join, session, dispatcher, the `devices` and `access` convergers, the five kinds, tunnels, secret and workload-token requests, the health watch, renewal, status | done for v0.1 |
 | `internal/config` | `/etc/bcd/config.toml` in a strict TOML subset | done |
 | `internal/journal` | the journal contract and the command rules (duplicates, crash recovery, self-terminating kinds), an in-memory store and the bbolt store | done |
 | `internal/dispatch` | lanes with credits and worker pools, per-resource locks, the kind registry, the acceptance checks | done |
 | `internal/session` | Hello and Welcome, the epoch, resume, reconnect back-off | done |
 | `internal/converge` | the NodeSpec sections and the observed-generation rule | done; section convergers live in `internal/agent` |
-| `internal/pki` | purpose-framed ES256, keys and pins, the join JWE, CSRs, `JoinResponse` and signed-intent verification, trust bundles | done; interop fixtures from `@better-compute/pki` |
+| `internal/pki` | purpose-framed ES256, keys and pins, the join JWE, CSRs, `JoinResponse` and signed-intent verification, trust bundles, exec tickets, secret and workload-token requests | done; interop fixtures from `@better-compute/pki` |
+| `internal/health` | the XID parser for `/dev/kmsg`, PSI pressure and CPU steal | done |
 | `internal/transport` | the `AgentGateway` client over connect-go | done |
 | `internal/inventory` | NodeInventory v1, canonicalization, section encoding and hashes, the procfs/sysfs `Collector` | done |
 | `internal/support` | the secret scanner of `@better-compute/pki` for log bundles | done |
@@ -249,9 +270,11 @@ better-compute dev --memory --sim 8
 better-compute sim --nodes 100 --chaos heavy --seed 7
 ```
 
-Where the two differ, the FakeDaemon is ahead: it answers `OpenTunnel`, dials the WebSocket fallback, plays VPS hosts
-and their metadata service, site agents and self-update, and runs `driver.invoke`. bcd matches it on joining,
-sessions, the journal, signed intent, the four v0.1 kinds and the `devices` section.
+Where the two differ, the FakeDaemon is mostly ahead: it dials the WebSocket fallback, plays VPS hosts and their
+metadata service, site agents and self-update, and runs `driver.invoke`. bcd matches it on joining, sessions, the
+journal, signed intent, the five v0.1 kinds, the `devices` section, tunnels, secret and workload-token requests, XID
+conditions and host pressure. bcd is ahead on the `access` section, which the FakeDaemon still reports as
+`SectionUnsupported`, and its tunnels run a real shell where the FakeDaemon's answer with an echo shell.
 
 <Cards>
   <Card title="Installing bcd" href="/docs/daemon/install" icon={<Install />}>The install script, the files it writes and upgrades.</Card>

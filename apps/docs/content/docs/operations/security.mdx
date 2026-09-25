@@ -32,6 +32,10 @@ sources:
   - daemon/internal/agent/commands.go
   - daemon/internal/agent/conn.go
   - daemon/internal/pki/intent.go
+  - daemon/internal/pki/tickets.go
+  - daemon/internal/pki/secrets.go
+  - daemon/internal/agent/tunnels.go
+  - daemon/internal/agent/access.go
 ---
 
 Better Compute runs commands as root on your machines, so its security model starts from one question: who can make
@@ -61,7 +65,7 @@ are built, and ends with a hardening checklist.
 | Cloned node identity | A certificate alternating between two machines more than 3 times in 10 minutes is revoked (duplicate-identity quarantine) | Built in the gateway |
 | Compromised gateway | Holds no key in its code; commands and NodeSpecs signed; Renew and `JoinResponse` verified end to end; secrets as JWE; results and `AllocationBound` reports signed by the node. It can delay, drop or read frames, not forge intent, identity, results, bindings or secrets | Built, with the [process caveat](#gateway-processes) |
 | Compromised api or worker | Admissions still need IAM decisions; worker keys last 24 h; tickets are audited | Built; fleet-wide quorum is v1.0 |
-| Replay | Command-id journal, `not_after`, epoch fencing, a server time mark against rewound `Welcome`s, ticket `jti` sets, a Renew replay cache | Built in the control plane, the FakeDaemon and `bcd`, except the daemon's ticket `jti` set, which only the FakeDaemon has (bcd has no tunnels yet) |
+| Replay | Command-id journal, `not_after`, epoch fencing, a server time mark against rewound `Welcome`s, ticket `jti` sets, a Renew replay cache | Built in the control plane, the FakeDaemon and `bcd` (bcd keeps its ticket `jti` set in its journal, so a restart does not forget a spent ticket) |
 | Agent overspend | Delegation scope, confirmations, per-agent quotas, budgets, `agents.suspendAll` | Through Better IAM |
 | PXE and DHCP spoofing | One lease-holding boot server per site, isolated VLANs, signed images | Partly built (v0.2) |
 | Cross-tenant residue on bare metal | BMC-driven teardown: attested erase, DCGM, a firmware baseline check, a new identity generation | Built in `metal` (v0.2, v0.5) |
@@ -69,9 +73,10 @@ are built, and ends with a hardening checklist.
 <Callout type="warn" title="What the real daemon checks today">
   `bcd` is built and tested but not released. It implements the journal, the pinned join and TLS, `JoinResponse`
   verification, signed commands and specs (once its trust bundle holds command-signing roots), node-signed attested
-  results and allocation reports, and the server time mark. It does not answer `OpenTunnel`, so ticket
-  re-verification on the node, and the SSH `access` section, exist only in the TypeScript `FakeDaemon` and in the
-  design. Its node key is a 0600 file, not a TPM key. See [the daemon](/docs/daemon#what-bcd-does-today).
+  results and allocation reports, the server time mark, exec-ticket re-verification before it opens a tunnel, the
+  SSH `access` section (node-bound principals and a KRL), and node-signed `SecretRequest` and `WorkloadTokenRequest`
+  answered to a one-time key (no bcd feature sends them yet). Its node key is a 0600 file, not a TPM key, and it has
+  no privilege-separated helper yet. See [the daemon](/docs/daemon#what-bcd-does-today).
 </Callout>
 
 ## Gateway processes

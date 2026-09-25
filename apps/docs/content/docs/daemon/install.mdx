@@ -163,7 +163,8 @@ its target as `*.new` and renamed over it, so a replacement is atomic even while
 ### Check, join and start
 
 It runs `bcd doctor --config /etc/bcd/config.toml` and prints a warning if doctor reports a problem, without
-stopping. With a token, it pipes the token into `bcd join --config /etc/bcd/config.toml` with `printf`, a shell
+stopping. Before the first join, doctor's `identity` check only warns that the node has not joined; a gateway it
+cannot reach over TCP is a failure. With a token, it pipes the token into `bcd join --config /etc/bcd/config.toml` with `printf`, a shell
 builtin, so the token never appears in a process listing, then runs `systemctl enable --now bcd.service`. Without
 a token, it runs `systemctl restart bcd.service`.
 

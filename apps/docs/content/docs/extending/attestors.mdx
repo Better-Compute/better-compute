@@ -173,8 +173,9 @@ key already enrolled (a reclaim through a token needs `allowReclaim`), and that 
 site, pool and role. It inserts the node in `adopting` (or re-keys the existing one), issues the certificate, writes
 `node.joined` with `attestor: '<your id>'` and an audit row, all in the same transaction.
 
-`allowedKinds` is how the `discovery` attestor gives a ramdisk only `inventory`, `diag.*`, `wipe`, `deploy.*` and
-`boot.kexec`. It is stored on the certificate row (`node_certs.allowed_kinds`), renewed with it, and enforced both
+`allowedKinds` is how the `discovery` attestor gives a ramdisk only `inventory.refresh`, `logs.collect`, `diag.*`,
+`disk.wipe`, `deploy.*` and `boot.kexec`. Entries must be registered kind names (or `prefix.*`): matching is exact,
+so `wipe` would not allow `disk.wipe`. It is stored on the certificate row (`node_certs.allowed_kinds`), renewed with it, and enforced both
 when a command is enqueued and when the gateway dispatches it.
 
 `bind` is how `tpm` ties an endorsement key to a node: on the next join, the attestor finds the bound node and returns

@@ -123,7 +123,13 @@ await iam.api.bindings.create(orgOwner, {
       {
         "sid": "StopWhenOverBudget",
         "effect": "deny",
-        "actions": ["compute:reservations:create", "compute:reservations:extend", "compute:instances:create"],
+        "actions": [
+          "compute:reservations:create",
+          "compute:reservations:extend",
+          "compute:instances:create",
+          "compute:sandboxes:create",
+          "compute:sandboxes:update"
+        ],
         "resources": ["*"],
         "conditions": { "Bool": { "principal.spendExceeded": true } }
       },
@@ -151,7 +157,7 @@ await iam.api.bindings.create(orgOwner, {
 | `ReserveBoundedH100` | Creating a reservation when the draft asks for H100s in the listed regions, at most 8 GPUs for at most 72 hours, in a pool where the member holds `user`, and the tenant has the `compute.h100` flag |
 | `OwnReservations` | Reading and releasing the member's own reservations. `${principal.id}` is a Better IAM policy variable. |
 | `BoundedExtend` | Extending the member's own reservations while the total stays within 72 hours |
-| `StopWhenOverBudget` | Denies new reservations, extensions and instances once an enforced Better IAM budget covering the member is spent |
+| `StopWhenOverBudget` | Denies new reservations, extensions and instances once an enforced Better IAM budget covering the member is spent, and already names the planned v0.5 sandbox create and update (extend, snapshot) actions |
 | `SessionJwtForCompute`, `AssertToCompute` | What Better IAM checks before it mints a session JWT whose audience includes compute |
 
 `BoundedExtend` cannot be bypassed by extending in small steps. Before deciding, `reservations.extend` writes the
@@ -222,7 +228,9 @@ the rows carry today:
 
 A reservation's `gpuCount` counts whole GPUs only; fractional requests show up in `gpuSlices`. The catalog also
 declares `gpuMemoryGb` on pools and `dedicatedTo` on nodes, which no row carries yet, so a condition on them
-never matches. Rows written by `metal` verbs carry `provisionState`, `poolId` and `siteId` instead of the node
+never matches. The same holds for the planned v0.5 `compute-sandbox` type (`templateId`, `vcpu`, `memoryGiB`,
+`gpus`, `ttlSeconds`, `fromSnapshot`, `warm`): it is in the catalog, but nothing writes sandbox rows yet. Rows
+written by `metal` verbs carry `provisionState`, `poolId` and `siteId` instead of the node
 controller's attributes.
 
 A missing attribute fails every condition operator except `Exists`. For a deny statement that means the deny

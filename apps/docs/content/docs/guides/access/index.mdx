@@ -17,6 +17,9 @@ sources:
   - packages/cli/src/host/tunnels.ts
   - apps/console/README.md
   - daemon/internal/converge/converge.go
+  - daemon/internal/agent/tunnels.go
+  - daemon/internal/agent/access.go
+  - daemon/internal/pki/tickets.go
 ---
 
 import { Command, KeySquare, Route, ShieldCheck } from '@/lib/icons';
@@ -74,7 +77,8 @@ flowchart LR
 The last check is the one that matters. PLAN.md's security model treats the gateway as relay-only: a compromised
 gateway can delay, drop or read frames, but it holds no signing key, so it cannot mint a ticket the daemon would
 accept. The gateway test suite covers exactly that case: a gateway handed an attacker's JWKS accepts a forged
-ticket, and a bcd-like test daemon holding the real JWKS refuses it, so no tunnel opens.
+ticket, and a bcd-like test daemon holding the real JWKS refuses it, so no tunnel opens. bcd's own tests refuse
+replayed, expired, tampered and other-node tickets and a ticket whose `sid` is not the tunnel's.
 
 ## Authorization
 
@@ -146,8 +150,8 @@ it too.
 ## What ships today
 
 Interactive access is the v0.3 roadmap item "tunnels with daemon-verified tickets, `nodes.issueSshCert`, the
-`access` section". The control-plane half is written and tested; the node half exists only in the TypeScript
-FakeDaemon.
+`access` section". Both halves are written and tested: the control plane, and the node half in the Go bcd (built,
+not released yet) and in the TypeScript FakeDaemon.
 
 | Piece | State |
 | --- | --- |
@@ -157,7 +161,7 @@ FakeDaemon.
 | Gateway relay (`OpenTunnel`, `Tunnel` stream, internal `/v1/tunnels`) | Implemented in `@better-compute/gateway` |
 | Browser terminal and node console | `apps/console` with `@better-compute/console-kit` |
 | NodeSpec `access` section (JWKS, SSH CA keys) | Sent to every node |
-| Daemon side: verifying tickets, opening `Tunnel` streams, running shells, applying `access` to sshd | Not in bcd. The Go `bcd` is built and tested (not released) but ignores `OpenTunnel` and has no `access` converger, so it reports a non-empty `access` section as `SectionUnsupported`; the TypeScript FakeDaemon reports a non-empty `access` section as `SectionUnsupported`, but with its `tunnels` option (on in `dev --sim`) it verifies the ticket against the NodeSpec's JWKS and answers `OpenTunnel` with an echo shell, which the CLI's `console` and `exec` tests drive end to end |
+| Daemon side: verifying tickets, opening `Tunnel` streams, running shells, applying `access` to sshd | In bcd (built and tested, not released): it re-verifies each ticket against the NodeSpec's JWKS and its journaled `jti` set, runs a node console on a real pseudo-terminal and pipes `ssh` and `tcp` to loopback ports (`tests/e2e/bcd.test.ts` opens a console end to end), and its `access` converger writes the sshd drop-in, CA, node-bound principals and KRL. `exec` into an instance waits for bcd's instances runtime. The TypeScript FakeDaemon, with its `tunnels` option (on in `dev --sim`), answers `OpenTunnel` with an echo shell, which the CLI's `console` and `exec` tests drive end to end; it still reports a non-empty `access` section as `SectionUnsupported` |
 
 <Callout type="warn" title="The generated reference says planned">
   The [API reference](/docs/reference/api/tunnels#open) lists `tunnels.open` and `nodes.issueSshCert` as planned for

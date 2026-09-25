@@ -163,8 +163,9 @@ optionally the IP, product UUID and workflow id, with `issued_at` and `not_after
 
 Each signed assertion admits one join (`assertion-reused` otherwise), and the token is spent. The resulting
 certificate is a `ramdisk` certificate of at most 2 hours (`certTtlSeconds` may shorten it) that allows only the
-commissioning command kinds, `discoveryAllowedKinds` by default: `inventory`, `diag.*`, `wipe`, `deploy.*` and
-`boot.kexec`. Pass `allowedKinds` to change the list.
+commissioning command kinds, `discoveryAllowedKinds` by default: `inventory.refresh`, `logs.collect`, `diag.*`,
+`disk.wipe`, `deploy.*` and `boot.kexec`, which are exactly the registered kinds whose roles include `ramdisk`
+(`tests/pki-attestors.test.ts` checks the two agree). Pass `allowedKinds` to change the list.
 
 | Option | Default | Effect |
 | --- | --- | --- |

@@ -154,6 +154,8 @@ Migrations run in registration order:
 | `core/0020_command_created_at` | `commands.created_at`, for command latency, and the `commands_settled` index |
 | `core/0021_signed_specs` | `nodes.spec_body` and `spec_signature`: the signed bytes of each NodeSpec generation |
 | `core/0022_ssh_certificate_sessions` | `ssh_certificates.session_id` and `reauthorized_at`, so each break-glass certificate is re-decided for the session that issued it |
+| `core/0023_session_trust_version` | `node_sessions.trust_version` (`bigint`, default 0): the trust bundle version each daemon reports in `Hello` and `StatusReport`, which `pki rotate-command-root --stage switch` checks over connected sessions |
+| `core/0024_session_capabilities` | `node_sessions.capabilities` (`text[]`, default empty): the `Hello.capabilities` of the current session; `tunnels.open` needs `tunnel.instance-dial` there for instance `tcp` and `ssh` tunnels |
 
 ### Module migrations
 
