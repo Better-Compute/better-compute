@@ -12,6 +12,7 @@ import { pglite } from '@better-compute/postgres/pglite';
 import {
   capacityMigrations,
   chargeQuota,
+  createCapacityPort,
   extendAllocation,
   inlinePlacer,
   isSchedulable,
@@ -330,6 +331,29 @@ describe('inlinePlacer', () => {
       /refuses/,
     );
     expect((await place(request(1), context({ plugins: [refuse] }))).status).toBe('placed');
+
+    // The CapacityPort other modules book through (vps instances): the request's own booking
+    // passes its admission and is refused; a later retry by the module passes none.
+    await setQuota(db, 'acme', 'pool_1', 'gpu', 8);
+    const port = createCapacityPort(
+      { clock: { now: () => T0 } },
+      { plugins: [refuse], random: () => 0 },
+    );
+    const instance: PlacementRequest = {
+      tenantId: 'acme',
+      poolId: 'pool_1',
+      instanceId: 'inst_1',
+      devices: [{ class: 'gpu', count: 1 }],
+      during: { start: T0, end: T0 + HOUR },
+    };
+    await expect(
+      db.transaction((tx) => port.reserve(tx, instance, { admission })),
+    ).rejects.toThrow(/refuses/);
+    expect((await readQuotas(db, 'acme', 'pool_1'))[0]!.used).toBe(0);
+    await setQuota(db, 'acme', 'pool_1', 'gpu', 8);
+    const node = await addNode('node_b', { gpus: 1 });
+    expect(node).toHaveLength(1);
+    expect((await db.transaction((tx) => port.reserve(tx, instance))).status).toBe('placed');
   });
 
   it('prefers NVLink-complete sets from capacity_device_links', async () => {

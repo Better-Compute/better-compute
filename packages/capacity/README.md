@@ -143,6 +143,14 @@ with. A test keeps the two in agreement.
 `choosePlan` then picks at random among the top `topN` (default 5). `summarizeRejections` explains
 an empty result, e.g. `no node fits (3 nodes): 2 × fits: 1 of 4 gpu free; 1 × cordoned`.
 
+Scheduler plugins' `admit(request, admission)` hooks are admission decisions: they run once, in the
+request's own transaction, with the caller's `AdmissionContext`. That covers `reservations.create`
+(inline, pool-lease and `binding: 'node'` leases) and bookings other modules make through
+`createCapacityPort().reserve(tx, request, { admission })` (e.g. `instances.create`). The system's
+own re-placements of an admitted request carry no caller and do not re-admit: pending retries,
+BookingRepair, bind-timeout re-places, preemption and a module's retries. Filters and scorers apply
+to every attempt.
+
 `inlinePlacer()` runs this inside the admission transaction:
 
 - It plans on plain reads. When the request allows it (no selectors, no plugin scorers, no gang),
@@ -165,7 +173,7 @@ an empty result, e.g. `no node fits (3 nodes): 2 × fits: 1 of 4 gpu free; 1 × 
 | `reservations.create` answers | `placed` or `pending` | `pending` with a `Queued` condition, then `placed` once the batch runs |
 | Where placement runs | the admission transaction | the `capacity.placer` worker that owns the pool's shard (`shardBy: 'pool'`) |
 | Pool lock | only around the commit (a few ms) | never at admission; once per batch of ≤64 |
-| Throughput (bench/placements, PGlite, 1k nodes) | ~35 placements/s | ~118 placements/s |
+| Throughput (bench/placements, PGlite, 1k nodes) | ~35 placements/s | ~690 placements/s (placeQueued; 10k nodes: ~500) |
 
 ```ts
 capacityModule({ placer: 'pool-lease', maxBatch: 64 });

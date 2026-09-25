@@ -783,7 +783,14 @@ function requestedDuration(row: ReservationRow): number {
   return parseDuration(row.request.duration);
 }
 
-/** Places a draft or pending reservation now; `placed` or `pending` (with `Unschedulable`). */
+/**
+ * Places a draft or pending reservation now; `placed` or `pending` (with `Unschedulable`).
+ *
+ * Scheduler plugins' `admit` hooks run with `admission` — the caller's decision, present only in
+ * the request's own transaction (create). Re-placements the system makes of an admitted reservation
+ * (pending retries, BookingRepair, bind-timeout re-places, preemption) carry no caller and do not
+ * re-admit: filters and scorers still apply to every attempt.
+ */
 async function attemptPlacement(
   deps: ReservationDeps,
   tx: SqlTx,
@@ -794,6 +801,10 @@ async function attemptPlacement(
   const start = Math.max(row.request.start ?? now, now);
   let during = { start, end: start + requestedDuration(row) };
   const nodeLease = isNodeBinding(row);
+  // Node leases do not go through a placer, so their admission hooks run here.
+  if (nodeLease && admission)
+    for (const plugin of deps.placement.plugins)
+      await plugin.admit?.(placementRequest(row, during), admission);
   let outcome = nodeLease
     ? await placeNodeLease(tx, placementRequest(row, during), deps.placement)
     : await deps.placer.place(tx, placementRequest(row, during), {

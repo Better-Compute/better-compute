@@ -7,6 +7,7 @@ import {
   isId,
   newId,
   reservationStates,
+  type AdmissionContext,
   type CapacityPort,
   type ComputeModule,
   type Json,
@@ -18,6 +19,8 @@ import {
   type PoolClass,
   type PoolPolicy,
   type Placer,
+  type PlacementOutcome,
+  type PlacementRequest,
   type Reconciler,
   type Reservation,
   type ReservationState,
@@ -1264,15 +1267,27 @@ function buildApi(options: CapacityModuleOptions, placers: Placers): CapacityApi
 
 /**
  * The CapacityPort other modules book through (`context.capacity`): quota and placement together,
- * all-or-nothing. A request that does not fit gets its charge back and answers `pending`.
+ * all-or-nothing. A request that does not fit gets its charge back and answers `pending`. A caller
+ * booking inside a request's own transaction passes its `admission` (e.g. `instances.create`), so
+ * scheduler plugins' `admit` hooks run; its own later retries pass none (§10.3).
  */
 export function createCapacityPort(
   context: Pick<ModuleContext, 'clock'>,
   options: CapacityModuleOptions = {},
-): CapacityPort {
+): CapacityPort & {
+  reserve(
+    tx: SqlTx,
+    request: PlacementRequest,
+    booking?: { admission?: AdmissionContext },
+  ): Promise<PlacementOutcome>;
+} {
   const placer = inlinePlacer(options.maxAttempts ? { maxAttempts: options.maxAttempts } : {});
   return {
-    async reserve(tx, request) {
+    async reserve(
+      tx: SqlTx,
+      request: PlacementRequest,
+      booking: { admission?: AdmissionContext } = {},
+    ) {
       const demand = quotaDemand(request);
       await chargeQuota(tx, request.tenantId, request.poolId, demand);
       const outcome = await placer.place(tx, request, {
@@ -1281,6 +1296,7 @@ export function createCapacityPort(
         plugins: options.plugins ?? [],
         weights: options.weights ?? {},
         topN: options.topN ?? 5,
+        ...(booking.admission ? { admission: booking.admission } : {}),
       });
       if (outcome.status !== 'placed')
         await refundQuota(tx, request.tenantId, request.poolId, demand);

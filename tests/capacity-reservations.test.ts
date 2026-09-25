@@ -125,7 +125,12 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
   group: G,
   method: M,
   raw: unknown,
-  options: { deny?: boolean | ComputeError; who?: Caller; api?: CapacityApi } = {},
+  options: {
+    deny?: boolean | ComputeError;
+    who?: Caller;
+    api?: CapacityApi;
+    admission?: MethodContext['admission'];
+  } = {},
 ): Promise<unknown> {
   const definition = ((options.api ?? api)[group] as Record<string, CapacityApi[G][M]>)[
     method as string
@@ -144,7 +149,12 @@ async function call<G extends keyof CapacityApi, M extends keyof CapacityApi[G]>
   const input = definition.validate(raw);
   const who = options.who ?? caller;
   const context = (tx: SqlTx) =>
-    ({ ...moduleContext(within(tx)), caller: who, requestId: 'req_1' }) as MethodContext;
+    ({
+      ...moduleContext(within(tx)),
+      caller: who,
+      requestId: 'req_1',
+      ...(options.admission ? { admission: options.admission } : {}),
+    }) as MethodContext;
   if (definition.admission) {
     const plan = await db.transaction((tx) =>
       definition.admission!.prepare(context(tx), input, tx),
@@ -1829,6 +1839,51 @@ describe('node leases: binding node (v0.5)', () => {
       await expect(call('reservations', 'create', bad)).rejects.toMatchObject({
         code: 'INVALID_INPUT',
       });
+  });
+
+  it('runs scheduler admission hooks for node leases too', async () => {
+    const seen: string[] = [];
+    const policy = capacityModule({
+      random: () => 0,
+      topN: 1,
+      plugins: [
+        {
+          id: 'lease-policy',
+          extension: 'scheduler',
+          async admit(request) {
+            seen.push(request.reservationId!);
+            if (request.devices[0]!.count > 4)
+              throw new ComputeError('ACCESS_DENIED', 'Node leases above 4 GPUs are refused');
+          },
+        },
+      ],
+    });
+    const policyApi = policy.api!(moduleContext(db)) as CapacityApi;
+    const admission = {
+      tenantId: 'acme',
+      identityId: caller.identityId,
+      identityKind: 'user' as const,
+      sessionId: 'ses_1',
+      sessionKind: 'user' as const,
+      action: 'compute:reservations:create',
+      resource: { type: 'reservation', id: 'draft' },
+      decidedAt: T0,
+    };
+    await expect(
+      call(
+        'reservations',
+        'create',
+        lease({ devices: [{ class: 'gpu', count: 5 }], idempotencyKey: 'big' }),
+        { api: policyApi, admission },
+      ),
+    ).rejects.toThrow(/above 4 GPUs/);
+    const ok = (await call('reservations', 'create', lease(), {
+      api: policyApi,
+      admission,
+    })) as Rsv;
+    expect(ok.state).toBe('placed');
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toBe(ok.id);
   });
 });
 
