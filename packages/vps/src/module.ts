@@ -363,7 +363,10 @@ export function vps(options: VpsOptions = {}): ComputeModule<'vps', VpsApi> {
     // Written into every sandbox's sshd config: one printable OpenSSH key line, nothing else.
     if (
       typeof caPublicKey !== 'string' ||
-      !/^(ssh-ed25519|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+( [\x21-\x7e]*)?$/.test(caPublicKey)
+      // pki's rule: a comment may hold spaces (`<org> sandbox ssh ca`), never a line break.
+      !/^(ssh-ed25519|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+={0,2}( [\x21-\x7e][\x20-\x7e]{0,63})?$/.test(
+        caPublicKey,
+      )
     )
       throw new ComputeError(
         'INVALID_CONFIG',

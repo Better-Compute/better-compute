@@ -48,6 +48,7 @@ import {
 } from './instances.js';
 import {
   dropSnapshots,
+  purgeSettledSnapshots,
   purgeSnapshots,
   restoreSource,
   sandboxSnapshots,
@@ -517,27 +518,39 @@ function ttlBounds(
 }
 
 /** `sandboxTemplates.create`: checks the pool, flavor, image and runtime once, then stores the template. */
-/** Template env reaches the guest inside sealed user data only (§6 "Secrets"). */
+/**
+ * Secrets reach the guest inside sealed user data only (§6 "Secrets"): template env, and a template's
+ * `secret://` user data once vps renders it into a multipart (exec trust or env). Without the broker
+ * they would sit in `instances.user_data` and travel inline in the NodeSpec.
+ */
 function assertEnvDeliverable(
-  deps: Pick<InstanceDeps, 'broker'>,
+  deps: Pick<InstanceDeps, 'broker' | 'sandboxExec'>,
   env: Readonly<Record<string, string>> | undefined,
+  userData?: string | null,
 ): void {
-  if (env && Object.keys(env).length > 0 && !deps.broker)
+  if (deps.broker) return;
+  const hasEnv = env !== undefined && Object.keys(env).length > 0;
+  if (hasEnv)
     throw new ComputeError(
       'INVALID_CONFIG',
       'Template env needs the secret broker, which seals sandbox user data',
     );
+  if (deps.sandboxExec && isSecretRef(userData ?? undefined))
+    throw new ComputeError(
+      'INVALID_CONFIG',
+      'A secret:// user data with sandbox exec needs the secret broker, which seals sandbox user data',
+    );
 }
 
 export async function createTemplate(
-  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'authz' | 'broker'>,
+  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'authz' | 'broker' | 'sandboxExec'>,
   context: MethodContext,
   input: TemplateInput,
 ): Promise<SandboxTemplate> {
   const tx = context.sql;
   const caller = context.caller;
   if (!caller) throw new ComputeError('UNAUTHENTICATED', 'A caller is required');
-  assertEnvDeliverable(deps, input.env);
+  assertEnvDeliverable(deps, input.env, input.userData);
   const { runtime } = await resolveTemplate(deps, tx, input);
   const { defaultTtl, maxTtl } = ttlBounds(input.defaultTtlSeconds, input.maxTtlSeconds);
   const taken = await tx.query(
@@ -598,11 +611,11 @@ function shapes(
 
 /** `sandboxTemplates.update`: a new flavor or image is checked against the pool as on create. */
 export async function updateTemplate(
-  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'broker'>,
+  deps: Pick<InstanceDeps, 'images' | 'runtime' | 'runtimes' | 'broker' | 'sandboxExec'>,
   tx: SqlTx,
   input: TemplateUpdate,
 ): Promise<SandboxTemplate> {
-  assertEnvDeliverable(deps, input.env);
+  assertEnvDeliverable(deps, input.env, input.userData);
   const current = await readTemplate(tx, input.tenantId, input.templateId, { lock: true });
   if (!current)
     throw new ComputeError('NOT_FOUND', `Sandbox template ${input.templateId} not found`);
@@ -852,6 +865,8 @@ interface RawSandbox {
   addresses: string[] | null;
   node_id: string | null;
   from_snapshot: string | null;
+  agent_id: string | null;
+  delegation_id: string | null;
 }
 
 const ms = (column: string) => `(extract(epoch FROM ${column}) * 1000)::float8`;
@@ -860,7 +875,7 @@ const sandboxColumns = `s.id, s.tenant_id, s.template_id, s.pool_id, s.instance_
   ${ms('s.expired_at')} AS expired_ms, ${ms('s.deleting_at')} AS deleting_ms,
   ${ms('s.deleted_at')} AS deleted_ms, s.owner_identity_id, s.idempotency_key,
   encode(s.request_hash, 'hex') AS request_hash, s.version, ${ms('s.created_at')} AS created_ms,
-  i.state AS instance_state, i.addresses, i.node_id, s.from_snapshot`;
+  i.state AS instance_state, i.addresses, i.node_id, s.from_snapshot, s.agent_id, s.delegation_id`;
 const sandboxFrom = `sandboxes s LEFT JOIN instances i ON i.id = s.instance_id`;
 
 async function readSandbox(
@@ -1022,7 +1037,7 @@ export async function prepareCreateSandbox(
     );
   if (input.fromSnapshot !== undefined) {
     // The tenant's own ready snapshot (another tenant's is NOT_FOUND), written by this runtime.
-    const source = await restoreSource(tx, input.tenantId, input.fromSnapshot);
+    const source = await restoreSource(tx, input.tenantId, input.fromSnapshot, caller.identityId);
     if (source.runtime !== template.runtime)
       throw new ComputeError(
         'INVALID_INPUT',
@@ -1109,7 +1124,23 @@ async function createManagedInstance(
   spec: ManagedInstance,
 ): Promise<InstanceRow> {
   const template = spec.template;
+  if (spec.warmTemplateId) {
+    // The pass read the template earlier: a teardown or a reshaping since then stops this refill.
+    const current = await tx.query(
+      `SELECT 1 FROM sandbox_templates WHERE id = $1 AND NOT deleted AND instance_version = $2 FOR SHARE`,
+      [template.id, template.instanceVersion],
+    );
+    if (current.rows.length === 0)
+      throw new ComputeError(
+        'INVALID_STATE',
+        `Sandbox template ${template.id} changed; refill skipped`,
+      );
+  }
   const { flavor, image, runtime } = await resolveTemplate(deps, tx, template);
+  // Rendered, then sealed, before the row exists: resolved secrets never touch the table (§6).
+  const rendered = await instanceUserData(deps, template, spec.instanceId);
+  const sealed = rendered !== null && deps.broker !== undefined && !isSecretRef(rendered);
+  const userData = sealed ? await deps.broker!.put(template.tenantId, rendered!) : rendered;
   const desiredState =
     spec.desiredState === 'running'
       ? 'running'
@@ -1125,9 +1156,9 @@ async function createManagedInstance(
     `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, image, ssh_keys, user_data,
                             runtime, draft, state, desired_state, owner_identity_id, agent_id, delegation_id,
                             idempotency_key, request_hash, sandbox_id, warm_template_id, restore_from, network_policy,
-                            warm_template_version, version)
+                            warm_template_version, user_data_sealed, version)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, '{}', $8, $9, false, 'pending', $10, $11, $12, $13,
-             $14, decode($15, 'hex'), $16, $17, $18::jsonb, $19, $20, 1)`,
+             $14, decode($15, 'hex'), $16, $17, $18::jsonb, $19, $20, $21, 1)`,
     [
       spec.instanceId,
       template.tenantId,
@@ -1136,7 +1167,7 @@ async function createManagedInstance(
       JSON.stringify(shape),
       template.imageId,
       JSON.stringify(image),
-      await instanceUserData(deps, template, spec.instanceId),
+      userData,
       runtime,
       desiredState,
       spec.ownerIdentityId,
@@ -1149,6 +1180,7 @@ async function createManagedInstance(
       spec.restoreFrom ? JSON.stringify(spec.restoreFrom) : null,
       template.network === 'egress' ? null : template.network,
       spec.warmTemplateId ? template.instanceVersion : null,
+      sealed,
     ],
   );
   let row = (await readInstance(tx, spec.instanceId, { lock: true }))!;
@@ -1259,7 +1291,7 @@ async function instanceUserData(
 ): Promise<string | null> {
   const names = Object.keys(template.env);
   if (!deps.sandboxExec && names.length === 0) return template.userData ?? null;
-  assertEnvDeliverable(deps, template.env);
+  assertEnvDeliverable(deps, template.env, template.userData);
   const env: Record<string, string> = {};
   for (const name of names.sort()) {
     const ref = template.env[name]!;
@@ -1308,9 +1340,16 @@ async function claimWarm(
   await tx.query(
     `UPDATE instances
         SET warm_template_id = NULL, sandbox_id = $2, owner_identity_id = $3, desired_state = 'running',
-            claimed_at = $4::timestamptz, version = version + 1
+            claimed_at = $4::timestamptz, agent_id = $5, delegation_id = $6, version = version + 1
       WHERE id = $1`,
-    [rows[0].id, sandbox.id, sandbox.owner_identity_id, new Date(deps.clock.now()).toISOString()],
+    [
+      rows[0].id,
+      sandbox.id,
+      sandbox.owner_identity_id,
+      new Date(deps.clock.now()).toISOString(),
+      sandbox.agent_id,
+      sandbox.delegation_id,
+    ],
   );
   const row = (await readInstance(tx, rows[0].id, { lock: true }))!;
   await deps.authz.upsert(tx, {
@@ -1349,7 +1388,7 @@ export async function completeCreateSandbox(
   const source =
     raw.from_snapshot === null
       ? undefined
-      : await restoreSource(tx, raw.tenant_id, raw.from_snapshot);
+      : await restoreSource(tx, raw.tenant_id, raw.from_snapshot, raw.owner_identity_id);
   const claimed = source ? undefined : await claimWarm(deps, tx, template, raw);
   const instance =
     claimed ??
@@ -1370,6 +1409,9 @@ export async function completeCreateSandbox(
               sha256: source.sha256,
               includeMemory: source.includeMemory,
               ...(source.cpuModel ? { cpuModel: source.cpuModel } : {}),
+              ...(source.principalInstanceId
+                ? { principalInstanceId: source.principalInstanceId }
+                : {}),
             },
           }
         : {}),
@@ -1489,6 +1531,10 @@ export async function prepareExtendSandbox(
   const expires = extendedExpiry(raw, input);
   if (input.until !== undefined && expires <= Number(raw.expires_ms))
     return { status: 'replay', result: sandboxView(raw) };
+  // The handler applies this absolute expiry, not "current + by" again: two concurrent extends
+  // decided on the same lifetime must not add up to one no decision covered.
+  input.until = expires;
+  delete input.by;
   await context.authz.setPending(
     tx,
     { type: 'sandbox', id: raw.id, tenantId: raw.tenant_id },
@@ -1652,6 +1698,7 @@ export async function reconcileSandboxes(
       pass.deleted++;
     }
   });
+  dropped.push(...(await purgeSettledSnapshots(sql, { batch })));
   await purgeSnapshots(options.store, deps.log, dropped);
 
   // Warm pools: what each template holds, then one transaction per change.
@@ -1661,9 +1708,11 @@ export async function reconcileSandboxes(
   >(
     `SELECT ${templateColumnsOf('t.')},
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
+                                  AND i.state NOT IN ('error', 'lost')
                                   AND i.warm_template_version = t.instance_version) AS live,
             count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
-                                  AND i.warm_template_version IS DISTINCT FROM t.instance_version) AS stale
+                                  AND (i.warm_template_version IS DISTINCT FROM t.instance_version
+                                       OR i.state IN ('error', 'lost'))) AS stale
        FROM sandbox_templates t
        LEFT JOIN instances i ON i.warm_template_id = t.id
       WHERE (NOT t.deleted AND t.warm_min > 0) OR i.id IS NOT NULL
@@ -1793,7 +1842,7 @@ async function drainWarm(
     const { rows } = await tx.query<{ id: string }>(
       `SELECT id FROM instances
         WHERE warm_template_id = $1 AND desired_state <> 'deleted' AND state NOT IN ('deleting', 'deleted')
-          AND (warm_template_version IS DISTINCT FROM $3) = $4
+          AND (warm_template_version IS DISTINCT FROM $3 OR state IN ('error', 'lost')) = $4
         ORDER BY created_at DESC, id DESC LIMIT $2 FOR UPDATE SKIP LOCKED`,
       [template.id, count, template.instanceVersion, stale],
     );

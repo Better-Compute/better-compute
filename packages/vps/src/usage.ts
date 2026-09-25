@@ -102,7 +102,8 @@ export async function meterInstances(
           identityId: row.owner_identity_id,
           lines,
           tags,
-          from: claimed ?? from,
+          // A recreated allocation (lost host) starts after the claim: bill it from its own start.
+          from: Math.max(claimed ?? from, from),
           to,
         },
         now,

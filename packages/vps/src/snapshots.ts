@@ -90,6 +90,21 @@ ALTER TABLE sandboxes ADD COLUMN from_snapshot text;
 `,
 };
 
+/**
+ * Security-review fixes (2026-09-25):
+ * - `principal_instance_id`: the instance whose SSH principal a memory snapshot's guest still
+ *   accepts (a memory restore resumes without cloud-init), so exec into a restore signs for it;
+ * - `purged`: a snapshot deleted while its upload was pending keeps its object until the command
+ *   settles, then the object is deleted (otherwise the late upload would outlive the row).
+ */
+export const vpsSnapshotFixesMigration: Migration = {
+  name: 'vps/0009_snapshot_fixes',
+  sql: `
+ALTER TABLE sandbox_snapshots ADD COLUMN principal_instance_id text;
+ALTER TABLE sandbox_snapshots ADD COLUMN purged bool NOT NULL DEFAULT false;
+`,
+};
+
 export type SnapshotState = 'pending' | 'ready' | 'failed' | 'deleted';
 
 export interface SandboxSnapshot {
@@ -152,13 +167,16 @@ interface RawSnapshot {
   size_bytes: string | number | null;
   cpu_model: string | null;
   reason: string | null;
+  owner_identity_id: string;
+  principal_instance_id: string | null;
   created_ms: number;
   ready_ms: number | null;
 }
 
 const snapshotColumnsOf = (a: string) => `${a}id, ${a}tenant_id, ${a}sandbox_id, ${a}template_id,
   ${a}instance_id, ${a}node_id, ${a}runtime, ${a}include_memory, ${a}keep, ${a}state, ${a}command_id,
-  ${a}url, ${a}sha256, ${a}size_bytes, ${a}cpu_model, ${a}reason,
+  ${a}url, ${a}sha256, ${a}size_bytes, ${a}cpu_model, ${a}reason, ${a}owner_identity_id,
+  ${a}principal_instance_id,
   (extract(epoch FROM ${a}created_at) * 1000)::float8 AS created_ms,
   (extract(epoch FROM ${a}ready_at) * 1000)::float8 AS ready_ms`;
 const snapshotColumns = snapshotColumnsOf('');
@@ -201,20 +219,26 @@ export interface RestoreSource {
   runtime: string;
   includeMemory: boolean;
   cpuModel?: string;
+  /** A memory snapshot's guest still accepts this instance's SSH principal. */
+  principalInstanceId?: string;
 }
 
 /**
- * The snapshot a `sandboxes.create({ fromSnapshot })` restores: the tenant's own and ready. Another
- * tenant's snapshot is `NOT_FOUND`, exactly like a missing one.
+ * The snapshot a `sandboxes.create({ fromSnapshot })` restores: ready, and taken by the restoring
+ * identity (a snapshot holds its sandbox's memory and `/etc/sandbox/env`, so another user of the
+ * tenant must not boot it). Another identity's or tenant's snapshot is `NOT_FOUND`, exactly like a
+ * missing one.
  */
 export async function restoreSource(
   tx: SqlTx,
   tenantId: string,
   snapshotId: string,
+  identityId: string,
 ): Promise<RestoreSource> {
   const { rows } = await tx.query<RawSnapshot>(
-    `SELECT ${snapshotColumns} FROM sandbox_snapshots WHERE id = $1 AND tenant_id = $2`,
-    [snapshotId, tenantId],
+    `SELECT ${snapshotColumns} FROM sandbox_snapshots
+      WHERE id = $1 AND tenant_id = $2 AND owner_identity_id = $3`,
+    [snapshotId, tenantId, identityId],
   );
   const raw = rows[0];
   if (!raw || raw.state === 'deleted')
@@ -229,6 +253,7 @@ export async function restoreSource(
     includeMemory: raw.include_memory,
   };
   if (raw.cpu_model !== null) source.cpuModel = raw.cpu_model;
+  if (raw.include_memory) source.principalInstanceId = raw.principal_instance_id ?? raw.instance_id;
   return source;
 }
 
@@ -317,8 +342,8 @@ export async function snapshotSandbox(
   const { rows } = await tx.query<RawSnapshot>(
     `INSERT INTO sandbox_snapshots (id, tenant_id, sandbox_id, template_id, instance_id, node_id, runtime,
                                     include_memory, keep, state, command_id, url, owner_identity_id,
-                                    idempotency_key, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, 1)
+                                    idempotency_key, principal_instance_id, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, 1)
      RETURNING ${snapshotColumns}`,
     [
       snapshotId,
@@ -334,6 +359,8 @@ export async function snapshotSandbox(
       target.url,
       caller.identityId,
       input.idempotencyKey ?? null,
+      // A restored guest keeps the principal its memory was captured with.
+      instance.restoreFrom?.principalInstanceId ?? instance.id,
     ],
   );
   return snapshotView(rows[0]!);
@@ -440,15 +467,39 @@ export async function dropSnapshots(
   tx: SqlTx,
   scope: { sandboxId: string } | { tenantId: string },
 ): Promise<DroppedSnapshot[]> {
-  const { rows } = await tx.query<{ id: string; tenant_id: string; url: string }>(
-    'sandboxId' in scope
-      ? `UPDATE sandbox_snapshots SET state = 'deleted', version = version + 1
-          WHERE sandbox_id = $1 AND NOT keep AND state <> 'deleted' RETURNING id, tenant_id, url`
-      : `UPDATE sandbox_snapshots SET state = 'deleted', version = version + 1
-          WHERE tenant_id = $1 AND state <> 'deleted' RETURNING id, tenant_id, url`,
+  // A pending upload may still land: its object is deleted once the command settles
+  // (`purgeSettledSnapshots`), not now.
+  const { rows } = await tx.query<{ id: string; tenant_id: string; url: string; purged: boolean }>(
+    `UPDATE sandbox_snapshots SET state = 'deleted', purged = (state <> 'pending'), version = version + 1
+      WHERE ${'sandboxId' in scope ? 'sandbox_id = $1 AND NOT keep' : 'tenant_id = $1'} AND state <> 'deleted'
+      RETURNING id, tenant_id, url, purged`,
     ['sandboxId' in scope ? scope.sandboxId : scope.tenantId],
   );
-  return rows.map((row) => ({ tenantId: row.tenant_id, snapshotId: row.id, url: row.url }));
+  return rows
+    .filter((row) => row.purged)
+    .map((row) => ({ tenantId: row.tenant_id, snapshotId: row.id, url: row.url }));
+}
+
+/**
+ * Snapshots deleted while their upload was pending, whose command has now settled: marked purged, and
+ * their objects returned for `purgeSnapshots` (a late upload never outlives its row).
+ */
+export async function purgeSettledSnapshots(
+  sql: SqlExecutor,
+  options: { batch?: number } = {},
+): Promise<DroppedSnapshot[]> {
+  return sql.transaction(async (tx) => {
+    const { rows } = await tx.query<{ id: string; tenant_id: string; url: string }>(
+      `UPDATE sandbox_snapshots s SET purged = true, version = s.version + 1
+        WHERE s.id IN (SELECT s2.id FROM sandbox_snapshots s2 LEFT JOIN commands c ON c.id = s2.command_id
+                        WHERE s2.state = 'deleted' AND NOT s2.purged
+                          AND (c.id IS NULL OR c.state IN ('succeeded', 'failed', 'rejected', 'expired', 'cancelled'))
+                        ORDER BY s2.id LIMIT $1 FOR UPDATE OF s2 SKIP LOCKED)
+        RETURNING s.id, s.tenant_id, s.url`,
+      [options.batch ?? 100],
+    );
+    return rows.map((row) => ({ tenantId: row.tenant_id, snapshotId: row.id, url: row.url }));
+  });
 }
 
 /** Deletes dropped snapshots' stored objects (never inside a transaction; failures are logged). */

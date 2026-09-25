@@ -94,9 +94,9 @@ beforeAll(async () => {
   await db.migrate([]);
   // The vps tables, reduced to what sandboxes.exec reads.
   await db.query(`CREATE TABLE instances (id text PRIMARY KEY, tenant_id text NOT NULL, node_id text,
-                    state text NOT NULL, draft bool NOT NULL DEFAULT false)`);
+                    state text NOT NULL, draft bool NOT NULL DEFAULT false, restore_from jsonb)`);
   await db.query(`CREATE TABLE sandboxes (id text PRIMARY KEY, tenant_id text NOT NULL, instance_id text NOT NULL,
-                    draft bool NOT NULL DEFAULT false, deleting_at timestamptz)`);
+                    draft bool NOT NULL DEFAULT false, deleting_at timestamptz, expires_at timestamptz)`);
   await useSimClock(db, T0);
   await db.query(
     `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_01jz00000000000000000000aa', 'root', 'shared', 'eu', 1)`,
@@ -211,6 +211,33 @@ describe('sandboxes.exec', () => {
       details: { capability: 'tunnel.instance-dial' },
     });
     expect(events).toEqual([]);
+  });
+
+  it('never outlives the sandbox, and refuses one about to expire', async () => {
+    await db.query(`UPDATE sandboxes SET expires_at = $1::timestamptz`, [
+      new Date(T0 + 3 * 60_000).toISOString(),
+    ]);
+    const issued = await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey });
+    expect(issued.validBefore).toBe(T0 + 3 * 60_000);
+    await db.query(`UPDATE sandboxes SET expires_at = $1::timestamptz`, [
+      new Date(T0 + 30_000).toISOString(),
+    ]);
+    await expect(exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey })).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      details: { reason: 'sandbox-expiring' },
+    });
+  });
+
+  it('signs for the principal a memory-restored guest still accepts', async () => {
+    const ORIGINAL = 'inst_01jz00000000000000000000ib';
+    await db.query(`UPDATE instances SET restore_from = $1::jsonb`, [
+      JSON.stringify({ snapshotId: 'snap_x', principalInstanceId: ORIGINAL }),
+    ]);
+    const issued = await exec({ tenantId: 'acme', sandboxId: SANDBOX, publicKey });
+    expect(issued.principal).toBe(`sandbox@${ORIGINAL}`);
+    expect(parseSshCertificate(issued.certificate).principals).toEqual([`sandbox@${ORIGINAL}`]);
+    // The ticket still names the instance it dials.
+    expect(issued.instanceId).toBe(INSTANCE);
   });
 
   it('validates its configuration and input', () => {

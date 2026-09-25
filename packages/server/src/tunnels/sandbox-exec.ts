@@ -118,7 +118,12 @@ async function sandboxInstance(
   tx: SqlTx,
   tenantId: string,
   sandboxId: string,
-): Promise<{ instanceId: string; nodeId: string }> {
+): Promise<{
+  instanceId: string;
+  nodeId: string;
+  principalInstanceId: string;
+  expiresAt: number | null;
+}> {
   const present = await tx.query<{ found: string | null }>(
     `SELECT to_regclass('sandboxes')::text AS found`,
   );
@@ -130,8 +135,12 @@ async function sandboxInstance(
     deleting: boolean;
     node_id: string | null;
     state: string | null;
+    principal_instance_id: string | null;
+    expires_ms: number | null;
   }>(
-    `SELECT s.instance_id, s.draft, s.deleting_at IS NOT NULL AS deleting, i.node_id, i.state
+    `SELECT s.instance_id, s.draft, s.deleting_at IS NOT NULL AS deleting, i.node_id, i.state,
+            i.restore_from->>'principalInstanceId' AS principal_instance_id,
+            (extract(epoch FROM s.expires_at) * 1000)::float8 AS expires_ms
        FROM sandboxes s LEFT JOIN instances i ON i.id = s.instance_id
       WHERE s.id = $1 AND s.tenant_id = $2`,
     [sandboxId, tenantId],
@@ -145,7 +154,13 @@ async function sandboxInstance(
       'INVALID_STATE',
       `Sandbox ${sandboxId} is not ready (its instance is ${row.state ?? 'gone'})`,
     );
-  return { instanceId: row.instance_id, nodeId: row.node_id };
+  return {
+    instanceId: row.instance_id,
+    nodeId: row.node_id,
+    // A memory restore resumed without cloud-init: its sshd still accepts the original principal.
+    principalInstanceId: row.principal_instance_id ?? row.instance_id,
+    expiresAt: row.expires_ms === null ? null : Number(row.expires_ms),
+  };
 }
 
 export interface SandboxExecDeps {
@@ -189,10 +204,24 @@ export function sandboxExecMethod(
         invalid('publicKey must be an Ed25519 or ECDSA P-256 OpenSSH public key');
       }
       const tx = context.sql as SqlTx;
-      const { instanceId, nodeId } = await sandboxInstance(tx, input.tenantId, input.sandboxId);
+      const { instanceId, nodeId, principalInstanceId, expiresAt } = await sandboxInstance(
+        tx,
+        input.tenantId,
+        input.sandboxId,
+      );
       await deps.checkReachable(tx, nodeId, deps.instanceDialCapability);
       const now = context.clock.now();
+      // Past its expiry a sandbox is on its way out, even before the reconciler deletes it; a
+      // certificate never outlives the sandbox.
+      if (expiresAt !== null && expiresAt - now < 60_000)
+        throw new ComputeError(
+          'INVALID_STATE',
+          `Sandbox ${input.sandboxId} expires within a minute; extend it first`,
+          undefined,
+          { reason: 'sandbox-expiring' },
+        );
       let validBefore = now + (input.ttlSeconds ?? 600) * 1000;
+      if (expiresAt !== null) validBefore = Math.min(validBefore, expiresAt);
       if (caller.sessionExpiresAt !== undefined) {
         if (caller.sessionExpiresAt - now < 60_000)
           throw new ComputeError(
@@ -218,7 +247,7 @@ export function sandboxExecMethod(
         instanceId,
         sandboxId: input.sandboxId,
       });
-      const principal = `${deps.account}@${instanceId}`;
+      const principal = `${deps.account}@${principalInstanceId}`;
       const keyId = `bc:${caller.identityId}:${input.sandboxId}:${newId('ssh')}`;
       const issued = ca.issueUserCertificate({
         publicKey: input.publicKey,

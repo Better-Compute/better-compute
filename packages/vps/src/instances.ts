@@ -306,6 +306,11 @@ export interface InstanceRestore {
   includeMemory: boolean;
   /** Memory state needs a host with this `cpu.model` label (a `cpuModelLabelValue`). */
   cpuModel?: string;
+  /**
+   * A memory restore resumes the guest without re-running cloud-init, so its sshd still accepts the
+   * SSH principal of this (original) instance: `sandboxes.exec` signs for it.
+   */
+  principalInstanceId?: string;
 }
 
 /**

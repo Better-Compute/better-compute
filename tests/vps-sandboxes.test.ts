@@ -779,6 +779,24 @@ describe('warm pools', () => {
     expect((await createSandbox(template.id, {}, bob)).warm).toBe(true);
   });
 
+  it('replace warm instances that failed instead of counting them forever', async () => {
+    const template = await createTemplate({ warm: { min: 1 } });
+    await reconcileSandboxes();
+    const [broken] = (
+      await db.query<{ id: string }>(`SELECT id FROM instances WHERE warm_template_id = $1`, [
+        template.id,
+      ])
+    ).rows;
+    await db.query(`UPDATE instances SET state = 'error' WHERE id = $1`, [broken!.id]);
+    await reconcileSandboxes();
+    const { rows } = await db.query<{ id: string; desired_state: string }>(
+      `SELECT id, desired_state FROM instances WHERE warm_template_id = $1 ORDER BY created_at, id`,
+      [template.id],
+    );
+    expect(rows.find((row) => row.id === broken!.id)?.desired_state).toBe('deleted');
+    expect(rows.filter((row) => row.desired_state !== 'deleted')).toHaveLength(1);
+  });
+
   it('keep instances stopped on a runtime that cannot pause', async () => {
     const template = await createTemplate({ warm: { min: 1 } });
     const noPause = vps({
@@ -1052,6 +1070,9 @@ describe('snapshots', () => {
       sandboxId: sandbox.id,
       keep: true,
     })) as SnapshotView;
+    // Both uploads finished before the sandbox goes.
+    for (const command of recorded.commands) await settle(command.id, 'succeeded');
+    await reconcileWith('all');
     deletedObjects.length = 0;
     await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
     await reconcileInstance(sandbox.instanceId);
@@ -1063,11 +1084,65 @@ describe('snapshots', () => {
     );
     expect(Object.fromEntries(states.rows.map((row) => [row.id, row.state]))).toEqual({
       [dropped.id]: 'deleted',
-      [kept.id]: 'pending',
+      [kept.id]: 'ready',
     });
     // The tenant's teardown takes kept ones too.
     await withStore.tenantDeleted!(moduleContext(db), 'acme');
     expect(deletedObjects).toEqual([dropped.id, kept.id]);
+  });
+
+  it('keep a pending upload’s object until its command settles, then delete it', async () => {
+    const { sandbox } = await running();
+    const pending = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+    })) as SnapshotView;
+    deletedObjects.length = 0;
+    await call('sandboxes', 'delete', { tenantId: 'acme', sandboxId: sandbox.id });
+    await reconcileInstance(sandbox.instanceId);
+    await hostsReport('absent');
+    await reconcileWith('all');
+    // Deleted, but the host may still be uploading: nothing to delete yet.
+    expect(deletedObjects).toEqual([]);
+    await settle(recorded.commands[0]!.id, 'succeeded');
+    await reconcileWith('all');
+    expect(deletedObjects).toEqual([pending.id]);
+    await reconcileWith('all');
+    expect(deletedObjects).toEqual([pending.id]);
+  });
+
+  it("restore only the caller's own snapshots, and memory restores keep the exec principal", async () => {
+    const { template, sandbox } = await running();
+    const snapshot = (await callStore('snapshot', {
+      tenantId: 'acme',
+      sandboxId: sandbox.id,
+    })) as SnapshotView;
+    await settle(recorded.commands[0]!.id, 'succeeded');
+    await reconcileWith(snapshot.id);
+    // Another user of the tenant cannot boot alice's memory.
+    await expect(
+      callStore(
+        'create',
+        {
+          tenantId: 'acme',
+          templateId: template.id,
+          fromSnapshot: snapshot.id,
+          idempotencyKey: 'b',
+        },
+        bob,
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    const restored = (await callStore('create', {
+      tenantId: 'acme',
+      templateId: template.id,
+      fromSnapshot: snapshot.id,
+      idempotencyKey: 'mine',
+    })) as SandboxView;
+    const { rows } = await db.query<{ restore_from: { principalInstanceId?: string } }>(
+      `SELECT restore_from FROM instances WHERE id = $1`,
+      [restored.instanceId],
+    );
+    expect(rows[0]!.restore_from.principalInstanceId).toBe(sandbox.instanceId);
   });
 });
 
@@ -1256,6 +1331,25 @@ describe('exec trust', () => {
     expect(userData).toContain('Content-Type: text/x-shellscript; charset="utf-8"');
     expect(userData).toContain('echo hello');
     expect(userData.trimEnd().endsWith(`--bc-sandbox-${sandbox.instanceId}--`)).toBe(true);
+  });
+
+  it('refuses a secret:// user data it would have to render without a broker', async () => {
+    await expect(
+      run(
+        (execApi.sandboxTemplates as Record<string, Definition>).create!,
+        templateInput({
+          name: 'secret-ud',
+          userData: 'secret://acme/cloud-init',
+        }),
+        alice,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIG' });
+  });
+
+  it('takes a CA key whose comment has spaces (as pki writes them)', () => {
+    expect(() =>
+      vps({ images, sandboxExec: { caPublicKey: `${caPublicKey} extra words here` } }),
+    ).not.toThrow();
   });
 
   it('refuses a CA that is not one key line, and a bad account', () => {

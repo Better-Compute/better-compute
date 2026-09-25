@@ -37,17 +37,24 @@ export async function vpsTenantDeleted(
   const outcome = await context.sql.transaction(async (tx) => {
     // Its snapshots, kept ones included (tenant data with memory state).
     dropped = await dropSnapshots(tx, { tenantId });
-    await tx.query(
+    const templates = await tx.query<{ id: string }>(
       `UPDATE sandbox_templates SET deleted = true, version = version + 1
-        WHERE tenant_id = $1 AND NOT deleted`,
+        WHERE tenant_id = $1 AND NOT deleted RETURNING id`,
       [tenantId],
     );
+    for (const { id } of templates.rows)
+      await deps.authz.remove(tx, { type: 'sandbox-template', id, tenantId });
     await tx.query(
       `UPDATE sandboxes SET deleting_at = $2::timestamptz, version = version + 1
         WHERE tenant_id = $1 AND NOT draft AND deleting_at IS NULL`,
       [tenantId, at],
     );
-    await tx.query(`DELETE FROM sandboxes WHERE tenant_id = $1 AND draft`, [tenantId]);
+    const sandboxDrafts = await tx.query<{ id: string }>(
+      `DELETE FROM sandboxes WHERE tenant_id = $1 AND draft RETURNING id`,
+      [tenantId],
+    );
+    for (const { id } of sandboxDrafts.rows)
+      await deps.authz.remove(tx, { type: 'sandbox', id, tenantId });
     const drafts = await tx.query<{ id: string }>(
       `DELETE FROM instances WHERE tenant_id = $1 AND draft RETURNING id`,
       [tenantId],

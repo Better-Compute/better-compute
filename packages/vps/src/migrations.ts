@@ -6,7 +6,7 @@ import {
   vpsTemplateNetworkMigration,
   vpsWarmClaimsMigration,
 } from './sandboxes.js';
-import { vpsSandboxSnapshotsMigration } from './snapshots.js';
+import { vpsSandboxSnapshotsMigration, vpsSnapshotFixesMigration } from './snapshots.js';
 
 /**
  * The VPS tables (PLAN.md §3.6, §8.3 "v0.3 tables"): flavors per pool, provider accounts, instances
@@ -123,4 +123,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsWarmClaimsMigration,
   vpsTemplateEnvMigration,
   vpsTemplateNetworkMigration,
+  vpsSnapshotFixesMigration,
 ]);
