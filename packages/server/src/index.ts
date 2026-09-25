@@ -34,6 +34,7 @@ import {
 } from './runtime/index.js';
 import { createSelfCheck, type SelfCheckReport } from './self-check.js';
 import { createSiteBootModule } from './site-boot-module.js';
+import { createAuditSinksModule } from './audit-sinks-module.js';
 import { tunnelsModule } from './tunnels/module.js';
 import { serverInfo } from './version.js';
 
@@ -80,6 +81,7 @@ export type { CommandSigner, CommandSignerOptions } from './runtime/command-sign
 export * from './controllers/index.js';
 export * from './nodes-module.js';
 export * from './site-boot-module.js';
+export * from './audit-sinks-module.js';
 export { siteBootLeaseName, siteBootTtlSeconds, tickSiteBoot } from './controllers/site-boot.js';
 export type { SiteBootState } from './controllers/site-boot.js';
 export * from './tunnels/index.js';
@@ -191,6 +193,8 @@ export function betterCompute<
     // The default secret store's table (`sealed_secrets`, owned by pki's migration).
     ...(resolved.sealedSecrets ? [{ name: 'pki', migrations: [sealedSecretsMigration] }] : []),
     ...(options.tunnels ? [tunnelsModule(options.tunnels)] : []),
+    // Audit sinks (`sinks.audit` and modules' AuditSink extensions): committed audit rows, in order.
+    ...(resolved.auditSinks.length ? [createAuditSinksModule(resolved.auditSinks)] : []),
     ...(options.modules ?? []),
   ];
   const plugins: readonly ComputePlugin[] = [...(options.plugins ?? [])];

@@ -3,6 +3,7 @@ import {
   computeResourceTypes,
   newId,
   type AttestorVerifier,
+  type AuditSink,
   type BlobStore,
   type CapacityPort,
   type CertificateAuthority,
@@ -17,6 +18,7 @@ import {
   type Notifier,
   type ProviderDefinition,
   type SchedulerOptions,
+  type SchedulerPlugin,
   type SecretStore,
   type SinkOptions,
   type SqlExecutor,
@@ -194,6 +196,8 @@ export interface ResolvedOptions {
   log: Logger;
   notifier?: Notifier;
   eventSinks: readonly EventSink[];
+  /** `sinks.audit` plus the audit sinks modules list: the built-in audit-sinks module delivers to them. */
+  auditSinks: readonly AuditSink[];
   iamJobs: readonly IamJob[];
   worker: WorkerSettings;
   ports: { capacity?: CapacityPort; inventory?: InventoryPort };
@@ -301,7 +305,32 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
       throw invalid(`${list} must be an array`);
   if (options.notifier !== undefined)
     requireMethods(options.notifier, 'notifier', ['publish', 'subscribe']);
-  const eventSinks = [...(options.sinks?.events ?? [])];
+  // Extensions the modules and plugins list run like the options' own: event sinks and audit
+  // sinks are delivered to, scheduler plugins join the placer (the registry refuses duplicates).
+  const listed = [...(options.modules ?? []), ...(options.plugins ?? [])].flatMap(
+    (module) => ((module as { extensions?: unknown[] }).extensions ?? []) as unknown[],
+  );
+  const sinksOf = <K extends 'events' | 'usage' | 'audit'>(kind: K) =>
+    listed.filter(
+      (extension) =>
+        isRecord(extension) && extension.extension === 'sink' && extension.kind === kind,
+    );
+  if ((options.sinks?.usage?.length ?? 0) > 0 || sinksOf('usage').length > 0)
+    throw invalid(
+      'Usage sinks are not supported yet: usage windows go to IAM billing through the IAM bridge (§12.7)',
+    );
+  const eventSinks = [...(options.sinks?.events ?? []), ...(sinksOf('events') as EventSink[])];
+  const auditSinks = [...(options.sinks?.audit ?? []), ...(sinksOf('audit') as AuditSink[])];
+  for (const sink of auditSinks) {
+    requireMethods(sink, 'sinks.audit[]', ['write']);
+    if (typeof sink.id !== 'string' || !sink.id)
+      throw invalid('sinks.audit[].id must be a non-empty string');
+  }
+  if (new Set(auditSinks.map((sink) => sink.id)).size !== auditSinks.length)
+    throw invalid('An audit sink is listed twice');
+  const schedulerPlugins = listed.filter(
+    (extension) => isRecord(extension) && extension.extension === 'scheduler',
+  ) as SchedulerPlugin[];
   const sinkIds = new Set<string>();
   for (const sink of eventSinks) {
     requireMethods(sink, 'sinks.events[]', ['deliver']);
@@ -312,7 +341,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     sinkIds.add(sink.id);
   }
   const ports = resolvePorts(options.ports);
-  const capacity = resolveCapacity(options.capacity, options.scheduler);
+  const capacity = resolveCapacity(options.capacity, options.scheduler, schedulerPlugins);
   const join = options.pki?.join;
   if (join !== undefined) {
     requireMethods(join, 'pki.join', [
@@ -355,6 +384,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     log,
     ...(options.notifier ? { notifier: options.notifier } : {}),
     eventSinks,
+    auditSinks,
     iamJobs: resolveIamJobs(options.iamJobs ?? []),
     worker,
     ports,
@@ -448,6 +478,7 @@ function resolveWorker(options: WorkerOptions | undefined): WorkerSettings {
 function resolveCapacity(
   capacity: ComputeOptions['capacity'],
   scheduler: SchedulerOptions | undefined,
+  listed: readonly SchedulerPlugin[] = [],
 ): CapacityModuleOptions {
   if (capacity !== undefined && !isRecord(capacity as unknown))
     throw invalid('capacity must be an object');
@@ -458,7 +489,8 @@ function resolveCapacity(
   if (scheduler?.plugins !== undefined && !Array.isArray(scheduler.plugins))
     throw invalid('scheduler.plugins must be an array');
   const resolved: CapacityModuleOptions = { ...capacity };
-  if (scheduler?.plugins) resolved.plugins = scheduler.plugins;
+  const plugins = [...(scheduler?.plugins ?? []), ...listed];
+  if (plugins.length) resolved.plugins = plugins;
   if (scheduler?.weights) resolved.weights = scheduler.weights;
   if (scheduler?.topN !== undefined) resolved.topN = scheduler.topN;
   return resolved;
