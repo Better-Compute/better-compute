@@ -8,6 +8,7 @@ import {
 } from '@better-compute/core';
 import { stateProfile, workflowStates } from './profiles.js';
 import { applyProvisionVerb, readMetalNode, setMetalWorkflow, type MetalNodeRow } from './store.js';
+import { dueNodeLease, leaseEnded, markLeaseBound, newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 
 // The metal reconciler (key: node id). Level-triggered: for a node in a workflow-driven provision
 // state it makes sure exactly that state's workflow runs, and when the workflow ends it applies
@@ -42,6 +43,47 @@ async function releaseVerified(tx: SqlTx, workflowId: string, mode: string): Pro
   return rows.length > 0 && rows.every((row) => row.result?.attested === true);
 }
 
+/**
+ * Dedicated-root leases (tenant-root.ts). A ready node with a due node-binding allocation in a
+ * `tenantRoot` pool starts its lease: tenant-controlled trust, the platform identity revoked, and the
+ * lessee's profile deploying. A deployed tenant-root node whose lease ended starts its teardown.
+ */
+async function leaseTransition(context: Context, tx: SqlTx, node: MetalNodeRow): Promise<MetalReconcileOutcome | undefined> {
+  const state = node.provision_state;
+  if (state === 'ready' && !node.maintenance && !node.lease_allocation_id) {
+    const lease = await dueNodeLease(tx, node.node_id);
+    if (!lease || !tenantRootPolicy(node.pool_policy).allowed) return undefined;
+    if (!lease.profileId || !Number.isInteger(lease.profileVersion) || lease.profileVersion < 1) {
+      await publish(context, tx, node, 'node.tenant-root.refused', { allocationId: lease.allocationId, reason: 'the reservation names no metal profile' });
+      return undefined;
+    }
+    await tx.query(
+      `UPDATE metal_nodes SET lease_allocation_id = $2, tenant_root = true, deploy_profile_id = $3, deploy_profile_version = $4,
+         release_wipe = 'secure-erase', updated_at = compute_now(), version = version + 1 WHERE node_id = $1`,
+      [node.node_id, lease.allocationId, lease.profileId, lease.profileVersion],
+    );
+    // The next join is the lessee's OS: JoinService issues it a node-tenant certificate.
+    await tx.query(`UPDATE nodes SET trust = 'tenant-controlled' WHERE id = $1`, [node.node_id]);
+    await newIdentityGeneration(tx, node.node_id, 'tenant-root-lease');
+    Object.assign(node, { lease_allocation_id: lease.allocationId, tenant_root: true, trust: 'tenant-controlled' });
+    const to = await applyProvisionVerb(tx, node, 'deploy');
+    await publish(context, tx, node, 'node.tenant-root.leased', {
+      allocationId: lease.allocationId,
+      reservationId: lease.reservationId,
+      lesseeTenantId: lease.tenantId,
+      profileId: lease.profileId,
+      profileVersion: lease.profileVersion,
+    });
+    return { action: 'completed', from: state, to };
+  }
+  if (state === 'deployed' && node.tenant_root && node.lease_allocation_id && (await leaseEnded(tx, node.lease_allocation_id))) {
+    const to = await applyProvisionVerb(tx, node, 'release');
+    await publish(context, tx, node, 'node.tenant-root.ending', { allocationId: node.lease_allocation_id });
+    return { action: 'completed', from: state, to };
+  }
+  return undefined;
+}
+
 /** One reconcile transition, in one transaction. */
 async function step(context: Context, nodeId: string): Promise<MetalReconcileOutcome> {
   return context.sql.transaction(async (tx) => {
@@ -52,6 +94,8 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
       if (isComputeError(error, 'NOT_FOUND')) return { action: 'missing' };
       throw error;
     }
+    const leased = await leaseTransition(context, tx, node);
+    if (leased) return leased;
     const state = node.provision_state;
     if (!workflowStates.includes(state)) return { action: 'idle', state };
 
@@ -78,6 +122,9 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
         const role = state === 'deploying' ? (workflow.profile_document?.role ?? 'host') : undefined;
         const to = await applyProvisionVerb(tx, node, 'complete', role ? { role } : {});
         await setMetalWorkflow(tx, nodeId, null, null);
+        // A dedicated-root lease is bound once its deploy is done; capacity takes it from there.
+        if (state === 'deploying' && node.lease_allocation_id && (await markLeaseBound(tx, context.work, node.lease_allocation_id)))
+          await publish(context, tx, node, 'node.tenant-root.bound', { allocationId: node.lease_allocation_id });
         await publish(context, tx, node, `node.provision.${to}`, { from: state, workflowId: node.workflow_id });
         return { action: 'completed', from: state, to };
       }
@@ -93,13 +140,19 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
       throw new ComputeError('INVALID_CONFIG', 'metal() needs the provision module: ModuleContext.workflows is not set');
     let profileId: string;
     let profileVersion: number;
+    let tenantId = node.tenant_id;
     if (state === 'deploying') {
       if (!node.deploy_profile_id || !node.deploy_profile_version)
         throw new ComputeError('INVALID_STATE', `Node ${nodeId} is deploying without a profile`);
       profileId = node.deploy_profile_id;
       profileVersion = node.deploy_profile_version;
+      // A leased node deploys the lessee's profile, resolved in the lessee's tenant.
+      if (node.lease_allocation_id) {
+        const { rows } = await tx.query<{ tenant_id: string }>('SELECT tenant_id FROM allocations WHERE id = $1', [node.lease_allocation_id]);
+        if (rows[0]) tenantId = rows[0].tenant_id;
+      }
     } else {
-      const profile = stateProfile(state, node.pool_agent);
+      const profile = stateProfile(state, node.pool_agent, { tenantRoot: node.tenant_root });
       if (!profile) {
         // Rescue boots a ramdisk, which an agentless machine never runs.
         const error = { code: 'UNSUPPORTED', message: `${state} needs an agent; pool ${node.pool_id} has agent 'none'` };
@@ -111,7 +164,7 @@ async function step(context: Context, nodeId: string): Promise<MetalReconcileOut
       profileVersion = profile.version;
     }
     // `owner` is provision's addition to the core input: the engine wakes this reconciler on finish.
-    const input = { tenantId: node.tenant_id, profileId, profileVersion, nodeId, owner: metalWorkKind };
+    const input = { tenantId, profileId, profileVersion, nodeId, owner: metalWorkKind };
     const { id } = await context.workflows.start(tx, input);
     await setMetalWorkflow(tx, nodeId, state, id);
     await publish(context, tx, node, 'node.provision.workflow', { state, workflowId: id, profileId, profileVersion });

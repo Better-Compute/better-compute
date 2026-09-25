@@ -19,6 +19,7 @@ import {
 } from '@better-compute/provision';
 import { isIP } from 'node:net';
 import { nodeSignedResults } from './attestation.js';
+import { newIdentityGeneration, tenantRootPolicy } from './tenant-root.js';
 import { bmcResult, dcgmResult, deployResult, inventoryRefreshResult, wipeResult } from './results.js';
 import { readMetalNode, type MetalNodeRow } from './store.js';
 
@@ -461,5 +462,92 @@ export function metalSteps(options: MetalStepOptions = {}): StepDefinition[] {
     },
   });
 
-  return [getPower, setPower, setBootDevice, inspectOob, mediaInsert, mediaEject, prepareRamdisk, cleanUp, ensureRamdisk, refreshInventory, dcgm, wipe, deploy, kexec, revokeIdentity];
+  // Tenant-root teardown (§13). The tenant's identity goes first: once its node-tenant certificates
+  // are revoked, nothing the tenant left behind can sign a result for this node.
+  const fenceTenant = defineStep({
+    id: 'metal.fenceTenant',
+    runsOn: 'control-plane',
+    timeout: '1m',
+    retrySafe: true,
+    input: manifest({}),
+    async run(_input, context) {
+      const nodeId = requireNode(context);
+      return context.sql.transaction(async (tx) => ({ revokedCertificates: await newIdentityGeneration(tx, nodeId, 'tenant-root-ended') }));
+    },
+  });
+
+  /** Every component of the pool's firmware baseline must report exactly that version (§13 step 5). */
+  const firmwareCheck = defineStep({
+    id: 'metal.firmwareCheck',
+    runsOn: 'control-plane',
+    relays: ['site'],
+    timeout: '5m',
+    retrySafe: true,
+    input: manifest({}),
+    async run(_input, context) {
+      const node = await metalNode(context);
+      const { firmwareBaseline } = tenantRootPolicy(node.pool_policy);
+      if (!firmwareBaseline || Object.keys(firmwareBaseline).length === 0)
+        throw new ComputeError('INVALID_CONFIG', `Pool ${node.pool_id} has no policy.firmwareBaseline to verify against`);
+      const result = (await bmc(context, 'bmc.query', 'firmware.components', {})) as Record<string, Json>;
+      const reported = new Map<string, string>();
+      for (const component of Array.isArray(result.components) ? result.components : [])
+        if (component && typeof component === 'object' && !Array.isArray(component)) {
+          const { id, version } = component as Record<string, Json>;
+          if (typeof id === 'string' && typeof version === 'string') reported.set(id, version);
+        }
+      const drift = Object.entries(firmwareBaseline)
+        .filter(([id, version]) => reported.get(id) !== version)
+        .map(([id, expected]) => ({ component: id, expected, found: reported.get(id) ?? null }));
+      // Drift quarantines the machine: the workflow fails, and the node fails with maintenance on.
+      if (drift.length)
+        throw new ComputeError('DRIVER_ERROR', `Firmware differs from the pool baseline: ${drift.map((d) => d.component).join(', ')}`, undefined, {
+          code: 'FIRMWARE_DRIFT',
+          drift,
+        });
+      return { verified: Object.keys(firmwareBaseline).length };
+    },
+  });
+
+  /** The lease is over: a new identity generation, platform trust, no lease. */
+  const exitTenantRoot = defineStep({
+    id: 'metal.exitTenantRoot',
+    runsOn: 'control-plane',
+    timeout: '1m',
+    retrySafe: true,
+    input: manifest({}),
+    async run(_input, context) {
+      const nodeId = requireNode(context);
+      return context.sql.transaction(async (tx) => {
+        const revoked = await newIdentityGeneration(tx, nodeId, 'tenant-root-exit');
+        await tx.query(`UPDATE nodes SET trust = 'platform' WHERE id = $1`, [nodeId]);
+        await tx.query(
+          'UPDATE metal_nodes SET tenant_root = false, lease_allocation_id = NULL, updated_at = compute_now(), version = version + 1 WHERE node_id = $1',
+          [nodeId],
+        );
+        return { revokedCertificates: revoked, trust: 'platform' };
+      });
+    },
+  });
+
+  return [
+    getPower,
+    setPower,
+    setBootDevice,
+    inspectOob,
+    mediaInsert,
+    mediaEject,
+    prepareRamdisk,
+    cleanUp,
+    ensureRamdisk,
+    refreshInventory,
+    dcgm,
+    wipe,
+    deploy,
+    kexec,
+    revokeIdentity,
+    fenceTenant,
+    firmwareCheck,
+    exitTenantRoot,
+  ];
 }

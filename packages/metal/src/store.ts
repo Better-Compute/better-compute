@@ -46,13 +46,18 @@ export interface MetalNodeRow {
   /** `bcd`, or `none` for agentless machines (Talos, appliances): inspected and managed out of band only. */
   pool_agent: 'bcd' | 'none' | null;
   pool_policy: Record<string, unknown> | null;
+  trust: 'platform' | 'tenant-owned' | 'tenant-controlled';
+  /** The capacity allocation of the node's dedicated-root lease (binding 'node'), while leased. */
+  lease_allocation_id: string | null;
+  /** Tenant code may have run since the lease began: only the tenant-root teardown returns it to ready. */
+  tenant_root: boolean;
 }
 
 const select = `SELECT m.node_id, m.tenant_id, n.site_id, n.pool_id, n.provision_state, n.failed_from, n.maintenance,
     n.power, n.role, n.version AS node_version, m.bmc_driver, m.bmc_address, m.bmc_credentials,
     m.bmc_tls_spki_sha256, m.macs, m.product_uuid, m.arch, m.uefi, m.hardware_profile, m.phase, m.workflow_id,
     m.deploy_profile_id, m.deploy_profile_version, m.release_wipe, m.last_error, m.addresses,
-    p.agent AS pool_agent, p.policy AS pool_policy
+    p.agent AS pool_agent, p.policy AS pool_policy, n.trust, m.lease_allocation_id, m.tenant_root
   FROM metal_nodes m JOIN nodes n ON n.id = m.node_id LEFT JOIN pools p ON p.id = n.pool_id`;
 
 function normalize(row: MetalNodeRow): MetalNodeRow {

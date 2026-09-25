@@ -46,7 +46,12 @@ export interface SimMachine {
   bootDevice: string;
   mounted: string;
   power: 'on' | 'off';
+  /** What the BMC reports for firmware.components. */
+  firmware: Record<string, string>;
 }
+
+/** The firmware every simulated machine ships with. */
+export const simFirmware = Object.freeze({ bmc: '1.12.0', bios: '2.4.1', 'gpu-vbios': '96.00.5f' });
 
 export interface MetalSimOptions {
   modules?: readonly Pick<ComputeModule, 'extensions' | 'profiles'>[];
@@ -151,32 +156,37 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
     forgeWipe: false,
     /** Results are signed by another machine's key (a stolen or confused identity). */
     foreignSigner: false,
+    /** Results are signed with this key instead of the ramdisk's (e.g. a lessee's node-tenant key). */
+    signWith: undefined as KeyObject | undefined,
   };
-  // Every machine's node key and certificate (role ramdisk), issued by a node CA on first boot.
+  // Node keys and certificates from a node CA, as JoinService issues them: every ramdisk boot joins
+  // with a fresh key (role ramdisk), so revoking an identity generation never outlives a reboot.
   const nodeCa = createNodeCa({});
   const nodeKeys = new Map<string, KeyObject>();
-  async function nodeKey(nodeId: string): Promise<KeyObject> {
-    let key = nodeKeys.get(nodeId);
-    if (key) return key;
-    key = generateP256KeyPair().privateKey;
-    nodeKeys.set(nodeId, key);
+  async function issueNodeCert(nodeId: string, role: 'ramdisk' | 'node' | 'node-tenant'): Promise<KeyObject> {
+    const key = generateP256KeyPair().privateKey;
     const issued = await nodeCa.sign(createCsr(key), {
       usage: 'client',
-      role: 'ramdisk',
+      role,
       ttlSeconds: 3600,
       uriSans: [nodeSpiffeId({ trustDomain: 'compute.test', siteId: 'site_a', nodeId })],
     });
     await db.query(
       `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after)
-       VALUES ($1, $2, 'ramdisk', 0, $3, $4, $5, $6)`,
-      [issued.serial, nodeId, spkiSha256(key), issued.certificate, new Date(issued.notBefore), new Date(issued.notAfter)],
+       VALUES ($1, $2, $3, (SELECT identity_gen FROM nodes WHERE id = $2), $4, $5, $6, $7)`,
+      [issued.serial, nodeId, role, spkiSha256(key), issued.certificate, new Date(issued.notBefore), new Date(issued.notAfter)],
     );
+    if (role !== 'node-tenant') nodeKeys.set(nodeId, key);
     return key;
+  }
+  async function nodeKey(nodeId: string): Promise<KeyObject> {
+    return nodeKeys.get(nodeId) ?? issueNodeCert(nodeId, 'ramdisk');
   }
   const outsider = generateP256KeyPair().privateKey;
   let sessionEpoch = 0;
 
   async function connect(nodeId: string, role: string, bootId: string) {
+    if (role === 'ramdisk') await issueNodeCert(nodeId, 'ramdisk');
     await db.query(
       `INSERT INTO node_sessions (node_id, session_epoch, boot_id, role, connected_at) VALUES ($1, $4, $2, $3, compute_now())
        ON CONFLICT (node_id) DO UPDATE SET boot_id = EXCLUDED.boot_id, role = EXCLUDED.role, connected_at = compute_now(),
@@ -201,7 +211,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
 
   function machineOf(nodeId: string): SimMachine {
     let m = machines.get(nodeId);
-    if (!m) machines.set(nodeId, (m = { bootDevice: 'disk', mounted: '', power: 'off' }));
+    if (!m) machines.set(nodeId, (m = { bootDevice: 'disk', mounted: '', power: 'off', firmware: { ...simFirmware } }));
     return m;
   }
   const bmcResult = (value: unknown) =>
@@ -230,7 +240,9 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
           result = bmcResult(
             payload.operation === 'inspect.inspect'
               ? { macs: [macOf(target)] }
-              : { power: machineOf(target).power },
+              : payload.operation === 'firmware.components'
+                ? { components: Object.entries(machineOf(target).firmware).map(([id, version]) => ({ id, version })) }
+                : { power: machineOf(target).power },
           );
           break;
         case 'bmc.boot': {
@@ -279,7 +291,7 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       // The node signs attested results (`CommandUpdate.node_sig`); the gateway stores what it relays.
       let signature: { kid: string; sig: Uint8Array } | undefined;
       if (attested.has(command.kind) && (command.kind !== 'disk.wipe' || faults.attestWipe)) {
-        const key = faults.foreignSigner ? outsider : await nodeKey(command.node_id);
+        const key = faults.signWith ?? (faults.foreignSigner ? outsider : await nodeKey(command.node_id));
         signature = signCommandUpdate(key, { commandId: command.id, state: CommandState.SUCCEEDED, result });
       }
       if (command.kind === 'disk.wipe' && faults.forgeWipe)
@@ -323,6 +335,6 @@ export async function createMetalSim(options: MetalSimOptions = {}) {
       )
     ).rows[0]!;
 
-  return { db, context, api, provision, bareMetal, queue, events, seen, faults, tokens, secretsStore, machines, connect, disconnect, addSiteAgent, runAgents, settle, call, state, close: () => db.close() };
+  return { db, context, api, provision, bareMetal, queue, events, seen, faults, tokens, secretsStore, machines, machineOf, issueNodeCert, connect, disconnect, addSiteAgent, runAgents, settle, call, state, close: () => db.close() };
 }
 export type MetalSim = Awaited<ReturnType<typeof createMetalSim>>;

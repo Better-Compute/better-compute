@@ -25,12 +25,14 @@ export function pkiNodeSignatureCheck(options: { now?: () => number } = {}): Nod
   return async (tx, statement) => {
     const signature = { $typeName: 'bettercompute.common.v1.Signature', kid: statement.kid, sig: statement.sig } as Signature;
     try {
-      await verifyNodeStatement(statement.input, signature, {
+      const verified = await verifyNodeStatement(statement.input, signature, {
         nodeId: statement.nodeId,
         lookup: nodeCertsLookup(tx),
         now: options.now?.() ?? Date.now(),
       });
-      return true;
+      // A lessee's OS holds a node-tenant certificate for this very node (§13): it must never be
+      // able to vouch for the wipe that ends its own lease. Only platform identities attest.
+      return verified.role === 'ramdisk' || verified.role === 'node';
     } catch {
       return false;
     }

@@ -109,8 +109,57 @@ export const retireOobProfile = defineProfile({
   steps: [{ use: 'power.setPower', with: { action: 'off' }, onFailure: 'continue' }, { use: 'metal.revokeIdentity' }],
 });
 
-/** The profile a workflow-driven state runs for a pool's agent mode; `rescue` needs an agent. */
-export function stateProfile(state: ProvisionState, agent: 'bcd' | 'none' | null | undefined): ProfileDocument | undefined {
+// Tenant-root teardown (§13, v0.5): after a dedicated-root lease, always BMC-driven from the site
+// agent. Power off; revoke the tenant's identity before anything can report; boot the
+// platform-signed ramdisk; attested secure erase; GPU reset and ECC check (DCGM level 1); firmware
+// against the pool baseline (drift fails with maintenance on, a quarantine); a new identity
+// generation and platform trust; power off; then `ready`. BMC password rotation is per vendor
+// (verify) and not a step yet.
+
+/** releasing → ready after a dedicated-root lease. */
+export const tenantRootReleaseProfile = defineProfile({
+  id: 'metal-tenant-root-release',
+  version: 1,
+  target: 'metal',
+  description: 'Tear down a dedicated-root lease',
+  steps: [
+    { use: 'power.setPower', with: { action: 'off' } },
+    { use: 'metal.fenceTenant' },
+    { use: 'metal.ensureRamdisk' },
+    { use: 'disk.wipe', with: { mode: 'secure-erase' } },
+    { use: 'diag.dcgm', with: { level: 1 } },
+    { use: 'metal.firmwareCheck' },
+    { use: 'metal.exitTenantRoot' },
+    { use: 'power.setPower', with: { action: 'off' } },
+  ],
+  cleanup: [{ use: 'boot.cleanUp' }],
+});
+
+/** The same for agentless machines: no ramdisk, so no attested wipe (only with `allowUnverifiedRelease`). */
+export const tenantRootReleaseOobProfile = defineProfile({
+  id: 'metal-tenant-root-release-oob',
+  version: 1,
+  target: 'metal',
+  description: 'Tear down a dedicated-root lease on an agentless machine',
+  steps: [
+    { use: 'power.setPower', with: { action: 'off' } },
+    { use: 'metal.fenceTenant' },
+    { use: 'media.eject', onFailure: 'continue' },
+    { use: 'metal.firmwareCheck' },
+    { use: 'metal.exitTenantRoot' },
+  ],
+});
+
+/**
+ * The profile a workflow-driven state runs for a pool's agent mode; `rescue` needs an agent. A
+ * release after a dedicated-root lease (`tenantRoot`) runs the tenant-root teardown.
+ */
+export function stateProfile(
+  state: ProvisionState,
+  agent: 'bcd' | 'none' | null | undefined,
+  options: { tenantRoot?: boolean } = {},
+): ProfileDocument | undefined {
+  if (state === 'releasing' && options.tenantRoot) return agent === 'none' ? tenantRootReleaseOobProfile : tenantRootReleaseProfile;
   if (agent !== 'none') return stateProfiles[state];
   return (
     {
@@ -135,6 +184,8 @@ export const metalProfiles: readonly ProfileDocument[] = Object.freeze([
   commissionOobProfile,
   releaseOobProfile,
   retireOobProfile,
+  tenantRootReleaseProfile,
+  tenantRootReleaseOobProfile,
 ]);
 
 /** The shipped profile each workflow-driven provision state runs (`deploying` runs the tenant's). */

@@ -49,6 +49,20 @@ const compute = betterCompute({ modules: [provisionModule({ modules: [bareMetal]
   default verifier, `nodeSignedResults()`, rebuilds the signing input from the stored row and
   checks it with pki's `verifyNodeStatement` against `node_certs` (`pkiNodeSignatureCheck`), so a
   gateway can neither forge nor alter a wipe result. `acceptIngestedAttestation` is for tests only.
+- **Dedicated-root leases** (v0.5, `binding: 'node'`). This is level-triggered with capacity
+  through rows. A due node-binding allocation on a ready node of a `policy.tenantRoot` pool starts
+  the lease: trust becomes `tenant-controlled`, the platform identity is revoked, and the lessee's
+  profile (`reservations.request.node`) deploys in the lessee's tenant. When it completes, metal
+  marks the allocation bound and wakes `capacity.reservations`. When capacity releases the
+  allocation, `metal-tenant-root-release` runs:
+  1. power off, then revoke the tenant's identity;
+  2. boot the platform ramdisk and run an attested secure erase;
+  3. DCGM level 1;
+  4. check firmware against `policy.firmwareBaseline` (drift fails with maintenance on);
+  5. start a new identity generation and return to `platform` trust;
+  6. power off, then `ready`.
+
+  A lessee's `node-tenant` certificate can never attest a result.
 - **`metal.power`** sends `bmc.power` to the site agent directly. It is refused while a
   workflow controls the node.
 - **Recovery.** `recover` follows `metalRecoverTargets`: a failed deploy recovers into

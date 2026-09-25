@@ -45,4 +45,15 @@ CREATE INDEX metal_nodes_tenant ON metal_nodes (tenant_id);
 ALTER TABLE metal_nodes ADD COLUMN addresses text[] NOT NULL DEFAULT '{}';
 `,
   },
+  {
+    name: 'metal/0003_tenant_root',
+    sql: `
+-- Dedicated-root leases (PLAN.md §10.5 binding 'node', §13 tenant-root bare metal, v0.5): the
+-- capacity allocation the node is leased under, and whether tenant code may have run on it since the
+-- lease began (then only the tenant-root teardown returns it to ready).
+ALTER TABLE metal_nodes ADD COLUMN lease_allocation_id text;
+ALTER TABLE metal_nodes ADD COLUMN tenant_root bool NOT NULL DEFAULT false;
+CREATE UNIQUE INDEX metal_nodes_lease ON metal_nodes (lease_allocation_id) WHERE lease_allocation_id IS NOT NULL;
+`,
+  },
 ]);
