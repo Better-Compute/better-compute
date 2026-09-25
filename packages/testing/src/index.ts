@@ -87,6 +87,13 @@ export type {
 export { FakeDaemon, cdiSpecPath, envFilePath, mergeSpec } from './daemon/fake-daemon.js';
 export type { FakeDaemonOptions, FakeDaemonState, Verdict } from './daemon/fake-daemon.js';
 export {
+  belowMinimumProfile,
+  daemonSkewProfiles,
+  type DaemonProfile,
+  type ProfileHelloField,
+  type ProfileSpecSection,
+} from './daemon/profiles.js';
+export {
   DEFAULT_CREDITS,
   DEFAULT_WORKERS,
   defaultFakeKinds,

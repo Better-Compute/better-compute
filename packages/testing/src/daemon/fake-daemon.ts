@@ -112,6 +112,7 @@ import {
   type FakeKindContext,
   type FakeKindOutcome,
 } from './kinds.js';
+import type { DaemonProfile } from './profiles.js';
 
 /** Lifecycle of a fake node's daemon process. */
 export type FakeDaemonState = 'stopped' | 'running' | 'rebooting';
@@ -199,6 +200,14 @@ export interface FakeDaemonOptions {
    * is not checked (bcd verifies it against its pins). Without this option the section is UNSUPPORTED.
    */
   selfUpdate?: { badVersions?: readonly string[]; swapMs?: number };
+  /**
+   * Version skew (§7.6): behave like an older bcd (`daemonSkewProfiles`). It sets the defaults of
+   * `daemonVersion`, `protocol` and `capabilities`, and removes what that build lacks: its missing
+   * kinds are rejected UNSUPPORTED, its missing spec sections reported SectionUnsupported, its missing
+   * inventory sections never collected and its missing Hello fields never sent. Without it: the
+   * current build.
+   */
+  profile?: DaemonProfile;
 }
 
 interface Session {
@@ -377,13 +386,14 @@ export class FakeDaemon {
       this.intentVersion = options.intent.version;
     }
     this.role = options.role ?? AgentRole.NODE;
-    this.daemonVersion = options.daemonVersion ?? '0.1.0';
+    this.daemonVersion = options.daemonVersion ?? options.profile?.daemonVersion ?? '0.1.0';
     this.scheduler = options.scheduler;
     this.rng = options.rng ?? createRng(`fake-daemon/${options.nodeId}`);
     this.hw = options.hardware ?? fakeHardware({ seed: options.nodeId });
     this.uploads = options.objectStore ?? new Map();
     this.knobs = { diag: {}, logs: {}, cdiWriteFailures: 0, ...options.knobs };
     this.kinds = new Map(Object.entries(defaultFakeKinds));
+    for (const name of options.profile?.withoutKinds ?? []) this.kinds.delete(name);
     for (const [name, kind] of Object.entries(options.kinds ?? {}))
       if (kind === null) this.kinds.delete(name);
       else this.kinds.set(name, kind);
@@ -398,7 +408,11 @@ export class FakeDaemon {
           ? new FakeHypervisor(options.instances)
           : undefined;
     // A VPS host runs the vps module's `instance.snapshot` (sandboxes, v0.5) unless told otherwise.
-    if (this.hypervisor && !Object.hasOwn(options.kinds ?? {}, 'instance.snapshot'))
+    if (
+      this.hypervisor &&
+      !Object.hasOwn(options.kinds ?? {}, 'instance.snapshot') &&
+      !options.profile?.withoutKinds?.includes('instance.snapshot')
+    )
       this.kinds.set('instance.snapshot', fakeInstanceSnapshot);
   }
 
@@ -715,8 +729,11 @@ export class FakeDaemon {
       else unsupported(name, SECTION_FIELD[name]!);
     };
     let instances: ReturnType<FakeHypervisor['converge']> | undefined;
+    const lacks = new Set<string>(this.options.profile?.withoutSections ?? []);
     for (const name of SECTION_ORDER) {
-      if (name === 'instances' && this.hypervisor) {
+      // A section this build predates: only an empty one converges, as for any section it cannot act on.
+      if (lacks.has(name)) trivial(name, spec[name]);
+      else if (name === 'instances' && this.hypervisor) {
         instances = this.hypervisor.converge(spec.instances, (request) => this.fetchUserData(request));
         if (instances.state === SectionState.PROGRESSING) progressing = true;
         sections.push({
@@ -770,7 +787,8 @@ export class FakeDaemon {
       if (entry.state === 'done' && !entry.resultAcked) unacked.push(this.updateOf(entry.id, entry.result!));
       else if (entry.state !== 'done' && entry.incarnation === proc.incarnation) running.push(entry.id);
     }
-    const range = this.options.protocol ?? PROTOCOL_VERSION;
+    const range = this.options.protocol ?? this.options.profile?.protocol ?? PROTOCOL_VERSION;
+    const lacks = new Set<string>(this.options.profile?.withoutHello ?? []);
     return {
       nodeId: this.nodeId,
       bootId: this.bootIdValue,
@@ -780,7 +798,8 @@ export class FakeDaemon {
       protoMin: range.min,
       protoMax: range.max,
       capabilities: [
-        ...(this.options.capabilities ?? [
+        ...(this.options.capabilities ??
+          this.options.profile?.capabilities ?? [
           ...(this.hw.gpuUuids.length > 0 ? ['cdi', 'nvml'] : []),
           // Instance tcp/ssh tunnels reach the instance's own address (the tunnel program stands in for it), never
           // the host's loopback: tunnels.open requires this before opening one.
@@ -788,7 +807,9 @@ export class FakeDaemon {
         ]),
       ],
       drivers: [
-        ...(this.options.drivers ??
+        ...(lacks.has('drivers')
+          ? []
+          : this.options.drivers ??
           (this.hw.gpuUuids.length > 0
             ? [{ id: 'nvidia', version: this.daemonVersion, kinds: ['config'], configSchemaJson: '{"type":"object"}' }]
             : [])),
@@ -801,7 +822,7 @@ export class FakeDaemon {
       inventoryHashes: Object.fromEntries(proc.collected.sections.map((s) => [s.name, s.sha256])),
       appliedSpecHash: this.journalValue.spec()?.hash ?? new Uint8Array(),
       // The TrustBundle version held: a command-root switch waits until every node reports the new one (§13).
-      ...(this.intentVersion !== undefined ? { trustVersion: this.intentVersion } : {}),
+      ...(this.intentVersion !== undefined && !lacks.has('trustVersion') ? { trustVersion: this.intentVersion } : {}),
     };
   }
 
@@ -1683,7 +1704,9 @@ export class FakeDaemon {
       ...proc.lastStatus,
       ...(this.pressure ? { pressure: this.pressure } : {}),
       // A bundle applied from Welcome.trust after Hello is acknowledged here, without a reconnect.
-      ...(this.intentVersion !== undefined ? { trustVersion: this.intentVersion } : {}),
+      ...(this.intentVersion !== undefined && !this.options.profile?.withoutHello?.includes('trustVersion')
+        ? { trustVersion: this.intentVersion }
+        : {}),
     };
     this.send(proc.session, { case: 'status', value } as AgentFrame['msg']);
   }
@@ -1701,8 +1724,11 @@ export class FakeDaemon {
 
   private collect(rescan: boolean): EncodedSection[] {
     const proc = this.requireProcess();
-    if (rescan || proc.collected.sections.length === 0)
-      proc.collected = { sections: encodeInventorySections(this.hw.inventory), at: this.localNow() };
+    if (rescan || proc.collected.sections.length === 0) {
+      const lacks = new Set<string>(this.options.profile?.withoutInventory ?? []);
+      const sections = encodeInventorySections(this.hw.inventory).filter((section) => !lacks.has(section.name));
+      proc.collected = { sections, at: this.localNow() };
+    }
     return proc.collected.sections;
   }
 

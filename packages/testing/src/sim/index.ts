@@ -7,6 +7,8 @@ export type {
 export { runColdStart } from './cold-start.js';
 export type { ColdStartOptions, ColdStartPhase, ColdStartReport } from './cold-start.js';
 export { runNightly } from './nightly.js';
+export { allocationStates, disturbances, upgradeInPlace } from './upgrade.js';
+export type { AllocationState, UpgradeOptions, UpgradeReport, UpgradeStepName } from './upgrade.js';
 export type { NightlyChaos, NightlyOptions, NightlyReport } from './nightly.js';
 export { createFleetSim } from './fleet-sim.js';
 export type {
