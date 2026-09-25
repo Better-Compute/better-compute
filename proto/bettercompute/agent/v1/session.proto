@@ -299,6 +299,36 @@ message Command {
   bettercompute.common.v1.Signature signature = 2;
   // Delivery attempt (1-based). Outside the signature: informational only.
   uint32 attempt = 3;
+  // (v1.0, §13 quorum) For a body with batch_id: the operators' approval of the batch and this
+  // command's inclusion proof. Outside the worker signature: the approval carries its own.
+  BatchApproval batch_approval = 4;
+  BatchProof batch_proof = 5;
+}
+
+// k-of-n operator approval of a batch of destructive commands (PLAN.md §13). The scope is a Merkle
+// tree (RFC 6962 style, SHA-256) with one leaf per (node_id, kind), leaves ordered by their hash
+// (bytewise ascending, duplicates removed):
+//   leaf = H(0x00 ‖ lp(batch_id) ‖ lp(node_id) ‖ lp(kind)),  node = H(0x01 ‖ left ‖ right),
+// with lp(x) = uint32_be(len(x)) ‖ x, and an odd node promoted unchanged to the next level.
+// Signing purpose "batch-approval", parts [batch_id, scope_root, uint32_be(scope_size),
+// int64_be(not_after.seconds) ‖ int32_be(not_after.nanos)].
+message BatchApproval {
+  string batch_id = 1;
+  bytes scope_root = 2;
+  // Leaves in the tree: what the operators saw and approved ("reimage 412 nodes").
+  uint32 scope_size = 3;
+  // Server time after which the approval no longer admits a command.
+  google.protobuf.Timestamp not_after = 4;
+  // Approver key signatures (Signature.kid names an approver key); duplicates count once.
+  repeated bettercompute.common.v1.Signature signatures = 5;
+}
+
+// The path from this command's leaf to BatchApproval.scope_root.
+message BatchProof {
+  // The leaf's index in the sorted leaves.
+  uint32 index = 1;
+  // Sibling hashes from the leaf level up; a promoted odd node has no sibling at that level.
+  repeated bytes siblings = 2;
 }
 
 message CommandBody {
@@ -336,6 +366,10 @@ message CommandBody {
   // (v0.2) The workflow step this command executes; SecretRequest binds secrets to it.
   string workflow_id = 14;
   string step_id = 15;
+  // (v1.0, §13 quorum) The batch this destructive command belongs to. Inside the signed body, so
+  // a compromised gateway can neither add nor strip it; the daemon then requires
+  // Command.batch_approval + batch_proof.
+  string batch_id = 16;
 }
 
 // Progress and outcome of one command. Terminal updates are journaled until acked and replayed in

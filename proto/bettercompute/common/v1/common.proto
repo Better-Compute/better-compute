@@ -49,6 +49,23 @@ message TrustBundle {
   // DER X.509 roots that certify the short-lived (24 h) worker keys signing Command and
   // DesiredState bodies (v0.2). Empty in v0.1: signatures are optional there.
   repeated bytes command_signing_roots = 2;
+  // (v1.0, §13 quorum) Operator approval keys (P-256), held off the control plane (laptops, HSMs).
+  // With any set, a destructive command carrying CommandBody.batch_id runs only with a
+  // BatchApproval signed by `approver_threshold` distinct keys of this set.
+  repeated ApproverKey approver_keys = 3;
+  uint32 approver_threshold = 4;
+  // With approver keys set: destructive commands WITHOUT a batch_id this daemon runs per rolling
+  // hour; beyond it they are REJECTED UNBATCHED_LIMIT, so a fleet-wide batch cannot be split into
+  // unbatched commands to dodge the quorum. 0: no unbatched destructive command at all.
+  uint32 unbatched_destructive_per_hour = 5;
+}
+
+// One operator approval key.
+message ApproverKey {
+  // base64url (no padding) SHA-256 of spki_der, as Signature.kid names it.
+  string kid = 1;
+  // SubjectPublicKeyInfo DER of the P-256 key.
+  bytes spki_der = 2;
 }
 
 // A TrustBundle signed by the pinned JoinService signing key, so a gateway cannot inject roots.
@@ -150,4 +167,9 @@ enum CommandRejectReason {
   // No free credit on the command's lane. NOT terminal: the control plane puts the command back to
   // pending with not_before = compute_now() + backoff (1 s → 30 s).
   COMMAND_REJECT_REASON_BUSY = 5;
+  // (v1.0) A destructive command with a batch_id but no valid BatchApproval covering it (too few
+  // distinct approver signatures, expired, or an inclusion proof that does not reach scope_root).
+  COMMAND_REJECT_REASON_BATCH_UNAPPROVED = 6;
+  // (v1.0) Over TrustBundle.unbatched_destructive_per_hour.
+  COMMAND_REJECT_REASON_UNBATCHED_LIMIT = 7;
 }

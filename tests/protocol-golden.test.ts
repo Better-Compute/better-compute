@@ -39,6 +39,9 @@ import {
   wrapCommand,
   wrapDesiredState,
   workloadTokenRequestSigningInput,
+  batchApprovalSigningInput,
+  batchLeafInput,
+  batchNodeInput,
 } from '@better-compute/protocol';
 import type { SigningPurpose } from '@better-compute/protocol';
 
@@ -395,6 +398,22 @@ const signingVectors: {
     }),
   },
   {
+    name: 'batch-approval',
+    purpose: 'batch-approval',
+    parts: [
+      utf8('batch_01k5w000000000000000000001'),
+      filled(32, 0xab),
+      be(4, 412n),
+      new Uint8Array([...be(8, clientTime.seconds), ...be(4, BigInt(clientTime.nanos))]),
+    ],
+    built: batchApprovalSigningInput({
+      batchId: 'batch_01k5w000000000000000000001',
+      scopeRoot: filled(32, 0xab),
+      scopeSize: 412,
+      notAfter: clientTime,
+    }),
+  },
+  {
     name: 'renew-pop',
     purpose: 'renew-pop',
     parts: [
@@ -405,6 +424,53 @@ const signingVectors: {
     built: renewPopSigningInput({ csrSha256, nodeId, clientTime }),
   },
 ];
+// The batch scope tree (v1.0 quorum, BatchApproval in session.proto), computed here with node's
+// SHA-256 from the documented layouts: leaves ordered by hash, an odd node promoted unchanged, and
+// each leaf's proof as sibling hashes from the bottom. pki and bcd must reproduce batch-scope.json.
+const sha256 = (bytes: Uint8Array) => new Uint8Array(createHash('sha256').update(bytes).digest());
+const batchId = 'batch_01k5w000000000000000000001';
+const scopeEntries = [
+  { nodeId: 'node_01k5w000000000000000000003', kind: 'disk.wipe' },
+  { nodeId: 'node_01k5w000000000000000000001', kind: 'disk.wipe' },
+  { nodeId: 'node_01k5w000000000000000000002', kind: 'deploy.image' },
+];
+function batchScope() {
+  const leaves = scopeEntries
+    .map((entry) => ({ ...entry, hash: sha256(batchLeafInput(batchId, entry.nodeId, entry.kind)) }))
+    .sort((a, b) => Buffer.compare(a.hash, b.hash));
+  const proofs = leaves.map(() => [] as Uint8Array[]);
+  let level = leaves.map((leaf, index) => ({ hash: leaf.hash, members: [index] }));
+  while (level.length > 1) {
+    const next: typeof level = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const left = level[i]!;
+      const right = level[i + 1];
+      if (!right) {
+        next.push(left); // promoted unchanged, no sibling at this level
+        continue;
+      }
+      for (const member of left.members) proofs[member]!.push(right.hash);
+      for (const member of right.members) proofs[member]!.push(left.hash);
+      next.push({
+        hash: sha256(batchNodeInput(left.hash, right.hash)),
+        members: [...left.members, ...right.members],
+      });
+    }
+    level = next;
+  }
+  return {
+    batchId,
+    root: hex(level[0]!.hash),
+    leaves: leaves.map((leaf, index) => ({
+      index,
+      nodeId: leaf.nodeId,
+      kind: leaf.kind,
+      leafInput: hex(batchLeafInput(batchId, leaf.nodeId, leaf.kind)),
+      hash: hex(leaf.hash),
+      siblings: proofs[index]!.map(hex),
+    })),
+  };
+}
 const signingJson = () =>
   signingVectors.map(({ name, purpose, parts, built }) => ({
     name,
@@ -430,6 +496,7 @@ if (updating) {
     writeFileSync(`${goldenDir}${name}.hex`, `${hex(toBinary(schema, message))}\n`);
   }
   await writeJson(`${goldenDir}signing.json`, signingJson());
+  await writeJson(`${goldenDir}batch-scope.json`, batchScope());
 }
 
 describe('protocol golden vectors', () => {
@@ -460,5 +527,32 @@ describe('protocol golden vectors', () => {
     for (const { purpose, parts, built } of signingVectors)
       expect(hex(built)).toBe(hex(signingInput(purpose, parts)));
     expect(readJson(`${goldenDir}signing.json`)).toEqual(signingJson());
+  });
+
+  it('the batch scope tree matches batch-scope.json, and every proof reaches the root', () => {
+    const scope = batchScope();
+    expect(readJson(`${goldenDir}batch-scope.json`)).toEqual(scope);
+    // A verifier's walk: the index's bit at each level says which side the node is on; a level
+    // where the node was promoted (last odd node) consumes no sibling.
+    for (const leaf of scope.leaves) {
+      let hash = fromHex(leaf.hash);
+      let index = leaf.index;
+      let width = scope.leaves.length;
+      const siblings = leaf.siblings.map(fromHex);
+      while (width > 1) {
+        if (index % 2 === 1) hash = sha256(batchNodeInput(siblings.shift()!, hash));
+        else if (index + 1 < width) hash = sha256(batchNodeInput(hash, siblings.shift()!));
+        index = Math.floor(index / 2);
+        width = Math.ceil(width / 2);
+      }
+      expect(siblings).toEqual([]);
+      expect(hex(hash)).toBe(scope.root);
+    }
+    // Layout checks: tags, length prefixes, 32-byte digests only.
+    expect(batchLeafInput('b', 'n', 'k')).toEqual(
+      new Uint8Array([0, 0, 0, 0, 1, 98, 0, 0, 0, 1, 110, 0, 0, 0, 1, 107]),
+    );
+    expect(batchNodeInput(filled(32, 1), filled(32, 2))[0]).toBe(1);
+    expect(() => batchNodeInput(filled(31, 1), filled(32, 2))).toThrow(/32-byte/);
   });
 });

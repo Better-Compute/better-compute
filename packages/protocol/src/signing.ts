@@ -39,7 +39,12 @@ export type SigningPurpose =
    * Node key of a possibly expired certificate (≤ 7 days, §6), re-joining via the x509pop attestor; parts
    * [sha256(csr), node_id, client_time]. Separate from 'renew-pop' so a relayed Renew can't be replayed as a join.
    */
-  | 'x509pop';
+  | 'x509pop'
+  /**
+   * Operator approver key (v1.0 quorum, §13); parts [batch_id, scope_root,
+   * uint32_be(scope_size), timestamp(not_after)].
+   */
+  | 'batch-approval';
 
 const PREFIX = 'bettercompute.v1/';
 const utf8 = new TextEncoder();
@@ -130,6 +135,52 @@ export const workloadTokenRequestSigningInput = (
     utf8.encode(request.audience),
     request.epk,
   ]);
+
+/** Signing input of a `BatchApproval` signature: what k operators approve (v1.0 quorum, §13). */
+export const batchApprovalSigningInput = (approval: {
+  batchId: string;
+  scopeRoot: Uint8Array;
+  scopeSize: number;
+  notAfter: Timestamp;
+}): Uint8Array =>
+  signingInput('batch-approval', [
+    utf8.encode(approval.batchId),
+    digest('scopeRoot', approval.scopeRoot),
+    uint32(approval.scopeSize),
+    timestamp(approval.notAfter),
+  ]);
+
+/** `uint32_be(len) ‖ bytes`. */
+function lengthPrefixed(value: Uint8Array): Uint8Array {
+  const out = new Uint8Array(4 + value.byteLength);
+  new DataView(out.buffer).setUint32(0, value.byteLength);
+  out.set(value, 4);
+  return out;
+}
+
+/**
+ * The bytes a batch scope leaf hashes (SHA-256 by the caller): `0x00 ‖ lp(batch_id) ‖ lp(node_id)
+ * ‖ lp(kind)`. Leaves are ordered by their hash; see `BatchApproval` in session.proto.
+ */
+export function batchLeafInput(batchId: string, nodeId: string, kind: string): Uint8Array {
+  const parts = [batchId, nodeId, kind].map((part) => lengthPrefixed(utf8.encode(part)));
+  const out = new Uint8Array(1 + parts.reduce((sum, part) => sum + part.byteLength, 0));
+  let offset = 1; // out[0] = 0x00, the leaf tag
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+/** The bytes an inner node of the batch scope tree hashes: `0x01 ‖ left ‖ right`. */
+export function batchNodeInput(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const out = new Uint8Array(65);
+  out[0] = 0x01;
+  out.set(digest('left', left), 1);
+  out.set(digest('right', right), 33);
+  return out;
+}
 
 /** Signing input of `RenewRequest.pop_sig`. `csrSha256` is SHA-256 of `RenewRequest.csr`. */
 export const renewPopSigningInput = (input: {

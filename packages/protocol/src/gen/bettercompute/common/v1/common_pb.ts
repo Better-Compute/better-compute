@@ -33,7 +33,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file bettercompute/common/v1/common.proto.
  */
 export const file_bettercompute_common_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("CiRiZXR0ZXJjb21wdXRlL2NvbW1vbi92MS9jb21tb24ucHJvdG8SF2JldHRlcmNvbXB1dGUuY29tbW9uLnYxIjQKCVNpZ25hdHVyZRILCgNraWQYASABKAkSCwoDc2lnGAIgASgMEg0KBWNoYWluGAMgAygMIj0KC1RydXN0QnVuZGxlEg8KB3ZlcnNpb24YASABKAQSHQoVY29tbWFuZF9zaWduaW5nX3Jvb3RzGAIgAygMIlgKEVNpZ25lZFRydXN0QnVuZGxlEgwKBGJvZHkYASABKAwSNQoJc2lnbmF0dXJlGAIgASgLMiIuYmV0dGVyY29tcHV0ZS5jb21tb24udjEuU2lnbmF0dXJlIr8BCg5Ecml2ZXJNYW5pZmVzdBIKCgJpZBgBIAEoCRIPCgd2ZXJzaW9uGAIgASgJEg0KBWtpbmRzGAMgAygJEjAKB3J1bnNfb24YBCABKA4yHy5iZXR0ZXJjb21wdXRlLmNvbW1vbi52MS5SdW5zT24SGgoSY29uZmlnX3NjaGVtYV9qc29uGAUgASgJEhQKDGNhcGFiaWxpdGllcxgGIAMoCRIdChVyZXRyeV9zYWZlX29wZXJhdGlvbnMYByADKAkqdQoGUnVuc09uEhcKE1JVTlNfT05fVU5TUEVDSUZJRUQQABIZChVSVU5TX09OX0NPTlRST0xfUExBTkUQARIQCgxSVU5TX09OX1NJVEUQAhIQCgxSVU5TX09OX05PREUQAxITCg9SVU5TX09OX1JBTURJU0sQBCppCglBZ2VudFJvbGUSGgoWQUdFTlRfUk9MRV9VTlNQRUNJRklFRBAAEhMKD0FHRU5UX1JPTEVfTk9ERRABEhMKD0FHRU5UX1JPTEVfU0lURRACEhYKEkFHRU5UX1JPTEVfUkFNRElTSxADKlEKBExhbmUSFAoQTEFORV9VTlNQRUNJRklFRBAAEhAKDExBTkVfQ09OVFJPTBABEhIKDkxBTkVfUFJPVklTSU9OEAISDQoJTEFORV9CVUxLEAMqpQIKDENvbW1hbmRTdGF0ZRIdChlDT01NQU5EX1NUQVRFX1VOU1BFQ0lGSUVEEAASGQoVQ09NTUFORF9TVEFURV9QRU5ESU5HEAESHAoYQ09NTUFORF9TVEFURV9ESVNQQVRDSEVEEAISFwoTQ09NTUFORF9TVEFURV9BQ0tFRBADEhkKFUNPTU1BTkRfU1RBVEVfUlVOTklORxAEEhsKF0NPTU1BTkRfU1RBVEVfU1VDQ0VFREVEEAUSGAoUQ09NTUFORF9TVEFURV9GQUlMRUQQBhIaChZDT01NQU5EX1NUQVRFX1JFSkVDVEVEEAcSGQoVQ09NTUFORF9TVEFURV9FWFBJUkVEEAgSGwoXQ09NTUFORF9TVEFURV9DQU5DRUxMRUQQCSr7AQoTQ29tbWFuZFJlamVjdFJlYXNvbhIlCiFDT01NQU5EX1JFSkVDVF9SRUFTT05fVU5TUEVDSUZJRUQQABIlCiFDT01NQU5EX1JFSkVDVF9SRUFTT05fVU5TVVBQT1JURUQQARInCiNDT01NQU5EX1JFSkVDVF9SRUFTT05fQkFEX1NJR05BVFVSRRACEiEKHUNPTU1BTkRfUkVKRUNUX1JFQVNPTl9FWFBJUkVEEAMSKgomQ09NTUFORF9SRUpFQ1RfUkVBU09OX1NUQUxFX0dFTkVSQVRJT04QBBIeChpDT01NQU5EX1JFSkVDVF9SRUFTT05fQlVTWRAFQlZaVGdpdGh1Yi5jb20vYmV0dGVyLWNvbXB1dGUvYmV0dGVyLWNvbXB1dGUvZGFlbW9uL2dlbi9iZXR0ZXJjb21wdXRlL2NvbW1vbi92MTtjb21tb252MWIGcHJvdG8z");
+  fileDesc("CiRiZXR0ZXJjb21wdXRlL2NvbW1vbi92MS9jb21tb24ucHJvdG8SF2JldHRlcmNvbXB1dGUuY29tbW9uLnYxIjQKCVNpZ25hdHVyZRILCgNraWQYASABKAkSCwoDc2lnGAIgASgMEg0KBWNoYWluGAMgAygMIr4BCgtUcnVzdEJ1bmRsZRIPCgd2ZXJzaW9uGAEgASgEEh0KFWNvbW1hbmRfc2lnbmluZ19yb290cxgCIAMoDBI7Cg1hcHByb3Zlcl9rZXlzGAMgAygLMiQuYmV0dGVyY29tcHV0ZS5jb21tb24udjEuQXBwcm92ZXJLZXkSGgoSYXBwcm92ZXJfdGhyZXNob2xkGAQgASgNEiYKHnVuYmF0Y2hlZF9kZXN0cnVjdGl2ZV9wZXJfaG91chgFIAEoDSIsCgtBcHByb3ZlcktleRILCgNraWQYASABKAkSEAoIc3BraV9kZXIYAiABKAwiWAoRU2lnbmVkVHJ1c3RCdW5kbGUSDAoEYm9keRgBIAEoDBI1CglzaWduYXR1cmUYAiABKAsyIi5iZXR0ZXJjb21wdXRlLmNvbW1vbi52MS5TaWduYXR1cmUivwEKDkRyaXZlck1hbmlmZXN0EgoKAmlkGAEgASgJEg8KB3ZlcnNpb24YAiABKAkSDQoFa2luZHMYAyADKAkSMAoHcnVuc19vbhgEIAEoDjIfLmJldHRlcmNvbXB1dGUuY29tbW9uLnYxLlJ1bnNPbhIaChJjb25maWdfc2NoZW1hX2pzb24YBSABKAkSFAoMY2FwYWJpbGl0aWVzGAYgAygJEh0KFXJldHJ5X3NhZmVfb3BlcmF0aW9ucxgHIAMoCSp1CgZSdW5zT24SFwoTUlVOU19PTl9VTlNQRUNJRklFRBAAEhkKFVJVTlNfT05fQ09OVFJPTF9QTEFORRABEhAKDFJVTlNfT05fU0lURRACEhAKDFJVTlNfT05fTk9ERRADEhMKD1JVTlNfT05fUkFNRElTSxAEKmkKCUFnZW50Um9sZRIaChZBR0VOVF9ST0xFX1VOU1BFQ0lGSUVEEAASEwoPQUdFTlRfUk9MRV9OT0RFEAESEwoPQUdFTlRfUk9MRV9TSVRFEAISFgoSQUdFTlRfUk9MRV9SQU1ESVNLEAMqUQoETGFuZRIUChBMQU5FX1VOU1BFQ0lGSUVEEAASEAoMTEFORV9DT05UUk9MEAESEgoOTEFORV9QUk9WSVNJT04QAhINCglMQU5FX0JVTEsQAyqlAgoMQ29tbWFuZFN0YXRlEh0KGUNPTU1BTkRfU1RBVEVfVU5TUEVDSUZJRUQQABIZChVDT01NQU5EX1NUQVRFX1BFTkRJTkcQARIcChhDT01NQU5EX1NUQVRFX0RJU1BBVENIRUQQAhIXChNDT01NQU5EX1NUQVRFX0FDS0VEEAMSGQoVQ09NTUFORF9TVEFURV9SVU5OSU5HEAQSGwoXQ09NTUFORF9TVEFURV9TVUNDRUVERUQQBRIYChRDT01NQU5EX1NUQVRFX0ZBSUxFRBAGEhoKFkNPTU1BTkRfU1RBVEVfUkVKRUNURUQQBxIZChVDT01NQU5EX1NUQVRFX0VYUElSRUQQCBIbChdDT01NQU5EX1NUQVRFX0NBTkNFTExFRBAJKtICChNDb21tYW5kUmVqZWN0UmVhc29uEiUKIUNPTU1BTkRfUkVKRUNUX1JFQVNPTl9VTlNQRUNJRklFRBAAEiUKIUNPTU1BTkRfUkVKRUNUX1JFQVNPTl9VTlNVUFBPUlRFRBABEicKI0NPTU1BTkRfUkVKRUNUX1JFQVNPTl9CQURfU0lHTkFUVVJFEAISIQodQ09NTUFORF9SRUpFQ1RfUkVBU09OX0VYUElSRUQQAxIqCiZDT01NQU5EX1JFSkVDVF9SRUFTT05fU1RBTEVfR0VORVJBVElPThAEEh4KGkNPTU1BTkRfUkVKRUNUX1JFQVNPTl9CVVNZEAUSKgomQ09NTUFORF9SRUpFQ1RfUkVBU09OX0JBVENIX1VOQVBQUk9WRUQQBhIpCiVDT01NQU5EX1JFSkVDVF9SRUFTT05fVU5CQVRDSEVEX0xJTUlUEAdCVlpUZ2l0aHViLmNvbS9iZXR0ZXItY29tcHV0ZS9iZXR0ZXItY29tcHV0ZS9kYWVtb24vZ2VuL2JldHRlcmNvbXB1dGUvY29tbW9uL3YxO2NvbW1vbnYxYgZwcm90bzM");
 
 /**
  * An ES256 signature (ECDSA P-256 with SHA-256).
@@ -96,6 +96,29 @@ export type TrustBundle = Message<"bettercompute.common.v1.TrustBundle"> & {
    * @generated from field: repeated bytes command_signing_roots = 2;
    */
   commandSigningRoots: Uint8Array[];
+
+  /**
+   * (v1.0, §13 quorum) Operator approval keys (P-256), held off the control plane (laptops, HSMs).
+   * With any set, a destructive command carrying CommandBody.batch_id runs only with a
+   * BatchApproval signed by `approver_threshold` distinct keys of this set.
+   *
+   * @generated from field: repeated bettercompute.common.v1.ApproverKey approver_keys = 3;
+   */
+  approverKeys: ApproverKey[];
+
+  /**
+   * @generated from field: uint32 approver_threshold = 4;
+   */
+  approverThreshold: number;
+
+  /**
+   * With approver keys set: destructive commands WITHOUT a batch_id this daemon runs per rolling
+   * hour; beyond it they are REJECTED UNBATCHED_LIMIT, so a fleet-wide batch cannot be split into
+   * unbatched commands to dodge the quorum. 0: no unbatched destructive command at all.
+   *
+   * @generated from field: uint32 unbatched_destructive_per_hour = 5;
+   */
+  unbatchedDestructivePerHour: number;
 };
 
 /**
@@ -104,6 +127,34 @@ export type TrustBundle = Message<"bettercompute.common.v1.TrustBundle"> & {
  */
 export const TrustBundleSchema: GenMessage<TrustBundle> = /*@__PURE__*/
   messageDesc(file_bettercompute_common_v1_common, 1);
+
+/**
+ * One operator approval key.
+ *
+ * @generated from message bettercompute.common.v1.ApproverKey
+ */
+export type ApproverKey = Message<"bettercompute.common.v1.ApproverKey"> & {
+  /**
+   * base64url (no padding) SHA-256 of spki_der, as Signature.kid names it.
+   *
+   * @generated from field: string kid = 1;
+   */
+  kid: string;
+
+  /**
+   * SubjectPublicKeyInfo DER of the P-256 key.
+   *
+   * @generated from field: bytes spki_der = 2;
+   */
+  spkiDer: Uint8Array;
+};
+
+/**
+ * Describes the message bettercompute.common.v1.ApproverKey.
+ * Use `create(ApproverKeySchema)` to create a new message.
+ */
+export const ApproverKeySchema: GenMessage<ApproverKey> = /*@__PURE__*/
+  messageDesc(file_bettercompute_common_v1_common, 2);
 
 /**
  * A TrustBundle signed by the pinned JoinService signing key, so a gateway cannot inject roots.
@@ -130,7 +181,7 @@ export type SignedTrustBundle = Message<"bettercompute.common.v1.SignedTrustBund
  * Use `create(SignedTrustBundleSchema)` to create a new message.
  */
 export const SignedTrustBundleSchema: GenMessage<SignedTrustBundle> = /*@__PURE__*/
-  messageDesc(file_bettercompute_common_v1_common, 2);
+  messageDesc(file_bettercompute_common_v1_common, 3);
 
 /**
  * What a daemon-side driver (built into bcd or served over bcx) offers (PLAN.md §5.4, §5.5).
@@ -193,7 +244,7 @@ export type DriverManifest = Message<"bettercompute.common.v1.DriverManifest"> &
  * Use `create(DriverManifestSchema)` to create a new message.
  */
 export const DriverManifestSchema: GenMessage<DriverManifest> = /*@__PURE__*/
-  messageDesc(file_bettercompute_common_v1_common, 3);
+  messageDesc(file_bettercompute_common_v1_common, 4);
 
 /**
  * Where a step or driver runs (PLAN.md §5.1 `RunsOn`).
@@ -441,6 +492,21 @@ export enum CommandRejectReason {
    * @generated from enum value: COMMAND_REJECT_REASON_BUSY = 5;
    */
   BUSY = 5,
+
+  /**
+   * (v1.0) A destructive command with a batch_id but no valid BatchApproval covering it (too few
+   * distinct approver signatures, expired, or an inclusion proof that does not reach scope_root).
+   *
+   * @generated from enum value: COMMAND_REJECT_REASON_BATCH_UNAPPROVED = 6;
+   */
+  BATCH_UNAPPROVED = 6,
+
+  /**
+   * (v1.0) Over TrustBundle.unbatched_destructive_per_hour.
+   *
+   * @generated from enum value: COMMAND_REJECT_REASON_UNBATCHED_LIMIT = 7;
+   */
+  UNBATCHED_LIMIT = 7,
 }
 
 /**
