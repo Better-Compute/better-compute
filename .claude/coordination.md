@@ -319,7 +319,14 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       (ecf7cd0). Open: the install script's [update] release_pins ([402c97]); the docs callouts ([75b663]).
     - Quorum sim scenario DONE (15ab62f, tests/sim/quorum.test.ts). 10k-leaf bench: createBatch 446 ms, enqueue 513/s,
       release of 10k in 252 ms. Talos POSTs get their own bound one-leaf batch (8801451, tests/metal-quorum-proxy).
-      Next for [f02367]: a v0.5→HEAD upgrade with approvers switched on (tests/sim/upgrade), the v1.0 acceptance.
+      v1.0 ACCEPTANCE MET (80195df, tests/sim/upgrade): a v0.5 DB upgraded in place, then approvers switched on.
+      - No allocation moved, and the VM didn't reboot.
+      - The trust bundle went 1→2 once, and every daemon holds the quorum at epoch 1.
+      - A destructive command queued before the switch is rejected by the daemon (unbatched-limit); new ones are
+        refused at enqueue. This is in PLAN §13 "Turning the quorum on".
+      - core/0026 node_sessions approver columns (9e1b242); gateway writes next ([c321a3]), then the doctor listing
+        ([402c97]).
+      - createDevStack({ signedIntent }) (5071dbc) for the bcd WS e2e ([6a20b8], WS fallback 6cd48be, renew 06cb334).
     - Security review 9 (subagent over bcd self-update, proxy and quorum parity), 3 HIGH:
       - HIGH-2 epoch rewind: fixed in bcd 7ac5609; the TS pki + FakeDaemon half is [402c97]'s.
       - HIGH-3 httpProxy: (a) empty targets reach nothing (808379f); (d) anything but GET needs a bound leaf (bcd
