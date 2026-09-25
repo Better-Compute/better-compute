@@ -9,6 +9,8 @@ syntax = "proto3";
 
 package bettercompute.agent.v1;
 
+import "google/protobuf/struct.proto";
+
 option go_package = "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1;agentv1";
 
 // ---------------------------------------------------------------------------------------------
@@ -252,4 +254,25 @@ message KexecRequest {
 message KexecResult {
   // The ramdisk boot that ran the command; the rejoining agent reports the new one.
   string previous_boot_id = 1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// driver.invoke (v0.5): one driver operation `<concern>.<operation>` of a driver the agent hosts
+// (built into bcd, or a bcx plugin, §5.5). The provision engine sends it for profile steps that
+// name a driver operation.
+
+message DriverInvokeRequest {
+  string workflow_id = 1;
+  string step_id = 2;
+  uint32 attempt = 3;
+  // Set when a site agent runs it for another node.
+  string target_node_id = 4;
+  // The expanded step: {concern, operation, args, driver?, config?}; config holds secret:// refs
+  // only, never secret values.
+  google.protobuf.Struct args = 5;
+}
+
+message DriverInvokeResult {
+  // The operation's JSON result (bcx InvokeResponse.result_json).
+  string result_json = 1;
 }

@@ -634,6 +634,11 @@ export interface ProviderImpl {
     bootstrap: { joinToken: string; bcdUrl: string; sha256: string },
     context: CallContext,
   ): Promise<void>;
+  /**
+   * Reads the machine's SMBIOS UUID (e.g. dmidecode in rescue), so its `provisioned` bootstrap
+   * token can be bound to it (`expect.productUuid`) before `bootstrap` delivers it.
+   */
+  identify?(machine: ExternalMachine, context: CallContext): Promise<{ productUuid: string }>;
   power?(id: string, action: PowerAction, context: CallContext): Promise<void>;
   rescue?(id: string, context: CallContext): Promise<RescueAccess>;
   reinstall?(id: string, image: ImageRef, context: CallContext): Promise<void>;
@@ -752,7 +757,15 @@ export interface WorkflowEngine {
 
 /** Capacity, backed by the built-in capacity module; how other modules book resources. */
 export interface CapacityPort {
-  reserve(tx: SqlTx, request: PlacementRequest): Promise<PlacementOutcome>;
+  /**
+   * `admission`: the calling method's recorded decision (`ctx.admission`), so scheduler plugins'
+   * `admit` hooks run for this request; reconciler retries of an admitted request omit it.
+   */
+  reserve(
+    tx: SqlTx,
+    request: PlacementRequest,
+    options?: { admission?: AdmissionContext },
+  ): Promise<PlacementOutcome>;
   release(tx: SqlTx, allocationId: string): Promise<void>;
 }
 

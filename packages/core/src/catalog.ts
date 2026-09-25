@@ -491,6 +491,7 @@ group('providerAccounts', 'vps', [
   ['offers', 'read', 'providers:read', 'provider-account', 'v0.3'],
   ['update', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
   ['delete', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
+  ['bootstrap', 'mutation', 'providers:manage', 'provider-account', 'v0.3'],
 ]);
 group('tunnels', 'tunnels', [
   ['open', 'mutation', 'instances:exec', 'instance', 'v0.3', { or: [['nodes:console', 'node']] }],
