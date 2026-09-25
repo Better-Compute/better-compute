@@ -92,9 +92,12 @@ and so does `pools.update` when `prewarmImages` changes. Modules contribute `sit
 the section merges field by field (see [NodeSpec sections](/docs/extending/modules#nodespec-sections)).
 
 <Callout type="info" title="Status">
-`bcd site` is designed and its contracts are in `proto/bettercompute/site/v1`, but the mode is not
-written yet: the Go daemon's node agent works, while `bcd site` exits 2 with `NOT_IMPLEMENTED`. The dev stack joins site agents as FakeDaemons with role `site`
-(`createDevStack().joinSite()`), and the metal test suite answers site commands with a simulated agent.
+`bcd site` exists, and its contracts are in `proto/bettercompute/site/v1`. It runs BMC operations over
+Redfish (other drivers answer `unsupported-driver`), `site.httpProxy` and boot entries. While it holds the boot lease,
+its boot server serves iPXE scripts and discovery assertions, and its cache pre-warms `cacheImages` and serves them to
+the site's ramdisks by digest. Proxy DHCP and TFTP are not built yet, so the site's DHCP server has to chain machines to
+iPXE. The dev stack joins site agents as FakeDaemons with role `site` (`createDevStack().joinSite()`), and the metal
+test suite answers site commands with a simulated agent.
 </Callout>
 
 ## Enroll site agents with site tokens

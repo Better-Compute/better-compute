@@ -44,10 +44,14 @@ This section covers the second path: the `metal` module in `@better-compute/meta
 <Callout type="warn" title="What runs today">
 The control plane side is implemented and tested: the `metal` API group, the metal reconciler, the
 workflows, steps and profiles of every provision state, and the site and ramdisk command kinds. The
-agents that touch hardware are modes of the Go daemon `bcd` (`bcd site` and `bcd ramdisk`), which
-are planned for v0.2 and not written yet: bcd's node agent is built and tested, but `bcd site` and
-`bcd ramdisk` exit 2 with `NOT_IMPLEMENTED`. The test suite drives the whole lifecycle with
-simulated site agents and ramdisks (`tests/extensions/metal-sim.ts`).
+agents that touch hardware are modes of the Go daemon `bcd`, and both exist but are not complete.
+`bcd site` runs BMC operations over Redfish (other BMC drivers answer `unsupported-driver`),
+`site.httpProxy`, boot entries, an HTTP(S) boot server for iPXE scripts while it holds the site boot
+lease, and the pre-warmed image cache. It has no proxy DHCP or TFTP yet, so the site's own DHCP
+server has to chain machines to iPXE. `bcd ramdisk` runs `disk.wipe`, `deploy.image`, `boot.kexec`
+and `diag.dcgm`, and joins with the boot parameters on its kernel command line. The test suite
+still drives the whole lifecycle with simulated site agents and ramdisks
+(`tests/extensions/metal-sim.ts`).
 </Callout>
 
 ## Register the module
