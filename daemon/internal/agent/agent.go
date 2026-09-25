@@ -122,7 +122,9 @@ type Agent struct {
 	tunnels  int
 	secrets  map[string]*pendingSecret
 	// faults are this boot's active device conditions (XIDs); pressure the last PSI sample.
-	faults        []*agentv1.Condition
+	faults []*agentv1.Condition
+	// rootDisk is the disk deploy.image wrote (boot.kexec boots it).
+	rootDisk      *inventory.Disk
 	pressure      *agentv1.HostPressure
 	workloads     map[string]*pendingWorkload
 	upgradeNeeded bool

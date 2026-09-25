@@ -23,8 +23,8 @@
 // the session. Reconnects back off from 1 s to 60 s with full jitter (Backoff); Drain reconnects
 // after its jittered delay. Offline, the daemon keeps enforcing its last spec and journals events.
 //
-// TODO(v0.1): Conn over connect-go and daemon/gen, Join (sealed token, signed JoinResponse) and
-// Renew with proof of possession.
+// The stream itself (connect-go over daemon/gen), Join and Renew live in internal/agent and
+// internal/transport; this package keeps the journal-side rules they share.
 package session
 
 import (
@@ -59,7 +59,7 @@ type Identity struct {
 }
 
 // Hello mirrors agent/v1 Hello; UnackedResults holds the journal entries that become
-// CommandUpdates. TODO(v0.1): replace it with the daemon/gen type (and add drivers).
+// CommandUpdates. internal/agent builds the wire Hello (with drivers) from the same journal rules.
 type Hello struct {
 	NodeID            string
 	BootID            string
@@ -233,8 +233,8 @@ func (b Backoff) Delay(attempt int, r *rand.Rand) time.Duration {
 	return time.Duration(r.Int63n(int64(ceiling) + 1))
 }
 
-// Conn is one established Session stream. TODO(v0.1): implemented over connect-go on daemon/gen,
-// with the frames that follow the handshake.
+// Conn is one established Session stream, for simulators that speak the handshake without
+// daemon/gen (internal/agent uses connect-go streams directly).
 type Conn interface {
 	// Handshake sends Hello and waits for Welcome.
 	Handshake(ctx context.Context, hello Hello) (Welcome, error)

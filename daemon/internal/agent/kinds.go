@@ -44,6 +44,33 @@ func builtinKinds(a *Agent) []*Kind {
 			Exec:        a.runGpuReset,
 		},
 		{
+			Name:        "disk.wipe",
+			Lane:        dispatch.LaneProvision,
+			Roles:       []dispatch.Role{dispatch.RoleRamdisk},
+			Destructive: true,
+			Exec:        a.runDiskWipe,
+		},
+		{
+			Name:        "deploy.image",
+			Lane:        dispatch.LaneProvision,
+			Roles:       []dispatch.Role{dispatch.RoleRamdisk},
+			Destructive: true,
+			Exec:        a.runDeployImage,
+		},
+		{
+			Name:            "boot.kexec",
+			Lane:            dispatch.LaneControl,
+			Roles:           []dispatch.Role{dispatch.RoleRamdisk},
+			SelfTerminating: true,
+			Exec:            a.runKexec,
+		},
+		{
+			Name:  "diag.dcgm",
+			Lane:  dispatch.LaneProvision,
+			Roles: []dispatch.Role{dispatch.RoleRamdisk, dispatch.RoleNode},
+			Exec:  a.runDiagDcgm,
+		},
+		{
 			Name:            "node.reboot",
 			Lane:            dispatch.LaneControl,
 			Roles:           []dispatch.Role{dispatch.RoleNode, dispatch.RoleSite},

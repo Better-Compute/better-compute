@@ -38,6 +38,13 @@ type Host interface {
 	Kmsg() (io.ReadCloser, error)
 	// ResetGPU resets one GPU (gpu.reset).
 	ResetGPU(ctx context.Context, uuid string) error
+
+	// The ramdisk's operations (ramdisk.go, ramdisk_host.go).
+	SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (method string, verified bool, err error)
+	RereadPartitions(ctx context.Context, d *inventory.Disk) error
+	InstallUserData(ctx context.Context, d *inventory.Disk, kind string, data []byte) error
+	Kexec(ctx context.Context, d *inventory.Disk, kernel, initrd string, cmdline []string) error
+	RunDCGM(ctx context.Context, level uint32, uuids []string, gpus []*inventory.Gpu) (*agentv1.DiagDcgmResult, error)
 }
 
 // RealHost is the machine bcd runs on.
@@ -50,6 +57,8 @@ type RealHost struct {
 	Root string
 	// BootIDFile overrides /proc/sys/kernel/random/boot_id.
 	BootIDFile string
+	// KexecFunc overrides kexec (a fakehw machine "reboots" instead).
+	KexecFunc func(ctx context.Context, d *inventory.Disk, kernel, initrd string, cmdline []string) error
 	// ResetGPUFunc overrides nvidia-smi --gpu-reset.
 	ResetGPUFunc func(ctx context.Context, uuid string) error
 	// LogsFunc overrides journalctl.

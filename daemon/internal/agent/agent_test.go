@@ -168,6 +168,22 @@ func (h *fakeHost) ResetGPU(_ context.Context, uuid string) error {
 	h.resets = append(h.resets, uuid)
 	return nil
 }
+func (h *fakeHost) real() *RealHost { return &RealHost{Root: h.root, RebootFunc: h.Reboot} }
+func (h *fakeHost) SecureErase(ctx context.Context, d *inventory.Disk, mode agentv1.WipeMode) (string, bool, error) {
+	return h.real().SecureErase(ctx, d, mode)
+}
+func (h *fakeHost) RereadPartitions(ctx context.Context, d *inventory.Disk) error {
+	return h.real().RereadPartitions(ctx, d)
+}
+func (h *fakeHost) InstallUserData(ctx context.Context, d *inventory.Disk, kind string, data []byte) error {
+	return h.real().InstallUserData(ctx, d, kind, data)
+}
+func (h *fakeHost) Kexec(ctx context.Context, d *inventory.Disk, kernel, initrd string, cmdline []string) error {
+	return h.real().Kexec(ctx, d, kernel, initrd, cmdline)
+}
+func (h *fakeHost) RunDCGM(ctx context.Context, level uint32, uuids []string, gpus []*inventory.Gpu) (*agentv1.DiagDcgmResult, error) {
+	return h.real().RunDCGM(ctx, level, uuids, gpus)
+}
 func (h *fakeHost) ReloadSSH() error {
 	h.mu.Lock()
 	h.sshReloads++

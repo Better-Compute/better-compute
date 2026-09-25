@@ -12,9 +12,8 @@
 //
 // The server grants per-lane credits (control 8, provision 4, bulk 2) and refreshes them with
 // heartbeats; the daemon runs a fixed worker pool per lane (control 4, provision 2, bulk 1), never a
-// goroutine per command. Handlers for the v0.1 kinds (inventory.refresh, diag.nvml, the
-// self-terminating node.reboot) arrive in v0.1. Until then the registry is empty and every kind is
-// UNSUPPORTED, which fails closed (P11).
+// goroutine per command. The kinds and their handlers are registered by internal/agent; a kind the
+// registry does not hold is UNSUPPORTED, which fails closed (P11).
 package dispatch
 
 import (

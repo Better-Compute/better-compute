@@ -15,9 +15,8 @@
 // identity stays with its key. The server then fails in-flight non-retry-safe commands instead of
 // replaying them (PLAN.md §7.2).
 //
-// The production store is bbolt, capped at 64 MiB / 10k events. TODO(v0.1): add it once a Go
-// toolchain can produce go.sum for go.etcd.io/bbolt; until then Memory is the only implementation,
-// used by tests and the simulator.
+// The production store is Bolt (bbolt, capped at 64 MiB / 10k events); Memory serves tests and the
+// simulator.
 package journal
 
 import (

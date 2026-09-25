@@ -17,8 +17,8 @@
 // no converger for is reported SectionUnsupported (§7.6) and counts as terminal; so is the site
 // section of NodeSpec until site agents arrive in v0.2. Status mirrors agent/v1 SectionState.
 //
-// TODO(v0.1): the devices converger (CDI hold) and the empty access converger; patches against
-// base_generation and the section encodings come with daemon/gen.
+// The convergers themselves (devices, access, telemetry) live in internal/agent, which also applies
+// patches against base_generation and hands Run each section's encoding.
 package converge
 
 import (

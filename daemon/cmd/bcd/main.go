@@ -2,8 +2,8 @@
 // datacenter (site), inside the PXE ramdisk (ramdisk) and on test hosts (sim), plus the local
 // commands join, status, doctor and version (PLAN.md §6).
 //
-// join, node, status, doctor and version work; every other command parses its flags and then exits 2 with
-// the phase it arrives in. The release version is set at link time:
+// node, join, status, doctor and version work; site, ramdisk and sim parse their flags and then
+// exit 2 with the phase they arrive in. The release version is set at link time:
 //
 //	go build -ldflags "-X main.version=0.1.0" ./cmd/bcd
 package main
