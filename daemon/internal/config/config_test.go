@@ -231,6 +231,16 @@ func TestApproverSetSHA256(t *testing.T) {
 	}
 }
 
+func TestSiteBMCNetworks(t *testing.T) {
+	cfg, err := Parse([]byte(required() + "[site]\nbmc_networks = \"10.20.0.0/16, fd00:b::/64\"\n"))
+	if nets, nerr := cfg.BMCNets(); err != nil || nerr != nil || len(nets) != 2 || !nets[0].Contains([]byte{10, 20, 3, 4}) {
+		t.Fatalf("bmc_networks = %v %v", err, nerr)
+	}
+	if _, err := Parse([]byte(required() + "[site]\nbmc_networks = \"10.20.0.0\"\n")); err == nil {
+		t.Fatal("an address without a prefix length was accepted")
+	}
+}
+
 func TestDecodePin(t *testing.T) {
 	digest, err := DecodePin(testPin)
 	if err != nil {

@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path"
@@ -114,6 +115,10 @@ type Config struct {
 
 	// Update configures self-update ([update]).
 	Update Update
+
+	// BMCNetworks are the CIDRs of the site's BMC networks ([site] bmc_networks, comma-separated): a
+	// site agent never proxies a request into them, whatever the control plane asks.
+	BMCNetworks string
 
 	// IMDSListen is where a VPS host serves its instances' metadata service ([imds] listen, e.g.
 	// "169.254.169.254:80" on the instances' bridge); empty disables it.
@@ -343,6 +348,9 @@ func (c *Config) Validate() error {
 	if _, err := c.ApproverSetPin(); err != nil {
 		return err
 	}
+	if _, err := c.BMCNets(); err != nil {
+		return err
+	}
 	if !path.IsAbs(c.DataDir) {
 		return fmt.Errorf("data_dir must be an absolute path, got %q", c.DataDir)
 	}
@@ -383,6 +391,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log.level must be debug, info, warn or error, got %q", c.Log.Level)
 	}
 	return nil
+}
+
+// BMCNets parses [site] bmc_networks.
+func (c *Config) BMCNets() ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, cidr := range strings.Split(c.BMCNetworks, ",") {
+		if cidr = strings.TrimSpace(cidr); cidr == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("site.bmc_networks: %q is not a CIDR", cidr)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
 }
 
 // ApproverSetPin decodes approver_set_sha256 (nil when unset).
@@ -443,6 +467,7 @@ var fields = []field{
 	{section: "update", key: "release_threshold", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseThreshold = v.num }},
 	{section: "update", key: "release_sequence", kind: kindInt, set: func(c *Config, v value) { c.Update.ReleaseSequence = v.num }},
 	{section: "update", key: "entrypoint", kind: kindString, set: func(c *Config, v value) { c.Update.Entrypoint = v.str }},
+	{section: "site", key: "bmc_networks", kind: kindString, set: func(c *Config, v value) { c.BMCNetworks = v.str }},
 	{section: "imds", key: "listen", kind: kindString, set: func(c *Config, v value) { c.IMDSListen = v.str }},
 	{section: "boot", key: "listen", kind: kindString, set: func(c *Config, v value) { c.Boot.Listen = v.str }},
 	{section: "boot", key: "kernel", kind: kindString, set: func(c *Config, v value) { c.Boot.Kernel = v.str }},

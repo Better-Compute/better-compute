@@ -191,6 +191,17 @@ func TestHTTPProxyRefusesTargetsOutsideTheSite(t *testing.T) {
 	if !h.agent.knownBMC("10.0.0.9") || h.agent.knownBMC("10.0.0.10") {
 		t.Fatal("remembered BMC hosts")
 	}
+	// A BMC driven by name is remembered by its addresses too (review 9 HIGH-3(b)).
+	h.agent.rememberBMC("https://localhost/redfish/v1")
+	if !h.agent.knownBMC("127.0.0.1") && !h.agent.knownBMC("::1") {
+		t.Fatal("the addresses a BMC name resolves to were not remembered")
+	}
+	// The local configuration's BMC networks, whatever the control plane says (HIGH-3(c)).
+	_, bmcNet, _ := net.ParseCIDR("10.30.0.0/16")
+	h.agent.o.BMCNetworks = []*net.IPNet{bmcNet}
+	if !h.agent.knownBMC("10.30.4.5") || h.agent.knownBMC("10.31.0.1") {
+		t.Fatal("bmc_networks")
+	}
 	if k, _ := h.agent.reg.Lookup("site.httpProxy", "site"); !k.Destructive {
 		t.Fatal("site.httpProxy is not destructive")
 	}

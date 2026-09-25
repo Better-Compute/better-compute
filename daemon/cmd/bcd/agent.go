@@ -363,6 +363,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 	client.Store(first)
 	signerPin, _ := config.DecodePin(cfg.JoinSigningKeyPin)
 	approverSetPin, _ := cfg.ApproverSetPin() // validated when the file was loaded
+	bmcNetworks, _ := cfg.BMCNets()
 	var update *agent.UpdateOptions
 	if mode == "node" || mode == "site" {
 		if update, err = updateOptions(cfg); err != nil {
@@ -394,6 +395,7 @@ func runAgent(mode string, cfg *config.Config, log *slog.Logger, stderr io.Write
 		},
 		SignerPin:      signerPin,
 		ApproverSetPin: approverSetPin,
+		BMCNetworks:    bmcNetworks,
 		ImageCache:     cfg.ImageCache,
 		Runtimes:       runtimes,
 		Drivers:        drivers,

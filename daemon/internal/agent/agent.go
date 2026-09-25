@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -65,6 +66,9 @@ type Options struct {
 	OnRenewed func(*State, *ecdsa.PrivateKey)
 	// SignerPin is join_signing_key_pin: Welcome trust bundles must be signed by that key.
 	SignerPin []byte
+	// BMCNetworks are the site's BMC networks from the local configuration ([site] bmc_networks):
+	// site.httpProxy never reaches them.
+	BMCNetworks []*net.IPNet
 	// ApproverSetPin is approver_set_sha256 (review 7 M2): without approver keys the daemon takes only
 	// the approver set with this digest, and refuses destructive commands until it holds it.
 	ApproverSetPin []byte

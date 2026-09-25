@@ -174,19 +174,36 @@ func bmcHost(address string) string {
 	return ""
 }
 
-// rememberBMC records a BMC host, durably.
+// rememberBMC records a BMC host, durably: its name and every address it resolves to now (review 9
+// HIGH-3(b): a proxy request naming the BMC by another name or by address is refused too).
 func (a *Agent) rememberBMC(address string) {
 	host := bmcHost(address)
 	if host == "" {
 		return
 	}
+	keys := []string{host}
+	if ip := net.ParseIP(host); ip != nil {
+		keys = []string{ip.String()}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ips, _ := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		cancel()
+		for _, ip := range ips {
+			keys = append(keys, ip.String())
+		}
+	}
 	a.bmcMu.Lock()
 	defer a.bmcMu.Unlock()
 	hosts := a.bmcHostsLocked()
-	if hosts[host] {
+	added := false
+	for _, k := range keys {
+		if !hosts[k] {
+			hosts[k], added = true, true
+		}
+	}
+	if !added {
 		return
 	}
-	hosts[host] = true
 	raw, _ := json.Marshal(hosts)
 	if err := pki.WriteFileAtomic(filepath.Join(a.o.DataDir, bmcHostsFile), raw, 0o600); err != nil {
 		a.log.Error("remember a BMC host", "error", err.Error())
@@ -201,11 +218,22 @@ func (a *Agent) bmcHostsLocked() map[string]bool {
 	return hosts
 }
 
-// knownBMC reports whether a host (name or address) is a BMC this agent has driven.
+// knownBMC reports whether a host (name or address) is a BMC this agent has driven, or an address
+// in the local configuration's BMC networks ([site] bmc_networks), which the control plane cannot
+// change.
 func (a *Agent) knownBMC(host string) bool {
+	key := strings.ToLower(host)
+	if ip := net.ParseIP(host); ip != nil {
+		key = ip.String()
+		for _, n := range a.o.BMCNetworks {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
 	a.bmcMu.Lock()
 	defer a.bmcMu.Unlock()
-	return a.bmcHostsLocked()[strings.ToLower(host)]
+	return a.bmcHostsLocked()[key]
 }
 
 func str(v any) string {
