@@ -7,6 +7,7 @@ import { capacityCommands } from './capacity.js';
 import { daemonCommands } from './daemon.js';
 import { fleetCommands } from './fleet.js';
 import { iamSetupCommands } from './iam-setup.js';
+import { instanceCommands, nodeCommands } from './nodes.js';
 import { pkiCommands } from './pki.js';
 import { releaseCommands } from './release.js';
 import { sandboxCommands } from './sandbox.js';
@@ -28,6 +29,8 @@ export const builtinCommands: readonly CommandSpec<any>[] = [
   ...tunnelCommands,
   ...capacityCommands,
   ...sandboxCommands,
+  ...nodeCommands,
+  ...instanceCommands,
   ...fleetCommands,
   ...pkiCommands,
   ...batchCommands,
