@@ -1,8 +1,9 @@
 # @better-compute/provider-hetzner
 
 Hetzner providers for better-compute (PLAN.md D8, §3.6). **`hetznerCloud`** serves Hetzner Cloud
-servers as the instances of `class: 'provider'` pools. Hetzner Robot, for dedicated servers
-bootstrapped into `metal-host` pools, follows.
+servers as the instances of `class: 'provider'` pools. **`hetznerRobotProvider({ ssh })`** turns
+dedicated servers into bcd nodes of `metal-host` or `vps-host` pools through vps's
+`providerAccounts.bootstrap`.
 
 The package sits outside the umbrella, so install it directly. It depends on
 `@better-compute/core` and `@better-compute/vps`.
@@ -73,8 +74,13 @@ already has into `metal-host` nodes that run bcd (§3.6, "platform-owned provide
 - **Power** maps to Robot resets: `reset`/`cycle` → `hw`, `graceful-restart` → `sw`,
   `graceful-off`/`on` → `power`, `off` → `power_long`. Robot cannot report power state.
 - **`rescue`** activates Linux rescue with the account's key, then hardware-resets into it.
+- **`identify(machine)`** boots rescue (unless it already answers) and reads
+  `/sys/class/dmi/id/product_uuid` over SSH, so the bootstrap token can be bound to the machine
+  (`expect.productUuid`; the `provisioned` attestor refuses unbound tokens). It leaves the server in
+  rescue for `bootstrap`.
 - **`bootstrap(machine, { joinToken, bcdUrl, sha256 })`** runs in these steps:
-  1. It activates rescue and waits for SSH, through the injected `SshExecutor`.
+  1. It reuses a rescue system that already answers, else activates rescue and waits for SSH,
+     through the injected `SshExecutor` (one hardware reset for identify + bootstrap).
   2. It writes the single-use `provisioned` join token over SSH stdin into a `umask 077` file.
   3. It runs `bootstrapScript`, which calls `installimage` with software RAID 1 over the NVMe
      disks, else the SATA disks.

@@ -49,16 +49,41 @@ scalar claims in place on the node, quota first. `list` defaults to `scope: 'min
 
 - **Placement.** The instance claims vCPU (× overcommit), memory, disk and whole GPUs for VFIO
   through capacity. It then leases an IPv4 address from the pool's range (`setIpPool`).
-- **Node spec.** `nodeSpec` gives the host `NodeSpec.instances`: image, flavor, cloud-init with the
-  tenant's keys, GPU atoms, and `desiredState: 'deleted'` while the instance is deleting.
+- **Node spec.** `nodeSpec` gives the host `NodeSpec.instances`: image, flavor, the user-data ref,
+  allocation, NIC, GPU atoms, and `desiredState: 'deleted'` while the instance is deleting.
 - **Reports.** The gateway calls `reportInstances(tx, work, nodeId, reports, { complete })`. Only
   instances placed on that node are touched. A complete list marks missing instances `absent`.
   Instances the runtime holds that no row places there come back as `orphans`, which are leaks.
 - **The `vps.instances` reconciler** turns reports into transitions:
   provisioning → starting → running ⇄ stopped, `error` on a runtime error, and deleted once the
   runtime drops the instance. Deletion releases the booking, the IP and the quota.
-- **Lost hosts.** An instance on a `lost` node becomes `lost`. It recovers if the node comes back
-  and reports it. With `policy.recreateOnHostLoss` it is re-placed on another node.
+- **Lost hosts.** An instance on a `lost` node becomes `lost` (the periodic `vps.hosts` reconciler
+  wakes instances on hosts Liveness declared lost; a vps-host node turns lost only when its pool
+  sets `policy.lostAfter`). It recovers if the node comes back and reports it. With
+  `policy.recreateOnHostLoss` it is re-placed on another node, and the old host's spec drops it, so a
+  host that returns removes the stale domain.
+- **Host capacity.** `vps.hosts` (every `hostSyncEvery`, default 30 s) derives each vps-host node's
+  `vcpu` (logical CPUs), `memoryGiB` and `diskGiB` (non-removable disks) `node_resources` rows from
+  its applied inventory, minus `vps({ hostReserve })` (default 2 vCPU, 8 GiB, 100 GiB), with the
+  pool's `policy.overcommit[resource]` as the ratio (0.1 to 100). Rows change only when the
+  inventory or policy does, never below what is allocated. Tenant-controlled nodes add nothing.
+- **Runtimes.** A pool runs `policy.runtime`, else `vps({ runtimes })[0]`; the deployment must list
+  it. `builtinRuntimeTraits` covers `libvirt-kvm`, `cloud-hypervisor`, `firecracker` and
+  `containerd`; bcx runtimes pass `vps({ runtimeTraits })`. `instances.create` refuses image formats
+  the runtime cannot boot and GPUs it cannot pass through.
+- **Single-tenant containers (§13).** A container runtime (`containerd`) needs
+  `policy.singleTenant`; capacity then offers the pool to one tenant besides its owner, and
+  `instances.create` serves only that tenant (else the owner), never while the pool is offered to
+  two tenants or still runs another tenant's instances.
+- **User data.** The spec never carries it. At admission vps seals the rendered cloud-config through
+  `ModuleContext.secrets` and keeps only its `secret://` ref (`instances.user_data_sealed`); the
+  host fetches it with a node-signed `SecretRequest` for the instance's allocation, and vps deletes
+  it with the instance. A tenant may pass its own `secret://<tenant>/<id>` ref as `userData`; refs of
+  other tenants, `vault://` and `env://` are refused.
+- **NICs.** Each spec carries `allocationId` and one NIC on `vps({ hostNetwork })` (default `br0`)
+  with the IPAM address in CIDR form and a stable locally administered MAC.
+- **Admission hooks.** `instances.create` passes its decision to `CapacityPort.reserve`, so scheduler
+  plugins' `admit` hooks run once; the reconciler's scheduling retries do not pass it.
 
 ### Provider pools (`class: 'provider'`, `agent: 'none'`)
 
@@ -89,3 +114,22 @@ join token ever goes into tenant-readable user data.
 `defineProvider({ id, version, provides, config, create })` declares an external capacity
 provider. Its shapes are checked up front (`INVALID_CONFIG`), and the definition is returned
 frozen, with `extension: 'provider'`.
+
+## Platform-owned provider machines (§3.6)
+
+`providerAccounts.bootstrap({ tenantId, accountId, poolId, machineId | offerId, idempotencyKey })`
+turns a provider machine (a Hetzner Robot server) into a node of a vps-host or metal-host pool that
+runs bcd. It needs `vps({ bootstrap: { bcdUrl, sha256 } })`, the host PKI, and a provider with
+`identify` and `bootstrap`. The `vps.bootstraps` reconciler drives it:
+
+1. **claiming**: `ProviderImpl.create`, keyed by the bootstrap id (with `offerId`);
+2. **identifying**: `ProviderImpl.identify` reads the SMBIOS UUID (Robot: in rescue);
+3. **installing**: a single-use `provisioned` join token bound to that UUID (`expect.productUuid`,
+   TTL 2 h, at most 6 h) goes only to `ProviderImpl.bootstrap` (rescue/installimage), never to user
+   data. Its secret is never stored; a retry revokes it and mints another;
+4. **joining**: a node of the pool reporting that UUID in inventory collected after the install;
+5. **joined** or **failed** (provider errors retry with backoff up to `maxAttempts`; `JOIN_TIMEOUT`
+   after an hour revokes the token).
+
+A retry of the call under the same key returns the current status, never the token. Events:
+`provider.bootstrap.{started,installed,joined,failed}`.
