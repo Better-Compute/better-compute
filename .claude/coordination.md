@@ -128,6 +128,12 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   - nodes.listSshCerts (f0bdc81) + console-kit createSshAccessView (ba442cb).
   - pki sandboxSshCa + tunnelsOptions (b9debd5).
   - console-kit sandboxes view + page (a545208); commandOwner in hosts (8b31b44).
+  - Security review #4, all fixed: 26a515f (sandbox instances refused by tunnels.open), 3855a65 (sandbox exec: `--`
+    before the host, user ssh config neutralized, quoted paths, terminal-safe output), 3646b7c (sbx through gateway
+    reauthorize; re-auth errors; rewrite guard; CA split), 2a62d85 (reseal --accept-unauthenticated), 88792a5 +
+    06fce0e (guest host keys pinned via @cert-authority; pki issueHostCertificate a9c3662).
+  - Well-known gateway in hosts (8127271, 9620863); bootstrap pins into provisioned user data (afdaeb6, abb23dd).
+  - CLI sandbox-template, ssh-cert --connect, dev-sim CAs; console templates UI (a969dfc, 9047c42, c34f60b, cbea043).
 - [f85da7]: DONE: MCP → IAM confirmation → same-key retry as one flow (39b3eda); known-key replay matrix step
   (542885d); §12.6 policies incl. DelegatedSmall extend on real drafts (cc62e03, which also fixed stale-projection
   admissions); node-scoped gateway reports (6725423). Later: remote-IAM MCP remoteMcpIam (3afe9c1) + reservation
