@@ -333,6 +333,29 @@ describe('resume', () => {
     const [connected] = (await f.outbox('node.connected')).slice(-1);
     expect(connected!.payload.data).toMatchObject({ bootChanged: true, journalChanged: false });
   });
+
+  it("wakes the node's Workflow reconciler when a workflow step's command settles, on a result or on rejoin", async () => {
+    const node = await f.addNode();
+    const step = await f.enqueue(node);
+    const reboot = await f.enqueue(node, { kind: 'node.reboot' });
+    const plain = await f.enqueue(node);
+    await f.db.query(`UPDATE commands SET idempotency_key = 'wf:wf_1:' || id WHERE id = ANY($1::text[])`, [[step, reboot]]);
+    const workflowWork = async () =>
+      (await f.db.query<{ key: string }>("SELECT key FROM work_queue WHERE kind = 'workflow'")).rows.map((row) => row.key);
+    const first = await f.connect(node);
+    await f.gateway.jobs.dispatch.tick();
+    await first.handle.receive(update(plain, CommandState.SUCCEEDED));
+    expect(await workflowWork()).toEqual([]);
+    await first.handle.receive(update(step, CommandState.SUCCEEDED));
+    expect(await workflowWork()).toEqual([node]);
+
+    await f.db.query("DELETE FROM work_queue WHERE kind = 'workflow'");
+    await first.handle.receive(update(reboot, CommandState.RUNNING));
+    await first.handle.end();
+    await f.connect(node, { bootId: 'boot-2' });
+    expect(await f.command(reboot)).toMatchObject({ state: 'succeeded', reason: 'rebooted' });
+    expect(await workflowWork()).toEqual([node]);
+  });
 });
 
 describe('events', () => {

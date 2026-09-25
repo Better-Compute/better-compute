@@ -416,14 +416,18 @@ export function createGatewayStore(options: GatewayStoreOptions) {
   async function applyUpdatesBulk(tx: SqlTx, entries: readonly UpdateEntry[]): Promise<UpdatesResult[]> {
     const results = entries.map((): UpdatesResult => ({ settled: [], ackCommandIds: [], busy: [] }));
     const ids = [...new Set(entries.flatMap((entry) => entry.updates.map((update) => update.commandId)))].sort();
-    const rows = new Map<string, { nodeId: string; state: CommandState; kind: string }>();
+    const rows = new Map<string, { nodeId: string; state: CommandState; kind: string; workflow: boolean }>();
     if (ids.length) {
-      const read = await tx.query<{ id: string; node_id: string; state: CommandState; kind: string }>(
-        'SELECT id, node_id, state, kind FROM commands WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE',
+      const read = await tx.query<{ id: string; node_id: string; state: CommandState; kind: string; workflow: boolean }>(
+        `SELECT id, node_id, state, kind, starts_with(idempotency_key, 'wf:') AS workflow
+           FROM commands WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,
         [ids],
       );
-      for (const row of read.rows) rows.set(row.id, { nodeId: row.node_id, state: row.state, kind: row.kind });
+      for (const row of read.rows)
+        rows.set(row.id, { nodeId: row.node_id, state: row.state, kind: row.kind, workflow: row.workflow });
     }
+    /** Nodes whose workflow step's command settled: the Workflow reconciler (keyed by node) runs now, not at its 10 s poll. */
+    const workflowWake = new Set<string>();
     // Final write per command after every update of the batch, in order.
     const writes = new Map<
       string,
@@ -468,6 +472,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
               if (reason) settled.reason = reason;
               results[index]!.settled.push(settled);
               settledEvents.push({ entry: index, settled });
+              if (row.workflow) workflowWake.add(entry.nodeId);
             }
           }
         }
@@ -514,6 +519,8 @@ export function createGatewayStore(options: GatewayStoreOptions) {
       if (results[index]!.settled.length || results[index]!.busy.length) wake.add(entry.nodeId);
     });
     await enqueueAll(tx, 'node', [...wake]);
+    // `wf:` commands exist only where the provision module (and its `workflow` reconciler) runs.
+    await enqueueAll(tx, 'workflow', [...workflowWake]);
     return results;
   }
 
@@ -827,14 +834,16 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         );
         const epoch = Number(bumped.rows[0]!.session_epoch);
         const settled: SettledCommand[] = [];
+        let workflowSettled = false;
         const settleRule = async (sql: string, reason: string) => {
-          const { rows } = await tx.query<{ id: string; kind: string; state: CommandState }>(sql, [
+          const { rows } = await tx.query<{ id: string; kind: string; state: CommandState; workflow: boolean }>(sql, [
             input.nodeId,
             inFlight,
           ]);
           for (const row of rows) {
             const entry: SettledCommand = { id: row.id, kind: row.kind, state: row.state, reason };
             settled.push(entry);
+            if (row.workflow) workflowSettled = true;
             await settle(tx, input.nodeId, tenantId, entry);
           }
         };
@@ -843,7 +852,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           await settleRule(
             `UPDATE commands SET state = 'succeeded', reason = 'rebooted', updated_at = compute_now()
              WHERE node_id = $1 AND self_terminating AND state = ANY($2::text[])
-             RETURNING id, kind, state`,
+             RETURNING id, kind, state, starts_with(idempotency_key, 'wf:') AS workflow`,
             'rebooted',
           );
         // 2. A lost journal fails in-flight commands that are unsafe to run twice.
@@ -851,9 +860,11 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           await settleRule(
             `UPDATE commands SET state = 'failed', reason = 'journal-lost', updated_at = compute_now()
              WHERE node_id = $1 AND NOT retry_safe AND state = ANY($2::text[])
-             RETURNING id, kind, state`,
+             RETURNING id, kind, state, starts_with(idempotency_key, 'wf:') AS workflow`,
             'journal-lost',
           );
+        // A workflow step waiting on these (a reboot's `rejoin`) runs now, not at its next poll.
+        if (workflowSettled) await work.enqueue(tx, 'workflow', input.nodeId);
         const updates = await applyUpdates(tx, input.nodeId, tenantId, input.unackedResults, () => 1000);
         settled.push(...updates.settled);
 

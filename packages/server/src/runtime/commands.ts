@@ -482,7 +482,8 @@ export interface SweepInput {
  * One CommandSweeper pass in `tx` (fenced by the caller). Each transition wakes the node's
  * controller (`work_queue('node', nodeId)`, as the gateway does when a command settles), the
  * reconciler named by the idempotency key's prefix when one is registered (`wf:` → `workflow`,
- * `<reconciler>:<key>:…`), and publishes `command.settled` in the node owner's tenant.
+ * keyed by the workflow id and by the node, `<reconciler>:<key>:…`), and publishes
+ * `command.settled` in the node owner's tenant.
  */
 export async function sweepCommandsOnce(tx: SqlTx, input: SweepInput): Promise<SweptCommand[]> {
   const kinds = input.kinds.map((spec) => spec.kind);
@@ -523,6 +524,9 @@ export async function sweepCommandsOnce(tx: SqlTx, input: SweepInput): Promise<S
     wake('node', row.node_id);
     const owner = commandOwner(row.idempotency_key, input.registered);
     if (owner) wake(owner.kind, owner.key);
+    // Node workflows are keyed by their node (provision's `work_key`), only node-less ones by the
+    // workflow id: wake both, so the step fails now rather than at the engine's next poll.
+    if (owner?.kind === 'workflow') wake('workflow', row.node_id);
     if (row.owner_tenant_id)
       settled.push({
         type: 'command.settled',

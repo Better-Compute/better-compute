@@ -454,6 +454,28 @@ describe('CommandSweeper', () => {
     expect(settled.rows[0]!.payload.tenantId).toBe(fixture.tenants.acme.id);
   });
 
+  it("wakes a workflow step's owner under both keys the engine uses: the node and the workflow id", async () => {
+    const workflow = defineModule({
+      name: 'wf-probe',
+      reconcilers: [{ name: 'workflow', shardBy: 'node', run: async () => 'DONE' }],
+    });
+    const fixture = await computeFixture({ modules: [workflow] });
+    const { compute, database, clock, advance } = fixture;
+    const node = await seedNode(database, { tenantId: fixture.tenants.acme.id });
+    await database.transaction((tx) =>
+      compute.context.commands.enqueue(tx, {
+        nodeId: node.id,
+        kind: 'diag.nvml',
+        payload: undefined,
+        idempotencyKey: 'wf:wf_7:probe',
+        notAfter: clock.now() + 60_000,
+      }),
+    );
+    await advance(60_000);
+    expect(await compute.jobs['command-sweeper']!.tick()).toBe(1);
+    expect((await workRows(database, 'workflow')).map((row) => row.key).sort()).toEqual([node.id, 'wf_7'].sort());
+  });
+
   it('runs under its singleton lease only', async () => {
     const fixture = await computeFixture();
     await fixture.database.query(
