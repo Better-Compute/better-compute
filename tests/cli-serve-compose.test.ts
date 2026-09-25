@@ -86,13 +86,30 @@ function grpc(
   });
 }
 
-const until = async (check: () => boolean, timeoutMs: number, what: string) => {
-  const deadline = Date.now() + timeoutMs;
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-};
+// Every wait below is on an event (a frame, a gRPC status, a stream end). The bounds only turn a
+// hang into a readable failure; they are generous because several suites share this machine's CPU.
+const EVENT_BOUND_MS = 45_000;
+
+/** Resolves when `event` fires (checked on every frame and state change), or fails after the bound. */
+function eventually(
+  subscribe: (wake: () => void) => void,
+  check: () => boolean,
+  what: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`no ${what} within ${EVENT_BOUND_MS} ms`)),
+      EVENT_BOUND_MS,
+    );
+    const wake = () => {
+      if (!check()) return;
+      clearTimeout(timer);
+      resolve();
+    };
+    subscribe(wake);
+    wake();
+  });
+}
 
 /** A daemon's Session over mutual TLS: Hello sent, server frames collected until the stream ends. */
 function openSession(
@@ -105,13 +122,30 @@ function openSession(
     ca: toPem(bundle.rootCertificate),
     ...certificate,
   });
-  h2.on('error', () => undefined);
+  const listeners = new Set<() => void>();
+  const changed = () => {
+    for (const listener of listeners) listener();
+  };
   const state = {
     frames: [] as ReturnType<typeof decodeServerFrame>[],
     closed: false,
     status: undefined as number | undefined,
+    error: undefined as string | undefined,
     close: () => h2.destroy(),
+    /** Resolves once `check` holds, re-checked on every frame and on the end of the stream. */
+    when: (check: () => boolean, what: string) =>
+      eventually((wake) => listeners.add(wake), check, what),
+    /** Resolves when the stream ended: a gRPC status (a refusal is trailers-only) or a close. */
+    ended: (what: string) => state.when(() => state.closed, what),
   };
+  const end = () => {
+    state.closed = true;
+    changed();
+  };
+  h2.on('error', (error) => {
+    state.error ??= error.message;
+    end();
+  });
   const stream = h2.request({
     ':method': 'POST',
     ':path': `/${AGENT_GATEWAY_SERVICE}/Session`,
@@ -119,20 +153,23 @@ function openSession(
     te: 'trailers',
   });
   const decoder = new MessageDecoder(MAX_FRAME_BYTES);
-  // A refusal is trailers-only (the status in the response headers); a close sends trailers.
   const status = (headers: Record<string, unknown>) => {
     if (headers['grpc-status'] === undefined) return;
     state.status ??= Number(headers['grpc-status']);
-    state.closed = true;
+    end();
   };
   stream.on('response', status);
   stream.on('trailers', status);
   stream.on('data', (chunk: Uint8Array) => {
     for (const bytes of decoder.push(chunk)) state.frames.push(decodeServerFrame(bytes));
+    changed();
   });
-  stream.on('error', () => undefined);
-  stream.on('close', () => (state.closed = true));
-  h2.on('close', () => (state.closed = true));
+  stream.on('error', (error) => {
+    state.error ??= error.message;
+    end();
+  });
+  stream.on('close', end);
+  h2.on('close', end);
   stream.write(
     frameMessage(
       encodeAgentFrame(
@@ -251,7 +288,7 @@ describe('serve composition audit', () => {
 
   it(
     'serve runs the API, host routes and the gateway role over mTLS from one configuration',
-    { timeout: 90_000 },
+    { timeout: 240_000 },
     async () => {
       const cwd = await mkdtemp(join(tmpdir(), 'bc-serve-compose-'));
       const support = pathToFileURL(
@@ -403,7 +440,8 @@ export const host = composed.host;
 
         // The node opens its Session with the issued certificate (mutual TLS) and is welcomed.
         const live = openSession(gatewayPort, bundle, certificate, joined.nodeId);
-        await until(() => live.frames.length > 0, 10_000, 'Welcome');
+        await live.when(() => live.frames.length > 0 || live.closed, 'Welcome');
+        expect(live.error ?? live.status).toBeUndefined();
         expect(live.frames[0]!.msg.case).toBe('welcome');
 
         // A disallowed kind is never sent: it settles server-side; the allowed one is dispatched.
@@ -427,7 +465,7 @@ export const host = composed.host;
           live.frames
             .filter((frame) => frame.msg.case === 'command')
             .map((frame) => unwrapCommand(frame.msg.value as never).kind);
-        await until(() => commandKinds().includes('diag.nvml'), 15_000, 'diag.nvml dispatch');
+        await live.when(() => commandKinds().includes('diag.nvml'), 'diag.nvml dispatch');
         const reboot = await database!.query<{ state: string }>(
           'SELECT state FROM commands WHERE id = $1',
           [enqueued.reboot.id],
@@ -438,9 +476,9 @@ export const host = composed.host;
         // Revocation: the live session is closed (RevocationNotice), and the certificate is refused
         // at the next open.
         await bundle.nodeCa.revoke(parseCertificate(joined.certChain[0]!).serial, 'key-compromise');
-        await until(() => live.closed, 10_000, 'the revoked session to close');
+        await live.ended('close of the revoked session');
         const again = openSession(gatewayPort, bundle, certificate, joined.nodeId);
-        await until(() => again.closed, 10_000, 'the revoked certificate to be refused');
+        await again.ended('refusal of the revoked certificate');
         expect(again.status).toBe(16); // UNAUTHENTICATED
         expect(again.frames.some((frame) => frame.msg.case === 'welcome')).toBe(false);
         live.close();
@@ -449,7 +487,7 @@ export const host = composed.host;
         // node.joined reaches the SSE watch through the outbox.
         const reader = watch.body!.getReader();
         let text = '';
-        const deadline = Date.now() + 20_000;
+        const deadline = Date.now() + EVENT_BOUND_MS;
         while (!text.includes('node.joined') && Date.now() < deadline) {
           const { value, done: ended } = await reader.read();
           if (ended) break;
