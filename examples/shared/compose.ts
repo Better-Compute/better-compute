@@ -38,7 +38,7 @@ import {
   runtimeObserver,
   standardMetrics,
 } from '@better-compute/observability';
-import type { PkiBundle } from '@better-compute/pki';
+import { commandSigningOptions, type PkiBundle } from '@better-compute/pki';
 import { postgres, retentionModule } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { provisionModule } from '@better-compute/provision';
@@ -162,6 +162,9 @@ export async function exampleOptions(
               signingKey: bundle.joinSigning,
               encryptionKey: bundle.joinEncryption.privateKey,
             }),
+            // Signed intent (v0.2): commands and specs signed under the bundle's command-signing root, with the
+            // roots and trust version of a rotation in progress (pki rotate-command-root).
+            ...commandSigningOptions(bundle),
           },
         }
       : {}),

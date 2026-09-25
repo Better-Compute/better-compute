@@ -9,7 +9,9 @@ import {
   pkiPins,
   privateKeyPem,
   readPkiPins,
+  rotateCommandSigningRoot,
   toPem,
+  type CommandRootRotationStage,
   type PkiBundle,
 } from '@better-compute/pki';
 import type { Finding } from '@better-compute/core';
@@ -227,6 +229,59 @@ export const pkiCommands = [
         expires: Object.fromEntries(
           Object.entries(pins.expires).map(([name, ms]) => [name, iso(ms)]),
         ),
+      };
+    },
+  }),
+  defineCommand({
+    name: 'pki rotate-command-root',
+    group: 'PKI',
+    summary: 'Rotate the command-signing root in three steps: add, switch, drop',
+    description:
+      "pki rotate-command-root performs one step of a command-signing root rotation (PLAN.md §13) on the bundle and writes it back (sealed with BETTER_COMPUTE_SECRET when set). --stage add creates a new root and publishes it beside the current one (the trust bundle's version goes up); workers keep signing under the current root. Roll the bundle out to every process: daemons receive the new version in Welcome.trust. --stage switch, once every daemon holds that version, makes workers sign under the new root while the old one stays trusted. --stage drop, at least 24 hours later (worker keys live at most 24 h), removes the old root (version up again). Each step prints the roots and version daemons will trust.",
+    output: 'json',
+    flags: {
+      stage: {
+        type: 'string',
+        value: 'STAGE',
+        required: true,
+        choices: ['add', 'switch', 'drop'],
+        description: 'add a new root, switch signing to it, or drop the old one',
+      },
+      pki: pkiFlag,
+    },
+    examples: [
+      'better-compute pki rotate-command-root --stage add',
+      'better-compute pki rotate-command-root --stage switch',
+      'better-compute pki rotate-command-root --stage drop',
+    ],
+    async run({ flags, env, path, note }) {
+      const target = path(flags.pki ?? defaultPkiPath);
+      const bundle = await loadPkiBundle(target, env);
+      const stage = flags.stage as CommandRootRotationStage;
+      let rotated: PkiBundle;
+      try {
+        rotated = rotateCommandSigningRoot(bundle, stage);
+      } catch (error) {
+        throw new CliError('INVALID_STATE', (error as Error).message);
+      }
+      const secret = env.BETTER_COMPUTE_SECRET;
+      await replace(target, exportPkiBundle(rotated, secret ? { secret } : {}));
+      note(
+        stage === 'add'
+          ? 'Roll this bundle out to every process; switch once every daemon has the new trust version.'
+          : stage === 'switch'
+            ? 'Workers now sign under the new root. Drop the old root after 24 hours.'
+            : 'The old root is no longer trusted.',
+      );
+      const pins = pkiPins(rotated);
+      return {
+        stage,
+        trustVersion: pins.trustVersion,
+        signingRoot: pins.commandSigningRootSha256,
+        ...(pins.commandSigningNextRootSha256 ? { nextRoot: pins.commandSigningNextRootSha256 } : {}),
+        ...(pins.commandSigningPreviousRootSha256
+          ? { previousRoot: pins.commandSigningPreviousRootSha256 }
+          : {}),
       };
     },
   }),

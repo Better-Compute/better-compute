@@ -167,6 +167,7 @@ describe('help and the manifest', () => {
       'fleet apply',
       'pki init',
       'pki show',
+      'pki rotate-command-root',
       'pki issue-gateway',
       'daemon install-script',
       'iam setup',

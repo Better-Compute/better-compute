@@ -66,6 +66,15 @@ export interface PkiBundle {
    * development and small deployments, as for the CAs. Absent in older bundles.
    */
   commandSigning?: CommandSigningAuthority;
+  /**
+   * Root rotation (§13: new key first, switch after every daemon has it, then drop the old): the next root,
+   * published in the trust bundle but not signing yet (step 1).
+   */
+  commandSigningNext?: CommandSigningAuthority;
+  /** The former root (DER), still trusted after the switch until it is dropped (step 3). */
+  commandSigningPrevious?: Uint8Array;
+  /** `TrustBundle.version`: raised whenever the set of trusted roots changes (default 1). */
+  trustVersion?: number;
   /** Shared by the three CAs. */
   revocations: RevocationSet;
 }
@@ -86,6 +95,11 @@ export interface PkiPins {
   sshCaPublicKey?: string;
   /** Hex SHA-256 of the command-signing root certificate (DER), as trust bundles list it. */
   commandSigningRootSha256?: string;
+  /** During a root rotation: the added root (not signing yet) and the former root (still trusted). */
+  commandSigningNextRootSha256?: string;
+  commandSigningPreviousRootSha256?: string;
+  /** The trust bundle version daemons receive (default 1). */
+  trustVersion?: number;
 }
 
 export interface CreatePkiBundleOptions {
@@ -162,6 +176,80 @@ export function execTicketIssuer(
   return createExecTicketIssuer({ ...options, privateKey: bundle.execTicketKey });
 }
 
+/**
+ * What the server's `pki` options take for signed intent: the signing root, the other roots daemons must keep
+ * trusting during a rotation, and the trust bundle's version. Undefined without a command-signing root.
+ */
+export function commandSigningOptions(bundle: PkiBundle):
+  | {
+      commandSigning: CommandSigningAuthority;
+      commandSigningRoots: Uint8Array[];
+      trustVersion: number;
+    }
+  | undefined {
+  if (!bundle.commandSigning) return undefined;
+  return {
+    commandSigning: bundle.commandSigning,
+    commandSigningRoots: [
+      ...(bundle.commandSigningNext ? [bundle.commandSigningNext.certificate] : []),
+      ...(bundle.commandSigningPrevious ? [bundle.commandSigningPrevious] : []),
+    ],
+    trustVersion: bundle.trustVersion ?? 1,
+  };
+}
+
+export type CommandRootRotationStage = 'add' | 'switch' | 'drop';
+
+/**
+ * One step of a command-signing root rotation (PLAN.md §13), returning the new bundle (the input is unchanged):
+ * - `add`: a new root joins the trust bundle (version + 1); workers still sign under the current one.
+ * - `switch`: once every daemon holds that version, workers sign under the new root; the old one stays trusted.
+ * - `drop`: once nothing signed under the old root is in flight (worker keys live ≤ 24 h), it leaves the trust
+ *   bundle (version + 1).
+ * Throws `INVALID_STATE` for a step out of order.
+ */
+export function rotateCommandSigningRoot(
+  bundle: PkiBundle,
+  stage: CommandRootRotationStage,
+  options: { clock?: Clock; organization?: string } = {},
+): PkiBundle {
+  if (!bundle.commandSigning)
+    throw new ComputeError('INVALID_STATE', 'The bundle has no command-signing root to rotate');
+  const version = bundle.trustVersion ?? 1;
+  const refuse = (message: string) => new ComputeError('INVALID_STATE', message);
+  switch (stage) {
+    case 'add': {
+      if (bundle.commandSigningNext) throw refuse('A new root was already added; switch to it next');
+      if (bundle.commandSigningPrevious)
+        throw refuse('The previous root is still trusted; drop it before starting another rotation');
+      return {
+        ...bundle,
+        commandSigningNext: createCommandSigningAuthority({
+          ...(options.clock ? { clock: options.clock } : {}),
+          commonName: `${options.organization ?? 'better-compute'} command signing root ${version + 1}`,
+        }),
+        trustVersion: version + 1,
+      };
+    }
+    case 'switch': {
+      if (!bundle.commandSigningNext) throw refuse('No new root to switch to; add one first');
+      const { commandSigningNext: next, ...rest } = bundle;
+      // The set of trusted roots is unchanged, so the version stays.
+      return {
+        ...rest,
+        commandSigning: next,
+        commandSigningPrevious: bundle.commandSigning.certificate,
+        trustVersion: version,
+      };
+    }
+    case 'drop': {
+      if (!bundle.commandSigningPrevious) throw refuse('No previous root to drop');
+      const { commandSigningPrevious: _previous, ...rest } = bundle;
+      return { ...rest, trustVersion: version + 1 };
+    }
+  }
+}
+
 const execTicketKeyIdOf = (key: KeyObject) => {
   const jwk = toPublicKey(key).export({ format: 'jwk' });
   return jwkThumbprint({ kty: 'EC', crv: 'P-256', x: jwk.x!, y: jwk.y! });
@@ -180,6 +268,13 @@ export function pkiPins(bundle: PkiBundle): PkiPins {
     ...(bundle.commandSigning
       ? { commandSigningRootSha256: sha256Hex(bundle.commandSigning.certificate) }
       : {}),
+    ...(bundle.commandSigningNext
+      ? { commandSigningNextRootSha256: sha256Hex(bundle.commandSigningNext.certificate) }
+      : {}),
+    ...(bundle.commandSigningPrevious
+      ? { commandSigningPreviousRootSha256: sha256Hex(bundle.commandSigningPrevious) }
+      : {}),
+    ...(bundle.commandSigning ? { trustVersion: bundle.trustVersion ?? 1 } : {}),
   };
 }
 
@@ -230,6 +325,21 @@ export function readPkiPins(text: string): PkiPins & { expires: Record<string, n
     ...(commandSigning
       ? { commandSigningRootSha256: sha256Hex(fromPem(stored.commandSigningCertificate!)[0]!) }
       : {}),
+    ...(stored.commandSigningNextCertificate
+      ? {
+          commandSigningNextRootSha256: sha256Hex(
+            fromPem(stored.commandSigningNextCertificate)[0]!,
+          ),
+        }
+      : {}),
+    ...(stored.commandSigningPreviousCertificate
+      ? {
+          commandSigningPreviousRootSha256: sha256Hex(
+            fromPem(stored.commandSigningPreviousCertificate)[0]!,
+          ),
+        }
+      : {}),
+    ...(commandSigning ? { trustVersion: stored.trustVersion ?? 1 } : {}),
     expires: {
       root: root.notAfter,
       nodeCa: node.notAfter,
@@ -260,6 +370,10 @@ interface StoredBundle {
   sshCaPublicKey?: string;
   /** PEM of the command-signing root certificate. */
   commandSigningCertificate?: string;
+  /** Rotation: the next root (with its key under `commandSigningNext`) and the former root (public only). */
+  commandSigningNextCertificate?: string;
+  commandSigningPreviousCertificate?: string;
+  trustVersion?: number;
   /** PEM private keys by name, or `sealed` instead. */
   keys?: Record<KeyName, string>;
   sealed?: { alg: 'HKDF-SHA256+A256GCM'; salt: string; iv: string; data: string };
@@ -274,7 +388,8 @@ type KeyName =
   | 'auditSigning'
   | 'execTickets'
   | 'sshCa'
-  | 'commandSigning';
+  | 'commandSigning'
+  | 'commandSigningNext';
 
 const minSecretLength = 32;
 
@@ -313,6 +428,8 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
   if (bundle.sshCa) keys.sshCa = bundle.sshCa.export().privateKeyPem;
   const commandSigning = bundle.commandSigning?.export();
   if (commandSigning) keys.commandSigning = commandSigning.privateKeyPem;
+  const commandSigningNext = bundle.commandSigningNext?.export();
+  if (commandSigningNext) keys.commandSigningNext = commandSigningNext.privateKeyPem;
   const stored: StoredBundle = {
     format: 'better-compute-pki',
     version: 1,
@@ -337,6 +454,13 @@ export function exportPkiBundle(bundle: PkiBundle, options: ExportPkiBundleOptio
       : {}),
     ...(bundle.sshCa ? { sshCaPublicKey: bundle.sshCa.publicKey } : {}),
     ...(commandSigning ? { commandSigningCertificate: commandSigning.certificatePem } : {}),
+    ...(commandSigningNext
+      ? { commandSigningNextCertificate: commandSigningNext.certificatePem }
+      : {}),
+    ...(bundle.commandSigningPrevious
+      ? { commandSigningPreviousCertificate: toPem(bundle.commandSigningPrevious) }
+      : {}),
+    ...(bundle.trustVersion !== undefined ? { trustVersion: bundle.trustVersion } : {}),
   };
   if (options.secret !== undefined) {
     const salt = randomBytesArray(16);
@@ -496,6 +620,25 @@ export function importPkiBundle(text: string, options: ImportPkiBundleOptions = 
         certificate: stored.commandSigningCertificate,
       },
     });
+  if (stored.commandSigningNextCertificate)
+    bundle.commandSigningNext = createCommandSigningAuthority({
+      clock,
+      existing: {
+        privateKey: need('commandSigningNext'),
+        certificate: stored.commandSigningNextCertificate,
+      },
+    });
+  if (stored.commandSigningPreviousCertificate) {
+    const previous = fromPem(stored.commandSigningPreviousCertificate)[0];
+    if (!previous)
+      throw new ComputeError('INVALID_CONFIG', 'The PKI bundle has an unreadable previous command-signing root');
+    bundle.commandSigningPrevious = previous;
+  }
+  if (stored.trustVersion !== undefined) {
+    if (!Number.isSafeInteger(stored.trustVersion) || stored.trustVersion < 1)
+      throw new ComputeError('INVALID_CONFIG', 'The PKI bundle has an invalid trust version');
+    bundle.trustVersion = stored.trustVersion;
+  }
   if (rootKey)
     bundle.root = createRootCa({
       clock,
