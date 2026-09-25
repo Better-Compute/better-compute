@@ -192,9 +192,11 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - walkthrough 4 as a Go runtime plugin;
       - PAUSED/restore_from/instance.snapshot in the converger.
     - [f02367], v1.0:
-      - "upgrade from v0.5 disturbs no running allocation" scenario;
-      - an N−2 skew harness;
-      - an API surface freeze snapshot check (script; [f85da7] wires lint:repo).
+      - "upgrade from v0.5 disturbs no running allocation": DONE for reservations (24824c9, tests/sim/upgrade.test.ts,
+        0 disturbances, exact billing); VPS instances next (ControlPlaneSim vps pool);
+      - N−2 skew harness: DONE (24824c9, tests/skew-matrix.test.ts; v1.0 adds rows);
+      - API surface freeze: DONE (0aad40a, in lint:repo 4e99fc6);
+      - renderer join flags: DONE (e6b3b14, plus bcd.service).
     - [f85da7]:
       - nightly.yml (sim + 10k cold start, IAM-guarded suite, Postgres full suite, green-night streak): 6e723b1 (see its git note);
       - release.yml (goreleaser + syft SBOM + keyless cosign + SLSA3 provenance): 30ed477.
