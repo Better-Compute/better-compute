@@ -63,14 +63,24 @@
     },
     {
       "name": "vps",
-      "groups": ["flavors", "instances", "providerAccounts", "sandboxTemplates", "sandboxes"],
+      "groups": [
+        "flavors",
+        "instances",
+        "providerAccounts",
+        "sandboxSnapshots",
+        "sandboxTemplates",
+        "sandboxes"
+      ],
       "migrations": [
         "vps/0001_instances",
         "vps/0002_sealed_user_data",
         "vps/0003_provider_bootstraps",
         "vps/0004_sandboxes",
         "vps/0005_sandbox_snapshots",
-        "vps/0006_warm_claims"
+        "vps/0006_warm_claims",
+        "vps/0007_template_env",
+        "vps/0008_template_network",
+        "vps/0009_snapshot_fixes"
       ]
     },
     {

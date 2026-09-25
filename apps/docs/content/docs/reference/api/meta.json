@@ -23,6 +23,7 @@
     "releases",
     "reservations",
     "rollouts",
+    "sandbox-snapshots",
     "sandbox-templates",
     "sandboxes",
     "secrets",

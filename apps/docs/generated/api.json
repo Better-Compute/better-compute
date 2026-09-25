@@ -4948,6 +4948,128 @@
     ]
   },
   {
+    "group": "sandboxSnapshots",
+    "slug": "sandbox-snapshots",
+    "module": "vps",
+    "overview": "",
+    "methods": [
+      {
+        "method": "list",
+        "route": "POST /api/compute/sandboxSnapshots/list",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-tenant",
+        "alternatives": [],
+        "list": true,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "scope": {
+              "enum": ["mine", "all"],
+              "default": "mine"
+            },
+            "sandboxId": {
+              "type": "string",
+              "pattern": "^sbx_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 56,
+              "description": "Only this sandbox’s snapshots"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "cursor": {
+              "type": "string",
+              "pattern": "^snap_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The last snapshot id of the previous page"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "get",
+        "route": "POST /api/compute/sandboxSnapshots/get",
+        "kind": "read",
+        "action": "compute:sandboxes:read",
+        "resource": "compute-sandbox-snapshot",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "snapshotId": {
+              "type": "string",
+              "pattern": "^snap_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The snapshot"
+            }
+          },
+          "required": ["tenantId", "snapshotId"],
+          "additionalProperties": false
+        },
+        "summary": "",
+        "description": ""
+      },
+      {
+        "method": "delete",
+        "route": "POST /api/compute/sandboxSnapshots/delete",
+        "kind": "mutation",
+        "action": "compute:sandboxes:delete",
+        "resource": "compute-sandbox-snapshot",
+        "alternatives": [],
+        "list": false,
+        "phase": "v0.5",
+        "module": "vps",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "snapshotId": {
+              "type": "string",
+              "pattern": "^snap_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The snapshot"
+            }
+          },
+          "required": ["tenantId", "snapshotId"],
+          "additionalProperties": false
+        },
+        "summary": "",
+        "description": ""
+      }
+    ]
+  },
+  {
     "group": "sandboxTemplates",
     "slug": "sandbox-templates",
     "module": "vps",
@@ -5040,6 +5162,23 @@
               },
               "required": ["min"],
               "additionalProperties": false
+            },
+            "env": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Z_][A-Z0-9_]{0,63}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^secret://[^/]+/[^/]+$",
+                "description": "secret://<tenantId>/<id>, a secret of this tenant"
+              },
+              "description": "Variables written to /etc/sandbox/env (root, 0600) in every sandbox, from secrets of this tenant; needs the secret broker"
+            },
+            "network": {
+              "enum": ["egress", "private", "none"],
+              "description": "What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)"
             }
           },
           "required": ["tenantId", "name", "poolId", "flavor", "imageId"],
@@ -5181,6 +5320,23 @@
               },
               "required": ["min"],
               "additionalProperties": false
+            },
+            "env": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[A-Z_][A-Z0-9_]{0,63}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^secret://[^/]+/[^/]+$",
+                "description": "secret://<tenantId>/<id>, a secret of this tenant"
+              },
+              "description": "Variables written to /etc/sandbox/env (root, 0600) in every sandbox, from secrets of this tenant; needs the secret broker"
+            },
+            "network": {
+              "enum": ["egress", "private", "none"],
+              "description": "What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)"
             }
           },
           "required": ["tenantId", "templateId"],

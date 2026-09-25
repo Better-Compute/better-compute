@@ -37,20 +37,22 @@ A live template with the same name is `CONFLICT`. The caller becomes the templat
 
 **Input**
 
-| Field               | Type    | Required | Constraints                                                             |
-| ------------------- | ------- | -------- | ----------------------------------------------------------------------- |
-| `tenantId`          | string  | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
-| `name`              | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
-| `poolId`            | string  | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`       |
-| `flavor`            | string  | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
-| `imageId`           | string  | yes      | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
-| `runtime`           | string  |          | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`                 |
-| `userData`          | string  |          | at most 32768 characters                                                |
-| `defaultTtlSeconds` | integer |          | 60-2592000; default `3600`                                              |
-| `maxTtlSeconds`     | integer |          | 60-2592000; default `86400`                                             |
-| `warm`              | object  |          |                                                                         |
-| `warm.min`          | integer | yes      | 0-64                                                                    |
-| `warm.max`          | integer |          | 0-64                                                                    |
+| Field               | Type                               | Required | Constraints                                                             |
+| ------------------- | ---------------------------------- | -------- | ----------------------------------------------------------------------- |
+| `tenantId`          | string                             | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `name`              | string                             | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `poolId`            | string                             | yes      | at most 57 characters; matches `^pool_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+| `flavor`            | string                             | yes      | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `imageId`           | string                             | yes      | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
+| `runtime`           | string                             |          | at most 64 characters; matches `^[a-z][a-z0-9-]{0,63}$`                 |
+| `userData`          | string                             |          | at most 32768 characters                                                |
+| `defaultTtlSeconds` | integer                            |          | 60-2592000; default `3600`                                              |
+| `maxTtlSeconds`     | integer                            |          | 60-2592000; default `86400`                                             |
+| `warm`              | object                             |          |                                                                         |
+| `warm.min`          | integer                            | yes      | 0-64                                                                    |
+| `warm.max`          | integer                            |          | 0-64                                                                    |
+| `env`               | map of string                      |          | at most 64 entries; keys match `^[A-Z_][A-Z0-9_]{0,63}$`                |
+| `network`           | one of `egress`, `private`, `none` |          |                                                                         |
 
 ## list
 
@@ -108,18 +110,20 @@ Sandboxes that exist keep their instances, and warm instances already created st
 
 **Input**
 
-| Field               | Type        | Required | Constraints                                                             |
-| ------------------- | ----------- | -------- | ----------------------------------------------------------------------- |
-| `tenantId`          | string      | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
-| `templateId`        | string      | yes      | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$`       |
-| `flavor`            | string      |          | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
-| `imageId`           | string      |          | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
-| `userData`          | string,null |          | at most 32768 characters                                                |
-| `defaultTtlSeconds` | integer     |          | 60-2592000                                                              |
-| `maxTtlSeconds`     | integer     |          | 60-2592000                                                              |
-| `warm`              | object      |          |                                                                         |
-| `warm.min`          | integer     | yes      | 0-64                                                                    |
-| `warm.max`          | integer     |          | 0-64                                                                    |
+| Field               | Type                               | Required | Constraints                                                             |
+| ------------------- | ---------------------------------- | -------- | ----------------------------------------------------------------------- |
+| `tenantId`          | string                             | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`              |
+| `templateId`        | string                             | yes      | at most 57 characters; matches `^sbxt_[0-9a-hjkmnp-tv-z]{26,52}$`       |
+| `flavor`            | string                             |          | at most 63 characters; matches `^[a-z0-9][a-z0-9._-]{0,62}$`            |
+| `imageId`           | string                             |          | at most 200 characters; matches `^[A-Za-z0-9][A-Za-z0-9._@:/-]{0,199}$` |
+| `userData`          | string,null                        |          | at most 32768 characters                                                |
+| `defaultTtlSeconds` | integer                            |          | 60-2592000                                                              |
+| `maxTtlSeconds`     | integer                            |          | 60-2592000                                                              |
+| `warm`              | object                             |          |                                                                         |
+| `warm.min`          | integer                            | yes      | 0-64                                                                    |
+| `warm.max`          | integer                            |          | 0-64                                                                    |
+| `env`               | map of string                      |          | at most 64 entries; keys match `^[A-Z_][A-Z0-9_]{0,63}$`                |
+| `network`           | one of `egress`, `private`, `none` |          |                                                                         |
 
 ## delete
 
