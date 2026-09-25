@@ -41,6 +41,7 @@ import {
   type TenantReaderSlot,
 } from './tenancy/tenancy.js';
 import { createAuditSinksModule } from './audit-sinks-module.js';
+import { createConfirmationBindingsModule } from './confirmation-bindings.js';
 import { createQuorumModule, quorumConfigOf } from './quorum/quorum.js';
 import { payloadTypeOf } from './runtime/commands.js';
 import { trustVersionSettler } from './quorum/trust-version.js';
@@ -282,6 +283,8 @@ export function betterCompute<
       reader: tenantReader,
       ...(resolved.rootTenantId ? { rootTenantId: resolved.rootTenantId } : {}),
     }),
+    // Approvals bound to the request a person saw (review 14 M1): the envelope's table.
+    createConfirmationBindingsModule(),
     // §13 v1.0 destructive-batch quorum: batches, `commandBatches`, the expiry sweep (always on, so
     // the command queue can batch; approvals are needed only with `pki.approvers`).
     createQuorumModule({

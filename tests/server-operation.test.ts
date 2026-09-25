@@ -233,6 +233,8 @@ describe('betterCompute()', () => {
       'inventory',
       'capacity',
       'tenancy',
+      // Approvals bound to the request a person saw (review 14 M1), always hosted.
+      'confirmations',
       // v1.0 destructive-batch quorum (§13), always hosted.
       'quorum',
       // The default secret store's table, when no `secrets` are configured.
@@ -290,9 +292,10 @@ describe('betterCompute()', () => {
     expect(quorum[0]).toBe('quorum/0001_batches');
     expect(migrations.slice(-2 - quorum.length, -2)).toEqual(quorum);
     const beforeQuorum = migrations.slice(0, -2 - quorum.length);
-    expect(beforeQuorum.at(-1)).toBe('tenancy/0002_teardown_attempts');
-    expect(beforeQuorum.at(-2)).toBe('tenancy/0001_tenant_states');
-    expect(beforeQuorum.slice(0, -2).every((name) => name.startsWith('capacity/'))).toBe(true);
+    expect(beforeQuorum.at(-1)).toBe('confirmations/0001_bindings');
+    expect(beforeQuorum.at(-2)).toBe('tenancy/0002_teardown_attempts');
+    expect(beforeQuorum.at(-3)).toBe('tenancy/0001_tenant_states');
+    expect(beforeQuorum.slice(0, -3).every((name) => name.startsWith('capacity/'))).toBe(true);
     expect(compute.registry.hasModule('inventory')).toBe(true);
     expect(compute.registry.hasModule('capacity')).toBe(true);
     expect(compute.registry.hasModule('metal')).toBe(false);

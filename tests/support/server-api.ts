@@ -23,6 +23,7 @@ import { coreGroups } from '../../packages/server/src/api.js';
 import type { JoinTokenMinter } from '../../packages/server/src/api/join-tokens.js';
 import { createOperations } from '../../packages/server/src/operations.js';
 import { resolveOptions } from '../../packages/server/src/options.js';
+import { createConfirmationBindingsModule } from '../../packages/server/src/confirmation-bindings.js';
 import { createQuorumModule } from '../../packages/server/src/quorum/quorum.js';
 import { createRegistry } from '../../packages/server/src/registry.js';
 import { fakeIam, type FakeIam } from './fake-iam.js';
@@ -214,6 +215,7 @@ export async function serverHarness(options: HarnessOptions = {}) {
   // The quorum module is always hosted: the commands API reads its batch members.
   await store.migrate([
     ...(createQuorumModule({}).migrations ?? []),
+    ...(createConfirmationBindingsModule().migrations ?? []),
     ...plugins.flatMap((plugin) => plugin.migrations ?? []),
   ]);
   await useSimClock(store, START);

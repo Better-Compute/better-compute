@@ -17,6 +17,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { cachesFor, publicCaches, type ComputeCaches } from './caches.js';
+import { bindConfirmation, matchesBinding } from './confirmation-bindings.js';
 import { checkPlan, createComposites, outsideComposite, type CompositeCall } from './composite.js';
 import { createListRecipe, readOnlyExecutor, runsOutsideTransaction } from './list.js';
 import { noTenantGate, type TenantGate } from './tenancy/tenancy.js';
@@ -278,6 +279,25 @@ export function createOperations(
    * gets `CONFIRMATION_REQUIRED` with the confirmation's id; everything else, including a failed
    * request, keeps the refusal (fail closed).
    */
+  /** What a person asked to confirm reads: the admission's own description, else the decision. */
+  const confirmationText = (
+    entry: RegisteredMethod,
+    admission: MethodAdmission<unknown, unknown>,
+    input: unknown,
+    decision: Decision,
+  ): string => {
+    const described = admission.describe?.(input);
+    return typeof described === 'string' && described
+      ? described
+      : `${entry.group}.${entry.method}: ${decision.action} on ${decision.resource.type}/${decision.resource.id}`;
+  };
+  const boundDecision = (caller: Caller, decision: Decision) => ({
+    tenantId: decision.tenantId,
+    delegationId: caller.delegationId ?? '',
+    action: decision.action,
+    resource: decision.resource,
+  });
+
   async function refusalOf(
     entry: RegisteredMethod,
     admission: MethodAdmission<unknown, unknown>,
@@ -289,16 +309,22 @@ export function createOperations(
     requestId: string,
   ): Promise<unknown> {
     if (caller.sessionKind !== 'delegated') return error;
-    let reason = `${entry.group}.${entry.method}: ${decision.action} on ${decision.resource.type}/${decision.resource.id}`;
     try {
-      const described = admission.describe?.(input);
-      if (typeof described === 'string' && described) reason = described;
+      const reason = confirmationText(entry, admission, input, decision);
       const answer = await iam.requestConfirmation(credential, { ...decision, reason });
       if (
         isRecord(answer) &&
         typeof answer.confirmationId === 'string' &&
         answer.confirmationId !== ''
-      )
+      ) {
+        // Review 14 M1: the approval admits this text only (see confirmation-bindings.ts).
+        await bindConfirmation(
+          database,
+          answer.confirmationId,
+          boundDecision(caller, decision),
+          reason,
+          typeof answer.expiresAt === 'number' ? answer.expiresAt : clock.now() + 15 * 60_000,
+        );
         return new ComputeError(
           'CONFIRMATION_REQUIRED',
           'The person this agent acts for must confirm the request; retry with the same idempotencyKey once they have',
@@ -310,6 +336,7 @@ export function createOperations(
             resource: { ...decision.resource },
           },
         );
+      }
     } catch (failure) {
       log.warn('Requesting a delegated confirmation failed; the request stays denied', {
         requestId,
@@ -416,6 +443,22 @@ export function createOperations(
         }
         throw refusal;
       }
+      // Review 14 M1: an approval still open on this decision admits only the request it was given for.
+      // A different one is refused (`abandoned` then clears what prepare staged).
+      if (
+        caller.sessionKind === 'delegated' &&
+        !(await matchesBinding(
+          database,
+          boundDecision(caller, decision),
+          confirmationText(entry, admission, input, decision),
+        ))
+      )
+        throw new ComputeError(
+          'ACCESS_DENIED',
+          'The approval given for this resource was for a different request; ask again for this one',
+          undefined,
+          { reason: 'approval-mismatch' },
+        );
       // Checks that may call IAM (budgets), outside any compute transaction; a refusal leaves the draft
       // as it is (no `denied`), so the same key can succeed later.
       if (admission.check)

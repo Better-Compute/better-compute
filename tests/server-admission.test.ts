@@ -11,6 +11,7 @@ import {
   type MethodDefinition,
 } from '@better-compute/core';
 import { betterCompute } from '@better-compute/server';
+import { bindConfirmation } from '../packages/server/src/confirmation-bindings.js';
 import { fakeIam } from './support/fake-iam.js';
 import { ACME, OTHER, ROOT, options } from './support/server.js';
 import { ADMIN, OUTSIDER, USER, serverHarness, type Harness } from './support/server-api.js';
@@ -106,9 +107,36 @@ const drafts = definePlugin({
           return { id, gpus: input.gpus, state: 'placed', admission: context.admission! };
         },
       }),
+      // An extend-like method: decided on an existing resource, described with its parameters.
+      grow: defineMethod<GrowInput, { grown: number }>({
+        action: 'compute:drafts:create',
+        kind: 'mutation',
+        resource: () => undefined,
+        validate: (input) => growInput.parse(input),
+        admission: {
+          async prepare(_context, input) {
+            trace.push('prepare grow');
+            return { status: 'decide', resource: { type: 'reservation', id: input.orderId } };
+          },
+          describe: (input) => `orders.grow ${input.orderId} by ${input.by} GPUs`,
+          async abandoned(_context, _input, _tx, error) {
+            trace.push(`abandoned ${(error as ComputeError).code}`);
+          },
+        },
+        async handler(_context, input) {
+          trace.push('handler grow');
+          return { grown: input.by };
+        },
+      }),
     },
   }),
 });
+const growInput = manifest({
+  tenantId: field.string({ pattern: '^[A-Za-z0-9._:-]{1,128}$' }),
+  orderId: field.string({ pattern: '^ord_[0-9a-z]{26,52}$' }),
+  by: field.int({ min: 1, max: 64 }),
+});
+type GrowInput = { tenantId: string; orderId: string; by: number };
 
 let h: Harness;
 beforeAll(async () => {
@@ -350,6 +378,11 @@ describe('delegated confirmation (§3.4 step 7)', () => {
       ]);
       expect(methods()).toEqual(['authenticate', 'require', 'requestConfirmation']);
       expect(trace).toEqual(['prepare', 'denied CONFIRMATION_REQUIRED']);
+      // Review 14 M1: the confirmation is bound to the text the person reads.
+      const { rows } = await h.store.query<{ delegation_id: string; resource_id: string }>(
+        `SELECT delegation_id, resource_id FROM confirmation_bindings WHERE confirmation_id = 'conf_1'`,
+      );
+      expect(rows).toEqual([{ delegation_id: 'dlg-held', resource_id: id }]);
     } finally {
       h.iam.requestConfirmation = original;
     }
@@ -377,6 +410,53 @@ describe('delegated confirmation (§3.4 step 7)', () => {
     } finally {
       h.iam.requestConfirmation = original;
     }
+  });
+
+  it('admits under an open approval only the request it was given for (review 14 M1)', async () => {
+    const token = `token-bound-0123456789`;
+    h.iam.addCaller(token, {
+      tenantId: ACME,
+      identityId: 'id-bound',
+      sessionId: 'ses-bound',
+      sessionKind: 'delegated',
+      agentId: 'agent-bound',
+      delegationId: 'dlg-bound',
+    });
+    // IAM allows: the person approved "orders.grow <order> by 2 GPUs" a moment ago.
+    h.iam.allow({ token });
+    const orderId = 'ord_01k5w00000000000000000000b';
+    await bindConfirmation(
+      h.store,
+      'conf_bound',
+      {
+        tenantId: ACME,
+        delegationId: 'dlg-bound',
+        action: 'compute:drafts:create',
+        resource: { type: 'compute-reservation', id: orderId },
+      },
+      `orders.grow ${orderId} by 2 GPUs`,
+      Date.UTC(2026, 0, 1, 1),
+    );
+    const grow = (by: number, as = token) =>
+      h.call<{ grown: number }>('plugins/drafts/orders/grow', as, { tenantId: ACME, orderId, by });
+    expect(await grow(2)).toEqual({ grown: 2 });
+    // The same open approval for another request: refused, and what prepare staged is abandoned.
+    trace.length = 0;
+    const other = await h.failure('plugins/drafts/orders/grow', token, { tenantId: ACME, orderId, by: 30 });
+    expect(other).toMatchObject({ code: 'ACCESS_DENIED', details: { reason: 'approval-mismatch' } });
+    expect(trace).toEqual(['prepare grow', 'abandoned ACCESS_DENIED']);
+    // Another delegation is not bound by it.
+    const peer = 'token-bound-peer-0123456789';
+    h.iam.addCaller(peer, {
+      tenantId: ACME,
+      identityId: 'id-bound',
+      sessionId: 'ses-peer',
+      sessionKind: 'delegated',
+      agentId: 'agent-peer',
+      delegationId: 'dlg-peer',
+    });
+    h.iam.allow({ token: peer });
+    expect(await grow(30, peer)).toEqual({ grown: 30 });
   });
 
   it('never asks for a confirmation for other sessions', async () => {
