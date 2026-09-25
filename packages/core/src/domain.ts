@@ -615,6 +615,12 @@ export interface SiteSpec {
   cacheImages?: { url: string; sha256: string; format: ImageFormat }[];
 }
 
+/**
+ * One module's NodeSpec contribution. Sections merge across modules; `site` merges field by field
+ * (SiteBoot contributes `boot`, provision `cacheImages`), the last contribution per field winning.
+ */
+export type NodeSpecPart = Omit<Partial<NodeSpec>, 'site'> & { site?: Partial<SiteSpec> };
+
 /** Generation-numbered desired state; the daemon converges each section idempotently. */
 export interface NodeSpec {
   generation: number;

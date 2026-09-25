@@ -10,6 +10,8 @@ import {
   type ModuleContext,
   type NodeRecord,
   type NodeSpec,
+  type NodeSpecPart,
+  type SiteSpec,
   type ProvisionState,
   type SqlTx,
 } from '@better-compute/core';
@@ -104,7 +106,7 @@ export async function loadNodeRecord(
 }
 
 /** Merges module contributions over the base sections, in registration order. */
-export function mergeNodeSpecs(parts: readonly Partial<NodeSpec>[]): NodeSpec {
+export function mergeNodeSpecs(parts: readonly NodeSpecPart[]): NodeSpec {
   const spec: NodeSpec = { generation: 0, host: {}, devices: { assignments: [] } };
   const assignments = new Map<string, DeviceAssignment>();
   const instances = new Map<string, InstanceSpec>();
@@ -127,7 +129,8 @@ export function mergeNodeSpecs(parts: readonly Partial<NodeSpec>[]): NodeSpec {
       };
     if (part.telemetry) spec.telemetry = { ...spec.telemetry, ...part.telemetry };
     if (part.daemon) spec.daemon = part.daemon;
-    if (part.site) spec.site = part.site;
+    // Field by field: SiteBoot's `boot` and provision's `cacheImages` come from different modules.
+    if (part.site) spec.site = { ...spec.site, ...part.site } as SiteSpec;
   }
   spec.devices = { assignments: [...assignments.values()] };
   if (instances.size) spec.instances = [...instances.values()];
@@ -270,9 +273,9 @@ export async function wireNodeSpec(tx: SqlTx, spec: NodeSpec): Promise<JsonObjec
     wire.daemon = daemon;
   }
   if (spec.site) {
-    const site: JsonObject = {
-      boot: { active: spec.site.boot.active, epoch: String(spec.site.boot.epoch) },
-    };
+    // A site section without SiteBoot's contribution holds no boot lease.
+    const boot = spec.site.boot ?? { active: false, epoch: 0 };
+    const site: JsonObject = { boot: { active: boot.active, epoch: String(boot.epoch) } };
     // Sorted by URL so equal specs serialize equally.
     const images = [...(spec.site.cacheImages ?? [])].sort((a, b) => a.url.localeCompare(b.url));
     if (images.length)
@@ -319,7 +322,7 @@ export async function reconcileNodeSpec(
       !(schedulableProvisionStates as readonly ProvisionState[]).includes(record.provisionState)
     )
       return undefined;
-    const parts: Partial<NodeSpec>[] = [];
+    const parts: NodeSpecPart[] = [];
     for (const module of modules)
       if (typeof module.nodeSpec === 'function') parts.push(await module.nodeSpec(context, record));
     const next = await wireNodeSpec(tx, mergeNodeSpecs(parts));

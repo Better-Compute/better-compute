@@ -23,6 +23,7 @@ import type {
   NodeRef,
   NodeRole,
   NodeSpec,
+  NodeSpecPart,
   NodeTrust,
   PowerAction,
   ProfileDocument,
@@ -1083,7 +1084,7 @@ export interface ComputeModule<Name extends string = string, A extends ApiGroups
   api?(context: ModuleContext): A;
   reconcilers?: Reconciler[];
   commandKinds?: CommandKindSpec[];
-  nodeSpec?(context: ModuleContext, node: NodeRecord): Promise<Partial<NodeSpec>>;
+  nodeSpec?(context: ModuleContext, node: NodeRecord): Promise<NodeSpecPart>;
   /** Merged into the IAM plugin's catalog. */
   catalog?: { actions?: string[]; resourceTypes?: Record<string, ComputeResourceType> };
   commands?: CliCommandSpec[];
