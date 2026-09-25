@@ -392,6 +392,8 @@ describe('daemon install-script', () => {
     expect(node.dropIn).toContain('CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL');
     expect(node.dropIn).toContain('Delegate=yes');
     expect(node.dropIn).toContain('RestrictNamespaces=no');
+    expect(node.dropIn).toContain('CAP_IPC_LOCK');
+    expect(node.dropIn).toContain('RestrictAddressFamilies=AF_VSOCK');
     // An upgrade from a script without --plugins keeps the operator's sections, and so the drop-in.
     await writeFile(`${root}/etc/bcd/config.toml`, `${node.config}[imds]\nlisten = "169.254.169.254:80"\n`);
     node = await apply([]);
@@ -406,6 +408,7 @@ describe('daemon install-script', () => {
     node = await apply(['--plugins']);
     expect(node.dropIn).toContain('Delegate=yes');
     expect(node.dropIn).not.toContain('RestrictNamespaces=no');
+    expect(node.dropIn).not.toContain('CAP_IPC_LOCK');
     expect(await run([...base, '--privileged-plugins', 'kata;rm'])).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
   });
 

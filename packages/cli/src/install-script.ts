@@ -146,9 +146,16 @@ DelegateSubgroup=main
 ProtectControlGroups=no
 `;
 
-/** Added for plugins named in plugins.privileged (a runtime plugin makes namespaces and mounts). */
-export const bcdPrivilegedPluginsDropIn = `# plugins.privileged in /etc/bcd/config.toml: runtime plugins that make namespaces (Kata).
+/**
+ * Added for plugins named in plugins.privileged: a runtime plugin (Kata) runs VMs as root, so it needs namespaces,
+ * vsock, the vhost modules and close to root's capabilities (VM memory locking, device nodes, virtiofsd's ptrace).
+ * Only those plugins get them: confined plugins drop every capability at setuid (their own uid, NNP, seccomp).
+ */
+export const bcdPrivilegedPluginsDropIn = `# plugins.privileged in /etc/bcd/config.toml: runtime plugins that run VMs as root (Kata).
+CapabilityBoundingSet=CAP_MKNOD CAP_SYS_RESOURCE CAP_IPC_LOCK CAP_SYS_NICE CAP_NET_RAW CAP_SYS_CHROOT CAP_FSETID CAP_SETPCAP CAP_SYS_PTRACE
 RestrictNamespaces=no
+RestrictAddressFamilies=AF_VSOCK AF_PACKET
+ProtectKernelModules=no
 `;
 
 /** The systemd unit, with the §6 hardening. Until the v0.4 helper split, bcd runs as root. */
