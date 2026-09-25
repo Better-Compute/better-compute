@@ -175,8 +175,11 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   - v0.5/v1.0 exit-gap audit ([f85da7], 2026-09-25):
     - [097b34]:
       - sandboxes.exec: DONE (dd352d3);
-      - tests: a denied create claims nothing; concurrent SKIP LOCKED claims; the snapshot memory round trip;
-      - template env and network (network needs a proto seam; they propose, [f85da7] lands it).
+      - tests: a denied create claims nothing; concurrent SKIP LOCKED claims; the snapshot memory round trip:
+        DONE (9b83bda, 6b3dfb2);
+      - template env and network: DONE (a8c8020; 7c73072 on [f85da7]'s seam 5a946c9). Also: readyAt at first run,
+        fresh-only warm claims (template instance_version), selfCheck findings (7d03d6d), vps.sandbox.warm meter
+        (83d0ebd). bcd still owes network_policy nftables + instance.snapshot ([6a20b8] told).
     - [31c64a]:
       - tests/e2e/sandboxes.test.ts (500 TTL expiries, zero-leak diff, warm claim with no placement);
       - widen vitest.iam-remote beyond 9 files.
