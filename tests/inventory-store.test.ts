@@ -346,6 +346,34 @@ describe('inventory.history and inventory.diff', () => {
   });
 });
 
+describe('atom health edges wake started reservations', () => {
+  it('queues capacity.reservations for active reservations on the node when a booked GPU turns unhealthy', async () => {
+    await report(node, { gpus: encoded.gpus(8), system: encoded.system('S-wake') });
+    await applyInventory(db, node, { events, work });
+    await db.query(
+      `INSERT INTO reservations (id, tenant_id, pool_id, state, request, request_hash, owner_identity_id, idempotency_key, version)
+       VALUES ($1, 'ten_root', 'pool_a', 'active', '{}', '\\x00', 'idn_a', $1, 1)`,
+      [`rsv_${node}`],
+    );
+    await db.query(
+      `INSERT INTO allocations (id, tenant_id, pool_id, node_id, owner_kind, owner_id, atoms, during, version)
+       VALUES ($1, 'ten_root', 'pool_a', $2, 'reservation', $3, $4, tstzrange(compute_now(), compute_now() + interval '1 day'), 1)`,
+      [`alloc_${node}`, node, `rsv_${node}`, [`GPU-${node}-0`]],
+    );
+    // Health (v0.2) quarantines GPU 0; the next inventory application flips it unhealthy.
+    await db.query(`INSERT INTO device_health (device_id, node_id, reason, source) VALUES ($1, $2, 'Xid79', 'xid')`, [`GPU-${node}-0`, node]);
+    enqueued.length = 0;
+    await report(node, { gpus: encoded.gpus(8), system: encoded.system('S-wake-2') });
+    await applyInventory(db, node, { events, work });
+    expect(enqueued).toContain(`capacity.reservations:rsv_${node}`);
+    // No health change: no wake.
+    enqueued.length = 0;
+    await report(node, { gpus: encoded.gpus(8), system: encoded.system('S-wake-3') });
+    await applyInventory(db, node, { events, work });
+    expect(enqueued.filter((entry) => entry.startsWith('capacity.reservations:'))).toEqual([]);
+  });
+});
+
 describe('recordInventoryHashesMany (batched Hellos and heartbeats)', () => {
   it('answers each node as recordInventoryHashes would, in one statement for the batch', async () => {
     const fresh = `node_${++seq}`;

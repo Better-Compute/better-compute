@@ -13,7 +13,14 @@ import { devicesFromGpus, planDevices, poolSharing, type GpuSharing, type Stored
 import { applyImageCache } from './image-cache.js';
 import { diffInventory } from './diff.js';
 import { hardwareKey } from './hardware-key.js';
-import { applyInventoryHealth, healthWorkKind, inventoryHealthFindings, upsertNodeConditions as upsertConditions, type HealthFinding } from './health.js';
+import {
+  applyInventoryHealth,
+  healthWorkKind,
+  inventoryHealthFindings,
+  upsertNodeConditions as upsertConditions,
+  wakeStartedReservations,
+  type HealthFinding,
+} from './health.js';
 import {
   inventoryConditions,
   inventoryLabels,
@@ -361,7 +368,8 @@ export async function applyInventory(
     const health = inventoryHealthFindings(sections.gpus);
     const healthReasons = await applyInventoryHealth(tx, nodeId, health, node.no_schedule_reasons);
     if (options.work && health.some((finding) => finding.noSchedule)) await options.work.enqueue(tx, healthWorkKind, nodeId);
-    const devices = await applyDevices(tx, nodeId, sections, poolSharing(node.sharing, node.policy));
+    const { healthChanged, ...devices } = await applyDevices(tx, nodeId, sections, poolSharing(node.sharing, node.policy));
+    if (options.work && healthChanged) await wakeStartedReservations(tx, options.work, nodeId);
     await applyLabels(tx, nodeId, sections);
     await applyImageCache(tx, nodeId, sections.images);
 
@@ -521,11 +529,18 @@ async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySectio
     );
     await tx.query('DELETE FROM devices WHERE node_id = $1 AND id = ANY($2::text[])', [nodeId, plan.remove]);
   }
+  // Existing devices whose health changed (new devices cannot be booked yet): capacity's started
+  // reservations on the node re-derive their conditions.
+  const before = new Map(current.map((device) => [device.id, device.healthy]));
+  const healthChanged =
+    plan.quarantine.length > 0 ||
+    plan.upsert.some((device) => before.has(device.id) && before.get(device.id) !== device.healthy && !claimedElsewhere.includes(device.id));
   return {
     upserted: plan.upsert.length - claimedElsewhere.length,
     removed: plan.remove.length,
     quarantined: plan.quarantine.length,
     claimedElsewhere,
+    healthChanged,
   };
 }
 

@@ -105,6 +105,32 @@ export function inventoryHealthFindings(section: GpusSection | undefined): Healt
   return findings;
 }
 
+/** capacity's reservation reconciler (inventory cannot import capacity, which builds on it). */
+export const reservationsWorkKind = 'capacity.reservations';
+
+/**
+ * Wakes the started reservations (`binding`, `active`) with a live allocation on a node, so their
+ * conditions (Degraded / AtomUnhealthy) follow a change of its atoms' health at once rather than
+ * at capacity's periodic recheck. The same query as capacity's `wakeStartedOnNode`.
+ */
+export async function wakeStartedReservations(
+  tx: SqlTx,
+  work: { enqueue(tx: SqlTx, kind: string, key: string): Promise<void>; enqueueMany?(tx: SqlTx, kind: string, keys: readonly string[]): Promise<void> },
+  nodeId: string,
+): Promise<number> {
+  const { rows } = await tx.query<{ owner_id: string }>(
+    `SELECT DISTINCT a.owner_id FROM allocations a JOIN reservations r ON r.id = a.owner_id
+      WHERE a.node_id = $1 AND a.owner_kind = 'reservation' AND a.released_at IS NULL
+        AND r.state IN ('binding', 'active')
+      ORDER BY a.owner_id`,
+    [nodeId],
+  );
+  const keys = rows.map((row) => row.owner_id);
+  if (keys.length && work.enqueueMany) await work.enqueueMany(tx, reservationsWorkKind, keys);
+  else for (const key of keys) await work.enqueue(tx, reservationsWorkKind, key);
+  return keys.length;
+}
+
 async function upsertCondition(tx: SqlTx, nodeId: string, type: string, status: 'true' | 'false', reason: string | null) {
   await upsertNodeConditions(tx, nodeId, [{ type, status, reason }]);
 }

@@ -1,5 +1,5 @@
 import { field, manifest, type Json, type ModuleContext, type SqlTx, type StepDefinition } from '@better-compute/core';
-import { clearNodeFaults, healthWorkKind, type NodeConditionType } from '@better-compute/inventory';
+import { clearNodeFaults, healthWorkKind, wakeStartedReservations, type NodeConditionType } from '@better-compute/inventory';
 import { awaitCommand } from './command-step.js';
 import { defineProfile } from './profile.js';
 import { defineStep } from './step.js';
@@ -137,6 +137,9 @@ export async function reconcileHealth(
     );
     const node = nodes.rows[0];
     if (!node) return { action: 'healthy' };
+    // Health edges (an XID, a finding, a remediation clearing faults) change atom health: the node's
+    // started reservations re-derive their Degraded/AtomUnhealthy conditions now.
+    await wakeStartedReservations(tx, context.work, nodeId);
     const now = node.now.getTime();
     const faults = await tx.query<{ type: NodeConditionType; since: Date }>(
       `SELECT type, since FROM node_conditions WHERE node_id = $1 AND status = 'true' AND type = ANY($2) ORDER BY type`,
