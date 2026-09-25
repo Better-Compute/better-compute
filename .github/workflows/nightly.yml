@@ -1,0 +1,111 @@
+name: nightly
+# PLAN.md §15-§16: the scale and chaos gates that are too slow for every push.
+# - sim: tests/nightly/*.nightly.ts (the fleet simulation matrix and the 10k cold start);
+#   v0.4 exits when these are green on 3 consecutive nights (the `streak` job reports it).
+# - guarded: the whole suite with the §8.1 IAM guard in throw mode (no IamPort call inside a
+#   compute transaction) and with remote IAM.
+# - postgres: the conformance suites on a real Postgres, plus the Postgres-only tests.
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      COLD_START_NODES: '10000'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm sim:nightly
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-results
+          path: |
+            bench/**/results/*.json
+          if-no-files-found: ignore
+  guarded:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      BETTER_COMPUTE_IAM_GUARD: throw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+      - run: pnpm test:iam-remote
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: better-compute-ci
+          POSTGRES_DB: better_compute_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      BETTER_COMPUTE_POSTGRES_URL: postgres://postgres:better-compute-ci@localhost:5432/better_compute_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # Every suite: the Postgres-only cases (concurrency, SKIP LOCKED claims) run when the URL is set.
+      - run: pnpm test
+  streak:
+    needs: [sim, guarded, postgres]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report consecutive green nights (v0.4 exit needs 3)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          THIS_RUN: ${{ needs.sim.result == 'success' && needs.guarded.result == 'success' && needs.postgres.result == 'success' }}
+        run: |
+          streak=0
+          if [ "$THIS_RUN" = "true" ]; then
+            streak=1
+            for conclusion in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow nightly.yml --event schedule \
+                --status completed --limit 10 --json conclusion,databaseId \
+                --jq ".[] | select(.databaseId != ${GITHUB_RUN_ID}) | .conclusion"); do
+              [ "$conclusion" = "success" ] || break
+              streak=$((streak + 1))
+            done
+          fi
+          echo "Consecutive green nights: $streak" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$streak" -ge 3 ]; then echo "v0.4 exit gate met (3 consecutive green nights)." >> "$GITHUB_STEP_SUMMARY"; fi
+          [ "$THIS_RUN" = "true" ]
