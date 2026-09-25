@@ -239,8 +239,10 @@ config unit. A change must never repartition booked GPUs, so it goes through a g
    past that point, though idle time before it still books.
 3. At that time it grants the new layout and invalidates the node spec. The daemon repartitions
    idle GPUs.
-4. Once the node has converged a newer spec (or after 5 minutes, if its spec never carried the
-   layout), the holds are released.
+4. Once the node has converged a newer spec, the holds are released. A node whose host config
+   doesn't take its layout from the pool never repartitions for it, and is released at the grant.
+   No timer releases a hold, since work could then land on atoms a late repartition destroys. A
+   node that never converges shows up in doctor as `capacity.mig.stuck`.
 
 Events: `node.mig.scheduled`, `node.mig.granted`, `node.mig.applied`. Rollups don't count partition
 holds.

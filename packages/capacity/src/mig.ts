@@ -14,13 +14,15 @@ import { bookPartitionChange, releasePartitionChange } from './partition.js';
 // 3. At that time it grants the pending layout and invalidates the node's spec; the daemon
 //    repartitions idle GPUs.
 // 4. Once the node has converged the spec that carried it (a newer generation, observed), the
-//    partition bookings are released and the new atoms take work.
+//    partition bookings are released and the new atoms take work. A node whose host config does
+//    not take its layout from the pool (no provision `mig-layout { from: 'pool' }`) never
+//    repartitions for it: its holds are released at the grant. A node that never converges keeps
+//    them (doctor: `capacity.mig.stuck`); releasing on a timer could let work land on atoms a late
+//    repartition then destroys.
 //
 // A node joining later reads the pool's layout directly: it is not schedulable before its first
 // converged spec, so nothing of it can be booked yet.
 
-/** How long a granted change may leave the node's generation unmoved before the gate assumes its spec never carried the layout. */
-export const migGrantSettleMs = 5 * 60_000;
 /** Polling while a change waits for convergence. */
 const convergencePollMs = 30_000;
 /** Partition windows are open-ended in practice: they end when released. */
@@ -120,22 +122,9 @@ export async function stepMigGate(
   if (gate.granted_generation !== null) {
     const granted = Number(gate.granted_generation);
     const generation = Number(node.generation);
-    const converged =
-      (generation > granted && Number(node.observed_generation) >= generation) ||
-      (generation === granted && now - Number(gate.granted_at_ms) >= migGrantSettleMs);
+    const converged = generation > granted && Number(node.observed_generation) >= generation;
     if (!converged) return now + convergencePollMs;
-    for (const booking of gate.bookings) await releasePartitionChange(tx, booking);
-    await tx.query(
-      `UPDATE capacity_mig_layouts SET bookings = '{}', change_at = NULL, granted_generation = NULL,
-              granted_at = NULL, updated_at = compute_now() WHERE node_id = $1`,
-      [nodeId],
-    );
-    await context.events.publish(tx, {
-      type: 'node.mig.applied',
-      tenantId: node.owner_tenant_id,
-      subject: `node/${nodeId}`,
-      data: { layout: gate.layout },
-    });
+    await applied(tx, context, nodeId, node.owner_tenant_id, gate.layout, gate.bookings);
     // A newer layout may already be waiting.
     return gate.pending_layout !== null ? now : undefined;
   }
@@ -198,7 +187,65 @@ export async function stepMigGate(
     subject: `node/${nodeId}`,
     data: { layout: gate.pending_layout },
   });
+  // Its spec does not take the layout from the pool: nothing will repartition, release now.
+  if (!(await carriesPoolLayout(tx, nodeId))) {
+    const held = gate.bookings.length > 0 ? gate.bookings : await heldBookings(tx, nodeId);
+    await applied(tx, context, nodeId, node.owner_tenant_id, gate.pending_layout, held);
+    return undefined;
+  }
   return now + convergencePollMs;
+}
+
+/** The partition bookings a gate row holds (read back after this step booked them). */
+async function heldBookings(tx: SqlTx, nodeId: string): Promise<string[]> {
+  const { rows } = await tx.query<{ bookings: string[] }>(
+    `SELECT bookings FROM capacity_mig_layouts WHERE node_id = $1`,
+    [nodeId],
+  );
+  return rows[0]?.bookings ?? [];
+}
+
+/** Releases a change's holds and records it applied. */
+async function applied(
+  tx: SqlTx,
+  context: Pick<ModuleContext, 'events'>,
+  nodeId: string,
+  tenantId: string,
+  layout: string,
+  bookings: readonly string[],
+): Promise<void> {
+  for (const booking of bookings) await releasePartitionChange(tx, booking);
+  await tx.query(
+    `UPDATE capacity_mig_layouts SET bookings = '{}', change_at = NULL, granted_generation = NULL,
+            granted_at = NULL, updated_at = compute_now() WHERE node_id = $1`,
+    [nodeId],
+  );
+  await context.events.publish(tx, {
+    type: 'node.mig.applied',
+    tenantId,
+    subject: `node/${nodeId}`,
+    data: { layout },
+  });
+}
+
+/**
+ * Whether the node's host config takes its MIG layout from the pool: provision's last succeeded
+ * workflow with a `hostConfig` has `mig-layout { from: 'pool' }` (what `hostSpecFor` resolves).
+ * Without provision (no `workflows` table) nothing carries it.
+ */
+export async function carriesPoolLayout(tx: SqlTx, nodeId: string): Promise<boolean> {
+  const { rows: present } = await tx.query<{ present: boolean }>(
+    `SELECT to_regclass('workflows') IS NOT NULL AS present`,
+  );
+  if (!present[0]?.present) return false;
+  const { rows } = await tx.query<{ from_pool: boolean | null }>(
+    `SELECT (w.profile_document->'hostConfig'->'mig-layout'->>'from') = 'pool' AS from_pool
+       FROM workflows w
+      WHERE w.node_id = $1 AND w.state = 'succeeded' AND w.profile_document ? 'hostConfig'
+      ORDER BY w.finished_at DESC NULLS LAST, w.id DESC LIMIT 1`,
+    [nodeId],
+  );
+  return rows[0]?.from_pool === true;
 }
 
 /** The `capacity.mig` reconciler (shardBy node): one gate step, re-enqueued at its next time. */

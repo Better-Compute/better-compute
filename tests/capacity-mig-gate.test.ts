@@ -2,12 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { MethodContext, ModuleContext, SqlExecutor, SqlTx } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
+import { provisionMigrations } from '@better-compute/provision';
 import {
   capacityMigrations,
   capacityModule,
   grantedMigLayout,
   inlinePlacer,
-  migGrantSettleMs,
+  freezeMigLayouts,
   parseSelector,
   stepMigGate,
   type CapacityApi,
@@ -80,7 +81,7 @@ const partitionBookings = async () =>
 
 beforeAll(async () => {
   db = pglite();
-  await db.migrate([...capacityMigrations]);
+  await db.migrate([...capacityMigrations, ...provisionMigrations]);
   await useSimClock(db, T0);
   await db.query(
     `INSERT INTO sites (id, owner_tenant_id, kind, region, version) VALUES ('site_m', 'root', 'shared', 'eu', 1)`,
@@ -117,6 +118,14 @@ beforeAll(async () => {
         ],
       );
   }
+  // The node was deployed with a profile whose host config takes the MIG layout from the pool.
+  await db.query(
+    `INSERT INTO workflows (id, tenant_id, node_id, profile_id, profile_version, state, work_key,
+                            finished_at, profile_document)
+     VALUES ('wf_01jz00000000000000000000mg', 'root', $1, 'prf_mig', 1, 'succeeded', $1,
+             compute_now(), '{"hostConfig": {"mig-layout": {"from": "pool"}}}')`,
+    [NODE],
+  );
 });
 afterAll(() => db.close());
 
@@ -218,23 +227,41 @@ describe('the MIG layout gate', () => {
     await db.query(`UPDATE nodes SET no_schedule_reasons = '{}' WHERE id = $1`, [NODE]);
   });
 
-  it('releases after a settle time when the node spec never carried the layout', async () => {
+  it('holds a granted change until the node converges, however long that takes', async () => {
     recorded.events = [];
     await db.query(`UPDATE pools SET policy = '{"migLayout": "all-1g.10gb"}' WHERE id = $1`, [
       POOL,
     ]);
-    await db.transaction(async (tx) => {
-      const { freezeMigLayouts } = await import('@better-compute/capacity');
-      await freezeMigLayouts(tx, context.work, POOL, 'all-1g.10gb', 'all-2g.20gb');
-    });
+    await db.transaction((tx) =>
+      freezeMigLayouts(tx, context.work, POOL, 'all-1g.10gb', 'all-2g.20gb'),
+    );
     await step(); // idle now: books and grants in one step
     expect(await grantedMigLayout(db, NODE)).toBe('all-2g.20gb');
     expect(await partitionBookings()).toHaveLength(2);
-    await advance(migGrantSettleMs - MIN);
-    await step();
+    // A NodeSpec backlog: no newer generation for an hour. The holds stay (no timer releases them).
+    await advance(HOUR);
+    expect(await step()).toBe(now + 30_000);
     expect(await partitionBookings()).toHaveLength(2);
-    await advance(MIN);
+    await db.query(
+      `UPDATE nodes SET generation = generation + 1, observed_generation = generation + 1 WHERE id = $1`,
+      [NODE],
+    );
     expect(await step()).toBeUndefined();
+    expect(await partitionBookings()).toEqual([]);
+  });
+
+  it('releases at the grant when the node’s spec does not take its layout from the pool', async () => {
+    recorded.events = [];
+    await db.query(
+      `UPDATE workflows SET profile_document = '{"hostConfig": {"mig-layout": {"layout": "all-7g.80gb"}}}'
+        WHERE node_id = $1`,
+      [NODE],
+    );
+    await db.transaction((tx) =>
+      freezeMigLayouts(tx, context.work, POOL, 'all-2g.20gb', 'all-3g.40gb'),
+    );
+    expect(await step()).toBeUndefined(); // books, grants and releases in one step
+    expect(await grantedMigLayout(db, NODE)).toBe('all-3g.40gb');
     expect(await partitionBookings()).toEqual([]);
     expect(recorded.events.map((event) => event.type)).toEqual([
       'node.mig.scheduled',

@@ -7,6 +7,7 @@ import {
 } from '@better-compute/core';
 import { postgres, sqlState, useSimClock } from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
+import { provisionMigrations } from '@better-compute/provision';
 import {
   bookPartitionChange,
   capacityMigrations,
@@ -104,6 +105,15 @@ async function seed(db: SqlExecutor, nodeCount: number, gpusPerNode: number): Pr
                           identity_gen, shard, version)
        VALUES ($1, 'site_m', $2, 'root', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
       [node, POOL],
+    );
+    // Deployed with a host config that takes the MIG layout from the pool: a granted change is
+    // held until the node converges (the gate's simulated daemon below).
+    await db.query(
+      `INSERT INTO workflows (id, tenant_id, node_id, profile_id, profile_version, state, work_key,
+                              finished_at, profile_document)
+       VALUES ($1, 'root', $2, 'prf_mig', 1, 'succeeded', $2, compute_now(),
+               '{"hostConfig": {"mig-layout": {"from": "pool"}}}')`,
+      [`wf_${node}`, node],
     );
     for (let g = 0; g < gpusPerNode; g++) {
       const gpu = `${node}-g${g}`;
@@ -622,7 +632,7 @@ describe('the capacity torture test on a MIG pool (PGlite, interleaved)', () => 
   let db: SqlExecutor;
   beforeAll(async () => {
     db = pglite();
-    await db.migrate([...capacityMigrations]);
+    await db.migrate([...capacityMigrations, ...provisionMigrations]);
     await useSimClock(db, T0);
   });
   afterAll(async () => {
@@ -669,7 +679,7 @@ describe.skipIf(!url)('the capacity torture test on a MIG pool (PostgreSQL, conc
     schema = `bc_torture_${globalThis.crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
     await admin.query(`CREATE SCHEMA ${schema}`);
     db = postgres({ url: inSchema(url!, schema), max: 20 });
-    await db.migrate([...capacityMigrations]);
+    await db.migrate([...capacityMigrations, ...provisionMigrations]);
     await useSimClock(db, T0);
   });
   afterAll(async () => {
