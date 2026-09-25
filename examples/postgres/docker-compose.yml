@@ -1,0 +1,21 @@
+# PostgreSQL for examples/postgres. Only the database runs in a container; the control plane runs from
+# this workspace with `better-compute serve` (see README.md). PostgreSQL 16+ is required; btree_gist
+# ships with the official image.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: compute
+      POSTGRES_PASSWORD: compute
+      POSTGRES_DB: compute
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U compute -d compute']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  postgres:

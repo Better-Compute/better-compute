@@ -1,0 +1,17 @@
+{
+  "name": "@better-compute-examples/dev",
+  "version": "0.0.0",
+  "private": true,
+  "description": "better-compute dev --sim 8: a control plane with every module and simulated GPU machines on your laptop.",
+  "type": "module",
+  "scripts": {
+    "dev": "better-compute dev --memory --sim 8",
+    "dev:persistent": "better-compute dev --sim 8"
+  },
+  "dependencies": {
+    "@better-compute-examples/shared": "workspace:*",
+    "@better-compute/cli": "workspace:*",
+    "@better-compute/server": "workspace:*",
+    "@better-compute/testing": "workspace:*"
+  }
+}

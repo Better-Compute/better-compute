@@ -6,6 +6,7 @@ import { workerRoles, type WorkerRole } from '@better-compute/server';
 import {
   configFromEnv,
   createDeployment,
+  loadConfig,
   type AnyCompute,
   type AnyComputeOptions,
   type Deployment,
@@ -307,12 +308,23 @@ export const serveCommands = [
       'better-compute dev --memory --sim 8',
       'better-compute dev --sim 4 --sim-variant l40s',
     ],
-    async run({ flags, io, env, path, note, configPath, deployment }) {
+    async run({ flags, io, env, cwd, path, note, configPath, configModule, deployment }) {
       const port = flags.port ?? 3000;
       const host = flags.host ?? '127.0.0.1';
       let local: Deployment | undefined;
       let chosen: Deployment;
-      if ((await configPath()) || env.BETTER_COMPUTE_DATABASE_URL) chosen = await deployment();
+      const located = await configPath();
+      if (located && flags.memory) {
+        // Configurations read their store from BETTER_COMPUTE_DATABASE_URL (the template and the
+        // examples do); --memory points it at a throwaway PGlite for this run.
+        local = chosen = await loadConfig({
+          config: located.path,
+          cwd,
+          env: { ...env, BETTER_COMPUTE_DATABASE_URL: 'pglite:memory' },
+          command: 'dev',
+        });
+        note(`Development database: pglite:memory for ${located.path}`);
+      } else if (located || env.BETTER_COMPUTE_DATABASE_URL) chosen = await deployment();
       else {
         const secretFile = path('.better-compute/dev-secret');
         const secret = await devSecret(secretFile, env);
@@ -344,6 +356,17 @@ export const serveCommands = [
         : undefined;
       // The same store and options plus the dev join keys: one control plane, not a second stack.
       if (sim) chosen = createDeployment(sim.options, chosen.source);
+      // The configuration's HTTP routes (events, metrics); its gateway stays off in dev.
+      const hostHttp = located
+        ? (
+            await resolveHost((await configModule()).host, {
+              compute: chosen.compute,
+              options: chosen.options,
+              env,
+              cwd,
+            })
+          ).http
+        : undefined;
       const stop = stopSignal(io.signal);
       try {
         const running = await runServer(chosen.compute, {
@@ -353,6 +376,7 @@ export const serveCommands = [
           migrate: true,
           signal: stop.signal,
           note,
+          ...(hostHttp ? { hostConfig: { http: hostHttp } } : {}),
           ...(sim
             ? {
                 afterMigrate: () => sim.afterMigrate(),

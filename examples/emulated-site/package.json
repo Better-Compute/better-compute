@@ -1,0 +1,16 @@
+{
+  "name": "@better-compute-examples/emulated-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The bare-metal walkthrough on QEMU/KVM machines with sushy-tools Redfish BMCs and a bcd site agent (Linux + KVM).",
+  "type": "module",
+  "scripts": {
+    "serve": "better-compute serve",
+    "doctor": "better-compute doctor"
+  },
+  "dependencies": {
+    "@better-compute-examples/shared": "workspace:*",
+    "@better-compute/cli": "workspace:*",
+    "@better-compute/server": "workspace:*"
+  }
+}

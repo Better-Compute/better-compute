@@ -1,0 +1,25 @@
+{
+  "name": "@better-compute-examples/shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The deployment every better-compute example runs: all modules, and a host with events, metrics and the gateway.",
+  "type": "module",
+  "exports": {
+    ".": "./compose.ts"
+  },
+  "dependencies": {
+    "@better-compute/audit": "workspace:*",
+    "@better-compute/cli": "workspace:*",
+    "@better-compute/core": "workspace:*",
+    "@better-compute/events": "workspace:*",
+    "@better-compute/fleet": "workspace:*",
+    "@better-compute/metal": "workspace:*",
+    "@better-compute/observability": "workspace:*",
+    "@better-compute/pki": "workspace:*",
+    "@better-compute/postgres": "workspace:*",
+    "@better-compute/provision": "workspace:*",
+    "@better-compute/rollout": "workspace:*",
+    "@better-compute/server": "workspace:*",
+    "@better-compute/vps": "workspace:*"
+  }
+}
