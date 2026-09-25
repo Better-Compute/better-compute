@@ -1,6 +1,7 @@
 import {
   ComputeError,
   defineMethod,
+  describedBy,
   fleetResourceId,
   type ComputeModule,
   type Duration,
@@ -9,6 +10,7 @@ import {
   type SqlTx,
 } from '@better-compute/core';
 import { validateFleetConfig, type FleetConfig } from './config.js';
+import { schemas } from './schemas.js';
 import {
   fleetAppliedMigration,
   fleetDriftReconciler,
@@ -131,7 +133,9 @@ export function fleetModule(options: FleetModuleOptions = {}): ComputeModule<'fl
         action: 'compute:fleet:admin',
         kind: 'read',
         resource,
-        validate: (value) => ({ tenantId: object(value, ['tenantId']).tenantId as string }),
+        validate: describedBy(schemas.tenant, (value) => ({
+          tenantId: object(value, ['tenantId']).tenantId as string,
+        })),
         async handler(context, input) {
           const state = await readFleetState(context.sql as SqlTx, input.tenantId);
           return { config: exportFleetConfig(state), missing: state.missing };
@@ -141,7 +145,9 @@ export function fleetModule(options: FleetModuleOptions = {}): ComputeModule<'fl
         action: 'compute:fleet:admin',
         kind: 'read',
         resource,
-        validate: (value) => parsePlan(value, ['tenantId', 'config', 'prune']),
+        validate: describedBy(schemas.plan, (value) =>
+          parsePlan(value, ['tenantId', 'config', 'prune']),
+        ),
         handler: (context, input) => plan(context, context.sql as SqlTx, input),
       }),
       apply: defineMethod<ApplyInput, ApplyResult>({
@@ -149,7 +155,7 @@ export function fleetModule(options: FleetModuleOptions = {}): ComputeModule<'fl
         kind: 'mutation',
         resource,
         transaction: 'manual',
-        validate(value) {
+        validate: describedBy(schemas.apply, (value) => {
           const input = parsePlan(value, ['tenantId', 'config', 'prune', 'planHash']);
           if (
             input.planHash !== undefined &&
@@ -157,7 +163,7 @@ export function fleetModule(options: FleetModuleOptions = {}): ComputeModule<'fl
           )
             throw new ComputeError('INVALID_INPUT', 'planHash must be a SHA-256 hex digest');
           return input as ApplyInput;
-        },
+        }),
         async handler(context, input) {
           if (!context.check || !context.invoke)
             throw new ComputeError(
@@ -211,7 +217,9 @@ export function fleetModule(options: FleetModuleOptions = {}): ComputeModule<'fl
         action: 'compute:fleet:admin',
         kind: 'read',
         resource,
-        validate: (value) => ({ tenantId: object(value, ['tenantId']).tenantId as string }),
+        validate: describedBy(schemas.tenant, (value) => ({
+          tenantId: object(value, ['tenantId']).tenantId as string,
+        })),
         handler: (context, input) => readFleetStatus(context.sql as SqlTx, input.tenantId),
       }),
     },
