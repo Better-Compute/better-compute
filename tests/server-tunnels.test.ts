@@ -190,6 +190,27 @@ describe('tunnels.open', () => {
     }
   });
 
+  it('refuses a sandbox’s (or a warm) instance: those are reached through sandboxes.exec only', async () => {
+    await db.query('ALTER TABLE instances ADD COLUMN IF NOT EXISTS sandbox_id text');
+    await db.query('ALTER TABLE instances ADD COLUMN IF NOT EXISTS warm_template_id text');
+    try {
+      await db.query(`UPDATE instances SET sandbox_id = 'sbx_1' WHERE id = $1`, [INSTANCE]);
+      for (const op of ['exec', 'tcp', 'ssh'])
+        await expect(
+          open({ tenantId: 'acme', instanceId: INSTANCE, op, ...(op === 'tcp' ? { port: 22 } : {}) }),
+        ).rejects.toMatchObject({ code: 'INVALID_STATE', details: { reason: 'sandbox-managed' } });
+      await db.query(`UPDATE instances SET sandbox_id = NULL, warm_template_id = 'sbxt_1' WHERE id = $1`, [INSTANCE]);
+      await expect(open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' })).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+      });
+    } finally {
+      await db.query('ALTER TABLE instances DROP COLUMN sandbox_id');
+      await db.query('ALTER TABLE instances DROP COLUMN warm_template_id');
+    }
+    // Without the columns (no sandboxes): as before.
+    await expect(open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec' })).resolves.toMatchObject({ op: 'exec' });
+  });
+
   it('refuses what cannot be tunneled', async () => {
     const refused = (raw: Record<string, unknown>) =>
       open({ tenantId: 'acme', instanceId: INSTANCE, op: 'exec', ...raw });

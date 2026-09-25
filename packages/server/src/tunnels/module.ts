@@ -457,12 +457,34 @@ async function tableExists(tx: SqlTx, table: string): Promise<boolean> {
 async function instanceNode(tx: SqlTx, tenantId: string, instanceId: string): Promise<string> {
   if (!(await tableExists(tx, 'instances')))
     throw new ComputeError('NOT_FOUND', `Instance ${instanceId} not found`);
-  const { rows } = await tx.query<{ node_id: string | null; state: string; draft: boolean }>(
-    'SELECT node_id, state, draft FROM instances WHERE id = $1 AND tenant_id = $2',
-    [instanceId, tenantId],
+  // A sandbox's instance (or a warm one waiting for a sandbox) is reached only through sandboxes.exec (§3.7): its
+  // session requirement and compute:sandboxes:exec decision must not be bypassed with instances:exec.
+  const { rows: columns } = await tx.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'instances' AND column_name IN ('sandbox_id', 'warm_template_id')`,
   );
+  const managed = columns.length === 2 ? 'sandbox_id, warm_template_id' : 'NULL AS sandbox_id, NULL AS warm_template_id';
+  const { rows } = await tx.query<{
+    node_id: string | null;
+    state: string;
+    draft: boolean;
+    sandbox_id: string | null;
+    warm_template_id: string | null;
+  }>(`SELECT node_id, state, draft, ${managed} FROM instances WHERE id = $1 AND tenant_id = $2`, [
+    instanceId,
+    tenantId,
+  ]);
   const row = rows[0];
   if (!row || row.draft) throw new ComputeError('NOT_FOUND', `Instance ${instanceId} not found`);
+  if (row.sandbox_id || row.warm_template_id)
+    throw new ComputeError(
+      'INVALID_STATE',
+      row.sandbox_id
+        ? `Instance ${instanceId} is managed by sandbox ${row.sandbox_id}; use sandboxes.exec`
+        : `Instance ${instanceId} is a warm sandbox instance; it takes no tunnels`,
+      undefined,
+      { reason: 'sandbox-managed' },
+    );
   if (!row.node_id)
     throw new ComputeError(
       'UNSUPPORTED',
