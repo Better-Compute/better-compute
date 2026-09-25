@@ -83,6 +83,7 @@ export * from './nodes-module.js';
 export * from './site-boot-module.js';
 export * from './audit-sinks-module.js';
 export { bcdArtifact, type DownloadsOptions } from './downloads.js';
+export { supportBundleKey, type SupportBundlesOptions } from './api/commands.js';
 export { siteBootLeaseName, siteBootTtlSeconds, tickSiteBoot } from './controllers/site-boot.js';
 export type { SiteBootState } from './controllers/site-boot.js';
 export * from './tunnels/index.js';

@@ -78,6 +78,7 @@ export function coreGroups(
       caches: cachesFor(options, { now: () => options.clock.now() }),
       ...(secrets ? { secrets } : {}),
       ...(host.drivers ? { drivers: host.drivers } : {}),
+      ...(options.supportBundles ? { supportBundles: options.supportBundles } : {}),
       ...extra,
     }),
   };

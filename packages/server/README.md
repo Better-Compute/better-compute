@@ -212,4 +212,6 @@ subject, data, time}`, topic = type), `authz` (`authz_projection` plus the `auth
 - The server itself prunes nothing: `@better-compute/postgres`'s `retentionModule()` (which the
   CLI adds to every deployment) prunes the outbox behind the stored cursors; in-process
   subscribers and SSE watch keep no stored cursor and rely on retention's minimum age.
-- `logs.collect` has no upload destination until the downloads BlobStore presigns one.
+- `logs.collect` uploads only with `supportBundles: { blob }` (a store that presigns): the daemon
+  gets a presigned PUT for `support-bundles/{nodeId}/{key}.bundle`, shown as the command's
+  `bundleKey`. There is no API to download a bundle yet; operators read the blob store.

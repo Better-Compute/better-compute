@@ -2,6 +2,7 @@ import {
   ComputeError,
   commandStates,
   defineMethod,
+  type BlobStore,
   type CommandState,
   type Json,
   type MethodDefinition,
@@ -97,6 +98,8 @@ export interface CommandInfo {
   retrySafe: boolean;
   selfTerminating: boolean;
   attested: boolean;
+  /** `logs.collect` with `supportBundles`: the blob key the bundle is uploaded to. */
+  bundleKey?: string;
 }
 
 export type CommandsApi = {
@@ -132,10 +135,28 @@ const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
 /**
+ * Where `logs.collect` bundles go (PLAN.md §6 support bundles): a blob store that presigns PUT URLs.
+ * Without it (or without `presign`) the daemon gets no upload destination.
+ */
+export interface SupportBundlesOptions {
+  blob: BlobStore;
+  /** Largest upload the daemon may send (default 256 MiB; it truncates oldest first). */
+  maxBytes?: number;
+}
+
+/** The blob key a `logs.collect` command uploads to: per node and command idempotency key. */
+export function supportBundleKey(nodeId: string, idempotencyKey: string): string {
+  return `support-bundles/${nodeId}/${idempotencyKey.replace(/^api:/, '').replace(/[^A-Za-z0-9._-]/g, '_')}.bundle`;
+}
+
+/**
  * The kind's request message for a validated API payload, every field set as `create()` would set
  * it, so the command queue can encode it into `CommandBody.payload`.
  */
-function requestMessage(input: RunCommandInput): CommandPayload<RunnableCommandKind> {
+function requestMessage(
+  input: RunCommandInput,
+  upload?: { url: string; maxBytes: number },
+): CommandPayload<RunnableCommandKind> {
   const payload: Record<string, unknown> = input.payload ?? {};
   switch (input.kind) {
     case 'diag.nvml':
@@ -152,15 +173,15 @@ function requestMessage(input: RunCommandInput): CommandPayload<RunnableCommandK
         rescan: payload.rescan === true,
       };
     case 'logs.collect':
-      // The upload destination (a presigned URL from the downloads BlobStore) is v0.2's.
+      // With `supportBundles`, a presigned PUT for this command's key (no credential travels).
       return {
         $typeName: 'bettercompute.agent.v1.LogsCollectRequest',
-        uploadUrl: '',
+        uploadUrl: upload?.url ?? '',
         uploadHeaders: [],
         units: strings(payload.units),
         lookbackSeconds: typeof payload.sinceSeconds === 'number' ? payload.sinceSeconds : 0,
-        maxBytes: 0n,
-        supportBundle: false,
+        maxBytes: BigInt(upload?.maxBytes ?? 0),
+        supportBundle: upload !== undefined,
       };
     case 'node.reboot':
       return {
@@ -197,11 +218,12 @@ interface CommandRow {
   retry_safe: boolean;
   self_terminating: boolean;
   attested: boolean;
+  idempotency_key: string;
 }
 const columns = `c.id, c.node_id, c.seq, c.kind, c.state, c.reason, c.not_before, c.not_after,
-  c.min_generation, c.retry_safe, c.self_terminating, c.attested`;
+  c.min_generation, c.retry_safe, c.self_terminating, c.attested, c.idempotency_key`;
 
-function toCommand(row: CommandRow): CommandInfo {
+function toCommand(row: CommandRow, bundles?: SupportBundlesOptions): CommandInfo {
   const command: CommandInfo = {
     id: row.id,
     nodeId: row.node_id,
@@ -217,12 +239,23 @@ function toCommand(row: CommandRow): CommandInfo {
   if (row.reason !== null) command.reason = row.reason;
   if (row.min_generation !== null && row.min_generation !== undefined)
     command.minGeneration = int(row.min_generation);
+  if (bundles && row.kind === 'logs.collect')
+    command.bundleKey = supportBundleKey(row.node_id, row.idempotency_key);
   return command;
 }
 
 const nodeVisible = visibleIn('node', 'c.node_id', '$1');
 
-export function commandsApi(): CommandsApi {
+export function commandsApi(bundles?: SupportBundlesOptions): CommandsApi {
+  /** A presigned upload for a `logs.collect` command, valid until the command expires (+15 min). */
+  const uploadFor = async (input: RunCommandInput, idempotencyKey: string) => {
+    if (input.kind !== 'logs.collect' || !bundles?.blob.presign) return undefined;
+    const url = await bundles.blob.presign(supportBundleKey(input.nodeId, idempotencyKey), {
+      method: 'PUT',
+      expiresInSeconds: (input.notAfterSeconds ?? 600) + 900,
+    });
+    return { url, maxBytes: bundles.maxBytes ?? 256 * 1024 * 1024 };
+  };
   return {
     commands: {
       run: defineMethod<RunCommandInput, CommandInfo>({
@@ -246,10 +279,11 @@ export function commandsApi(): CommandsApi {
             [input.nodeId, idempotencyKey],
           );
           if (existing[0] && existing[0].kind !== input.kind) throw keyReused();
+          const upload = existing[0] ? undefined : await uploadFor(input, idempotencyKey);
           const { id } = await context.commands.enqueue(context.sql, {
             nodeId: input.nodeId,
             kind: input.kind,
-            payload: requestMessage(input),
+            payload: requestMessage(input, upload),
             idempotencyKey,
             notAfter: context.clock.now() + (input.notAfterSeconds ?? 600) * 1000,
           });
@@ -258,7 +292,7 @@ export function commandsApi(): CommandsApi {
             [id],
           );
           if (!rows[0]) throw new ComputeError('INTERNAL_ERROR', 'The queued command is missing');
-          const command = toCommand(rows[0]);
+          const command = toCommand(rows[0], bundles);
           if (!existing[0])
             await context.events.publish(context.sql, {
               type: 'node.command.queued',
@@ -281,7 +315,7 @@ export function commandsApi(): CommandsApi {
             [input.tenantId, input.nodeId, input.commandId],
           );
           if (!rows[0]) throw notFound('Command');
-          return toCommand(rows[0]);
+          return toCommand(rows[0], bundles);
         },
       }),
       list: defineMethod<ListCommandsInput, Page<CommandInfo>>({
@@ -298,7 +332,12 @@ export function commandsApi(): CommandsApi {
              ORDER BY c.seq DESC LIMIT $5`,
             [input.tenantId, input.nodeId, input.state ?? null, input.cursor ?? null, size + 1],
           );
-          return page(rows, size, toCommand, (row) => String(int(row.seq)));
+          return page(
+            rows,
+            size,
+            (row: CommandRow) => toCommand(row, bundles),
+            (row) => String(int(row.seq)),
+          );
         },
       }),
     },

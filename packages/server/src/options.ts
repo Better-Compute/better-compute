@@ -167,6 +167,12 @@ export interface ComputeOptions<
   notifier?: Notifier;
   sinks?: SinkOptions;
   downloads?: { dir?: string; blob?: BlobStore };
+  /**
+   * Where `commands.run` `logs.collect` bundles go: the daemon gets a presigned PUT for
+   * `support-bundles/{nodeId}/{key}.bundle` (the blob store needs `presign`), and the command shows
+   * that `bundleKey`. Without it `logs.collect` has no upload destination.
+   */
+  supportBundles?: { blob: BlobStore; maxBytes?: number };
   gateway?: { publicUrls: Record<string, string>; maxStreams?: number };
   /**
    * Business time (P9). Default: the process clock anchored to `compute_now()`, re-sampled at every
@@ -207,6 +213,8 @@ export interface ResolvedOptions {
   eventSinks: readonly EventSink[];
   /** Where `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` finds the daemon binaries. */
   downloads?: DownloadsOptions;
+  /** Where `logs.collect` uploads support bundles (a blob store that presigns). */
+  supportBundles?: { blob: BlobStore; maxBytes?: number };
   /** `sinks.audit` plus the audit sinks modules list: the built-in audit-sinks module delivers to them. */
   auditSinks: readonly AuditSink[];
   iamJobs: readonly IamJob[];
@@ -352,6 +360,16 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     sinkIds.add(sink.id);
   }
   const downloads = resolveDownloads(options.downloads);
+  const bundles = options.supportBundles;
+  if (bundles !== undefined) {
+    if (!isRecord(bundles)) throw invalid('supportBundles must be an object');
+    requireMethods(bundles.blob, 'supportBundles.blob', ['get', 'presign']);
+    if (
+      bundles.maxBytes !== undefined &&
+      !(Number.isSafeInteger(bundles.maxBytes) && bundles.maxBytes > 0)
+    )
+      throw invalid('supportBundles.maxBytes must be a positive integer');
+  }
   const ports = resolvePorts(options.ports);
   const capacity = resolveCapacity(options.capacity, options.scheduler, schedulerPlugins);
   const join = options.pki?.join;
@@ -401,6 +419,7 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     eventSinks,
     auditSinks,
     ...(downloads ? { downloads } : {}),
+    ...(bundles ? { supportBundles: bundles } : {}),
     iamJobs: resolveIamJobs(options.iamJobs ?? []),
     worker,
     ports,

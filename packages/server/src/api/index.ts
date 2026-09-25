@@ -1,6 +1,6 @@
 import type { Caches } from '../caches.js';
 import { createListRecipe } from '../list.js';
-import { commandsApi, type CommandsApi } from './commands.js';
+import { commandsApi, type CommandsApi, type SupportBundlesOptions } from './commands.js';
 import { eventsApi, type EventsApi } from './events.js';
 import { joinTokensApi, type JoinTokenMinter, type JoinTokensApi } from './join-tokens.js';
 import { nodesApi, type NodesApi } from './nodes.js';
@@ -17,7 +17,9 @@ export type {
   ListCommandsInput,
   RunCommandInput,
   RunnableCommandKind,
+  SupportBundlesOptions,
 } from './commands.js';
+export { supportBundleKey } from './commands.js';
 export type { EventsApi, ListEventsInput } from './events.js';
 export type {
   CreatedJoinToken,
@@ -76,6 +78,8 @@ export interface ServerGroupsOptions {
   secrets?: ServerV02Options['secrets'];
   /** The registered drivers, for `drivers.list`. */
   drivers?: ServerV02Options['drivers'];
+  /** Where `commands.run logs.collect` uploads support bundles (presigned PUT). */
+  supportBundles?: SupportBundlesOptions;
 }
 
 /** Builds the server's groups; handlers reach the ports through each call's `MethodContext`. */
@@ -92,7 +96,7 @@ export function serverGroups(options: ServerGroupsOptions): ServerApi {
       ...sitesApi(lists),
       ...joinTokensApi(options.joinTokens),
       ...nodesApi(lists),
-      ...commandsApi(),
+      ...commandsApi(options.supportBundles),
       ...usageApi(),
       ...eventsApi(),
     },
