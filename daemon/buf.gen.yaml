@@ -1,0 +1,20 @@
+# Go code generation for the daemon (PLAN.md D1). Run `node scripts/daemon-proto-gen.mjs` from the
+# repository root; it runs the pinned buf from node_modules with this template. The TypeScript side
+# stays in the root buf.gen.yaml. Plugins are local only (no remote BSR plugin uploads our protos):
+#   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+#   go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.21.0
+# The go_package options map every package to daemon/gen/bettercompute/<area>/v1.
+version: v2
+# Not `clean`: daemon/gen also holds its README.
+clean: false
+inputs:
+  - directory: proto
+plugins:
+  - local: protoc-gen-go
+    out: daemon/gen
+    opt:
+      - paths=source_relative
+  - local: protoc-gen-connect-go
+    out: daemon/gen
+    opt:
+      - paths=source_relative

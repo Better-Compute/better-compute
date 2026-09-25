@@ -64,7 +64,7 @@ func parseDocument(data []byte) (*document, error) {
 	section := ""
 	sections := map[string]bool{}
 	keys := map[string]bool{}
-	text := strings.TrimPrefix(string(data), "﻿")
+	text := strings.TrimPrefix(string(data), "\uFEFF")
 	for i, raw := range strings.Split(text, "\n") {
 		line := i + 1
 		s := strings.TrimSpace(raw)
