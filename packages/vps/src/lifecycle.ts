@@ -30,6 +30,7 @@ import {
   type InstanceRow,
 } from './instances.js';
 import { releaseAddress } from './ipam.js';
+import { markSandboxReady } from './sandboxes.js';
 
 // The Instance controller (PLAN.md §11.1, §3.6): converges `state` toward `desiredState`.
 // - Hosted pools: the daemon's runtime converges `NodeSpec.instances`; its reports arrive through
@@ -234,6 +235,9 @@ async function reconcileHosted(
     if (row.state !== reported) {
       const next = await advance(tx, row, reported);
       if (next.state !== row.state) await publishInstance(deps, tx, next, `instance.${next.state}`);
+      // A sandbox is ready the moment its instance runs (§3.7), not a sandbox pass later.
+      if (next.sandboxId !== undefined && next.state === 'running')
+        await markSandboxReady(deps, tx, next.id);
       return next.state === reported ? undefined : now;
     }
     return undefined;
@@ -542,9 +546,10 @@ export async function instanceSpecs(
     address: string | null;
     mac: string;
     restore_from: { snapshotId: string; url: string; sha256: string } | string | null;
+    network_policy: 'private' | 'none' | null;
   }>(
     `SELECT i.id, i.state, i.desired_state, i.runtime, i.flavor, i.image, i.user_data, i.ssh_keys,
-            i.allocation_id, a.atoms, i.restore_from, host(l.address) || '/' || masklen(p.cidr) AS address,
+            i.allocation_id, a.atoms, i.restore_from, i.network_policy, host(l.address) || '/' || masklen(p.cidr) AS address,
             regexp_replace('02' || substr(encode(sha256(convert_to(i.id, 'UTF8')), 'hex'), 1, 10),
                            '(..)(?=.)', '\\1:', 'g') AS mac
        FROM instances i
@@ -584,6 +589,8 @@ export async function instanceSpecs(
       typeof row.restore_from === 'string' ? JSON.parse(row.restore_from) : row.restore_from;
     if (restore)
       spec.restoreFrom = { url: restore.url, sha256: restore.sha256, imageId: restore.snapshotId };
+    // A sandbox template's network (§3.7): the host enforces it on the instance's taps.
+    if (row.network_policy) spec.networkPolicy = row.network_policy;
     spec.nics = [{ network, mac: row.mac, addresses: row.address ? [row.address] : [] }];
     return [spec];
   });

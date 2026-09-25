@@ -264,6 +264,11 @@ export const schemas = {
       },
       warm: warmPool,
       env: templateEnv,
+      network: {
+        enum: ['egress', 'private', 'none'],
+        description:
+          'What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)',
+      },
     },
     ['tenantId', 'name', 'poolId', 'flavor', 'imageId'],
   ),
@@ -282,6 +287,11 @@ export const schemas = {
       maxTtlSeconds: ttlSeconds('The longest lifetime a sandbox may have, extensions included'),
       warm: warmPool,
       env: templateEnv,
+      network: {
+        enum: ['egress', 'private', 'none'],
+        description:
+          'What sandboxes reach: egress (default), private (the pool subnet and the host) or none (the host only; exec still works)',
+      },
     },
     ['tenantId', 'templateId'],
   ),

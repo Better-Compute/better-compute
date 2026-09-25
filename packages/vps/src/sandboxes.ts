@@ -148,6 +148,24 @@ export const vpsTemplateEnvMigration: Migration = {
   sql: `ALTER TABLE sandbox_templates ADD COLUMN env jsonb NOT NULL DEFAULT '{}';`,
 };
 
+/**
+ * Template network (§3.7) and warm freshness: `network` is `egress` (default), `private` (the pool's
+ * subnet and the host) or `none` (the host only; tunnels still work), carried to the instance as
+ * `network_policy` (NULL: egress) and enforced by the host. A warm instance records the template
+ * `instance_version` it was made from; one from an older version is never claimed and is drained.
+ */
+export const vpsTemplateNetworkMigration: Migration = {
+  name: 'vps/0008_template_network',
+  sql: `
+ALTER TABLE sandbox_templates ADD COLUMN network text NOT NULL DEFAULT 'egress'
+  CHECK (network IN ('egress', 'private', 'none'));
+ALTER TABLE instances ADD COLUMN network_policy text CHECK (network_policy IN ('private', 'none'));
+ALTER TABLE instances ADD COLUMN warm_template_version bigint;
+-- Bumped only by changes that shape instances (flavor, image, user data, env, network).
+ALTER TABLE sandbox_templates ADD COLUMN instance_version bigint NOT NULL DEFAULT 1;
+`,
+};
+
 /** When a sandbox claimed a warm instance: its warm capacity metering ends there (`vps.sandbox.warm`). */
 export const vpsWarmClaimsMigration: Migration = {
   name: 'vps/0006_warm_claims',
@@ -170,7 +188,17 @@ export interface SandboxTemplate {
   warm: { min: number; max: number };
   /** Environment for every sandbox: variable name → `secret://<tenantId>/<id>` of this tenant. */
   env: Record<string, string>;
+  /** What sandboxes may reach: `egress` (default), `private` (pool subnet + host) or `none` (host only). */
+  network: SandboxNetwork;
   version: number;
+}
+
+export type SandboxNetwork = 'egress' | 'private' | 'none';
+const networks: readonly SandboxNetwork[] = ['egress', 'private', 'none'];
+
+function network(value: unknown): SandboxNetwork {
+  if (!networks.includes(value as SandboxNetwork)) fail('network must be egress, private or none');
+  return value as SandboxNetwork;
 }
 
 export interface TemplateInput {
@@ -186,6 +214,7 @@ export interface TemplateInput {
   maxTtlSeconds?: number;
   warm?: { min: number; max?: number };
   env?: Record<string, string>;
+  network?: SandboxNetwork;
 }
 
 export interface TemplateUpdate {
@@ -200,6 +229,7 @@ export interface TemplateUpdate {
   warm?: { min: number; max?: number };
   /** Replaces the whole map (`{}` removes every variable). */
   env?: Record<string, string>;
+  network?: SandboxNetwork;
 }
 
 export type TemplateRef = { tenantId: string; templateId: string };
@@ -263,6 +293,7 @@ export function parseTemplateInput(raw: unknown): TemplateInput {
     'maxTtlSeconds',
     'warm',
     'env',
+    'network',
   ]);
   const tenantId = tenant(input.tenantId);
   const result: TemplateInput = {
@@ -284,6 +315,7 @@ export function parseTemplateInput(raw: unknown): TemplateInput {
   if (maxTtl !== undefined) result.maxTtlSeconds = maxTtl;
   if (input.warm !== undefined) result.warm = warm(input.warm);
   if (input.env !== undefined) result.env = env(input.env, tenantId);
+  if (input.network !== undefined) result.network = network(input.network);
   return result;
 }
 
@@ -298,6 +330,7 @@ export function parseTemplateUpdate(raw: unknown): TemplateUpdate {
     'maxTtlSeconds',
     'warm',
     'env',
+    'network',
   ]);
   const tenantId = tenant(input.tenantId);
   const result: TemplateUpdate = {
@@ -314,6 +347,7 @@ export function parseTemplateUpdate(raw: unknown): TemplateUpdate {
   if (maxTtl !== undefined) result.maxTtlSeconds = maxTtl;
   if (input.warm !== undefined) result.warm = warm(input.warm);
   if (input.env !== undefined) result.env = env(input.env, tenantId);
+  if (input.network !== undefined) result.network = network(input.network);
   return result;
 }
 
@@ -339,6 +373,8 @@ interface RawTemplate {
   warm_min: number;
   warm_max: number;
   env: Record<string, string> | string;
+  network: SandboxNetwork;
+  instance_version: string | number;
   created_by: string;
   deleted: boolean;
   version: string | number;
@@ -359,6 +395,8 @@ const templateColumnsOf = (alias: string) =>
     'warm_min',
     'warm_max',
     'env',
+    'network',
+    'instance_version',
     'created_by',
     'deleted',
     'version',
@@ -367,7 +405,12 @@ const templateColumnsOf = (alias: string) =>
     .join(', ');
 const templateColumns = templateColumnsOf('');
 
-type TemplateRow = SandboxTemplate & { createdBy: string; deleted: boolean };
+type TemplateRow = SandboxTemplate & {
+  createdBy: string;
+  deleted: boolean;
+  /** Bumped by changes that shape instances: warm instances of an older one are stale. */
+  instanceVersion: number;
+};
 
 function toTemplate(raw: RawTemplate): TemplateRow {
   const template: TemplateRow = {
@@ -382,6 +425,8 @@ function toTemplate(raw: RawTemplate): TemplateRow {
     maxTtlSeconds: Number(raw.max_ttl_seconds),
     warm: { min: Number(raw.warm_min), max: Number(raw.warm_max) },
     env: typeof raw.env === 'string' ? JSON.parse(raw.env) : { ...(raw.env ?? {}) },
+    network: raw.network ?? 'egress',
+    instanceVersion: Number(raw.instance_version ?? 1),
     version: Number(raw.version),
     createdBy: raw.created_by,
     deleted: raw.deleted,
@@ -392,7 +437,7 @@ function toTemplate(raw: RawTemplate): TemplateRow {
 
 /** The public view of a template. */
 export function templateView(row: TemplateRow): SandboxTemplate {
-  const { createdBy: _by, deleted: _deleted, ...view } = row;
+  const { createdBy: _by, deleted: _deleted, instanceVersion: _instances, ...view } = row;
   return { ...view, warm: { ...view.warm }, env: { ...view.env } };
 }
 
@@ -503,8 +548,8 @@ export async function createTemplate(
   const templateId = newId('sbxt');
   const { rows } = await tx.query<RawTemplate>(
     `INSERT INTO sandbox_templates (id, tenant_id, name, pool_id, flavor, image_id, runtime, user_data,
-                                    default_ttl_seconds, max_ttl_seconds, warm_min, warm_max, created_by, env, version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, 1)
+                                    default_ttl_seconds, max_ttl_seconds, warm_min, warm_max, created_by, env, network, version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, 1)
      RETURNING ${templateColumns}`,
     [
       templateId,
@@ -521,6 +566,7 @@ export async function createTemplate(
       input.warm?.max ?? input.warm?.min ?? 0,
       caller.identityId,
       JSON.stringify(input.env ?? {}),
+      input.network ?? 'egress',
     ],
   );
   await deps.authz.upsert(tx, {
@@ -531,6 +577,22 @@ export async function createTemplate(
     ownerId: caller.identityId,
   });
   return templateView(toTemplate(rows[0]!));
+}
+
+/** Whether an update changes what the template's instances are made of. */
+function shapes(
+  current: TemplateRow,
+  next: { flavor: string; imageId: string; userData: string | null; input: TemplateUpdate },
+): boolean {
+  return (
+    next.flavor !== current.flavor ||
+    next.imageId !== current.imageId ||
+    next.userData !== (current.userData ?? null) ||
+    (next.input.env !== undefined &&
+      JSON.stringify(Object.entries(next.input.env).sort()) !==
+        JSON.stringify(Object.entries(current.env).sort())) ||
+    (next.input.network !== undefined && next.input.network !== current.network)
+  );
 }
 
 /** `sandboxTemplates.update`: a new flavor or image is checked against the pool as on create. */
@@ -564,7 +626,7 @@ export async function updateTemplate(
     `UPDATE sandbox_templates
         SET flavor = $2, image_id = $3, runtime = $4, user_data = $5, default_ttl_seconds = $6,
             max_ttl_seconds = $7, warm_min = $8, warm_max = $9, env = $10::jsonb,
-            version = version + 1
+            network = $11, instance_version = instance_version + $12, version = version + 1
       WHERE id = $1
       RETURNING ${templateColumns}`,
     [
@@ -578,6 +640,8 @@ export async function updateTemplate(
       warmPool.min,
       warmPool.max,
       JSON.stringify(input.env ?? current.env),
+      input.network ?? current.network,
+      shapes(current, { flavor, imageId: image, userData: userDataValue, input }) ? 1 : 0,
     ],
   );
   return templateView(toTemplate(rows[0]!));
@@ -868,6 +932,27 @@ async function publishSandbox(
   });
 }
 
+/**
+ * Marks the sandbox an instance runs `ready` the moment the instance reaches `running` (the instance
+ * reconciler calls it in its transaction), so `readyAt` and `sandbox.ready` never trail the view's
+ * state by a reconciler pass. The sandbox pass stays the fallback.
+ */
+export async function markSandboxReady(
+  deps: Pick<InstanceDeps, 'events' | 'clock'>,
+  tx: SqlTx,
+  instanceId: string,
+): Promise<void> {
+  const { rows } = await tx.query<
+    Pick<RawSandbox, 'id' | 'tenant_id' | 'template_id' | 'instance_id' | 'pool_id' | 'warm'>
+  >(
+    `UPDATE sandboxes SET ready_at = $2::timestamptz, version = version + 1
+      WHERE instance_id = $1 AND NOT draft AND ready_at IS NULL AND deleting_at IS NULL
+      RETURNING id, tenant_id, template_id, instance_id, pool_id, warm`,
+    [instanceId, new Date(deps.clock.now()).toISOString()],
+  );
+  for (const raw of rows) await publishSandbox(deps, tx, raw, 'sandbox.ready', { warm: raw.warm });
+}
+
 /** The attributes IAM policies read on a sandbox (§9.2). */
 export function sandboxAttributes(
   template: Pick<SandboxTemplate, 'id' | 'warm'>,
@@ -1038,9 +1123,10 @@ async function createManagedInstance(
   await tx.query(
     `INSERT INTO instances (id, tenant_id, pool_id, flavor_id, flavor, image_id, image, ssh_keys, user_data,
                             runtime, draft, state, desired_state, owner_identity_id, agent_id, delegation_id,
-                            idempotency_key, request_hash, sandbox_id, warm_template_id, restore_from, version)
+                            idempotency_key, request_hash, sandbox_id, warm_template_id, restore_from, network_policy,
+                            warm_template_version, version)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, '{}', $8, $9, false, 'pending', $10, $11, $12, $13,
-             $14, decode($15, 'hex'), $16, $17, $18::jsonb, 1)`,
+             $14, decode($15, 'hex'), $16, $17, $18::jsonb, $19, $20, 1)`,
     [
       spec.instanceId,
       template.tenantId,
@@ -1060,6 +1146,8 @@ async function createManagedInstance(
       spec.sandboxId ?? null,
       spec.warmTemplateId ?? null,
       spec.restoreFrom ? JSON.stringify(spec.restoreFrom) : null,
+      template.network === 'egress' ? null : template.network,
+      spec.warmTemplateId ? template.instanceVersion : null,
     ],
   );
   let row = (await readInstance(tx, spec.instanceId, { lock: true }))!;
@@ -1211,9 +1299,9 @@ async function claimWarm(
   const { rows } = await tx.query<{ id: string }>(
     `SELECT id FROM instances
       WHERE warm_template_id = $1 AND tenant_id = $2 AND NOT draft AND desired_state <> 'deleted'
-        AND state = ANY($3::text[])
+        AND state = ANY($3::text[]) AND warm_template_version = $4
       ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`,
-    [template.id, template.tenantId, claimable],
+    [template.id, template.tenantId, claimable, template.instanceVersion],
   );
   if (!rows[0]) return undefined;
   await tx.query(
@@ -1566,9 +1654,15 @@ export async function reconcileSandboxes(
   await purgeSnapshots(options.store, deps.log, dropped);
 
   // Warm pools: what each template holds, then one transaction per change.
-  const { rows: pools } = await sql.query<RawTemplate & { live: string | number }>(
+  // Only instances of the template's current version count; older ones are drained.
+  const { rows: pools } = await sql.query<
+    RawTemplate & { live: string | number; stale: string | number }
+  >(
     `SELECT ${templateColumnsOf('t.')},
-            count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')) AS live
+            count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
+                                  AND i.warm_template_version = t.instance_version) AS live,
+            count(i.id) FILTER (WHERE i.desired_state <> 'deleted' AND i.state NOT IN ('deleting', 'deleted')
+                                  AND i.warm_template_version IS DISTINCT FROM t.instance_version) AS stale
        FROM sandbox_templates t
        LEFT JOIN instances i ON i.warm_template_id = t.id
       WHERE (NOT t.deleted AND t.warm_min > 0) OR i.id IS NOT NULL
@@ -1578,7 +1672,9 @@ export async function reconcileSandboxes(
     const template = toTemplate(raw);
     const live = Number(raw.live);
     const keep = template.deleted ? 0 : template.warm.max;
-    if (live > keep) pass.warmDrained += await drainWarm(deps, sql, template, live - keep);
+    if (Number(raw.stale) > 0)
+      pass.warmDrained += await drainWarm(deps, sql, template, Number(raw.stale), true);
+    if (live > keep) pass.warmDrained += await drainWarm(deps, sql, template, live - keep, false);
     const want = template.deleted ? 0 : Math.min(template.warm.min - live, warmRefillPerPass);
     for (let index = 0; index < want; index++) {
       try {
@@ -1605,19 +1701,24 @@ export async function reconcileSandboxes(
   return pass;
 }
 
-/** Deletes up to `count` of a template's warm instances, newest first (the oldest are claimed first). */
+/**
+ * Deletes up to `count` of a template's warm instances: those made from an older template version
+ * (`stale`), or else current ones newest first (the oldest are claimed first).
+ */
 async function drainWarm(
   deps: InstanceDeps,
   sql: SqlExecutor,
   template: TemplateRow,
   count: number,
+  stale: boolean,
 ): Promise<number> {
   return sql.transaction(async (tx) => {
     const { rows } = await tx.query<{ id: string }>(
       `SELECT id FROM instances
         WHERE warm_template_id = $1 AND desired_state <> 'deleted' AND state NOT IN ('deleting', 'deleted')
+          AND (warm_template_version IS DISTINCT FROM $3) = $4
         ORDER BY created_at DESC, id DESC LIMIT $2 FOR UPDATE SKIP LOCKED`,
-      [template.id, count],
+      [template.id, count, template.instanceVersion, stale],
     );
     for (const { id: instanceId } of rows) {
       const row = (await readInstance(tx, instanceId, { lock: true }))!;

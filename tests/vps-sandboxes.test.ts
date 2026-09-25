@@ -1071,6 +1071,71 @@ describe('snapshots', () => {
   });
 });
 
+describe('template network and versions', () => {
+  it("carries the template's network to the instance spec; egress stays implicit", async () => {
+    const closed = await createTemplate({ name: 'closed', network: 'none' });
+    const open = await createTemplate({ name: 'open' });
+    expect(closed).toMatchObject({ network: 'none' });
+    expect(open).toMatchObject({ network: 'egress' });
+    const a = await createSandbox(closed.id, { idempotencyKey: 'a' });
+    const b = await createSandbox(open.id, { idempotencyKey: 'b' });
+    const specs = await db.transaction(async (tx) => [
+      ...(await instanceSpecs(tx, 'node_01jz00000000000000000000va')),
+      ...(await instanceSpecs(tx, 'node_01jz00000000000000000000vb')),
+    ]);
+    const byId = new Map(specs.map((spec) => [spec.id, spec]));
+    expect(byId.get(a.instanceId)?.networkPolicy).toBe('none');
+    expect(byId.get(b.instanceId)).not.toHaveProperty('networkPolicy');
+    await expect(
+      call('sandboxTemplates', 'update', {
+        tenantId: 'acme',
+        templateId: open.id,
+        network: 'internet',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('never claims a warm instance made from an older template version, and replaces it', async () => {
+    const template = await createTemplate({ warm: { min: 1 } });
+    await reconcileSandboxes();
+    await hostsReport('paused');
+    const [old] = (
+      await db.query<{ id: string }>(`SELECT id FROM instances WHERE warm_template_id = $1`, [
+        template.id,
+      ])
+    ).rows;
+    await call('sandboxTemplates', 'update', {
+      tenantId: 'acme',
+      templateId: template.id,
+      userData: '#cloud-config\n',
+    });
+    // Stale until the pass: a create goes cold rather than boot yesterday's template.
+    expect((await createSandbox(template.id)).warm).toBe(false);
+    await reconcileSandboxes();
+    const warm = await db.query<{ id: string; desired_state: string }>(
+      `SELECT id, desired_state FROM instances WHERE warm_template_id = $1 ORDER BY created_at, id`,
+      [template.id],
+    );
+    expect(Object.fromEntries(warm.rows.map((row) => [row.id, row.desired_state]))).toMatchObject({
+      [old!.id]: 'deleted',
+    });
+    expect(warm.rows.filter((row) => row.desired_state === 'paused')).toHaveLength(1);
+  });
+
+  it('stamps readyAt the moment the instance runs, not a sandbox pass later', async () => {
+    const template = await createTemplate();
+    const sandbox = await createSandbox(template.id);
+    await advance(7_000);
+    recorded.events = [];
+    await hostsReport('running');
+    expect(await getSandbox(sandbox.id)).toMatchObject({ state: 'ready', readyAt: T0 + 7_000 });
+    expect(recorded.events.map((event) => event.type)).toContain('sandbox.ready');
+    recorded.events = [];
+    await reconcileSandboxes();
+    expect(recorded.events.map((event) => event.type)).not.toContain('sandbox.ready');
+  });
+});
+
 describe('template env', () => {
   afterEach(() => {
     broker = undefined;

@@ -3,6 +3,7 @@ import { vpsProviderBootstrapsMigration } from './bootstraps.js';
 import {
   vpsSandboxesMigration,
   vpsTemplateEnvMigration,
+  vpsTemplateNetworkMigration,
   vpsWarmClaimsMigration,
 } from './sandboxes.js';
 import { vpsSandboxSnapshotsMigration } from './snapshots.js';
@@ -121,4 +122,5 @@ export const vpsMigrations: readonly Migration[] = Object.freeze([
   vpsSandboxSnapshotsMigration,
   vpsWarmClaimsMigration,
   vpsTemplateEnvMigration,
+  vpsTemplateNetworkMigration,
 ]);

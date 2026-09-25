@@ -5,6 +5,7 @@ import { anyPack } from '@bufbuild/protobuf/wkt';
 import {
   CommandBodySchema,
   InstanceDesiredState,
+  InstanceNetworkPolicy,
   InstancesSectionSchema,
   type InstanceSpecSchema,
   decodeMessage,
@@ -119,6 +120,22 @@ describe('FakeHypervisor snapshot round trip', () => {
       state: 'running',
     });
     expect(target.domains.get('inst_cold')?.memory).toBeUndefined();
+  });
+
+  it("records each domain's network policy (egress unless the spec says otherwise)", () => {
+    const host = new FakeHypervisor({ runtimes: ['cloud-hypervisor'] });
+    host.converge(
+      section([
+        spec('inst_none', { networkPolicy: InstanceNetworkPolicy.NONE }),
+        spec('inst_private', { networkPolicy: InstanceNetworkPolicy.PRIVATE }),
+        spec('inst_default'),
+      ]),
+    );
+    expect(host.domains.get('inst_none')?.networkPolicy).toBe('none');
+    expect(host.domains.get('inst_private')?.networkPolicy).toBe('private');
+    expect(host.domains.get('inst_default')?.networkPolicy).toBe('egress');
+    host.converge(section([spec('inst_none')]));
+    expect(host.domains.get('inst_none')?.networkPolicy).toBe('egress');
   });
 });
 

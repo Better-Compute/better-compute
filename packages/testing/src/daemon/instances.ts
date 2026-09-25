@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { MessageInitShape } from '@bufbuild/protobuf';
 import {
+  InstanceNetworkPolicy,
   InstanceDesiredState,
   InstanceObservedState,
   SectionState,
@@ -60,7 +61,17 @@ export interface FakeDomain {
    * snapshot and comes back in a domain restored from it (sandboxes, §3.7).
    */
   memory?: string;
+  /**
+   * (v0.5) What the host lets the guest reach (`InstanceSpec.network_policy`): `egress`, `private`
+   * (the pool subnet and the host) or `none` (the host only). bcd enforces it on the taps.
+   */
+  networkPolicy: 'egress' | 'private' | 'none';
 }
+
+const NETWORK_POLICY: Partial<Record<InstanceNetworkPolicy, FakeDomain['networkPolicy']>> = {
+  [InstanceNetworkPolicy.PRIVATE]: 'private',
+  [InstanceNetworkPolicy.NONE]: 'none',
+};
 
 /** What `FakeHypervisor.snapshot` captured: the upload an `instance.snapshot` command reports. */
 export interface FakeSnapshot {
@@ -241,6 +252,7 @@ export class FakeHypervisor {
           addresses,
           userData,
           boots: 0,
+          networkPolicy: NETWORK_POLICY[spec.networkPolicy] ?? 'egress',
           ...(restore ? { restoredFrom: hex(restore.sha256) } : {}),
         };
         // A memory snapshot brings its guest memory back (when the store holds the object).
@@ -261,6 +273,7 @@ export class FakeHypervisor {
         domain.gpus = [...spec.gpuDeviceIds];
         domain.addresses = addresses;
         domain.macs = macs;
+        domain.networkPolicy = NETWORK_POLICY[spec.networkPolicy] ?? 'egress';
         for (const [tap, owner] of [...this.taps]) if (owner === id) this.taps.delete(tap);
         spec.nics.forEach((_, index) => this.taps.set(tapName(id, index), id));
       }
@@ -345,6 +358,7 @@ export class FakeHypervisor {
       addresses: [],
       userData: '',
       boots: 1,
+      networkPolicy: 'egress',
     });
   }
 
