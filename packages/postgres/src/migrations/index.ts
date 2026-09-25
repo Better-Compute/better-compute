@@ -20,6 +20,7 @@ import { partitionedHistoryMigration } from './0018_partitioned_history.js';
 import { outboxDeadLettersMigration, outboxDeadLettersTables } from './0019_outbox_dead_letters.js';
 import { commandCreatedAtMigration } from './0020_command_created_at.js';
 import { signedSpecsMigration } from './0021_signed_specs.js';
+import { sshCertificateSessionsMigration } from './0022_ssh_certificate_sessions.js';
 
 /**
  * Every table the base schema creates, in creation order. Partitions of the history tables
@@ -53,6 +54,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   outboxDeadLettersMigration,
   commandCreatedAtMigration,
   signedSpecsMigration,
+  sshCertificateSessionsMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

@@ -81,6 +81,7 @@ describe('migrate', () => {
       'core/0019_outbox_dead_letters',
       'core/0020_command_created_at',
       'core/0021_signed_specs',
+      'core/0022_ssh_certificate_sessions',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -371,6 +372,15 @@ describe('outbox dead letters and command latency (core/0019, core/0020)', () =>
     );
     expect(rows).toEqual([{ is_nullable: 'NO', column_default: 'compute_now()' }]);
     expect(await indexDefinition('commands_settled')).toMatch(/\(updated_at\) WHERE \(state = ANY/);
+  });
+
+  it('records the issuing session of SSH certificates and indexes the outstanding ones (core/0022)', async () => {
+    const { rows } = await db.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'ssh_certificates' AND column_name IN ('session_id', 'reauthorized_at') ORDER BY 1`,
+    );
+    expect(rows.map((row) => row.column_name)).toEqual(['reauthorized_at', 'session_id']);
+    expect(await indexDefinition('ssh_certificates_outstanding')).toMatch(/\(expires_at\) WHERE \(revoked_at IS NULL\)/);
   });
 
   it('keeps a node spec signed bytes next to it (core/0021)', async () => {

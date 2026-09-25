@@ -155,6 +155,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0019_outbox_dead_letters',
       'core/0020_command_created_at',
       'core/0021_signed_specs',
+      'core/0022_ssh_certificate_sessions',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });
