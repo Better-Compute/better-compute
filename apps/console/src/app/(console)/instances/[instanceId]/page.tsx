@@ -62,6 +62,10 @@ export default function InstancePage({ params }: { params: Promise<{ instanceId:
                     <Link href={`/instances/${encodeURIComponent(instanceId)}/terminal`}>
                       Open a terminal
                     </Link>
+                    {' · '}
+                    <Link href={`/instances/${encodeURIComponent(instanceId)}/console`}>
+                      Serial console
+                    </Link>
                   </p>
                 )}
               </section>
