@@ -75,6 +75,7 @@ describe('migrate', () => {
       'core/0013_image_cache',
       'core/0014_ssh_certificates',
       'core/0015_inventory_images',
+      'core/0016_duplicate_identity',
     ]);
     expect(await db.migrate()).toEqual({ applied: names, skipped: [] });
     expect(await db.migrate()).toEqual({ applied: [], skipped: names });
@@ -319,6 +320,19 @@ describe('audit commit order (core/0005)', () => {
     } finally {
       await fresh.close();
     }
+  });
+});
+
+describe('duplicate-identity counters (core/0016)', () => {
+  it('adds the Hello alternation window to node_sessions', async () => {
+    const { rows } = await db.query<{ column_name: string; column_default: string | null }>(
+      `SELECT column_name, column_default FROM information_schema.columns
+        WHERE table_name = 'node_sessions' AND column_name IN ('duplicate_hellos', 'duplicate_since') ORDER BY 1`,
+    );
+    expect(rows).toEqual([
+      { column_name: 'duplicate_hellos', column_default: '0' },
+      { column_name: 'duplicate_since', column_default: null },
+    ]);
   });
 });
 
