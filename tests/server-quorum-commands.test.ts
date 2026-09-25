@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { fromBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { afterEach, describe, expect, it } from 'vitest';
 import { defineModule, manualClock, shardOf, type SqlExecutor } from '@better-compute/core';
 import { setSimClock, useSimClock } from '@better-compute/postgres';
@@ -12,7 +12,7 @@ import {
   generateP256KeyPair,
   signBatchApproval,
 } from '@better-compute/pki';
-import { CommandBodySchema } from '@better-compute/protocol';
+import { CommandBodySchema, site } from '@better-compute/protocol';
 import { betterCompute, pkiJoinCrypto } from '@better-compute/server';
 import { fakeIam } from '@better-compute/testing';
 import { ACME, OTHER, options } from './support/server.js';
@@ -42,6 +42,16 @@ const destroyer = defineModule({
       timeout: '10m',
       roles: ['node'],
       payload: { kind: 'message', typeName: 'acme.Wipe' },
+    },
+    // As metal registers it (destructive; review 7 HIGH-1).
+    {
+      kind: 'site.httpProxy',
+      lane: 'control',
+      retrySafe: false,
+      destructive: true,
+      timeout: '1m',
+      roles: ['node'],
+      payload: { kind: 'message', typeName: 'bettercompute.site.v1.HttpProxyRequest' },
     },
   ],
 });
@@ -121,8 +131,47 @@ async function setup(withApprovers: boolean, unbatchedDestructivePerHour = 0) {
         [id],
       )
     ).rows[0]!;
-  return { compute, approvers, batch, enqueue, row };
+  return { compute, approvers, batch, enqueue, row, commands };
 }
+
+describe('site.httpProxy under the quorum (review 9)', () => {
+  const request = (method: string) =>
+    toBinary(
+      site.HttpProxyRequestSchema,
+      create(site.HttpProxyRequestSchema, { targetNodeId: 'node_b', url: 'https://10.1.0.9:50000/', method }),
+    );
+  const proxy = (s: Awaited<ReturnType<typeof setup>>, method: string, key: string, batchId?: string) =>
+    db!.transaction((tx) =>
+      s.commands.enqueue(tx, {
+        nodeId: 'node_a',
+        kind: 'site.httpProxy',
+        payload: request(method),
+        idempotencyKey: key,
+        notAfter: T0 + 600_000,
+        ...(batchId ? { batchId } : {}),
+      }),
+    );
+
+  it('runs a state-changing request only under a leaf bound to its exact payload', async () => {
+    // Break-glass allowance on, so the unbatched path is not refused as batch-required first.
+    const s = await setup(true, 5);
+    await expect(proxy(s, 'POST', 'p1')).rejects.toMatchObject({ details: { reason: 'bound-leaf-required' } });
+    expect(await proxy(s, 'GET', 'g1')).toMatchObject({ id: expect.any(String) });
+    const unbound = await s.batch(ACME, [{ subject: 'node:node_b', kind: 'site.httpProxy' }]);
+    await expect(proxy(s, 'POST', 'p2', unbound.batchId)).rejects.toMatchObject({
+      details: { reason: 'bound-leaf-required' },
+    });
+    expect(await proxy(s, 'GET', 'g2', unbound.batchId)).toMatchObject({ id: expect.any(String) });
+    const bound = await s.batch(ACME, [
+      {
+        subject: 'node:node_b',
+        kind: 'site.httpProxy',
+        payloadSha256: new Uint8Array(createHash('sha256').update(request('POST')).digest()),
+      },
+    ]);
+    expect(await proxy(s, 'POST', 'p3', bound.batchId)).toMatchObject({ id: expect.any(String) });
+  });
+});
 
 describe('CommandQueue batches (v1.0 quorum, §13)', () => {
   it('holds a batched command until the quorum approves, with batch_id in its signed body', async () => {

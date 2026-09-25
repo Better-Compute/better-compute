@@ -19,11 +19,13 @@ import {
   AgentRole as WireRole,
   CommandBodySchema,
   commandKinds as wireKinds,
+  decodeMessage,
   encodeMessage,
   encodeMessageJson,
   Lane as WireLane,
   MAX_COMMAND_BODY_BYTES,
   ProtocolError,
+  site as siteProto,
   type CommandBody,
 } from '@better-compute/protocol';
 import { batchSubject, commandKindAllowed } from '@better-compute/pki';
@@ -439,6 +441,19 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
           payloadSha256: createHash('sha256').update(payload).digest(),
         });
         batch = { id: command.batchId, subject, held, leafSha256 };
+      }
+      // (review 9) With a quorum, a site.httpProxy that can change state (any method but GET) runs
+      // only under a leaf bound to its exact payload: the agent refuses it under an "any payload" leaf
+      // or the unbatched allowance, so approvers always see the request they allow. Early warning.
+      if (input.quorum && spec.kind === 'site.httpProxy' && !batch?.leafSha256.length) {
+        const method = decodeMessage(siteProto.HttpProxyRequestSchema, payload).method.toUpperCase();
+        if (method !== 'GET')
+          throw new ComputeError(
+            'INVALID_STATE',
+            `site.httpProxy ${method} needs a batch leaf bound to its exact payload`,
+            undefined,
+            { reason: 'bound-leaf-required', kind: spec.kind },
+          );
       }
       const body = encodeCommandBody({
         id,
