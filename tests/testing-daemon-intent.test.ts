@@ -15,8 +15,7 @@ import {
   wrapCommand,
   type CommandBody,
 } from '@better-compute/protocol';
-// Until server exports it (runtime/command-signing.ts).
-import { createCommandSigner } from '../packages/server/src/runtime/command-signing.js';
+import { createCommandSigner } from '@better-compute/server';
 import {
   createDaemonHarness,
   type DaemonHarness,

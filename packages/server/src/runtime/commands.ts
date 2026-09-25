@@ -25,6 +25,7 @@ import {
   type CommandBody,
 } from '@better-compute/protocol';
 import { commandKindAllowed } from '@better-compute/pki';
+import type { CommandSigner } from './command-signing.js';
 import type { CommitHook } from './commit-hooks.js';
 
 // The durable command queue (PLAN.md §7.4, §8.5) and the CommandSweeper. Enqueue runs in the
@@ -289,6 +290,8 @@ export interface CommandQueueInput {
   registry: RegistryView;
   notifier?: Notifier;
   afterCommit(hook: CommitHook): void;
+  /** Worker command signing (`createCommandSigner`); without it commands go unsigned (v0.1). */
+  signer?: Pick<CommandSigner, 'sign'>;
 }
 
 /** `ctx.commands`. */
@@ -345,9 +348,9 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
       });
       const inserted = await tx.query<{ id: string; seq: number | bigint }>(
         `INSERT INTO commands (id, node_id, seq, kind, body, state, not_before, not_after,
-           min_generation, retry_safe, self_terminating, attested, idempotency_key)
+           min_generation, retry_safe, self_terminating, attested, idempotency_key, signature)
          VALUES ($1, $2, $3, $4, $5, 'pending', COALESCE($6::timestamptz, compute_now()), $7, $8,
-           $9, $10, $11, $12)
+           $9, $10, $11, $12, $13)
          ON CONFLICT (node_id, idempotency_key) DO NOTHING
          RETURNING id, seq`,
         [
@@ -363,6 +366,9 @@ export function createCommandQueue(input: CommandQueueInput): CommandQueue {
           spec.selfTerminating ?? false,
           spec.attested ?? false,
           command.idempotencyKey,
+          // Signed intent (§13): every command, when a worker signer is configured; daemons require
+          // it for the kinds their own table marks destructive.
+          input.signer ? input.signer.sign(body) : null,
         ],
       );
       if (!inserted.rows[0]) {

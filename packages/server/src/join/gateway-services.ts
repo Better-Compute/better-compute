@@ -29,21 +29,31 @@ import {
   type WorkQueue,
 } from '@better-compute/core';
 import { createSecretBroker, type SecretBrokerOptions } from './secret-broker.js';
-import type {
-  JoinRequest,
-  JoinResponse,
-  RenewRequest,
-  RenewResponse,
-  SecretRequest,
-  SecretResponse,
+import { create, toBinary } from '@bufbuild/protobuf';
+import {
+  SignedTrustBundleSchema,
+  TrustBundleSchema,
+  type JoinRequest,
+  type JoinResponse,
+  type RenewRequest,
+  type RenewResponse,
+  type SecretRequest,
+  type SecretResponse,
+  type SignedTrustBundle,
 } from '@better-compute/protocol';
-import type { JoinCrypto } from './crypto.js';
+import type { JoinCrypto, JoinTrustBundle } from './crypto.js';
 import { createJoinService, type GatewayCallContext, type JoinService } from './service.js';
 
 export interface GatewayServices {
   join(request: JoinRequest, context?: GatewayCallContext): Promise<JoinResponse>;
   renew(request: RenewRequest, context?: GatewayCallContext): Promise<RenewResponse>;
   secret(request: SecretRequest, context?: GatewayCallContext): Promise<SecretResponse>;
+  /**
+   * `Welcome.trust` (v0.2 signed intent): the command-signing roots, signed by the JoinService key
+   * (purpose `trust-bundle`) so a gateway relays it without holding a key (P14). Undefined without
+   * `pki.commandSigning` or JoinService keys.
+   */
+  trustBundle?(): Promise<SignedTrustBundle | undefined>;
 }
 
 export interface GatewayServicesInput {
@@ -70,6 +80,8 @@ export interface GatewayServicesInput {
   secrets?: readonly SecretStore[];
   /** Allocation-bound refs a module knows about (see `SecretBrokerOptions.allocationRefs`). */
   allocationRefs?: SecretBrokerOptions['allocationRefs'];
+  /** The command-signing trust bundle (`JoinResponse.trust`, and signed for `Welcome.trust`). */
+  trustBundle?: JoinTrustBundle;
 }
 
 /** JoinService behind the gateway-facing interface. */
@@ -84,7 +96,27 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
     ...(input.authz ? { authz: input.authz } : {}),
     ...(input.log ? { log: input.log } : {}),
     ...(input.rootTenantId ? { rootTenantId: input.rootTenantId } : {}),
+    ...(input.trustBundle ? { trustBundle: input.trustBundle } : {}),
   });
+  // Signed once per process (the roots change only with a restart or a new version).
+  let signedBundle: Promise<SignedTrustBundle | undefined> | undefined;
+  const trustBundle = async (): Promise<SignedTrustBundle | undefined> => {
+    const bundle = input.trustBundle ?? input.pki?.join?.trustBundle;
+    const crypto = input.pki?.join;
+    if (!bundle || !crypto) return undefined;
+    const body = toBinary(
+      TrustBundleSchema,
+      create(TrustBundleSchema, {
+        version: bundle.version,
+        commandSigningRoots: [...bundle.commandSigningRoots],
+      }),
+    );
+    const signature = await crypto.sign('trust-bundle', [body]);
+    return create(SignedTrustBundleSchema, {
+      body,
+      signature: { kid: signature.kid, sig: signature.sig, chain: [...(signature.chain ?? [])] },
+    });
+  };
   const broker = input.secrets?.length
     ? createSecretBroker({
         database: input.database,
@@ -106,5 +138,10 @@ export function createGatewayServices(input: GatewayServicesInput): GatewayServi
       if (!broker) throw notImplemented('The secret broker', 'v0.2');
       return broker.secret(request, context);
     },
+    trustBundle: () =>
+      (signedBundle ??= trustBundle().catch((error: unknown) => {
+        signedBundle = undefined; // retry on the next Welcome
+        throw error;
+      })),
   });
 }

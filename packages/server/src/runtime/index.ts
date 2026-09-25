@@ -269,6 +269,8 @@ export function createRuntime(options: ResolvedOptions): Runtime {
           registry,
           ...(options.notifier ? { notifier: options.notifier } : {}),
           afterCommit: options.afterCommit,
+          // Signed intent (v0.2): every command signed by this worker's key (`pki.commandSigning`).
+          ...(options.commandSigner ? { signer: options.commandSigner } : {}),
         }),
         events: eventPublisher,
         authz: authzWriter,

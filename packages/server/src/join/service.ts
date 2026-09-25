@@ -32,7 +32,7 @@ import {
 import { requestAcceptance } from '../controllers/lifecycle.js';
 import { nodeWorkKind, refreshNodeAuthz } from '../controllers/node-state.js';
 import { joinTokenAttestor, type JoinTokenRefusal } from './attestor.js';
-import type { JoinCrypto, JoinSignature } from './crypto.js';
+import type { JoinCrypto, JoinSignature, JoinTrustBundle } from './crypto.js';
 import {
   claimedHardwareKey,
   coreClaims,
@@ -79,6 +79,11 @@ export interface JoinServiceOptions {
   rootTenantId?: string;
   /** `security.join.refused` events per (attestor, reason) per minute (default 60). */
   refusalEventsPerMinute?: number;
+  /**
+   * `JoinResponse.trust`: the command-signing roots daemons verify signed intent against (§13),
+   * from `pki.commandSigning`. Wins over `crypto.trustBundle`.
+   */
+  trustBundle?: JoinTrustBundle;
 }
 
 /** What JoinService records about a refused join (`security.join.refused`). */
@@ -700,7 +705,7 @@ export function createJoinService(options: JoinServiceOptions): JoinService {
         ],
       );
 
-      const bundle = crypto.trustBundle;
+      const bundle = options.trustBundle ?? crypto.trustBundle;
       const body: JoinResponseBody = {
         $typeName: 'bettercompute.agent.v1.JoinResponseBody',
         nodeId,

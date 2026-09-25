@@ -75,6 +75,8 @@ export type { CallerIdentity, NoInput, SystemApi, WhoAmI } from './system.js';
 export { serverVersion, wellKnownJoinKeys } from './version.js';
 export type { ServerInfo, WellKnownJoinKeys } from './version.js';
 export * from './join/index.js';
+export { commandTrustBundle, createCommandSigner } from './runtime/command-signing.js';
+export type { CommandSigner, CommandSignerOptions } from './runtime/command-signing.js';
 export * from './controllers/index.js';
 export * from './nodes-module.js';
 export * from './site-boot-module.js';
@@ -318,6 +320,8 @@ export function betterCompute<
       rootTenantId: resolved.rootTenantId,
       // The secret broker (SecretRequest → JWE) over the same stores as `ctx.secrets`.
       secrets: resolved.secretStores,
+      // Signed intent: command-signing roots in JoinResponse.trust and (signed) Welcome.trust.
+      ...(resolved.trustBundle ? { trustBundle: resolved.trustBundle } : {}),
     }),
     initialize,
     async start(startOptions = {}) {

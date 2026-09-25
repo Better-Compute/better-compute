@@ -22,8 +22,9 @@ import {
   type SqlExecutor,
 } from '@better-compute/core';
 import type { CapacityModuleOptions } from '@better-compute/capacity';
-import { localSealedSecretStore } from '@better-compute/pki';
-import type { JoinCrypto } from './join/crypto.js';
+import { localSealedSecretStore, type CommandSigningAuthority } from '@better-compute/pki';
+import type { JoinCrypto, JoinTrustBundle } from './join/crypto.js';
+import { createCommandSigner, type CommandSigner } from './runtime/command-signing.js';
 import type { TunnelsOptions } from './tunnels/module.js';
 import { anchoredClock } from './runtime/clock.js';
 import { withCommitHooks, type CommitHook } from './runtime/commit-hooks.js';
@@ -131,6 +132,19 @@ export interface ComputeOptions<
      * Their public halves (`publicKeys()`) are served in `/.well-known/better-compute` as `join`.
      */
     join?: JoinCrypto;
+    /**
+     * Signed intent (v0.2, §13): the command-signing root (pki `createCommandSigningAuthority`, or
+     * the PKI bundle's `commandSigning`). Every command is then signed by a 24 h worker key it
+     * certifies, and JoinResponse/Welcome carry its root so daemons can require signatures for
+     * destructive kinds.
+     */
+    commandSigning?: Pick<CommandSigningAuthority, 'certificate' | 'issueWorkerKey'>;
+    /**
+     * Roots still trusted during a rotation (the old root while daemons move to the new one), and
+     * the trust bundle's version (default 1): bump it whenever the roots change.
+     */
+    commandSigningRoots?: readonly Uint8Array[];
+    trustVersion?: number | bigint;
   };
   secrets?: SecretStore[];
   /**
@@ -187,6 +201,10 @@ export interface ResolvedOptions {
   capacity: CapacityModuleOptions;
   /** JoinService's keys and node CA, when configured. */
   join?: JoinCrypto;
+  /** Signs every command (`pki.commandSigning`); absent: commands go unsigned (v0.1). */
+  commandSigner?: CommandSigner;
+  /** The command-signing roots and version daemons get (JoinResponse.trust, Welcome.trust). */
+  trustBundle?: JoinTrustBundle;
   /**
    * The secret stores behind `ctx.secrets` and the `secrets` group: `secrets`, or by default
    * `sealed_secrets` in the compute database under the deployment secret (`sealedSecrets`).
@@ -320,6 +338,9 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
   const secretStores: readonly SecretStore[] = configuredStores.length
     ? configuredStores
     : [localSealedSecretStore({ sql: hooks.database, keys: options.secret })];
+  const clock = options.clock ?? anchoredClock();
+  const worker = resolveWorker(options.worker);
+  const signing = resolveCommandSigning(options.pki, worker.id, clock);
 
   return {
     database: hooks.database,
@@ -330,19 +351,51 @@ export function resolveOptions(options: ComputeOptions<any, any>): ResolvedOptio
     origin: baseURL.origin,
     basePath,
     acceptIamCookie: options.acceptIamCookie ?? false,
-    clock: options.clock ?? anchoredClock(),
+    clock,
     log,
     ...(options.notifier ? { notifier: options.notifier } : {}),
     eventSinks,
     iamJobs: resolveIamJobs(options.iamJobs ?? []),
-    worker: resolveWorker(options.worker),
+    worker,
     ports,
     capacity,
     ...(join ? { join } : {}),
+    ...signing,
     secretStores,
     sealedSecrets: configuredStores.length === 0,
     afterCommit: hooks.afterCommit,
     inTransaction: hooks.inTransaction,
+  };
+}
+
+/** `pki.commandSigning` → the worker's command signer and the trust bundle daemons get. */
+function resolveCommandSigning(
+  pki: ComputeOptions<any, any>['pki'],
+  workerId: string,
+  clock: Clock,
+): { commandSigner?: CommandSigner; trustBundle?: JoinTrustBundle } {
+  const authority = pki?.commandSigning;
+  if (authority === undefined) {
+    if (pki?.commandSigningRoots !== undefined || pki?.trustVersion !== undefined)
+      throw invalid('pki.commandSigningRoots and pki.trustVersion need pki.commandSigning');
+    return {};
+  }
+  requireMethods(authority, 'pki.commandSigning', ['issueWorkerKey']);
+  if (!(authority.certificate instanceof Uint8Array))
+    throw invalid('pki.commandSigning.certificate must be the root certificate (DER)');
+  const extra = pki?.commandSigningRoots ?? [];
+  if (!Array.isArray(extra) || !extra.every((root) => root instanceof Uint8Array))
+    throw invalid('pki.commandSigningRoots must be DER certificates');
+  const version = pki?.trustVersion ?? 1;
+  if (
+    !(typeof version === 'bigint' || (typeof version === 'number' && Number.isInteger(version))) ||
+    BigInt(version) < 1n
+  )
+    throw invalid('pki.trustVersion must be a whole number of at least 1');
+  const commandSigner = createCommandSigner({ authority, workerId, clock, additionalRoots: extra });
+  return {
+    commandSigner,
+    trustBundle: { version: BigInt(version), commandSigningRoots: [...commandSigner.roots] },
   };
 }
 

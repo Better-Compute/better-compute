@@ -11,8 +11,7 @@ import {
 } from '@better-compute/pki';
 import { SignatureSchema } from '@better-compute/protocol';
 import { createRealtimeScheduler, createWsDialer, FakeDaemon } from '@better-compute/testing';
-// Until server exports it (runtime/command-signing.ts).
-import { createCommandSigner } from '../packages/server/src/runtime/command-signing.js';
+import { createCommandSigner } from '@better-compute/server';
 import { gatewayFixture, SITE, type GatewayFixture } from './support/gateway.js';
 
 // Signed intent through a real gateway (PLAN.md §13, v0.2 exit: "unsigned destructive commands are
