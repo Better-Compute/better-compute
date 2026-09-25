@@ -140,10 +140,15 @@ describe('tenancy', () => {
       await advance(5_000);
       expect(await poke(USER, ACME, 'w4')).toMatchObject({ poked: 'w4' });
 
-      // Deleted: refused from the inbox commit on, even with IAM down; everything is refused.
+      // Deleted: a teardown cannot be undone, so the event alone is not trusted: nothing changes until IAM
+      // confirms it (IAM has already ended the tenant's sessions); then everything is refused.
       iamStates = [{ tenantId: ACME_CHILD, status: 'deleted' }];
       iamDown = true;
       await deliver('iam:tenants:delete', ACME_CHILD);
+      await tick();
+      expect(await poke(CHILD, ACME_CHILD, 'w5a')).toMatchObject({ poked: 'w5a' });
+      iamDown = false;
+      await advance(5_000);
       await expect(poke(CHILD, ACME_CHILD, 'w5')).rejects.toMatchObject({
         code: 'TENANT_SUSPENDED',
       });
@@ -152,7 +157,6 @@ describe('tenancy', () => {
         details: { state: 'deleted' },
       });
       expect(await poke(USER, ACME, 'w6')).toMatchObject({ poked: 'w6' });
-      iamDown = false;
 
       // The teardown runs until every module is done: the one still releasing is asked again by the sweep (30 s).
       await tick();
@@ -205,9 +209,9 @@ describe('tenancy', () => {
         context: compute.context,
         tenants: { invalidate: compute.tenants.invalidate },
       });
-      const deliver = (action: string) =>
+      const deliver = (action: string, tenantId = 'tenant-gone') =>
         db.transaction((tx) =>
-          bare(tx, { tenantId: ROOT, action, subjectId: 'tenant-gone', metadata: {} }),
+          bare(tx, { tenantId, action, subjectId: 'tenant-gone', metadata: {} }),
         );
       await deliver('iam:tenants:update');
       const states = async () =>
@@ -216,6 +220,9 @@ describe('tenancy', () => {
             `SELECT state FROM compute_tenant_states WHERE tenant_id = 'tenant-gone'`,
           )
         ).rows.map((row) => row.state);
+      expect(await states()).toEqual([]);
+      // An event naming another tenant than its own is not trusted with a teardown.
+      await deliver('iam:tenants:delete', ROOT);
       expect(await states()).toEqual([]);
       await deliver('iam:tenants:delete');
       expect(await states()).toEqual(['deleted']);

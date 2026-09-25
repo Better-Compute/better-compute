@@ -202,11 +202,13 @@ describe('host.iam', () => {
     const tx = sql as never;
     // The handler runs in the inbox transaction and asks IAM nothing (§8.1): the tenancy reconciler re-reads.
     const reconcile = () => compute.jobs['tenancy']!.tick();
-    // Without readTenants: a deletion of the named tenant only; an update is not read.
-    await installed.tenant!(tx, event('iam:tenants:delete', 'ten_gone'));
+    // Without readTenants: only the deletion of the event's own tenant (never another one it names); an update
+    // is not read.
+    await installed.tenant!(tx, event('iam:tenants:delete', 'ten_other'));
+    await installed.tenant!(tx, event('iam:tenants:delete', 'ten_a'));
     await installed.tenant!(tx, event('iam:tenants:update', 'ten_a'));
     await reconcile();
-    expect(await states()).toEqual([{ tenant_id: 'ten_gone', state: 'deleted' }]);
+    expect(await states()).toEqual([{ tenant_id: 'ten_a', state: 'deleted' }]);
     // With it: the suspension of a parent reaches its children.
     const asked: string[] = [];
     installIamHandlers(compute, {
@@ -224,8 +226,8 @@ describe('host.iam', () => {
     await reconcile();
     expect(asked).toEqual(['ten_parent']);
     expect(await states()).toEqual([
+      { tenant_id: 'ten_a', state: 'deleted' },
       { tenant_id: 'ten_child', state: 'suspended' },
-      { tenant_id: 'ten_gone', state: 'deleted' },
       { tenant_id: 'ten_parent', state: 'suspended' },
     ]);
     const context = { compute: {} as never, options: {} as never, env: {}, cwd: '.' };

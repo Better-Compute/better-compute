@@ -69,9 +69,11 @@ describe('tenancy under the fleet simulator (§12.8)', () => {
       ),
     ).toMatchObject({ id: ids[0], state: 'active' });
 
-    // IAM deletes acme: refused at once, and the teardown releases its reservations.
+    // IAM deletes acme: refused once the reconciler's IAM read confirms it, and the teardown releases its
+    // reservations.
     iamStates = [{ tenantId: acmeId, status: 'deleted' }];
     await deliver('iam:tenants:delete');
+    await r.run(5_000);
     await expect(
       r.api(() =>
         r.compute.api.reservations.get(acme, { tenantId: acmeId, reservationId: ids[0]! } as never),

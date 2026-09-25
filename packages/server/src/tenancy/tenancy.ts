@@ -1,7 +1,8 @@
 // Tenancy (PLAN.md §12.8 `iam:tenants:update|delete` → "suspend admissions; schedule teardown and purge"), hosted:
 // - `compute_tenant_states` mirrors the IAM tenants that are not active (suspended or deleted). The IAM bridge's
-//   `tenant` handler (`tenantStateHandler`) runs in the inbox transaction, so it makes no IAM call (§8.1): it records a
-//   deleted tenant at once and queues a `sync:<tenant>` key; the `tenancy` reconciler then re-reads the tenant's
+//   `tenant` handler (`tenantStateHandler`) runs in the inbox transaction, so it makes no IAM call (§8.1): it queues a
+//   `sync:<tenant>` key (without a reader it can only record the deletion of the event's own tenant); the `tenancy`
+//   reconciler then re-reads the tenant's
 //   subtree from IAM outside any transaction (a suspension or deletion cascades to descendants, and the audit event
 //   names only the tenant acted on), retrying with back-off while IAM is down. A periodic `resync` re-reads the
 //   whole tree from the root as the backstop for anything missed;
@@ -282,17 +283,22 @@ export function tenantStateHandler(
     if (event.action !== 'iam:tenants:update' && event.action !== 'iam:tenants:delete') return;
     const tenantId = event.subjectId || event.tenantId;
     if (!tenantId) return;
-    // Only SQL in the inbox transaction: a deletion of the named tenant is certain without asking IAM, so it is
-    // refused from this commit on; the subtree (and any suspension) comes from the reconciler's IAM read.
-    const changed =
-      event.action === 'iam:tenants:delete'
-        ? await applyTenantStates(
-            tx,
-            compute.context,
-            [{ tenantId, status: 'deleted' }],
-            event.action,
-          )
-        : [];
+    // Only SQL in the inbox transaction. A teardown cannot be undone, so the event alone is not trusted with one:
+    // with a reader, every state (a deletion included) is applied only once the reconciler's IAM read confirms it
+    // (IAM has already ended the tenant's sessions). Without one, only the deletion of the event's own tenant
+    // applies (better-iam audits `tenants.setStatus` with tenant = resource = the target).
+    const deleteNow =
+      event.action === 'iam:tenants:delete' &&
+      options.readTenants === undefined &&
+      tenantId === event.tenantId;
+    const changed = deleteNow
+      ? await applyTenantStates(
+          tx,
+          compute.context,
+          [{ tenantId, status: 'deleted' }],
+          event.action,
+        )
+      : [];
     if (sync) await compute.context.work.enqueue(tx, tenancyWorkKind, `${syncPrefix}${tenantId}`);
     // This process reloads the gate before its next call; others within the gate's refresh (5 s).
     if (changed.length > 0) compute.tenants?.invalidate();
