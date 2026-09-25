@@ -120,7 +120,8 @@ export function assertPlacementRequest(request: PlacementRequest): void {
     fail('during must be a non-empty interval');
 }
 
-const archived: PlacementOutcome = Object.freeze({
+/** An archived pool takes no new placements (`pools.archive`). */
+export const archived: PlacementOutcome = Object.freeze({
   status: 'pending',
   reason: 'the pool is archived',
 }) as PlacementOutcome;

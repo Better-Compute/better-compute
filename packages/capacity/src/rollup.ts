@@ -1,5 +1,6 @@
 import type { DeviceClass, SqlTx } from '@better-compute/core';
 import { nodeBucket, type CapacityBucket, type EligibilityPool } from './eligibility.js';
+import { scalarCapacity } from './pipeline.js';
 import { readDevices, readNodeResources, readPoolNodes } from './store.js';
 
 // pool_capacity_rollup (PLAN.md §10.2, §10.6): kept current by deltas in the booking transaction and
@@ -110,7 +111,7 @@ export async function rebuildPoolRollup(
     for (const [resource, scalar] of Object.entries(resources)) {
       if (bucket === 'excluded') continue;
       const entry = of(resource);
-      addToBucket(entry, bucket, Math.floor(scalar.allocatable * scalar.ratio));
+      addToBucket(entry, bucket, scalarCapacity(scalar));
       entry.allocated += scalar.allocated;
     }
   }

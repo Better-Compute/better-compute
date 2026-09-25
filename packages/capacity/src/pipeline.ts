@@ -249,12 +249,21 @@ function fitDevices(
   };
 }
 
+/**
+ * A scalar's capacity, `floor(allocatable × ratio)`, as the database computes it in numeric: in
+ * float, 100 × 0.29 is 28.999…96 and would lose the last unit (the SQL guards allow 29). The
+ * epsilon only absorbs that rounding; the guarded commit still decides.
+ */
+export function scalarCapacity(scalar: { allocatable: number; ratio: number }): number {
+  return Math.floor(scalar.allocatable * scalar.ratio + 1e-9);
+}
+
 function fitScalars(request: PlacementRequest, node: NodeView): true | string {
   for (const [resource, need] of Object.entries(request.resources ?? {})) {
     if (need <= 0) continue;
     const scalar = node.resources[resource];
     if (!scalar) return `no ${resource}`;
-    const room = Math.floor(scalar.allocatable * scalar.ratio) - scalar.allocated;
+    const room = scalarCapacity(scalar) - scalar.allocated;
     if (need > room) return `${resource}: ${need} requested, ${Math.max(0, room)} free`;
   }
   return true;

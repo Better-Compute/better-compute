@@ -52,6 +52,7 @@ import {
 } from './spot.js';
 import { loadNodeViews, lockPool, readPool, readPoolNodes, type PoolRow } from './store.js';
 import {
+  archived,
   bulkCommittable,
   commitPlansBulk,
   observePlacement,
@@ -1071,13 +1072,25 @@ export async function placeQueued(
   if (batch.length === 0) return { placed: 0, pending: 0, more: false };
   const checkout = options.cache ? await options.cache.checkout(tx, pool, now) : undefined;
   const index = checkout?.index ?? (await PoolIndex.load(tx, pool, now));
-  await lockPool(tx, poolId);
+  const locked = await lockPool(tx, poolId);
   const context = { ...deps.placement, clock: deps.clock };
   const { rows: raw } = await tx.query<RawReservation>(
     `SELECT ${reservationColumns} FROM reservations WHERE id = ANY($1::text[])`,
     [batch.map((entry) => entry.id)],
   );
   const byId = new Map(raw.map((entry) => [entry.id, toReservation(entry)]));
+  // The index (read before the lock, or cached) may predate an archive: the locked row decides.
+  // Nothing new lands in an archived pool; each stays pending with the reason, as inline placement
+  // answers, and the index is not handed back.
+  if (locked.archived) {
+    for (const { id } of batch) {
+      const row = byId.get(id);
+      if (!row || row.state !== 'pending') continue;
+      const start = Math.max(row.request.start ?? now, now);
+      await settlePlacement(deps, tx, row, { start, end: start + requestedDuration(row) }, archived);
+    }
+    return { placed: 0, pending: batch.length, more: false };
+  }
 
   // 1. Plan every simple request on the index (each recorded tentatively for the next ones), then
   //    commit them with set-based statements. The rest, and whatever lost a race, go one by one.

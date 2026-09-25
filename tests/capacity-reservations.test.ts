@@ -2350,6 +2350,20 @@ describe('the v0.4 pool-lease placer', () => {
     });
   });
 
+  it('places nothing in a pool archived after its reservations were queued', async () => {
+    const queued = [await queue('a1', 2), await queue('a2', 2)];
+    await db.query(`UPDATE pools SET archived_at = compute_now() WHERE id = $1`, [poolId]);
+    await runBatch();
+    for (const reservation of queued)
+      expect(await get(reservation.id)).toMatchObject({
+        state: 'pending',
+        conditions: [
+          expect.objectContaining({ type: 'Unschedulable', message: 'the pool is archived' }),
+        ],
+      });
+    expect((await db.query(`SELECT 1 FROM allocations`)).rows).toEqual([]);
+  });
+
   it('lets a waiting create follow its queued reservation to placed (poll, §9.1)', async () => {
     const create_ = batchApi.reservations.create as unknown as {
       poll: {

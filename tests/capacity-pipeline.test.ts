@@ -20,6 +20,7 @@ import {
   parseSelector,
   planPlacement,
   quotaDemand,
+  scalarCapacity,
   summarizeRejections,
 } from '@better-compute/capacity';
 
@@ -352,6 +353,16 @@ describe('planPlacement (§10.3)', () => {
     );
     expect(plan.ranked.map((entry) => entry.nodeId)).toEqual(['m']);
     expect(new Set(plan.ranked[0]!.atoms).size).toBe(5);
+  });
+});
+
+describe('scalarCapacity', () => {
+  it('floors allocatable × ratio as the database does in numeric, not a float short of it', () => {
+    // In float, 100 × 0.29 is 28.999…96; the SQL guards allow 29.
+    expect(100 * 0.29).toBeLessThan(29);
+    expect(scalarCapacity({ allocatable: 100, ratio: 0.29 })).toBe(29);
+    expect(scalarCapacity({ allocatable: 64, ratio: 1.5 })).toBe(96);
+    expect(scalarCapacity({ allocatable: 7, ratio: 0.5 })).toBe(3);
   });
 });
 

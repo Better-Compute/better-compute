@@ -8,7 +8,7 @@ import type {
   TimeRange,
 } from '@better-compute/core';
 import { dedicatedTenant, mayBeSchedulable } from './eligibility.js';
-import { missingNodeLabel } from './pipeline.js';
+import { missingNodeLabel, scalarCapacity } from './pipeline.js';
 import { before, partialScorer, type Candidate, type CandidateCounts } from './shortlist.js';
 import {
   readDeviceLinks,
@@ -272,7 +272,7 @@ export class PoolIndex {
         const need = resources[resource]!;
         if (!(need > 0)) continue;
         const scalar = scalars[resource];
-        if (!scalar || scalar.allocated + need > Math.floor(scalar.allocatable * scalar.ratio))
+        if (!scalar || scalar.allocated + need > scalarCapacity(scalar))
           return undefined;
       }
     }
