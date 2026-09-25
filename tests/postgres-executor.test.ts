@@ -148,6 +148,7 @@ describe.skipIf(!url)('postgres() on PostgreSQL', () => {
       'core/0012_v02_evidence',
       'core/0013_image_cache',
       'core/0014_ssh_certificates',
+      'core/0015_inventory_images',
     ]);
     expect((await db.migrate()).applied).toEqual([]);
   });

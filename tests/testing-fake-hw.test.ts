@@ -117,7 +117,8 @@ describe('fakeHardware()', () => {
     );
     const one = inventoryHashes(fakeHardware({ seed: 1 }).inventory);
     const two = inventoryHashes(fakeHardware({ seed: 2 }).inventory);
-    expect(Object.keys(one)).toEqual([...INVENTORY_SECTIONS]);
+    // Fake GPU hosts have no image cache, so no `images` section.
+    expect(Object.keys(one)).toEqual(INVENTORY_SECTIONS.filter((s) => s !== 'images'));
     for (const name of ['system', 'disks', 'nics', 'gpus', 'bmc'])
       expect(one[name]).not.toEqual(two[name]);
     for (const name of ['cpu', 'memory', 'os']) expect(one[name]).toEqual(two[name]);
@@ -191,7 +192,7 @@ describe('fakeHardware()', () => {
     expect(cpu.inventory.gpus).toBeUndefined();
     expect(cpu.gpuUuids).toEqual([]);
     expect(Object.keys(inventoryHashes(cpu.inventory))).toEqual(
-      INVENTORY_SECTIONS.filter((s) => s !== 'gpus'),
+      INVENTORY_SECTIONS.filter((s) => s !== 'gpus' && s !== 'images'),
     );
   });
 });

@@ -589,6 +589,7 @@ export function canonicalizeInventory(inventory: NodeInventory): void {
     }
   }
   if (os) os.runtimes.sort(byCodeUnits);
+  if (inventory.images) sortBy(inventory.images.images, (image) => Buffer.from(image.sha256).toString('hex'));
 }
 
 /**

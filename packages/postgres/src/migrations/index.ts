@@ -13,6 +13,7 @@ import { v02SecurityMigration, v02SecurityTables } from './0011_v02_security.js'
 import { v02EvidenceMigration, v02EvidenceTables } from './0012_v02_evidence.js';
 import { imageCacheMigration, imageCacheTables } from './0013_image_cache.js';
 import { sshCertificatesMigration, sshCertificatesTables } from './0014_ssh_certificates.js';
+import { inventoryImagesMigration } from './0015_inventory_images.js';
 
 /** Every table the base schema creates, in creation order. */
 export const baseTables = Object.freeze([...base0002Tables, ...v01Tables, ...deviceHealthTables, ...runtimeTables, ...v02ServerTables, ...v02SecurityTables, ...v02EvidenceTables, ...imageCacheTables, ...sshCertificatesTables]);
@@ -36,6 +37,7 @@ export const baseMigrations: readonly Migration[] = Object.freeze([
   v02EvidenceMigration,
   imageCacheMigration,
   sshCertificatesMigration,
+  inventoryImagesMigration,
 ]);
 
 /** `compute_schema_version.version` after the base schema is applied: one per base migration. */

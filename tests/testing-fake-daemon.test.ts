@@ -373,7 +373,8 @@ describe('session', () => {
     expect(hello.journalId).toBe(h.daemon.journalId);
     expect(hello.drivers.map((d) => d.id)).toEqual(['nvidia']);
     const sections = encodeInventorySections(h.daemon.hardware.inventory);
-    expect(Object.keys(hello.inventoryHashes)).toEqual([...INVENTORY_SECTIONS]);
+    // Every section a GPU host has; `images` comes only from nodes with an image cache.
+    expect(Object.keys(hello.inventoryHashes)).toEqual(INVENTORY_SECTIONS.filter((s) => s !== 'images'));
     for (const s of sections) expect(hello.inventoryHashes[s.name]).toEqual(s.sha256);
     expect(h.daemon.welcomed).toBe(true);
     expect(h.daemon.epoch).toBe(1);
@@ -411,7 +412,7 @@ describe('session', () => {
     await h.advance(90_000);
     const beats = h.server.of('heartbeat');
     expect(beats).toHaveLength(10);
-    expect(Object.keys(beats[9]!.inventoryHashes)).toHaveLength(INVENTORY_SECTIONS.length);
+    expect(Object.keys(beats[9]!.inventoryHashes)).toHaveLength(INVENTORY_SECTIONS.length - 1);
     expect(beats[9]!.credits.find((c) => c.lane === Lane.BULK)?.credits).toBe(2);
   });
 

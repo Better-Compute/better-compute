@@ -4,6 +4,7 @@ import {
   CpuSectionSchema,
   DisksSectionSchema,
   GpusSectionSchema,
+  ImagesSectionSchema,
   MemorySectionSchema,
   NicsSectionSchema,
   OsSectionSchema,
@@ -26,6 +27,8 @@ export const INVENTORY_SECTIONS = [
   'gpus',
   'bmc',
   'os',
+  // The runtime's local image cache (vps hosts, deploy caches); only nodes that have one send it.
+  'images',
 ] as const;
 /** A NodeInventory v1 section name. */
 export type InventorySectionName = (typeof INVENTORY_SECTIONS)[number];
@@ -40,6 +43,7 @@ export const inventorySectionSchemas = {
   gpus: GpusSectionSchema,
   bmc: BmcSectionSchema,
   os: OsSectionSchema,
+  images: ImagesSectionSchema,
 } as const;
 /** The decoded content of one inventory section. */
 export type InventorySectionContent<N extends InventorySectionName> = MessageShape<

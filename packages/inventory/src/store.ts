@@ -10,6 +10,7 @@ import {
 } from '@better-compute/core';
 import { INVENTORY_SECTIONS, type InventorySectionName } from '@better-compute/protocol';
 import { devicesFromGpus, planDevices, poolSharing, type GpuSharing, type StoredDevice } from './devices.js';
+import { applyImageCache } from './image-cache.js';
 import { diffInventory } from './diff.js';
 import { hardwareKey } from './hardware-key.js';
 import { applyInventoryHealth, healthWorkKind, inventoryHealthFindings, type HealthFinding } from './health.js';
@@ -241,6 +242,7 @@ export async function applyInventory(
     if (options.work && health.some((finding) => finding.noSchedule)) await options.work.enqueue(tx, healthWorkKind, nodeId);
     const devices = await applyDevices(tx, nodeId, sections, poolSharing(node.sharing, node.policy));
     await applyLabels(tx, nodeId, sections);
+    await applyImageCache(tx, nodeId, sections.images);
 
     // Hardware key: trusted keys are unique. A second node with the same trusted key is a
     // DuplicateIdentity (a cloned disk image, or a reclaimed board): this node keeps the key
