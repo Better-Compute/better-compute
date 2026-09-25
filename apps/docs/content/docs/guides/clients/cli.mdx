@@ -250,19 +250,26 @@ better-compute events watch --url https://compute.example.com --path /api/comput
 - It needs `--url` (`UNSUPPORTED` without it): it follows a running server's stream. `--path` defaults to `/watch`,
   the route the examples' hosts mount; the console app serves `/api/compute/watch`.
 - `--tenant` is sent as `?tenantId=`, which the host's watch authorizer decides as `events.list` for that tenant.
-- Each line carries the event's `sequence`, and `--since` is meant to resume after one. It reconnects after a broken
-  connection from the last event, and stops on Ctrl-C, after `--count` events, or on a refusal (a revoked session, a
-  withdrawn `compute:events:read`).
+- Each line carries the event's `sequence`, the stream's cursor, and `--since` resumes after one: pass the last
+  `sequence` a previous run printed (86706b4). It reconnects after a broken connection from the last event, and stops
+  on Ctrl-C, after `--count` events, or on a refusal (a revoked session, a withdrawn `compute:events:read`).
 - `--types` takes up to 20 type patterns; they and `--since` are checked before it connects.
 - Lines are terminal-safe: DEL, the C1 controls and U+2028/U+2029, which JSON leaves raw, are escaped as `\uXXXX`.
 
-<Callout type="warn" title="--since does not take the server's cursors yet">
-The CLI accepts `--since` only in the form `<digits>:<digits>`, but the stream's sequences, like every event cursor
-the server makes, are `<txid>.<seq>` (`88213.51120`; `formatCursor` in `@better-compute/events`). A sequence copied
-from a printed line is therefore refused as a usage error, and resuming with `--since` does not work against a real
-server. Within one run the reconnects resume on their own; across runs, use the typed client's `$watch` with
-`lastEventId`.
-</Callout>
+The two event commands take different cursors. Both name an outbox position, but each command accepts only its own
+form and refuses the other's as a usage error:
+
+| Command | Flag | Form | Where it comes from |
+| --- | --- | --- | --- |
+| `events watch` | `--since` | `<txid>.<seq>`, with a dot (`184467.12`) | The `sequence` of a line the stream printed (`formatCursor` in `@better-compute/events`) |
+| `events list` | `--cursor` | `<txid>:<seq>`, with a colon (`184467:12`) | The `nextCursor` of the previous `events.list` page |
+
+```bash
+# resume a watch after the last event a previous run printed
+better-compute events watch --url https://compute.example.com --since 184467.12 --count 100
+# page through the tenant's events
+better-compute events list --limit 100 --cursor 184467:12
+```
 
 See [watch](/docs/guides/events/watch).
 
@@ -332,7 +339,10 @@ certificates, or whose certificate expired) is refused with `INVALID_STATE` and 
 with a note that its key is trusted on first use for this connection. The account must be a Unix
 account name (`INVALID_RESPONSE` otherwise). The command after `--` runs remotely; without one you get a login shell. The temporary directory is
 removed afterwards, whatever happened, and the CLI exits with ssh's own status (`REMOTE_EXIT`). Like the other tunnel
-commands it needs `--url`, and `sandboxes.exec` needs a signed-in session rather than an API key.
+commands it needs `--url`, and `sandboxes.exec` needs a signed-in session rather than an API key. Today it is refused
+(`INVALID_STATE`, `restore-shares-identity`) while a memory restore and its source, or two restores of one memory
+snapshot, are live together, since they share one SSH identity; see
+[restore](/docs/guides/vps/sandboxes#restore).
 
 The guest is untrusted, so the connection is hardened against it and against the command you pass:
 

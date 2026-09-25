@@ -158,8 +158,8 @@ archived`, as inline placement answers.
 `nodeLabels` (v0.2) is checked on every path: the pipeline filter above, the SQL shortlist (a `node_labels` check
 added only when the request names labels, so other requests pay nothing) and the pool-lease index, which memoizes
 its rankings per label set. The labels a request usually needs are the ones the gateway writes at every `Hello`:
-each driver the daemon advertises becomes the system label `bc.dev/driver.<id>=<version>` (see
-[inventory and health](/docs/guides/nodes/inventory-and-health)). Plans read labels without locks, and the commit
+each driver the daemon advertises becomes the system label `bc.dev/driver.<id>=<version>`, and each kind it serves
+`bc.dev/driver-kind.<id>.<kind>=1` (14ceb1e; see [labels](/docs/guides/nodes/inventory-and-health#labels)). Plans read labels without locks, and the commit
 reads the locked nodes' labels again (bb6da07, in `commitPlan` and `commitPlansBulk`), so a label that went away in
 between, such as a capability a downgraded daemon no longer advertises, makes that commit a lost race, and the placer
 replans without the node. A value of `'*'` (`anyLabelValue`) asks only for the label to exist, whatever its value,

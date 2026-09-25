@@ -97,7 +97,7 @@ content.
 | `node_id`, `role` | Who is speaking; checked against the certificate |
 | `boot_id` | The kernel boot id, which changes on every boot |
 | `journal_id` | The journal's id, which changes when the journal is lost |
-| `daemon_version`, `proto_min`, `proto_max`, `capabilities`, `drivers` | Versions and what the daemon offers; each driver becomes the node label `bc.dev/driver.<id>=<version>` |
+| `daemon_version`, `proto_min`, `proto_max`, `capabilities`, `drivers` | Versions and what the daemon offers; each driver becomes the node label `bc.dev/driver.<id>=<version>`, and each kind it serves `bc.dev/driver-kind.<id>.<kind>=1` (14ceb1e) |
 | `last_epoch` | The last epoch the daemon saw; diagnostics only |
 | `applied_generation`, `applied_spec_hash` | The newest desired state it holds, and that spec's hash |
 | `unacked_results` | Terminal command results the control plane has not acknowledged |

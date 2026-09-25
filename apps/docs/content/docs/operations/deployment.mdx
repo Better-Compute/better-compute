@@ -288,6 +288,19 @@ certificate exists.
 `dev --sim` adopts machines and serves `/watch`. The PostgreSQL and emulated-site walkthroughs are not run in CI
 beyond that.
 
+The PostgreSQL walkthrough joins machines from a signed release (5792b2b): the api role serves goreleaser's `dist`
+through `BETTER_COMPUTE_DOWNLOADS_DIR`, `daemon install-script` takes `--release-manifest` and `--release-pins` so the
+script pins the binary's digest from the manifest, and the join token comes from `join-tokens create --out`. A site
+agent that drives IPMI BMCs adds `--install-plugins bcx-ipmi`, and `--unprivileged` runs `bcd node` beside a root
+`bcd helper`:
+
+```bash
+better-compute daemon install-script --pool pool_… --site site_… \
+  --gateway-url https://gw.eu-1.compute.example.com:8443 --base-url https://compute.example.com \
+  --bcd-version 0.1.0 --release-manifest dist/manifest.json --release-pins sha256/… --out install.sh
+better-compute join-tokens create --pool pool_… --ttl 2h --max-uses 8 --out join-token
+```
+
 The shared composition reads these variables:
 
 | Variable | Effect |
@@ -299,6 +312,7 @@ The shared composition reads these variables:
 | `BETTER_COMPUTE_GATEWAY_PORT`, `BETTER_COMPUTE_REGION` | Gateway port (default 8443) and region (default `dev-1`) |
 | `BETTER_COMPUTE_METRICS_TOKEN` | At least 16 characters; mounts `GET /metrics` |
 | `BETTER_COMPUTE_RELEASE_PINS`, `BETTER_COMPUTE_DOWNLOADS_URL` | Turn on the rollout module |
+| `BETTER_COMPUTE_DOWNLOADS_DIR` | goreleaser's `dist` directory (the bare `bcd` binaries and the plugin archives), absolute or relative to the working directory: the deployment then serves `GET /api/compute/downloads/{bcd,bcx-ipmi}/{version}/linux-{arch}` from it (`downloads: { dir }`), for install scripts, plugin installs and self-update. Without `BETTER_COMPUTE_DOWNLOADS_URL`, the rollout module's `downloadsUrl` becomes `{BETTER_COMPUTE_BASE_URL}/api/compute/downloads` (5792b2b) |
 | `BETTER_COMPUTE_BASE_URL`, `BETTER_COMPUTE_ROOT_TENANT` | Public origin and IAM root tenant |
 
 <Callout type="warn" title="No IAM in the examples">

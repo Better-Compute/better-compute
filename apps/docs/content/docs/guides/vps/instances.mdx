@@ -523,20 +523,21 @@ through its `Runtime` interface. Both are written, and a host build runs each on
 - `libvirt-kvm` (362317c), with `virsh`: `virsh -c qemu:///system` and `qemu-img`, a host-passthrough CPU, domains
   marked as bcd's in their metadata (others are reported as unmanaged and never touched), and `iso` images booted
   from a cdrom.
-- `cloud-hypervisor` (2598f0a), with the `cloud-hypervisor` binary: one VMM per instance, started as a systemd
-  transient unit `bcd-ch-<id>` so the VM outlives bcd, and driven over its REST API; bcd's own `vm.json` per
-  instance says what it owns, since cloud-hypervisor keeps no registry. It boots disk images only (`iso` is
-  refused), and needs `systemd-run` and the firmware at `/usr/share/cloud-hypervisor/CLOUDHV.fd`, which
-  `bcd doctor` checks.
+- `cloud-hypervisor` (2598f0a), with the `cloud-hypervisor` binary: one VMM per instance, started as a confined
+  systemd transient unit `bcd-ch-<id>.service` in `bcd-instances.slice` so the VM outlives bcd, and driven over its
+  REST API; bcd's own `vm.json` per instance says what it owns, since cloud-hypervisor keeps no registry. It boots
+  disk images only (`iso` is refused), and needs `systemd-run` and the firmware at
+  `/usr/share/cloud-hypervisor/CLOUDHV.fd`, which `bcd doctor` checks.
 
-<Callout type="warn" title="cloud-hypervisor is not production-safe">
-Security review 12 found two open high-severity issues in bcd's `cloud-hypervisor` runtime: when a guest reboots,
-its tap interfaces are recreated off the policed bridge, so the instance firewall (anti-spoofing, the `private` and
-`none` network policies) no longer applies to them; and the VMM, which runs as root, follows the qcow2 backing file
-a tenant's image names, which could expose the host's disk or another tenant's disk. Do not give a pool of tenant
-instances the `cloud-hypervisor` runtime. `libvirt-kvm` is being checked for the backing-file issue; that check has
-not concluded.
-</Callout>
+Both runtimes treat a tenant's image as hostile (security review 12, fixed in 933c51b). Every base image is checked
+with `qemu-img info -f <declared format>` when it is downloaded and again each time an instance uses it, and so are
+a restored snapshot's disk and seed: an image that names a backing file or an external data file, is not its
+declared format, or is `raw` or `iso` but probes as another format is refused, which fails that instance. On
+`cloud-hypervisor` each instance's taps exist, on their bridge, before its VMM starts, so a guest reboot never puts
+a tap outside the instance firewall; the VMM's unit sees only its own instance directory and base image, opens only
+KVM, tun and (with GPUs) VFIO devices, and is bounded by the flavor's memory, vCPUs and a task limit; and a memory
+snapshot restores only into an instance with the same vCPUs and memory. See
+[the runtimes](/docs/daemon/delivery#the-runtimes).
 
 Both give a 60-second graceful shutdown, VFIO GPUs, a serial console for instance console tunnels, and snapshots and
 restores that refuse another runtime or CPU model; see [the runtimes](/docs/daemon/delivery#the-runtimes). Both have

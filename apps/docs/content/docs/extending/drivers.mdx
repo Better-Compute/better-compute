@@ -66,8 +66,8 @@ each kind is data: a binding on the node, inherited from its pool's hardware pro
   implemented and tested.
 - **The built-in drivers run in bcd, partly.** They live inside `bcd site` and `bcd ramdisk`, the Go daemon's v0.2
   modes, which are written but not released. Redfish (with BIOS settings, RAID layouts and firmware updates), PXE
-  and iPXE, image streaming and kexec are there. IPMI power and boot device run in `bcx-ipmi`, a bcx plugin the site
-  agent hosts (51806ab); vendor BMCs are not there. See [what bcd does today](/docs/daemon#what-bcd-does-today).
+  and iPXE, image streaming and kexec are there. IPMI power, boot device and inspection run in `bcx-ipmi`, a bcx plugin the
+  site agent hosts (51806ab, 7818f19); vendor BMCs are not there. See [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
   instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
 - **bcx works in TypeScript and in bcd.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to
@@ -282,34 +282,58 @@ on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 
 ### bcx-ipmi, the IPMI driver
 
-`daemon/cmd/bcx-ipmi` is the first Go plugin in the repository (51806ab): driver `ipmi`, kinds `power` and
-`management`, `runsOn: site`, over `ipmitool` with IPMI-over-LAN (`-I lanplus`).
+`daemon/cmd/bcx-ipmi` is the first Go plugin in the repository (51806ab): driver `ipmi`, kinds `power`,
+`management` and, since 7818f19, `inspect`, `runsOn: site`, over `ipmitool` with IPMI-over-LAN (`-I lanplus`).
 
 | Operation | `ipmitool` command | Answer |
 | --- | --- | --- |
 | `power.getPower` | `chassis power status` | `{"power":"on"}` or `{"power":"off"}` |
 | `power.setPower` (`action`) | `chassis power on`, `off`, `cycle`, `reset` or `soft` (`shutdown` is `soft`) | `{}` |
 | `management.setBootDevice` (`device`, `persistent`) | `chassis bootdev pxe`, `disk`, `cdrom` or `bios` (`hdd` is `disk`, `cd` is `cdrom`), plus `options=persistent` | `{}` |
+| `inspect.inspect` | `fru print 0` and `chassis power status` (required), then `mc info`, `lan print` and `sdr list` (best effort) | The Redfish driver's shape, less the host's NICs and UUID (below) |
 
-- **Config** is `{ "address": "10.0.0.5[:623]" }`: a host name or IP address with an optional port (a `scheme://`
-  prefix is stripped). Anything else is `invalid-address`.
-- **Credentials** come as the secrets `username` and `password`. The password reaches `ipmitool` only through its
-  environment (`IPMI_PASSWORD` with `-E`), never its arguments, so it never shows in a process listing; the child
-  gets only `PATH` besides. A username outside `[A-Za-z0-9._@-]{1,64}` or a missing password is
-  `credentials-unavailable`.
+`inspect.inspect` answers:
+
+| Field | From |
+| --- | --- |
+| `manufacturer`, `model`, `serialNumber` | The builtin FRU (`fru print 0`): `Product Manufacturer`, `Product Name`, `Product Serial`, falling back to the board's (and for the serial the chassis') fields |
+| `power` | `chassis power status` |
+| `macs`, `ipAddresses` | Always empty: IPMI does not name the host's NICs reliably. `productUuid` is left out for the same reason |
+| `board` | `{ manufacturer, product, serial }` from the FRU's board fields |
+| `bmc` | `{ firmware, manufacturer }` from `mc info` and `{ mac, ipAddress }` from `lan print`: the BMC's own identity, not the host's |
+| `sensors` | `{ count, ok, problems }` from `sdr list`; `problems` names at most 32 sensors whose status is neither `ok` nor `ns` |
+
+A failed FRU read or power read fails the operation; a failed `mc info`, `lan print` or `sdr list` only leaves its
+part out. Each `ipmitool` run is a separate process with the password through its own pipe.
+
+- **Config** is `{ "address": "10.0.0.5[:623]", "cipherSuite": 17 | 3 }`: a host name or IP address with an
+  optional port (a `scheme://` prefix is stripped; anything else is `invalid-address`), and the RMCP+ cipher suite,
+  17 (HMAC-SHA256, AES-128) by default or 3 for BMCs without 17; any other value is `invalid-config` (933c51b). The
+  site agent's config today carries only the address and the BMC's key pin, so a metal operation always runs with
+  suite 17.
+- **No key pin.** IPMI has no TLS, so a BMC enrolled with a `tlsSpkiSha256` pin is refused (`pin-unsupported`) rather
+  than driven unpinned: use a Redfish driver, or remove the pin.
+- **Credentials** come as the secrets `username` and `password`. The password reaches `ipmitool` through a pipe it
+  reads once (`-f /dev/fd/3`), never its arguments (a process listing) nor its environment (readable in `/proc` by
+  any process of the same user); an IPMI 2.0 password has at most 20 bytes. `ipmitool` runs by absolute path (the
+  first of `/usr/bin`, `/usr/sbin`, `/usr/local/bin` and `/usr/local/sbin` that has it) with a fixed
+  `PATH=/usr/sbin:/usr/bin:/sbin:/bin` and nothing else in its environment (933c51b). A username outside
+  `[A-Za-z0-9._@-]{1,64}`, a missing password or a longer one is `credentials-unavailable`.
 - **Arguments** are checked against fixed sets before anything runs: an unknown action or device is `invalid-args`,
   and any other operation is `unsupported-operation`.
-- **Failures.** Each call has 30 seconds (`unreachable`, retryable, on timeout); a failing `ipmitool` is `bmc-error`
-  (retryable) with the first line of its output. `Health` is `NOT_SERVING` when `ipmitool` is not installed.
+- **Failures.** Each `ipmitool` run has 30 seconds (`unreachable`, retryable, on timeout); a failing `ipmitool` is
+  `bmc-error` (retryable) with the first line of its output. `Health` is `NOT_SERVING` when `ipmitool` is not
+  installed.
 
-It covers power and boot device only: virtual media, inspection, firmware, BIOS, RAID and credential rotation stay
+It covers power, boot device and inspection: virtual media, firmware, BIOS, RAID and credential rotation stay
 Redfish's. goreleaser builds it without cgo and ships it as `bcx-ipmi_<version>_linux_{amd64,arm64}.tar.gz` (348ff56),
 and the api's downloads route serves that archive (97b2ac2; see
 [serving the binaries](/docs/daemon/install#serving-the-binaries)); `daemon install-script --install-plugins bcx-ipmi`
 installs it with its pin after checking the archive against the signed release manifest (adf2ae9; see
 [installing plugins from the release](/docs/daemon/install#installing-plugins-from-the-release)). To use it, have it
-in a site agent's `[plugins] dir` (below) and enroll the machine's BMC with driver `ipmi`; metal's stock enrollment runs an
-out-of-band inspection that IPMI does not serve here (see [IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi)).
+in a site agent's `[plugins] dir` (below) and enroll the machine's BMC with driver `ipmi`, without a key pin and with
+its PXE `macs`, since IPMI inspection finds none; see
+[IPMI through bcx-ipmi](/docs/guides/bare-metal/bmc#ipmi-through-bcx-ipmi) for what metal can and cannot do with it.
 Its tests run it against a fake `ipmitool` only.
 
 ## Out-of-process drivers: bcx
@@ -548,9 +572,12 @@ test runs bcd with a plugin against the control plane yet.
 
 The control plane does not merge `Hello.drivers` into its driver registry. What it does with them today is label
 the node: at every `Hello` the gateway writes each advertised driver as the system label
-`bc.dev/driver.<id>=<version>`, and each `Hello` capability as `bc.dev/cap.<name>=1` (such as
-`bc.dev/cap.instance.network-policy`), and drops the ones no longer advertised, so placement can require a runtime or
-a capability with `PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)). The FakeDaemon
+`bc.dev/driver.<id>=<version>`, each kind a driver serves as `bc.dev/driver-kind.<id>.<kind>=1` (14ceb1e; kinds
+outside `[a-z][a-z0-9-]`, 1 to 32 characters, skipped, at most 32 per driver), and each `Hello` capability as
+`bc.dev/cap.<name>=1` (such as `bc.dev/cap.instance.network-policy`), and drops the ones no longer advertised, so
+placement can require a runtime, a driver's kind or a capability with `PlacementRequest.nodeLabels`, `'*'` matching
+any value. The kind labels are meant for BMC steps that check a site agent's driver serves a concern before they run
+(`bc.dev/driver-kind.ipmi.inspect`); no metal step reads them yet (see [placement](/docs/guides/capacity/placement#eligibility-filters)). The FakeDaemon
 only advertises an `nvidia` driver of kind `config` on GPU hosts. PLAN.md's v0.5 acceptance includes "a third-party TS driver runs on a
 node via bcx" and a Kata `runtime` plugin in Go (walkthrough 4).
 

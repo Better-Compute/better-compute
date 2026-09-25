@@ -544,7 +544,7 @@ function in a real `sh` against real archives, including a wrong digest, a symli
 
 `bcd helper` (28dc2ae, PLAN.md §6, v0.4) lets `bcd node` run as an unprivileged account while a root process beside
 it does the privileged work: the CDI specs, allocation env files and sshd files bcd owns, the `bcd_instances`
-nftables table, GPU resets, reboots and sshd reloads. [Privilege separation](/docs/daemon#privilege-separation)
+and `bcd_taps` nftables tables, GPU resets, reboots and sshd reloads. [Privilege separation](/docs/daemon#privilege-separation)
 describes the operations and the checks. The mode is opt-in: generate the script with `--unprivileged` (169c459).
 
 ```bash

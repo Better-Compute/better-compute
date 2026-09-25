@@ -218,7 +218,8 @@ and bcd has it since 28dc2ae:
 - **Typed operations, not paths.** Files are named by kind and id (`cdi`, `allocation-env`, `ssh-dropin`, `ssh-ca`,
   `ssh-krl`, `ssh-principals`); the helper builds the path from its own table, refuses a symlink or non-directory on
   the way down, caps a file at 1 MiB and writes it atomically without following a symlink at the target. A ruleset
-  must stay inside `table bridge bcd_instances` (no other table, no `include`, `define` or `ruleset`); `gpu.reset`
+  must stay inside `table bridge bcd_instances` and `table inet bcd_taps` (no other table or family, no `include`,
+  `define` or `ruleset`); `gpu.reset`
   names only a GPU in the host's own inventory; a reboot reason is cut to 200 bytes.
 - **Everything is logged.** Each operation and each refused caller is logged with the caller's pid.
 - **Self-update without trusting the node** (2d67b25). The slots and the upgrade and release records live in root's
@@ -262,7 +263,10 @@ bcx driver plugins run next to bcd, which runs as root as installed, so bcd conf
   `ptrace` and `process_vm_*`, the keyring, `perf_event_open`, `userfaultfd`, `open_by_handle_at`, raw I/O ports,
   clock changes, `acct`, `quotactl`, `lookup_dcookie` and `syslog` with `EPERM`, and kills a call from a foreign ABI.
 - **Bounded and reaped.** `[plugins] cgroup` puts each plugin in its own child cgroup with `memory_max` and
-  `pids_max`; every plugin has its own process group, dies with bcd and is killed as a group on close.
+  `pids_max`; every plugin has its own process group, dies with bcd and is killed as a group on close, and with a
+  cgroup also through `cgroup.kill`, so a child that left the group with `setsid` dies too (933c51b). The handshake
+  line is at most 64 KiB, each plugin message at most 16 MiB, and `Describe` is bounded by the handshake timeout, so
+  a plugin that never answers does not hold up bcd's start.
 
 The install script's `bcd.service` stays as tight as before on nodes without plugins. On a node whose `config.toml`
 has a `[plugins]` section (`daemon install-script --plugins`), the script adds a drop-in,
@@ -330,8 +334,9 @@ forwarded requests are refused. Since the metadata service and instance tunnels 
 guards every instance tap with host nftables rules (only the NIC's own MAC, IP addresses, EUI-64 link-local address
 and ARP; each guarded address bound to its own tap so no other bridge port can send from it or claim it; on every
 tap, guarded or not, no DHCP server reply, router advertisement or redirect, and never the host's own bridge
-addresses; no foreign neighbour advert), trusts only addresses those loaded rules bind to an instance, counts the
-table's rules every 5 seconds so a flushed table or chain is caught and loaded again at once, and never serves an
+addresses; no foreign neighbour advert), trusts only addresses those loaded rules bind to an instance, drops traffic from or to
+a tap that is off its bridge (the `inet bcd_taps` backstop), counts the tables' rules every 5 seconds so a flushed
+table or chain is caught and loaded again at once, and never serves an
 address two instances claim or a loopback caller. See [workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels, tickets and break-glass SSH
@@ -376,10 +381,25 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
   `secrets.put`, never fleet-scoped ones, and naming them decides `compute:secrets:manage` (on the fleet too in the root tenant, whose store
   also holds fleet secrets). An update that changes what the guest runs is decided on the template's secrets even
   when it names none, and each new instance re-checks them.
+- **A rotated secret leaves the warm pool.** Warm guests hold resolved secret values, so each records the
+  `secret_refs.version` of every secret it got; after a rotation or delete, claims skip and retire the stale ones
+  (falling back to a cold create) and the reconciler replaces them (2c7072b, review 13 L4).
 - **Snapshots are the owner's.** A snapshot holds memory and `/etc/sandbox/env`, so it belongs to the sandbox's owner,
   whoever took it, and only that owner can restore it (`NOT_FOUND` for anyone else in the tenant); someone allowed
-  to snapshot another user's sandbox cannot boot its memory as their own. A deleted snapshot's object is purged only
-  once its upload settled and no live instance restores from it.
+  to snapshot another user's sandbox cannot boot its memory as their own. An agent restores only snapshots of
+  sandboxes it created itself, a restore runs only under its snapshot's own template (so memory captured under a
+  `none` network never resumes under `egress`), and an owner who leaves without a successor has every snapshot
+  dropped (7b01053, security review 13). A deleted snapshot's object is purged only once its upload settled and no
+  live instance restores from it.
+- **No exec into a shared identity.** A memory restore resumes with its source's sshd principal and host key, so a
+  certificate for one such guest would open the others. Today `sandboxes.exec` refuses with `INVALID_STATE`
+  (`restore-shares-identity`) while another live guest of the tenant shares the sandbox's identity: the source, a
+  sibling restore of the same snapshot, or a restore of the sandbox itself (87ff2c5, review 13 H2). Disk-only
+  restores are not affected. The refusal stays until bcd gives a restored guest its own identity.
+- **Replays and races.** A sandbox create's idempotency hash covers the caller's agent and delegation, so an agent
+  cannot replay its person's key (or the reverse) to take over a sandbox, and a template update decided on one set
+  of secrets is refused (`CONFLICT`, `secrets-changed`) if the template names others by the time it writes
+  (7b01053).
 - **The CLI treats the guest as hostile.** `sandbox exec` puts `--` before the host, so a generated command is never
   an ssh option, and turns off agent and X11 forwarding, port forwardings, proxies, connection sharing and local
   commands for that connection. CLI output strips control characters from server text (table cells, string results,
@@ -390,6 +410,15 @@ A sandbox is a tenant VM for code you do not trust, often written by an agent. T
   loaded, and vps refuses `private` or `none` on a pool without an IP range. Such instances are placed only on hosts
   labelled `bc.dev/cap.instance.network-policy`, since an older bcd would drop the policy and give full egress.
   `private` spans the pool's whole IPAM subnet, other tenants' instances included on a shared pool.
+
+- **The tenant's image is hostile to the host.** Both bcd runtimes check every base image, and every restored
+  snapshot's disk and seed, with `qemu-img info -f <declared format>`, and refuse one that names a backing file or an
+  external data file, is not its declared format, or is `raw` or `iso` but probes as another format, so the root
+  hypervisor never opens a host disk or another instance's disk for a guest (security review 12, 933c51b). On
+  `cloud-hypervisor` each VMM runs in a confined `bcd-ch-<id>.service` unit that sees only its own instance directory
+  and base image, opens only KVM, tun and VFIO devices, and is bounded by its flavor; its taps are on their bridge
+  before it starts; and a memory snapshot restores only into the same vCPUs and memory, with its configuration
+  rebuilt from an allowlist. See [the runtimes](/docs/daemon/delivery#the-runtimes).
 
 - **The guest is pinned too.** With `vps({ sandboxExec: { certifyHostKey } })`, each guest presents a host key the
   sandbox CA certified (its private key only in sealed user data), and `sandbox exec` checks it with

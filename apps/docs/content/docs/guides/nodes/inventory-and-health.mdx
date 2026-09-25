@@ -233,6 +233,13 @@ writes nothing when they did not change. Operators cannot overwrite them either.
 instance whose runtime is not built into `bcd` (`libvirt-kvm`, `cloud-hypervisor`) is placed only on hosts carrying
 `bc.dev/driver.<runtime>`.
 
+Since 14ceb1e the same statement also writes one label per kind each advertised driver serves,
+`bc.dev/driver-kind.<id>.<kind>=1` (a site agent hosting `bcx-ipmi` carries `bc.dev/driver-kind.ipmi.power`,
+`.management` and `.inspect`), and drops the ones a later `Hello` no longer lists. Kinds outside `[a-z][a-z0-9-]`
+(1 to 32 characters) are skipped, and at most 32 are read per driver. A placement or selector can require one with
+`'*'`, as for driver labels. These labels are groundwork for BMC steps that check a site agent's driver serves a
+concern before they run; no metal step reads them yet.
+
 ### The hardware key
 
 The hardware key identifies the machine rather than its operating system. It is the SHA-256 over the normalized

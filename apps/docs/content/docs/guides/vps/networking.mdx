@@ -5,7 +5,7 @@ metaTitle: VPS networking and pool IPAM
 icon: Network
 status: beta
 packages: ['@better-compute/vps']
-sources: ['packages/vps/src/ipam.ts', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'PLAN.md']
+sources: ['packages/vps/src/ipam.ts', 'packages/vps/src/migrations.ts', 'packages/vps/src/instances.ts', 'packages/vps/src/lifecycle.ts', 'packages/server/src/controllers/nodespec.ts', 'proto/bettercompute/agent/v1/session.proto', 'packages/provider-hetzner/src/cloud.ts', 'packages/provider-proxmox/src/proxmox.ts', 'packages/provision/src/profile.ts', 'tests/vps-instances.test.ts', 'tests/vps-churn.test.ts', 'daemon/internal/agent/netpolicy.go', 'daemon/internal/runtime/cloudhypervisor.go', 'daemon/internal/helper/helper.go', 'PLAN.md']
 ---
 
 A VM is not much use until you know its address. Better Compute keeps networking deliberately small: an address
@@ -114,10 +114,26 @@ The NodeSpec encoder keeps NIC order, since it is the guest's interface order. T
 `allocationId`, which the host names when it fetches the user data. The FakeDaemon's fake hypervisor creates a tap
 per NIC. On a host build with `virsh`, bcd's `libvirt-kvm` runtime (362317c) attaches each NIC as a virtio device on
 the named bridge with the spec's MAC, on a tap named `runtime.TapName`, so bcd's nftables rules for the NIC exist
-before the tap does. bcd's `cloud-hypervisor` runtime (2598f0a) gives the VM a tap of the same name with the spec's
-MAC and attaches it to the named bridge (`ip link set <tap> master <bridge>`) once the VM runs. Both have been tested
-against fake tools only, not on a real host. A VPS profile can already declare `network: { mode: 'bridge', ipam: 'pool' }`
+before the tap does. bcd's `cloud-hypervisor` runtime (2598f0a) creates a persistent tap of the same name
+(`ip tuntap add`), puts it on the named bridge and brings it up before the VMM starts, then gives it to the VM with
+the spec's MAC (933c51b). A guest reboot reopens that same tap, a tap that cannot be attached means the VM does not
+start, a NIC without a network is refused, and the taps are deleted when the VM stops or is destroyed. Both have been
+tested against fake tools only, not on a real host. A VPS profile can already declare `network: { mode: 'bridge', ipam: 'pool' }`
 (see [steps and profiles](/docs/extending/steps-and-profiles)), but `vps()` does not read profiles.
+
+### bcd's nftables tables
+
+Every instance tap is named `bc<10 hex digits>n<nic>` (`runtime.TapName`), and bcd owns two nftables tables, which
+it replaces together in one transaction before any domain starts:
+
+| Table | Holds |
+| --- | --- |
+| `bridge bcd_instances` | The per-tap rules: anti-spoofing (the NIC's MAC and addresses), the `private` and `none` network policies, and the drops every tap gets (DHCP server replies, router advertisements and redirects, the host's own addresses). See [sandbox networks](/docs/guides/vps/sandboxes#network) |
+| `inet bcd_taps` | A backstop (933c51b): `iifname "bc*" drop` on the input and forward hooks, and `oifname "bc*" drop` on forward. Frames of a tap that is on its bridge reach these hooks as the bridge's, so only a tap off its bridge, which the bridge table cannot see, is dropped here. With no instance NIC on the host the table is deleted and not loaded again |
+
+bcd's 5-second check counts the rules of both tables against what it loaded, and under
+[privilege separation](/docs/daemon#privilege-separation) the root helper accepts a ruleset that names these two
+tables and no other.
 
 What is not there at all: IPv6 ranges, more than one range or lease per instance, and an API to manage ranges. Tunnels
 give you exec, SSH and single-port TCP access without routing to the instance network; see [tunnels](/docs/guides/access/tunnels).

@@ -69,14 +69,12 @@ run instances on a file-backed runtime, and the TypeScript FakeDaemon's `FakeHyp
 snapshots and restores for the end-to-end suites. See [where sandboxes run today](#where-sandboxes-run-today).
 </Callout>
 
-<Callout type="warn" title="cloud-hypervisor is not production-safe">
-The examples on this page use a `cloud-hypervisor` pool, the microVM runtime PLAN.md pairs with sandboxes, but
-security review 12 found two open high-severity issues in bcd's `cloud-hypervisor` runtime (2598f0a): when a guest
-reboots, its tap interfaces are recreated off the policed bridge, so the template's `network` rules and the
-anti-spoofing guard no longer apply to them; and the VMM, which runs as root, follows the qcow2 backing file a
-tenant's image names, which could expose the host's disk or another tenant's disk. Do not run tenant sandboxes on it.
-`libvirt-kvm` is being checked for the backing-file issue; that check has not concluded.
-</Callout>
+The examples on this page use a `cloud-hypervisor` pool, the microVM runtime PLAN.md pairs with sandboxes. Security
+review 12 of that runtime was fixed in 933c51b: a sandbox's taps are created on their bridge before its VMM starts,
+so a guest reboot never takes them out of the template's `network` rules; each VMM runs in its own confined
+`bcd-ch-<id>.service` unit that sees only its instance directory and base image; tenant images and restored
+snapshots that name a backing file or an external data file are refused on both runtimes; and a memory snapshot
+restores only into a sandbox of the same vCPUs and memory. See [the runtimes](/docs/daemon/delivery#the-runtimes).
 
 ## Templates
 
@@ -134,7 +132,10 @@ type prefix (`ModuleContext.typePrefix`), falling back to `vps({ typePrefix })`.
 
 [update](/docs/reference/api/sandbox-templates#update) changes the flavor, image, user data, `env`, `network`, TTL
 bounds or warm pool and raises `version`; the pool, name and runtime stay, and a new flavor or image is checked again,
-including that the pool still runs the template's runtime. A change to the flavor, image, user data, `env` or
+including that the pool still runs the template's runtime. The secrets check reads the template before the write's
+transaction, so an update that changes what the guest runs records the secret references it was decided on, and the
+write refuses it with `CONFLICT` and `details.reason: 'secrets-changed'` when the template, read under its lock,
+names any other (someone added one meanwhile); retry it (7b01053). A change to the flavor, image, user data, `env` or
 `network` also raises the template's internal `instance_version`: warm instances made from an older one are never
 claimed and are drained, so a claim always gets an instance of the current shape. Existing sandboxes keep their
 instances. [delete](/docs/reference/api/sandbox-templates#delete) hides the template from `get`, `list`, `update` and
@@ -151,8 +152,9 @@ user data. vps renders that user data and seals it through the broker before the
 values never reach the `instances` table, its WAL or the NodeSpec in the clear. The values never appear in the
 template, the API or an event. Without a broker, a template with `env` (or, with exec trust configured, one whose user
 data is a `secret://` reference) is `INVALID_CONFIG`, both when it is written and when an instance is made from it.
-A warm instance holds the values resolved when it was made; changing `env` drains it, but rotating a secret's value
-does not. The broker releases nothing for a suspended or deleted tenant. Source the file from your own user data or command, for example `set -a; . /etc/sandbox/env`.
+A warm instance holds the values resolved when it was made; changing `env` drains it, and since 2c7072b so does
+rotating or deleting one of its secrets: it is never claimed again and the next pass replaces it (see
+[warm pools](#warm-pools)). A running sandbox keeps the values it booted with. The broker releases nothing for a suspended or deleted tenant. Source the file from your own user data or command, for example `set -a; . /etc/sandbox/env`.
 
 ### Network
 
@@ -166,7 +168,9 @@ instance's taps, whatever the runtime (6db49c8):
 | `none` | Only the host: DHCP, ARP, replies, and connections the host opens from its address on the subnet (bcd's tunnel dial). No other instance, nothing routed. `sandboxes.exec` still works |
 
 bcd owns one bridge-family table, `bcd_instances`, and replaces it in a single nftables transaction whenever the
-policies change, before any domain starts. Taps are matched by name, so the rules exist before a runtime creates the
+policies change, before any domain starts; the same transaction loads the backstop table `inet bcd_taps`, which drops
+traffic from or to an instance tap that is not on its bridge (see
+[networking](/docs/guides/vps/networking)). Taps are matched by name, so the rules exist before a runtime creates the
 tap. It fails closed: a policy that cannot be expressed (a NIC without IPAM addresses) or rules that fail to load put
 the instance in `error` and stop it if it runs.
 
@@ -228,7 +232,9 @@ A sandbox is admitted like an instance: it exists as a <Term id="draft">draft</T
 
 The sandbox id (`sbx_` and 52 characters) derives from the tenant, the caller's identity and the idempotency key. An
 admitted sandbox with that id is returned as it is (a replay); a different request under the same key is `CONFLICT`
-with `details.sandboxId`. `wait` is not part of the compared request. vps reads the template (`NOT_FOUND` when it is
+with `details.sandboxId`. `wait` is not part of the compared request, but the caller's agent and delegation are
+(7b01053): an agent replaying its person's key, or the person replaying the agent's, is `CONFLICT` rather than a
+takeover of a sandbox attributed to someone else. A person's own requests hash as before. vps reads the template (`NOT_FOUND` when it is
 missing or deleted), bounds `ttlSeconds` by its `maxTtlSeconds` (`INVALID_INPUT`), checks that its flavor still
 exists (`INVALID_STATE`), checks a `fromSnapshot` (see [restore](#restore)), and writes the draft and its
 authorization row.
@@ -430,7 +436,8 @@ before any sandbox exists. A memory restore is the exception: it resumes the gue
 its sshd still accepts the principal of the instance the memory was captured on. Snapshots record that instance, a
 restore carries it in `restore_from.principalInstanceId`, and `sandboxes.exec` signs for it. A snapshot belongs to
 its sandbox's owner, whoever took it, and only that owner can restore it, so only the owner's own lineage shares a
-principal.
+principal. Within that lineage a certificate for one guest would open the others, so today `sandboxes.exec` refuses
+while more than one of them is live; see [restore](#restore).
 
 The CA must be one `ssh-ed25519` or `ecdsa-sha2-nistp256` key line, with an optional comment of up to 64 printable
 characters that may contain spaces, as pki's are (`INVALID_CONFIG` otherwise). It is one CA for the deployment, not
@@ -499,6 +506,7 @@ key id is `bc:<identityId>:<sandboxId>:ssh_<id>`.
 | The session ends within a minute | `ACCESS_DENIED`, `details.reason: 'session-ending'` |
 | The sandbox is not `ready` (its instance not `running`), or is being deleted | `INVALID_STATE` |
 | The sandbox expires within a minute (or already has): extend it first | `INVALID_STATE`, `details.reason: 'sandbox-expiring'` |
+| Another live guest of the tenant shares the sandbox's SSH identity: its memory snapshot's source, a sibling restore, or a memory restore of this sandbox (87ff2c5; see [restore](#restore)) | `INVALID_STATE`, `details.reason: 'restore-shares-identity'` |
 | The node is not connected, or its daemon does not advertise `tunnel.instance-dial` | as for `tunnels.open` |
 | More tunnels than the per-identity limit, shared with `tunnels.open` | `RATE_LIMITED` |
 | An RSA or malformed key | `INVALID_INPUT` |
@@ -585,7 +593,8 @@ node (`INVALID_STATE` otherwise, and for a sandbox being deleted), on a runtime 
 (`containerd`, a bcx runtime that does not declare it) is `UNSUPPORTED` before any command reaches the host. vps enqueues the `instance.snapshot` command (lane
 `bulk`, not retry-safe, timeout 1 h) on the instance's node with the upload URL, keyed
 `vps.sandboxes:<snapshotId>:snapshot`, and records the snapshot `pending`. With an `idempotencyKey`, the snapshot id
-derives from the key and a retry returns the same snapshot; the key used for another sandbox is `CONFLICT`. Without
+derives from the key and a retry returns the same snapshot; the key used for another sandbox, or with another
+`includeMemory` or `keep`, is `CONFLICT` (7b01053). Without
 one, every call takes a new snapshot.
 
 The host's runtime captures the instance and uploads it with its SHA-256. When the command settles, the command
@@ -604,15 +613,38 @@ sweeper or the gateway wakes `vps.sandboxes` with the snapshot id:
 `sandboxes.create({ ..., fromSnapshot: 'snap_…' })` restores one of the caller's own `ready` snapshots: a snapshot
 holds its sandbox's memory and `/etc/sandbox/env`, so it belongs to the sandbox's owner, whoever took it (someone
 allowed `compute:sandboxes:update` on another user's sandbox can snapshot it, but the snapshot is still the owner's),
-and only that owner may boot it. Another user's snapshot, even in the same tenant, another tenant's, or a deleted one,
-is `NOT_FOUND`; one still `pending` or
-`failed` is `INVALID_STATE`; one taken
-on a runtime other than the template's is `INVALID_INPUT`. The decision sees `fromSnapshot`, and a restore never
+and only that owner may boot it. An agent acting for the owner restores only snapshots of sandboxes that agent
+created itself (7b01053, security review 13): snapshots record the agent of their sandbox (`sandbox_snapshots.agent_id`,
+migration `vps/0015_snapshot_agent`, backfilled from the sandboxes), so an agent never boots its person's other
+memory, shell history or `/etc/sandbox/env`. Another user's snapshot, even in the same tenant, another agent's,
+another tenant's, or a deleted one, is `NOT_FOUND`; one still `pending` or `failed` is `INVALID_STATE`. A restore
+runs under the template its snapshot was taken under: `templateId` must be that template (`INVALID_INPUT` otherwise),
+so memory captured under a `none` network never resumes under an `egress` one. One taken on a runtime other than the
+template's is `INVALID_INPUT` too. The decision sees `fromSnapshot`, and a restore never
 claims a warm instance: it creates one whose spec carries `restore_from` (the URL, the SHA-256 and the snapshot id). A
 memory snapshot places only on nodes whose `cpu.model` label equals the one it was taken on, because memory state
 needs the same CPU features. bcd downloads the object over https only into `data_dir/snapshots/<sha256>`, verifies
 the digest before using it, fails the instance for a snapshot from another runtime or a memory snapshot from another
 CPU model, and deletes the file once no spec restores from it.
+
+<Callout type="warn" title="No exec while a memory restore shares its guest's SSH identity">
+A memory restore resumes the guest with its source's sshd identity: the principal of the instance the memory was
+captured on, and its host key. A certificate for one of those guests would therefore open the others, and guests on
+a pool can reach each other. Today `sandboxes.exec` (and `better-compute sandbox exec`) refuses with `INVALID_STATE`
+and `details.reason: 'restore-shares-identity'` while another live guest of the tenant (any state but `deleting` or
+`deleted`) shares the sandbox's identity (87ff2c5, security review 13 H2):
+
+- exec into a memory-restored sandbox is refused while its source, or a sibling restored from the same snapshot, is
+  still live; restores of restores carry the original principal and count too;
+- exec into the source is refused while a memory restore of it is live.
+
+Delete the other guest to exec again. Disk-only snapshots (`includeMemory: false`,
+`better-compute sandbox snapshot --no-memory`) are not affected: their restores boot fresh, and exec signs for the
+restored instance itself. The refusal lasts until bcd gives a restored guest its own principal and host key. The
+planned route is a new identity delivered to the restored guest by bcd: the
+wire already has fields for it (`InstanceSpec.identity_rebind_ref` and `ssh_from_host_only`,
+`InstanceStatus.identity_rebound_ref`; 27e0999), but nothing sets or honours them yet.
+</Callout>
 
 ### Lifetime
 
@@ -706,6 +738,18 @@ A warm instance's `desiredState` depends on the runtime its template stores:
 The lifecycle walks a paused warm instance `provisioning`, `starting`, `running`, then `paused` as the host reports
 each; it becomes claimable only once it is `paused` (or `stopped`). See
 [paused instances](/docs/guides/vps/instances#paused-instances).
+
+**Rotated secrets** (2c7072b, security review 13). A warm guest holds the template's secrets as they were resolved
+when it was made, so each warm instance records the `secret_refs.version` of every secret it was given
+(`instances.warm_secret_versions`, migration `vps/0016_warm_secret_versions`). The versions are read before the
+secrets are resolved, so a rotation that races the creation reads as stale, never as current. A warm instance whose
+recorded versions differ from the current ones (a secret was rotated with `secrets.put`, or deleted) is stale:
+
+- a claim retires a stale candidate and tries the next, up to 4 in one claim, and falls back to a cold create when
+  none is current;
+- each pass first retires every stale warm instance of a template that names secrets, then refills to `warm.min`.
+
+Templates without secrets record nothing and pay for no check.
 
 Warm instances of an older `instance_version` are drained first, then instances beyond `warm.max`, newest first since
 claims take the oldest; a deleted template's are all drained. Draining sets `desiredState: 'deleted'`. Warm instances
@@ -801,7 +845,9 @@ transaction beside capacity's reservation reactions:
   to the successor, authorization rows included (`sandbox.reassigned`). It clears the departed owner's agent and
   delegation from those sandboxes, so a later event about that agent cannot delete the successor's work, and it
   rewrites their authorization attributes from each instance's own shape. Without a successor it deletes the owner's
-  open sandboxes; their templates and kept snapshots stay for the tenant's administrators.
+  open sandboxes and, since 7b01053, all their snapshots, kept ones included (as `sandboxSnapshots.delete` does: at
+  once for reads, each publishing `sandbox.snapshot.deleted`, the objects on a later reconciler pass), since nobody
+  may restore them any more and they hold memory and secrets. Their templates stay for the tenant's administrators.
 
 Events can be missed, or race a create, so the IamReconcile sweep re-reads every identity that holds a sandbox (the
 `sandboxHolders` it is given) and hands each one that is no longer active to the identity reaction as if its event
@@ -895,7 +941,7 @@ are not configured and hides the button for the session. See [the console](/docs
 | End to end | `tests/e2e/sandboxes.test.ts` runs the real server runtime and gateway with three FakeDaemon VPS hosts whose fake `cloud-hypervisor` pauses: a warm claim reaches `ready` without a placement (the paused instance resumes on the same node and allocation, booted once) and the pool refills to `warm.min`; 500 sandboxes (`E2E_SANDBOXES`) with a 60 s TTL expire on their own, each publishing `sandbox.expired` then `sandbox.deleted` once, with no leaks on hosts or in the database (domains, overlays, taps, IP leases, bookings, scalar claims) and the readiness and expiry series counted; a memory snapshot taken on one sandbox restores its guest memory into a new one (and the stored object goes with the sandbox); deleting a warm template drains its pool until the hosts are empty; `instances.stop`, `start` and `delete` on a sandbox's instance are refused `INVALID_STATE` naming the sandbox, and another tenant gets `NOT_FOUND` restoring from or reading the snapshot (bfb1d45) |
 | Upgrade | `tests/sim/upgrade.test.ts` runs a sandbox on a VPS host through the v1.0 upgrade in place: it stays running with the same boot count and keeps its expiry |
 | FakeDaemon `FakeHypervisor` | Boots then pauses on a desired `PAUSED`, resumes without a reboot, runs `instance.snapshot` and carries guest memory to a restored domain, records the network policy without enforcing it |
-| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, instance `ssh` tunnels, and the `network` policy as host nftables rules (Go unit tests). A host build with `virsh` runs `libvirt-kvm` (362317c): paused warm instances (`virsh suspend`), snapshots as a tar of the flattened disk, the seed and `virsh save`'s memory state, restores that refuse another runtime or CPU model; tested against a fake `virsh` and `qemu-img` only. A host build with the `cloud-hypervisor` binary runs `cloud-hypervisor` (2598f0a): paused warm instances (`vm.pause`), snapshots as a tar of the flattened disk, the seed and cloud-hypervisor's own snapshot of the paused VM, restores with the snapshot's configuration rewritten to the new instance's disks, taps and console, refusing another runtime or CPU model; tested against a fake VMM API only, and not production-safe (two open high-severity issues from security review 12, above). A template's `runtime` is its pool's, so a sandbox runs on `cloud-hypervisor` only in a pool whose runtime is `cloud-hypervisor`, on hosts that have it. fakehw builds run a file-backed runtime, and a bcx plugin can serve one (none is written; plugin runtimes take no snapshots) |
+| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, instance `ssh` tunnels, and the `network` policy as host nftables rules (Go unit tests). A host build with `virsh` runs `libvirt-kvm` (362317c): paused warm instances (`virsh suspend`), snapshots as a tar of the flattened disk, the seed and `virsh save`'s memory state, restores that refuse another runtime or CPU model; tested against a fake `virsh` and `qemu-img` only. A host build with the `cloud-hypervisor` binary runs `cloud-hypervisor` (2598f0a): paused warm instances (`vm.pause`), snapshots as a tar of the flattened disk, the seed and cloud-hypervisor's own snapshot of the paused VM, restores with the snapshot's configuration rebuilt from an allowlist around the new instance's disks, taps and console, refusing another runtime, CPU model, or vCPU and memory size; each VMM in a confined `bcd-ch-<id>.service` unit with its taps bridged before it starts (security review 12, fixed in 933c51b); tested against a fake VMM API only. Both runtimes refuse a tenant image or restored snapshot that names a backing file or an external data file. A template's `runtime` is its pool's, so a sandbox runs on `cloud-hypervisor` only in a pool whose runtime is `cloud-hypervisor`, on hosts that have it. fakehw builds run a file-backed runtime, and a bcx plugin can serve one (none is written; plugin runtimes take no snapshots) |
 | Provider pools | Not allowed for sandboxes |
 
 On a host whose bcd runs no instance runtime (no `virsh`, no `cloud-hypervisor`, no runtime plugin), a sandbox's instance is placed but

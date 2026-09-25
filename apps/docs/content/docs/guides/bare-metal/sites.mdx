@@ -85,7 +85,7 @@ the control plane it is a node like any other: a `nodes` row with `role = 'site'
 | TFTP and iPXE scripts, one per machine being booted | only while holding the boot lease | yes: read-only TFTP for the iPXE builds, scripts over plain HTTP |
 | Vouching for ramdisks that PXE-booted from it (signed discovery assertions) | only while holding the boot lease | yes |
 | An image cache that ramdisks stream from | always | yes, by digest (`GET /cache/<sha256>`) |
-| BMC access (Redfish, IPMI, vendor drivers) on the management network | always | Redfish built in; IPMI power and boot device through the hosted `bcx-ipmi` plugin (51806ab), which `daemon install-script --install-plugins bcx-ipmi` installs from the release (adf2ae9); no vendor driver |
+| BMC access (Redfish, IPMI, vendor drivers) on the management network | always | Redfish built in; IPMI power, boot device and inspection through the hosted `bcx-ipmi` plugin (51806ab, 7818f19), which `daemon install-script --install-plugins bcx-ipmi` installs from the release (adf2ae9); no vendor driver |
 
 The command kinds it accepts are role-restricted to `site`: `bmc.query`, `bmc.boot`, `bmc.power`,
 `bmc.rotate`, `bmc.firmware`, `bmc.storage`, `boot.prepareRamdisk`, `boot.cleanUp` and `site.httpProxy`, plus
