@@ -120,6 +120,10 @@ An empty `payloadSha256` marks a leaf that admits any payload of its kind, which
 
 `POST /api/compute/commandBatches/members`
 
+Returns the commands enqueued into a batch so far, in command-id order: each one's node, (subject, kind), state and reason, and `awaitingApproval` while it is held for the batch's approval.
+
+`state` keeps one command state. Pages hold 1 to 500 commands (100 by default); `next` is the command id to pass as `cursor`. A batch of another tenant is `NOT_FOUND`.
+
 - **Kind:** read
 - **Authorization:** `compute:batches:read` @ `compute-tenant`
 - **Module:** `quorum`
