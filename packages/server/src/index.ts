@@ -189,8 +189,6 @@ export function betterCompute<
       specChanged: (tx, nodeId) => runtime.pokes.pokeNodes(tx, [nodeId]),
       // Signed intent: every new spec generation is signed like commands (the gateway relays it).
       ...(resolved.commandSigner ? { signer: resolved.commandSigner } : {}),
-      // Signed intent: every new spec generation is signed like commands (the gateway relays it).
-      ...(resolved.commandSigner ? { signer: resolved.commandSigner } : {}),
     }),
     createSiteBootModule(),
     inventoryModule,
