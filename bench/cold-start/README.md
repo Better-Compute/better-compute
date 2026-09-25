@@ -38,10 +38,10 @@ needs the reference setup.
 
 ## Results so far
 
-| Date | Commit | Nodes | Connected p99 / all | Adopted p99 / all ready | Power cycle, all back | Unreachable | Violations | Wall |
-|---|---|---|---|---|---|---|---|---|
-| 2026-09-25 | 5b03790 | 1,000 (`workerPasses` 1) | 29.8 s / 30.0 s | 79 s / 80 s | 40 s | 0 | 0 | 73 s |
-| 2026-09-25 | 6670778 | 10,000 | 29.7 s / 30.0 s | 79 s / 80 s | 40 s | 0 | 0 | 641 s (join 80 s) |
+| Date       | Commit  | Nodes                    | Connected p99 / all | Adopted p99 / all ready | Power cycle, all back | Unreachable | Violations | Wall              |
+| ---------- | ------- | ------------------------ | ------------------- | ----------------------- | --------------------- | ----------- | ---------- | ----------------- |
+| 2026-09-25 | 5b03790 | 1,000 (`workerPasses` 1) | 29.8 s / 30.0 s     | 79 s / 80 s             | 40 s                  | 0           | 0          | 73 s              |
+| 2026-09-25 | 6670778 | 10,000                   | 29.7 s / 30.0 s     | 79 s / 80 s             | 40 s                  | 0           | 0          | 641 s (join 80 s) |
 
 Connection is bound by the power-on spread (30 s). Adoption takes the same time at 1k and 10k (p50 55 s): it is
 paced by the acceptance command and the node pass, not by throughput. Of the 10k run's wall time, 327 s went to
