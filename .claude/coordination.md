@@ -327,6 +327,14 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - core/0026 node_sessions approver columns (9e1b242); gateway writes next ([c321a3]), then the doctor listing
         ([402c97]).
       - createDevStack({ signedIntent }) (5071dbc) for the bcd WS e2e ([6a20b8], WS fallback 6cd48be, renew 06cb334).
+    - bcd helper (privilege separation, 28dc2ae), install-script --unprivileged (169c459).
+      - The helper socket lives in /run/bcd-helper, not the bcd-owned /run/bcd: a symlink swap there could get the root
+        helper to chown any file. bcd itself should switch to fchmod/fchown and refuse bcd-writable slots as
+        installedBinary ([6a20b8]).
+      - Next for [6a20b8]: update.swap, so self-update works in helper mode.
+    - Instance serial consoles over tunnels.open (798e710, compute:instances:exec; sandbox instances refused).
+    - Clock sweep after the fixed test dates passed: [097b34], [6a20b8], [c321a3], [31c64a] clean; [402c97] fixed
+      6891ba1.
     - Security review 9 (subagent over bcd self-update, proxy and quorum parity), 3 HIGH:
       - HIGH-2 epoch rewind: fixed in bcd 7ac5609; the TS pki + FakeDaemon half is [402c97]'s.
       - HIGH-3 httpProxy: (a) empty targets reach nothing (808379f); (d) anything but GET needs a bound leaf (bcd
