@@ -232,10 +232,13 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 runcmd:
-  - [sh, -c, "curl -fsSL {{bcdUrl}} -o /usr/local/bin/bcd && echo '{{bcdSha256}}  /usr/local/bin/bcd' | sha256sum -c - && chmod 0755 /usr/local/bin/bcd"]
-  - [/usr/local/bin/bcd, join, --server, {{controlPlaneUrl}}, --token-file, /etc/bcd/join-token, --node-id, {{nodeId}}]
+  - [sh, -c, "curl -fsSL '{{bcdUrl}}' -o /usr/local/bin/bcd && echo '{{bcdSha256}}  /usr/local/bin/bcd' | sha256sum -c - && chmod 0755 /usr/local/bin/bcd"]
+  - [/usr/local/bin/bcd, join, --server, {{controlPlaneUrl}}, --token-file, /etc/bcd/join-token, --node-id, {{nodeId}}, --serving-ca-pin, {{servingCaPin}}, --join-signing-pin, {{joinSigningPin}}, --join-encryption-pin, {{joinEncryptionPin}}]
   - [systemctl, enable, --now, bcd.service]
 ```
+
+(The template is a function; the snippet shows its output with placeholders. Without pins the three `--…-pin`
+arguments are left out.)
 
 The Ignition one does the same with two units: `bcd-join.service`, a oneshot that runs only while the token file
 exists, and `bcd.service` after it. Both run exactly `bcdJoinArgv()` and `bcdNodeArgv()` (exported from
@@ -247,13 +250,20 @@ exists, and `bcd.service` after it. Both run exactly `bcdJoinArgv()` and `bcdNod
   the pinned key).
 - The ramdisk's `deploy.image` installs its pinned `config.toml` and `join-encryption.jwk` into the OS it wrote, so
   `bcd node` finds its configuration at the default path.
+- The three pins are the trust anchors bcd checks the well-known document against: the gateway serving CA, the key
+  that signs `JoinResponse`, and the JoinService key the token is sealed to. They come from the host's authenticated
+  PKI bundle (`userData.pins`, see below), never from that document, so a forged document (DNS takeover plus a Web
+  PKI certificate) cannot swap them. A real bcd refuses to bootstrap without all three.
 
-`controlPlaneUrl` and `bcdUrl` must be http(s) URLs without spaces, quotes, commas, brackets or `%`, and `bcdSha256`
-64 lower-case hex digits, so each stays a single argument. `provisionModule` refuses anything else with
-`INVALID_CONFIG`.
+`controlPlaneUrl` must be an http(s) URL without spaces, quotes or shell and systemd special characters (it is a plain
+argument). `bcdUrl` is single-quoted for `sh -c`, so a presigned URL's `&` and `%` are fine; it may not hold quotes,
+backslashes or whitespace. `bcdSha256` is 64 lower-case hex digits, and each pin is `sha256/` plus the base64 SPKI
+digest. `provisionModule` refuses anything else with `INVALID_CONFIG`, including a partial set of pins.
 
-- Configure it with `provisionModule({ userData: { controlPlaneUrl, bcdUrl, bcdSha256, templates?, tokenTtlSeconds? } })`.
-  Without the three URLs and the digest, rendering fails with `INVALID_CONFIG`.
+- Configure it with
+  `provisionModule({ userData: { controlPlaneUrl, bcdUrl, bcdSha256, pins?, templates?, tokenTtlSeconds? } })`, where
+  `pins` is `{ servingCaPin, joinSigningPin, joinEncryptionPin }` from the host's bundle. Without the URLs and the
+  digest, rendering fails with `INVALID_CONFIG`. Custom templates get the pins as the variables of the same names.
 - A template is a string with `{{name}}` placeholders or a function of the variables. Every value
   must be a single line without `{{`, so a value can never add lines to the document; a placeholder
   with no value is `INVALID_CONFIG`.
