@@ -1,11 +1,18 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { SqlExecutor } from '@better-compute/core';
+import {
+  detachHistoryPartition,
+  ensureHistoryPartitions,
+  setSimClock,
+  useSimClock,
+} from '@better-compute/postgres';
 import { pglite } from '@better-compute/postgres/pglite';
 import { createAuditSigningKey } from '@better-compute/pki';
 import {
   auditMigrations,
   auditModule,
   checkpointAudit,
+  markAuditArchived,
   proveAuditEvent,
   verifyAuditCheckpoints,
   verifyAuditProof,
@@ -95,6 +102,8 @@ describe('checkpointAudit', () => {
       checkpoints: 2,
       events: 17,
       unsealed: 0,
+      archived: [],
+      archivedMonths: [],
       problems: [],
     });
     await record('ten_a', 2);
@@ -191,11 +200,87 @@ describe('inclusion proofs', () => {
   });
 });
 
+describe('archived months', () => {
+  it('reports sealed months detached after markAuditArchived as archived, and catches the rest', async () => {
+    const store = pglite();
+    try {
+      await store.migrate([...auditMigrations]);
+      await useSimClock(store, Date.UTC(2026, 0, 10));
+      await store.transaction((tx) => ensureHistoryPartitions(tx, { monthsAhead: 2 }));
+      let k = 0;
+      const recordAt = async (day: string, count: number) => {
+        for (let i = 0; i < count; i++)
+          await store.query(
+            `INSERT INTO audit_events (id, tenant_id, occurred_at, action, resource_type, resource_id, details)
+             VALUES ($1, 'ten_a', $2::timestamptz, 'compute:nodes:cordon', 'node', 'node_1', $3::jsonb)`,
+            [`arc_${++k}`, `${day}T12:00:00Z`, JSON.stringify({ k })],
+          );
+      };
+      await recordAt('2026-01-12', 4);
+      await checkpointAudit(store, { signer });
+      await setSimClock(store, Date.UTC(2026, 1, 10));
+      await recordAt('2026-02-11', 3);
+      await checkpointAudit(store, { signer });
+      await setSimClock(store, Date.UTC(2026, 2, 5));
+      const verify = () => verifyAuditCheckpoints(store, { tenantId: 'ten_a', trust });
+
+      // Only past months whose rows are all sealed can be archived.
+      await expect(markAuditArchived(store, { month: '2026-03' })).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+      });
+      await recordAt('2026-02-20', 1);
+      await expect(markAuditArchived(store, { month: '2026-02' })).rejects.toThrow(/not sealed/);
+      await expect(markAuditArchived(store, { month: '2026-1' })).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+      await checkpointAudit(store, { signer });
+      expect(await markAuditArchived(store, { month: '2026-01', by: 'ops' })).toMatchObject({
+        month: '2026-01',
+      });
+      await markAuditArchived(store, { month: '2026-01' });
+
+      // Marked but still attached: verified as usual, so an edited row still shows.
+      expect(await verify()).toMatchObject({ ok: true, archived: [], archivedMonths: ['2026-01'] });
+      await store.query(`UPDATE audit_events SET details = '{"k":99}' WHERE id = 'arc_1'`);
+      expect((await verify()).problems.map((p) => p.code)).toEqual(['root']);
+      await store.query(`UPDATE audit_events SET details = '{"k":1}' WHERE id = 'arc_1'`);
+
+      // Detached: January's checkpoint is archived (chain and signature still checked), February verifies.
+      await store.transaction((tx) =>
+        detachHistoryPartition(tx, 'audit_events', 'audit_events_p202601'),
+      );
+      const report = await verify();
+      expect(report).toMatchObject({
+        ok: true,
+        checkpoints: 3,
+        events: 4,
+        archived: [{ sequence: 1, months: ['2026-01'], partial: false }],
+      });
+
+      // A month detached without being marked archived is missing rows, as tampering would be.
+      await store.transaction((tx) =>
+        detachHistoryPartition(tx, 'audit_events', 'audit_events_p202602'),
+      );
+      expect((await verify()).problems.map((p) => [p.code, p.sequence])).toEqual([
+        ['size', 2],
+        ['root', 2],
+        ['size', 3],
+        ['root', 3],
+      ]);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
 describe('auditModule', () => {
   it('runs hourly checkpoints and warns about rows left unsealed', async () => {
     const module = auditModule({ signer });
     expect(module.name).toBe('audit');
-    expect(module.migrations?.map((m) => m.name)).toEqual(['audit/0001_checkpoints']);
+    expect(module.migrations?.map((m) => m.name)).toEqual([
+      'audit/0001_checkpoints',
+      'audit/0002_archives',
+    ]);
     const [reconciler] = module.reconcilers!;
     expect(reconciler).toMatchObject({
       name: 'audit.checkpoint',

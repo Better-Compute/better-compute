@@ -37,4 +37,28 @@ CREATE TABLE audit_checkpoint_cursor (
 `,
 };
 
-export const auditMigrations: readonly Migration[] = [checkpointsMigration];
+/**
+ * Archived months (`audit_events` is partitioned by UTC month, core/0018): each checkpoint records the span of
+ * `occurred_at` it sealed, and `audit_archives` lists the months an operator archived (detached) after they were
+ * sealed. Verification reports a checkpoint wholly inside archived months as archived instead of recomputing a
+ * root over rows that are no longer attached.
+ */
+export const archivesMigration: Migration = {
+  name: 'audit/0002_archives',
+  sql: `
+ALTER TABLE audit_checkpoints ADD COLUMN occurred_from timestamptz, ADD COLUMN occurred_to timestamptz;
+UPDATE audit_checkpoints c SET (occurred_from, occurred_to) = (
+  SELECT min(e.occurred_at), max(e.occurred_at) FROM audit_events e
+   WHERE e.tenant_id = c.tenant_id
+     AND (e.txid, e.seq) > (c.from_txid, c.from_seq) AND (e.txid, e.seq) <= (c.to_txid, c.to_seq));
+CREATE TABLE audit_archives (
+  -- The first day of an archived UTC month.
+  month date PRIMARY KEY CHECK (extract(day FROM month) = 1),
+  partition text,
+  archived_by text,
+  archived_at timestamptz NOT NULL DEFAULT compute_now()
+);
+`,
+};
+
+export const auditMigrations: readonly Migration[] = [checkpointsMigration, archivesMigration];

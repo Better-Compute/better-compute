@@ -122,9 +122,80 @@ interface CheckpointRow {
   last_event_id: string;
   body: string;
   signature: unknown;
+  /** `YYYY-MM` (UTC) of the earliest and latest occurred_at sealed; null for checkpoints older than audit/0002. */
+  from_month: string | null;
+  to_month: string | null;
 }
 const checkpointColumns = `from_txid::text AS from_txid, from_seq::text AS from_seq, to_txid::text AS to_txid,
-  to_seq::text AS to_seq, first_event_id, last_event_id, body, signature`;
+  to_seq::text AS to_seq, first_event_id, last_event_id, body, signature,
+  to_char(occurred_from AT TIME ZONE 'UTC', 'YYYY-MM') AS from_month,
+  to_char(occurred_to AT TIME ZONE 'UTC', 'YYYY-MM') AS to_month`;
+
+/** The UTC months from `from` to `to` inclusive, as `YYYY-MM`. */
+function monthsBetween(from: string, to: string): string[] {
+  const months: string[] = [];
+  let [year, month] = from.split('-').map(Number) as [number, number];
+  const [endYear, endMonth] = to.split('-').map(Number) as [number, number];
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    months.push(`${year}-${String(month).padStart(2, '0')}`);
+    if (++month > 12) {
+      month = 1;
+      year++;
+    }
+    if (months.length > 1200) break;
+  }
+  return months;
+}
+
+const monthPattern = /^(\d{4})-(0[1-9]|1[0-2])$/;
+
+/**
+ * Records that the UTC month `YYYY-MM` of `audit_events` is archived, before its partition is detached
+ * (`detachHistoryPartition(tx, 'audit_events', 'audit_events_pYYYYMM')`). Verification then reports the
+ * checkpoints inside it as archived. Refuses the current or a future month, and a month with rows no checkpoint
+ * has sealed yet (run a checkpoint pass first). Idempotent.
+ */
+export async function markAuditArchived(
+  sql: SqlExecutor,
+  input: { month: string; partition?: string; by?: string },
+): Promise<{ month: string; archivedAt: number }> {
+  if (!monthPattern.test(input.month))
+    throw new ComputeError('INVALID_INPUT', 'month must be YYYY-MM');
+  return sql.transaction(async (tx) => {
+    const first = `${input.month}-01`;
+    const { rows: now } = await tx.query<{ current: boolean }>(
+      `SELECT $1::date >= date_trunc('month', compute_now() AT TIME ZONE 'UTC')::date AS current`,
+      [first],
+    );
+    if (now[0]?.current)
+      throw new ComputeError('INVALID_STATE', `${input.month} is the current or a future month`);
+    const { rows: unsealed } = await tx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM audit_events e
+        WHERE e.occurred_at >= ($1::date::timestamp AT TIME ZONE 'UTC')
+          AND e.occurred_at < (($1::date + interval '1 month')::timestamp AT TIME ZONE 'UTC')
+          AND (e.txid, e.seq) > coalesce(
+                (SELECT (c.txid, c.seq) FROM audit_checkpoint_cursor c WHERE c.name = 'audit'),
+                ('0'::xid8, 0::bigint))`,
+      [first],
+    );
+    const pending = Number(unsealed[0]?.count ?? 0);
+    if (pending > 0)
+      throw new ComputeError(
+        'INVALID_STATE',
+        `${pending} rows of ${input.month} are not sealed by a checkpoint yet`,
+      );
+    await tx.query(
+      `INSERT INTO audit_archives (month, partition, archived_by) VALUES ($1::date, $2, $3)
+       ON CONFLICT (month) DO NOTHING`,
+      [first, input.partition ?? null, input.by ?? null],
+    );
+    const { rows } = await tx.query<{ at: Date }>(
+      'SELECT archived_at AS at FROM audit_archives WHERE month = $1::date',
+      [first],
+    );
+    return { month: input.month, archivedAt: new Date(rows[0]!.at).getTime() };
+  });
+}
 
 function toCheckpoint(row: CheckpointRow): AuditCheckpoint {
   return {
@@ -215,10 +286,16 @@ export async function checkpointAudit(
       };
       const signed = signCheckpoint(body, options.signer);
       const bodyText = new TextDecoder().decode(signed.bodyBytes);
+      // The span of occurred_at it seals (unsigned bookkeeping): verification uses it for archived months.
+      const times = events.map((row) => BigInt(row.occurred_us));
+      const earliest = times.reduce((a, b) => (b < a ? b : a));
+      const latest = times.reduce((a, b) => (b > a ? b : a));
       await tx.query(
         `INSERT INTO audit_checkpoints (tenant_id, sequence, from_txid, from_seq, to_txid, to_seq, size, root,
-                                        first_event_id, last_event_id, body, signature)
-         VALUES ($1, $2, $3::xid8, $4, $5::xid8, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
+                                        first_event_id, last_event_id, body, signature, occurred_from, occurred_to)
+         VALUES ($1, $2, $3::xid8, $4, $5::xid8, $6, $7, $8, $9, $10, $11, $12::jsonb,
+                 'epoch'::timestamptz + $13::bigint * interval '1 microsecond',
+                 'epoch'::timestamptz + $14::bigint * interval '1 microsecond')`,
         [
           tenantId,
           body.sequence,
@@ -232,6 +309,8 @@ export async function checkpointAudit(
           events.at(-1)!.id,
           bodyText,
           JSON.stringify(signed.signature),
+          earliest.toString(),
+          latest.toString(),
         ],
       );
       checkpoints.push({
@@ -295,6 +374,14 @@ export interface VerifyReport {
   events: number;
   /** Committed rows after the tenant's last checkpoint. */
   unsealed: number;
+  /**
+   * Checkpoints whose rows lie in archived months (`markAuditArchived`): their body, chain and signature were
+   * checked, their root and size were not (the rows are detached). `partial`: it also sealed rows of a month that
+   * is not archived, which are not re-verified either.
+   */
+  archived: { sequence: number; months: string[]; partial: boolean }[];
+  /** The archived months, `YYYY-MM`. */
+  archivedMonths: string[];
   problems: AuditProblem[];
 }
 
@@ -315,10 +402,17 @@ export async function verifyAuditCheckpoints(
         `SELECT ${checkpointColumns} FROM audit_checkpoints WHERE tenant_id = $1 ORDER BY sequence`,
         [options.tenantId],
       );
+      const { rows: archivedRows } = await tx.query<{ month: string }>(
+        `SELECT to_char(month, 'YYYY-MM') AS month FROM audit_archives ORDER BY month`,
+      );
+      const archivedMonths = archivedRows.map((row) => row.month);
+      const archivedSet = new Set(archivedMonths);
+      const archived: VerifyReport['archived'] = [];
       let previous: AuditCheckpoint | undefined;
       let events = 0;
-      for (const checkpoint of rows.map(toCheckpoint)) {
+      for (const [index, checkpoint] of rows.map(toCheckpoint).entries()) {
         const { body } = checkpoint;
+        const row = rows[index]!;
         const at = body.sequence;
         const expected = (previous?.body.sequence ?? 0) + 1;
         if (body.sequence !== expected)
@@ -352,6 +446,23 @@ export async function verifyAuditCheckpoints(
             message: 'The signature does not verify under the audit key',
           });
         const leaves = await rangeRows(tx, options.tenantId, checkpoint.from, checkpoint.to);
+        const rootMatches =
+          base64url(merkleRoot(leaves.map((leaf) => auditLeafHash(toLeaf(leaf))))) === body.root;
+        const months =
+          row.from_month && row.to_month ? monthsBetween(row.from_month, row.to_month) : [];
+        const inArchive = months.filter((month) => archivedSet.has(month));
+        const partial = inArchive.length > 0 && inArchive.length < months.length;
+        // Detached rows cannot be re-hashed, and that is not tampering: a checkpoint wholly inside archived
+        // months counts as archived once its rows are gone (while they are still attached it is verified as
+        // usual), and one straddling an archived month once its rows no longer match.
+        if (
+          inArchive.length > 0 &&
+          (partial ? leaves.length !== body.size || !rootMatches : leaves.length === 0)
+        ) {
+          archived.push({ sequence: at, months: inArchive, partial });
+          previous = checkpoint;
+          continue;
+        }
         events += leaves.length;
         if (leaves.length !== body.size)
           problems.push({
@@ -359,7 +470,7 @@ export async function verifyAuditCheckpoints(
             sequence: at,
             message: `${leaves.length} rows are in range, the checkpoint sealed ${body.size}`,
           });
-        if (base64url(merkleRoot(leaves.map((row) => auditLeafHash(toLeaf(row))))) !== body.root)
+        if (!rootMatches)
           problems.push({
             code: 'root',
             sequence: at,
@@ -387,6 +498,8 @@ export async function verifyAuditCheckpoints(
         checkpoints: rows.length,
         events,
         unsealed,
+        archived,
+        archivedMonths,
         problems,
       };
     },
