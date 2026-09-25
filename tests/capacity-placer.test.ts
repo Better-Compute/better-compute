@@ -656,6 +656,45 @@ describe('rollups and eligibility SQL', () => {
     expect(seen.every((entry) => entry.seconds >= 0)).toBe(true);
   });
 
+  it('places only on nodes carrying every requested label, on every placement path', async () => {
+    await addNode('node_a', { gpus: 2 });
+    await addNode('node_b', { gpus: 8 });
+    await db.query(
+      `INSERT INTO node_labels (node_id, key, value, source)
+       VALUES ('node_a', 'bc.dev/driver.kata', '3.2', 'inventory'), ('node_b', 'bc.dev/driver.kata', '3.1', 'inventory')`,
+    );
+    const kata = { 'bc.dev/driver.kata': '3.2' };
+    // The shortlist, and the whole pool (a selector declines the shortlist): node_b would win binpack.
+    expect(await place(request(1, { nodeLabels: kata }))).toMatchObject({
+      status: 'placed',
+      allocations: [{ nodeId: 'node_a' }],
+    });
+    expect(
+      await place(
+        request(1, {
+          nodeLabels: kata,
+          devices: [{ class: 'gpu', count: 1, selector: parseSelector('vramGiB >= 80') }],
+        }),
+      ),
+    ).toMatchObject({ status: 'placed', allocations: [{ nodeId: 'node_a' }] });
+    const refused = await place(request(1, { nodeLabels: kata }));
+    expect(refused).toMatchObject({
+      status: 'pending',
+      reason: expect.stringMatching(/needs label bc\.dev\/driver\.kata=3\.2/),
+    });
+    // The pool index ranks per label set.
+    await db.transaction(async (tx) => {
+      const index = await PoolIndex.load(tx, (await readPool(tx, 'pool_1'))!, T0);
+      expect(
+        index
+          .ranked(request(1, { nodeLabels: { 'bc.dev/driver.kata': '3.1' } }))
+          .map((c) => c.nodeId),
+      ).toEqual(['node_b']);
+      expect(index.ranked(request(1, { nodeLabels: { 'bc.dev/driver.gvisor': '1' } }))).toEqual([]);
+      expect(index.ranked(request(1)).map((c) => c.nodeId)).toEqual(['node_b']);
+    });
+  });
+
   it('places on a node dedicated to a tenant only for that tenant, on every placement path', async () => {
     const dedicated = await addNode('node_d', { gpus: 2, noSchedule: [dedicatedTaint('acme')] });
     await setQuota(db, 'beta', 'pool_1', 'gpu', 8);

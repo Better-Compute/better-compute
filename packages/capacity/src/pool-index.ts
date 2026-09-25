@@ -8,6 +8,7 @@ import type {
   TimeRange,
 } from '@better-compute/core';
 import { dedicatedTenant, mayBeSchedulable } from './eligibility.js';
+import { missingNodeLabel } from './pipeline.js';
 import { before, partialScorer, type Candidate, type CandidateCounts } from './shortlist.js';
 import {
   readDeviceLinks,
@@ -209,6 +210,11 @@ export class PoolIndex {
   ): CandidateCounts | undefined {
     const dedicated = this.dedicatedTo.get(nodeId);
     if (dedicated !== undefined && dedicated !== request.tenantId) return undefined;
+    if (
+      request.nodeLabels &&
+      missingNodeLabel(request.nodeLabels, this.labels.get(nodeId) ?? {}) !== undefined
+    )
+      return undefined;
     const resources = request.resources;
     if (resources) {
       const scalars = this.resources.get(nodeId) ?? {};
@@ -263,6 +269,7 @@ export class PoolIndex {
       weights,
       // Rankings differ per tenant only when some node is dedicated to one.
       this.dedicatedTo.size > 0 ? request.tenantId : null,
+      request.nodeLabels ?? null,
     ]);
     let shape = this.shapes.get(key);
     if (!shape) {

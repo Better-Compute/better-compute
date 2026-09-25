@@ -90,12 +90,24 @@ async function candidates(
          SELECT 1 FROM node_resources nr
           WHERE nr.node_id = n.id AND nr.resource = s.key
             AND nr.allocated + s.value::numeric <= floor(nr.allocatable * nr.ratio)))`;
+  // Every requested node label, with exactly that value (only when the request names some).
+  const labels = Object.keys(request.nodeLabels ?? {}).length > 0;
+  const labelsOk = `NOT EXISTS (
+      SELECT 1 FROM jsonb_each_text($5::jsonb) l
+       WHERE NOT EXISTS (
+         SELECT 1 FROM node_labels nl WHERE nl.node_id = n.id AND nl.key = l.key AND nl.value = l.value))`;
   // Three single-table-driven statements rather than one: their plans stay sane without statistics.
   const nodes = await tx.query<{ node_id: string }>(
     `SELECT n.id AS node_id FROM nodes n JOIN pools p ON p.id = n.pool_id
       WHERE n.pool_id = $1 AND ${schedulableSqlTolerating('$4::text[]')}
-        AND NOT (n.id = ANY($2::text[])) AND ${scalarsOk}`,
-    [pool.id, [...excluded], JSON.stringify(scalars), [dedicatedTaint(request.tenantId)]],
+        AND NOT (n.id = ANY($2::text[])) AND ${scalarsOk}${labels ? ` AND ${labelsOk}` : ''}`,
+    [
+      pool.id,
+      [...excluded],
+      JSON.stringify(scalars),
+      [dedicatedTaint(request.tenantId)],
+      ...(labels ? [JSON.stringify(request.nodeLabels)] : []),
+    ],
   );
   if (want.size === 0) return nodes.rows.map((row) => ({ nodeId: row.node_id, free: 0, total: 0 }));
   const classes = [...want.keys()];

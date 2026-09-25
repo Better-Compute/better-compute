@@ -44,9 +44,22 @@ export interface NodePlan {
 /** A node the pipeline turned down, and which step did. */
 export interface Rejection {
   nodeId: string;
-  /** `eligible`, `excluded`, `fits`, `topology`, or a plugin filter id. */
+  /** `eligible`, `excluded`, `labels`, `fits`, `topology`, or a plugin filter id. */
   filter: string;
   reason: string;
+}
+
+/**
+ * The first `request.nodeLabels` entry a node does not carry with exactly that value, as
+ * `key=value`; `undefined` when it carries them all (or the request names none).
+ */
+export function missingNodeLabel(
+  wanted: Readonly<Record<string, string>> | undefined,
+  labels: Readonly<Record<string, string>>,
+): string | undefined {
+  if (!wanted) return undefined;
+  for (const key in wanted) if (labels[key] !== wanted[key]) return `${key}=${wanted[key]}`;
+  return undefined;
 }
 
 export interface PlacementPlan {
@@ -288,6 +301,11 @@ export function planPlacement(
     const why = ineligibility(node, pool, request.tenantId);
     if (why) {
       rejected.push({ nodeId: node.id, filter: 'eligible', reason: why.reason });
+      continue;
+    }
+    const label = missingNodeLabel(request.nodeLabels, node.labels);
+    if (label !== undefined) {
+      rejected.push({ nodeId: node.id, filter: 'labels', reason: `needs label ${label}` });
       continue;
     }
     const scalars = fitScalars(request, node);
