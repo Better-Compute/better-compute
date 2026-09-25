@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	agentv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/agent/v1"
 	commonv1 "github.com/better-compute/better-compute/daemon/gen/bettercompute/common/v1"
@@ -24,6 +25,9 @@ func TestSnapshotAndRestore(t *testing.T) {
 	h := newHarness(t, func(o *Options) {
 		fake = &runtime.Fake{RuntimeName: "libvirt-kvm", Path: filepath.Join(t.TempDir(), "runtime.json"), BootID: "boot-1"}
 		o.Runtimes = []runtime.Runtime{fake}
+		// Restores settle a pass or two after their downloads; under a loaded test run the retry
+		// (default 30 s) must not be what brings the next pass.
+		o.ConvergeRetry = 100 * time.Millisecond
 	})
 	var uploaded []byte
 	store := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
