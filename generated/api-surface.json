@@ -5228,9 +5228,42 @@
       "resource": "compute-sandbox",
       "alternatives": [],
       "list": false,
-      "status": "planned",
+      "status": "registered",
       "phase": "v0.5",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128
+          },
+          "sandboxId": {
+            "type": "string",
+            "pattern": "^sbx_[0-9a-z]{26,52}$",
+            "maxLength": 56,
+            "description": "The sandbox to exec into"
+          },
+          "publicKey": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Your OpenSSH public key line (Ed25519 or ECDSA P-256)"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 900,
+            "default": 600,
+            "description": "Certificate lifetime in seconds; never past your session"
+          }
+        },
+        "required": [
+          "tenantId",
+          "sandboxId",
+          "publicKey"
+        ],
+        "additionalProperties": false
+      }
     },
     "sandboxes.extend": {
       "route": "POST /api/compute/sandboxes/extend",
