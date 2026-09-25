@@ -216,6 +216,43 @@ describe('vps runtimes (§11.3)', () => {
     expect(await runtimeOf((await create(micro, acme, 's', 'rootfs')).id)).toBe('firecracker');
   });
 
+  it('places a plugin runtime only on hosts whose bcd advertised it (walkthrough 4)', async () => {
+    const pool = await hostPool('micro-hosts', { runtime: 'firecracker' }, ['acme']);
+    const host = async (id: string, labels: Record<string, string>) => {
+      await db.query(
+        `INSERT INTO nodes (id, site_id, pool_id, owner_tenant_id, role, provision_state, maintenance,
+                            cordoned, connectivity, trust, generation, observed_generation, next_cmd_seq,
+                            identity_gen, shard, version)
+         VALUES ($1, $2, $3, 'root', 'host', 'adopted', false, false, 'connected', 'platform', 1, 1, 1, 1, 0, 1)`,
+        [id, SITE, pool],
+      );
+      for (const [resource, allocatable] of [
+        ['vcpu', 64],
+        ['memoryGiB', 256],
+        ['diskGiB', 4000],
+      ] as const)
+        await db.query(
+          `INSERT INTO node_resources (node_id, resource, allocatable, ratio, allocated) VALUES ($1, $2, $3, 1, 0)`,
+          [id, resource, allocatable],
+        );
+      for (const [key, value] of Object.entries(labels))
+        await db.query(
+          `INSERT INTO node_labels (node_id, key, value, source) VALUES ($1, $2, $3, 'system')`,
+          [id, key, value],
+        );
+    };
+    await host('node_01jz0000000000000000000ra1', {});
+    await host('node_01jz0000000000000000000ra2', { 'bc.dev/driver.firecracker': '1.12.0' });
+    for (let i = 0; i < 3; i++) {
+      const instance = await create(pool, acme, 's', 'rootfs');
+      const { rows } = await db.query<{ node_id: string | null }>(
+        `SELECT node_id FROM instances WHERE id = $1`,
+        [instance.id],
+      );
+      expect(rows[0]!.node_id).toBe('node_01jz0000000000000000000ra2');
+    }
+  });
+
   it('refuses a runtime the deployment does not run, an image it cannot boot and GPUs it cannot pass', async () => {
     const unknown = await hostPool('unknown', { runtime: 'cloud-hypervisor' }, ['acme']);
     expect((await rejection(create(unknown, acme))).code).toBe('INVALID_CONFIG');

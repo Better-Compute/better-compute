@@ -691,6 +691,13 @@ describe('rollups and eligibility SQL', () => {
           .map((c) => c.nodeId),
       ).toEqual(['node_b']);
       expect(index.ranked(request(1, { nodeLabels: { 'bc.dev/driver.gvisor': '1' } }))).toEqual([]);
+      // `*`: the label with any value (a driver whatever its version).
+      expect(
+        index
+          .ranked(request(1, { nodeLabels: { 'bc.dev/driver.kata': '*' } }))
+          .map((c) => c.nodeId),
+      ).toEqual(['node_b']);
+      expect(index.ranked(request(1, { nodeLabels: { 'bc.dev/driver.gvisor': '*' } }))).toEqual([]);
       expect(index.ranked(request(1)).map((c) => c.nodeId)).toEqual(['node_b']);
     });
   });

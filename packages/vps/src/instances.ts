@@ -40,7 +40,7 @@ import {
   tenant,
 } from './input.js';
 import { leaseAddress } from './ipam.js';
-import { builtinRuntimeTraits, type RuntimeTraits } from './runtime.js';
+import { builtinRuntimeTraits, runtimeNodeLabels, type RuntimeTraits } from './runtime.js';
 
 // Instances (PLAN.md §3.6, §11.1): request-as-resource drafts decided on `compute-instance/{draftId}`,
 // admitted in the second transaction, then converged by the `vps.instances` reconciler toward
@@ -846,6 +846,8 @@ export async function scheduleHosted(
         diskGiB: row.shape.diskGiB,
       },
       during: { start: now, end: openEnded },
+      // A plugin runtime lands only on hosts whose bcd advertised it (walkthrough 4).
+      ...(runtimeNodeLabels(row.runtime) ? { nodeLabels: runtimeNodeLabels(row.runtime)! } : {}),
     },
     admission ? { admission } : undefined,
   );

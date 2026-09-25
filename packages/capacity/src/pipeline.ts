@@ -50,15 +50,25 @@ export interface Rejection {
 }
 
 /**
- * The first `request.nodeLabels` entry a node does not carry with exactly that value, as
- * `key=value`; `undefined` when it carries them all (or the request names none).
+ * A `nodeLabels` value that asks only for the label to exist, with any value: e.g. a driver the
+ * host's bcd advertised in Hello (`bc.dev/driver.<id>=<version>`) whatever its version.
+ */
+export const anyLabelValue = '*';
+
+/**
+ * The first `request.nodeLabels` entry a node does not carry with exactly that value (or at all,
+ * for `anyLabelValue`), as `key=value`; `undefined` when it carries them all (or none are asked).
  */
 export function missingNodeLabel(
   wanted: Readonly<Record<string, string>> | undefined,
   labels: Readonly<Record<string, string>>,
 ): string | undefined {
   if (!wanted) return undefined;
-  for (const key in wanted) if (labels[key] !== wanted[key]) return `${key}=${wanted[key]}`;
+  for (const key in wanted) {
+    const value = wanted[key]!;
+    if (value === anyLabelValue ? labels[key] === undefined : labels[key] !== value)
+      return `${key}=${value}`;
+  }
   return undefined;
 }
 

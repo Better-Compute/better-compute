@@ -95,7 +95,8 @@ async function candidates(
   const labelsOk = `NOT EXISTS (
       SELECT 1 FROM jsonb_each_text($5::jsonb) l
        WHERE NOT EXISTS (
-         SELECT 1 FROM node_labels nl WHERE nl.node_id = n.id AND nl.key = l.key AND nl.value = l.value))`;
+         SELECT 1 FROM node_labels nl WHERE nl.node_id = n.id AND nl.key = l.key
+                                        AND (l.value = '*' OR nl.value = l.value)))`;
   // Three single-table-driven statements rather than one: their plans stay sane without statistics.
   const nodes = await tx.query<{ node_id: string }>(
     `SELECT n.id AS node_id FROM nodes n JOIN pools p ON p.id = n.pool_id

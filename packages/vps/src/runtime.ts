@@ -52,6 +52,18 @@ export const builtinRuntimeTraits: Readonly<Record<string, RuntimeTraits>> = Obj
   },
 });
 
+/** The runtimes every `bcd` builds in (v0.3); any other comes as a bcx plugin some hosts have. */
+export const bcdBuiltinRuntimes: ReadonlySet<string> = new Set(['libvirt-kvm', 'cloud-hypervisor']);
+
+/**
+ * The node labels a host must carry to run `runtime` (§5.6 walkthrough 4): none for bcd's built-ins;
+ * for a plugin runtime, the driver label the gateway writes from Hello.drivers
+ * (`bc.dev/driver.<id>=<version>`), any version.
+ */
+export function runtimeNodeLabels(runtime: string): Record<string, string> | undefined {
+  return bcdBuiltinRuntimes.has(runtime) ? undefined : { [`bc.dev/driver.${runtime}`]: '*' };
+}
+
 /** An instance as the runtime reports it on its host. */
 export interface RuntimeInstanceStatus {
   id: string;
