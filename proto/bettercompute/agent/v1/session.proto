@@ -585,6 +585,18 @@ message StatusReport {
   repeated InstanceStatus instances = 6;
   // (v0.3) `instances` is the runtimes' whole inventory: a placed instance missing from it is absent.
   bool instances_complete = 7;
+  // (v0.3) Host resource pressure for the Disk/Memory/CpuPressure conditions (§10.1). Absent when
+  // the kernel exposes no PSI.
+  HostPressure pressure = 8;
+}
+
+// Linux pressure stall information (/proc/pressure/*, "some" avg10, percent of wall time) and CPU
+// steal (percent over the last report interval).
+message HostPressure {
+  float cpu_some_avg10 = 1;
+  float memory_some_avg10 = 2;
+  float io_some_avg10 = 3;
+  float steal_pct = 4;
 }
 
 // (v0.3) One instance as a host runtime reports it.
