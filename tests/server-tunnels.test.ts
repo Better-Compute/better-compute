@@ -57,7 +57,8 @@ const INSTANCE = 'inst_01jz00000000000000000000ia';
 let db: SqlExecutor;
 let events: string[] = [];
 const issuer = createExecTicketIssuer({ issuer: 'https://compute.test' });
-const module = tunnelsModule({ issuer });
+// Many opens by one identity at a fixed clock: the rate limit has its own test.
+const module = tunnelsModule({ issuer, limits: { tunnelsPerMinute: 1000 } });
 
 const alice: Caller = {
   identityId: 'usr_alice',
@@ -336,7 +337,7 @@ describe('tunnels.open', () => {
 
 describe('nodes.issueSshCert', () => {
   const ca = createSshCertificateAuthority();
-  const withSsh = tunnelsModule({ issuer, ssh: ca });
+  const withSsh = tunnelsModule({ issuer, ssh: ca, limits: { sshCertsPerHour: 1000 } });
   const sshApi = withSsh.api!({} as ModuleContext) as unknown as {
     nodes: { issueSshCert: Definition };
   };
@@ -417,6 +418,20 @@ describe('nodes.issueSshCert', () => {
     expect(principals.some((principal) => specB.access!.sshPrincipals!.includes(principal))).toBe(
       false,
     );
+  });
+
+  it('never outlives the session that asked for it', async () => {
+    const mfa = { ...alice, mfa: true };
+    const soon = Date.now() + 5 * 60_000;
+    const clamped = await issue({ ttlSeconds: 3600 }, { ...mfa, sessionExpiresAt: soon });
+    expect(clamped.validBefore).toBeLessThanOrEqual(soon);
+    expect(parseSshCertificate(clamped.certificate).validBefore).toBeLessThanOrEqual(soon);
+    await expect(
+      issue({}, { ...mfa, sessionExpiresAt: Date.now() + 30_000 }),
+    ).rejects.toMatchObject({ code: 'ACCESS_DENIED', details: { reason: 'session-ending' } });
+    // Unknown session expiry: the requested TTL (≤ 1 h) as before.
+    const later = await issue({ ttlSeconds: 1200 }, mfa);
+    expect(later.validBefore - Date.now()).toBeGreaterThan(19 * 60_000);
   });
 
   it('allows only the configured accounts', async () => {

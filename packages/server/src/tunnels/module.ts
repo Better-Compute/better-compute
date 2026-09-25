@@ -40,7 +40,7 @@ export interface TunnelsOptions {
    */
   sshAccounts?: readonly string[];
   /**
-   * Per-identity limits, per api replica: tunnels opened per minute (default 30) and break-glass
+   * Per-identity limits, per api replica: tunnels opened per minute (default 10) and break-glass
    * certificates per hour (default 20). Beyond them: `RATE_LIMITED` with `retryAfterMs`.
    */
   limits?: { tunnelsPerMinute?: number; sshCertsPerHour?: number };
@@ -276,7 +276,7 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
   const sshAccounts = [...(options.sshAccounts ?? ['root'])];
   if (!sshAccounts.length || sshAccounts.some((account) => !accountPattern.test(account)))
     throw new ComputeError('INVALID_CONFIG', 'tunnels.sshAccounts must list Unix account names');
-  const limitTunnels = slidingLimit(options.limits?.tunnelsPerMinute ?? 30, 60_000, 'tunnels');
+  const limitTunnels = slidingLimit(options.limits?.tunnelsPerMinute ?? 10, 60_000, 'tunnels');
   const limitCerts = slidingLimit(
     options.limits?.sshCertsPerHour ?? 20,
     3_600_000,
@@ -374,15 +374,28 @@ export function tunnelsModule(options: TunnelsOptions): ComputeModule<'tunnels',
             invalid(`principal must be one of ${sshAccounts.join(', ')}`);
           const tx = context.sql as SqlTx;
           await visibleNode(tx, input.tenantId, input.nodeId);
-          limitCerts(caller.identityId, context.clock.now());
+          // A certificate never outlives the session (or MFA activation) that asked for it.
+          const now = context.clock.now();
+          let validBefore = now + (input.ttlSeconds ?? 900) * 1000;
+          if (caller.sessionExpiresAt !== undefined) {
+            if (caller.sessionExpiresAt - now < 60_000)
+              throw new ComputeError(
+                'ACCESS_DENIED',
+                'Your session ends within a minute; sign in again for a break-glass certificate',
+                undefined,
+                { reason: 'session-ending' },
+              );
+            validBefore = Math.min(validBefore, caller.sessionExpiresAt);
+          }
+          limitCerts(caller.identityId, now);
           const principal = sshPrincipal(account, input.nodeId);
           const keyId = `bc:${caller.identityId}:${input.nodeId}:${newId('ssh')}`;
           const issued = ca.issueUserCertificate({
             publicKey: input.publicKey,
             principals: [principal],
             keyId,
-            // The CA bounds lifetimes on its own (server) clock, so the TTL counts from it.
-            validBefore: context.clock.now() + (input.ttlSeconds ?? 900) * 1000,
+            // The CA bounds lifetimes (≤ 1 h) on its own (server) clock; the TTL counts from it.
+            validBefore,
           });
           await context.events.publish(tx, {
             type: 'node.ssh-cert.issued',
