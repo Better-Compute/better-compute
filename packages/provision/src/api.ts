@@ -1,6 +1,7 @@
 import {
   ComputeError,
   defineMethod,
+  describedBy,
   isId,
   type Json,
   type MethodDefinition,
@@ -32,6 +33,7 @@ import {
 } from './images.js';
 import { invalidateSiteCaches } from './site-cache.js';
 import { createProfile, deleteProfile, profileSource, updateProfile } from './profiles.js';
+import { schemas } from './schemas.js';
 
 // The `profiles` and `workflows` groups of PLAN.md §9.2 (v0.2 rows). Workflows start from other
 // modules (metal deploy, release, …) through `ctx.workflows`; the API reads them and lets an
@@ -283,7 +285,7 @@ export function provisionApi(
         action: 'compute:images:publish',
         kind: 'mutation',
         resource: (input) => ({ type: 'tenant', id: input.tenantId }),
-        validate(raw) {
+        validate: describedBy(schemas.registerImage, (raw) => {
           const input = object(raw, ['tenantId', 'ref', 'kind', 'format', 'compression', 'sha256', 'sizeBytes', 'source', 'signature', 'signerId']);
           const out: RegisterImageRequest = {
             tenantId: tenant(input.tenantId),
@@ -304,7 +306,7 @@ export function provisionApi(
           if (input.signature !== undefined) out.signature = text(input.signature, 'signature', 1024);
           if (input.signerId !== undefined) out.signerId = text(input.signerId, 'signerId', 128);
           return out;
-        },
+        }),
         handler: (ctx, input) =>
           ctx.sql.transaction(async (tx) => {
             const image = await registerImage(tx, ctx.authz, input.tenantId, rootTenant(), input, options.imageVerifier);
@@ -317,14 +319,14 @@ export function provisionApi(
         action: 'compute:images:read',
         kind: 'read',
         resource: imageResource,
-        validate: imageRef,
+        validate: describedBy(schemas.imageRef, imageRef),
         handler: (ctx, input) => readImage(ctx.sql, input.tenantId, input.imageId),
       }),
       list: defineMethod<ListImagesInput, { items: CatalogImage[]; cursor?: string }>({
         action: 'compute:images:read',
         kind: 'read',
         resource: (input) => ({ type: 'tenant', id: input.tenantId }),
-        validate(raw) {
+        validate: describedBy(schemas.listImages, (raw) => {
           const input = object(raw, ['tenantId', 'kind', 'limit', 'cursor']);
           const out: ListImagesInput = { tenantId: tenant(input.tenantId) };
           if (input.kind !== undefined) out.kind = input.kind === 'os' || input.kind === 'ramdisk' ? input.kind : fail("kind must be 'os' or 'ramdisk'");
@@ -333,7 +335,7 @@ export function provisionApi(
           const after = cursor(input.cursor);
           if (after !== undefined) out.cursor = after;
           return out;
-        },
+        }),
         handler: (ctx, input) =>
           listImages(ctx.sql, input.tenantId, {
             limit: input.limit ?? 50,
@@ -345,7 +347,7 @@ export function provisionApi(
         action: 'compute:images:publish',
         kind: 'mutation',
         resource: imageResource,
-        validate: imageRef,
+        validate: describedBy(schemas.imageRef, imageRef),
         handler: (ctx, input) =>
           ctx.sql.transaction(async (tx) => {
             const image = await promoteImage(tx, ctx.authz, input.tenantId, input.imageId);
@@ -359,14 +361,14 @@ export function provisionApi(
         action: 'compute:profiles:manage',
         kind: 'mutation',
         resource: (input) => ({ type: 'tenant', id: input.tenantId }),
-        validate(raw) {
+        validate: describedBy(schemas.createProfile, (raw) => {
           const input = object(raw, ['tenantId', 'document', 'visibility']);
           if (typeof input.document !== 'object' || input.document === null) fail('document must be a profile document');
           const out: CreateProfileInput = { tenantId: tenant(input.tenantId), document: input.document as ProfileDocument };
           const v = visibility(input.visibility);
           if (v) out.visibility = v;
           return out;
-        },
+        }),
         handler: (ctx, input) =>
           ctx.sql.transaction((tx) => createProfile(tx, ctx.authz, input.tenantId, input)),
       }),
@@ -374,14 +376,14 @@ export function provisionApi(
         action: 'compute:profiles:read',
         kind: 'read',
         resource: profileResource,
-        validate: profileRef,
+        validate: describedBy(schemas.profileRef, profileRef),
         handler: (_ctx, input) => findProfile(input),
       }),
       validate: defineMethod<ProfileRefInput, ProfileValidation>({
         action: 'compute:profiles:read',
         kind: 'read',
         resource: profileResource,
-        validate: profileRef,
+        validate: describedBy(schemas.profileRef, profileRef),
         async handler(_ctx, input) {
           const { issues } = await expandProfile((await findProfile(input)).document, options.steps);
           return { valid: issues.length === 0, issues };
@@ -391,7 +393,7 @@ export function provisionApi(
         action: 'compute:profiles:read',
         kind: 'read',
         resource: profileResource,
-        validate: profileRef,
+        validate: describedBy(schemas.profileRef, profileRef),
         async handler(_ctx, input) {
           const profile = (await findProfile(input)).document;
           const { steps, issues } = await expandProfile(profile, options.steps);
@@ -406,7 +408,7 @@ export function provisionApi(
         action: 'compute:profiles:read',
         kind: 'read',
         resource: (input) => ({ type: 'tenant', id: input.tenantId }),
-        validate(raw) {
+        validate: describedBy(schemas.listProfiles, (raw) => {
           const input = object(raw, ['tenantId', 'limit', 'cursor']);
           const out: ListProfilesInput = { tenantId: tenant(input.tenantId) };
           const limit = optionalPositive(input.limit, 'limit', 200);
@@ -414,7 +416,7 @@ export function provisionApi(
           const after = cursor(input.cursor);
           if (after !== undefined) out.cursor = after;
           return out;
-        },
+        }),
         handler: (ctx, input) =>
           profiles.list(ctx.sql, input.tenantId, { limit: input.limit ?? 50, ...(input.cursor ? { after: input.cursor } : {}) }),
       }),
@@ -422,7 +424,7 @@ export function provisionApi(
         action: 'compute:profiles:manage',
         kind: 'mutation',
         resource: profileResource,
-        validate(raw) {
+        validate: describedBy(schemas.updateProfile, (raw) => {
           const input = object(raw, ['tenantId', 'profileId', 'profileVersion', 'document', 'visibility', 'expectedVersion']);
           const out: UpdateProfileInput = {
             tenantId: tenant(input.tenantId),
@@ -436,14 +438,14 @@ export function provisionApi(
           if (expected !== undefined) out.expectedVersion = expected;
           if (out.document === undefined && out.visibility === undefined) fail('Nothing to update: pass document or visibility');
           return out;
-        },
+        }),
         handler: (ctx, input) => ctx.sql.transaction((tx) => updateProfile(tx, ctx.authz, input.tenantId, input)),
       }),
       delete: defineMethod<DeleteProfileInput, { deleted: number }>({
         action: 'compute:profiles:manage',
         kind: 'mutation',
         resource: profileResource,
-        validate: profileRef,
+        validate: describedBy(schemas.deleteProfile, profileRef),
         handler: (ctx, input) => ctx.sql.transaction((tx) => deleteProfile(tx, ctx.authz, input.tenantId, input)),
       }),
     },
@@ -452,14 +454,14 @@ export function provisionApi(
         action: 'compute:workflows:read',
         kind: 'read',
         resource: nodeResource,
-        validate: (raw) => workflowRef(raw),
+        validate: describedBy(schemas.workflowRef, (raw) => workflowRef(raw)),
         handler: (ctx, input) => readWorkflow(ctx, input),
       }),
       list: defineMethod<ListWorkflowsInput, { items: WorkflowView[]; cursor?: string }>({
         action: 'compute:workflows:read',
         kind: 'read',
         resource: nodeResource,
-        validate(raw) {
+        validate: describedBy(schemas.listWorkflows, (raw) => {
           const input = object(raw, ['tenantId', 'nodeId', 'limit', 'cursor']);
           const out: ListWorkflowsInput = { tenantId: tenant(input.tenantId), nodeId: nodeId(input.nodeId) };
           const limit = optionalPositive(input.limit, 'limit', 100);
@@ -467,7 +469,7 @@ export function provisionApi(
           const after = cursor(input.cursor);
           if (after !== undefined) out.cursor = after;
           return out;
-        },
+        }),
         async handler(ctx, input) {
           const limit = input.limit ?? 20;
           // Newest first; ids are ULIDs, so id order is creation order.
@@ -492,12 +494,12 @@ export function provisionApi(
         action: 'compute:workflows:manage',
         kind: 'mutation',
         resource: nodeResource,
-        validate(raw) {
+        validate: describedBy(schemas.abortWorkflow, (raw) => {
           const input = workflowRef(raw, ['reason']);
           if (input.reason !== undefined && (typeof input.reason !== 'string' || input.reason.length > 512))
             fail('reason must be a string of at most 512 characters');
           return input as AbortWorkflowInput;
-        },
+        }),
         async handler(ctx, input) {
           await readWorkflow(ctx, input);
           await ctx.sql.transaction((tx) =>
@@ -510,12 +512,12 @@ export function provisionApi(
         action: 'compute:workflows:manage',
         kind: 'mutation',
         resource: nodeResource,
-        validate(raw) {
+        validate: describedBy(schemas.retryWorkflow, (raw) => {
           const input = workflowRef(raw, ['fromStep']);
           if (input.fromStep !== undefined && (typeof input.fromStep !== 'string' || input.fromStep.length > 256))
             fail('fromStep must be a step id');
           return input as RetryWorkflowInput;
-        },
+        }),
         async handler(ctx, input) {
           await readWorkflow(ctx, input);
           await ctx.sql.transaction((tx) =>
@@ -528,7 +530,7 @@ export function provisionApi(
         action: 'compute:workflows:manage',
         kind: 'mutation',
         resource: nodeResource,
-        validate: (raw) => workflowRef(raw, []) as WorkflowRefInput,
+        validate: describedBy(schemas.workflowRef, (raw) => workflowRef(raw, []) as WorkflowRefInput),
         async handler(ctx, input) {
           await readWorkflow(ctx, input);
           await ctx.sql.transaction((tx) => pauseWorkflow(ctx, tx, input.workflowId, input.tenantId));
@@ -539,7 +541,7 @@ export function provisionApi(
         action: 'compute:workflows:manage',
         kind: 'mutation',
         resource: nodeResource,
-        validate: (raw) => workflowRef(raw, []) as WorkflowRefInput,
+        validate: describedBy(schemas.workflowRef, (raw) => workflowRef(raw, []) as WorkflowRefInput),
         async handler(ctx, input) {
           await readWorkflow(ctx, input);
           await ctx.sql.transaction((tx) => resumeWorkflow(ctx, tx, input.workflowId, input.tenantId));
