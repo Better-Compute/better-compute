@@ -1,6 +1,7 @@
 import type { CommandSpec } from '../framework.js';
 import { apiCommands } from './api.js';
 import { authCommands } from './auth.js';
+import { batchCommands } from './batch.js';
 import { auditCommands } from './audit.js';
 import { capacityCommands } from './capacity.js';
 import { daemonCommands } from './daemon.js';
@@ -29,6 +30,7 @@ export const builtinCommands: readonly CommandSpec<any>[] = [
   ...sandboxCommands,
   ...fleetCommands,
   ...pkiCommands,
+  ...batchCommands,
   ...daemonCommands,
   ...iamSetupCommands,
   ...auditCommands,

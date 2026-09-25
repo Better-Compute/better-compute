@@ -189,6 +189,8 @@ describe('help and the manifest', () => {
       'pki rotate-command-root',
       'pki renew-ca',
       'pki issue-gateway',
+      'batch keygen',
+      'batch sign',
       'daemon install-script',
       'iam setup',
       'audit checkpoint',
