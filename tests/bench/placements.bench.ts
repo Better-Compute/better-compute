@@ -14,6 +14,7 @@ import {
   PoolIndexCache,
   type ReservationDeps,
 } from '@better-compute/capacity';
+import { checkI1 } from '@better-compute/testing';
 
 // The v0.1 placements/s measurement (PLAN.md §16, bench/REFERENCE.md "placements"): the inline placer
 // on one pool of BENCH_PLACE_NODES nodes × 8 GPUs. Each placement is an admission-shaped transaction
@@ -25,6 +26,12 @@ import {
 //
 // Knobs: BENCH_PLACE_NODES (1000), BENCH_PLACE_COUNT per step (300), BENCH_PLACE_CONCURRENCY ("1,8,32" on pg),
 // BENCH_PLACE_GPUS per placement (1), BENCH_PLACE_PROFILE=1 for time per statement.
+//
+// After every step I1 is checked over device_bookings (no atom booked twice at once; every live
+// allocation holds exactly its bookings). The result records the v0.4 gate (§16: ≥200 placements/s
+// through the pool-lease placer, end to end = the placeQueued step) as `gate.met`; setting
+// BENCH_PLACE_GATE (placements/s) also fails the run below it — on the reference hardware and
+// Postgres, not PGlite, whose numbers are indicative.
 
 const postgresUrl = process.env.BETTER_COMPUTE_POSTGRES_URL;
 const nodes = Number(process.env.BENCH_PLACE_NODES ?? 1000);
@@ -35,8 +42,39 @@ const concurrencies = (process.env.BENCH_PLACE_CONCURRENCY ?? (postgresUrl ? '1,
   .map((value) => Number(value.trim()))
   .filter((value) => Number.isInteger(value) && value > 0);
 
+const gateTarget = Number(process.env.BENCH_PLACE_GATE ?? 200);
+const gateEnforced = process.env.BENCH_PLACE_GATE !== undefined;
+
 const T0 = Date.UTC(2026, 8, 24, 12);
 const HOUR = 3_600_000;
+
+/** I1 over the bookings a step left behind, plus allocations that disagree with their bookings. */
+async function assertI1(db: SqlExecutor, step: string): Promise<void> {
+  const { rows } = await db.query<{
+    allocation_id: string;
+    device_id: string;
+    start_ms: number;
+    end_ms: number;
+  }>(
+    `SELECT allocation_id, device_id, (extract(epoch FROM lower(during)) * 1000)::float8 AS start_ms,
+            (extract(epoch FROM upper(during)) * 1000)::float8 AS end_ms FROM device_bookings`,
+  );
+  const violations = checkI1({
+    bookings: rows.map((row) => ({
+      allocationId: row.allocation_id,
+      deviceId: row.device_id,
+      start: Number(row.start_ms),
+      end: Number(row.end_ms),
+    })),
+  });
+  expect(violations, `I1 after ${step}`).toEqual([]);
+  const mismatched = await db.query<{ id: string }>(
+    `SELECT a.id FROM allocations a LEFT JOIN device_bookings b ON b.allocation_id = a.id
+      WHERE a.released_at IS NULL GROUP BY a.id, a.atoms
+     HAVING count(b.device_id) <> cardinality(a.atoms)`,
+  );
+  expect(mismatched.rows, `allocations whose bookings disagree after ${step}`).toEqual([]);
+}
 
 const percentile = (sorted: number[], p: number) =>
   sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))]! : 0;
@@ -65,6 +103,9 @@ interface Step {
 describe('placements', () => {
   let db: SqlExecutor;
   const steps: Step[] = [];
+  let gate:
+    | { placementsPerSecond: number; step: string; measured: number; met: boolean }
+    | undefined;
 
   beforeAll(async () => {
     db = postgresUrl
@@ -113,6 +154,7 @@ describe('placements', () => {
         gpusPerPlacement: gpus,
         host: { cpus: cpus().length, memoryGiB: Math.round(totalmem() / 2 ** 30) },
         steps,
+        ...(gate ? { gate } : {}),
       };
       mkdirSync('bench/placements/results', { recursive: true });
       writeFileSync(
@@ -212,6 +254,7 @@ describe('placements', () => {
       console.log(`placements c=${concurrency}`, JSON.stringify(step));
       expect(errors).toBe(0);
       expect(placed).toBe(count);
+      await assertI1(db, `inline c=${concurrency}`);
     });
 
   // The v0.4 pool-lease placer's batch: one transaction per ≤64 requests, one in-memory index each.
@@ -286,6 +329,7 @@ describe('placements', () => {
       summary(loads),
     );
     expect(placed).toBe(count);
+    await assertI1(db, 'pool-lease batches');
   });
 
   // End to end: the capacity.placer worker's placeQueued over queued reservation rows, with an event
@@ -349,5 +393,14 @@ describe('placements', () => {
     steps.push(step);
     console.log('placements placeQueued', JSON.stringify(step));
     expect(placed).toBe(count);
+    await assertI1(db, 'placeQueued');
+    gate = {
+      placementsPerSecond: gateTarget,
+      step: 'placeQueued',
+      measured: step.placementsPerSecond,
+      met: step.placementsPerSecond >= gateTarget,
+    };
+    console.log(`placements gate ${gate.met ? 'MET' : 'NOT MET'}`, JSON.stringify(gate));
+    if (gateEnforced) expect(step.placementsPerSecond).toBeGreaterThanOrEqual(gateTarget);
   });
 });
