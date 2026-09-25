@@ -213,7 +213,9 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
       - Join chain status:
         - bcd flags (797915d, c98dd68) and renderers (e6b3b14): done;
         - the well-known `gateway` section (670d586, [f85da7]): done;
-        - hosts passing gateway.url + pki.servingCa: [402c97].
+        - hosts passing gateway.url + pki.servingCa: DONE (8127271: compose env vars, dev stack externalTls);
+        - the user-data pins that replace trust on first use: pki bootstrapPins (afdaeb6), provision flags
+          ([f02367]), bcd preferring the user-data pins ([6a20b8]).
     - [31c64a] security review #5 (routed by them):
       - HIGH: tenancy read a bare IAM 404 as "tenant missing" and could tear down root: [31c64a] fixing;
       - MED-HIGH: the well-known join trusts web PKI only; the fix is user-data pins
@@ -225,7 +227,10 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
     - Sandbox snapshots can be deleted (46d0a29); owner-scoped lists, PLAN rows and MCP tools (935e150).
     - Docs-session sandbox gaps:
       - MCP gate rules: fixed (e2ead0e);
-      - iam setup meter vps.sandbox.warm, console snapshot store, CLI list limit, pki reseal auth: [402c97];
+      - console snapshot button (0b9495c), CLI list limit and pki reseal --accept-unauthenticated (2a62d85):
+        DONE ([402c97]); the vps.sandbox.warm meter in iam setup: [31c64a];
+      - sandbox exec host-key pinning: pki.issueHostCertificate (a9c3662), vps half [097b34], then the CLI
+        switches to @cert-authority ([402c97]);
       - bcd network_policy nftables: DONE (6db49c8, fails closed); Redfish system paths + an @odata.id guard
         (4e4c1d7);
       - deleting a kept snapshot: [097b34];
