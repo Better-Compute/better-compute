@@ -6,6 +6,7 @@ export * from './clock.js';
 export * from './states.js';
 export * from './domain.js';
 export * from './manifest.js';
+export * from './input-schema.js';
 export * from './extension.js';
 export * from './sql.js';
 export * from './iam.js';
