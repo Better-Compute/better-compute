@@ -194,6 +194,7 @@ Every call is authenticated (except public methods), refused before any database
 | `metal.deploy`   | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | planned |
 | `metal.undeploy` | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | planned |
 | `metal.rescue`   | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | planned |
+| `metal.unrescue` | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | planned |
 | `metal.abort`    | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | planned |
 | `metal.recover`  | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | planned |
 | `metal.retire`   | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | planned |

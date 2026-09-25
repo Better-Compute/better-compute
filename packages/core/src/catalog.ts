@@ -429,6 +429,7 @@ group('metal', 'metal', [
   ['deploy', 'mutation', 'nodes:provision', 'node', 'v0.2'],
   ['undeploy', 'mutation', 'nodes:provision', 'node', 'v0.2'],
   ['rescue', 'mutation', 'nodes:provision', 'node', 'v0.2'],
+  ['unrescue', 'mutation', 'nodes:provision', 'node', 'v0.2'],
   ['abort', 'mutation', 'nodes:provision', 'node', 'v0.2'],
   ['recover', 'mutation', 'nodes:provision', 'node', 'v0.2'],
   ['retire', 'mutation', 'nodes:provision', 'node', 'v0.2'],
