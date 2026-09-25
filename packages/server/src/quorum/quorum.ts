@@ -126,6 +126,15 @@ ALTER TABLE command_batch_scope ADD COLUMN payload bytea;
 `,
 };
 
+/** Who proposed a batch when an agent did (review 14 M3): its reason is the agent's text, not the person's. */
+export const quorumAgentMigration: Migration = {
+  name: 'quorum/0008_batch_agent',
+  sql: `
+ALTER TABLE command_batches ADD COLUMN created_by_agent text;
+ALTER TABLE command_batches ADD COLUMN delegation_id text;
+`,
+};
+
 /** `commandBatches.create` retries: the request a caller's key stands for. */
 export const quorumRequestMigration: Migration = {
   name: 'quorum/0005_batch_request',
@@ -182,6 +191,12 @@ export interface CommandBatchView {
   createdAt: number;
   approvedAt?: number;
   createdBy?: string;
+  /**
+   * The agent that proposed it on `createdBy`'s behalf, and its delegation: the reason is then the
+   * agent's text, which approvers should read as such (review 14 M3).
+   */
+  createdByAgent?: string;
+  delegationId?: string;
 }
 
 /** A leaf, optionally with the payload approvers are shown (its digest is then derived from it). */
@@ -199,6 +214,9 @@ export interface CreateBatchInput {
   /** When the batch stops admitting commands (default 24 h); approvals are signed up to it. */
   notAfterMs?: number;
   createdBy?: string;
+  /** An agent acting for `createdBy`, and its delegation (review 14 M3). */
+  createdByAgent?: string;
+  delegationId?: string;
   /**
    * A deterministic id (the API derives it from the caller's idempotency key) with the digest of
    * the request it stands for: the same request again returns the stored batch (`replayed`), a
@@ -318,8 +336,8 @@ export async function createCommandBatch(
     : 0;
   const inserted = await tx.query(
     `INSERT INTO command_batches (id, tenant_id, reason, scope_root, scope_size, required, not_after,
-                                  state, created_by, request_sha256)
-     VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8 / 1000), 'pending', $8, $9)
+                                  state, created_by, request_sha256, created_by_agent, delegation_id)
+     VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8 / 1000), 'pending', $8, $9, $10, $11)
      ON CONFLICT (id) DO NOTHING RETURNING id`,
     [
       batchId,
@@ -331,6 +349,8 @@ export async function createCommandBatch(
       notAfter,
       input.createdBy ?? null,
       input.requestSha256 ? Buffer.from(input.requestSha256) : null,
+      input.createdByAgent ?? null,
+      input.delegationId ?? null,
     ],
   );
   if (inserted.rows.length === 0) {
@@ -418,9 +438,11 @@ interface BatchRow {
   created_by: string | null;
   created_at: Date | string;
   approved_at: Date | string | null;
+  created_by_agent?: string | null;
+  delegation_id?: string | null;
 }
 
-const ms = (value: Date | string) => new Date(value).getTime();
+const ms =(value: Date | string) => new Date(value).getTime();
 
 /** A pending batch past its end reads as expired at once; the sweep records it and cancels its commands. */
 const effectiveState = `CASE WHEN state = 'pending' AND not_after <= compute_now() THEN 'expired'
@@ -434,7 +456,7 @@ async function readBatch(
 ): Promise<BatchRow> {
   const { rows } = await tx.query<BatchRow>(
     `SELECT id, tenant_id, reason, scope_root, scope_size, required, not_after, ${effectiveState},
-            created_by, created_at, approved_at
+            created_by, created_at, approved_at, created_by_agent, delegation_id
        FROM command_batches WHERE id = $1 AND tenant_id = $2${lock ? ' FOR UPDATE' : ''}`,
     [batchId, tenantId],
   );
@@ -476,6 +498,8 @@ async function batchView(
     createdAt: ms(row.created_at),
     ...(row.approved_at ? { approvedAt: ms(row.approved_at) } : {}),
     ...(row.created_by ? { createdBy: row.created_by } : {}),
+    ...(row.created_by_agent ? { createdByAgent: row.created_by_agent } : {}),
+    ...(row.delegation_id ? { delegationId: row.delegation_id } : {}),
   };
 }
 
@@ -830,6 +854,8 @@ export function commandBatchesApi(options: {
               reason: input.reason,
               notAfterMs: context.clock.now() + (input.notAfterSeconds ?? defaultBatchTtlMs / 1000) * 1000,
               ...(context.caller?.identityId ? { createdBy: context.caller.identityId } : {}),
+              ...(context.caller?.agentId ? { createdByAgent: context.caller.agentId } : {}),
+              ...(context.caller?.delegationId ? { delegationId: context.caller.delegationId } : {}),
               batchId: await derivedId('batch', input.tenantId, context, input.idempotencyKey),
               requestSha256: new Uint8Array(requestSha256),
             },
@@ -878,7 +904,8 @@ export function commandBatchesApi(options: {
           const { rows } = await context.sql.query<BatchRow>(
             `SELECT * FROM (
                SELECT id, tenant_id, reason, scope_root, scope_size, required, not_after,
-                      ${effectiveState}, created_by, created_at, approved_at
+                      ${effectiveState}, created_by, created_at, approved_at, created_by_agent,
+                      delegation_id
                  FROM command_batches WHERE tenant_id = $1) b
               WHERE ($2::text IS NULL OR state = $2)
                 AND ($3::text IS NULL OR id < $3)
@@ -1141,6 +1168,7 @@ export function createQuorumModule(options: {
         quorumRequestMigration,
         trustBundleHistoryMigration,
         quorumLeafPayloadMigration,
+        quorumAgentMigration,
       ],
       api: () => commandBatchesApi(options),
       reconcilers: [expiryReconciler()],

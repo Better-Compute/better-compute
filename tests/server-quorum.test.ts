@@ -33,6 +33,7 @@ import { ACME, options } from './support/server.js';
 const T0 = Date.UTC(2026, 8, 25, 12);
 const TOKEN = 'op-token';
 const TRUST_DOMAIN = 'compute.test';
+const AGENT_TOKEN = 'agent-token';
 const NODE_Q = 'node_01k5w00000000000000000000q';
 let db: SqlExecutor | undefined;
 afterEach(async () => {
@@ -60,7 +61,10 @@ async function setup() {
   const clock = manualClock(T0);
   const approvers = [createApproverKey(), createApproverKey(), createApproverKey()];
   const iam = fakeIam({
-    callers: { [TOKEN]: { tenantId: ACME, identityId: 'usr_ops' } },
+    callers: {
+      [TOKEN]: { tenantId: ACME, identityId: 'usr_ops' },
+      [AGENT_TOKEN]: { tenantId: ACME, identityId: 'usr_ops', agentId: 'agt_ops', delegationId: 'dlg_1' },
+    },
     allow: [{}],
   });
   const compute = betterCompute({
@@ -436,6 +440,24 @@ describe('commandBatches (v1.0 quorum, §13)', () => {
         ],
       }),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('records the agent that proposed a batch, apart from the person it acts for (review 14 M3)', async () => {
+    const s = await setup();
+    const request = {
+      tenantId: ACME,
+      reason: 'agent: reboot node_a',
+      idempotencyKey: 'agent-1',
+      scope: [{ subject: 'node_a', kind: 'node.reboot' }],
+    };
+    const byAgent = await s.api.create({ token: AGENT_TOKEN }, request);
+    expect(byAgent).toMatchObject({ createdBy: 'usr_ops', createdByAgent: 'agt_ops', delegationId: 'dlg_1' });
+    const byPerson = await s.api.create(s.cred, { ...request, idempotencyKey: 'person-1' });
+    expect(byPerson.createdByAgent).toBeUndefined();
+    const listed = await s.api.list(s.cred, { tenantId: ACME });
+    expect(listed.items.find((item: { batchId: string }) => item.batchId === byAgent.batchId)).toMatchObject({
+      createdByAgent: 'agt_ops',
+    });
   });
 
   it("refuses leaves that name another tenant's machines, or no machine (review 8 #1)", async () => {
