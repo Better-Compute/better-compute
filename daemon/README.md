@@ -53,7 +53,7 @@ dependencies are connect-go, bbolt and protobuf.
 | `internal/nvml` | the NVML boundary; a stub for now |
 | `internal/selfupdate` | the A/B binary slots, `upgrade.json`, the release floor and the crash-loop rollback units |
 | `internal/bcx` | bcx driver plugins: the sandbox shim (`bcd __bcx-exec`: no-new-privs, seccomp, per-plugin uid), cgroups |
-| `internal/runtime` | instance runtimes: `Libvirt` (virsh, qemu-img, NoCloud seeds, snapshots, serial consoles) and `Fake` |
+| `internal/runtime` | instance runtimes: `Libvirt` (virsh, qemu-img, NoCloud seeds, snapshots, serial consoles), `CloudHypervisor` (a VMM per instance in a `bcd-ch-<id>` systemd unit, driven over its REST socket; VFIO GPUs, memory snapshots bound to the CPU model) and `Fake` |
 | `internal/redfish` | the Redfish client of the site agent's `bmc.*` kinds (power, boot, BIOS, RAID, firmware, accounts) |
 | `internal/bootparams`, `internal/pxe` | the ramdisk's `bc.*` kernel command line; the site agent's proxyDHCP and TFTP |
 | `internal/imds` | the instance metadata service of VPS hosts |
@@ -247,7 +247,8 @@ both clocks, and list the bare binary `bcd_<version>_<os>_<arch>` with the secti
 binary is staged in the other slot, `upgrade.json` gets a 120 s deadline, `current` swaps and bcd
 execs the entrypoint. The new binary is confirmed by its first Welcome; without one it swaps back,
 and the old binary records the version as failed. Going back to the version in the other slot
-needs no manifest.
+needs no manifest only while that slot's recorded release sequence is still at or above the floor,
+so a confirmed upgrade (which raises the floor) is never undone that way: rollouts roll forward.
 
 **WebSocket fallback** (`transport/ws.go`, `cmd/bcd/websocket.go`). For proxies that strip client
 certificates: the Session runs over `wss://…/v1/session` (subprotocol `bc.agent.v1`, the same
@@ -264,7 +265,9 @@ host's own GPUs, bcd's nftables table, sshd reloads, and self-update (`update.*`
 downloads; the helper verifies the manifest with its own pins and floor, re-hashes the staged
 binary into root's slots, swaps, and swaps back on its own deadline). Peers are checked by
 SO_PEERCRED and `/proc/<pid>/exe`; requests are versioned, strictly decoded JSON; every operation
-is logged. The socket's directory must be root's and closed to others.
+is logged. Every directory on the way to the socket, the slots and the entrypoint must be root's
+and closed to others (`bcd doctor` checks it), neither the slots nor the entrypoint may live in
+`data_dir`, and the helper adopts into a slot only a root-owned entrypoint no one else can write.
 
 **Server time** (`agent/conn.go`). The daemon keeps a high-water mark of server time, advanced by
 every Welcome and heartbeat and mirrored in `identity.json`. A Welcome more than 5 minutes behind it
