@@ -43,6 +43,7 @@ Moves the end of a `placed`, `binding` or `active` reservation later, all or not
 - It is admitted like `create`: the pending change goes into the reservation's authz row with `durationHours` set to the total after the change, so a policy that caps duration also caps extensions. A refusal is `ACCESS_DENIED` and clears the pending change. `SPEND_LIMIT_REACHED` applies as for `create`.
 - When another booking starts before the new end, nothing moves and the answer is `extended: false` with `availableUntil`, the latest end the bookings can reach.
 - **Idempotency.** An `until` the reservation already reaches answers `extended: false` without a decision, so a retried `until` is safe. `idempotencyKey` does not replay: a repeated `by` extends again from the new end.
+- While another extend of the same reservation is being decided, the call is `CONFLICT` with `details.reason: 'extend-in-flight'` and `retryAfterSeconds`.
 
 Emits `reservation.extended` with the new `end`.
 

@@ -85,3 +85,13 @@ Queues a `bmc.power` command to the site agent of the node's site and returns it
 - `INVALID_STATE` when the node has no BMC credentials, while it is `inspecting`, `commissioning`, `deploying` or `releasing` (a workflow controls its power then), or when no site agent serves its site.
 
 The command expires five minutes after it is queued. Its idempotency key derives from the request id, so a retry with the same `X-Request-Id` header returns the same command.
+
+## bulk
+
+Runs one lifecycle verb on many nodes of a pool at once (`manage`, `inspect`, `provide`, `undeploy`, `rescue` or `retire`), as one batch; returns every node and, when the verb sends destructive commands, the batch.
+
+- Each node is decided on its own, exactly as if the verb were called for it (`metal.<verb>`); one refusal refuses the whole call before anything changes. Every node must be in `poolId` (`INVALID_INPUT` otherwise), listed once, 1 to 10,000 of them.
+- When the verb's steps send destructive commands, a quorum batch (`commandBatches`) is created over them with `reason`, and each node's commands carry it: with approver keys they wait for its approval; without, it is recorded for audit.
+- `wipe` applies to `undeploy` only.
+
+Decided as `compute:nodes:provision` on the pool, then per node.

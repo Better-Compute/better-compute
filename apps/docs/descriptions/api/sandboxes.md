@@ -33,6 +33,7 @@ Moves a sandbox's `expiresAt` later after one IAM decision, within its template'
 - Give exactly one of `until` (the new expiry, epoch milliseconds) or `by` (added to the current expiry: `30m`, `8h`, `7d`, or milliseconds, at most 30 days); both or neither is `INVALID_INPUT`. A lifetime past the template's `maxTtlSeconds` is `INVALID_INPUT`, and a sandbox whose deletion has started, by `delete` or by expiry, is `INVALID_STATE`.
 - **IAM.** `compute:sandboxes:update` is decided on the sandbox with a pending `ttlSeconds` equal to the whole lifetime after the change, so a policy that caps `ttlSeconds` on `create` also caps extensions. A refusal is `ACCESS_DENIED` and clears the pending change.
 - **Idempotency.** An `until` that is not later than the current expiry returns the sandbox unchanged without a decision, so a retried `until` is safe. There is no `idempotencyKey`: a repeated `by` extends again.
+- While another extend of the same sandbox is being decided, the call is `CONFLICT` with `details.reason: 'extend-in-flight'` and `retryAfterSeconds`. A spent budget is `SPEND_LIMIT_REACHED`.
 
 The stored `ttlSeconds` becomes the new whole lifetime. Publishes `sandbox.extended` with the new `expiresAt`.
 
