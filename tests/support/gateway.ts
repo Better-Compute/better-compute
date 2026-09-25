@@ -79,6 +79,7 @@ export interface HelloOverrides {
   unackedResults?: MessageInitShape<typeof CommandUpdateSchema>[];
   inventoryHashes?: Record<string, Uint8Array>;
   trustVersion?: bigint;
+  capabilities?: string[];
 }
 
 export function helloFrame(nodeId: string, overrides: HelloOverrides = {}): AgentFrame {
@@ -97,6 +98,7 @@ export function helloFrame(nodeId: string, overrides: HelloOverrides = {}): Agen
       unackedResults: overrides.unackedResults ?? [],
       inventoryHashes: overrides.inventoryHashes ?? {},
       trustVersion: overrides.trustVersion ?? 0n,
+      capabilities: overrides.capabilities ?? [],
     },
   });
 }

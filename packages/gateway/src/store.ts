@@ -91,8 +91,22 @@ export interface HelloInput {
    * `node_sessions.trust_version` so a command-root switch can wait for every connected node (§13).
    */
   trustVersion?: bigint;
+  /**
+   * `Hello.capabilities` (e.g. `tunnel.instance-dial`), stored as `node_sessions.capabilities`, as-is
+   * from each Hello, for API checks such as `tunnels.open`. Malformed entries are dropped.
+   */
+  capabilities?: readonly string[];
   /** `Hello.drivers`: each becomes the node label `bc.dev/driver.<id>=<version>`. */
   drivers?: readonly { id: string; version: string }[];
+}
+
+/**
+ * Hello's capabilities as stored: names of `[a-z0-9][a-z0-9._-]{0,63}` only (a daemon's claim, never
+ * trusted into anything but this list), de-duplicated, sorted, at most 64.
+ */
+export function sessionCapabilities(capabilities: readonly string[] | undefined): string[] {
+  const valid = (capabilities ?? []).filter((name) => /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name));
+  return [...new Set(valid)].sort().slice(0, 64);
 }
 
 /** The prefix of the node labels Hello writes for advertised drivers (source `system`). */
@@ -872,7 +886,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         const bumped = await tx.query<{ session_epoch: number; acked_event_seq: number }>(
           `UPDATE node_sessions SET gateway_id = $2, session_id = $3, session_epoch = session_epoch + 1,
              boot_id = $4, journal_id = $5, role = $6, daemon_version = $7, proto_max = $8,
-             trust_version = $9,
+             trust_version = $9, capabilities = $10::text[],
              acked_event_seq = CASE WHEN journal_id IS DISTINCT FROM $5 THEN 0 ELSE acked_event_seq END,
              connected_at = compute_now(), last_seen = compute_now(), disconnected_at = NULL
            WHERE node_id = $1
@@ -890,6 +904,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             // What the daemon holds now, even if older than before (a restored disk): a root switch
             // must not count a node that lost the new bundle.
             String(input.trustVersion ?? 0n),
+            sessionCapabilities(input.capabilities),
           ],
         );
         const epoch = Number(bumped.rows[0]!.session_epoch);

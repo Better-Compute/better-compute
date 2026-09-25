@@ -58,6 +58,21 @@ describe('session versions', () => {
     await f.connect(node, { trustVersion: 2n, bootId: 'boot-restored' });
     expect(await trust()).toBe(2);
   });
+
+  it('stores Hello.capabilities as-is from each Hello, dropping malformed names', async () => {
+    f = await gatewayFixture();
+    const node = await f.addNode();
+    const capabilities = async () =>
+      (await f.db.query<{ capabilities: string[] }>('SELECT capabilities FROM node_sessions WHERE node_id = $1', [node])).rows[0]!
+        .capabilities;
+    await f.connect(node, {
+      capabilities: ['tunnel.instance-dial', 'Bad Name', 'tunnel.instance-dial', 'x'.repeat(65), 'logs.collect'],
+    });
+    expect(await capabilities()).toEqual(['logs.collect', 'tunnel.instance-dial']);
+    // A daemon that stops advertising a capability loses it at its next Hello.
+    await f.connect(node, { bootId: 'boot-2' });
+    expect(await capabilities()).toEqual([]);
+  });
 });
 
 describe('xidStatusHandler', () => {
