@@ -135,8 +135,13 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
   selfUpdate); observability databaseCollector (b569f05); events.prune retention (f069c84); remote admission
   refresh + projection page/refresh race (3371cb0); audit archived months (103068f); faults-1k (0486a1b); SSE
   /watch revocation + watch registry (7d616be; host wiring asked of [402c97]); resolver-timeout e2e (13b6a7d);
-  usage-restart acceptance with spend read-back (d82cf37); inbox-down scenario (1908f79). NOW: sim invariants
-  I4 (liveness false positives) / I3 (convergence) / I7 (placeable pending), then suites in both IAM modes.
+  usage-restart acceptance with spend read-back (d82cf37); inbox-down scenario (1908f79); sim invariants I4
+  (c11554d), I3 (a2c7011), I7 (bcdf2c7, capacity's placeablePending); collector lease + placementObserver
+  (90503ef); metricCatalog (2d856dd); both IAM modes: createEmbeddedTestIam({ mode }) + vitest.iam-remote.config.ts
+  (3c8a74e, 30/30 green; root script asked of [f85da7]); events catalog rows (b41ebe6). The whole exit-gap list
+  for [31c64a] is DONE. Then: budget-alert handler (9cfe709), subtree-webhook intake (22cceaa). NOW (agreed with
+  [097b34]): NEW files `packages/capacity/src/iam-reactions.ts` (applyBudgetPolicy, withdrawAgentReservations,
+  reassignReservations) + `tests/capacity-iam-reactions.test.ts`; capacity's module/reservations/placer stay [097b34]'s.
 - [c321a3] round 4 (gateway, server runtime, docs generator): orphan store.ts (d430815); tunnel filters tenantId/anyAgent +
   reauthorizeTunnels (6aeb5c4); generator MDX escaping + MDX compile check (bd57184), events page (c563de7); ramdisk
   exit test + ReportContext.attested (56f8cc1); FakeDaemon signs attested reports (f7fbba7); v0.4 scheduler worker role
