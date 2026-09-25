@@ -35,6 +35,7 @@ export {
   bcdPrivilegedPluginsDropIn,
   bcdServiceUnit,
   renderBcdPluginsSection,
+  renderBcdUpdateSection,
   checkInstallScriptOptions,
   renderBcdConfig,
   renderInstallScript,

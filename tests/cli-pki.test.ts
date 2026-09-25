@@ -325,6 +325,16 @@ describe('daemon install-script', () => {
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain(`SHA256_amd64='${manifest.artifacts[0]!.sha256}'`);
     expect(result.stdout).toContain("SHA256_arm64=''");
+    // bcd self-updates only under the release keys that verified this manifest ([update]; none, no self-update).
+    expect(result.stdout).toContain(`[update]\nrelease_pins = "${spkiPin(key.publicKey)}"\nrelease_threshold = 1\n`);
+    expect((await run(base)).stdout).not.toContain('[update]');
+    const shell = posixShell();
+    if (shell) {
+      const file = join(scratch, 'install-update-check.sh');
+      await writeFile(file, result.stdout);
+      expect(spawnSync(shell, ['-n', file], { encoding: 'utf8' }).status).toBe(0);
+    }
+    expect(await run([...withManifest, '--release-threshold', '2'], pins)).toMatchObject({ ok: false });
 
     const other = createReleaseSigningKey();
     expect(await run(withManifest, { BCD_RELEASE_PINS: spkiPin(other.publicKey) })).toMatchObject({

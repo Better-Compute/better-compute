@@ -41,6 +41,11 @@ export interface InstallScriptOptions {
    * that set as its first, and refuses destructive commands until it has it.
    */
   approverSetSha256?: string;
+  /**
+   * bcd self-update (PLAN.md §6): the release keys' pins and how many must have signed, as an [update] section
+   * (without pins bcd refuses every self-update).
+   */
+  update?: { releasePins: readonly string[]; threshold?: number };
   /** Generation stamp for the header comment. */
   generatedAt?: string;
   generator?: string;
@@ -88,6 +93,14 @@ export function checkInstallScriptOptions(options: InstallScriptOptions): Instal
   }
   if (options.approverSetSha256 !== undefined && !hexPattern.test(options.approverSetSha256))
     throw invalid('--approver-set-sha256', 'must be 64 lower-case hex digits (pki trust-version prints it)');
+  if (options.update) {
+    const pins = options.update.releasePins;
+    if (pins.length === 0 || !pins.every((pin) => pinPattern.test(pin)))
+      throw invalid('--release-pins', 'must be sha256/<base64 of 32 bytes> pins, comma-separated');
+    const threshold = options.update.threshold ?? 1;
+    if (!Number.isInteger(threshold) || threshold < 1 || threshold > pins.length)
+      throw invalid('--release-threshold', `must be from 1 to the ${pins.length} release pin(s)`);
+  }
   for (const name of options.plugins?.privileged ?? [])
     if (!idPattern.test(name)) throw invalid('--privileged-plugins', 'must name plugins by letters, digits and . _ -');
   const jwk = options.joinEncryptionJwk;
@@ -122,6 +135,11 @@ export function renderBcdConfig(
     ...(options.approverSetSha256 ? [`approver_set_sha256 = "${options.approverSetSha256}"`] : []),
     '',
   ].join('\n');
+}
+
+/** The [update] section: bcd self-updates only to releases signed by `threshold` of these keys. */
+export function renderBcdUpdateSection(update: { releasePins: readonly string[]; threshold?: number }): string {
+  return ['[update]', `release_pins = "${update.releasePins.join(',')}"`, `release_threshold = ${update.threshold ?? 1}`, ''].join('\n');
 }
 
 /** Where plugins live (root-owned, 0755: each runs under its own uid and must reach its binary). */
@@ -291,6 +309,15 @@ if [ -f /etc/bcd/config.toml ] && grep -q '^\\[' /etc/bcd/config.toml; then
   sed -n '/^\\[/,$p' /etc/bcd/config.toml >> /etc/bcd/config.toml.new
 fi
 ${
+  options.update
+    ? `# bcd self-update: an [update] section unless the operator's config already has one.
+if ! grep -q '^\\[update\\]' /etc/bcd/config.toml.new; then
+  cat >> /etc/bcd/config.toml.new <<'BCD_UPDATE'
+${renderBcdUpdateSection(options.update)}BCD_UPDATE
+fi
+`
+    : ''
+}${
   options.plugins
     ? `# This node runs bcx plugins: a [plugins] section unless the operator's config already has one.
 if ! grep -q '^\\[plugins\\]' /etc/bcd/config.toml.new; then

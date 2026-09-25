@@ -240,6 +240,18 @@ export const daemonCommands = [
           y: string;
         },
         ...(flags['approver-set-sha256'] ? { approverSetSha256: flags['approver-set-sha256'] } : {}),
+        // The release keys that verified the manifest are the ones bcd self-updates under.
+        ...(flags['release-pins']
+          ? {
+              update: {
+                releasePins: flags['release-pins']
+                  .split(',')
+                  .map((pin) => pin.trim())
+                  .filter(Boolean),
+                ...(flags['release-threshold'] === undefined ? {} : { threshold: flags['release-threshold'] }),
+              },
+            }
+          : {}),
         ...(flags.plugins || flags['privileged-plugins']
           ? {
               plugins: {
