@@ -1,3 +1,4 @@
+import { ComputeError } from '@better-compute/core';
 import { connect, type ClientHttp2Session } from 'node:http2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -382,5 +383,67 @@ describe('restricted certificates (node_certs.allowed_kinds)', () => {
     await f.gateway.open({ nodeId: node, serial: 'c3' }, stream).receive(helloFrame(node));
     await f.gateway.jobs.dispatch.tick();
     expect(stream.commandIds()).toEqual([reset]);
+  });
+});
+describe('database-side revocation at Hello, and call context for the services', () => {
+  let f: GatewayFixture;
+  beforeEach(async () => {
+    f = await gatewayFixture();
+  });
+  afterEach(() => f.close());
+
+  async function record(nodeId: string, serial: string, options: { revoked?: boolean; identityGen?: number } = {}) {
+    await f.db.query(
+      `INSERT INTO node_certs (serial, node_id, role, identity_gen, spki_sha256, der, not_before, not_after, revoked_at)
+       VALUES ($1, $2, 'node', $3, '\\x00', '\\x00', compute_now() - interval '1 minute', compute_now() + interval '1 hour',
+               CASE WHEN $4 THEN compute_now() END)`,
+      [serial, nodeId, options.identityGen ?? 1, options.revoked ?? false],
+    );
+  }
+
+  it('refuses a revoked or superseded certificate before touching the live session', async () => {
+    const node = await f.addNode();
+    await record(node, 'aa01');
+    await record(node, 'aa02', { revoked: true });
+    await record(node, 'aa03', { identityGen: 0 });
+    const live = new FakeStream();
+    await f.gateway.open({ nodeId: node, serial: 'aa01' }, live).receive(helloFrame(node));
+    expect(live.of('welcome')).toHaveLength(1);
+
+    for (const serial of ['aa02', 'aa03']) {
+      const intruder = new FakeStream();
+      await f.gateway.open({ nodeId: node, serial }, intruder).receive(helloFrame(node, { bootId: 'boot-x' }));
+      expect(intruder.closed?.error).toMatchObject({ code: GrpcCode.UNAUTHENTICATED, message: 'certificate revoked' });
+    }
+    // The legitimate session was never superseded.
+    expect(live.closed).toBeUndefined();
+    expect(await f.session(node)).toMatchObject({ session_epoch: 1, boot_id: 'boot-1' });
+  });
+
+  it('passes { peerNodeId, gatewayId } to secret and renew, and { gatewayId } to join', async () => {
+    const seen: { method: string; context: unknown }[] = [];
+    f.services.services.secret = async (_request, context) => {
+      seen.push({ method: 'secret', context });
+      throw new ComputeError('NOT_FOUND', 'no such secret');
+    };
+    f.services.services.renew = async (_request, context) => {
+      seen.push({ method: 'renew', context });
+      throw new ComputeError('ACCESS_DENIED', 'no');
+    };
+    f.services.services.join = async (_request, context) => {
+      seen.push({ method: 'join', context });
+      throw new ComputeError('ACCESS_DENIED', 'no');
+    };
+    const node = await f.addNode();
+    const { stream, handle } = await f.connect(node);
+    await handle.receive(agentFrame({ case: 'secretRequest', value: { ref: 'secret://x', requestId: 'r' } }));
+    await expect.poll(() => stream.of('secret').length).toBe(1);
+    await expect(f.gateway.renew({} as never, { nodeId: node })).rejects.toBeDefined();
+    await expect(f.gateway.join({} as never)).rejects.toBeDefined();
+    expect(seen).toEqual([
+      { method: 'secret', context: { peerNodeId: node, gatewayId: f.gateway.id } },
+      { method: 'renew', context: { peerNodeId: node, gatewayId: f.gateway.id } },
+      { method: 'join', context: { gatewayId: f.gateway.id } },
+    ]);
   });
 });

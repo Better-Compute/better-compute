@@ -671,6 +671,26 @@ export function createGatewayStore(options: GatewayStoreOptions) {
     async hello(input: HelloInput, options: { liveWindowMs: number }): Promise<HelloResult> {
       return db.transaction(async (tx) => {
         await fence(tx);
+        // The session certificate as compute recorded it, before anything changes: Postgres is the
+        // revocation truth (the in-memory feed may lag a poll), and a restricted certificate
+        // (discovery/ramdisk, core/0010) limits what may be sent here. An unrecorded serial (a
+        // certificate issued outside JoinService) is unrestricted.
+        let allowedKinds: string[] | null = null;
+        if (input.certSerial) {
+          const cert = await tx.query<{ allowed_kinds: string[] | null; revoked: boolean; stale: boolean }>(
+            `SELECT c.allowed_kinds, c.revoked_at IS NOT NULL AS revoked,
+                    c.identity_gen < n.identity_gen AS stale
+               FROM node_certs c JOIN nodes n ON n.id = c.node_id
+              WHERE c.serial = $1 AND c.node_id = $2`,
+            [input.certSerial, input.nodeId],
+          );
+          const row = cert.rows[0];
+          if (row?.revoked || row?.stale)
+            throw new ComputeError('UNAUTHENTICATED', 'certificate revoked', undefined, {
+              reason: row.revoked ? 'revoked' : 'superseded identity generation',
+            });
+          allowedKinds = row?.allowed_kinds ?? null;
+        }
         const previous = await tx.query<{
           boot_id: string | null;
           journal_id: string | null;
@@ -788,15 +808,6 @@ export function createGatewayStore(options: GatewayStoreOptions) {
         });
         if (connected.rowCount || settled.length) await work.enqueue(tx, 'node', input.nodeId);
 
-        // A restricted certificate (discovery/ramdisk, core/0010) limits what may be sent here.
-        let allowedKinds: string[] | null = null;
-        if (input.certSerial) {
-          const cert = await tx.query<{ allowed_kinds: string[] | null }>(
-            'SELECT allowed_kinds FROM node_certs WHERE serial = $1 AND node_id = $2',
-            [input.certSerial, input.nodeId],
-          );
-          allowedKinds = cert.rows[0]?.allowed_kinds ?? null;
-        }
 
         const requestSections = await inventory.recordHashes(
           tx,
@@ -1023,7 +1034,7 @@ export function createGatewayStore(options: GatewayStoreOptions) {
      */
     async status(nodeId: string, tenantId: string, report: StatusReport): Promise<void> {
       await db.transaction(async (tx) => {
-        await tx.query(
+        const advanced = await tx.query(
           `UPDATE nodes SET observed_generation = $2
            WHERE id = $1 AND observed_generation < $2`,
           [nodeId, Number(report.observedGeneration)],
@@ -1037,7 +1048,9 @@ export function createGatewayStore(options: GatewayStoreOptions) {
             report: toJson(StatusReportSchema, report, { registry: protocolRegistry }) as Json,
           },
         });
-        await work.enqueue(tx, 'node', nodeId);
+        // The node reconciler waits on convergence: wake it when observed_generation moved, not on
+        // every (coalesced, ~1/s) report. Conditions and instances go to the status handlers.
+        if (advanced.rowCount) await work.enqueue(tx, 'node', nodeId);
         // Health, instances, … are the host's; a failing handler must not hold back
         // observed_generation or the other handlers: each runs under its own savepoint.
         const handlers = reports.status === undefined ? [] : Array.isArray(reports.status) ? reports.status : [reports.status];

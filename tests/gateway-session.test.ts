@@ -423,8 +423,10 @@ describe('status, inventory and specs', () => {
     await handle.receive(
       agentFrame({ case: 'inventory', value: { section: 'cpu', sha256: new Uint8Array(32), content, schemaVersion: 1 } }),
     );
-    const { rows } = await f.db.query('SELECT section FROM node_inventory_sections WHERE node_id = $1', [node]);
-    expect(rows).toEqual([{ section: 'gpus' }]);
+    // Sections are stored off the frame queue (one group commit per node's burst), so wait for it.
+    await expect
+      .poll(async () => (await f.db.query('SELECT section FROM node_inventory_sections WHERE node_id = $1', [node])).rows)
+      .toEqual([{ section: 'gpus' }]);
     expect(stream.closed).toBeUndefined();
     const { rows: work } = await f.db.query("SELECT key FROM work_queue WHERE kind = 'inventory'");
     expect(work).toEqual([{ key: node }]);

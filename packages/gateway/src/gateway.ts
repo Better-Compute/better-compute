@@ -684,17 +684,20 @@ export function createGateway(options: GatewayOptions): Gateway {
     );
   }
 
-  async function onInventory(session: Session, section: InventorySection) {
-    try {
-      await inventoryBatched({ kind: 'section', nodeId: session.nodeId, section });
-    } catch (error) {
-      if (!isComputeError(error, 'INVALID_INPUT')) throw error;
-      log.warn('gateway: inventory section rejected', {
+  /**
+   * Not awaited by the frame queue: a section is an idempotent upsert that needs no ack, so a node's
+   * sections (sent back to back after Welcome) join one group commit and one coalesced `inventory`
+   * enqueue, instead of one batch and one reconciler run per section. A section lost to a store
+   * error is simply requested again at the next Hello (its hash still differs).
+   */
+  function onInventory(session: Session, section: InventorySection) {
+    inventoryBatched({ kind: 'section', nodeId: session.nodeId, section }).catch((error: unknown) => {
+      log.warn('gateway: inventory section not stored', {
         nodeId: session.nodeId,
         section: section.section,
-        cause: error.message,
+        cause: isComputeError(error) ? error.message : String(error),
       });
-    }
+    });
   }
 
   async function onSpecRequest(session: Session, _request: SpecRequest) {
@@ -715,7 +718,8 @@ export function createGateway(options: GatewayOptions): Gateway {
       return;
     }
     // Outside the frame queue: the broker may be slow and nothing else depends on its answer.
-    options.services.secret(request).then(
+    // The broker verifies node_sig against this peer's current certificate only (fails closed without it).
+    options.services.secret(request, { peerNodeId: session.nodeId, gatewayId: id }).then(
       (response) => {
         if (!session.closed) session.sink.send(frame({ case: 'secret', value: response }));
       },
@@ -1059,7 +1063,7 @@ export function createGateway(options: GatewayOptions): Gateway {
               session.appliedGeneration = Math.max(session.appliedGeneration, Number(msg.value.appliedGeneration));
               return;
             case 'inventory':
-              return await onInventory(session, msg.value);
+              return onInventory(session, msg.value);
             case 'specRequest':
               return await onSpecRequest(session, msg.value);
             case 'secretRequest':
@@ -1091,11 +1095,12 @@ export function createGateway(options: GatewayOptions): Gateway {
     async join(request) {
       if (!handshakes.take())
         throw new GrpcError(GrpcCode.RESOURCE_EXHAUSTED, 'handshake rate exceeded; retry with jitter');
-      return options.services.join(request);
+      return options.services.join(request, { gatewayId: id });
     },
 
-    async renew(request, _peer) {
-      return options.services.renew(request);
+    async renew(request, peer) {
+      // JoinService checks the presented chain belongs to this mTLS peer (defence in depth).
+      return options.services.renew(request, { peerNodeId: peer.nodeId, gatewayId: id });
     },
 
     async drain(drainOptions = {}) {
