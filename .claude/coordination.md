@@ -181,7 +181,8 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         fresh-only warm claims (template instance_version), selfCheck findings (7d03d6d), vps.sandbox.warm meter
         (83d0ebd). bcd still owes network_policy nftables + instance.snapshot ([6a20b8] told).
     - [31c64a]:
-      - tests/e2e/sandboxes.test.ts: written and green at 20 sandboxes; the 500 run is in progress;
+      - tests/e2e/sandboxes.test.ts: v0.5 sandboxes EXIT MET (a8f3dfc): 500 TTL expiries with a zero-leak diff,
+        the warm claim, the memory round trip, the drain;
       - both IAM modes: DONE (d5816ac). The server/capacity/vps suites run on fakeIam and have no mode;
         the §9.2 matrix through IamPort covers the contract in both.
       - nightly I8: fixed (aa5faeb, 5/5 green).
@@ -209,6 +210,17 @@ hardware or Postgres). Owners pick these up after their orphan WIP:
         those flags plus a Go contract test fed from scripts/daemon-fixtures.mjs ([6a20b8]); renderers
         emit exactly that ([f02367]).
       - Redfish system path, ramdisk/iPXE image build + site/ramdisk e2e, BIOS/RAID/firmware BMC ops: [6a20b8].
+      - Join chain status:
+        - bcd flags (797915d, c98dd68) and renderers (e6b3b14): done;
+        - the well-known `gateway` section (670d586, [f85da7]): done;
+        - hosts passing gateway.url + pki.servingCa: [402c97].
+    - Docs-session sandbox gaps:
+      - MCP gate rules: fixed (e2ead0e);
+      - iam setup meter vps.sandbox.warm, console snapshot store, CLI list limit, pki reseal auth: [402c97];
+      - bcd network_policy nftables: [6a20b8];
+      - deleting a kept snapshot: [097b34];
+      - the sandbox-templates reference regen: [c321a3];
+      - SDK exec/files helpers: deferred (PLAN §3.7).
     - Open, no owner:
       - the real-hardware nightly (needs hardware);
       - a Postgres CPU <50% bench and the 30-min gateway run (need reference Postgres);
