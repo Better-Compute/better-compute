@@ -277,6 +277,7 @@ describe('capacityModule API surface', () => {
     expect(module.name).toBe('capacity');
     expect(module.migrations!.map((migration) => migration.name)).toEqual([
       'capacity/0001_device_links',
+      'capacity/0002_lease_health',
     ]);
     expect(module.reconcilers!.map((reconciler) => reconciler.name)).toEqual([
       reservationWork,
@@ -1690,6 +1691,46 @@ describe('node leases: binding node (v0.5)', () => {
     });
     expect(recorded.work).toContainEqual({ kind: 'metal', key: nodeId });
     expect((await allocationsOf(leased.id)).every((row) => row.released)).toBe(true);
+  });
+
+  it('bills node.metal.hours plus the GPUs healthy at each window start', async () => {
+    const leased = (await call('reservations', 'create', lease())) as Rsv;
+    await reconcile(leased.id);
+    const [allocation] = await allocationsOf(leased.id);
+    await db.query(`UPDATE allocations SET bound_at = compute_now() WHERE id = $1`, [
+      allocation!.id,
+    ]);
+    await reconcile(leased.id);
+    const meter = () => db.transaction((tx) => meterReservations(tx, clock.now()));
+    const flip = (healthy: boolean) =>
+      db.query(`UPDATE devices SET healthy = $2 WHERE id = $1`, [allocation!.atoms[0], healthy]);
+
+    await meter(); // 12:00 snapshot: 4 of 5 GPUs healthy
+    await advance(30 * 60_000);
+    await flip(false); // an XID at 12:30
+    await advance(31 * 60_000);
+    await meter(); // 13:01: 12:00 is final; 13:00 snapshot: 3 healthy
+    await advance(60 * 60_000);
+    await meter(); // 14:01: 13:00 is final
+    await advance(9 * 60_000);
+    await flip(true); // recovered at 14:10
+    await advance(51 * 60_000);
+    await meter(); // 15:01: 14:00 is final (its snapshot says 3)
+    expect((await meter()).windows).toBe(0); // repeating a pass writes nothing
+
+    const { rows } = await db.query<{ start: string; meter: string; quantity: string }>(
+      `SELECT to_char(window_start AT TIME ZONE 'UTC', 'HH24:MI') AS start, meter, quantity::text AS quantity
+         FROM usage_windows WHERE allocation_id = $1 ORDER BY window_start, meter`,
+      [allocation!.id],
+    );
+    expect(rows.map((row) => [row.start, row.meter, Number(row.quantity)])).toEqual([
+      ['12:00', 'gpu.h100.hours', 4],
+      ['12:00', 'node.metal.hours', 1],
+      ['13:00', 'gpu.h100.hours', 3],
+      ['13:00', 'node.metal.hours', 1],
+      ['14:00', 'gpu.h100.hours', 3],
+      ['14:00', 'node.metal.hours', 1],
+    ]);
   });
 
   it('leases gangs of whole nodes', async () => {

@@ -20,5 +20,25 @@ CREATE TABLE capacity_device_links (
 `,
 };
 
+/**
+ * Healthy GPUs of a node lease at the start of each usage window (§12.7 billing for `binding:
+ * 'node'`): the usage job snapshots them when it first sees a window open, and the window bills
+ * that many GPUs, so a GPU that fails mid-lease stops billing from the next window.
+ */
+export const leaseHealthMigration: Migration = {
+  name: 'capacity/0002_lease_health',
+  sql: `
+CREATE TABLE capacity_lease_health (
+  allocation_id text NOT NULL REFERENCES allocations ON DELETE CASCADE,
+  window_start timestamptz NOT NULL,
+  healthy_gpus numeric NOT NULL CHECK (healthy_gpus >= 0),
+  PRIMARY KEY (allocation_id, window_start)
+);
+`,
+};
+
 /** The capacity module's migrations, in ledger order. */
-export const capacityMigrations: readonly Migration[] = Object.freeze([deviceLinksMigration]);
+export const capacityMigrations: readonly Migration[] = Object.freeze([
+  deviceLinksMigration,
+  leaseHealthMigration,
+]);
