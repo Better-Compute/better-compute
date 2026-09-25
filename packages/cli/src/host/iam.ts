@@ -10,9 +10,11 @@ import {
   agentStreamFilter,
   budgetAlertHandler,
   combineStreamClosers,
+  createIamWebhookHandler,
   gatewayStreamCloser,
   identityEndOf,
   localStreamCloser,
+  sqlInbox,
   successorLookup,
   type AgentStreamFilter,
   type LocalStreamRegistry,
@@ -23,6 +25,7 @@ import {
 } from '@better-compute/iam';
 import { revokeIdentitySshCertificates } from '@better-compute/server';
 import type { AnyCompute } from '../config.js';
+import type { HostRoute } from './http.js';
 
 // Compute's reactions to IAM events (PLAN.md §12.8), installed by the host because it is the one place that
 // holds the bridge, the control plane and the way to the gateways. The iam module's inbox drain calls them in
@@ -60,6 +63,26 @@ export interface HostIamConfig {
   streams?: readonly HostStreamRegistry[];
   /** Close failures of the default `agent` handler and handler errors (never thrown). */
   onError?(error: unknown, context: { filter?: AgentStreamFilter; event?: IamInboxEvent }): void;
+  /**
+   * Remote IAM without access to its database (v0.4 fallback intake): better-iam delivers compute's events as
+   * signed webhooks to `POST <path>` (default `/iam/events`), which writes them to this store's `iam_inbox`. The
+   * IAM root subscribes with `webhooks.create({ scope: 'subtree', events: computeIamEventPatterns, outcomes:
+   * ['allow'], url })`; `secret` is what that call returned.
+   */
+  webhook?: { secret: string; path?: string };
+}
+
+/** The host route of `host.iam.webhook`, if configured. */
+export function iamWebhookRoutes(compute: AnyCompute, config: HostIamConfig | undefined): HostRoute[] {
+  const webhook = config?.webhook;
+  if (!webhook) return [];
+  return [
+    {
+      path: webhook.path ?? '/iam/events',
+      method: 'POST',
+      handler: createIamWebhookHandler({ secret: webhook.secret, inbox: sqlInbox(compute.context.sql) }),
+    },
+  ];
 }
 
 export interface LiveGatewaysOptions {

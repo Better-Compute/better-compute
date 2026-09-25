@@ -1,7 +1,9 @@
+import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createDeployment,
   hostFindings,
+  iamWebhookRoutes,
   installIamHandlers,
   liveGateways,
   resolveHost,
@@ -119,6 +121,45 @@ describe('host.iam', () => {
       `SELECT topic FROM outbox WHERE topic = 'node.ssh-cert.revoked'`,
     );
     expect(events.rows).toHaveLength(1);
+  });
+
+  it('mounts the remote-IAM webhook intake into the inbox (host.iam.webhook)', async () => {
+    const { compute } = await deploy();
+    expect(iamWebhookRoutes(compute, { bridge: { setHandlers() {} } })).toEqual([]);
+    const secret = 'whsec_remote_iam_webhook_test_0123456789';
+    const [route] = iamWebhookRoutes(compute, { bridge: { setHandlers() {} }, webhook: { secret } });
+    expect(route).toMatchObject({ path: '/iam/events', method: 'POST' });
+    const body = JSON.stringify({
+      id: 'aud_01',
+      tenantId: 'ten_a',
+      type: 'delegation:revoke',
+      outcome: 'allow',
+      timestamp: Date.now(),
+      actorId: 'idn_1',
+      resourceId: 'dlg_1',
+    });
+    const post = (signature: string) => {
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      return route!.handler(
+        new Request('https://compute.example.com/iam/events', {
+          method: 'POST',
+          headers: {
+            'x-better-iam-timestamp': timestamp,
+            'x-better-iam-signature':
+              signature || `v1=${createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')}`,
+          },
+          body,
+        }),
+      );
+    };
+    expect((await post(`v1=${'0'.repeat(64)}`)).status).toBe(401);
+    const accepted = await post('');
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({ accepted: 1 });
+    const { rows } = await compute.context.sql.query<{ action: string }>(
+      `SELECT action FROM iam_inbox WHERE event_id = 'aud_01'`,
+    );
+    expect(rows).toEqual([{ action: 'delegation:revoke' }]);
   });
 
   it('doctor warns about remote IAM without admission refresh', async () => {

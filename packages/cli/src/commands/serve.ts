@@ -18,7 +18,7 @@ import { defineCommand, type FlagSpec } from '../framework.js';
 import { mcpRoutes, resolveHost, type HostConfig } from '../host/config.js';
 import { startGateway, type RunningGateway } from '../host/gateway.js';
 import { hostListener } from '../host/http.js';
-import { installIamHandlers } from '../host/iam.js';
+import { iamWebhookRoutes, installIamHandlers } from '../host/iam.js';
 import { startHostMetrics } from '../host/metrics.js';
 import { workloadRoutes } from '../host/workload.js';
 import { mountTunnels, type TunnelMount } from '../host/tunnels.js';
@@ -135,9 +135,11 @@ export async function runServer(
       const http = withMetricsRoute(options.hostConfig);
       // Workload identity's OIDC discovery and JWKS, when the deployment issues workload tokens.
       const workload = options.computeOptions ? workloadRoutes(options.computeOptions) : [];
+      // Remote IAM's signed event webhooks into this store's inbox, when host.iam.webhook is set.
+      const iamWebhook = iamWebhookRoutes(compute, options.hostConfig?.iam);
       const listener = hostListener(compute, {
         ...http,
-        routes: [...(http?.routes ?? []), ...workload],
+        routes: [...(http?.routes ?? []), ...workload, ...iamWebhook],
         upgrade: [...(tunnels ? [tunnels.upgrade] : []), ...(http?.upgrade ?? [])],
       });
       if (tunnels) options.note(`Tunnels: ${compute.endpoint.basePath}/tunnels/{ticket}`);

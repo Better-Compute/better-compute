@@ -119,6 +119,7 @@ export {
   type SupportBundleInput,
 } from './commands/support.js';
 export {
+  iamWebhookRoutes,
   installIamHandlers,
   liveGateways,
   type HostIamConfig,
