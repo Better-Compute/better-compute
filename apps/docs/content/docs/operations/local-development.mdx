@@ -234,14 +234,19 @@ Two options let a daemon outside the process, such as a real `bcd`, join the dev
 
 | Option | What it adds |
 | --- | --- |
-| `externalTls: { host?, port?, dnsNames? }` | A second gateway listener authenticated as in production: HTTP/2 over mTLS, a serving certificate from a dev serving CA (`servingCaCertificate`, what the daemon pins; names `localhost` and `gw.dev.local` by default), client certificates checked against the dev node CA. Its URL is `externalGatewayUrl`. Safe to bind beyond loopback |
+| `externalTls: { host?, port?, dnsNames?, servingCa? }` | A second gateway listener authenticated as in production: HTTP/2 over mTLS, a serving certificate from a dev serving CA (`servingCaCertificate`, what the daemon pins; names `localhost` and `gw.dev.local` by default), client certificates checked against the dev node CA. Its URL is `externalGatewayUrl`. Its port (a free one unless given) and serving CA are chosen before the control plane starts and published in `/.well-known/better-compute` as `gateway` (`https://<host or 127.0.0.1>:<port>`, `serverName` the first DNS name, and the CA's pin). Safe to bind beyond loopback |
 | `admitExternalJoins: true` | On the loopback h2c listener, also accepts the `x-bc-test-node` header of nodes that joined on their own, once their current certificate is in `node_certs` (polled every 250 ms, or `admit(nodeId)` at once). bcd reaches it only as a fakehw build with `dev_insecure_h2c = true` |
 
 For `externalTls`, write a `config.toml` with `gateway_url` set to the listener, `serving_ca_spki_pin` from
 `servingCaCertificate`, the join pins from `pins`, and `gateway_server_name = "gw.dev.local"` when you dial an IP
 address; put `pins.joinEncryptionJwk` next to it as `join-encryption.jwk`. Then pipe a join token into `bcd join`
 and start `bcd node`. `tests/e2e/bcd.test.ts` does exactly this from WSL; see
-[testing](/docs/operations/testing#the-go-daemon).
+[testing](/docs/operations/testing#the-go-daemon). Since the stack publishes its gateway, a machine without any
+`config.toml` can also join with `bcd join --server <the stack's base URL>`, which takes the gateway from the
+well-known document: a host build also needs `--serving-ca-pin`, `--join-signing-pin` and `--join-encryption-pin`
+(from `servingCaCertificate` and `pins`), while a fakehw build may join with `--server` alone, taking the pins from
+the document on trust (and accepts an `http://` server); see
+[joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document).
 
 ## The example
 

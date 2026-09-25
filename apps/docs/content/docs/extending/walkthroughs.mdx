@@ -42,7 +42,7 @@ the best worked examples of the contracts on the other pages of this section.
 | 1. Ubuntu autoinstall via Redfish virtual media | v0.2 | a control-plane step, a profile, a plugin | `tests/extensions/ubuntu-autoinstall.test.ts` | runs in simulation |
 | 2. VPS provider `acme-cloud` | v0.3 | `defineProvider`, conformance cases, a provider pool | `tests/extensions/acme-cloud.test.ts` | runs against an in-memory cloud emulator, live and from a recording |
 | 3. Talos on an agentless pool | v0.3 | a relaying step, a profile, `site.httpProxy` | `tests/extensions/talos.test.ts`, `tests/metal-fakedaemon.test.ts` | runs in simulation and on the dev stack |
-| 4. Kata runtime in Go | v0.5 | a bcx `runtime` plugin in bcd's `[plugins] dir` | none | not started; bcd hosts plugins, but its `instances` converger does not use them |
+| 4. Kata runtime in Go | v0.5 | a bcx `runtime` plugin in bcd's `[plugins] dir` | `daemon/internal/agent/pluginruntime_test.go` | bcd serves runtimes from bcx plugins (Go unit tests); no Kata plugin written |
 | Emulated site | v0.2 | a hardware profile, the whole metal lifecycle | `examples/emulated-site` | configuration checked; needs Linux, KVM and a `bcd` build to run |
 
 <Callout type="warn" title="No real hardware yet">
@@ -51,8 +51,7 @@ daemon are now written and answer every command these walkthroughs send, except 
 through the BMC, but they are not released and only their Go unit tests run them. No walkthrough runs against them
 yet: the tests answer the commands with simulated site agents and machines, or with a FakeDaemon site agent over
 the real gateway. Running one for real also needs what the repository does not provide (iPXE builds, a ramdisk
-image, a KVM host), and the emulated site hits a limit of bcd's Redfish client, which drives only the first system
-behind a BMC address. PLAN.md's pass criterion for walkthrough 1, "a sushy-tools VM reaches `deployed`", has not
+image, a KVM host). PLAN.md's pass criterion for walkthrough 1, "a sushy-tools VM reaches `deployed`", has not
 been met. See [what bcd does today](/docs/daemon#what-bcd-does-today).
 </Callout>
 
@@ -181,9 +180,24 @@ pnpm vitest run tests/extensions/acme-cloud.test.ts
 
 A `runtime` driver written in Go, pinned in bcd's `[plugins] dir`, advertised in `Hello.drivers`, and selected by pools
 through `vps({ runtimes })`. The TypeScript half of bcx is in `@better-compute/driver-sdk`, with a real-subprocess test
-suite. bcd now hosts pinned plugins and advertises their drivers, and `bcx.Serve` in `daemon/internal/bcx` is the
-start of a Go plugin SDK, but bcd's `instances` converger drives only the runtimes built into bcd, not a plugin, and no
-Kata plugin exists. The control-plane half is in place: the gateway writes each driver a daemon advertises in
+suite. bcd hosts pinned plugins and advertises their drivers, and `bcx.Serve` in `daemon/internal/bcx` is the start
+of a Go plugin SDK.
+
+On `bcd node`, a hosted driver whose manifest lists the kind `runtime`, and whose id is not a runtime built into bcd,
+becomes an instances runtime (`agent.PluginRuntime`, 494de69). bcd speaks the TypeScript `RuntimeDriver` contract to
+it over `Invoke`, with positional JSON arguments:
+
+| Operation | Arguments | Answers |
+| --- | --- | --- |
+| `list` | none | `[{ id, state, addresses, message? }]` |
+| `apply` | core's `InstanceSpec` as JSON, with `desiredState` | `{ id, state, addresses, message? }`; `state: 'error'` fails the instance |
+| `remove` | the instance id | `null` |
+
+`apply` converges one instance, desired state included, so bcd records each spec and applies it when the state
+changes. A new instance's first `apply` carries its user data and, for a restore, the snapshot bcd already downloaded
+and verified, as a `file://` URL; later ones do not. Snapshots answer `unsupported`, since they are not in the bcx
+contract yet. A plugin never shadows a built-in runtime of the same name, and `Hello` lists its manifest once. Go
+unit tests (`pluginruntime_test.go`) cover it; no Kata plugin exists yet. The control-plane half is in place: the gateway writes each driver a daemon advertises in
 `Hello.drivers` as the node label `bc.dev/driver.<id>=<version>`, and vps places an instance whose runtime is not built
 into bcd only on nodes carrying `bc.dev/driver.<runtime>` (`runtimeNodeLabels`, through
 `PlacementRequest.nodeLabels`; see [placement](/docs/guides/capacity/placement#eligibility-filters)). See
@@ -207,10 +221,10 @@ export const hardwareProfiles = {
 
 A pool that names it in `policy.hardwareProfile` drives the emulated BMCs through commission, deploy, release and
 retire. The run needs Linux with `/dev/kvm`, QEMU, libvirt, sushy-tools and a `bcd` build, plus iPXE builds for the
-site agent's TFTP root and a ramdisk kernel and initramfs with `bcd ramdisk` in it, so none of it runs in CI. As
-written it would not pass against today's `bcd site`: one `sushy-emulator` serves both VMs, and bcd's Redfish client
-uses only the host of a BMC address and drives the first system behind it (see
-[Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)).
+site agent's TFTP root and a ramdisk kernel and initramfs with `bcd ramdisk` in it, so none of it runs in CI. One
+`sushy-emulator` serves both VMs, so each enrollment names its system in the BMC address
+(`https://192.168.122.1:8000/redfish/v1/Systems/<libvirt domain uuid>`); bcd's Redfish client then drives that
+system and its own manager (see [Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)).
 What CI checks, in `tests/examples-smoke.test.ts`, is that the configuration loads, migrates on PGlite and passes
 `better-compute doctor` with no error findings (on an unconfigured machine it reports `iam.not-configured`).
 

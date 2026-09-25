@@ -128,10 +128,10 @@ fallback fills a JSON without a username), and runs the operation:
 
 | Operation | Redfish request | Result |
 | --- | --- | --- |
-| `power.getPower` | `GET` the first `ComputerSystem` | `{ power: 'on' \| 'off' \| 'unknown' }` |
+| `power.getPower` | `GET` the address's system (the one it names, else the first `ComputerSystem`) | `{ power: 'on' \| 'off' \| 'unknown' }` |
 | `power.setPower` | `POST .../Actions/ComputerSystem.Reset` with the `ResetType` of [power](#power) | `{}` |
 | `management.setBootDevice` | `PATCH` the system's `Boot`: `BootSourceOverrideTarget` `Pxe`, `UefiHttp`, `Hdd` or `Cd` for `pxe`, `http`, `disk` and `cd`; `Once`, or `Continuous` when `persistent`; `UEFI`, or `Legacy` when `uefi` is false | `{}` |
-| `virtual-media.insert`, `virtual-media.eject` | `InsertMedia` (an http(s) image URL) or `EjectMedia` on the first manager's first virtual media device that takes a CD or DVD | `{}` |
+| `virtual-media.insert`, `virtual-media.eject` | `InsertMedia` (an http(s) image URL) or `EjectMedia` on the first virtual media device that takes a CD or DVD, of the system's own manager (its `Links.ManagedBy`), else of the first manager | `{}` |
 | `inspect.inspect` | the system and its `EthernetInterfaces` | `macs`, `ipAddresses`, `manufacturer`, `model`, `serialNumber`, `productUuid`, `power` |
 | `firmware.components` | `UpdateService/FirmwareInventory` | `components: [{ id, name, version }]` |
 | `management.rotateCredential` | `PATCH` the `AccountService` account with the new password (fetched by `newCredentialRef`), then a login with it | `{ verified }` |
@@ -140,9 +140,16 @@ fallback fills a JSON without a username), and runs the operation:
   `tlsSpkiSha256` the BMC's certificate must match that SPKI hash, since BMCs mostly present self-signed
   certificates; without it the system roots verify it. Redirects are never followed, and a request times out after
   60 seconds.
-- **The address.** Only the host of `bmc.address` is used. The client drives the first member of
-  `/redfish/v1/Systems` and of `/redfish/v1/Managers`, so one BMC endpoint that serves several systems (an emulator
-  such as sushy-tools with several VMs) is driven as its first system.
+- **The address.** `bmc.address` is a host (`10.20.0.5`, `bmc.example:8443`), an `https://` or `redfish://` URL,
+  or such a URL naming one system of a multi-system service (sushy-tools in front of libvirt, a chassis manager):
+  `https://192.168.122.1:8000/redfish/v1/Systems/<id>`. Requests always go over HTTPS to the URL's host. Without a
+  system path the client drives the first member of `/redfish/v1/Systems`. Any other path, credentials in the URL, a
+  query or a fragment is refused (`invalid-address`). Virtual media uses the system's own manager, from its
+  `Links.ManagedBy`, and falls back to the first member of `/redfish/v1/Managers`.
+- **Paths stay on the BMC.** Resource paths come from the BMC's own answers (`@odata.id`), so every request path
+  must start with `/redfish/v1` and contain no `@`, `..`, query, backslash or whitespace; anything else fails with
+  `bmc-error`. A value such as `@evil.example/…` appended to the base would otherwise have sent the credentials to
+  another host.
 - **Failures.** A BMC that refuses or fails does not fail the command: it succeeds with `ok: false` and a stable
   `errorCode`, as the FakeDaemon's fake site answers. The codes are `unreachable` (including a pin mismatch),
   `auth-failed` (401 or 403), `unsupported` (404, 405, or an operation the client does not have), `bmc-error`,
@@ -180,7 +187,7 @@ const node = await compute.api.metal.enroll(credential, {
     tenantId: { type: 'string', description: 'The pool owner.', required: true },
     siteId: { type: 'string', description: "The pool's site. Another site is INVALID_INPUT.", required: true },
     poolId: { type: 'string', description: 'A pool the tenant owns; otherwise NOT_FOUND.', required: true },
-    'bmc.address': { type: 'string', description: 'The BMC endpoint, at most 512 characters.', required: true },
+    'bmc.address': { type: 'string', description: 'The BMC endpoint, at most 512 characters: a host, or an https:// URL that may name one system (/redfish/v1/Systems/<id>) of a multi-system service.', required: true },
     'bmc.driver': { type: 'string', description: 'A driver id such as redfish or ipmi.', required: true },
     'bmc.credentials': { type: "'secret://…' | { username, password }", description: 'A secret reference, or inline credentials stored at once and never echoed.', required: true },
     'bmc.tlsSpkiSha256': { type: 'string', description: "64 hex digits: the SHA-256 of the BMC certificate's SubjectPublicKeyInfo, pinned." },

@@ -185,9 +185,16 @@ agents, over the runtimes the build provides) follows the FakeDaemon's `FakeHype
   captures the disk (and with `include_memory` the memory state), and bcd hashes it and uploads it to a presigned
   https URL.
 
-Only fakehw builds have a runtime: a file-backed stand-in named `libvirt-kvm` whose domains outlive the process and
-honor vCPU and memory limits. A host build has none yet (`libvirt-kvm` and `cloud-hypervisor` are not written), so a
-non-empty section fails with `this host runs no instance runtime` and no VM boots on real hardware.
+- Before any domain starts, the instances' `network_policy` becomes host nftables rules on their taps (one
+  `bcd_instances` table, replaced atomically): `PRIVATE` keeps a NIC to its IPAM subnets and the host, `NONE` to the
+  host only, `EGRESS` adds nothing. A policy that cannot be expressed (a NIC without IPAM addresses), or rules that
+  fail to load, fail the instance and stop it if it runs.
+
+Only fakehw builds have a built-in runtime: a file-backed stand-in named `libvirt-kvm` whose domains outlive the
+process and honor vCPU and memory limits. On `bcd node`, a bcx plugin whose driver lists the kind `runtime` is also a
+runtime (`list`, `apply`, `remove` over `Invoke`; no snapshots). A host build has no built-in runtime yet
+(`libvirt-kvm` and `cloud-hypervisor` are not written) and no runtime plugin exists, so without one a non-empty
+section fails with `this host runs no instance runtime` and no VM boots on real hardware.
 
 ## Commands
 

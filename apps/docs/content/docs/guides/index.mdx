@@ -13,7 +13,7 @@ set of GPUs to a few vCPUs and GiB of memory. The database referees every bookin
 given to two holders at once. It also makes machines useful: you can adopt a server that is already running, deploy
 an image to a bare machine over PXE, or run isolated VMs, as VPS or as [sandboxes](/docs/guides/vps/sandboxes), on
 your own hosts or on a provider's. A sandbox is a hosted VPS instance with a template, a time-to-live and an optional
-warm pool, served by the `sandboxes` and `sandboxTemplates` API groups of `vps()`.
+warm pool, served by the `sandboxes`, `sandboxTemplates` and `sandboxSnapshots` API groups of `vps()`.
 
 It is a library, not a hosted service. You construct the control plane with `betterCompute()` in your own process,
 on your own PostgreSQL, the same way you construct Better IAM with `betterIam()`:

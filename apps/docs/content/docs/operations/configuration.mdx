@@ -115,7 +115,7 @@ Anything wrong throws `INVALID_CONFIG` before a connection is opened.
 | `ports` | built-in | Replace `ctx.capacity` or `ctx.inventory`. |
 | `downloads` | none | `{ dir?, blob? }` (at least one): where `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` finds `bcd` binaries. See [installing bcd](/docs/daemon/install#serving-the-binaries). |
 | `supportBundles` | none | `{ blob, maxBytes? }`: a `BlobStore` with `get` and `presign`, and the largest upload (a positive integer, default 256 MiB). `commands.run` `logs.collect` then hands the daemon a presigned PUT for `support-bundles/{nodeId}/{key}.bundle`. Without it `logs.collect` has no upload destination. The CLI host does not set it. See [support bundles](/docs/guides/nodes/commands#support-bundles). |
-| `gateway` | none | Accepted and typed for a later phase (gateway public URLs); nothing reads it yet. |
+| `gateway` | none | `{ url?, serverName?, publicUrls?, maxStreams? }`. With `url` (https, no credentials, query or fragment; `INVALID_CONFIG` otherwise) the server publishes where daemons dial in `/.well-known/better-compute` as `gateway: { url, serverName?, servingCaPin? }`, the pin computed from `pki.servingCa`, so `bcd join --server <control plane>` on a machine without `config.toml` finds the gateway (a host build still checks the document against the pins its install brings). `serverName` is the TLS name when it differs from the URL's host (a DNS name). `publicUrls` and `maxStreams` are not read. See [installing bcd](/docs/daemon/install#joining-from-the-well-known-document). |
 
 ### capacity
 
@@ -149,7 +149,8 @@ CommandSweeper runs every 5 s.
 | Option | What it does |
 | --- | --- |
 | `pki.nodeCa` | The node CA. The gateway role takes its trust anchor and revocation set from it. |
-| `pki.servingCa`, `pki.internalCa` | Accepted, but nothing reads them yet: the gateway's TLS comes from `host.gateway`, issued with `pki issue-gateway`. |
+| `pki.servingCa` | The gateway serving CA. With `gateway.url`, its SPKI pin is published in `/.well-known/better-compute` as `gateway.servingCaPin` (read once; a failure is logged, the pin left out and retried a minute later). The gateway's own TLS still comes from `host.gateway`, issued with `pki issue-gateway`. |
+| `pki.internalCa` | Accepted, but nothing reads it yet. |
 | `pki.join` | JoinService's keys and node CA: `pkiJoinCrypto({ trustDomain, nodeCa, signingKey, encryptionKey })`. Without it, `Join` and `Renew` answer `INVALID_CONFIG`. Its public keys appear in `/.well-known/better-compute` as `join`. |
 | `pki.commandSigning` | The command-signing root (v0.2). Every command is then signed with a 24 h worker key it certifies, every NodeSpec generation is signed as it is written (v0.4), daemons get its root in their trust bundle, and capacity's `attestedBindings` defaults to the pki check. |
 | `pki.commandSigningRoots` | Roots still trusted during a rotation. Needs `commandSigning`. |
@@ -275,6 +276,8 @@ The CLI reads these:
 | `BETTER_COMPUTE_DATABASE_URL` | environment-only mode, `dev`, the template | `postgres://…`, `pglite:DIR` or `pglite:memory` |
 | `BETTER_COMPUTE_SECRET` | environment-only mode, `pki`, `audit`, the template | The deployment secret |
 | `BETTER_COMPUTE_BASE_URL` | environment-only mode, the template | The public origin (default `http://localhost:3000`) |
+| `BETTER_COMPUTE_GATEWAY_URL`, `BETTER_COMPUTE_GATEWAY_SERVER_NAME` | environment-only mode, the examples | `gateway.url` and `gateway.serverName`, published in `/.well-known/better-compute` for `bcd join --server`. Environment-only mode has no PKI bundle, so no serving-CA pin is published; the examples add it from the bundle |
+| `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED` | every bundle loader | `1` loads a bundle sealed in the former format (or unsealed while a secret is set) until it is resealed; the commands that write the bundle refuse it. See [pki reseal](/docs/operations/pki#pki-reseal) |
 | `BETTER_COMPUTE_ROLES`, `PORT`, `HOST` | `serve` | `--roles` (default `all`), `--port` (default 3000), `--host` (default `0.0.0.0`) |
 | `BETTER_COMPUTE_PKI` | `pki`, `doctor`, `audit` | The PKI bundle (default `.better-compute/pki.json`) |
 | `BETTER_COMPUTE_TRUST_DOMAIN` | `pki init` | `--trust-domain` |

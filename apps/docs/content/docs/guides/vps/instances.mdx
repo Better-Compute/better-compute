@@ -355,10 +355,11 @@ From the reports, the reconciler moves the instance:
 
 <Callout type="warn" title="The host side is not written yet">
 bcd's node agent is built and tested but not released. It has the `instances` converger (the FakeHypervisor's
-rules, user data fetched with a `SecretRequest` bound to the allocation, every domain in its status reports), but a
-real host build has no runtime yet, so a non-empty `instances` section fails with `this host runs no instance
-runtime` and no VM boots on real hardware. Only fakehw builds run instances, on a file-backed stand-in runtime named
-`libvirt-kvm`; see [delivery](/docs/daemon/delivery#instances). The TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
+rules, user data fetched with a `SecretRequest` bound to the allocation, every domain in its status reports, the
+instance network policy as host nftables rules), but a real host build has no built-in runtime yet. It can run
+instances through a runtime a bcx plugin serves, and no such plugin is written, so without one a non-empty
+`instances` section fails with `this host runs no instance runtime` and no VM boots on real hardware. fakehw builds
+run instances on a file-backed stand-in runtime named `libvirt-kvm`; see [delivery](/docs/daemon/delivery#instances). The TypeScript FakeDaemon plays a VPS host on a fake hypervisor (domains, overlay disks, NoCloud seeds, taps), fetching
 user data through the broker, and `tests/e2e/vps.test.ts` runs hosted instances through the real server and gateway
 with it.
 </Callout>
@@ -479,8 +480,10 @@ them sets `pause: true` in its `RuntimeTraits`, and `builtinRuntimeTraits` does 
 `libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet:
 bcd's `instances` converger drives them through its `Runtime` interface, and today only fakehw builds provide one, a
 file-backed stand-in named `libvirt-kvm`.
-Out-of-process runtimes (a Kata runtime as a bcx plugin, selected by pools) are planned for v0.5; see
-[drivers](/docs/extending/drivers). `vps({ runtimes })` only names the ids: the first one is recorded on every new
+Out-of-process runtimes are served too: on `bcd node`, a bcx plugin whose driver lists the kind `runtime` becomes a
+runtime (`list`, `apply(spec)`, `remove(id)` over `Invoke`; no snapshots), selected by pools like any other. No such
+plugin (a Kata runtime is PLAN.md's walkthrough 4) is written yet; see
+[walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx). `vps({ runtimes })` only names the ids: the first one is recorded on every new
 hosted instance and sent in its spec.
 
 The control plane already places plugin runtimes correctly: an instance whose runtime is not one of bcd's built-ins

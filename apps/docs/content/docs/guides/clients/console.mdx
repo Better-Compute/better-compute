@@ -124,13 +124,16 @@ Run it from `apps/console`: the stack file and the data directory are resolved a
 | `CONSOLE_GATEWAY_TLS_CERT`, `_KEY`, `_CA` | none needed (h2c gateways) | all three or none; tunnels need them |
 | `CONSOLE_AUDIT_KEY_FILE` | a generated `audit-checkpoint.pem` (P-256 PKCS#8) | unset: no audit checkpoints; every replica shares the key |
 | `CONSOLE_RELEASE_PINS`, `CONSOLE_DOWNLOADS_URL`, `CONSOLE_RELEASE_THRESHOLD` | unset: no rollout module | set the first two to mount rollouts |
+| `CONSOLE_GATEWAY_URL`, `CONSOLE_GATEWAY_SERVER_NAME` | unset: no `gateway` section | published in `/.well-known/better-compute` as `gateway` for `bcd join --server`; the console has no PKI bundle, so no serving-CA pin is published |
 | `CONSOLE_CONFIG` | `console.config.mjs` | another stack file |
 | `PORT`, `HOSTNAME` | `3100`, `localhost` | the same |
 
 Every replica and gateway must share the exec ticket key, and nodes pin its public key and the SSH CA's, so
 production supplies the key files rather than generating them. The sandbox SSH CA is a separate key, so a sandbox
 certificate never opens a node and a break-glass one never opens a sandbox; the console passes its public key to
-`vps({ sandboxExec })` so every sandbox guest trusts it. Every replica must share it too. The stack is built once per
+`vps({ sandboxExec })` so every sandbox guest trusts it, and certifies each guest's host key with it
+(`certifyHostKey`), so `sandbox exec` against the console pins guests instead of trusting them on first use. Every
+replica must share it too. The stack is built once per
 process from `console.config.mjs` (loaded at run time, never bundled): Better IAM, then compute with the `vps`, `fleet` and
 `events` (webhooks) modules and `retentionModule()` (the console builds `betterCompute()` itself, so the CLI's
 automatic retention does not apply), `audit` when an audit key is available, and `rollout` when release pins are set.
@@ -171,8 +174,7 @@ A delegated call held back for approval shows "awaiting approval" with the confi
 ### Sandboxes
 
 The **Sandboxes** page (`createSandboxesView` in console-kit) works on [sandboxes](/docs/guides/vps/sandboxes) of the
-session's tenant. Templates are created elsewhere (`sandboxTemplates.create`, or a FleetConfig document); with none,
-the page says so. Create sends `sandboxes.create` with a fresh `console-…` idempotency key and waits up to 20 seconds
+session's tenant. With no template, the create form says an administrator creates them. Create sends `sandboxes.create` with a fresh `console-…` idempotency key and waits up to 20 seconds
 for the sandbox to leave `starting`. The list shows the person's own sandboxes, or, with **Everyone's sandboxes**,
 the tenant's (`scope: 'all'`), each with its template name, `warm` and the snapshot it was restored from. The
 countdown ticks every second from `expiresAt` and reads `expired` at zero.
@@ -182,7 +184,15 @@ is `sandboxes.extend` with `by` of 30 minutes, **Snapshot** takes a memory snaps
 **Delete** asks for confirmation first. A shell is not opened in the browser: the page shows the
 `better-compute sandbox exec sbx_…` command, which runs OpenSSH through a tunnel. The console's own stack configures
 the sandbox SSH CA but no snapshot store, so **Snapshot** answers `INVALID_CONFIG` there until you give
-`vps({ snapshots })` a store in `console.config.mjs`.
+`vps({ snapshots })` a store in `console.config.mjs`. On that answer the page says snapshots are not configured on
+this deployment and hides the button for the rest of the session.
+
+A **Templates** section serves tenant administrators (`compute:sandboxes:manage`; the calls are decided, not the
+section hidden). It lists the tenant's templates with pool, flavor, image, lifetime and warm pool, with **Warm +1**,
+**Warm −1** (`sandboxTemplates.update` of `warm`) and delete, and a form that creates one from a name, pool, flavor,
+image, warm minimum and longest lifetime in hours. console-kit's `SandboxesView` exposes the same as
+`createTemplate`, `updateTemplate` and `deleteTemplate`. Templates can also come from
+`better-compute sandbox-template create` or a FleetConfig document.
 
 ### Break-glass SSH
 

@@ -192,12 +192,14 @@ framework.
 | `start_instance` | `instances.start` | any authenticated caller | idempotent |
 | `stop_instance` | `instances.stop` | any authenticated caller | destructive, idempotent |
 | `delete_instance` | `instances.delete` | any authenticated caller | destructive, idempotent |
-| `list_sandbox_templates` | `sandboxTemplates.list` | no rule in `gateTools()` (see below) | read-only |
-| `create_sandbox` | `sandboxes.create`, confirmation-aware | no rule in `gateTools()` | idempotent |
-| `list_sandboxes` | `sandboxes.list`: the caller's own by default, `scope: 'all'`, filter `templateId`, `limit` 1 to 200, `cursor` | no rule in `gateTools()` | read-only |
-| `get_sandbox` | `sandboxes.get` | no rule in `gateTools()` | read-only |
-| `extend_sandbox` | `sandboxes.extend` by a duration | no rule in `gateTools()` | not idempotent: each call extends again |
-| `delete_sandbox` | `sandboxes.delete` | no rule in `gateTools()` | destructive, idempotent |
+| `list_sandbox_templates` | `sandboxTemplates.list` | any authenticated caller | read-only |
+| `create_sandbox` | `sandboxes.create`, confirmation-aware | `compute:sandboxes:read` on the template | idempotent |
+| `list_sandboxes` | `sandboxes.list`: the caller's own by default, `scope: 'all'`, filter `templateId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
+| `get_sandbox` | `sandboxes.get` | any authenticated caller | read-only |
+| `extend_sandbox` | `sandboxes.extend` by a duration | any authenticated caller | not idempotent: each call extends again |
+| `delete_sandbox` | `sandboxes.delete` | any authenticated caller | destructive, idempotent |
+| `list_sandbox_snapshots` | `sandboxSnapshots.list`: the caller's own by default, `scope: 'all'`, filter `sandboxId`, `limit` 1 to 200, `cursor` | any authenticated caller | read-only |
+| `delete_sandbox_snapshot` | `sandboxSnapshots.delete` | any authenticated caller | destructive, idempotent |
 | `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot` | `compute:nodes:read` on the node | destructive |
 | `fleet_export` (with `fleet: true`) | `fleet.export` | `compute:fleet:admin` on the fleet | read-only |
 | `fleet_plan` (with `fleet: true`) | `fleet.plan` | `compute:fleet:admin` on the fleet | read-only |
@@ -226,10 +228,12 @@ The sandbox tools act on the caller's tenant. `create_sandbox` takes a `template
 sandbox is ready or failed, or the wait runs out. It answers `{ idempotencyKey, sandbox }` and, like
 `create_instance`, turns `CONFIRMATION_REQUIRED` into a result to retry with the same key. `extend_sandbox` takes a
 `sandboxId` and `by` (such as `30m`), and `get_sandbox` and `delete_sandbox` a `sandboxId`; `delete_sandbox` removes
-the sandbox and its disk before its TTL ends. There are no tools for snapshots or for `sandboxes.exec`.
+the sandbox and its disk before its TTL ends. `list_sandbox_snapshots` lists snapshots (kept ones of deleted sandboxes
+too), and `delete_sandbox_snapshot` deletes one (`snap_…`) for good. No tool takes a snapshot or calls
+`sandboxes.exec`.
 
 Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
-(`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
+(`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`, `snap_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
 with the path of the first problem.
 
 **Fleet tools plan but never apply.** `fleet_plan` returns the changes and the `planHash`, with the list of calls
@@ -249,20 +253,14 @@ deliberately light:
   filters and decides every call anyway, on the reservation or instance itself (`OwnReservations`, `BoundedExtend`,
   a delegation's confirm list).
 - The fleet tools need `compute:fleet:admin` on `compute-fleet/global`, which only resolves in the root tenant.
-- The sandbox tools have **no rule yet**, so with `unlisted: 'deny'` the gate refuses and hides them. To offer them,
-  add rules to the map `gateTools()` returns; since compute decides each call on the sandbox, its draft or the tenant,
-  they can be open like the instance tools:
+- `create_sandbox` is visible to a caller with `compute:sandboxes:read` on `compute-sandbox-template/{templateId}`:
+  creating a sandbox starts with seeing its template. The other sandbox tools (`list_sandbox_templates`,
+  `list_sandboxes`, `get_sandbox`, `extend_sandbox`, `delete_sandbox`, `list_sandbox_snapshots`,
+  `delete_sandbox_snapshot`) are open to any authenticated caller, since compute decides each call on the tenant,
+  the sandbox, the snapshot or the draft.
 
-```ts
-const tools = {
-  ...gateTools(),
-  ...Object.fromEntries(
-    ['list_sandbox_templates', 'create_sandbox', 'list_sandboxes', 'get_sandbox', 'extend_sandbox', 'delete_sandbox']
-      .map((name) => [name, { public: true }]),
-  ),
-};
-const gate = createMcpGate({ iam, tenantId, tools, unlisted: 'deny' });
-```
+Every tool the server can list has a rule: a test builds a server with every option on and requires a gate rule for
+each of its tools, so a gate with `unlisted: 'deny'` never hides a tool by omission.
 
 The gate never checks the action a tool performs, such as `compute:reservations:create`. That decision happens once,
 in compute, on the reservation draft with its full attributes. Actions a delegation holds back for confirmation are
@@ -331,10 +329,9 @@ to `expired`. Without a bearer token or a tenant it returns nothing and the tool
   and `node_status` or the command's own methods show it.
 - `reserve_gpus` always books with `binding: 'hold'`; whole-node leases, spot, gangs and calendar starts are not
   exposed as tool arguments.
-- `release_reservation`, `stop_instance`, `delete_instance` and `delete_sandbox` are marked destructive: many MCP
-  hosts ask the user before calling such a tool.
-- The sandbox tools need gate rules you add yourself (see [the gate](#the-gate-checks-visibility-only)), and cannot
-  snapshot a sandbox or run code in it.
+- `release_reservation`, `stop_instance`, `delete_instance`, `delete_sandbox` and `delete_sandbox_snapshot` are
+  marked destructive: many MCP hosts ask the user before calling such a tool.
+- The sandbox tools cannot take a snapshot or run code in a sandbox; code runs through the CLI's `sandbox exec`.
 - The server is stateless, with JSON responses only: it does not open SSE streams or send server notifications, and
   `tools.listChanged` is `false`. It negotiates protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`,
   answering with the newest when the client asks for another.

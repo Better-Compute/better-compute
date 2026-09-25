@@ -267,8 +267,51 @@ fails `bcd join` with exit code 1. See [the join key and its fallback](/docs/gui
 
 An OS that `deploy.image` installed needs neither the script nor this file: the ramdisk writes its own pinned
 `config.toml` (gateway, server name, site and the three pins) and `join-encryption.jwk` into the installed root, both
-mode 0600, and the deploy's user data runs `bcd join --server … --token-file /etc/bcd/join-token --node-id …`, then
-`bcd node`. See [profiles and images](/docs/guides/bare-metal/profiles-and-images).
+mode 0600, and the deploy's user data runs `bcd join --server … --token-file /etc/bcd/join-token --node-id …` (with
+the three pin flags when provision is given `userData.pins`), then `bcd node`. See
+[profiles and images](/docs/guides/bare-metal/profiles-and-images).
+
+### Joining from the well-known document
+
+A machine with no `config.toml` at all, such as an OS that Hetzner Robot's `bcd-join.service` or provision's user
+data set up with a token, the control plane's URL and three pins, can still join. `bcd join --server
+https://… --serving-ca-pin … --join-signing-pin … --join-encryption-pin …` reads
+`<server>/.well-known/better-compute` for what the pins cannot say (where the gateway is), checks the rest against the
+pins, joins, and writes its own configuration.
+
+| Field of the document | Becomes |
+| --- | --- |
+| `gateway.url` | `gateway_url` |
+| `gateway.serverName` | `gateway_server_name` |
+| `gateway.servingCaPin` | compared with `--serving-ca-pin`, which becomes `serving_ca_spki_pin` |
+| `join.signingKeyPin`, `join.encryptionKeyPin` | compared with `--join-signing-pin` and `--join-encryption-pin`, which become `join_signing_key_pin` and `join_encryption_key_pin` |
+| `join.encryptionJwk` | the key the token is sealed to, used only when it matches `--join-encryption-pin` |
+
+The pins are `sha256/<base64>`, as in `config.toml`, and a host build requires all three to bootstrap ("joining
+without config.toml needs --serving-ca-pin, --join-signing-pin and --join-encryption-pin from the install"). A
+document whose published pin differs from one given is refused ("refusing to join"). Only a fakehw development build
+may join with no pins at all, taking them from the document (and it also accepts an `http://` server). On a machine
+that already has `config.toml`, the configuration wins, and any pin flag given must match it.
+
+The control plane publishes the `gateway` section when its options set `gateway: { url, serverName? }`, with
+`servingCaPin` computed from `pki.servingCa`; the examples read `BETTER_COMPUTE_GATEWAY_URL` and
+`BETTER_COMPUTE_GATEWAY_SERVER_NAME`. bcd fetches the document over the control plane's own TLS (system roots, a
+30-second timeout, at most 64 KiB, redirects refused), refuses a document without `gateway.url` ("install
+/etc/bcd/config.toml instead"), joins, and only then writes `config.toml` (0600, with the site the join answered)
+and `join-encryption.jwk` (0644) beside it. Re-running it on a node that already joined exits 0 without a token, so a
+join unit can run on every boot. The pins come from the sealed PKI bundle: `bootstrapPins(bundle)` in
+`better-compute/pki` returns all three, and provision's user data (`provisionModule({ userData: { pins } })`) and a
+Robot bootstrap (`vps({ bootstrap: { pins } })`) render them into the machine; see
+[profiles and images](/docs/guides/bare-metal/profiles-and-images).
+
+<Callout type="warn" title="Why the pins travel with the install">
+The well-known document is authenticated only by the control plane's TLS certificate. Taking its pins on trust would
+be trust on first use: whoever can serve that name with a publicly trusted certificate (a DNS hijack plus a
+certificate for the name) could hand the machine their own gateway and JoinService keys, open the sealed token and
+take the node's identity. Pins that come with the install, from the sealed bundle, are stronger, which is why a host
+build refuses to bootstrap without them. A fakehw build joining with no pins is trust on first use; keep that to
+development.
+</Callout>
 
 ## The systemd unit
 

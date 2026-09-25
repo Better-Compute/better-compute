@@ -62,7 +62,7 @@ never share a host with the process they measure.
 
 | Gate | Phase | Target | Measured so far |
 | --- | --- | --- | --- |
-| Gateway streams | v0.1 | One Node gateway holds 5,000 or more mTLS sessions at 10 s heartbeats for 30 min, dispatch p99 below 500 ms, RSS below 2 GiB; otherwise decide D20 (a Go gateway) before v0.2 | Sessions, dispatch and RSS criteria met on a workstation: 5,000 mTLS sessions with the gateway in its own process (PGlite), dispatch p99 26 ms, gateway RSS 1,240 MiB, 0 drops, for 60 s. Left: the 30 min run on the reference host with Postgres |
+| Gateway streams | v0.1 | One Node gateway holds 5,000 or more mTLS sessions at 10 s heartbeats for 30 min, dispatch p99 below 500 ms, RSS below 2 GiB; otherwise decide D20 (a Go gateway) before v0.2 | Sessions, dispatch and RSS criteria met on a workstation: 5,000 mTLS sessions with the gateway in its own process (PGlite), dispatch p99 26 ms, gateway RSS 1,240 MiB, 0 drops, for 60 s; for 30 min on PGlite, every criterion met (dispatch p99 24 ms, RSS 2,016 MiB, only just, grown by PGlite's WebAssembly memory). Left: the 30 min run on the reference host with Postgres out of process, to confirm the RSS criterion |
 | IAM lane | v0.1 | Embedded better-iam on adapter-postgres sustains 50 or more admissions/s (about 150 lock acquisitions/s) with lock wait below 50%; record the ceiling; below 200 admissions/s, propose R1 (D18) | not run: it needs Postgres |
 | Placements | v0.1 | Placements/s recorded | 35.7/s inline, 1k nodes, PGlite (see below) |
 | Place to active | v0.1 | p99 below 2 s with 1k FakeDaemons in the real-time harness | 1.02 s at 5/s in the first runs; 101 to 191 ms at 5/s and 176 ms at 10/s in later runs |
@@ -92,11 +92,15 @@ in their own process, so RSS is the gateway's alone. All runs are on a 64 vCPU w
 | 60 s, h2c, with a reconnect storm, `maxPendingHellos` on | 25.5 s | 5 / 32 / 101 ms | 924 MiB | 0 |
 | 60 s, mTLS, storm, generator in process | 83.8 s (refused dials: the Windows accept queue) | 12 / 27 / 99 ms | 2,183 MiB (includes the generator's 5,000 client TLS sessions) | 0 |
 | 60 s, mTLS, storm, split | 32.1 s (120 refused dials) | 14 / 26 / 94 ms | 1,240 MiB (the gateway process, PGlite included) | 0 |
+| 30 min, mTLS, storm, split | 30.4 s | 14 / 24 / 422 ms (90,000 commands) | 2,016 MiB (JS heap 235 MiB) | 0 |
 
 The split mTLS run meets the gate's sessions, dispatch p99 and RSS criteria; its storm brought all 5,000 back
 (p99 38.8 s, all 39.0 s) with 3,464 of 3,464 commands succeeded, and the gateway's event-loop p99 was 25 ms. The
-result file still records `met: false`, because the run lasted 60 s: the 30 min run on the reference host with
-Postgres is what remains (D15, D20). The suite's test timeout follows `BENCH_GW_DURATION_MS`, so a 30 min run is not
+result file still records `met: false`, because the run lasted 60 s. The 30 min split run met every criterion on
+PGlite, RSS only just: it grew from 1,240 to 2,016 MiB while the JS heap stayed at 235 MiB, and a 5 min run with
+memory attributed put almost all of such growth in `arrayBuffers`, PGlite's WebAssembly database inside the gateway
+process. Its storm brought all 5,000 back in 40.4 s with 90,480 of 90,480 commands succeeded. The 30 min run on the
+reference host with Postgres out of process is what remains, to confirm the RSS criterion (D15, D20). The suite's test timeout follows `BENCH_GW_DURATION_MS`, so a 30 min run is not
 cut off by the default timeout.
 
 The failed run found that a storm could make the gateway fence itself: Hellos queued without bound behind a slow

@@ -19,6 +19,13 @@ sources:
   - packages/server/src/join/rate.ts
   - packages/server/src/runtime/command-signing.ts
   - packages/server/src/tunnels/module.ts
+  - packages/server/src/tunnels/sandbox-exec.ts
+  - packages/vps/src/sandboxes.ts
+  - packages/vps/src/snapshots.ts
+  - packages/cli/src/commands/sandbox.ts
+  - packages/cli/src/commands/ssh.ts
+  - packages/cli/src/output.ts
+  - packages/server/src/version.ts
   - packages/gateway/README.md
   - packages/gateway/src/gateway.ts
   - packages/pki/README.md
@@ -171,6 +178,10 @@ gateway's report handlers also ignore reports about allocations placed on anothe
 - A hosted VPS instance's user data is released only when its `secret://` reference belongs to the instance's own
   tenant, so one tenant's VM cannot boot with another tenant's secret; `instances.create` refuses a foreign
   reference up front as well.
+- Nothing is released for a tenant that is suspended or deleted: after the signature and binding checks, a reference
+  whose tenant has a non-active `compute_tenant_states` row is refused (reason `tenant-suspended` or
+  `tenant-deleted`, recorded as `security.secret.refused`), so a deleted tenant's instance cannot fetch its user data
+  while teardown is still reaching it. It is released again once the tenant is active.
 - Commands carry references, never values.
 
 ### Workload identity (v0.5)
@@ -183,25 +194,63 @@ node, for a live instance placed on that node with its live allocation there, in
 The gateway refuses a tenant-controlled session without asking, since the lessee holds root there. The token is a
 JWE to the request's one-time key, lives at most 15 minutes, and its audit row carries only the `jti`. Refusals
 publish `security.workload.refused`. On the host, a session token binds each metadata request to one instance and
-forwarded requests are refused. See [workload identity](/docs/guides/vps/instances#workload-identity).
+forwarded requests are refused. Since the metadata service and instance tunnels name an instance by its address, bcd
+guards every instance tap with host nftables rules (only the NIC's own MAC, IP addresses and ARP), answers only while
+those rules are loaded, and never serves an address two instances claim or a loopback caller. See [workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels, tickets and break-glass SSH
 
 - `tunnels.open` decides the caller with Better IAM, then issues a 60 s, single-use exec ticket for one node. The
   gateway and the daemon each verify it again, including its `jti`.
 - While a tunnel is open, the caller is re-authorized every 60 s by the ticket's own action; after 2 minutes of IAM
-  failures it closes. Tunnels last at most 12 h. A revoked delegation or suspended agent closes its tunnels on every
-  gateway when `host.iam` is configured.
+  failures it closes. A ticket with an unexpected action fails closed. Tunnels last at most 12 h. A revoked
+  delegation or suspended agent closes its tunnels on every gateway when `host.iam` is configured.
 - Break-glass shells use `nodes.issueSshCert`: `compute:nodes:ssh-root` on the node and, by default, an MFA session.
   Certificates last at most 1 h and never beyond the session, name `<account>@<nodeId>`, and grant only
   `permit-pty`. Each issuance is recorded; `nodes.revokeSshCert` puts the serial in the node's key revocation list.
   With `host.iam`, a role deactivation, an identity's offboarding, expiry or deletion, and its session revocations
   revoke its certificates too, and the `tunnels.ssh-certificates-reauthorize` reconciler re-decides every live
-  certificate for its issuing session each minute. When IAM is unreachable a certificate stays valid until it
-  expires, on purpose: break-glass is for outages.
+  certificate for its issuing session each minute. Only a `false` answer, `NOT_FOUND` or `TENANT_SUSPENDED` revokes.
+  When IAM is unreachable, or refuses compute's own credential (a thrown `ACCESS_DENIED` or `UNAUTHENTICATED`), a
+  certificate stays valid until it expires, on purpose: break-glass is for outages, and an expired service token
+  must not revoke every certificate mid-outage.
 - Per identity and per api replica: 10 tunnels a minute and 20 certificates an hour, then `RATE_LIMITED`.
+- `ssh-cert --connect HOST` accepts only a host name or an IP address, never something ssh would read as an option.
 
 See [interactive access](/docs/guides/access).
+
+### Sandboxes (v0.5)
+
+A sandbox is a tenant VM for code you do not trust, often written by an agent. The controls:
+
+- **One way in.** `sandboxes.exec` needs a signed-in session (not an API key), decides `compute:sandboxes:exec` on the
+  sandbox, and signs a certificate of at most 15 minutes, never past the session or the sandbox's expiry, for a
+  principal that names one instance. It refuses a sandbox that expires within a minute. `tunnels.open` refuses a
+  sandbox's instance and a warm one (`sandbox-managed`), so `compute:instances:exec` cannot bypass that decision.
+- **Re-decided on the sandbox.** The ticket carries the sandbox (`sbx`); the gateway keeps it and every 60-second
+  re-check decides `compute:sandboxes:exec` on the sandbox, never on the instance it drives.
+- **Separate CAs.** The sandbox SSH CA is never the break-glass CA: the tunnels module refuses the same key for both
+  (`INVALID_CONFIG`), so a sandbox certificate never opens a node.
+- **Secrets sealed before storage.** Template `env` values and a `secret://` user data are resolved into user data
+  that is sealed through the secret broker before the instance row is written; without a broker such a template is
+  `INVALID_CONFIG`.
+- **Snapshots are the owner's.** A snapshot holds memory and `/etc/sandbox/env`, so only the identity that took it
+  can restore it (`NOT_FOUND` for anyone else in the tenant). A snapshot deleted during its upload is purged once the
+  upload settles.
+- **The CLI treats the guest as hostile.** `sandbox exec` puts `--` before the host, so a generated command is never
+  an ssh option, and turns off agent and X11 forwarding, port forwardings, proxies, connection sharing and local
+  commands for that connection. CLI output strips control characters from server text (table cells, string results,
+  hints) and JSON escapes DEL and the C1 controls.
+
+- **Network policy on the host.** A template's `network` (`private`, `none`) becomes host nftables rules on the
+  instance's taps, whatever runs inside; bcd fails closed, stopping an instance whose rules cannot be expressed or
+  loaded, and vps refuses `private` or `none` on a pool without an IP range.
+
+- **The guest is pinned too.** With `vps({ sandboxExec: { certifyHostKey } })`, each guest presents a host key the
+  sandbox CA certified (its private key only in sealed user data), and `sandbox exec` checks it with
+  `@cert-authority` and `StrictHostKeyChecking=yes`; a guest without one is accepted on first use, and the CLI says so.
+
+See [sandboxes](/docs/guides/vps/sandboxes#run-code-inside).
 
 ### Tenant isolation
 
@@ -284,6 +333,14 @@ change; see [sinks](/docs/extending/sinks#audit-sinks).
 - `pki init` with the secret (never `--plaintext` outside development) and `--offline-root`, with the root key
   kept off every server.
 - The bundle, the secret and the root key backed up, separately.
+- A bundle sealed in the former format resealed once: `pki reseal` prints its pins, you compare them with your
+  records, then `pki reseal --accept-unauthenticated`. `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED` unset afterwards;
+  the commands that write the bundle refuse it anyway. See [PKI](/docs/operations/pki#pki-reseal).
+- Machines installed with their pins, taken from the sealed bundle (`bootstrapPins(bundle)` into provision's user
+  data and `vps({ bootstrap: { pins } })`): a host build of `bcd join --server` without `config.toml` requires all
+  three and refuses a `/.well-known/better-compute` whose pins differ, since only the control plane's TLS
+  certificate vouches for that document. Only fakehw builds join on the document's word (trust on first use). See
+  [installing bcd](/docs/daemon/install#joining-from-the-well-known-document).
 
 </Step>
 <Step>

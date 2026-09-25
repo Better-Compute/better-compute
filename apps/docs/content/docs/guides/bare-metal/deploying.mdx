@@ -124,10 +124,11 @@ and `tftp_root` (the iPXE builds), `server_ip` and `url` on the bridge, and the 
 [installing bcd](/docs/daemon/install#a-site-agent). It becomes the site's boot server once the SiteBoot controller
 gives it the lease.
 
-One limit of `bcd site` matters here: its Redfish client uses only the host of each BMC address and drives the first
-system behind it (see [Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)). With one
-`sushy-emulator` serving both VMs, as above, both enrollments would drive the same first system, so this walkthrough
-cannot pass against today's `bcd site` as written.
+One `sushy-emulator` serves both VMs, so each enrollment names its own system in the BMC address:
+`https://192.168.122.1:8000/redfish/v1/Systems/<id>`, where `<id>` is the libvirt domain's UUID
+(`virsh domuuid bm-1`, or the `Members` of `GET /redfish/v1/Systems` on the emulator). bcd's Redfish client then
+drives that system and its own manager for virtual media; an address without a system path would drive the first
+system for both machines. See [Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site).
 </Step>
 <Step>
 ### Register the image and the profile

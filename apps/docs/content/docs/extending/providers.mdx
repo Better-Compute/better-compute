@@ -234,15 +234,20 @@ tenant-readable user data. `hetzner-robot` shows how:
 3. Run `installimage` (software RAID 1 over NVMe, else SATA) with a post-install script that places the token at
    `/etc/bcd/join-token` (0600), downloads `bcd` over https, checks its sha256, installs two units and shreds
    itself: `bcd-join.service`, a oneshot running `bcd join --server <controlPlaneUrl> --token-file /etc/bcd/join-token
-   --attestor provisioned` (`robotJoinArgv`), and `bcd.service` (`bcd node`) after it.
+   --attestor provisioned --serving-ca-pin … --join-signing-pin … --join-encryption-pin …`
+   (`robotJoinArgv(url, pins)`), and `bcd.service` (`bcd node`) after it.
 4. Reboot and deactivate rescue.
 
 Robot needs the control plane's URL, `vps({ bootstrap: { controlPlaneUrl } })`, passed to `ProviderImpl.bootstrap`.
 It is optional in `vps()`, where a value that could break out of a unit file (anything but https, or spaces,
 quotes, `%` or `$`) is `INVALID_CONFIG` at startup; the Robot adapter refuses a missing or unsafe one with
-`INVALID_INPUT` before anything reaches the machine. With no `config.toml` on the new system, `bcd join --server`
-reads the gateway and the join pins from the control plane's `/.well-known/better-compute`, joins, and writes
-`config.toml` itself. A join unit that runs again after the node joined exits 0. The installed `bcd` joins through
+`INVALID_INPUT` before anything reaches the machine. It also needs the three join pins,
+`vps({ bootstrap: { pins: { servingCa, joinSigning, joinEncryption } } })` (`sha256/<base64>` SPKI pins from the PKI
+bundle, validated at construction; `ProviderImpl.bootstrap` receives them as `pins`), and refuses a bootstrap without
+them (`INVALID_CONFIG`). With no `config.toml` on the new system, `bcd join --server` reads the gateway from the
+control plane's `/.well-known/better-compute`, refuses the document if its pins differ from the ones on the command
+line, joins, and writes `config.toml` itself; the pins never come from the document, which only the control plane's
+Web PKI certificate vouches for. A join unit that runs again after the node joined exits 0. The installed `bcd` joins through
 the `provisioned` attestor. `scripts/daemon-install-contract.mjs` writes the exact command lines the cloud-init,
 Ignition and Robot installs run, and bcd's `TestInstallContract` parses each with its real flags. Without a `resolveTarget` that maps the token to a node,
 the token must carry `expect: { productUuid }`, and the machine joins as a new node. See

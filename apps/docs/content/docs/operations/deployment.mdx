@@ -132,7 +132,7 @@ The HTTP listener answers, in order:
 | --- | --- |
 | `GET /healthz` | Always `200 {"ok":true}`: the process is up. |
 | `GET /readyz` | `200 {"ok":true}` when `SELECT 1` succeeds, else `503 {"ok":false}`. |
-| `GET /.well-known/better-compute` | The server's document (name, version, base path, agent protocol range) plus JoinService's public keys as `join` when `pki.join` publishes them. Cached for 300 s. `host.http.wellKnown` adds fields but never overrides the server's. |
+| `GET /.well-known/better-compute` | The server's document (name, version, base path, agent protocol range) plus JoinService's public keys as `join` when `pki.join` publishes them, and `gateway: { url, serverName?, servingCaPin? }` when the options set `gateway.url` (the pin from `pki.servingCa`), which `bcd join --server` reads on a machine without `config.toml`. Cached for 300 s. `host.http.wellKnown` adds fields but never overrides the server's. |
 | `host.http.routes` | Your own fetch-style routes, for example the events module's `GET /watch` and `GET /metrics`. |
 | `{basePath}/…` | The API: `POST {basePath}/{group}/{method}`, `GET {basePath}/health` and `GET {basePath}/.well-known/better-compute`. The default base path is `/api/compute`. |
 | `GET {basePath}/tunnels/{ticket}` (upgrade) | Interactive tunnels, mounted when the options set `tunnels: { issuer }`. |

@@ -158,7 +158,24 @@ ssh -i ~/.ssh/id_ed25519 root@10.20.0.14
 (default `root`) as `principal` and `--minutes` (default 15, 1 to 60) as `ttlSeconds`, and writes the certificate
 beside the key as `<key>-cert.pub`. It prints the certificate's path, serial, principals, account and
 `validBefore`. A `--key` that is not a `.pub` file, or whose content holds a private key, is refused before anything
-is sent. The same call through `api`:
+is sent.
+
+`--connect HOST` issues the certificate and connects in one step. After writing it, `ssh-cert` runs your OpenSSH
+client (`--ssh`, default `ssh`) to the node's address, and the command after `--` runs there (without one, a
+shell):
+
+```bash
+better-compute ssh-cert --tenant root --node node_01jzq3v0m6y8x7w5t4s3r2p1na --connect 10.20.0.14 -- journalctl -u bcd -n 50
+# runs: ssh -i <key> -o CertificateFile="<key>-cert.pub" -o IdentitiesOnly=yes -l root -- 10.20.0.14 journalctl -u bcd -n 50
+```
+
+`HOST` must be a host name or an IPv4 or IPv6 address. Anything ssh would parse as an option, such as
+`-oProxyCommand=…`, is a usage error before any certificate is issued, and a command without `--connect` is one too.
+The command exits with ssh's own status (`REMOTE_EXIT`). It keeps your ssh configuration on purpose, so a bastion or
+`ProxyJump` you configured for the node still applies (unlike `sandbox exec`, which disables it for an untrusted
+guest).
+
+The same call through `api`:
 
 ```bash
 better-compute api nodes.issueSshCert \
@@ -253,10 +270,19 @@ id, or an IAM port without `authorizeSession`, is not re-decided. Tenant-wide se
 and are left to this re-decision. Each revocation publishes `node.ssh-cert.revoked` in the certificate's own tenant.
 See [IAM events](/docs/guides/iam#iam-events-compute-reacts-to).
 
+`authorizeSession` answers `false` for everything about the holder (session gone, identity gone or inactive, the
+decision says no), and that revokes. It throws only when compute's own read fails, so the reconciler treats only two
+error codes as a denial: `NOT_FOUND` and `TENANT_SUSPENDED`. A thrown `ACCESS_DENIED` or `UNAUTHENTICATED` means
+compute's own credential was refused, not the holder: like any other error, it keeps the certificate, stamps
+`reauthorized_at` and logs `Re-authorizing an SSH certificate failed; it stays valid until it expires`. Otherwise an
+expired service token would revoke every break-glass certificate within a minute, mid-outage. A certificate whose
+tenant `compute_tenant_states` marks suspended or deleted is revoked without asking (reason `tenant-suspended` or
+`tenant-deleted`).
+
 <Callout type="warn" title="IAM down keeps certificates valid">
-When the re-decision cannot reach Better IAM, the certificate stays valid until it expires, at most 1 hour after
-issue, and the reconciler logs a warning. This is deliberate: break-glass access exists for outages, and IAM may be
-part of one.
+When the re-decision cannot reach Better IAM, or IAM refuses compute's own credential, the certificate stays valid
+until it expires, at most 1 hour after issue, and the reconciler logs a warning. This is deliberate: break-glass
+access exists for outages, and IAM may be part of one.
 </Callout>
 
 ## Who has access
@@ -351,8 +377,8 @@ that calls `nodes.revokeSshCert` after a confirmation. See [the console](/docs/g
 | | Break-glass | Sandbox exec |
 | --- | --- | --- |
 | Method and action | `nodes.issueSshCert`, `compute:nodes:ssh-root` on the node | `sandboxes.exec`, `compute:sandboxes:exec` on the sandbox |
-| Principal | `<account>@<nodeId>` | `<account>@<instanceId>`, account default `sandbox` |
-| Lifetime | 60 s to 1 h, default 15 min | 60 s to 15 min, default 10 min |
+| Principal | `<account>@<nodeId>` | `<account>@<instanceId>`, account default `sandbox` (a memory restore keeps its source instance's) |
+| Lifetime | 60 s to 1 h, default 15 min | 60 s to 15 min, default 10 min, never past the sandbox's expiry |
 | Session | MFA by default | a signed-in session, not an API key; no MFA requirement |
 | Who trusts the CA | nodes, through NodeSpec `access` and bcd | sandbox guests, through the user data vps renders |
 | Revocation | recorded in `ssh_certificates`, KRL on the node, re-decided every minute | none in the guest: the short lifetime, plus tunnel re-authorization |
@@ -360,7 +386,8 @@ that calls `nodes.revokeSshCert` after a confirmation. See [the console](/docs/g
 
 Because the two CAs differ, a sandbox certificate never opens a node and a break-glass certificate never opens a
 sandbox. The tunnels module refuses a CA public key that is not one printable line, since it is written into sshd
-configuration.
+configuration, and refuses a `tunnels.sandboxSsh` that is the same key as `tunnels.ssh` (`INVALID_CONFIG`), so the
+split cannot be configured away.
 
 ## Shipped and planned
 
@@ -372,6 +399,7 @@ configuration.
 | `nodes.revokeSshCert` and the node's KRL (`access.sshRevokedSerials`) | Shipped in the control plane; bcd writes the KRL that sshd enforces |
 | Revoking certificates on `binding:deactivate` | Shipped as `serve`'s default IAM `binding` handler |
 | Revoking certificates on offboarding, expiry, deletion and session revocation | Shipped as `serve`'s default `identity` and `sessions` handlers |
-| Re-deciding live certificates every minute (`tunnels.ssh-certificates-reauthorize`) | Shipped; IAM unreachable keeps a certificate until it expires |
+| Re-deciding live certificates every minute (`tunnels.ssh-certificates-reauthorize`) | Shipped; IAM unreachable, or refusing compute's own credential, keeps a certificate until it expires |
+| `ssh-cert --connect HOST [-- command]`: issue and connect in one step | Shipped in the CLI |
 | `nodes.listSshCerts`: who holds or held a certificate for a node, with its state | Shipped, and in the console's node page with a revoke button per certificate |
 | Rotating the SSH CA | No rotation flow; `access.sshCaPublicKeys` lists only the current key |

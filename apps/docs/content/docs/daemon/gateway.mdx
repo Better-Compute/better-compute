@@ -253,7 +253,8 @@ on it.
 | `POST /v1/poke` | `{ nodeIds? }` | 202; dispatch now, and a spec check for the named nodes |
 | `POST /v1/revoke` | `{ nodeId, reason, serials?: hex[] }` | `{ revoked }` |
 | `POST /v1/drain` | `{ reason? }` | 202 |
-| `POST /v1/tunnels/close` | `{ tunnelId?, nodeId?, subject?, agentId?, delegationId?, reason }` | `{ closed }`; at least one filter |
+| `POST /v1/tunnels/close` | `{ tunnelId?, nodeId?, subject?, agentId?, delegationId?, sandboxId?, tenantId?, anyAgent?, reason }` | `{ closed }`; the filter must name an id key, or `tenantId` with `anyAgent: true` |
+| `POST /v1/tunnels/reauthorize` | the same filter | `{ checked }`; re-authorizes the matching tunnels now |
 | `POST /v1/tunnels` | a duplex stream | The api's side of one tunnel |
 
 Host wiring uses three helpers. `gatewayControlClient(...)` calls one gateway. `gatewayNotifier(...)` implements the
@@ -283,8 +284,13 @@ PLAN.md's v0.1 gate is one Node gateway holding at least 5,000 mTLS sessions at 
 with dispatch p99 under 500 ms and RSS under 2 GiB; if it fails, the gateway is rewritten in Go on the same proto
 (decision D20). On a development workstation (PGlite, 60 seconds), the gateway in its own process held 5,000 mTLS
 sessions, one TLS 1.3 connection per daemon, with dispatch p99 26 ms, a gateway process RSS of 1,240 MiB (PGlite
-included) and 0 drops, and survived a reconnect storm with 5,000 of 5,000 back within 39 seconds. That meets the
-gate's sessions, dispatch and RSS criteria; the 30-minute run on the reference host with Postgres remains. See
+included) and 0 drops, and survived a reconnect storm with 5,000 of 5,000 back within 39 seconds. A 30-minute run of
+the same split setup (14ff010) held 5,000 sessions with dispatch p99 24 ms over 90,000 commands, 0 drops and every
+command of the storm `succeeded`, but the gateway process's RSS grew from 1,240 to 2,016 MiB while the JS heap stayed
+at 235 MiB; a 5-minute run with memory attributed traced the growth to PGlite's WebAssembly memory inside the gateway
+process, not the gateway's own. Every
+criterion is met on PGlite, and the gateway's own RSS stays near 1.1 GiB; the run with Postgres out of process, on
+the reference host, is still to confirm it. See
 [scaling](/docs/operations/scaling#gateway-sessions) and `bench/gateway-streams`.
 
 ### Several gateways

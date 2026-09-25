@@ -346,6 +346,28 @@ how an OS a deploy installed joins (`--server`, `--token-file` and `--node-id`, 
 file that is present but does not match the pin still fails `bcd join`: after rotating the key, generate the install
 script again and rerun it, which rewrites the file and the pins.
 
+When there is no `config.toml` at all, `bcd join --server` goes further and builds its configuration from the
+document: the gateway from its `gateway` section, which the server publishes when its options set
+`gateway: { url, serverName? }` (with `servingCaPin` computed from `pki.servingCa`). The pins do not come from the
+document: a host build requires `--serving-ca-pin`, `--join-signing-pin` and `--join-encryption-pin` from the install
+and refuses a document whose pins differ. It joins, then writes `config.toml` and `join-encryption.jwk`. A provider
+server installed with a token, the control plane's URL and the pins (from `bootstrapPins(bundle)`) joins this way;
+see [joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document).
+
+```json title="the gateway section of the document"
+{
+  "gateway": { "url": "https://gw.eu.example.com", "serverName": "gw.eu.example.com", "servingCaPin": "sha256/…" }
+}
+```
+
+<Callout type="warn" title="The well-known document alone would be trust on first use">
+The document is authenticated only by the control plane's TLS certificate. Taking its pins would be trust on first
+use: whoever can serve that name with a publicly trusted certificate could point the machine at their own gateway and
+JoinService keys and take its token. Pins that travel with the install (the install script, the ramdisk's pinned
+config for `deploy.image`, user data or a Robot unit carrying `bootstrapPins(bundle)`) are stronger, so a host build
+of bcd bootstraps only with them. Only a fakehw development build joins with no pins, on trust.
+</Callout>
+
 ## Placeholder hardware and reclaims
 
 JoinService derives the machine's <Term id="hardware-key">hardware key</Term> from its claims, exactly as the

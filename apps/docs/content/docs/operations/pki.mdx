@@ -96,16 +96,18 @@ prints the pins, like `pki show`.
 A bundle sealed in the former format (before the seal covered the public parts, commits 482dea8 and 7b9e9af) is
 refused wherever it is loaded (`INVALID_CONFIG`: "sealed in the former format"), and so is an unsealed bundle when
 `BETTER_COMPUTE_SECRET` is set, since a sealed one may have been replaced. Nothing authenticates such a file: whoever
-could write it could have added a trust anchor or a second SSH CA line. `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1`
-makes every loader accept it again; set it only for the one check below, never on a running deployment. Once:
+could write it could have added a trust anchor or a second SSH CA line. Once, with `BETTER_COMPUTE_SECRET` set:
 
-1. compare the pins of `pki show` with the ones your install scripts and join tokens use (with the secret set,
-   `pki show` needs the variable too; without the secret it prints the pins with a warning that nothing vouches for
-   them);
-2. run [`pki reseal`](#pki-reseal), which accepts the old format by itself and writes the bundle in the current one.
+1. run [`pki reseal`](#pki-reseal). For such a bundle it prints the pins it would vouch for, with
+   `authenticated: false`, and stops with `INVALID_STATE`;
+2. compare those pins with your records (install scripts, join tokens, pinned CAs);
+3. run `pki reseal --accept-unauthenticated`, which writes the bundle in the current format.
 
-A former-format bundle that carries command-signing rotation fields cannot be re-sealed: restore the copy from
-before the rotation and run `pki rotate-command-root` again.
+`BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1` only lets other readers, such as a server, load the legacy bundle until
+it is resealed; never leave it set on a running deployment. The commands that write the bundle back
+(`pki rotate-command-root`, `pki add-sandbox-ca`, `pki renew-ca`) refuse it with `INVALID_STATE`: only `pki reseal`
+vouches for an unauthenticated bundle. A former-format bundle that carries command-signing rotation fields cannot be
+re-sealed: restore the copy from before the rotation and run `pki rotate-command-root` again.
 </Callout>
 
 | Flag | Default | Meaning |
@@ -170,21 +172,36 @@ better-compute pki add-sandbox-ca
 Bundles from `pki init` already hold a [sandbox SSH CA](#the-sandbox-ssh-ca). For a bundle made before sandboxes,
 this creates one (Ed25519, comment `<trust domain> sandbox ssh ca`), writes the bundle back (sealed when
 `BETTER_COMPUTE_SECRET` is set; an offline root stays out) and prints `sandboxSshCaPublicKey`. A bundle that already
-has one is `INVALID_STATE`. It loads the bundle like any other command, so re-seal a former-format bundle first. Roll
+has one is `INVALID_STATE`. It writes the bundle back, so it refuses `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1`
+(`INVALID_STATE`): re-seal a former-format bundle with [`pki reseal`](#pki-reseal) first. Roll
 the bundle out to every api replica, and give vps the public key as `sandboxExec.caPublicKey`. The only flag is
 `--pki`.
 
 ### pki reseal
 
 ```bash
-better-compute pki show && better-compute pki reseal
+better-compute pki reseal                            # an unauthenticated bundle: prints its pins and stops
+better-compute pki reseal --accept-unauthenticated   # after comparing them with your records
 ```
 
 It rewrites the bundle sealed with `BETTER_COMPUTE_SECRET` (required, at least 32 characters; `MISSING_ENV`
 otherwise) in the current format, where the seal also covers every certificate and pin, so a file changed without the
-secret no longer loads. It accepts a bundle sealed in the former format, or left unsealed, without any variable, and
-keeps every key and certificate: nothing is rotated. It prints the pins it now vouches for, with
-`authenticated: true`. It seals whatever the file holds, so compare the pins first. The only flag is `--pki`.
+secret no longer loads. It keeps every key and certificate: nothing is rotated.
+
+- **An authenticated bundle** (already sealed in the current format under this secret) is simply resealed.
+- **An unauthenticated bundle** (sealed in the former format, or unsealed while `BETTER_COMPUTE_SECRET` is set) is
+  not sealed at first: resealing would vouch for whatever the file holds. The command prints the pins it would vouch
+  for, the same fields as `pki show` with `authenticated: false`, and stops with `INVALID_STATE` ("nothing vouches for
+  the pins above"). Compare them with your install scripts, join tokens and pinned CAs, then run it again with
+  `--accept-unauthenticated`.
+
+After sealing it prints the pins it now vouches for, with `authenticated: true`. It needs no
+`BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED`.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--accept-unauthenticated` | off | Seal a bundle nothing authenticates, after comparing the pins printed without it |
+| `--pki PATH` | `.better-compute/pki.json` | The bundle |
 
 ### pki renew-ca
 
@@ -197,7 +214,8 @@ It issues a new certificate for the node, serving or internal CA from the root, 
 writes the bundle back (sealed when `BETTER_COMPUTE_SECRET` is set). Certificates the CA already issued stay valid and
 the serving CA's SPKI pin does not change, so nothing is re-pinned and no node rejoins. Roll the bundle out to every
 process before the old certificate expires. It prints the CA, the new `notAfter` and serial, and for `serving` the
-unchanged pin.
+unchanged pin. Like every command that writes the bundle back, it refuses `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1`
+with `INVALID_STATE`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -246,12 +264,13 @@ in the clear and the private keys either sealed or, with `--plaintext`, as PEM.
 
 | Function | Package | Does |
 | --- | --- | --- |
-| `loadPkiBundle(path, env)` | `better-compute/cli` | Reads the file and unseals it with `env.BETTER_COMPUTE_SECRET` (and `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED`) |
+| `loadPkiBundle(path, env)` | `better-compute/cli` | Reads the file and unseals it with `env.BETTER_COMPUTE_SECRET` (and `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1`, which loads a legacy bundle until it is resealed) |
 | `importPkiBundle(text, { secret?, rootKey?, allowUnauthenticated? })` | `better-compute/pki` | Loads a bundle; `INVALID_CONFIG` on a wrong secret, a damaged file, a key that does not match its certificate, changed public parts, or (unless `allowUnauthenticated`) a former-format seal or an unsealed bundle with a secret |
 | `exportPkiBundle(bundle, { secret?, omitRootKey? })` | `better-compute/pki` | Serializes a bundle, sealed when `secret` is given |
 | `exportRootKey(bundle, { secret? })` | `better-compute/pki` | The root key alone, for keeping it offline |
 | `readPkiPins(text, { secret? })` | `better-compute/pki` | The pins and expiry dates from the public half, and `authenticated` (checked against the seal when `secret` is given) |
 | `createPkiBundle({ trustDomain })` | `better-compute/pki` | What `pki init` runs |
+| `bootstrapPins(bundle)` | `better-compute/pki` | `{ servingCaPin, joinSigningPin, joinEncryptionPin }` in bcd's `sha256/<base64>` form, taken from the bundle: what a new machine pins before it trusts anything the control plane says (`bcd join --serving-ca-pin --join-signing-pin --join-encryption-pin`), never the pins in the unsigned `/.well-known/better-compute`. Pass it to `provisionModule({ userData: { pins } })`, as the examples do; see [joining from the well-known document](/docs/daemon/install#joining-from-the-well-known-document) |
 | `tunnelsOptions(bundle, { issuer })` | `better-compute/pki` | The `tunnels` options: the exec ticket issuer, `ssh` (break-glass) and `sandboxSsh`, when the bundle has them |
 
 Wire it into the options and the gateway:
@@ -385,7 +404,9 @@ better-compute pki rotate-command-root --stage switch  # workers sign under the 
 better-compute pki rotate-command-root --stage drop    # the old root is no longer trusted; version up again
 ```
 
-A step out of order is `INVALID_STATE`, and `doctor` reminds you of a rotation left half done (`pki.rotation`).
+A step out of order is `INVALID_STATE`, and `doctor` reminds you of a rotation left half done (`pki.rotation`). So is
+a run with `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1`: the command writes the bundle back, and only
+[`pki reseal`](#pki-reseal) vouches for an unauthenticated one.
 
 Every daemon reports the trust bundle version it holds: `Hello.trust_version` at session start, and
 `StatusReport.trust_version` again once it applies a newer bundle from `Welcome.trust` mid-session, so the
@@ -418,12 +439,15 @@ its next NodeSpec. See [SSH](/docs/guides/access/ssh) and [tunnels](/docs/guides
 ## The sandbox SSH CA
 
 The bundle's `sandboxSshCa` (v0.5) is a second OpenSSH CA, used only by `sandboxes.exec`. It signs user certificates
-of 60 seconds to 15 minutes, never past the caller's session, for the one principal `<account>@<instanceId>`. It is
-kept apart from the break-glass CA so neither certificate opens what the other is for: nodes never trust the sandbox
-CA, and sandbox guests never trust the break-glass CA.
+of 60 seconds to 15 minutes, never past the caller's session or the sandbox's expiry, for the one principal
+`<account>@<instanceId>` (for a sandbox restored from a memory snapshot, the instance the memory was captured on,
+since the resumed guest keeps that principal). It is kept apart from the break-glass CA so neither certificate opens
+what the other is for: nodes never trust the sandbox CA, and sandbox guests never trust the break-glass CA.
 
 - **Signing.** Pass it as `tunnels.sandboxSsh` (`tunnelsOptions(bundle, …)` does). Without it, `sandboxes.exec` is
-  `UNSUPPORTED`.
+  `UNSUPPORTED`. The tunnels module refuses a `sandboxSsh` whose key is the break-glass `ssh` CA's
+  (`INVALID_CONFIG`: "tunnels.sandboxSsh must be a different CA from tunnels.ssh"), so the split cannot be undone by
+  configuration.
 - **Trust.** Pass its public key as `vps({ sandboxExec: { caPublicKey } })`. vps writes it into every sandbox
   instance's user data as `TrustedUserCAKeys`, with an `AuthorizedPrincipalsFile` holding that instance's own
   principal. vps and the tunnels module each refuse a key that is not one line (an ed25519 or ECDSA P-256 key for
@@ -431,6 +455,13 @@ CA, and sandbox guests never trust the break-glass CA.
 - **Older bundles.** `pki add-sandbox-ca` adds it; `pki show` prints it as `sandboxSshCaPublicKey`.
 - **Revocation.** Guests have no agent and receive no revocation list, so the short lifetime and tunnel
   re-authorization are the controls. See [sandboxes](/docs/guides/vps/sandboxes#run-code-inside).
+- **Host certificates.** Every `SshCertificateAuthority` can also sign OpenSSH host certificates:
+  `issueHostCertificate({ publicKey, principals, keyId, validBefore })` returns `{ certificate, serial, validBefore }`
+  with no options or extensions, for principals that are plain names (letters, digits, `.`, `_`, `-`; never a list
+  or a wildcard) and a lifetime of at most `maxHostTtlSeconds` (default and maximum 30 days). Wire the sandbox CA's
+  `issueHostCertificate` into `vps({ sandboxExec: { certifyHostKey } })` and sandbox guests present host keys it certified, which
+  `sandbox exec` pins with `@cert-authority` instead of accepting them on first use; see
+  [how the guest trusts it](/docs/guides/vps/sandboxes#how-the-guest-trusts-it).
 
 ## The audit key
 
@@ -476,7 +507,7 @@ fakehw builds of bcd run instances to serve so far. What the broker checks is in
 | Command-signing root | `pki rotate-command-root`, the three steps above |
 | Exec ticket key | `rotate()` on the issuer; the previous key stays in the JWKS |
 | SSH CA, sandbox SSH CA | Not automated. A new sandbox CA reaches only instances created after it, since the key is in their user data |
-| A bundle sealed in the former format | Once, `pki reseal` (see [pki reseal](#pki-reseal)) |
+| A bundle sealed in the former format | Once: `pki reseal` prints its pins, then `pki reseal --accept-unauthenticated` after comparing them (see [pki reseal](#pki-reseal)) |
 | Workload issuer keys | `addKey()`, `promote(kid)`, then `retire(kid)` once the old key's tokens expired |
 | Sealed secrets | `localSealedSecretStore` with several keys, then `reseal()` (see [configuration](/docs/operations/configuration#the-deployment-secret)) |
 | Node, serving and internal CAs (1 year) | `pki renew-ca --ca node` (or `serving`, `internal`) before they expire (`doctor` warns 30 days ahead); see [pki renew-ca](#pki-renew-ca) |

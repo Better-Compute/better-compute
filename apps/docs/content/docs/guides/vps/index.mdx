@@ -113,8 +113,9 @@ Registering the module adds:
 
 - the `instances`, `flavors` and `providerAccounts` API groups
   ([instances](/docs/reference/api/instances), [flavors](/docs/reference/api/flavors),
-  [providerAccounts](/docs/reference/api/provider-accounts)), and the v0.5 `sandboxes` and `sandboxTemplates` groups
-  ([sandboxes](/docs/reference/api/sandboxes), [sandboxTemplates](/docs/reference/api/sandbox-templates)) for
+  [providerAccounts](/docs/reference/api/provider-accounts)), and the v0.5 `sandboxes`, `sandboxTemplates` and `sandboxSnapshots` groups
+  ([sandboxes](/docs/reference/api/sandboxes), [sandboxTemplates](/docs/reference/api/sandbox-templates),
+  [sandboxSnapshots](/docs/reference/api/sandbox-snapshots)) for
   [sandboxes](/docs/guides/vps/sandboxes) on hosted pools;
 - the migrations `vps/0001_instances`, with the tables `flavors`, `provider_accounts`, `instances`, `ip_pools` and
   `ip_leases`, `vps/0002_sealed_user_data` (`instances.user_data_sealed`), `vps/0003_provider_bootstraps`
@@ -124,7 +125,9 @@ Registering the module adds:
   `vps/0005_sandbox_snapshots` (`sandbox_snapshots`, `instances.restore_from`, `sandboxes.from_snapshot`),
   `vps/0006_warm_claims` (`instances.claimed_at`), `vps/0007_template_env` (`sandbox_templates.env`) and
   `vps/0008_template_network` (`sandbox_templates.network` and `instance_version`, `instances.network_policy` and
-  `warm_template_version`);
+  `warm_template_version`), `vps/0009_snapshot_fixes` (`sandbox_snapshots.principal_instance_id` and `purged`),
+  `vps/0010_sandbox_metric_indexes` (partial indexes for the sandbox metrics) and `vps/0011_host_certificates`
+  (`instances.host_certified`, `sandbox_snapshots.host_certified`);
 - the `vps.instances` reconciler, woken through the <Term id="work-queue">work queue</Term> by every change, the
   `vps.sandboxes` reconciler (every 15 seconds: sandbox expiry, sandbox events, warm pools and settling snapshots),
   and the `vps.usage` job, which meters hosted instances every 5 minutes;
@@ -246,11 +249,11 @@ allocation, IP lease, scalar claim or quota). What runs the VMs on a host is not
 | `vps.instances` reconciler, IPAM, `vps.usage` metering      | Shipped.                                                                                                                                                                                                                |
 | `hetzner-cloud` provider                                    | Shipped in `@better-compute/provider-hetzner`, tested against an in-memory emulator of the Hetzner Cloud API.                                                                                                           |
 | `proxmox` provider                                          | Shipped in `@better-compute/provider-proxmox` (PLAN.md scheduled it for v0.5), tested against an in-memory PVE emulator.                                                                                                |
-| Host runtimes `libvirt-kvm` and `cloud-hypervisor`          | Planned for bcd (v0.3). The `RuntimeDriver` contract and the protocol messages exist; bcd's node agent is built but not released. It has the `instances` converger, but only fakehw builds have a runtime (a file-backed stand-in); a real host build has none, so a non-empty section fails and no VM boots on real hardware. |
-| Runtimes as out-of-process plugins (Kata, and others)       | Planned for v0.5 with bcx.                                                                                                                                                                                              |
+| Host runtimes `libvirt-kvm` and `cloud-hypervisor`          | Planned for bcd (v0.3). The `RuntimeDriver` contract and the protocol messages exist; bcd's node agent is built but not released. It has the `instances` converger, but only fakehw builds have a built-in runtime (a file-backed stand-in); a real host build has none, so without a runtime plugin a non-empty section fails and no VM boots on real hardware. |
+| Runtimes as out-of-process plugins (Kata, and others)       | v0.5: bcd serves a bcx plugin of kind `runtime` as an instances runtime (`list`, `apply`, `remove`; no snapshots), Go unit tests only. No Kata plugin is written. See [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx). |
 | Single-tenant container runtimes                            | Planned for v0.3; the `RuntimeTraits` contract describes them, nothing enforces single tenancy yet.                                                                                                                     |
 | Interactive access (exec, SSH, TCP through a tunnel)        | `tunnels.open` with an `instanceId`, decided as `compute:instances:exec`: hosted instances only, and only when the deployment configures tunnels. The API reference lists it as planned. See [tunnels](/docs/guides/access/tunnels). |
-| Sandboxes (`sandboxes`, `sandboxTemplates`)                 | v0.5: served, all 12 methods. Templates with `env` and `network`, TTL expiry, warm pools of paused instances and their `vps.sandbox.warm` meter, snapshots and restores, `sandboxes.exec` (from the tunnels module), the instance guard, tenant teardown (`tests/vps-sandboxes.test.ts`, `tests/e2e/sandboxes.test.ts`). bcd does not enforce a template's `network` yet. Like every hosted instance, a sandbox needs a host runtime. See [sandboxes](/docs/guides/vps/sandboxes). |
+| Sandboxes (`sandboxes`, `sandboxTemplates`, `sandboxSnapshots`) | v0.5: served, all 15 methods. Templates with `env` and `network`, TTL expiry, warm pools of paused instances and their `vps.sandbox.warm` meter, snapshots, restores and snapshot management, `sandboxes.exec` (from the tunnels module), the instance guard, tenant teardown (`tests/vps-sandboxes.test.ts`, `tests/e2e/sandboxes.test.ts`). bcd enforces a template's `network` with host nftables rules. Like every hosted instance, a sandbox needs a host runtime. See [sandboxes](/docs/guides/vps/sandboxes). |
 | Per-instance metadata service and workload identity         | v0.5, optional. The control plane half (the workload broker, the session frames, the issuer and its published JWKS) is built and tested against the FakeDaemon's metadata service; bcd serves the same contract on `[imds] listen`, for instances of its fakehw stand-in runtime only so far. See [workload identity](/docs/guides/vps/instances#workload-identity). |
 
 The TypeScript `FakeDaemon` in `@better-compute/testing` speaks the real protocol for the simulator and

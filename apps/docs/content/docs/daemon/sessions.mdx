@@ -103,10 +103,11 @@ at its next session. The API reads the column to refuse what the connected daemo
 | `tunnel.instance-dial` | `tunnels.open` | The daemon dials an instance's own address for instance `ssh` and `tcp` tunnels. Without it those tunnels are `UNSUPPORTED` with details `{ reason: 'daemon-capability', capability }`; `exec` and node consoles are not affected |
 
 On a node with GPUs, bcd advertises the capabilities `cdi` and `nvml` and the driver `nvidia`, and a node agent
-lists each instance runtime it runs as a driver of kind `runtime` (only `libvirt-kvm`, the file-backed stand-in of
-fakehw builds, today). A node agent that runs an instance runtime also advertises `tunnel.instance-dial`, because
-it then dials an instance ticket to the instance's own address, never the host's (see
-[tunnels](/docs/guides/access/tunnels#the-node-half)); a host build, which has no runtime yet, does not. The FakeDaemon
+lists each built-in instance runtime it runs as a driver of kind `runtime` (only `libvirt-kvm`, the file-backed
+stand-in of fakehw builds, today); a runtime a bcx plugin serves is listed once, through its plugin's manifest. A node
+agent that runs an instance runtime also advertises `tunnel.instance-dial`, because it then dials an instance ticket
+to the instance's own address, never the host's (see [tunnels](/docs/guides/access/tunnels#the-node-half)); a host
+build without a runtime does not. The FakeDaemon
 advertises it when its tunnels are configured.
 
 ### The Hello transaction

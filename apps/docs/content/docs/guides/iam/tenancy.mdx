@@ -262,8 +262,9 @@ Either way:
 - Each status is the tenant's **effective** one, the worst of its own and its ancestors' (`active` < `pending` <
   `suspended` < `deleted` < `missing`). Better IAM writes a deletion into every descendant's own status, but a
   suspension only into its decisions, so a child of a suspended tenant reads as `suspended` here.
-- A tenant IAM no longer knows is `missing`. A subtree larger than `maxTenants` (default 10,000) is refused with
-  `INVALID_STATE`.
+- A tenant IAM no longer knows is `missing`, and only IAM's own "Tenant not found" answer means that. Any other
+  error, a bare 404 from a proxy or a wrong base path included, throws and is retried, so it can never read as a
+  deleted tenant. A subtree larger than `maxTenants` (default 10,000) is refused with `INVALID_STATE`.
 
 `better-compute dev --sim` with the embedded Better IAM wires `iamTenantReader` in by itself, so suspending or
 deleting a tenant there reaches its whole subtree.
@@ -286,10 +287,13 @@ bridge.setHandlers({
 - `readTenants(tenantId)` returns `{ tenantId, status }` for the tenant acted on and its descendants, with `status`
   one of `active`, `pending`, `suspended`, `deleted` or `missing` (IAM no longer knows it). A suspension or
   deletion cascades to descendants, and the audit event names only the tenant acted on, so compute re-reads the
-  subtree instead of trusting the event. `suspended` maps to `suspended`; `deleted` and `missing` map to
-  `deleted`; anything else is `active`.
-- Without a reader, only `iam:tenants:delete` is applied, and only to the named tenant; an update changes nothing,
-  and the reconciler logs a warning for each subtree it could not re-read.
+  subtree instead of trusting the event. `suspended` maps to `suspended`; `deleted` maps to `deleted`; anything
+  else is `active`. `missing` only confirms a tenant already recorded as suspended or deleted: it never starts a
+  teardown by itself (so an id IAM audits under `iam:tenants:update` without being a tenant, such as an
+  invitation's, is never torn down). The root tenant is never suspended or deleted, whatever IAM answers.
+- Without a reader, only `iam:tenants:delete` is applied, and only to the named tenant; an update changes nothing.
+  The handler queues subtree syncs only when it was given a reader, and a sync key that reaches a process without
+  one fails with `UNAVAILABLE` and is retried with back-off rather than dropped.
 - Each change publishes `tenant.state-changed` (`tenantId`, `state`, `previous`, `reason`) on `tenant/{id}`. A
   replay changes nothing, and a tenant reactivated in IAM becomes `active` again.
 
@@ -306,8 +310,9 @@ IAM call there. It only writes SQL:
 The reconciler then reads the subtree through the reader outside any transaction (`syncTenantStates`) and applies
 it in a transaction of its own (reason `iam:tenants:sync`). When IAM cannot answer, the read throws and the key is
 retried with back-off: a suspension or deletion is delayed while IAM is down, never dropped, and compute never
-fails open. As a backstop, a periodic `resync` key re-reads the whole tree from the root tenant every 15 minutes
-(reason `iam:tenants:resync`).
+fails open. As a backstop, the `tenancy.resync` reconciler, separate so it never delays syncs and teardowns,
+re-reads the whole tree from the root tenant every 15 minutes (reason `iam:tenants:resync`); past the reader's size
+limit it re-reads only the tenants already refused.
 
 ```mermaid
 sequenceDiagram
@@ -336,10 +341,14 @@ Every call passes a tenant gate right after the cross-tenant pre-check, before c
 | `deleted` | `TENANT_SUSPENDED` (403) | `TENANT_SUSPENDED` (403) |
 
 The gate checks the caller's tenant and the tenants the call acts in; the error's `details` carry `tenantId` and
-`state`. Root-tenant callers are exempt, so the platform can still act in a suspended tenant. The gate answers from
-memory: each process loads the non-active states at start and reloads them every 5 seconds, and the process that
-applied a change reloads before its next call (`compute.tenants.invalidate()`). Another process may therefore
-admit a suspended tenant's mutation for up to 5 seconds. A reload that fails is reported once per run of failures,
+`state`. Root-tenant callers may still act in a suspended tenant and read a deleted one, but never write into a
+deleted tenant, since what they created after the teardown would never be torn down. The gate answers from memory:
+each process loads the non-active states at start, or on its first call when it never ran `initialize()` (an
+API-only replica started with `--no-migrate`; `compute.tenants.ready()` loads it up front), and reloads them every
+5 seconds. The process that applied a change reloads before its next call (`compute.tenants.invalidate()`, a
+generation counter, so a load already in flight cannot swallow it). Another process may therefore admit a suspended
+tenant's mutation for up to 5 seconds. Operations built without a deployment (unit harnesses) get `noTenantGate`,
+which refuses nothing. A reload that fails is reported once per run of failures,
 not every 5 seconds, and the timer stops once the store is closed (a one-shot CLI command closes it without
 stopping compute).
 
@@ -347,8 +356,9 @@ stopping compute).
 
 A deletion enqueues the `tenancy` reconciler for the tenant. It calls every hosted module's `tenantDeleted` hook,
 plugins included; a module that answers `SYNC_AGAIN` is asked again by the 30-second `sweep`, which also recovers
-a lost work item. When every hook answers `DONE` in one pass, the reconciler sets `teardown_done_at` and publishes
-`tenant.torn-down`.
+a lost work item and retries the longest-waiting teardowns first (`teardown_attempted_at`, migration
+`tenancy/0002_teardown_attempts`). When every hook answers `DONE` in one pass, the reconciler sets
+`teardown_done_at` and publishes `tenant.torn-down`. The root tenant is never torn down, whatever a row says.
 
 | Module | What it releases (idempotent, in batches of 100) |
 | --- | --- |
@@ -360,8 +370,9 @@ a lost work item. When every hook answers `DONE` in one pass, the reconciler set
 <Callout type="warn" title="Not torn down yet">
 Only `capacity`, `provision`, `metal` and `vps` implement `tenantDeleted` in this release. A deleted tenant's
 non-metal `tenant-owned` nodes and its sites are not released by the teardown; the gate only stops the tenant from
-reaching them. While its instances wait for teardown, their VMs cannot mint workload identity tokens: the workload
-broker refuses a suspended or deleted tenant's instances with `disabled`. Plugins release their own state through the same hook; see
+reaching them. While its instances wait for teardown, their VMs cannot mint workload identity tokens (the workload
+broker refuses a suspended or deleted tenant's instances with `disabled`), and the secret broker releases none of
+the tenant's secrets or user data (`security.secret.refused`, reason `tenant-suspended` or `tenant-deleted`). Plugins release their own state through the same hook; see
 [modules](/docs/extending/modules#tenantdeleted).
 </Callout>
 

@@ -20,6 +20,7 @@ sources:
   - packages/server/src/tunnels/module.ts
   - packages/server/src/controllers/nodespec.ts
   - packages/iam/src/sessions.ts
+  - packages/gateway/src/tunnels.ts
   - packages/pki/src/bundle.ts
   - packages/cli/src/commands/sandbox.ts
   - packages/mcp/src/tools.ts
@@ -33,6 +34,8 @@ sources:
   - daemon/internal/agent/snapshot.go
   - tests/vps-sandboxes.test.ts
   - tests/server-sandbox-exec.test.ts
+  - tests/cli-sandbox-exec.test.ts
+  - tests/mcp-server.test.ts
   - tests/e2e/sandboxes.test.ts
   - PLAN.md
 ---
@@ -48,19 +51,21 @@ guarantees of [instances](/docs/guides/vps/instances) hold unchanged. It is its 
 <Term id="flavor">flavor</Term>, with no <Term id="join-token">join token</Term>, no `bcd` and no IAM key inside, and
 its boot data sealed through the secret broker.
 
-`vps()` serves two API groups for it (v0.5, beta): [sandboxTemplates](/docs/reference/api/sandbox-templates) and
-[sandboxes](/docs/reference/api/sandboxes), whose `exec` method the tunnels module contributes. All 12 methods are
-served. Migrations `vps/0004_sandboxes` to `vps/0008_template_network` add their tables and columns, and the
+`vps()` serves three API groups for it (v0.5, beta): [sandboxTemplates](/docs/reference/api/sandbox-templates),
+[sandboxes](/docs/reference/api/sandboxes), whose `exec` method the tunnels module contributes, and
+[sandboxSnapshots](/docs/reference/api/sandbox-snapshots). All 15 methods are served. Migrations `vps/0004_sandboxes` to `vps/0011_host_certificates` add their tables, columns and indexes, and the
 `vps.sandboxes` reconciler expires sandboxes, keeps warm pools filled and settles snapshots.
 
 <Callout type="warn" title="The control plane is done; the host runtime is not">
 Sandboxes run only on hosted (`vps-host`) pools, and a hosted instance is booted by a runtime inside `bcd` on its
-host. bcd has the `instances` converger, `instance.snapshot` and `restore_from`, but a real host build has no runtime
-yet (`libvirt-kvm` and `cloud-hypervisor` are not written): a non-empty `instances` section fails with `this host runs
-no instance runtime`, so on real hardware a sandbox's instance is placed and holds its allocation and IP lease, but
-never boots, and the sandbox stays `starting`. Only fakehw builds of bcd run instances, on a file-backed stand-in.
-bcd also does not enforce a template's `network` yet. The TypeScript FakeDaemon's `FakeHypervisor` implements pause,
-resume, snapshots and restores for the end-to-end suites. See [where sandboxes run today](#where-sandboxes-run-today).
+host. bcd has the `instances` converger, `instance.snapshot`, `restore_from` and the template `network` rules, but no
+built-in runtime for a real host yet (`libvirt-kvm` and `cloud-hypervisor` are not written). A host build runs
+instances only through a runtime served by a bcx plugin, and no such plugin is written; without one, a non-empty
+`instances` section fails with `this host runs no instance runtime`, so on real hardware a sandbox's instance is placed
+and holds its allocation and IP lease, but never boots, and the sandbox stays `starting`. Only fakehw builds of bcd
+run instances out of the box, on a file-backed stand-in. The TypeScript FakeDaemon's `FakeHypervisor` implements
+pause, resume, snapshots and restores for the end-to-end suites. See
+[where sandboxes run today](#where-sandboxes-run-today).
 </Callout>
 
 ## Templates
@@ -92,9 +97,9 @@ const template = await client.sandboxTemplates.create({
     flavor: { type: 'string', description: 'A flavor of that pool, not archived (NOT_FOUND otherwise).', required: true },
     imageId: { type: 'string', description: 'Resolved with vps({ images }) for the tenant (NOT_FOUND when it does not resolve; INVALID_CONFIG without images).', required: true },
     runtime: { type: 'string', description: "Optional. When given it must equal the pool's runtime (INVALID_INPUT otherwise). The template always stores the pool's runtime, checked once here.", default: "the pool's" },
-    userData: { type: 'string', description: 'At most 32 KiB of cloud-init, or secret://<tenantId>/<id> for a secret of this tenant; any other URI is INVALID_INPUT. update takes null to remove it.' },
-    env: { type: 'Record<string, string>', description: 'Up to 64 variables, named A-Z 0-9 _ (not starting with a digit, at most 64 characters), each a secret://<tenantId>/<id> reference of this tenant; a value is never accepted. Needs the secret broker (INVALID_CONFIG otherwise). update replaces the whole map.', default: '{}' },
-    network: { type: "'egress' | 'private' | 'none'", description: "What the sandbox's NICs may reach: anything the pool's network allows, the pool's IPAM subnet and the host, or the host only.", default: "'egress'" },
+    userData: { type: 'string', description: 'At most 32 KiB of cloud-init, or secret://<tenantId>/<id> for a secret of this tenant; any other URI is INVALID_INPUT. With vps({ sandboxExec }), a secret:// reference needs the secret broker (INVALID_CONFIG otherwise), since vps resolves it into the user data it renders. update takes null to remove it.' },
+    env: { type: 'Record<string, string>', description: 'Up to 64 variables, named A-Z 0-9 _ (not starting with a digit, at most 64 characters), each a secret://<tenantId>/<id> reference to a secret this tenant wrote with secrets.put; a value is never accepted, and a platform-minted secret is INVALID_INPUT. Needs the secret broker (INVALID_CONFIG otherwise). update replaces the whole map.', default: '{}' },
+    network: { type: "'egress' | 'private' | 'none'", description: "What the sandbox's NICs may reach: anything the pool's network allows, the pool's IPAM subnet and the host, or the host only. private and none need the pool's IP range (INVALID_STATE otherwise).", default: "'egress'" },
     defaultTtlSeconds: { type: 'number', description: 'A sandbox lifetime when create gives none. 60 s to 30 days.', default: '3600' },
     maxTtlSeconds: { type: 'number', description: 'The longest lifetime, extensions included. 60 s to 30 days, at least defaultTtlSeconds.', default: 'max(86400, defaultTtlSeconds)' },
     warm: { type: '{ min: number; max?: number }', description: 'Warm instances to keep, 0 to 64 each; max defaults to min and must be at least min.', default: '{ min: 0, max: 0 }' },
@@ -103,6 +108,13 @@ const template = await client.sandboxTemplates.create({
 
 The checks are those of a hosted `instances.create`: the pool must be visible to the tenant, and its runtime must boot
 the image's format and pass through the flavor's GPUs. Unknown fields are `INVALID_INPUT`.
+
+A template that names secrets, in `env` or as a `secret://` user data, hands them to every sandbox's guest, which can
+read them, while secrets are otherwise write-only. So those references must be secrets the tenant wrote itself with
+`secrets.put` (never platform-minted ones such as join tokens, BMC credentials or sealed user data, which are
+`INVALID_INPUT`), and `create` and `update` also decide `compute:secrets:manage` on the tenant, with the caller's own
+credential, before the write (`ACCESS_DENIED` with `reason: 'credential-required'` without one). Pass
+`vps({ typePrefix })` when the deployment's IAM type prefix is not `compute-`.
 
 [update](/docs/reference/api/sandbox-templates#update) changes the flavor, image, user data, `env`, `network`, TTL
 bounds or warm pool and raises `version`; the pool, name and runtime stay, and a new flavor or image is checked again,
@@ -119,25 +131,41 @@ be kept in a [FleetConfig](/docs/guides/fleet-config) document.
 
 Each `env` value is resolved by the secret broker for the template's tenant when an instance is created, and written
 to `/etc/sandbox/env` (owner `root`, mode 0600) as one `NAME='value'` shell assignment per line, inside the instance's
-user data, which the broker seals before it reaches the host. The values never appear in the template, the API or an
-event. A warm instance holds the values resolved when it was made; changing `env` drains it, but rotating a secret's
-value does not. Source the file from your own user data or command, for example `set -a; . /etc/sandbox/env`.
+user data. vps renders that user data and seals it through the broker before the instance row is inserted, so resolved
+values never reach the `instances` table, its WAL or the NodeSpec in the clear. The values never appear in the
+template, the API or an event. Without a broker, a template with `env` (or, with exec trust configured, one whose user
+data is a `secret://` reference) is `INVALID_CONFIG`, both when it is written and when an instance is made from it.
+A warm instance holds the values resolved when it was made; changing `env` drains it, but rotating a secret's value
+does not. The broker releases nothing for a suspended or deleted tenant. Source the file from your own user data or command, for example `set -a; . /etc/sandbox/env`.
 
 ### Network
 
-`network` becomes the instance's `InstanceSpec.network_policy`, which PLAN.md has bcd enforce with nftables rules on
-the instance's taps whatever the runtime:
+`network` becomes the instance's `InstanceSpec.network_policy`, which bcd enforces with host nftables rules on the
+instance's taps, whatever the runtime (6db49c8):
 
 | `network` | The guest may reach |
 | --- | --- |
-| `egress` (default) | Anything the pool's network allows; sent as the wire default, so older specs are unchanged |
-| `private` | Only the pool's IPAM subnet and the host |
-| `none` | Only the host: bcd's tunnel dial, DHCP and ARP. `sandboxes.exec` still works |
+| `egress` (default) | Anything the pool's network allows; no rules. Sent as the wire default, so older specs are unchanged |
+| `private` | Only its NICs' IPAM subnets and the host on them (the metadata service included); nothing routed beyond them, nothing from outside them |
+| `none` | Only the host: DHCP, ARP, replies, and connections the host opens from its address on the subnet (bcd's tunnel dial). No other instance, nothing routed. `sandboxes.exec` still works |
 
-<Callout type="warn" title="Not enforced on hosts yet">
-The control plane sends the policy in every spec and the FakeDaemon records it, but bcd has no code that applies it
-(the Go side has only the generated field). Until it does, treat every sandbox as `egress`.
-</Callout>
+bcd owns one bridge-family table, `bcd_instances`, and replaces it in a single nftables transaction whenever the
+policies change, before any domain starts. Taps are matched by name, so the rules exist before a runtime creates the
+tap. It fails closed: a policy that cannot be expressed (a NIC without IPAM addresses) or rules that fail to load put
+the instance in `error` and stop it if it runs.
+
+Because the rules are written on the NICs' addresses, `private` and `none` need the pool's IP range (`setIpPool`): a
+template with either on a pool without one is `INVALID_STATE` at create and update, and so is creating an instance
+from it if the range was removed since, so vps never starts an instance bcd would have to stop. The FakeDaemon
+records the policy without enforcing it.
+
+An older bcd drops `network_policy` as an unknown field, so a bcd that enforces it advertises the capability
+`instance.network-policy`, which the gateway writes as the node label `bc.dev/cap.instance.network-policy=1`; a
+placement can require it through `nodeLabels`, though vps does not add that constraint for sandboxes yet. Whatever
+the policy, bcd also guards every tap whose NIC has a MAC and IPAM addresses (278296e): frames must carry the NIC's
+MAC, IP packets its own addresses (plus `0.0.0.0` and `::` for DHCP and `fe80::/10` for neighbour discovery) and ARP
+its own IPv4 addresses, so one guest cannot pose as another. The metadata service and instance tunnels, which name an
+instance by its address, work only while those rules are loaded and never for an address two instances claim.
 
 ## Create a sandbox
 
@@ -194,7 +222,8 @@ Better IAM budget answers `SPEND_LIMIT_REACHED` and keeps the draft. See
 Unless the create is a restore, vps looks for the template's oldest warm instance that has settled (`stopped` or
 `paused`, not being deleted) and was made from the template's current `instance_version`, with `FOR UPDATE SKIP
 LOCKED`, so concurrent creates never wait on each other and each gets a different instance. A claimed instance moves
-to the sandbox: its owner becomes the caller, `desiredState` becomes `running`, `claimed_at` is stamped (its warm
+to the sandbox: its owner becomes the caller, it takes the sandbox's agent and delegation attribution,
+`desiredState` becomes `running`, `claimed_at` is stamped (its warm
 metering ends there), and `instance.starting` is published. Nothing new is placed or charged; it was placed and
 charged when it was warmed. Without a claimable instance, vps creates one from the template and schedules it with the
 decision's admission context, exactly like a hosted `instances.create`: placement, quota (`QUOTA_EXCEEDED`), an IP
@@ -281,8 +310,9 @@ like any other and the sandbox goes back to `starting`.
   as `compute:sandboxes:update` with a pending `ttlSeconds` equal to the whole lifetime after the change, counted from
   `createdAt`, so a policy that caps `ttlSeconds` caps extensions too and cannot be bypassed in small steps. The
   handler then refuses a lifetime above the template's `maxTtlSeconds` (`INVALID_INPUT`), even for a template deleted
-  since. An `until` not later than the current expiry returns the sandbox unchanged without a decision; a repeated
-  `by` extends again. A sandbox being deleted is `INVALID_STATE`. It publishes `sandbox.extended`.
+  since. The handler applies the absolute expiry that was decided, not "current plus `by`" again, so two concurrent
+  `by` extends cannot add up to a lifetime no decision covered. An `until` not later than the current expiry returns
+  the sandbox unchanged without a decision; a repeated `by` extends again. A sandbox being deleted is `INVALID_STATE`. It publishes `sandbox.extended`.
 - [delete](/docs/reference/api/sandboxes#delete) marks the sandbox `deleting`, sets its instance's `desiredState` to
   `deleted` (publishing `instance.deleting` with `sandboxId`) and wakes the reconciler. It is idempotent. The
   `vps.instances` reconciler releases the allocation, IP lease, quota and sealed user data as for any instance.
@@ -325,12 +355,29 @@ first line; a `secret://` reference is resolved first). vps's part:
 - writes the CA key to `/etc/ssh/bc_sandbox_ca.pub` and the principal `<account>@<instanceId>` to
   `/etc/ssh/bc_sandbox_principals/<account>`;
 - adds `/etc/ssh/sshd_config.d/10-bc-sandbox.conf` with `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`, and
-  reloads sshd.
+  reloads sshd;
+- with `certifyHostKey` (below), also writes a P-256 host key to `/etc/ssh/bc_sandbox_host_key` (0600) and its host
+  certificate beside it, and adds `HostKey` and `HostCertificate` to the drop-in.
+
+`certifyHostKey` closes the other direction: without it the guest's own SSH host key is new at every boot and a
+client can only accept it on first use. With it, vps generates a host key for each sandbox instance and asks the hook
+for a host certificate naming the instance id, valid for 30 days; the host wires it to the same sandbox CA's
+`issueHostCertificate`. The private key travels only in broker-sealed user data, so the hook without a secret broker
+is `INVALID_CONFIG`. `instances.host_certified` records it (migration `vps/0011_host_certificates`), a memory restore
+inherits the source's value through its snapshot, and `sandboxes.exec` returns `hostPrincipal` and `hostCertified`
+so a client can pin the guest with `@cert-authority <hostPrincipal> <sandbox CA key>`. `better-compute sandbox exec`
+does (see [the CLI](#from-the-cli)).
 
 The principal names the instance, so a certificate for one sandbox opens no other, and a warm instance trusts the CA
-before any sandbox exists. The CA must be one `ssh-ed25519` or `ecdsa-sha2-nistp256` key line (`INVALID_CONFIG`
-otherwise), and it is one CA for the deployment, not one per tenant as PLAN.md first described. It is separate from
-the [break-glass SSH](/docs/guides/access/ssh) CA, so a sandbox certificate never opens a node.
+before any sandbox exists. A memory restore is the exception: it resumes the guest without re-running cloud-init, so
+its sshd still accepts the principal of the instance the memory was captured on. Snapshots record that instance, a
+restore carries it in `restore_from.principalInstanceId`, and `sandboxes.exec` signs for it. Since only the
+snapshot's owner can restore it, only that owner's own lineage shares a principal.
+
+The CA must be one `ssh-ed25519` or `ecdsa-sha2-nistp256` key line, with an optional comment of up to 64 printable
+characters that may contain spaces, as pki's are (`INVALID_CONFIG` otherwise). It is one CA for the deployment, not
+one per tenant as PLAN.md first described. It is separate from the [break-glass SSH](/docs/guides/access/ssh) CA, so
+a sandbox certificate never opens a node; the tunnels module refuses a `tunnels.sandboxSsh` equal to `tunnels.ssh`.
 
 ### Wire it
 
@@ -344,6 +391,7 @@ import { tunnelsOptions } from 'better-compute/pki';
 import { vps } from 'better-compute/vps';
 
 const bundle = await loadPkiBundle('.better-compute/pki.json', process.env);
+const sandboxCa = bundle.sandboxSshCa!;
 
 export const compute = betterCompute({
   // database, secret, iam, pki ...
@@ -351,7 +399,13 @@ export const compute = betterCompute({
   modules: [
     vps({
       images,
-      sandboxExec: { caPublicKey: bundle.sandboxSshCa!.publicKey }, // guests trust it
+      sandboxExec: {
+        caPublicKey: sandboxCa.publicKey, // guests trust it for user certificates
+        // optional: guests present host keys the same CA certifies, so clients pin them
+        certifyHostKey: async ({ instanceId, principals, publicKey, validBefore }) =>
+          sandboxCa.issueHostCertificate({ publicKey, principals, keyId: `host/${instanceId}`, validBefore })
+            .certificate,
+      },
       snapshots: snapshotStore, // see below
     }),
   ],
@@ -369,12 +423,13 @@ fails at login.
     tenantId: { type: 'string', description: 'The tenant acting.', required: true },
     sandboxId: { type: 'string', description: 'The sandbox (sbx_…).', required: true },
     publicKey: { type: 'string', description: 'Your OpenSSH public key line, Ed25519 or ECDSA P-256, at most 4096 characters.', required: true },
-    ttlSeconds: { type: 'number', description: "Certificate lifetime, 60 to 900, and never past the caller's session.", default: '600' },
+    ttlSeconds: { type: 'number', description: "Certificate lifetime, 60 to 900, and never past the caller's session or the sandbox's expiresAt.", default: '600' },
   }}
 />
 
 It answers `{ sandboxId, instanceId, nodeId, tunnelId, ticket, path, expiresAt, certificate, serial, keyId, principal,
-account, validBefore }`. Open `GET {basePath}/{path}` as a WebSocket before `expiresAt` (the ticket is single use and
+account, validBefore, hostPrincipal, hostCertified }`; `hostPrincipal` is the name the guest's host certificate
+carries (its instance, or the original one after a memory restore), and `hostCertified` says whether it has one. Open `GET {basePath}/{path}` as a WebSocket before `expiresAt` (the ticket is single use and
 lives 60 s) and speak SSH over it as `account`, with the certificate saved beside your key as `<key>-cert.pub`. The
 key id is `bc:<identityId>:<sandboxId>:ssh_<id>`.
 
@@ -384,6 +439,7 @@ key id is `bc:<identityId>:<sandboxId>:ssh_<id>`.
 | An API key rather than a signed-in session | `ACCESS_DENIED`, `details.reason: 'session-required'` |
 | The session ends within a minute | `ACCESS_DENIED`, `details.reason: 'session-ending'` |
 | The sandbox is not `ready` (its instance not `running`), or is being deleted | `INVALID_STATE` |
+| The sandbox expires within a minute (or already has): extend it first | `INVALID_STATE`, `details.reason: 'sandbox-expiring'` |
 | The node is not connected, or its daemon does not advertise `tunnel.instance-dial` | as for `tunnels.open` |
 | More tunnels than the per-identity limit, shared with `tunnels.open` | `RATE_LIMITED` |
 | An RSA or malformed key | `INVALID_INPUT` |
@@ -409,9 +465,12 @@ The CLI's `better-compute sandbox exec sbx_… -- cmd` does all of it with your 
 ### Revocation
 
 Guests have no agent to receive a revocation list, so the certificate's short lifetime (at most 15 minutes, never
-past your session) is the revocation control. The transport is re-authorized: the exec ticket names the sandbox, and
+past your session or the sandbox) is the revocation control. The transport is re-authorized: the exec ticket names
+the sandbox (`sbx`), the gateway keeps it as `TunnelInfo.sandboxId` and hands it back at each 60-second re-check, and
 tunnel re-authorization (`tunnelAuthorizer` from `better-compute/iam`) re-decides `compute:sandboxes:exec` on that
-sandbox, never on the instance, so withdrawn access closes an open session. Each call publishes `tunnel.issued` (subject `instance/<id>`, with `sandboxId`) and
+sandbox, never on the instance, so withdrawn access closes an open session while a session that is still allowed
+stays open. A gateway's control API can also close or re-check the tunnels into one sandbox (`sandboxId` in its
+tunnel filter). Each call publishes `tunnel.issued` (subject `instance/<id>`, with `sandboxId`) and
 `sandbox.exec.issued`.
 
 `sandboxes.exec` is the only way in. `tunnels.open` refuses a sandbox's instance, and a warm one, for every op
@@ -481,20 +540,44 @@ sweeper or the gateway wakes `vps.sandboxes` with the snapshot id:
 
 ### Restore
 
-`sandboxes.create({ ..., fromSnapshot: 'snap_…' })` restores one of the tenant's own `ready` snapshots. Another
-tenant's snapshot, or a deleted one, is `NOT_FOUND`; one still `pending` or `failed` is `INVALID_STATE`; one taken
+`sandboxes.create({ ..., fromSnapshot: 'snap_…' })` restores one of the caller's own `ready` snapshots: a snapshot
+holds its sandbox's memory and `/etc/sandbox/env`, so only the identity that took it may boot it. Another user's
+snapshot, even in the same tenant, another tenant's, or a deleted one, is `NOT_FOUND`; one still `pending` or
+`failed` is `INVALID_STATE`; one taken
 on a runtime other than the template's is `INVALID_INPUT`. The decision sees `fromSnapshot`, and a restore never
 claims a warm instance: it creates one whose spec carries `restore_from` (the URL, the SHA-256 and the snapshot id). A
 memory snapshot places only on nodes whose `cpu.model` label equals the one it was taken on, because memory state
-needs the same CPU features. bcd downloads the object into `data_dir/snapshots/<sha256>`, verifies the digest before
-using it, and fails the instance for a snapshot from another runtime or a memory snapshot from another CPU model.
+needs the same CPU features. bcd downloads the object over https only into `data_dir/snapshots/<sha256>`, verifies
+the digest before using it, fails the instance for a snapshot from another runtime or a memory snapshot from another
+CPU model, and deletes the file once no spec restores from it.
 
 ### Lifetime
 
 Snapshots are tenant data that include memory. They are never promoted to shared images, and when their sandbox is
 deleted they are deleted with it unless taken with `keep: true`; the store's `delete` then removes the object, outside
-any transaction. A kept snapshot outlives its sandbox and can still be restored; no method deletes it, and a tenant
-teardown deletes every snapshot, kept ones included.
+any transaction. A snapshot deleted while its upload is still pending keeps its object until the command settles;
+the reconciler then purges it (the `purged` column), so a late upload never outlives its row. A kept snapshot
+outlives its sandbox and can still be restored by its owner until it is deleted, and a tenant teardown deletes every
+snapshot, kept ones included.
+
+### Manage snapshots
+
+Each snapshot is its own IAM resource, `compute-sandbox-snapshot/<id>`, owned by whoever took it, with the attributes
+`sandboxId`, `templateId` and `includeMemory`, so a kept one stays reachable after its sandbox is gone. The
+[sandboxSnapshots](/docs/reference/api/sandbox-snapshots) group manages them:
+
+| Method | Action | Does |
+| --- | --- | --- |
+| `sandboxSnapshots.list` | `compute:sandboxes:read` on the tenant | The tenant's snapshots, newest first, deleted ones left out and kept ones of deleted sandboxes included. `scope` is `mine` (the default) or `all` (each item checked); `sandboxId` filters; `limit` 1 to 200 (default 50); `cursor` is the last snapshot id of the previous page |
+| `sandboxSnapshots.get` | `compute:sandboxes:read` on the snapshot | One snapshot; a deleted or unknown one is `NOT_FOUND` |
+| `sandboxSnapshots.delete` | `compute:sandboxes:delete` on the snapshot | Deletes it at once for reads and restores, publishes `sandbox.snapshot.deleted` and wakes the reconciler, whose next pass deletes the stored object (after the command settles, for a pending upload), so no network call runs in the request. Idempotent |
+
+```ts
+const { items } = await client.sandboxSnapshots.list({ tenantId: 'acme', sandboxId: sandbox.id });
+await client.sandboxSnapshots.delete({ tenantId: 'acme', snapshotId: items[0].id });
+```
+
+Snapshot views carry `ownerIdentityId`, since only the owner can restore one.
 
 ## The reconciler
 
@@ -509,13 +592,18 @@ snapshot commands wake it. Each pass does five things:
    (the fallback for the instance reconciler's own stamp).
 4. **Deleted.** A sandbox whose instance is `deleted` (or gone) is marked deleted, leaves the authorization
    projection, drops its snapshots that are not kept, and publishes `sandbox.deleted` with `expired` telling whether
-   expiry ended it.
+   expiry ended it. Snapshots deleted while their upload was pending are purged once their command settles.
 5. **Warm pools**, below.
 
-`doctor` reports `vps.sandboxes.expiry` (error: sandboxes more than 30 s past `expiresAt` and not deleting, so the
-reconciler is not running), `vps.sandboxes.deleting` (sandboxes deleting for over 10 minutes: a stuck instance) and
-`vps.sandboxes.warm` (templates below `warm.min` with no refill for 10 minutes, or warm instances unsettled after 10
-minutes). The [metrics](/docs/reference/metrics) include `better_compute_sandbox_ready_seconds` by source (warm or
+`vps().selfCheck` adds three sandbox findings to [`doctor`](/docs/operations/observability#doctor):
+
+| Check | Severity | Means |
+| --- | --- | --- |
+| `vps.sandboxes.expiry` | error | Sandboxes more than two passes (30 s) past `expiresAt` and not deleting: the reconciler is not running, or failing |
+| `vps.sandboxes.deleting` | warning | Sandboxes deleting for over 10 minutes: their instance is stuck (its host must report it gone, or be declared lost) |
+| `vps.sandboxes.warm` | warning | Templates below `warm.min` settled instances with no refill for 10 minutes (quota, capacity, a vanished flavor or image), or warm instances not settled within 10 minutes |
+
+The [metrics](/docs/reference/metrics) include `better_compute_sandbox_ready_seconds` by source (warm or
 cold), `better_compute_sandbox_expiry_lag_seconds` and the warm-pool gauges.
 
 ### Warm pools
@@ -525,7 +613,10 @@ For each live template with `warm.min > 0`, the reconciler keeps `warm.min` warm
 author (`instances.warm_template_id` set). Each is placed and charged to the tenant's quota when it is created, like
 any instance, and publishes `instance.created` with `warmTemplateId`. Refills are best effort: a quota refusal, a
 flavor or image that is gone, or no fitting host stops that template's refill for the pass, logs `vps: warm sandbox
-instance not created`, and the next pass tries again.
+instance not created`, and the next pass tries again. Each refill re-reads its template in its own transaction (`FOR
+SHARE`: not deleted, same `instance_version`), so a template deleted or reshaped since the pass began, such as by a
+tenant teardown, is skipped rather than refilled. Warm instances in `error` or `lost` do not count toward
+`warm.min`: they are drained and replaced.
 
 A warm instance's `desiredState` depends on the runtime its template stores:
 
@@ -544,9 +635,11 @@ are hidden from `instances.list` and refused by instance methods.
 
 **Metering.** Until a sandbox claims it, a warm instance accrues `vps.sandbox.warm`: its flavor's vCPUs per hour,
 billed to the tenant with no identity, so you can price idle capacity. From `claimed_at` on it accrues the ordinary
-`vps.vcpu.hours`, `vps.memory.gib.hours` and GPU lines for the sandbox's owner. `better-compute iam setup --meters`
-does not create the `vps.sandbox.warm` meter; create it in Better IAM billing before a template keeps a warm pool, or
-its windows are dead-lettered. See [usage](/docs/guides/capacity/quotas-and-usage).
+`vps.vcpu.hours`, `vps.memory.gib.hours` and GPU lines for the sandbox's owner; if the claimed instance's allocation
+is recreated after a lost host, it is billed from that allocation's own start, so nothing is counted twice.
+`better-compute iam setup --meters` creates the `vps.sandbox.warm` meter ("Warm sandbox vCPU hours") with the other
+root meters; it must exist in Better IAM billing before a template keeps a warm pool, or its windows are
+dead-lettered. See [usage](/docs/guides/capacity/quotas-and-usage).
 
 ## The instance behind a sandbox
 
@@ -574,6 +667,7 @@ Sandbox events have subject `sandbox/<id>`. The lifecycle events carry `template
 | `sandbox.deleted` | Its instance is gone | `expired` |
 | `sandbox.exec.issued` | `exec` issued a certificate | `instanceId`, `tunnelId`, `serial`, `keyId`, `principal`, `identityId`, `validBefore` |
 | `sandbox.snapshot.ready`, `sandbox.snapshot.failed` | A snapshot settled | `snapshotId`, `includeMemory`, and `sha256` and `sizeBytes`, or `reason` |
+| `sandbox.snapshot.deleted` | `sandboxSnapshots.delete` deleted a snapshot | `snapshotId`, `includeMemory` |
 
 The instance publishes its own `instance.*` events alongside, with `sandboxId` or `warmTemplateId` in `data`. Both
 `sandbox.*` and `sandbox.snapshot.*` are in the events catalog, so webhooks can subscribe to them like any other
@@ -583,16 +677,20 @@ family. See [event types](/docs/guides/events#event-types).
 
 | Method | Action | Decided on |
 | --- | --- | --- |
-| `sandboxTemplates.create` | `compute:sandboxes:manage` | `compute-tenant` |
+| `sandboxTemplates.create` | `compute:sandboxes:manage`, and `compute:secrets:manage` when it names secrets | `compute-tenant` |
 | `sandboxTemplates.list` | `compute:sandboxes:read` | `compute-tenant` + items |
 | `sandboxTemplates.get` | `compute:sandboxes:read` | `compute-sandbox-template` |
-| `sandboxTemplates.update`, `delete` | `compute:sandboxes:manage` | `compute-sandbox-template` |
+| `sandboxTemplates.update` | `compute:sandboxes:manage`, and `compute:secrets:manage` on the tenant when it names secrets | `compute-sandbox-template` |
+| `sandboxTemplates.delete` | `compute:sandboxes:manage` | `compute-sandbox-template` |
 | `sandboxes.create` | `compute:sandboxes:create` | `compute-sandbox` (the draft) |
 | `sandboxes.list` | `compute:sandboxes:read` | `compute-tenant` + items |
 | `sandboxes.get` | `compute:sandboxes:read` | `compute-sandbox` |
 | `sandboxes.extend`, `snapshot` | `compute:sandboxes:update` | `compute-sandbox` |
 | `sandboxes.exec` (tunnels module) | `compute:sandboxes:exec` | `compute-sandbox`, and again at tunnel re-authorization |
 | `sandboxes.delete` | `compute:sandboxes:delete` | `compute-sandbox` |
+| `sandboxSnapshots.list` | `compute:sandboxes:read` | `compute-tenant` + items |
+| `sandboxSnapshots.get` | `compute:sandboxes:read` | `compute-sandbox-snapshot` |
+| `sandboxSnapshots.delete` | `compute:sandboxes:delete` | `compute-sandbox-snapshot` |
 
 A `compute-sandbox` has the pool as its parent, so pool relations apply. The example `StopWhenOverBudget` statement
 denies `compute:sandboxes:create` and `compute:sandboxes:update` (extensions and snapshots) once the caller's budget is
@@ -603,7 +701,8 @@ spent. See [actions and resources](/docs/guides/iam/actions-and-resources) and [
 When an IAM tenant is deleted, the built-in `tenancy` reconciler calls `vps().tenantDeleted` until it answers `DONE`.
 In one transaction per call it deletes every snapshot of the tenant (kept ones too; their objects go through the
 store's `delete` afterwards), deletes its templates (their warm pools drain), marks its open sandboxes `deleting`,
-drops sandbox and instance drafts, and sets up to 100 live instances, sandboxes' and warm ones included, to
+drops sandbox and instance drafts (removing the authorization rows of the deleted templates and dropped drafts), and
+sets up to 100 live instances, sandboxes' and warm ones included, to
 `desiredState: 'deleted'`, each publishing `instance.deleting` with `reason: 'tenant deleted'`. It answers
 `SYNC_AGAIN` until every instance of the tenant is `deleted`; the `vps.sandboxes` reconciler then publishes each
 sandbox's `sandbox.deleted`. See [tenancy](/docs/guides/iam/tenancy).
@@ -613,6 +712,9 @@ sandbox's `sandbox.deleted`. See [tenancy](/docs/guides/iam/tenancy).
 The `sandbox` commands (group `Sandboxes`) call the API as `BETTER_COMPUTE_TOKEN`, in process or with `--url`:
 
 ```bash
+better-compute sandbox-template create --name python --pool pool_01k5w… --flavor small --image img_01k5w… \
+  --warm-min 2 --max-ttl 4h                              # compute:sandboxes:manage
+better-compute sandbox-template update sbxt_01k5w… --warm-min 4   # only the fields given; --no-user-data clears it
 better-compute sandbox templates --format table          # the tenant's templates and warm pools
 better-compute sandbox create --template sbxt_01k5w… --ttl 30m
 better-compute sandbox create --template sbxt_01k5w… --from-snapshot snap_01k5w…
@@ -626,50 +728,65 @@ better-compute sandbox delete sbx_01k5w…
 `sandbox exec` reads the public key beside `--key` (default `~/.ssh/id_ed25519`, so `~/.ssh/id_ed25519.pub`; the
 private key never leaves your machine), asks `sandboxes.exec` for a certificate of `--minutes` (default 10, 1 to 15),
 listens on a random `127.0.0.1` port for exactly one connection, and runs your OpenSSH client (`--ssh`, default
-`ssh`) against it with the certificate, `IdentitiesOnly=yes`, a one-off known-hosts file and `HostKeyAlias` set to the
-sandbox id. The certificate lives in a temporary directory that is removed afterwards, and the command exits with
-ssh's status. It needs `--url` and a signed-in session. See
+`ssh`) against it with the certificate, `IdentitiesOnly=yes` and a known-hosts file for this one connection. When
+the grant says `hostCertified`, that file holds `@cert-authority <hostPrincipal> <sandbox CA key>` (the key that
+signed your user certificate in the same authenticated answer, so there is no new trust input) and ssh runs with
+`HostKeyAlias=<hostPrincipal>` and `StrictHostKeyChecking=yes`: nothing that took the local port, and nothing on the
+node's network, can pose as the guest. A guest without a host certificate (created before `certifyHostKey`, or on a
+deployment without it) gets an empty file, `StrictHostKeyChecking=accept-new` and `HostKeyAlias` set to the sandbox
+id, and the CLI says its host key is accepted on first use. The certificate lives in a temporary directory that is
+removed afterwards, and the command exits with ssh's status. It needs `--url` and a signed-in session.
+
+Because the guest is untrusted and the command may come from an agent or a model, `sandbox exec` puts `--` before the
+host (a command such as `-oProxyCommand=…` runs in the guest, never as an ssh option on your machine) and turns off
+the parts of your ssh configuration that would hand the guest anything: agent and X11 forwarding (`-a -x`), all port
+forwardings, `ProxyCommand` and `ProxyJump`, connection sharing (`ControlMaster`, `ControlPath`) and
+`PermitLocalCommand`. `sandbox-template create|update|delete` manage templates from a terminal. See
 [the CLI guide](/docs/guides/clients/cli#sandboxes) and the [reference](/docs/reference/cli#sandbox-create).
 
 ## Agents over MCP
 
-The [MCP server](/docs/guides/clients/mcp#the-tools) has six sandbox tools: `list_sandbox_templates`,
+The [MCP server](/docs/guides/clients/mcp#the-tools) has eight sandbox tools: `list_sandbox_templates`,
 `create_sandbox` (`templateId`, `ttlSeconds`, `idempotencyKey`, `waitSeconds` default 20; it answers
 `{ idempotencyKey, sandbox }` and turns `CONFIRMATION_REQUIRED` into a result the model can retry), `list_sandboxes`,
-`get_sandbox`, `extend_sandbox` (`sandboxId`, `by`) and `delete_sandbox`. There are no snapshot or exec tools.
+`get_sandbox`, `extend_sandbox` (`sandboxId`, `by`), `delete_sandbox`, `list_sandbox_snapshots` (`scope`,
+`sandboxId`, `limit`, `cursor`) and `delete_sandbox_snapshot` (`snapshotId`). No tool takes a snapshot or runs code
+in a sandbox.
 
-<Callout type="warn" title="Give the gate rules for them">
-`gateTools()` has no rules for the sandbox tools yet, so a gate built with `unlisted: 'deny'` refuses and hides them.
-Add rules yourself, for example `{ ...gateTools(), create_sandbox: { public: true }, … }`: compute decides every call
-on the sandbox or its draft anyway.
-</Callout>
+`gateTools()` has a rule for each of them, so a gate built with `unlisted: 'deny'` shows them: `create_sandbox` is
+visible with `compute:sandboxes:read` on its template (`compute-sandbox-template/{templateId}`), and the other seven
+are open to any authenticated caller, since compute decides every call on the tenant, the sandbox, the snapshot or the
+draft. See
+[the gate](/docs/guides/clients/mcp#the-gate-checks-visibility-only).
 
 ## In the console
 
 The console's **Sandboxes** page lists the tenant's templates with their warm pool sizes in a create form (template
 and lifetime in minutes, capped at the template's maximum), and the person's own sandboxes, or everyone's, with a
 countdown to `expiresAt` that turns to a warning in the last 5 minutes. Each row offers **+30 min**, **Snapshot** and
-**Delete**, and shows the `better-compute sandbox exec sbx_…` line to copy, since a shell runs through the CLI. See
-[the console](/docs/guides/clients/console#screens).
+**Delete**, and shows the `better-compute sandbox exec sbx_…` line to copy, since a shell runs through the CLI. On a
+deployment without a `SnapshotStore`, the first **Snapshot** answers `INVALID_CONFIG`; the page then says snapshots
+are not configured and hides the button for the session. See [the console](/docs/guides/clients/console#screens).
 
 ## Where sandboxes run today
 
 | Layer | State |
 | --- | --- |
-| API, admission, TTL, warm pools, `env`, `network`, snapshots, exec trust, guard, teardown | Built and tested against PGlite with emulated host reports (`tests/vps-sandboxes.test.ts`, 26 tests; `tests/server-sandbox-exec.test.ts`) |
-| End to end | `tests/e2e/sandboxes.test.ts` runs the real server runtime and gateway with three FakeDaemon VPS hosts whose fake `cloud-hypervisor` pauses: a warm claim reaches `ready` without a placement, 500 short-lived sandboxes (`E2E_SANDBOXES`) expire with no leaks on hosts or in the database, a memory snapshot taken on one sandbox restores its guest memory into a new one (and the stored object goes with the sandbox), and deleting a warm template drains its pool |
-| FakeDaemon `FakeHypervisor` | Boots then pauses on a desired `PAUSED`, resumes without a reboot, runs `instance.snapshot` and carries guest memory to a restored domain, records the network policy |
-| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, and instance `ssh` tunnels; on fakehw builds only, over a file-backed stand-in runtime. A real host build has no runtime, and nothing enforces `network_policy` |
+| API, admission, TTL, warm pools, `env`, `network`, snapshots, exec trust, guard, teardown | Built and tested against PGlite with emulated host reports (`tests/vps-sandboxes.test.ts`, 33 tests; `tests/server-sandbox-exec.test.ts`) |
+| End to end | `tests/e2e/sandboxes.test.ts` runs the real server runtime and gateway with three FakeDaemon VPS hosts whose fake `cloud-hypervisor` pauses: a warm claim reaches `ready` without a placement (the paused instance resumes on the same node and allocation, booted once) and the pool refills to `warm.min`; 500 sandboxes (`E2E_SANDBOXES`) with a 60 s TTL expire on their own, each publishing `sandbox.expired` then `sandbox.deleted` once, with no leaks on hosts or in the database (domains, overlays, taps, IP leases, bookings, scalar claims) and the readiness and expiry series counted; a memory snapshot taken on one sandbox restores its guest memory into a new one (and the stored object goes with the sandbox); deleting a warm template drains its pool until the hosts are empty |
+| Upgrade | `tests/sim/upgrade.test.ts` runs a sandbox on a VPS host through the v1.0 upgrade in place: it stays running with the same boot count and keeps its expiry |
+| FakeDaemon `FakeHypervisor` | Boots then pauses on a desired `PAUSED`, resumes without a reboot, runs `instance.snapshot` and carries guest memory to a restored domain, records the network policy without enforcing it |
+| bcd | The `instances` converger, `instance.snapshot` and `restore_from`, instance `ssh` tunnels, and the `network` policy as host nftables rules (Go unit tests). Instances run on fakehw builds over a file-backed stand-in runtime, or through a runtime a bcx plugin serves (no such plugin is written; plugin runtimes take no snapshots). A real host build has no built-in runtime |
 | Provider pools | Not allowed for sandboxes |
 
-On a real host running today's bcd (a host build, which has no runtime), a sandbox's instance is placed but never
-reported, so it stays `provisioning` and the sandbox `starting`. Expiry and `delete` still set it to `deleting`, but
-a hosted instance finishes deleting only when a complete host report no longer lists it or the host is declared
-`lost`.
+On a real host running today's bcd without a runtime plugin, a sandbox's instance is placed but never reported, so
+it stays `provisioning` and the sandbox `starting`. Expiry and `delete` still set it to `deleting`, but a hosted
+instance finishes deleting only when a complete host report no longer lists it or the host is declared `lost`.
 
-Not built yet: host runtimes in bcd, bcd's enforcement of `network`, the SDK helpers PLAN.md section 3.7 describes
-for commands and files over the SSH session (`sandbox.exec(cmd)`, `files.put`, `files.get`), MCP gate rules and
-tools for snapshots and exec, and a method to delete a kept snapshot. See the
+Not built yet: the `libvirt-kvm` and `cloud-hypervisor` runtimes in bcd, and MCP tools that take a snapshot or run
+code. Exec is the CLI's `sandbox exec` over your own OpenSSH client. The SDK helpers for
+commands and files over the SSH session (`sandbox.exec(cmd)`, `files.put`, `files.get`) are deferred: PLAN.md
+section 3.7 leaves them for later because they need an SSH client in the SDK, a new dependency decision. See the
 [roadmap](/docs/reference/roadmap#sandboxes).
 
 ## Lower level: instances directly

@@ -75,8 +75,9 @@ sequenceDiagram
   Every half is implemented and tested, including the daemon's (steps 8 and 9) in the Go `bcd`, which is built but
   not released. `tests/e2e/bcd.test.ts` opens a node console through the api's relay, the gateway and a real bcd, and
   the shell's exit status comes back. bcd dials instance `ssh` and `tcp` tunnels to the instance's own address, but
-  only a host that runs an instance runtime advertises `tunnel.instance-dial`, and today only fakehw builds have one;
-  on a real host build `tunnels.open` refuses instance `ssh` and `tcp` tunnels outright, and `exec` into an instance
+  only a host that runs an instance runtime advertises `tunnel.instance-dial`, and today only fakehw builds have a
+  built-in one (a bcx runtime plugin would count, but none is written); on a real host build without one
+  `tunnels.open` refuses instance `ssh` and `tcp` tunnels outright, and `exec` into an instance
   closes at once with exit status 127. See [the node half](#the-node-half). The TypeScript FakeDaemon answers every
   op with an echo shell, so tunnels also open end to end in the tests and in `better-compute dev --sim N`.
 </Callout>
@@ -406,8 +407,12 @@ re-decided that way and closes at its first re-check.
 The gateway keeps its own registry of the tunnels it relays and can close them without the api:
 
 - revoking a node's identity closes every tunnel to that node (reason `revoked`);
-- `POST /v1/tunnels/close` on its internal control API, with `{ tunnelId?, nodeId?, subject?, reason }`, closes the
-  matching tunnels and answers `{ closed }`. `gatewayControlClient(...).closeTunnels(filter, reason)` calls it;
+- `POST /v1/tunnels/close` on its internal control API, with `{ tunnelId?, nodeId?, subject?, agentId?,
+  delegationId?, sandboxId?, tenantId?, anyAgent?, reason }`, closes the matching tunnels and answers `{ closed }`.
+  The filter must narrow: one of the id keys, or `tenantId` with `anyAgent: true`; a tenant alone is refused.
+  `sandboxId` matches the tunnels a `sandboxes.exec` ticket opened into that sandbox.
+  `gatewayControlClient(...).closeTunnels(filter, reason)` calls it, and `POST /v1/tunnels/reauthorize` takes the
+  same filter;
 - a gateway that stops closes all of its tunnels (`gateway-stopped`).
 
 ### Closing on IAM revocation
@@ -468,7 +473,10 @@ that answers for another node's tunnel, is refused.
 `serve`'s gateway role wires `reauthorize` itself when the IAM port can re-authorize sessions: every 60 seconds, and
 on `POST /v1/tunnels/reauthorize`, it decides the ticket's action (`compute:instances:exec` or
 `compute:nodes:console`) on its instance or node again for the ticket's identity and session, the same decision
-the api side makes. A ticket without a session, or with an unexpected action, fails closed.
+the api side makes. A `sandboxes.exec` ticket carries the sandbox as `sbx`, which the gateway keeps as
+`TunnelInfo.sandboxId` and passes back, so its tunnel is re-decided as `compute:sandboxes:exec` on the sandbox, never
+on the instance it drives. A ticket without a session, with an unexpected action, or naming
+`compute:sandboxes:exec` without a sandbox, fails closed.
 
 On the api side, `gatewayTunnelRelay` looks up the gateway holding the node's session (`node_sessions.gateway_id`,
 then `gateways.internal_url`, cached 30 s) and calls that gateway's `gatewayControlClient(...).openTunnel`, an

@@ -88,7 +88,7 @@ where the package that declares it is imported:
 | `bios` | metal | `getSettings()`, `applySettings(settings)` | draft until v0.5 |
 | `raid` | metal | `applyLayout(layout)`, `clear()` | draft until v0.5 |
 | `firmware` | metal | `components()`, `update(component, image)` | draft until v0.5 |
-| `runtime` | vps | `traits`, `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, optional `console(id)` | v0.3 (libvirt-kvm, cloud-hypervisor in bcd) |
+| `runtime` | vps | `traits`, `list()`, `apply(spec)`, `reboot(id)`, `remove(id)`, optional `console(id)` | v0.3 (libvirt-kvm, cloud-hypervisor in bcd, not written); bcd also serves a bcx plugin of this kind as a runtime (`list`, `apply`, `remove`) |
 
 Importing only `@better-compute/core` leaves `power` and `runtime` unusable, and `tests/stubs-driver-kinds.test.ts`
 checks exactly that. [BMC drivers and credentials](/docs/guides/bare-metal/bmc) describes what each metal kind is for.
@@ -418,8 +418,10 @@ At start, before its session opens, the agent runs every plugin the `pins` file 
    `bc.dev/driver.<id>=<version>`.
 
 A missing `pins` file runs no plugin (logged as a warning); an unreadable pin line, a pin mismatch or a plugin that
-fails to start is logged and skipped. Plugins are stopped with the agent. Only `driver.invoke` reaches them: the
-`instances` converger drives the runtimes built into bcd, not a plugin of kind `runtime`. bcd does not restart a plugin that exits,
+fails to start is logged and skipped. Plugins are stopped with the agent. Two paths reach them: `driver.invoke`,
+below, and, on `bcd node`, the `instances` converger, which runs a hosted driver of kind `runtime` whose id is not a
+built-in runtime as one of its runtimes (`list`, `apply(spec)`, `remove(id)` over `Invoke`; snapshots unsupported).
+See [walkthrough 4](/docs/extending/walkthroughs#walkthrough-4-a-kata-runtime-over-bcx). bcd does not restart a plugin that exits,
 does not call `Health` on its own, and runs plugins as its own user: PLAN.md §5.5's separate uid, seccomp and cgroup
 limits are not built.
 
@@ -441,8 +443,9 @@ test runs bcd with a plugin against the control plane yet.
 
 The control plane does not merge `Hello.drivers` into its driver registry. What it does with them today is label
 the node: at every `Hello` the gateway writes each advertised driver as the system label
-`bc.dev/driver.<id>=<version>` and drops the ones no longer advertised, so placement can require a runtime with
-`PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)). The FakeDaemon
+`bc.dev/driver.<id>=<version>`, and each `Hello` capability as `bc.dev/cap.<name>=1` (such as
+`bc.dev/cap.instance.network-policy`), and drops the ones no longer advertised, so placement can require a runtime or
+a capability with `PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)). The FakeDaemon
 only advertises an `nvidia` driver of kind `config` on GPU hosts. PLAN.md's v0.5 acceptance includes "a third-party TS driver runs on a
 node via bcx" and a Kata `runtime` plugin in Go (walkthrough 4).
 
