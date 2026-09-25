@@ -169,6 +169,13 @@ export interface ReportContext {
   bootId: string;
   /** Whether a `node_sig` came with it. Verified by workers from v0.2; never trusted as proof here. */
   signed: boolean;
+  /**
+   * An attested report exactly as the node sent it (`AttestedReport.body` bytes and `node_sig`),
+   * for handlers to store as evidence. The gateway never judges it: a worker verifies the stored
+   * bytes against the node's certificates (pki `verifyAttestedReport`) before any transition that
+   * depends on it (§13, P14). `kid`/`sig` are empty when the node did not sign.
+   */
+  attested?: { body: Uint8Array; kid: string; sig: Uint8Array };
   work: WorkQueue;
 }
 
@@ -554,6 +561,11 @@ export function createGatewayStore(options: GatewayStoreOptions) {
           else {
             context.bootId = report.bootId;
             context.signed = Boolean(envelope.nodeSig?.sig.byteLength);
+            context.attested = {
+              body: envelope.body,
+              kid: envelope.nodeSig?.kid ?? '',
+              sig: envelope.nodeSig?.sig ?? new Uint8Array(0),
+            };
             const inner = report.report;
             if (inner.case === 'allocationBound' && reports.allocationBound)
               apply = () => reports.allocationBound!(tx, context, inner.value);

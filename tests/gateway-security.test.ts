@@ -8,6 +8,7 @@ import {
   MessageDecoder,
   serveGateway,
   AGENT_GATEWAY_SERVICE,
+  type ReportContext,
   type ReportHandlers,
   type ServedGateway,
 } from '@better-compute/gateway';
@@ -23,8 +24,10 @@ import {
   type RevocationSet,
 } from '@better-compute/pki';
 import {
+  AgentRole,
   decodeServerFrame,
   encodeAgentFrame,
+  SignatureSchema,
   SignedTrustBundleSchema,
   wrapAttestedReport,
   type ServerFrame,
@@ -57,8 +60,10 @@ const bound = (nodeId: string, allocationId: string) =>
 describe('report handlers', () => {
   let f: GatewayFixture;
   const seen: { allocationId: string; nodeId: string; seq: number; signed: boolean }[] = [];
+  const evidence = new Map<string, ReportContext['attested']>();
   const reports: ReportHandlers = {
     async allocationBound(tx, context, report) {
+      evidence.set(report.allocationId, context.attested);
       if (report.allocationId === 'alloc_poison') {
         await tx.query(`UPDATE nodes SET cordoned = true WHERE id = $1`, [context.nodeId]);
         throw new Error('boom');
@@ -72,9 +77,36 @@ describe('report handlers', () => {
   };
   beforeEach(async () => {
     seen.length = 0;
+    evidence.clear();
     f = await gatewayFixture({ reports });
   });
   afterEach(() => f.close());
+
+  it('hands handlers the attested envelope exactly as the node sent it, signed or not, never judged', async () => {
+    const node = await f.addNode();
+    const { handle } = await f.connect(node);
+    const unsigned = bound(node, 'alloc_plain');
+    const signed = { ...bound(node, 'alloc_signed'), nodeSig: create(SignatureSchema, { kid: 'kid-1', sig: new Uint8Array([1, 2, 3]) }) };
+    await handle.receive(
+      agentFrame({
+        case: 'events',
+        value: {
+          journalId: 'journal-1',
+          events: [
+            { seq: 1n, body: { case: 'attested', value: unsigned } },
+            { seq: 2n, body: { case: 'attested', value: signed } },
+          ],
+        },
+      }),
+    );
+    expect(evidence.get('alloc_plain')).toEqual({ body: unsigned.body, kid: '', sig: new Uint8Array(0) });
+    // A signature that would never verify is still passed on as received: judging it is the worker's.
+    expect(evidence.get('alloc_signed')).toEqual({ body: signed.body, kid: 'kid-1', sig: new Uint8Array([1, 2, 3]) });
+    expect(seen.map((entry) => [entry.allocationId, entry.signed])).toEqual([
+      ['alloc_plain', false],
+      ['alloc_signed', true],
+    ]);
+  });
 
   it('applies reports in the ingest transaction, isolates a failing handler and never passes foreign reports', async () => {
     const node = await f.addNode();
@@ -221,7 +253,7 @@ describe('mutual TLS', () => {
     await f.close();
   });
 
-  async function agent(nodeId: string, options: { role?: 'node' | 'site'; trustDomain?: string } = {}) {
+  async function agent(nodeId: string, options: { role?: 'node' | 'site' | 'ramdisk'; trustDomain?: string } = {}) {
     const key = generateP256KeyPair();
     const issued = await nodeCa.sign(createCsr(key.privateKey), {
       usage: 'client',
@@ -298,6 +330,24 @@ describe('mutual TLS', () => {
     const site = session((await agent(node, { role: 'site' })).client);
     site.stream.write(frameMessage(encodeAgentFrame(helloFrame(node))));
     expect(await site.status).toBe(GrpcCode.PERMISSION_DENIED);
+  });
+
+  it('never lets a ramdisk certificate open a node session (v0.2 exit), only a ramdisk one', async () => {
+    const node = await f.addNode();
+    const asNode = session((await agent(node, { role: 'ramdisk' })).client);
+    asNode.stream.write(frameMessage(encodeAgentFrame(helloFrame(node))));
+    expect(await asNode.status).toBe(GrpcCode.PERMISSION_DENIED);
+    const { rows } = await f.db.query<{ session_epoch: number; role: string | null }>(
+      'SELECT session_epoch, role FROM node_sessions WHERE node_id = $1',
+      [node],
+    );
+    expect(rows).toEqual([{ session_epoch: 0, role: null }]);
+
+    // The same certificate is fine for what it was issued for.
+    const asRamdisk = session((await agent(node, { role: 'ramdisk' })).client);
+    asRamdisk.stream.write(frameMessage(encodeAgentFrame(helloFrame(node, { role: AgentRole.RAMDISK }))));
+    await expect.poll(() => asRamdisk.frames.map((frame) => frame.msg.case)).toEqual(['welcome']);
+    expect(f.gateway.sessions()).toMatchObject([{ nodeId: node, role: 'ramdisk' }]);
   });
 
   it('refuses a client without a certificate for Session but lets it Join', async () => {
