@@ -212,6 +212,9 @@ func VerifyApproverSet(current, next *commonv1.TrustBundle, trustDomain string, 
 	if bytes.Equal(ApproverSetInput(current), ApproverSetInput(next)) {
 		return nil
 	}
+	if next.GetApproverSetEpoch() < current.GetApproverSetEpoch() {
+		return fmt.Errorf("pki: the approver set epoch %d is below the held %d (the epoch never goes back)", next.GetApproverSetEpoch(), current.GetApproverSetEpoch())
+	}
 	if len(current.GetApproverKeys()) == 0 {
 		if len(pin) > 0 && !bytes.Equal(ApproverSetSHA256(next), pin) {
 			return errors.New("pki: the approver set is not the one this daemon was installed with (approver_set_sha256)")
@@ -232,6 +235,22 @@ func VerifyApproverSet(current, next *commonv1.TrustBundle, trustDomain string, 
 		return fmt.Errorf("pki: the approver set changes with %d of the %d current approver signatures it needs", got, need)
 	}
 	return nil
+}
+
+// AcceptApproverSet returns the bundle a daemon stores for next. Its roots and version always
+// apply. Its quorum fields (3-8) replace the held ones only when VerifyApproverSet allows a
+// different set; otherwise, the same set included, the held fields stay with their epoch and
+// signatures. The epoch never moves without a set change and never goes back, so an old, genuinely
+// signed change cannot be replayed after a rewound epoch (review 9 HIGH-2). err says why a
+// different set was refused.
+func AcceptApproverSet(current, next *commonv1.TrustBundle, trustDomain string, pin []byte) (*commonv1.TrustBundle, error) {
+	if bytes.Equal(ApproverSetInput(current), ApproverSetInput(next)) {
+		return KeepQuorum(current, next), nil
+	}
+	if err := VerifyApproverSet(current, next, trustDomain, pin); err != nil {
+		return KeepQuorum(current, next), err
+	}
+	return next, nil
 }
 
 // KeepQuorum returns next with current's quorum fields (3-8): the bundle a daemon stores when it

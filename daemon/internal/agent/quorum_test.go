@@ -311,3 +311,40 @@ func TestPinnedApproverSet(t *testing.T) {
 		t.Fatalf("the pinned set was refused: %v", held)
 	}
 }
+
+// review 9 HIGH-3(d): under a quorum, a site.httpProxy write runs only under a leaf bound to its
+// payload; unbatched break-glass and "any payload" leaves cover GETs only.
+func TestProxyWritesNeedABoundLeaf(t *testing.T) {
+	quorum := newApprovers(t, 1, 1, 5)
+	raw, _ := proto.Marshal(quorum.bundle)
+	h := newHarness(t, func(o *Options) {
+		o.State.Role, o.State.TrustBundle, o.State.TrustDomain = "site", raw, testTrustDomain
+	})
+	s, _ := h.open()
+	get := &sitev1.HttpProxyRequest{TargetNodeId: "node_1", Url: "https://10.0.0.5/ready"}
+	post := &sitev1.HttpProxyRequest{TargetNodeId: "node_1", Url: "https://10.0.0.5/reset", Method: "POST"}
+	proxy := func(id, batch string, req *sitev1.HttpProxyRequest) *agentv1.CommandBody {
+		b := body(id, "site.httpProxy", req)
+		b.BatchId = batch
+		return b
+	}
+	rejected := func(id string) {
+		t.Helper()
+		if u := s.update(t, id, commonv1.CommandState_COMMAND_STATE_REJECTED); u.GetRejectReason() != commonv1.CommandRejectReason_COMMAND_REJECT_REASON_BATCH_UNAPPROVED {
+			t.Fatalf("%s = %v", id, u)
+		}
+	}
+	s.push(command(proxy("g1", "", get)))
+	s.update(t, "g1", commonv1.CommandState_COMMAND_STATE_ACKED)
+	s.push(command(proxy("w1", "", post)))
+	rejected("w1")
+
+	root, proofs := scope("batch_p", [][]any{{"node:node_1", "site.httpProxy"}, {"node:node_1", "site.httpProxy", post}})
+	approval := quorum.approve("batch_p", root, 2, 1)
+	s.push(batched(proxy("w2", "batch_p", post), approval, proofs["node:node_1|site.httpProxy"]))
+	rejected("w2")
+	s.push(batched(proxy("w3", "batch_p", post), approval, proofs["node:node_1|site.httpProxy|bound"]))
+	s.update(t, "w3", commonv1.CommandState_COMMAND_STATE_ACKED)
+	s.push(batched(proxy("g2", "batch_p", get), approval, proofs["node:node_1|site.httpProxy"]))
+	s.update(t, "g2", commonv1.CommandState_COMMAND_STATE_ACKED)
+}

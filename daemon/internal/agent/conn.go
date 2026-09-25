@@ -293,12 +293,15 @@ func (a *Agent) onWelcome(ctx context.Context, s *sess, w *agentv1.Welcome) bool
 			current, ok := a.trustBundleLocked()
 			if !ok {
 				err = errors.New("the stored trust bundle is unreadable")
-			} else if qerr := pki.VerifyApproverSet(current, bundle, a.state.TrustDomain, a.o.ApproverSetPin); qerr != nil {
+			} else {
 				// Once approvers exist (or the install pinned the first set), the JoinService key alone
-				// cannot change them: the old quorum stays, and the roots and version still apply.
-				a.log.Warn("approver set refused; keeping the current quorum", "version", bundle.GetVersion(),
-					"epoch", bundle.GetApproverSetEpoch(), "reason", qerr.Error())
-				bundle = pki.KeepQuorum(current, bundle)
+				// cannot change them: the held quorum stays, and the roots and version still apply.
+				offered := bundle.GetApproverSetEpoch()
+				var qerr error
+				if bundle, qerr = pki.AcceptApproverSet(current, bundle, a.state.TrustDomain, a.o.ApproverSetPin); qerr != nil {
+					a.log.Warn("approver set refused; keeping the current quorum", "version", bundle.GetVersion(),
+						"epoch", offered, "reason", qerr.Error())
+				}
 			}
 		}
 		if err != nil {

@@ -146,7 +146,13 @@ func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBod
 		return "", false
 	}
 	now := a.serverNowLocked()
+	writes := proxyWrites(cmd)
 	if body.GetBatchId() == "" {
+		if writes {
+			// review 9 HIGH-3(d): break-glass covers reads only; a write needs its payload approved.
+			a.log.Warn("an unbatched site.httpProxy write is refused", "id", body.GetId())
+			return dispatch.RejectBatchUnapproved, false
+		}
 		return "", true
 	}
 	refuse := func(why string) (dispatch.Rejection, bool) {
@@ -175,14 +181,18 @@ func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBod
 		candidates = append(candidates, pki.BatchLeaf(body.GetBatchId(), subject, body.GetKind(), digest[:]))
 	}
 	candidates = append(candidates, pki.BatchLeaf(body.GetBatchId(), subject, body.GetKind(), nil))
-	for _, l := range candidates {
+	bound := false
+	for i, l := range candidates {
 		if pki.VerifyBatchProof(l, proof.GetIndex(), approval.GetScopeSize(), proof.GetSiblings(), approval.GetScopeRoot()) {
-			leaf = l
+			leaf, bound = l, i < len(candidates)-1
 			break
 		}
 	}
 	if leaf == nil {
 		return refuse("the command (" + subject + ", " + body.GetKind() + ") is not in the approved scope")
+	}
+	if writes && !bound {
+		return refuse("a site.httpProxy write (POST, PUT, DELETE) needs a leaf bound to its payload")
 	}
 	// Each leaf runs once per batch (the same command re-executed after a restart is not a second run).
 	if ran, done := a.ranLeavesLocked(now)[hex.EncodeToString(leaf)]; done && ran.Command != body.GetId() {
@@ -190,6 +200,21 @@ func (a *Agent) quorumVerdictLocked(c *agentv1.Command, body *agentv1.CommandBod
 	}
 	*leafOut, *leafUntil = hex.EncodeToString(leaf), approval.GetNotAfter().AsTime()
 	return "", false
+}
+
+// proxyWrites reports whether cmd is a site.httpProxy request other than a GET: under a quorum
+// such a request runs only under a leaf the approvers bound to its exact payload (review 9 HIGH-3(d);
+// the readiness polls of agentless profiles are GETs).
+func proxyWrites(cmd dispatch.Command) bool {
+	if cmd.Kind != "site.httpProxy" {
+		return false
+	}
+	req := &sitev1.HttpProxyRequest{}
+	if err := payloadOf(cmd, req); err != nil {
+		return true
+	}
+	method := strings.ToUpper(req.GetMethod())
+	return method != "" && method != "GET"
 }
 
 // unbatchedLocked reads the last hour's unbatched destructive commands.

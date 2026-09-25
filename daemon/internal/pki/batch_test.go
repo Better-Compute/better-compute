@@ -283,6 +283,28 @@ func TestApproverSetChanges(t *testing.T) {
 	if err := VerifyApproverSet(current, drop, domain, nil); err != nil {
 		t.Fatalf("the approvers could not stand down: %v", err)
 	}
+	// review 9 HIGH-2: the same set at a rewound epoch keeps the held epoch, so an old change signed
+	// by keys that are still current cannot be replayed afterwards.
+	rewound := proto.Clone(current).(*commonv1.TrustBundle)
+	rewound.Version, rewound.ApproverSetEpoch = 6, 0
+	stored, err := AcceptApproverSet(current, rewound, domain, nil)
+	if err != nil || stored.GetApproverSetEpoch() != 3 || stored.GetVersion() != 6 {
+		t.Fatalf("a rewound epoch was stored: %v, %v", stored, err)
+	}
+	old := proto.Clone(next).(*commonv1.TrustBundle)
+	old.ApproverSetEpoch = 2
+	sign(old, domain, privs[0], privs[2])
+	if got, err := AcceptApproverSet(stored, old, domain, nil); err == nil || got.GetApproverSetEpoch() != 3 || len(got.GetApproverKeys()) != 3 {
+		t.Fatalf("an old change was replayed: %v, %v", got, err)
+	}
+	if got, err := AcceptApproverSet(current, next, domain, nil); err != nil || got.GetApproverSetEpoch() != 4 {
+		t.Fatalf("a signed change at a higher epoch: %v, %v", got, err)
+	}
+	// Keyless, the epoch still never goes back.
+	keyless := &commonv1.TrustBundle{ApproverSetEpoch: 5}
+	if _, err := AcceptApproverSet(keyless, next, domain, nil); err == nil {
+		t.Fatal("a keyless daemon took a set below its epoch")
+	}
 	kept := KeepQuorum(current, next)
 	if kept.GetVersion() != 5 || kept.GetApproverSetEpoch() != 3 || !proto.Equal(kept.GetApproverKeys()[0], keys[0]) {
 		t.Fatalf("KeepQuorum = %v", kept)
