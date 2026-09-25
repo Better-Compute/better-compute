@@ -19,4 +19,5 @@ export * from './remote.js';
 export * from './sessions.js';
 export * from './streams.js';
 export * from './budget.js';
+export * from './webhook-intake.js';
 export * from './bridge.js';
