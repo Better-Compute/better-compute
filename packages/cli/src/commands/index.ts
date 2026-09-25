@@ -9,6 +9,7 @@ import { eventCommands } from './events.js';
 import { fleetCommands } from './fleet.js';
 import { iamSetupCommands } from './iam-setup.js';
 import { instanceCommands, nodeCommands } from './nodes.js';
+import { operationCommands } from './operations.js';
 import { pkiCommands } from './pki.js';
 import { releaseCommands } from './release.js';
 import { sandboxCommands } from './sandbox.js';
@@ -33,6 +34,7 @@ export const builtinCommands: readonly CommandSpec<any>[] = [
   ...nodeCommands,
   ...instanceCommands,
   ...eventCommands,
+  ...operationCommands,
   ...fleetCommands,
   ...pkiCommands,
   ...batchCommands,
