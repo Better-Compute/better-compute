@@ -165,6 +165,8 @@ export async function applyInventoryHealth(
   nodeId: string,
   findings: readonly HealthFinding[],
   currentReasons: readonly string[],
+  /** Collects the owned conditions here instead of writing them (a caller that writes one batch). */
+  deferred?: { type: string; status: 'true' | 'false'; reason: string | null }[],
 ): Promise<string[]> {
   await tx.query(`DELETE FROM device_health WHERE node_id = $1 AND source = 'inventory'`, [nodeId]);
   if (findings.length > 0)
@@ -174,14 +176,12 @@ export async function applyInventoryHealth(
        ON CONFLICT (device_id, reason) DO NOTHING`,
       [nodeId, findings.map((f) => f.deviceId), findings.map((f) => f.condition), findings.map((f) => f.message)],
     );
-  await upsertNodeConditions(
-    tx,
-    nodeId,
-    inventoryHealthConditions.map((type) => {
-      const hits = findings.filter((finding) => finding.condition === type);
-      return { type, status: hits.length ? 'true' : 'false', reason: hits.length ? hits.map((h) => h.deviceId).join(',').slice(0, 512) : null };
-    }),
-  );
+  const owned = inventoryHealthConditions.map((type) => {
+    const hits = findings.filter((finding) => finding.condition === type);
+    return { type, status: hits.length ? ('true' as const) : ('false' as const), reason: hits.length ? hits.map((h) => h.deviceId).join(',').slice(0, 512) : null };
+  });
+  if (deferred) deferred.push(...owned);
+  else await upsertNodeConditions(tx, nodeId, owned);
   return mergeNoScheduleReasons(
     currentReasons,
     inventoryHealthConditions,

@@ -310,6 +310,8 @@ export async function applyInventory(
   options: ApplyInventoryOptions = {},
 ): Promise<ApplyInventoryResult> {
   return sql.transaction(async (tx) => {
+    // Two statements on purpose: the node row first, then its inventory row (the lock order the
+    // gateway's Hello follows too; one joined statement could take them the other way round).
     const nodes = await tx.query<NodeRow>(
       `SELECT n.id, n.owner_tenant_id, n.pool_id, n.no_schedule_reasons, n.hardware_key,
               n.hardware_key_trusted, p.gpu_model, p.policy, p.sharing
@@ -366,7 +368,9 @@ export async function applyInventory(
 
     // Health first, so the device plan already sees this inventory's quarantines.
     const health = inventoryHealthFindings(sections.gpus);
-    const healthReasons = await applyInventoryHealth(tx, nodeId, health, node.no_schedule_reasons);
+    // Health's conditions are written together with inventory's own, further down.
+    const healthConditions: { type: string; status: 'true' | 'false'; reason: string | null }[] = [];
+    const healthReasons = await applyInventoryHealth(tx, nodeId, health, node.no_schedule_reasons, healthConditions);
     if (options.work && health.some((finding) => finding.noSchedule)) await options.work.enqueue(tx, healthWorkKind, nodeId);
     const { healthChanged, ...devices } = await applyDevices(tx, nodeId, sections, poolSharing(node.sharing, node.policy));
     if (options.work && healthChanged) await wakeStartedReservations(tx, options.work, nodeId);
@@ -417,23 +421,22 @@ export async function applyInventory(
             }
           : { type: 'DuplicateIdentity', status: 'false', noSchedule: false },
     ];
-    await upsertConditions(tx, nodeId, conditions);
+    await upsertConditions(tx, nodeId, [...healthConditions, ...conditions]);
 
     const reasons = mergeNoScheduleReasons(healthReasons, inventoryOwnedConditions, conditions);
     const currentKey = node.hardware_key ? Buffer.from(node.hardware_key).toString('hex') : null;
     const reasonsChanged = JSON.stringify(reasons) !== JSON.stringify([...node.no_schedule_reasons].sort());
-    if (reasonsChanged || keyHex !== currentKey || trusted !== node.hardware_key_trusted)
-      await tx.query(
-        `UPDATE nodes SET no_schedule_reasons = $2, hardware_key = decode($3, 'hex'),
-           hardware_key_trusted = $4, version = version + 1
-         WHERE id = $1`,
-        [nodeId, reasons, keyHex, trusted],
-      );
-
+    const nodeChanged = reasonsChanged || keyHex !== currentKey || trusted !== node.hardware_key_trusted;
+    // Both rows are locked by this transaction already: one statement records the applied snapshot
+    // and, when anything changed, the node's reasons and hardware key.
     await tx.query(
-      `UPDATE node_inventory SET applied_digest = $2, applied_snapshot_id = $3, applied_at = compute_now()
+      `WITH node AS (
+         UPDATE nodes SET no_schedule_reasons = $4, hardware_key = decode($5, 'hex'),
+           hardware_key_trusted = $6, version = version + 1
+          WHERE id = $1 AND $7::bool)
+       UPDATE node_inventory SET applied_digest = $2, applied_snapshot_id = $3, applied_at = compute_now()
         WHERE node_id = $1`,
-      [nodeId, digest, snapshotId],
+      [nodeId, digest, snapshotId, reasons, keyHex, trusted, nodeChanged],
     );
 
     if (options.events) {
@@ -476,19 +479,17 @@ async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySectio
     attributes: row.attributes,
     ...(row.parent_id ? { parentId: row.parent_id } : {}),
   }));
-  const booked = await tx.query<{ device_id: string }>(
-    `SELECT DISTINCT b.device_id FROM device_bookings b JOIN devices d ON d.id = b.device_id
-      WHERE d.node_id = $1 AND (upper_inf(b.during) OR upper(b.during) > compute_now())`,
-    [nodeId],
-  );
-  // Quarantined devices (`device_health`, v0.2 Health) stay unhealthy whatever inventory says.
-  const quarantined = await tx.query<{ device_id: string }>(
-    'SELECT DISTINCT device_id FROM device_health WHERE node_id = $1',
+  // Devices with live bookings, and quarantined ones (`device_health`, v0.2 Health), which stay
+  // unhealthy whatever inventory says: one statement for both sets.
+  const { rows: sets } = await tx.query<{ booked: string[] | null; quarantined: string[] | null }>(
+    `SELECT (SELECT array_agg(DISTINCT b.device_id) FROM device_bookings b JOIN devices d ON d.id = b.device_id
+              WHERE d.node_id = $1 AND (upper_inf(b.during) OR upper(b.during) > compute_now())) AS booked,
+            (SELECT array_agg(DISTINCT device_id) FROM device_health WHERE node_id = $1) AS quarantined`,
     [nodeId],
   );
   const plan = planDevices(current, devicesFromGpus(nodeId, sections.gpus, sharing), {
-    bookedDeviceIds: new Set(booked.rows.map((row) => row.device_id)),
-    unhealthy: new Set(quarantined.rows.map((row) => row.device_id)),
+    bookedDeviceIds: new Set(sets[0]?.booked ?? []),
+    unhealthy: new Set(sets[0]?.quarantined ?? []),
   });
 
   // One statement for every device (the foreign key to a parent in the same batch is checked at the
@@ -546,18 +547,17 @@ async function applyDevices(tx: SqlTx, nodeId: string, sections: InventorySectio
 
 async function applyLabels(tx: SqlTx, nodeId: string, sections: InventorySections): Promise<void> {
   const labels = inventoryLabels(sections);
+  // Stale inventory labels go and the current ones are upserted in one statement (the DELETE only
+  // touches keys the INSERT does not write, so the two never meet the same row).
   await tx.query(
-    `DELETE FROM node_labels WHERE node_id = $1 AND source = 'inventory' AND NOT (key = ANY($2))`,
-    [nodeId, labels.map((label) => label.key)],
+    `WITH gone AS (
+       DELETE FROM node_labels WHERE node_id = $1 AND source = 'inventory' AND NOT (key = ANY($2::text[])))
+     INSERT INTO node_labels (node_id, key, value, source)
+     SELECT $1, l.key, l.value, 'inventory' FROM unnest($2::text[], $3::text[]) AS l(key, value)
+     ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value
+     WHERE node_labels.source = 'inventory' AND node_labels.value <> EXCLUDED.value`,
+    [nodeId, labels.map((label) => label.key), labels.map((label) => label.value)],
   );
-  if (labels.length > 0)
-    await tx.query(
-      `INSERT INTO node_labels (node_id, key, value, source)
-       SELECT $1, l.key, l.value, 'inventory' FROM unnest($2::text[], $3::text[]) AS l(key, value)
-       ON CONFLICT (node_id, key) DO UPDATE SET value = EXCLUDED.value
-       WHERE node_labels.source = 'inventory' AND node_labels.value <> EXCLUDED.value`,
-      [nodeId, labels.map((label) => label.key), labels.map((label) => label.value)],
-    );
 }
 
 interface SnapshotRow {
