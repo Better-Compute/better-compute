@@ -140,7 +140,23 @@ export async function createStack() {
   const { vps } = await import('better-compute/vps');
   const { fleetModule } = await import('better-compute/fleet');
 
-  const modules = [vps(), fleetModule()];
+  const { eventsModule } = await import('better-compute/events');
+  const { retentionModule } = await import('better-compute/postgres');
+  // Webhooks (the events module), and the store's housekeeping (outbox, authz changes, spent attestations).
+  const modules = [vps(), fleetModule(), eventsModule({ secret }), retentionModule()];
+  // Signed hourly Merkle checkpoints of the audit log (§13): CONSOLE_AUDIT_KEY_FILE (a P-256 PKCS#8 key every
+  // replica shares; `better-compute audit verify` checks against its public key), generated in development.
+  const auditKey = await keyFile(
+    dataDir,
+    'CONSOLE_AUDIT_KEY_FILE',
+    'audit-checkpoint.pem',
+    () => generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey,
+  );
+  if (auditKey) {
+    const { auditModule } = await import('better-compute/audit');
+    const { createSigningKey } = await import('better-compute/pki');
+    modules.push(auditModule({ signer: createSigningKey({ privateKey: auditKey }) }));
+  }
   // Daemon rollouts need the offline release keys' pins (comma-separated `sha256/…`) and where binaries are served.
   if (env.CONSOLE_RELEASE_PINS && env.CONSOLE_DOWNLOADS_URL) {
     const { rolloutModule } = await import('better-compute/rollout');
@@ -193,6 +209,11 @@ export async function createStack() {
     ...(tunnels ? { tunnels } : {}),
   });
   await compute.initialize();
+  // IAM events reach compute through the inbox this process drains: a revoked delegation or suspended agent closes
+  // its tunnels on every gateway, and revocations drop the IAM caches (what `serve` does with host.iam).
+  const { installIamHandlers } = await import('better-compute/cli');
+  const tls = tunnels ? await gatewayTls() : undefined;
+  installIamHandlers(compute, { bridge }, tls ? { tls } : {});
   await compute.start();
 
   // What `server.mjs` needs to serve `GET /api/compute/tunnels/{ticket}` upgrades (Next route handlers cannot).
@@ -200,7 +221,6 @@ export async function createStack() {
   if (tunnels) {
     const { gatewayTunnelRelay } = await import('better-compute/gateway');
     const { tunnelAuthorizer } = await import('better-compute/iam');
-    const tls = await gatewayTls();
     tunnelHost = {
       sql: compute.context.sql,
       issuer: tunnels.issuer,
