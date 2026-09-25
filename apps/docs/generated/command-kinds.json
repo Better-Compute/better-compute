@@ -176,6 +176,17 @@
     "payload": "bettercompute.agent.v1.GpuResetRequest"
   },
   {
+    "kind": "instance.snapshot",
+    "lane": "bulk",
+    "retrySafe": false,
+    "selfTerminating": false,
+    "attested": false,
+    "destructive": false,
+    "timeout": "1h",
+    "roles": ["node"],
+    "payload": "bettercompute.agent.v1.InstanceSnapshotRequest"
+  },
+  {
     "kind": "inventory.refresh",
     "lane": "control",
     "retrySafe": true,

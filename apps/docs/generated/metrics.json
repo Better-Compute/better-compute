@@ -136,6 +136,43 @@
     "source": "standardMetrics"
   },
   {
+    "name": "better_compute_sandbox_ready_seconds",
+    "kind": "histogram",
+    "help": "Sandbox create to its instance first running (§3.7), by source: a warm claim or a cold create; the counts give the warm-pool hit ratio",
+    "labels": ["source"],
+    "buckets": [0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_sandbox_expiry_lag_seconds",
+    "kind": "histogram",
+    "help": "How late a sandbox was expired after its expiresAt",
+    "labels": [],
+    "buckets": [1, 5, 15, 30, 60, 120, 300, 900],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_sandbox_warm_instances",
+    "kind": "gauge",
+    "help": "Unclaimed warm-pool instances, by instance state",
+    "labels": ["state"],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_sandbox_warm_deficit",
+    "kind": "gauge",
+    "help": "Warm instances missing below the templates’ warm.min, summed over live templates",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
+    "name": "better_compute_sandbox_warm_refills_total",
+    "kind": "counter",
+    "help": "Warm-pool instances created to refill templates",
+    "labels": [],
+    "source": "standardMetrics"
+  },
+  {
     "name": "better_compute_cert_expiry_seconds",
     "kind": "gauge",
     "help": "Seconds until the soonest expiry",
