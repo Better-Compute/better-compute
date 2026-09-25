@@ -1,78 +1,268 @@
 # bcd
 
-`bcd` is the better-compute daemon: one Go binary whose modes run on every server (`node`), per
-datacenter (`site`), inside the PXE ramdisk (`ramdisk`) and on test hosts (`sim`). It dials out to
-the control plane's gateway over the `agent/v1` protocol (`proto/bettercompute/agent/v1`) and keeps
-policy out of the node: the daemon executes typed commands and converges typed desired state
-(PLAN.md §6, §7).
+`bcd` is the Better Compute daemon: one Go binary for the servers you manage (`node`), the site
+agents that boot bare metal (`site`), the PXE ramdisk (`ramdisk`) and simulated fleets (`sim`). It
+dials out to a regional gateway over the `agent/v1` protocol (`proto/bettercompute/agent/v1`). It
+reports what the machine is, runs the typed commands the control plane sends, and converges the
+machine toward its NodeSpec. Policy stays in the control plane (PLAN.md §6, §7).
 
-This directory is its own Go module, `github.com/better-compute/better-compute/daemon`, with no
-dependencies yet. It is the **P0 skeleton**: `bcd version` and `bcd doctor` work, every other
-command parses its flags and exits 2 naming the phase it arrives in, and the contracts the v0.1
-daemon builds on are in place with unit tests.
+This file is for people working on the daemon. For running it, start with the docs:
 
-## Build and test
+- [Overview](../apps/docs/content/docs/daemon/index.mdx) and
+  [Installing bcd](../apps/docs/content/docs/daemon/install.mdx)
+- [Protocol](../apps/docs/content/docs/daemon/protocol.mdx),
+  [Sessions](../apps/docs/content/docs/daemon/sessions.mdx),
+  [Delivery](../apps/docs/content/docs/daemon/delivery.mdx),
+  [Gateway](../apps/docs/content/docs/daemon/gateway.mdx),
+  [Failure modes](../apps/docs/content/docs/daemon/failure-modes.mdx)
+- [Joining](../apps/docs/content/docs/guides/nodes/joining.mdx),
+  [Commands](../apps/docs/content/docs/guides/nodes/commands.mdx),
+  [Inventory and health](../apps/docs/content/docs/guides/nodes/inventory-and-health.mdx),
+  [Break-glass SSH](../apps/docs/content/docs/guides/access/ssh.mdx),
+  [Tunnels](../apps/docs/content/docs/guides/access/tunnels.mdx)
+- [Command kinds](../apps/docs/content/docs/reference/command-kinds.mdx),
+  [PKI](../apps/docs/content/docs/operations/pki.mdx),
+  [Testing: the Go daemon](../apps/docs/content/docs/operations/testing.mdx#the-go-daemon)
 
-Requires Go 1.24 or later. From `daemon/`:
+## Status
 
-```sh
-go test -tags nonvml,fakehw ./...   # logic tests: no cgo, no NVIDIA driver, fake HGX H100 hardware
-go test ./...                       # default tags: the NVML and host-inventory stubs
-go vet -tags nonvml,fakehw ./...
-gofmt -l .                          # must print nothing
-go build -tags nonvml,fakehw -o bin/bcd ./cmd/bcd
-go build -ldflags "-X main.version=0.1.0" -o bin/bcd ./cmd/bcd
-```
-
-`daemon/bin/` and `daemon/dist/` are gitignored. Release archives come from goreleaser
-(`.goreleaser.yaml`): `goreleaser release --snapshot --clean` writes
-`dist/bcd_<version>_linux_{amd64,arm64}.tar.gz`, each with a `.sha256`.
-
-Build tags:
-
-| Tag | Effect |
-|---|---|
-| `nonvml` | `internal/nvml` builds without cgo and never loads `libnvidia-ml` |
-| `fakehw` | `bcd` reports the deterministic fake HGX H100 node of `internal/fakehw` instead of reading the host |
-
-### Windows
-
-`bcd` targets Linux only (amd64, and arm64 for Grace/GB200), but its logic runs anywhere: on the
-Windows workstation run the tests natively with `-tags nonvml,fakehw`. Full builds with NVML need
-cgo and a Linux C toolchain, so they go through WSL2 or Docker (`zig cc` in goreleaser). Paths in
-`config.toml` are Linux paths and are validated as such on every OS.
+`node`, `join`, `status`, `doctor` and `version` work. `site` and `ramdisk` arrive in v0.2, `sim`
+in v0.4. Until then they exit 2 with `bcd: NOT_IMPLEMENTED: bcd <cmd> arrives in <phase>`. NVML is
+not wired yet: `internal/nvml` answers `ErrNotBuilt` in every build, and GPU inventory comes from
+procfs and sysfs.
 
 ## Layout
 
-| Path | What | State |
+The module is `github.com/better-compute/better-compute/daemon` (Go 1.26). Its direct
+dependencies are connect-go, bbolt and protobuf.
+
+| Path | What |
+|---|---|
+| `cmd/bcd` | subcommands and flags; the hardware backend picked by build tag (`hardware_host.go`, `hardware_fakehw.go`); restart-in-place for reboots under fakehw (`reexec_*.go`) |
+| `internal/agent` | the node agent: session loop, command admission and kinds, the devices and access convergers, renewal, health watch, tunnels, secret and workload-token requests, the status socket |
+| `internal/journal` | durable memory (meta, commands, unacked events, last spec, certificates, exec-ticket `jti`s) and the command rules (`rules.go`); `Memory` for tests, `Bolt` (bbolt) in production |
+| `internal/dispatch` | the kind registry with role allowlists, `Precheck`, lanes with credits and worker pools, per-resource locks |
+| `internal/converge` | NodeSpec section order, the `Converger` interface, `Run` and the `observedGeneration` rule |
+| `internal/session` | protocol versions, Welcome and Ack handling, jittered reconnect backoff |
+| `internal/pki` | byte-compatible with `@better-compute/pki`: purpose-framed ES256 signatures (`sign.go`), P-256 keys and SPKI pins (`keys.go`), compact JWE (`jwe.go`), join tokens and responses (`join.go`), signed intent and trust bundles (`intent.go`), exec tickets (`tickets.go`), secret and workload-token requests (`secrets.go`) |
+| `internal/transport` | the connect-go client for `AgentGateway` (Join, Renew, Session, Tunnel): TLS 1.3 pinned to the serving CA, mTLS with the node certificate |
+| `internal/inventory` | NodeInventory v1 types, canonical section encoding and hashes, and the `Collector` (procfs and sysfs, no cgo) |
+| `internal/health` | PSI pressure, CPU steal, and the Xid parser for `/dev/kmsg` |
+| `internal/fakehw` | a deterministic 8× H100 SXM HGX node (NVSwitch, 2 NUMA nodes, NVMe, 2 NICs), seeded |
+| `internal/nvml` | the NVML boundary; a stub for now |
+| `internal/config` | `/etc/bcd/config.toml` in a strict TOML subset |
+| `internal/support` | redaction of keys, tokens, JWTs and URL passwords in logs and support bundles |
+| `gen/` | Go code generated from `proto/` (see [`gen/README.md`](gen/README.md)) |
+
+`internal/inventory/types.go` and `encode.go` are still generated from `inventory.proto` by
+`internal/inventory/mirror.mjs`. They are used next to `gen/`, and the golden tests in
+`hash_test.go` pin their section bytes to protobuf-es output.
+
+### Build tags
+
+| Tag | Effect |
+|---|---|
+| `fakehw` | reports the `internal/fakehw` node instead of reading the host, keeps its host root under `<data_dir>/fakehw-root` and its boot id in `<data_dir>/fakehw-boot-id`, and makes `node.reboot` restart the process in place. Also the only build that accepts `dev_insecure_h2c` |
+| `nonvml` | `internal/nvml` builds without cgo and never loads `libnvidia-ml` |
+
+The default build (`!fakehw`) reads the host with `inventory.Collector` and reboots with
+`systemctl reboot`.
+
+**Development transport.** `dev_insecure_h2c = true` lets `gateway_url` be `http://` (h2c). Only
+fakehw builds accept it, and `bcd node` logs a warning when it is on. Over h2c a joined node sends
+its id in `x-bc-test-node`, which only a gateway started with `insecureHeaderAuth` honours. Over
+`https` the header is refused. Production is always TLS 1.3 with mTLS.
+
+## Toolchain and tests
+
+You need Go 1.26. Tests always run with `-tags nonvml,fakehw`:
+
+```sh
+node scripts/daemon-test.mjs                       # every package
+node scripts/daemon-test.mjs ./internal/journal -v --run TestResolve
+node scripts/daemon-test.mjs --build-bcd           # also writes daemon/bin/bcd-linux-amd64
+```
+
+On Linux and macOS the script runs `go test`. On Windows it cross-compiles each package's test
+binary for linux/amd64 (`daemon/bin/tests/`) and runs it in WSL from the package directory
+(`--distro`, default `$BCD_WSL_DISTRO` or `Ubuntu`).
+
+Generated code and fixtures:
+
+```sh
+node scripts/daemon-proto-gen.mjs            # regenerate gen/ with the pinned buf (daemon/buf.gen.yaml)
+node scripts/daemon-proto-gen.mjs --check    # fail on missing, stale or extra files
+node --import ./tests/fixtures/bcx-loader.mjs scripts/daemon-fixtures.mjs
+```
+
+The last command writes `internal/pki/testdata/interop.json` from the TypeScript implementation:
+certificates, a JoinResponse and JWE, signed commands, DesiredState and TrustBundle, an exec ticket,
+and secret and workload-token exchanges, all on a fixed clock. `interop_test.go` checks the Go side
+against it, so run it again whenever `@better-compute/pki` changes a format.
+
+The end-to-end test `tests/e2e/bcd.test.ts` runs the real binary against a dev stack:
+
+- join and adoption;
+- `bcd status --json`;
+- `inventory.refresh`;
+- a reservation's CDI bind and release;
+- a console tunnel;
+- `node.reboot`.
+
+It runs on Linux when Go is present. On Windows it needs `BCD_E2E=1` and WSL; `BCD_E2E_LOG=1`
+streams bcd's log.
+
+CI (`.github/workflows/daemon.yml`, Ubuntu and Windows) runs `go vet`, `go test -tags nonvml,fakehw
+./...` and `goreleaser check`. Releases are built by `.goreleaser.yaml` for linux amd64 and arm64,
+with cgo through `zig cc`. `daemon/bin/` and `daemon/dist/` are gitignored.
+
+## Commands
+
+| Command | Flags | |
 |---|---|---|
-| `cmd/bcd` | subcommands and flags: `node`, `site`, `ramdisk`, `sim`, `join`, `status`, `doctor`, `version` | skeleton |
-| `internal/config` | `/etc/bcd/config.toml` in a documented TOML subset: gateway URL, site, SPKI and key pins | done |
-| `internal/journal` | the journal contract and the command rules (duplicate delivery, crash recovery, self-terminating kinds); an in-memory store | contract + memory |
-| `internal/dispatch` | lanes with credits and worker pools, per-resource locks, the kind registry, acceptance checks | contract + primitives |
-| `internal/session` | Hello/Welcome, epoch, resume, reconnect backoff | contract |
-| `internal/converge` | NodeSpec sections `host · devices · instances · access · telemetry · daemon` and the observedGeneration rule | contract + runner |
-| `internal/inventory` | NodeInventory v1 mirrored from `inventory.proto`, canonicalization, section encoding and hashes | done |
-| `internal/fakehw` | deterministic 8× H100 SXM5 80GB HGX node (NVSwitch, 2 NUMA nodes, NVMe, 2 NICs) | done |
-| `internal/nvml` | NVML boundary; `ErrNotBuilt` in every build for now | stub |
-| `gen/` | Go code generated from `proto/` | empty, see `gen/README.md` |
+| `bcd join` | `-config` | reads the `bcjt_…` token from `BCD_JOIN_TOKEN` (unset once read) or the first line of stdin, never from arguments |
+| `bcd node` | `-config` | runs the agent until SIGINT or SIGTERM |
+| `bcd status` | `-socket`, `-json` | asks the running agent over its unix socket |
+| `bcd doctor` | `-config` | checks the config (and its file mode), NVML and hardware collection |
+| `bcd version` | | `bcd <version> <os>/<arch> <go>` plus build tags; set the version with `-ldflags "-X main.version=…"` |
 
-Inventory sections follow `inventory.proto`: a section's content is the protobuf binary encoding
-of its canonicalized message (repeated fields sorted by stable key) and its hash is the SHA-256 of
-that content; the control plane verifies content against hash and never re-encodes.
-`internal/inventory/types.go` and `encode.go` are generated from the proto by
-`node daemon/internal/inventory/mirror.mjs` until `gen/` exists, and the golden tests in
-`hash_test.go` pin the encoder to protobuf-es output.
+Exit codes: 0 for success, 1 for failure, 2 for a usage error or a command that is not
+implemented yet. An unknown command is echoed only if it looks like a command name, so a token
+pasted in the wrong place is never printed.
 
-## Arrives in v0.1
+## Configuration and files
 
-- `go.sum` and the first dependencies, once a Go toolchain is installed: connect-go, protobuf,
-  `NVIDIA/go-nvml`, `go.etcd.io/bbolt`; generated code in `gen/`.
-- `bcd join` (sealed join token, signed `JoinResponse`), `Renew` with proof of possession, the
-  `Session` stream, the bbolt journal, `bcd status` over the root-only unix socket.
-- Host inventory from sysfs, netlink and NVML; the `devices` converger writing CDI specs for
-  `hold` bindings; the empty `access` section; `inventory.refresh`, `diag.nvml` and the
-  self-terminating `node.reboot`.
-- Release artifacts from CI (`.github/workflows/daemon.yml`, `release.yml`) and the install script.
+`/etc/bcd/config.toml` (at most 64 KiB) uses a strict TOML subset: comments, `[section]`,
+strings, integers and booleans. Unknown keys, duplicate keys and wrong types are errors.
 
-`site` and `ramdisk` arrive in v0.2, `sim` with real TLS in v0.4 (PLAN.md §16).
+| Key | Default |
+|---|---|
+| `gateway_url` | required; `https://`, or `http://` only with `dev_insecure_h2c` |
+| `site` | required |
+| `serving_ca_spki_pin`, `join_signing_key_pin`, `join_encryption_key_pin` | required, `sha256/<base64>` |
+| `gateway_server_name` | the URL's host (TLS name when you dial an address) |
+| `data_dir` | `/var/lib/bcd` |
+| `socket_path` | `/run/bcd/bcd.sock` |
+| `dev_insecure_h2c` | `false` (fakehw builds only) |
+| `[journal] max_bytes`, `max_events` | 64 MiB, 10 000 (the file may lower these caps, never raise them) |
+| `[log] level`, `json` | `info`, `true` |
+
+Files the daemon owns:
+
+| Path | |
+|---|---|
+| `<data_dir>/node.key` | the node's P-256 key, PKCS#8, 0600 |
+| `<data_dir>/node.key.next` | the key a renewal is certifying; promoted at start if the certificate matches it, otherwise deleted |
+| `<data_dir>/identity.json` | node, site, role, certificate chain, trust roots and version, and the server-time high-water mark (0600) |
+| `<data_dir>/journal.db` | the bbolt journal (0600). A journal that will not open is kept as `journal.db.corrupt-<unix>`; re-joining as another node keeps the old one as `journal.db.<oldNodeId>-<unix>` |
+| `<data_dir>/fakehw-root/`, `fakehw-boot-id` | fakehw builds only |
+| `/etc/bcd/join-encryption.jwk` | the JoinService encryption key, read from the config file's directory and checked against its pin |
+| `/run/bcd/bcd.sock` | the status socket, 0600 in a 0700 directory |
+| `/etc/cdi/bcd-<allocationId>.json` | CDI spec per GPU hold |
+| `/run/bcd/allocations/<allocationId>.env` | the hold's environment (`BCD_ALLOCATION_ID`, `BCD_RESERVATION_ID`, `NVIDIA_VISIBLE_DEVICES`, …) |
+| `/etc/ssh/sshd_config.d/10-better-compute.conf`, `/etc/ssh/bc_ca.pub`, `/etc/ssh/bc_principals/<account>`, `/etc/ssh/bc_krl` | break-glass SSH, written by the access converger |
+
+## Behaviour
+
+The docs pages above explain these for operators. What follows is where each rule lives in the
+code.
+
+**Commands and the journal** (`internal/journal/rules.go`). A command is journaled with `Accept`
+before any side effect. A redelivered command is handled by the state stored at acceptance:
+
+- done: its stored result is resent;
+- still running in this process: the new delivery reattaches to it;
+- interrupted by a crash (each process start is a new incarnation):
+  - retry-safe kinds run again;
+  - a self-terminating kind whose boot id changed has succeeded (`rebooted`);
+  - anything else fails with `interrupted`.
+
+`Recover` runs at start. `Sweep` removes finished entries after 7 days, at start and then hourly.
+BUSY refusals are never journaled.
+
+**Acceptance order** (`dispatch.Precheck`, `agent/commands.go`). The checks run in this order:
+
+1. the journal (duplicate or resume);
+2. the node id;
+3. `upgrade_required`;
+4. the kind and the node's role;
+5. `min_generation`: the command is deferred until the spec arrives, asking for it with `SpecRequest`;
+6. `not_after`, against server time (the local clock plus the Welcome offset);
+7. the signature;
+8. lane credit: otherwise the answer is BUSY, which is also the answer while the journal is full;
+9. `Accept`, then `ACKED`, `RUNNING` and the result.
+
+A command cancelled before its side effect ends `CANCELLED`. After the side effect has started,
+the real outcome is reported.
+
+**Signed intent** (`pki/intent.go`, `agent/commands.go`, `agent/spec.go`). Once the node holds
+trust roots, from `JoinResponse.trust` and newer versions in `Welcome.trust` signed by the pinned
+JoinService key:
+
+- any signature present on a command is verified;
+- a signature is required for kinds the daemon's own table marks destructive;
+- every DesiredState must verify.
+
+Attested results and allocation reports carry the node's own signature.
+
+**Server time** (`agent/conn.go`). The daemon keeps a high-water mark of server time, advanced by
+every Welcome and heartbeat and mirrored in `identity.json`. A Welcome more than 5 minutes behind it
+is refused.
+
+**Renewal** (`agent/renew.go`). Renewal starts at 60% of the certificate's lifetime and backs off
+from 30 s to 10 min on failure. It is crash-safe:
+
+1. write `node.key.next`;
+2. call `Renew` with proof of possession;
+3. check that the identity is unchanged;
+4. save `identity.json`;
+5. rename the new key into place;
+6. rebuild the mTLS client.
+
+**Convergence** (`converge/`, `agent/spec.go`). Sections apply in the order `host`, `devices`,
+`instances`, `access`, `telemetry`, `daemon`.
+
+- A section without a converger is converged when empty. Otherwise it reports `SectionUnsupported`.
+- Transient errors retry after 30 s. `Terminal` ones fail the section.
+- `observedGeneration` advances only when no section is still progressing.
+- Specs apply only at a higher generation. A patch must be based on the applied generation, and
+  the stored spec is enforced while offline.
+
+**Devices** (`agent/devices.go`). The devices converger writes one CDI spec and one env file per
+`hold` binding of GPUs. It releases holds that are no longer desired and reports
+`allocation.bound`, `allocation.released` and `allocation.failed` as signed events. It never drops
+a hold on its own.
+
+**Access** (`agent/access.go`). The access converger writes the sshd drop-in, CA, principals
+(`<account>@<nodeId>` only) and KRL. It reloads sshd only when the drop-in changed, and it removes
+everything it wrote when the section is empty. It also keeps the JWKS that tunnel tickets are
+checked against.
+
+**Kinds** (`agent/kinds.go`; the [command kinds reference](../apps/docs/content/docs/reference/command-kinds.mdx)
+is the full list):
+
+| Kind | What it does |
+|---|---|
+| `inventory.refresh` | resends inventory sections, optionally re-collecting them |
+| `diag.nvml` | per-GPU health checks (ECC, row remapping, PCIe link, recent Xids) |
+| `logs.collect` | collects `journalctl` output, redacts it and uploads it to a presigned https URL |
+| `gpu.reset` | resets a GPU that has no live hold (destructive) |
+| `node.reboot` | reboots; self-terminating, so it completes after the restart (destructive) |
+
+Tunnels (`agent/tunnels.go`, at most 16) are session frames, not kinds. They open only for an exec
+ticket that verifies against the pinned JWKS, whose `jti` is new and whose `sid` matches the tunnel.
+Secret and workload-token requests (`agent/requests.go`) are session frames too.
+
+**Health** (`agent/healthwatch.go`). Every 30 s the daemon samples PSI pressure and CPU steal.
+Xid lines on `/dev/kmsg` become conditions on the matching GPU.
+
+**Sessions** (`agent/conn.go`, `session/`).
+
+- The Hello resumes from the last epoch, generation and event sequence, and replays unacked events
+  after the Welcome.
+- Heartbeats default to every 10 s and carry free lane credits.
+- A full outbox (4096 frames) drops the session instead of blocking.
+- Reconnects use full-jitter backoff up to 60 s. A `Drain` frame sets the delay, and `Revoked`
+  stops the agent.
+
+Lanes: `control` has 8 credits and 4 workers, `provision` 4 and 2, `bulk` 2 and 1.
