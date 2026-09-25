@@ -78,6 +78,11 @@ export interface UpgradeOptions {
   migrations: readonly Migration[];
   /** How long every worker/api process is down while it restarts on the new build (default 30 s). */
   workerRestartMs?: number;
+  /**
+   * Starts the workers' new build while they are down (e.g. `rig.restartControlPlane()`); gateways take it as they
+   * roll. Without it the same control plane resumes.
+   */
+  restartWorkers?(rig: ControlPlaneSim): Promise<void>;
   /** Each gateway's downtime during its roll, and the settle time before the next (default 20 s, 40 s). */
   gatewayDownMs?: number;
   gatewaySettleMs?: number;
@@ -98,6 +103,16 @@ export interface UpgradeReport {
   disturbed: string[];
 }
 
+/** Restarts the gateways one at a time (each down `downMs`, then `settleMs` before the next): sessions move over. */
+export async function rollGateways(rig: ControlPlaneSim, options: { downMs?: number; settleMs?: number } = {}): Promise<void> {
+  for (let index = 0; index < rig.gateways.length; index++) {
+    rig.killGateway(index);
+    await rig.run(options.downMs ?? 20_000);
+    rig.reviveGateway(index);
+    await rig.run(options.settleMs ?? 40_000);
+  }
+}
+
 /** Runs the §7.6 upgrade order on `rig` and reports what it disturbed. */
 export async function upgradeInPlace(rig: ControlPlaneSim, options: UpgradeOptions): Promise<UpgradeReport> {
   const now = () => rig.sim.scheduler.now();
@@ -116,18 +131,17 @@ export async function upgradeInPlace(rig: ControlPlaneSim, options: UpgradeOptio
   });
   await step('workers', async () => {
     rig.pauseWorkers(true);
+    await options.restartWorkers?.(rig);
     await rig.run(options.workerRestartMs ?? 30_000);
     rig.pauseWorkers(false);
     await rig.run(30_000);
   });
-  await step('gateways', async () => {
-    for (let index = 0; index < rig.gateways.length; index++) {
-      rig.killGateway(index);
-      await rig.run(options.gatewayDownMs ?? 20_000);
-      rig.reviveGateway(index);
-      await rig.run(options.gatewaySettleMs ?? 40_000);
-    }
-  });
+  await step('gateways', () =>
+    rollGateways(rig, {
+      ...(options.gatewayDownMs !== undefined ? { downMs: options.gatewayDownMs } : {}),
+      ...(options.gatewaySettleMs !== undefined ? { settleMs: options.gatewaySettleMs } : {}),
+    }),
+  );
   await step('daemons', () => options.rollDaemons(rig));
   await rig.run(options.settleMs ?? 2 * 60_000);
 

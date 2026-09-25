@@ -277,7 +277,27 @@ export interface ControlPlaneSimOptions
    * authority), and every daemon enforces signed intent and the quorum from its join's trust bundle.
    * `ControlPlaneSim.approvers` holds the private keys that sign approvals.
    */
-  approvers?: { count?: number; threshold?: number; unbatchedDestructivePerHour?: number };
+  approvers?: SimApprovers;
+  /**
+   * Signed intent (§6, §13; v0.2) as a deployment before the quorum ran it: workers sign commands (a command-signing
+   * authority), daemons enforce it and pin the join signing key, so a newer trust bundle a gateway sends in its
+   * Welcome replaces theirs (roots, quorum), as bcd's does. Implied by `approvers` except for that pin; with it, the
+   * gateways relay the control plane's signed bundle (`createGateway({ trustBundle })`, as `serve` does).
+   */
+  signedIntent?: boolean;
+  /**
+   * The database starts as an older release left it: once the control plane first migrated, `sql` runs (e.g. DROP
+   * TABLE statements) and `migrations` leave the ledger, so a later migrate or `restartControlPlane` applies them
+   * again (an upgrade from before them).
+   */
+  rewind?: { migrations: readonly string[]; sql: readonly string[] };
+}
+
+/** The destructive-batch quorum the simulator's control plane publishes (fresh approver keys). */
+export interface SimApprovers {
+  count?: number;
+  threshold?: number;
+  unbatchedDestructivePerHour?: number;
 }
 
 export interface ExtraPoolOptions {
@@ -314,7 +334,8 @@ interface GatewaySlot {
 
 export interface ControlPlaneSim {
   sim: FleetSim;
-  compute: BetterCompute;
+  /** The current control plane (`restartControlPlane` replaces it). */
+  readonly compute: BetterCompute;
   /** The store without the sim-clock pin, for assertions. */
   database: SqlExecutor;
   fakeIam: FakeIam;
@@ -323,7 +344,15 @@ export interface ControlPlaneSim {
   poolId: string;
   nodes: readonly { nodeId: string; hardware: FakeHardware }[];
   /** With `approvers`: the approver keys (sign approvals with `signBatchApproval`) and the trust domain approvals name. */
-  approvers?: { keys: readonly { privateKey: KeyObject; key: ApproverKey }[]; trustDomain: string };
+  readonly approvers?: { keys: readonly { privateKey: KeyObject; key: ApproverKey }[]; trustDomain: string };
+  /**
+   * Every worker/api process restarts on a new build or configuration: the control plane stops and is built again
+   * on the same database (its `initialize()` applies the migrations the database lacks), with `approvers` set when
+   * given (fresh keys: a first quorum; changing one daemons hold needs set signatures, not modelled). Its jobs tick
+   * from then on and `api` calls reach it; each gateway takes its services, and its trust bundle, when it next starts
+   * (roll them to move sessions over). Pause the workers around it for a real restart's downtime.
+   */
+  restartControlPlane(next?: { approvers?: SimApprovers }): Promise<void>;
   /** The `extraPools`, in order, with the nodes that joined each. */
   pools: readonly { poolId: string; class: string; nodeIds: readonly string[] }[];
   /** The first gateway slot's current process. */
@@ -534,43 +563,47 @@ export async function createControlPlaneSim(
       };
     },
   });
-  // The quorum (§13), only when asked for: without it nothing here changes (seed digests stay).
-  const quorum = options.approvers
-    ? {
-        keys: Array.from({ length: Math.max(1, options.approvers.count ?? 2) }, () => createApproverKey()),
-        threshold: options.approvers.threshold ?? 1,
-        unbatched: options.approvers.unbatchedDestructivePerHour ?? 0,
-        signing: createCommandSigningAuthority({ clock: { now: () => start - 60_000 } }),
-      }
-    : undefined;
-  const compute = betterCompute({
-    database: reachable,
-    iam: options.iam ? options.iam(fake) : fake,
-    attestors: [restrictedAttestor],
-    ...(options.modules ? { modules: [...options.modules] } : {}),
-    secret: 'better-compute-control-plane-sim-secret-0123456789',
-    baseURL: 'https://compute.sim.test',
-    rootTenantId: tenants.root.id,
-    clock,
-    pki: {
-      join: pkiJoinCrypto({
-        trustDomain,
-        nodeCa,
-        signingKey,
-        encryptionKey: encryption.privateKey,
-      }),
-      ...(quorum
-        ? {
-            commandSigning: quorum.signing,
-            approvers: {
-              keys: quorum.keys.map((approver) => approver.key.spkiDer),
-              threshold: quorum.threshold,
-              unbatchedDestructivePerHour: quorum.unbatched,
-            },
-          }
-        : {}),
-    },
+  // The quorum (§13) and signed intent, only when asked for: without them nothing here changes (seed digests stay).
+  const signing =
+    options.approvers || options.signedIntent
+      ? createCommandSigningAuthority({ clock: { now: () => start - 60_000 } })
+      : undefined;
+  const quorumOf = (approvers: SimApprovers) => ({
+    keys: Array.from({ length: Math.max(1, approvers.count ?? 2) }, () => createApproverKey()),
+    threshold: approvers.threshold ?? 1,
+    unbatched: approvers.unbatchedDestructivePerHour ?? 0,
   });
+  let quorum = options.approvers ? quorumOf(options.approvers) : undefined;
+  const build = () =>
+    betterCompute({
+      database: reachable,
+      iam: options.iam ? options.iam(fake) : fake,
+      attestors: [restrictedAttestor],
+      ...(options.modules ? { modules: [...options.modules] } : {}),
+      secret: 'better-compute-control-plane-sim-secret-0123456789',
+      baseURL: 'https://compute.sim.test',
+      rootTenantId: tenants.root.id,
+      clock,
+      pki: {
+        join: pkiJoinCrypto({
+          trustDomain,
+          nodeCa,
+          signingKey,
+          encryptionKey: encryption.privateKey,
+        }),
+        ...(signing ? { commandSigning: signing } : {}),
+        ...(quorum
+          ? {
+              approvers: {
+                keys: quorum.keys.map((approver) => approver.key.spkiDer),
+                threshold: quorum.threshold,
+                unbatchedDestructivePerHour: quorum.unbatched,
+              },
+            }
+          : {}),
+      },
+    });
+  let compute = build();
   let slots: GatewaySlot[] = [];
   const close = async () => {
     for (const slot of slots) await slot.gateway?.stop().catch(() => {});
@@ -579,6 +612,12 @@ export async function createControlPlaneSim(
   };
   try {
     await compute.initialize();
+    if (options.rewind) {
+      for (const statement of options.rewind.sql) await raw.query(statement);
+      await raw.query('DELETE FROM compute_migrations WHERE name = ANY($1::text[])', [
+        [...options.rewind.migrations],
+      ]);
+    }
     await useSimClock(raw, start);
 
     const api = <T>(fn: () => Promise<T>) => trace('api', fn);
@@ -733,6 +772,8 @@ export async function createControlPlaneSim(
     const slotGateway = async (slot: GatewaySlot): Promise<Gateway> => {
       if (slot.gateway) return slot.gateway;
       slot.starting ??= (async () => {
+        // As `serve` relays it: the control plane's signed trust bundle, resolved (its version settled) at start.
+        const trust = options.signedIntent ? await compute.gatewayServices.trustBundle?.() : undefined;
         const created = createGateway({
           id: `gw_sim_${slot.index + 1}_${++slot.generation}`,
           region: 'sim',
@@ -750,6 +791,7 @@ export async function createControlPlaneSim(
               : xidStatusHandler,
           },
           revocations,
+          ...(trust ? { trustBundle: () => trust } : {}),
           ...options.gateway,
         });
         await created.start();
@@ -779,22 +821,30 @@ export async function createControlPlaneSim(
       extraPools: _extraPools,
       statusHandlers: _statusHandlers,
       approvers: _approvers,
+      signedIntent: _signedIntent,
+      rewind: _rewind,
       ...fleetOptions
     } = options;
-    // With the quorum on, daemons enforce signed intent and the quorum, as bcd does from its join's trust bundle.
-    if (quorum)
+    // With the quorum or signed intent on, daemons enforce signed intent (and the quorum), as bcd does from its
+    // join's trust bundle; with `signedIntent` they pin the join signing key and take newer bundles from Welcome.
+    if (signing)
       fleetOptions.daemon = {
         ...fleetOptions.daemon,
         intent: {
-          roots: [quorum.signing.certificate],
+          roots: [signing.certificate],
           version: 1n,
           trustDomain,
-          quorum: {
-            approverKeys: quorum.keys.map((approver) => approver.key),
-            trustDomain,
-            threshold: quorum.threshold,
-            unbatchedPerHour: quorum.unbatched,
-          },
+          ...(options.signedIntent ? { trustSigner: { publicKey: signingKey.publicKey } } : {}),
+          ...(quorum
+            ? {
+                quorum: {
+                  approverKeys: quorum.keys.map((approver) => approver.key),
+                  trustDomain,
+                  threshold: quorum.threshold,
+                  unbatchedPerHour: quorum.unbatched,
+                },
+              }
+            : {}),
         },
       };
     const workerPasses = Math.max(1, options.workerPasses ?? 1);
@@ -802,7 +852,13 @@ export async function createControlPlaneSim(
       ...fleetOptions,
       start,
       nodes: [
-        ...nodes.map(({ nodeId, hardware }) => ({ nodeId, hardware })),
+        // With command signing the control plane verifies node-signed AllocationBound reports (attestedBindings):
+        // every daemon then holds the key it joined with.
+        ...nodes.map(({ nodeId, hardware }) =>
+          signing
+            ? { nodeId, hardware, daemon: { ...fleetOptions.daemon, nodeKey: nodeKeys.get(nodeId)! } }
+            : { nodeId, hardware },
+        ),
         // Extra pools' daemons hold the key they joined with: a VPS host signs its SecretRequests (user data).
         ...extraNodes.map(({ nodeId, hardware, daemon }) => ({
           nodeId,
@@ -874,7 +930,9 @@ export async function createControlPlaneSim(
 
     return {
       sim,
-      compute: compute as unknown as BetterCompute,
+      get compute() {
+        return compute as unknown as BetterCompute;
+      },
       database: raw,
       fakeIam: fake,
       tenants,
@@ -882,7 +940,20 @@ export async function createControlPlaneSim(
       poolId: pool.id,
       nodes,
       pools,
-      ...(quorum ? { approvers: { keys: quorum.keys, trustDomain } } : {}),
+      get approvers() {
+        return quorum ? { keys: quorum.keys, trustDomain } : undefined;
+      },
+      async restartControlPlane(next = {}) {
+        if (next.approvers && !signing)
+          throw new ComputeError(
+            'INVALID_STATE',
+            'restartControlPlane({ approvers }) needs signedIntent (or approvers) from the start: daemons take a quorum only in a signed bundle',
+          );
+        await compute.stop().catch(() => {});
+        if (next.approvers) quorum = quorumOf(next.approvers);
+        compute = build();
+        await compute.initialize();
+      },
       get gateway() {
         return slots[0]!.gateway;
       },
