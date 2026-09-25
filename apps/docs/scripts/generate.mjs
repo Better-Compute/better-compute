@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import prettier from 'prettier';
 import { checkDescriptions, firstParagraph, sections } from './descriptions.mjs';
+import { readProtocol } from './protocol.mjs';
 
 const docs = join(dirname(fileURLToPath(import.meta.url)), '..');
 const root = join(docs, '..', '..');
@@ -400,6 +401,81 @@ files.set(
   ].join('\n'),
 );
 
+// ---- The daemon protocol, from the .proto sources ------------------------------------------------
+
+const protocol = await readProtocol(join(root, 'proto'), root);
+{
+  // A type's anchor: messages and enums are headed by their name, qualified by package when two
+  // packages use the same one.
+  const all = protocol.flatMap((file) =>
+    [...file.messages, ...file.enums].map((decl) => ({ package: file.package, name: decl.name })),
+  );
+  const counts = new Map();
+  for (const decl of all) counts.set(decl.name, (counts.get(decl.name) ?? 0) + 1);
+  const headingOf = (pkg, name) => (counts.get(name) > 1 ? `${pkg}.${name}` : name);
+  const slugOf = (heading) => heading.toLowerCase().replace(/[^\p{L}\p{M}\p{N}\p{Pc}\s-]/gu, '').replace(/\s/g, '-');
+  const byFull = new Map(all.map((decl) => [`${decl.package}.${decl.name}`, decl]));
+  /** A field type, linked to its message or enum when it is one of ours. */
+  const typeCell = (pkg, type) => {
+    const map = /^map<([\w.]+),([\w.]+)>$/.exec(type);
+    if (map) return `map of ${typeCell(pkg, map[1])} to ${typeCell(pkg, map[2])}`;
+    const decl = byFull.get(type) ?? byFull.get(`${pkg}.${type}`) ?? all.find((entry) => entry.name === type);
+    if (!decl) return code(type);
+    const heading = headingOf(decl.package, decl.name);
+    return `[${code(decl.name)}](#${slugOf(heading)})`;
+  };
+  // Comments are wrapped proto text: one paragraph per blank comment line, indentation dropped.
+  const text = (comment) =>
+    comment
+      .split('\n')
+      .map((line) => line.trim())
+      .join('\n');
+  const lines = [
+    frontmatter({
+      title: 'Protocol',
+      description: 'Every service, message and enum of the daemon protocol, from the .proto sources, with field numbers and types.',
+    }),
+    generatedNote('the .proto sources in proto/bettercompute'),
+    '',
+    'The wire contract between bcd, the gateway and drivers. It is frozen: changes are additive only (`buf breaking`), and messages and fields marked with a phase are part of the frozen shape before they are used. For the session flow, framing, renewal and the WebSocket fallback, see [Protocol](/docs/daemon/protocol).',
+  ];
+  for (const file of protocol) {
+    lines.push('', `## ${file.file.split('/').pop()}`, '', `Package ${code(file.package)}, ${code(file.file)}.`);
+    const intro = firstParagraph(file.description);
+    if (intro) lines.push('', prose(intro));
+    for (const service of file.services) {
+      lines.push('', `### ${service.name}`, '');
+      if (service.description) lines.push(prose(text(service.description)), '');
+      lines.push('| RPC | Request | Response | Description |', '| --- | --- | --- | --- |');
+      for (const rpc of service.rpcs)
+        lines.push(
+          `| ${code(rpc.name)} | ${rpc.clientStreaming ? 'stream ' : ''}${typeCell(file.package, rpc.request)} | ${rpc.serverStreaming ? 'stream ' : ''}${typeCell(file.package, rpc.response)} | ${cell(rpc.description)} |`,
+        );
+    }
+    for (const message of file.messages) {
+      lines.push('', `### ${headingOf(file.package, message.name)}`, '');
+      if (message.description) lines.push(prose(text(message.description)), '');
+      if (!message.fields.length) {
+        lines.push('No fields.');
+        continue;
+      }
+      lines.push('| Field | Number | Type | Description |', '| --- | --- | --- | --- |');
+      for (const field of message.fields)
+        lines.push(
+          `| ${code(field.name)} | ${field.number} | ${field.label ? `${field.label} ` : ''}${typeCell(file.package, field.type)}${field.oneof ? ` (oneof ${code(field.oneof)})` : ''} | ${cell(field.description)} |`,
+        );
+    }
+    for (const en of file.enums) {
+      lines.push('', `### ${headingOf(file.package, en.name)}`, '');
+      if (en.description) lines.push(prose(text(en.description)), '');
+      lines.push('| Value | Number | Description |', '| --- | --- | --- |');
+      for (const value of en.values)
+        lines.push(`| ${code(value.name)} | ${value.number} | ${cell(value.description)} |`);
+    }
+  }
+  files.set(`${reference}/protocol.mdx`, lines.join('\n'));
+}
+
 const cliLines = [
   frontmatter({
     title: 'CLI',
@@ -557,6 +633,7 @@ files.set(
 const data = {
   'generated/api.json': api,
   'generated/errors.json': errors,
+  'generated/protocol.json': protocol,
   'generated/cli.json': cli,
   'generated/command-kinds.json': commandKinds,
   'generated/events.json': events,

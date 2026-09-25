@@ -1,6 +1,6 @@
 {
   "title": "Reference",
-  "description": "Generated API, CLI, command kinds, errors, events, metrics, modules and packages, plus the glossary and roadmap",
+  "description": "Generated API, CLI, command kinds, errors, protocol, events, metrics, modules and packages, plus the glossary and roadmap",
   "root": true,
   "icon": "Code",
   "pages": [
@@ -9,6 +9,7 @@
     "cli",
     "command-kinds",
     "errors",
+    "protocol",
     "events",
     "metrics",
     "modules",
