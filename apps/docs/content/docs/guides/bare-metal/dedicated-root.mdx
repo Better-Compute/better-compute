@@ -15,6 +15,8 @@ sources:
   - packages/capacity/src/node-lease.ts
   - packages/capacity/src/reservations.ts
   - packages/capacity/src/usage.ts
+  - packages/inventory/src/store.ts
+  - packages/inventory/src/pressure.ts
   - packages/capacity/src/eligibility.ts
   - packages/server/src/join/service.ts
   - packages/server/src/join/secret-broker.ts
@@ -156,9 +158,16 @@ authority:
 The attestation check accepts only `ramdisk` and `node` certificates by default, so even a wipe
 result the lessee's OS signs with its own key for this very node is refused.
 
-PLAN.md goes further for v0.5: the lessee's inventory reports become advisory, and in-band BMC access
-is disabled where the vendor supports it. Neither is implemented yet, which is one reason the teardown
-rotates the BMC password.
+The lessee's inventory and health reports are advisory. While the node is `tenant-controlled`, an
+inventory it sends is appended as a snapshot (`node.inventory.changed` with `advisory: true`) but
+changes none of the node's devices, device health, labels, conditions, image cache or hardware key, and
+its XIDs and host pressure are ignored. A GPU the lessee reports missing or unhealthy therefore stays
+healthy and on the lease's bill. `metal.exitTenantRoot` ends the advisory period, so the first report
+under platform trust applies for real. See
+[trust](/docs/guides/nodes/inventory-and-health#trust-tenant-controlled-nodes-are-advisory).
+
+PLAN.md also disables in-band BMC access where the vendor supports it. That is not implemented yet,
+which is one reason the teardown rotates the BMC password.
 
 ## The teardown
 

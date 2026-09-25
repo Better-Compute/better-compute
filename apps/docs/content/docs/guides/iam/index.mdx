@@ -79,7 +79,8 @@ compute does not run.
 
 The remote pieces (`bridge.remote`, `remoteIam`, and `computeIamHost`, `replicaProjection`, `postgresInbox`,
 `httpInbox` and `createInboxHandler` from `better-compute/iam/plugin`) already exist and are tested against a real
-Better IAM, but remote mode belongs to the v0.4 milestone on the [roadmap](/docs/reference/roadmap). Pointing Better
+Better IAM: `pnpm test:iam-remote`, part of `pnpm check`, reruns the IAM-dependent suites with `bridge.remote`, the
+authz matrix included (see [testing](/docs/operations/testing#real-better-iam-in-tests)). Remote mode belongs to the v0.4 milestone on the [roadmap](/docs/reference/roadmap). Pointing Better
 IAM's own console at compute's IAM database needs an upstream Better IAM change (U0) first, in either mode.
 
 ## How the pieces fit

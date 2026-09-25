@@ -145,7 +145,7 @@ writes a type outside the catalog.
 | `command.settled` | `command/{id}` | gateway | A command reached a terminal state |
 | `workflow.*` | `workflow/{id}` | provision | `workflow.created`, `started`, `paused`, `resumed`, `retried`, `cancelled`, and one per state |
 | `instance.*` | `instance/{id}` | vps | `instance.created`, `scheduled`, `provisioning`, `starting`, `stopping`, `resized`, `deleting`, `deleted`, `failed`, `lost`, `recovered`, `recreating`, `orphaned` |
-| `sandbox.*` | `sandbox/{id}` | vps | `sandbox.created`, `ready`, `extended`, `expired`, `deleted`; `sandbox.snapshot.ready` / `failed` are declared for the planned snapshots; see [sandbox events](/docs/guides/vps/sandboxes#events) |
+| `sandbox.*` | `sandbox/{id}` | vps | `sandbox.created`, `ready`, `extended`, `expired`, `deleted`, `exec.issued`; `sandbox.snapshot.ready` / `failed` when a snapshot settles; see [sandbox events](/docs/guides/vps/sandboxes#events) |
 | `fleet.*` | `fleet/{id}` | fleet | `fleet.drifted`, `fleet.converged` |
 | `rollout.*` | `rollout/{id}` | rollout | `rollout.started`, `paused`, `resumed`, `aborted`, `completed` |
 | `tunnel.*` | `tunnel/{id}` | server | `tunnel.issued` |

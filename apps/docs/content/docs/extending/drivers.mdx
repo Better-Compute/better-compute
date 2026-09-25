@@ -35,6 +35,12 @@ sources:
   - tests/fixtures/bcx-loader.mjs
   - tests/metal-driver-kinds.test.ts
   - tests/server-groups-secrets-drivers.test.ts
+  - daemon/internal/bcx/bcx.go
+  - daemon/internal/bcx/host.go
+  - daemon/internal/bcx/serve.go
+  - daemon/internal/agent/drivers.go
+  - daemon/cmd/bcd/plugins.go
+  - daemon/internal/config/config.go
   - PLAN.md
   - .claude/coordination.md
 ---
@@ -58,8 +64,11 @@ each kind is data: a binding on the node, inherited from its pool's hardware pro
   [what bcd does today](/docs/daemon#what-bcd-does-today).
 - **No control-plane code calls a driver's operations yet.** Metal's BMC steps build commands for the site agent
   instead. Direct calls from TypeScript (`ctx.drivers.for(node)`) are planned for v0.5.
-- **bcx works in TypeScript.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to end, with
-  real subprocesses in its tests. The Go side (`daemon/pkg/bcx`, `/etc/bcd/plugins.d/`) does not exist yet.
+- **bcx works in TypeScript and in bcd.** `@better-compute/driver-sdk` (v0.5 draft) serves and hosts plugins end to
+  end, with real subprocesses in its tests. bcd hosts sha256-pinned plugins from its `[plugins] dir` and runs
+  `driver.invoke` in them (`daemon/internal/bcx`, Go unit tests only); see
+  [driver plugins in bcd](#driver-plugins-in-bcd). The control plane still does not merge the drivers a daemon
+  advertises into its registry.
 </Callout>
 
 ## Driver kinds
@@ -234,8 +243,8 @@ power and deploy), not retry-safe, roles `node`, `site` and `ramdisk`, payload `
 default timeout (each step's own timeout sets `notAfter`). `tests/e2e/bcx.test.ts` runs such steps end to end: a
 module profile binds `power.getPower` and `power.setPower` to a bcx plugin's driver, and both go out as
 `driver.invoke` through the real engine, queue and gateway to a FakeDaemon that runs them in the plugin process
-(`fakeDriverInvoke` from `@better-compute/testing`). bcd has no `driver.invoke` kind yet and answers it
-`UNSUPPORTED`. Metal's own steps
+(`fakeDriverInvoke` from `@better-compute/testing`). bcd runs `driver.invoke` with the same semantics in the
+plugins it hosts (see [driver plugins in bcd](#driver-plugins-in-bcd)); no end-to-end test runs bcd for it yet. Metal's own steps
 (`power.setPower`, `media.insert`, ...) are registered control-plane steps that relay typed commands instead; see
 [workflows](/docs/guides/bare-metal/workflows).
 
@@ -248,7 +257,8 @@ credential reference are, and send one `BmcOperationRequest` (`driver`, `address
 and answers a `BmcOperationResult`. PLAN.md drives BMCs through bmclib (Redfish, IPMI and vendor BMCs); `bcd site`
 today has its own Redfish client only and answers any other driver `unsupported-driver` (see
 [Redfish in bcd site](/docs/guides/bare-metal/bmc#redfish-in-bcd-site)). A new BMC family therefore means a
-driver the site agent can run: built into `bcd site`, or, from v0.5, a bcx plugin next to it. The command kinds and
+driver the site agent can run: built into `bcd site`, or a bcx plugin that `bcd site` hosts. The `bmc.*` kinds do not
+reach plugins; a plugin's operations run through profile steps sent as `driver.invoke`. The command kinds and
 credential handling are on [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 
 ## Out-of-process drivers: bcx
@@ -377,13 +387,60 @@ are backed by the plugin:
   restarted plugin that describes other drivers is logged and the registered ones are kept. `close()` closes stdin,
   sends SIGTERM (not on Windows), then SIGKILL after `shutdownGraceMs`.
 
-### bcx under bcd
+### Driver plugins in bcd
 
-PLAN.md §5.5 has `bcd` run bcx plugins that are sha256-pinned in `/etc/bcd/plugins.d/`, each under its own uid with
-seccomp and cgroup limits, and advertise their manifests in `Hello.drivers` so the control plane merges them as remote
-drivers scoped to those agents. A Go SDK, `daemon/pkg/bcx.Serve`, would serve the same protocol. None of this is in
-the daemon yet, and the control plane does not merge `Hello.drivers` into its driver registry. What it does with
-them today is label the node: at every `Hello` the gateway writes each advertised driver as the system label
+bcd hosts bcx plugins in `bcd node` and `bcd site`, with the Go side of the protocol in `daemon/internal/bcx`.
+(`bcd ramdisk` accepts `driver.invoke` too, but it has no config file, so no plugin directory and no plugins.) Point
+the agent at a plugin directory in `config.toml`; there is no default:
+
+```toml title="/etc/bcd/config.toml"
+[plugins]
+dir = "/etc/bcd/plugins.d"
+```
+
+The directory holds the plugin binaries and a `pins` file in `sha256sum` format, one `<sha256 hex>  <file name>` line
+per plugin (`#` comments and blank lines are skipped). Keep both root-owned, like `config.toml`:
+
+```text title="/etc/bcd/plugins.d/pins"
+9f3e0c…  acme-bmc
+```
+
+At start, before its session opens, the agent runs every plugin the `pins` file names:
+
+1. It hashes the binary and refuses to run it unless the SHA-256 equals its pin.
+2. It makes an ephemeral self-signed P-256 certificate and a fresh 0700 socket directory, and execs the plugin with
+   only `PATH`, `BCX_MAGIC_COOKIE`, `BCX_SOCKET_DIR` and `BCX_CLIENT_CERT` in its environment. The plugin's stderr goes
+   to bcd's.
+3. It waits up to 10 seconds for the handshake line (`bcx|1|unix|<socket>|grpc|<cert>`), dials the socket over gRPC
+   with mTLS, pinning the plugin's certificate byte for byte, and calls `Describe`; a plugin that reports a bcx
+   protocol other than 1 is stopped.
+4. `Hello.drivers` advertises each driver the plugins describe, so the gateway labels the node
+   `bc.dev/driver.<id>=<version>`.
+
+A missing `pins` file runs no plugin (logged as a warning); an unreadable pin line, a pin mismatch or a plugin that
+fails to start is logged and skipped. Plugins are stopped with the agent. Only `driver.invoke` reaches them: the
+`instances` converger drives the runtimes built into bcd, not a plugin of kind `runtime`. bcd does not restart a plugin that exits,
+does not call `Health` on its own, and runs plugins as its own user: PLAN.md §5.5's separate uid, seccomp and cgroup
+limits are not built.
+
+`driver.invoke` then runs in them, as the FakeDaemon's `fakeDriverInvoke` does:
+
+| Step | bcd |
+| --- | --- |
+| Pick the driver | the one hosted driver whose manifest lists the concern among its kinds, restricted to `driver` when the args name one; none is `driver-not-found`, several are `ambiguous-driver` (the step must name one) |
+| Secrets | every top-level `config` field whose value is a `secret://`, `vault://` or `env://` reference is fetched with a node-signed `SecretRequest` bound to the workflow step and sent as a `SecretValue`; the config keeps the reference. A failed fetch is `secret-unavailable` |
+| Request | `InvokeRequest` with the concern as `kind`, the operation, `config_json`, `args_json` (the step's args), the idempotency key `wf:<workflowId>:<stepId>#<attempt>`, the command's `traceparent`, and the command's `not_after` as the deadline, which also cancels the call |
+| Result | `DriverInvokeResult { result_json }`; a `DriverError` keeps its code, any other failure is `driver-error` |
+
+A Go plugin serves the protocol with `bcx.Serve(ctx, impl, os.Stdout)`, where `impl` is a
+`driverv1connect.DriverPluginHandler`: it checks the magic cookie, listens on `plugin.sock` in the host's directory,
+accepts only the host's certificate from `BCX_CLIENT_CERT`, and prints the handshake line. It is the start of a Go
+plugin SDK, internal to the daemon module for now. The Go unit tests run a pinned plugin (the test binary executed
+again as one), a refused unpinned binary, and `driver.invoke` through a hosted driver with a secret; no end-to-end
+test runs bcd with a plugin against the control plane yet.
+
+The control plane does not merge `Hello.drivers` into its driver registry. What it does with them today is label
+the node: at every `Hello` the gateway writes each advertised driver as the system label
 `bc.dev/driver.<id>=<version>` and drops the ones no longer advertised, so placement can require a runtime with
 `PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)). The FakeDaemon
 only advertises an `nvidia` driver of kind `config` on GPU hosts. PLAN.md's v0.5 acceptance includes "a third-party TS driver runs on a

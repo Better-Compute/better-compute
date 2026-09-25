@@ -137,7 +137,8 @@ never from a frame. `Join` also carries the hardware claims, the attestor name (
 daemon version and the role. A `JoinResponseBody` may carry a `JoinDeferral` (v0.2) instead of a certificate: the
 daemon then sends `Join` again with the same CSR, after `retry_after_seconds` or with its answer to a challenge.
 The join flow is described in [joining nodes](/docs/guides/nodes/joining). bcd sends `join-token` (for `bcd join`,
-as role `node` or `site`) and `discovery` (for `bcd ramdisk`, as role `ramdisk`, with the site agent's serialized
+as role `node` or `site`), `provisioned` (for `bcd join --node-id` on an OS a deploy installed; `--attestor` names
+any other) and `discovery` (for `bcd ramdisk`, as role `ramdisk`, with the site agent's serialized
 `SignedDiscoveryAssertion` as the evidence); it answers no attestor challenge yet.
 
 PLAN.md places JoinService and the secret broker in the api, behind internal mTLS. The gateway consumes them as a
@@ -288,9 +289,27 @@ along with its own capabilities. It also stores the daemon's capabilities as `no
 can refuse what an old daemon cannot do safely: `tunnels.open` opens an instance `ssh` or `tcp` tunnel only when the
 node advertises `tunnel.instance-dial` (see [sessions](/docs/daemon/sessions#hello)). Today both sides speak exactly version 1 (`PROTOCOL_VERSION = { min: 1, max: 1 }`
 in TypeScript, `ProtoMin` and `ProtoMax` in Go). When the ranges do not overlap, the daemon is below the server's
-minimum: `Welcome.upgrade_required` is set, no desired state or command other than `daemon.upgrade` is sent, and
-the FakeDaemon and bcd reject anything else `UNSUPPORTED`. bcd has no `daemon.upgrade` kind yet, so an upgrade-only
-bcd session refuses every command until the binary is replaced by hand.
+minimum: `Welcome.upgrade_required` is set, `Welcome.protocol_version` is the gateway's minimum, no desired state or
+command other than `daemon.upgrade` is sent, and the FakeDaemon and bcd reject anything else `UNSUPPORTED`. bcd has
+no `daemon.upgrade` kind yet, so an upgrade-only bcd session refuses every command until the binary is replaced by
+hand.
+
+**The gateway's range.** `createGateway({ protocol: { min, max } })` sets the versions a gateway speaks; the default
+is `PROTOCOL_VERSION`. Negotiation and the `Welcome` use it, so a gateway at `{ min: 1, max: 3 }` welcomes a daemon
+at 1..1 at version 1 and one at 1..2 at version 2, while a gateway at `{ min: 2, max: 3 }` restricts a 1..1 daemon to
+`upgrade_required`. A range with `min` below 1, `max` below `min` or a non-integer bound is `INVALID_CONFIG` at
+construction. It exists for the v1.0 N-2 skew tests and staged protocol bumps (`tests/gateway-protocol.test.ts`);
+no version beyond 1 is defined yet.
+
+**The skew matrix.** `tests/skew-matrix.test.ts` runs each supported daemon line against real dev stacks
+(`createDevStack({ gateway: { protocol }, daemon: { profile } })`). A FakeDaemon `profile` from `daemonSkewProfiles`
+in `@better-compute/testing` makes it behave like an older bcd: the version and protocol range it announces, its
+capabilities, the kinds it rejects `UNSUPPORTED`, the spec sections it reports `SectionUnsupported`, the inventory
+sections and `Hello` fields it never sends. The rows today are N (0.5.0), N-1 (0.4.0, no `instance.snapshot`) and
+N-2 (0.3.0, also no `daemon` section and no `trust_version`); each is welcomed at the highest shared version,
+adopted, runs `inventory.refresh` and gets its missing kinds rejected. `belowMinimumProfile`, and the current line
+against a gateway at `{ min: 2, max: 3 }`, get `upgrade_required`: no spec, and ordinary commands stay pending. A
+release adds a row on top and drops the one that leaves the window.
 
 **What is recorded.** The gateway stores `Hello.daemon_version` and `Hello.proto_max` in `node_sessions`
 (migration `core/0008_session_versions`), which is how the rollout controller sees a node finish an upgrade and
@@ -318,8 +337,9 @@ freeze them. Within the frozen packages, change is absorbed at every level:
 holds their flags; the daemon's dispatcher must carry the same table. Later kinds add their own messages: the
 ramdisk's `diag.dcgm`, `disk.wipe`, `deploy.image` and `boot.kexec` in `bettercompute.agent.v1`, the site agent's
 `bmc.*`, `site.httpProxy`, `boot.prepareRamdisk` and `boot.cleanUp` in `bettercompute.site.v1` (their flags are
-`metalCommandKinds` in `@better-compute/metal`, and bcd implements them), then `driver.invoke` and `daemon.upgrade`,
-which bcd does not.
+`metalCommandKinds` in `@better-compute/metal`, and bcd implements them), then `driver.invoke`, which bcd runs in the
+bcx plugins it hosts (see [drivers](/docs/extending/drivers#driver-plugins-in-bcd)), and `daemon.upgrade`, which bcd
+does not implement yet.
 
 | Kind | Lane | Retry-safe | Self-terminating | Attested | Destructive | Roles |
 | --- | --- | --- | --- | --- | --- | --- |

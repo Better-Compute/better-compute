@@ -1,6 +1,6 @@
 ---
 title: Fleet configuration
-description: Keep sites, provider accounts, pools, quotas, offers and flavors in one reviewed FleetConfig document; export, plan and apply it, and catch drift.
+description: Keep sites, provider accounts, pools, quotas, offers, flavors and sandbox templates in one reviewed FleetConfig document; plan, apply, catch drift.
 metaTitle: FleetConfig as code
 icon: FileCode
 status: new
@@ -11,6 +11,7 @@ sources:
   - packages/fleet/src/config.ts
   - packages/fleet/src/plan.ts
   - packages/fleet/src/state.ts
+  - packages/vps/src/sandboxes.ts
   - packages/fleet/src/drift.ts
   - packages/fleet/src/module.ts
   - packages/cli/src/commands/fleet.ts
@@ -49,13 +50,15 @@ export const compute = betterCompute({
 
 `fleetModule({ driftEvery })` takes one option, how often the drift check runs (default `15m`). It adds the
 migrations `fleet/0001_names` (table `fleet_names`) and `fleet/0002_applied` (table `fleet_applied`), and the
-`fleet.drift` <Term id="reconciler">reconciler</Term>. Flavors and provider accounts are served by the `vps` module;
-without it, `fleet.export` leaves them out and reports them in `missing`, and a document's flavors plan as blocked.
+`fleet.drift` <Term id="reconciler">reconciler</Term>. Flavors, provider accounts and sandbox templates are served by
+the `vps` module; without it (or, for templates, without its v0.5 migrations), `fleet.export` leaves them out and
+reports them in `missing`, and a document's flavors and templates plan as blocked.
 
 ## The document
 
-A document has `version: 1` and any of four lists. References between items are names from the same document or
-objects fleet already manages. Secrets are references only (`secret://`, `vault://` or `env://`), never values.
+A document has `version: 1` and any of five lists. References between items are names from the same document or
+objects fleet already manages. Secrets are references only (`secret://`, `vault://` or `env://`), never values, so
+the document is safe to commit.
 
 ```json title="fleet.json"
 {
@@ -80,11 +83,22 @@ objects fleet already manages. Secrets are references only (`secret://`, `vault:
     },
     { "name": "burst", "site": "fra", "class": "provider", "providerAccount": "cloud" }
   ],
-  "flavors": [{ "pool": "vps-fra", "name": "g1.small", "vcpu": 2, "memoryGiB": 4, "diskGiB": 40 }]
+  "flavors": [{ "pool": "vps-fra", "name": "g1.small", "vcpu": 2, "memoryGiB": 4, "diskGiB": 40 }],
+  "sandboxTemplates": [
+    {
+      "name": "py-small",
+      "pool": "vps-fra",
+      "flavor": "g1.small",
+      "imageId": "ubuntu-24.04",
+      "env": { "PIP_INDEX_URL": "secret://root/sec_01k…" },
+      "network": "private",
+      "warm": { "min": 2, "max": 4 }
+    }
+  ]
 }
 ```
 
-<Tabs items={['sites', 'providerAccounts', 'pools', 'offers', 'flavors']}>
+<Tabs items={['sites', 'providerAccounts', 'pools', 'offers', 'flavors', 'sandboxTemplates']}>
 <Tab value="sites">
 
 <TypeTable
@@ -161,6 +175,28 @@ See [pools](/docs/guides/capacity/pools).
 See [flavors](/docs/guides/vps/flavors).
 
 </Tab>
+<Tab value="sandboxTemplates">
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: 'Same form as a site name; the key fleet matches on.', required: true },
+    pool: { type: 'string', description: 'A pool name in this document, or the id (pool_…) of a pool offered to the tenant. Fixed once created.', required: true },
+    flavor: { type: 'string', description: 'A flavor name of that pool.', required: true },
+    imageId: { type: 'string', description: 'The image the template boots.', required: true },
+    runtime: { type: 'string', description: "Must be the pool's runtime. Fixed once created.", default: "the pool's" },
+    userData: { type: 'string', description: 'Cloud-init of at most 32 KiB, or a secret://<tenant>/<id> reference to it.' },
+    defaultTtlSeconds: { type: 'number', description: '60 to 2592000.' },
+    maxTtlSeconds: { type: 'number', description: '60 to 2592000.' },
+    warm: { type: '{ min: number; max?: number }', description: '0 to 64 each.' },
+    env: { type: 'Record<string, string>', description: 'Variable names (A-Z, 0-9, _) to secret://<tenant>/<id> references only, written to /etc/sandbox/env in each sandbox.' },
+    network: { type: "'egress' | 'private' | 'none'", description: "What the sandbox's NICs may reach.", default: "'egress'" },
+  }}
+/>
+
+Only the fields you list are compared, so TTL bounds and warm sizes the server filled in are not drift. `env` is
+compared and replaced as a whole map. See [sandboxes](/docs/guides/vps/sandboxes#templates).
+
+</Tab>
 </Tabs>
 
 Validation rejects unknown fields, a `version` other than 1, lists over 1000 items, repeated names (flavors repeat
@@ -171,8 +207,9 @@ or more.
 ### Names instead of ids
 
 Sites and pools have no name of their own, so fleet keeps the names it gave them in `fleet_names`. Provider accounts
-use their `name`, flavors are named `<pool>/<name>`, offers `<pool> -> <tenant>`, and owner quotas
-`<pool>:<resource>`.
+and sandbox templates use their `name`, flavors are named `<pool>/<name>`, offers `<pool> -> <tenant>`, and owner
+quotas `<pool>:<resource>`. An exported template names a pool offered to the tenant by its id, since the pool is not
+the tenant's.
 
 - **Objects fleet did not create** appear in an export under their id (`pool_01...`). Keep those names: the plan
   matches by name, so a new name plans a new object.
@@ -199,14 +236,17 @@ What each kind can do:
 | Owner quota | `quotas.set` | `quotas.set` | No | |
 | Offer | `pools.offer` | `pools.offer` (`quota`, `includeDescendants`, `priority`) | `pools.unoffer` | |
 | Flavor | `flavors.create` | `flavors.update` (`vcpu`, `memoryGiB`, `diskGiB`, `gpus`, `offerId`) | `flavors.delete` | |
+| Sandbox template | `sandboxTemplates.create` | `sandboxTemplates.update` (`flavor`, `imageId`, `userData`, `defaultTtlSeconds`, `maxTtlSeconds`, `network`, `env`, `warm`) | `sandboxTemplates.delete`: its warm instances are deleted, running sandboxes keep their TTL | `pool`, `runtime` |
 
 A change is **blocked** when it touches a field that cannot change, names an unknown site, pool or provider account,
-offers a pool to its own owner, or lists flavors on a deployment without `vps`. Fix the document, or create a new
+offers a pool to its own owner, or lists flavors or sandbox templates on a deployment without them (a template then
+reads `this deployment does not run sandboxes (vps v0.5)`). Fix the document, or create a new
 object instead of changing a fixed field. Without `prune`, items the document leaves out are left alone, so you can
 adopt FleetConfig one list at a time.
 
 Calls run in dependency order: provider account creates and updates, site creates, pool creates, pool updates and
-quotas, offers, flavor creates and updates, flavor deletes, unoffers, pool archives, and provider account deletes.
+quotas, offers, flavor creates and updates, sandbox template creates and updates, template deletes, flavor deletes,
+unoffers, pool archives, and provider account deletes.
 
 ## Apply
 
@@ -255,6 +295,7 @@ The caller therefore needs `compute:fleet:admin` and the permission of every cal
 | `quotas.set` | `compute:quotas:manage` |
 | `flavors.create`, `flavors.update`, `flavors.delete` | `compute:flavors:manage` |
 | `providerAccounts.create`, `providerAccounts.update`, `providerAccounts.delete` | `compute:providers:manage` |
+| `sandboxTemplates.create`, `sandboxTemplates.update`, `sandboxTemplates.delete` | `compute:sandboxes:manage` |
 
 Every call writes its own audit row, and the apply writes one more after it succeeds. The result is
 `{ plan, applied }`, the number of calls that ran.

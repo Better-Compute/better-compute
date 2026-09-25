@@ -286,9 +286,10 @@ refuse it with `INVALID_STATE` ("Instance … is managed by sandbox …" or "…
 the sandbox's `instanceId` points the other way. The instance events vps publishes for them carry `data.sandboxId`
 or `data.warmTemplateId`.
 
-`tunnels.open` does not consult either column: a sandbox's instance takes `exec`, `ssh` and `tcp` tunnels like any
-other hosted instance once it is `running`, decided as `compute:instances:exec` on the instance, whose owner is the
-sandbox's owner. A warm instance is `paused` or `stopped`, so a tunnel to it is `INVALID_STATE`.
+`tunnels.open` refuses both kinds too, for every op, with `INVALID_STATE` and `details.reason: 'sandbox-managed'`,
+so `compute:instances:exec` on the instance cannot bypass the sandbox's own decision. The way into a sandbox is
+[`sandboxes.exec`](/docs/guides/vps/sandboxes#run-code-inside), decided as `compute:sandboxes:exec` on the sandbox;
+a warm instance takes no tunnels at all.
 
 ### Paused instances
 
@@ -460,7 +461,7 @@ interface RuntimeDriver {
   reboot(instanceId: string): Promise<void>;
   remove(instanceId: string): Promise<void>; // an absent instance counts as removed
   console?(instanceId: string): Promise<DuplexStream>; // the serial console, for tunnels
-  // v0.5, for sandboxes: warm pools and (planned) snapshots
+  // v0.5, for sandboxes: warm pools and snapshots
   pause?(instanceId: string): Promise<void>; // vCPUs stopped, memory resident
   resume?(instanceId: string): Promise<void>;
   snapshot?(instanceId: string, target: RuntimeSnapshotTarget): Promise<RuntimeSnapshotResult>;
@@ -470,8 +471,10 @@ interface RuntimeDriver {
 `pause` and `resume` serve [sandbox warm pools](/docs/guides/vps/sandboxes#warm-pools): a runtime that implements
 them sets `pause: true` in its `RuntimeTraits`, and `builtinRuntimeTraits` does so for `libvirt-kvm`,
 `cloud-hypervisor` and `firecracker` (not `containerd`). vps then keeps warm instances `paused` on that runtime; see
-[paused instances](#paused-instances). `snapshot` and `InstanceSpec.restoreFrom` are seams for sandbox snapshots,
-which are planned: no API method snapshots an instance in this release.
+[paused instances](#paused-instances). `snapshot` and `InstanceSpec.restoreFrom` serve
+[sandbox snapshots](/docs/guides/vps/sandboxes#snapshots-and-restore): `sandboxes.snapshot` sends the host an
+`instance.snapshot` command, and `sandboxes.create({ fromSnapshot })` boots a new instance from one. No
+`instances.*` method snapshots a plain instance.
 
 `libvirt-kvm` and `cloud-hypervisor` are planned as runtimes built into bcd for v0.3, and neither is implemented yet:
 bcd's `instances` converger drives them through its `Runtime` interface, and today only fakehw builds provide one, a

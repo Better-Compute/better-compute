@@ -273,8 +273,8 @@ its result is journaled.
 
 These are the kinds bcd registers (`daemon/internal/agent/kinds.go` and `site.go`), with the lanes, roles and flags
 of `commandKinds` in `@better-compute/protocol`, `metalCommandKinds` in `@better-compute/metal` and
-`instanceSnapshotKind` in `@better-compute/vps`. A kind outside
-the agent's role is `UNSUPPORTED`.
+`instanceSnapshotKind` in `@better-compute/vps`, plus `driver.invoke`, which `provisionModule()` registers. A kind
+outside the agent's role is `UNSUPPORTED`.
 
 | Lane | Kind | Roles | Flags |
 | --- | --- | --- | --- |
@@ -291,6 +291,7 @@ the agent's role is `UNSUPPORTED`.
 | `provision` | `disk.wipe` | ramdisk | attested, destructive |
 | `provision` | `deploy.image` | ramdisk | destructive |
 | `provision` | `diag.dcgm` | ramdisk, node | retry-safe, attested |
+| `provision` | `driver.invoke` | node, site, ramdisk | destructive; runs in a bcx plugin bcd hosts (see [drivers](/docs/extending/drivers#driver-plugins-in-bcd)) |
 | `bulk` | `logs.collect` | node, site, ramdisk | retry-safe |
 | `bulk` | `instance.snapshot` | node | none (not retry-safe) |
 

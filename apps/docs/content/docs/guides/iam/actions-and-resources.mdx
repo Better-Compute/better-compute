@@ -45,7 +45,7 @@ resource, it calls compute's <Term id="resolver">resolver</Term>, which answers 
 | `compute-image` | An OS or ramdisk image | | | `visibility`, `verified` |
 | `compute-profile` | A provisioning profile | | | |
 | `compute-provider-account` | An account with an external capacity provider | | | |
-| `compute-sandbox` | A [sandbox](/docs/guides/vps/sandboxes) (v0.5): a VPS instance with a template and a lifetime, decided while it is still a draft | `compute-pool` | | `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `fromSnapshot`, `warm` (vps writes all but `fromSnapshot`, which waits for snapshot restore) |
+| `compute-sandbox` | A [sandbox](/docs/guides/vps/sandboxes) (v0.5): a VPS instance with a template and a lifetime, decided while it is still a draft | `compute-pool` | | `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `warm`, and `fromSnapshot` on a restore |
 | `compute-sandbox-template` | A tenant's sandbox template (v0.5): pool, flavor, image, runtime, TTL bounds, warm pool | | | |
 
 Besides a row's attributes, every resolved resource carries `ownerId` when the row has an owner, and the prefixed
@@ -171,7 +171,8 @@ See [Modules](/docs/extending/modules) and [Methods](/docs/extending/methods).
 This table is rendered from the live method registry. The normative source is PLAN.md §9.2, kept as `apiSurface`
 in `@better-compute/core`: `scripts/authz-matrix.mjs` generates one test per row, and
 `tests/iam-bridge-matrix.test.ts` checks every action and type pair against a real Better IAM carrying the
-bridge, allowing each only when granted.
+bridge, allowing each only when granted. It decides through compute's own `IamPort`: `bridge.embedded` under
+`pnpm test`, and `bridge.remote` over the IAM's HTTP API under `pnpm test:iam-remote`.
 
 - **Decided on** is the resource type of the one decision. Its id comes from the input: the pool for
   `compute-pool`, the tenant for `compute-tenant`, `global` for `compute-fleet`.
@@ -339,8 +340,8 @@ bridge, allowing each only when granted.
 | [`sandboxes.list`](/docs/reference/api/sandboxes#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |
 | [`sandboxes.get`](/docs/reference/api/sandboxes#get) | `compute:sandboxes:read` | `compute-sandbox` | v0.5 |
 | [`sandboxes.extend`](/docs/reference/api/sandboxes#extend) | `compute:sandboxes:update` | `compute-sandbox` | v0.5 |
-| [`sandboxes.snapshot`](/docs/reference/api/sandboxes#snapshot) | `compute:sandboxes:update` | `compute-sandbox` | v0.5, planned |
-| [`sandboxes.exec`](/docs/reference/api/sandboxes#exec) | `compute:sandboxes:exec` | `compute-sandbox` | v0.5, planned |
+| [`sandboxes.snapshot`](/docs/reference/api/sandboxes#snapshot) | `compute:sandboxes:update` | `compute-sandbox` | v0.5 |
+| [`sandboxes.exec`](/docs/reference/api/sandboxes#exec) (hosted by the tunnels module) | `compute:sandboxes:exec` | `compute-sandbox` | v0.5 |
 | [`sandboxes.delete`](/docs/reference/api/sandboxes#delete) | `compute:sandboxes:delete` | `compute-sandbox` | v0.5 |
 | [`sandboxTemplates.create`](/docs/reference/api/sandbox-templates#create) | `compute:sandboxes:manage` | `compute-tenant` | v0.5 |
 | [`sandboxTemplates.list`](/docs/reference/api/sandbox-templates#list) | `compute:sandboxes:read` | `compute-tenant` + items | v0.5 |

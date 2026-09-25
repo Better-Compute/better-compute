@@ -27,6 +27,10 @@ sources:
   - daemon/internal/runtime/runtime.go
   - daemon/internal/agent/imds.go
   - daemon/internal/imds/imds.go
+  - daemon/internal/bcx/bcx.go
+  - daemon/internal/bcx/host.go
+  - daemon/internal/agent/drivers.go
+  - daemon/cmd/bcd/plugins.go
   - tests/e2e/bcd-vps.test.ts
   - daemon/internal/agent/access.go
   - daemon/internal/agent/tunnels.go
@@ -150,7 +154,7 @@ Beside the modes, bcd has four local commands, all of which work:
 
 | Command | Does |
 | --- | --- |
-| `bcd join` | Joins the fleet with a join token read from `BCD_JOIN_TOKEN` or standard input, never from arguments. `--role` is `node` (the default) or `site`; the token decides what is allowed. It seals the token to the key in `join-encryption.jwk` next to the config (refused unless it matches `join_encryption_key_pin`), verifies the signed `JoinResponse`, writes `node.key` and `identity.json` under `data_dir`, and prints `joined as <node> (site <site>, role <role>)` |
+| `bcd join` | Joins the fleet with a join token read from `BCD_JOIN_TOKEN`, standard input or `--token-file` (deleted once the join succeeds), never from arguments. `--role` is `node` (the default) or `site`; the token decides what is allowed. It seals the token to the key in `join-encryption.jwk` next to the config, or, when that file is absent and `--server https://…` is given, to `join.encryptionJwk` from the control plane's `/.well-known/better-compute`; either key is refused unless it matches `join_encryption_key_pin`. `--node-id` joins an installed OS with the `provisioned` attestor and fails unless the joined node is that one; `--attestor` names another. It verifies the signed `JoinResponse`, writes `node.key` and `identity.json` under `data_dir`, and prints `joined as <node> (site <site>, role <role>)`. With `--server` and no `config.toml` at all, it reads the gateway (`gateway.url`, `serverName`, `servingCaPin`) and the join pins from that well-known document, joins, then writes `config.toml` (0600) and `join-encryption.jwk` (0644). A node that already joined exits 0 without a token, so a join unit may run on every boot; a different `--node-id` is refused |
 | `bcd status` | Asks the running agent (node, site or ramdisk) over its root-only unix socket (`--socket`, default `/run/bcd/bcd.sock`; `--json` for JSON) for its node, site and role, boot, session epoch and clock offset, applied and observed generations with each section's state, running and deferred commands, the event backlog, certificate expiry, trust bundle version and whether signed intent is enforced |
 | `bcd doctor` | Checks the configuration file, NVML, the hardware backend, `/dev/kvm`, IOMMU units, a TCP connection to the gateway and the node's identity |
 | `bcd version` | Prints the version, platform, Go version and build tags |
@@ -185,15 +189,16 @@ check fails. There is no clock check yet.
 ## What bcd does today
 
 `bcd node` is the v0.1 node agent (`daemon/internal/agent`); `bcd site` and `bcd ramdisk` run the same agent with
-their own kinds. What it implements and what is still missing, as of commit be1e7d9:
+their own kinds. What it implements and what is still missing, as of commit 797915d:
 
 | Area | Implemented | Missing |
 | --- | --- | --- |
-| Identity | Join with a sealed `join-token` as role `node` or `site`; the ramdisk's `discovery` join (the token and the site agent's signed assertion from the kernel command line); a retried deferral with the same CSR, `JoinResponse` verification (pinned signer, CSR binding, leaf key, SPIFFE id, role); renewal at 60% of the lifetime with proof of possession and a new key | TPM keys (the key is a 0600 `node.key` file), attestor challenges, the `.well-known` key fallback |
+| Identity | Join with a sealed `join-token` as role `node` or `site`; a `provisioned` join for an OS a deploy installed (`--token-file`, `--node-id`, `--server` for the well-known join key); the ramdisk's `discovery` join (the token and the site agent's signed assertion from the kernel command line); a retried deferral with the same CSR, `JoinResponse` verification (pinned signer, CSR binding, leaf key, SPIFFE id, role); renewal at 60% of the lifetime with proof of possession and a new key | TPM keys (the key is a 0600 `node.key` file), attestor challenges, the `.well-known` fallback for a stale key file (bcd reads the well-known key only when `join-encryption.jwk` is absent and `--server` is given) |
 | Transport | gRPC over HTTP/2 with connect-go (`Join`, `Renew`, `Session`, `Tunnel`), TLS 1.3 pinned to the serving CA's SPKI (never system roots), mTLS with the node certificate, HTTP/2 pings every 20 s; `gateway_server_name` for a gateway reached by IP | The WebSocket fallback |
 | Session | Hello from the journal (with the trust bundle version it holds), Welcome (epoch, event ack, clock offset, requested sections, signed trust bundle), heartbeats with lane credits (inventory hashes every 10th), `Ack`, `Cancel`, `Drain`, `RevocationNotice`, `OpenTunnel`, secret and workload-token answers, full-jitter redial; a Welcome more than 5 minutes before the server time mark is refused, and one within that allowance never moves the working clock back; a newer trust bundle is acknowledged once, in the next `StatusReport` (`trust_version` is 0 in every other report) | |
 | Journal | bbolt, every write fsynced; the command rules, results with their `boot_id`, the `cancelled` outcome, the TTL sweep, spent exec-ticket ids (kept until 5 minutes after the ticket expires); a corrupt file is moved aside | |
-| Commands | `inventory.refresh`, `diag.nvml`, `logs.collect` (redacted bundle to a presigned https URL), `gpu.reset` (refuses a GPU with a live hold, reads health back), `node.reboot` (self-terminating); on a site agent `bmc.*`, `site.httpProxy`, `boot.prepareRamdisk` and `boot.cleanUp`; in the ramdisk `disk.wipe`, `deploy.image`, `boot.kexec` and `diag.dcgm` (also on nodes); on a VPS host `instance.snapshot` (disk, and optionally memory, uploaded to a presigned https URL with its SHA-256); the acceptance order; signed commands verified once the trust bundle holds command-signing roots; attested results node-signed | `daemon.upgrade`, `driver.invoke` and every other registered kind (answered `UNSUPPORTED`) |
+| Commands | `inventory.refresh`, `diag.nvml`, `logs.collect` (redacted bundle to a presigned https URL), `gpu.reset` (refuses a GPU with a live hold, reads health back), `node.reboot` (self-terminating); on a site agent `bmc.*`, `site.httpProxy`, `boot.prepareRamdisk` and `boot.cleanUp`; in the ramdisk `disk.wipe`, `deploy.image`, `boot.kexec` and `diag.dcgm` (also on nodes); on a VPS host `instance.snapshot` (disk, and optionally memory, uploaded to a presigned https URL with its SHA-256); `driver.invoke` (node, site and ramdisk) into a hosted bcx driver plugin; the acceptance order; signed commands verified once the trust bundle holds command-signing roots; attested results node-signed | `daemon.upgrade` and every other registered kind (answered `UNSUPPORTED`) |
+| Driver plugins | The bcx host (`internal/bcx`): the plugins of `[plugins] dir` named in its `pins` file, each run only if its binary's SHA-256 is its pin, over the go-plugin style handshake and gRPC with pinned mTLS on a unix socket; their drivers are advertised in `Hello.drivers`. `bcx.Serve` is the plugin side for Go plugins. See [drivers](/docs/extending/drivers#driver-plugins-in-bcd) | Restarting a plugin that exits; a plugin that fails to start is logged and skipped |
 | Desired state | Full specs and patches, signature checks with command-signing roots, stored and enforced offline; `devices` (CDI holds and env files, node-signed `AllocationBound` and `AllocationReleased`, `AllocationFailed`); `access` (break-glass SSH: the sshd drop-in, CA, node-bound principals and a KRL; the exec-ticket JWKS; a CA key or principal that could inject an sshd line makes the whole spec invalid, signed or not); `instances` (below); `telemetry` accepted; `site` (the boot lease state, and `cache_images` pulled into the image cache: `PROGRESSING` while they warm) | `host` and `daemon` converge only when empty, else `SectionUnsupported` |
 | Instances | The `instances` converger over a `Runtime` interface (`List`, `Ensure`, `SetState`, `Destroy`), on node agents: the section is the whole desired set; a domain bcd did not create is only reported; user data is fetched with a `SecretRequest` bound to the allocation; `RUNNING`, `PAUSED` and `STOPPED`; `restore_from` boots a new instance from a snapshot, downloaded to `data_dir/snapshots/<sha256>` and verified first (another runtime, or a memory snapshot from another CPU model, fails it); a failing instance fails alone (`InstanceFailed`); `StatusReport.instances` lists every domain with `instances_complete`, and `Hello.drivers` lists each runtime (kind `runtime`). fakehw builds run a file-backed stand-in named `libvirt-kvm`; `tests/e2e/bcd-vps.test.ts` runs it against the control plane. The metadata service on `[imds] listen`: `PUT /latest/api/token`, then `GET /latest/identity-token?audience=`, for the running instance that holds the request's source address | A real runtime: a host build has none, so a non-empty `instances` section fails (`this host runs no instance runtime`) and no VM boots on real hardware |
 | Tunnels | `OpenTunnel` with the exec ticket re-verified against the pinned JWKS and the journaled `jti` set; for node tickets `console` on a real pseudo-terminal, `ssh` and `tcp` to loopback ports; for instance tickets `ssh` (port 22) and `tcp` to the instance's own address as its runtime reports it, never a loopback, link-local or host address; `tunnel.instance-dial` advertised when the host runs a runtime; at most 16 at once | `exec` and `console` into a guest (they need a guest agent: the tunnel closes with exit status 127) |
@@ -257,6 +262,7 @@ go-nvml is not added yet.
 | `internal/bootparams` | the `bc.*` kernel command line between `bcd site` and `bcd ramdisk` (`Render`, `Parse`) | done |
 | `internal/redfish` | the site agent's Redfish client | done for the operations listed above |
 | `internal/pxe` | the boot server's first stage: a proxy DHCP server that never hands out addresses, and a read-only TFTP server | done |
+| `internal/bcx` | the out-of-process driver protocol: `Start` hosts a sha256-pinned plugin (handshake, pinned mTLS, `Describe`, `Invoke`, `Health`), `Serve` is the plugin side | done |
 | `internal/imds` | the VPS host's metadata service: session tokens bound to the calling instance, workload tokens per audience, forwarded requests refused | done |
 | `internal/runtime` | the `Runtime` interface instance runtimes implement, and `Fake`, a file-backed runtime whose domains outlive the process and stop on a new boot id | interface and fake done; `libvirt-kvm` and `cloud-hypervisor` not written |
 | `internal/config` | `/etc/bcd/config.toml` in a strict TOML subset | done |
@@ -317,8 +323,9 @@ better-compute dev --memory --sim 8
 better-compute sim --nodes 100 --chaos heavy --seed 7
 ```
 
-Where the two differ, the FakeDaemon is still ahead on the WebSocket fallback, self-update and `driver.invoke`. bcd
-matches it on joining, sessions, the journal, signed intent, the five v0.1 kinds, the `devices` section, the
+Where the two differ, the FakeDaemon is still ahead on the WebSocket fallback and self-update. bcd
+matches it on joining, sessions, the journal, signed intent, the five v0.1 kinds, `driver.invoke` (the same driver
+selection, secret handling and idempotency key), the `devices` section, the
 `instances` rules (on a fakehw build; the FakeDaemon's `FakeHypervisor` and bcd's fake runtime follow the same ones),
 the metadata service's contract, tunnels (both advertise `tunnel.instance-dial`: the FakeDaemon when its tunnels are
 configured, bcd when it runs a runtime), secret and workload-token requests, XID conditions and host pressure. bcd is ahead on the `access`

@@ -2,7 +2,7 @@
   {
     "id": "sandbox",
     "term": "Sandbox",
-    "definition": "An isolated place to run untrusted code, served by `sandboxes.create`: one hosted VPS instance made from a per-tenant template (pool, flavor, image), with a time-to-live after which it is deleted, and optionally claimed from the template's warm pool of paused (or stopped) instances. Instance methods refuse a sandbox's instance. Snapshots and exec are planned.",
+    "definition": "An isolated place to run untrusted code, served by `sandboxes.create`: one hosted VPS instance made from a per-tenant template (pool, flavor, image), with a time-to-live after which it is deleted, and optionally claimed from the template's warm pool of paused (or stopped) instances. Instance methods refuse a sandbox's instance. It can be snapshotted and restored, and `sandboxes.exec` reaches it over SSH through a tunnel, with no agent in the guest.",
     "href": "/docs/guides/vps/sandboxes"
   },
   {
@@ -408,6 +408,18 @@
     "href": "/docs/guides/rollouts"
   },
   {
+    "id": "sandbox-ssh-ca",
+    "term": "Sandbox SSH CA",
+    "definition": "The deployment's SSH certificate authority for `sandboxes.exec`, separate from the break-glass CA: it signs certificates of at most 15 minutes for the principal `<account>@<instanceId>`, and every sandbox instance's user data makes its sshd trust it for its own principal only.",
+    "href": "/docs/guides/vps/sandboxes#run-code-inside"
+  },
+  {
+    "id": "sandbox-template",
+    "term": "Sandbox template",
+    "definition": "A tenant's recipe for sandboxes (`sandboxTemplates.*`): a hosted pool, a flavor, an image and the pool's runtime, optional user data, `env` as `secret://` references, `network` (`egress`, `private` or `none`), TTL bounds and a warm pool size.",
+    "href": "/docs/guides/vps/sandboxes#templates"
+  },
+  {
     "id": "session",
     "term": "Session",
     "definition": "The long-lived gRPC stream a daemon holds to one gateway, opened with `Hello` and answered with `Welcome`. Each new session increments the node's epoch, which fences the old one.",
@@ -478,6 +490,12 @@
     "term": "Usage window",
     "definition": "One row per allocation, hour and meter in `usage_windows`, such as `gpu.h100.hours`, written by the usage reconcilers every 5 minutes and sent to Better IAM billing with an idempotency key, so every retry is safe.",
     "href": "/docs/guides/capacity/quotas-and-usage"
+  },
+  {
+    "id": "warm-pool",
+    "term": "Warm pool",
+    "definition": "The instances a sandbox template keeps booted and then `paused` (or `stopped` on a runtime that cannot pause), so `sandboxes.create` can claim one after its own IAM decision without a new placement. Warm instances are charged to the tenant's quota and metered as `vps.sandbox.warm` until claimed.",
+    "href": "/docs/guides/vps/sandboxes#warm-pools"
   },
   {
     "id": "work-queue",

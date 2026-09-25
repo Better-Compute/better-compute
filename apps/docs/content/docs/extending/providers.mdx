@@ -232,11 +232,19 @@ tenant-readable user data. `hetzner-robot` shows how:
 1. Activate rescue with the account's SSH key and wait for SSH through an injected `SshExecutor`.
 2. Write the token over SSH **stdin** into a `umask 077` file, so it never appears in argv or the script.
 3. Run `installimage` (software RAID 1 over NVMe, else SATA) with a post-install script that places the token at
-   `/etc/better-compute/join-token` (0600), downloads `bcd` over https, checks its sha256, enables it, and shreds
-   itself.
+   `/etc/bcd/join-token` (0600), downloads `bcd` over https, checks its sha256, installs two units and shreds
+   itself: `bcd-join.service`, a oneshot running `bcd join --server <controlPlaneUrl> --token-file /etc/bcd/join-token
+   --attestor provisioned` (`robotJoinArgv`), and `bcd.service` (`bcd node`) after it.
 4. Reboot and deactivate rescue.
 
-The installed `bcd` joins through the `provisioned` attestor. Without a `resolveTarget` that maps the token to a node,
+Robot needs the control plane's URL, `vps({ bootstrap: { controlPlaneUrl } })`, passed to `ProviderImpl.bootstrap`.
+It is optional in `vps()`, where a value that could break out of a unit file (anything but https, or spaces,
+quotes, `%` or `$`) is `INVALID_CONFIG` at startup; the Robot adapter refuses a missing or unsafe one with
+`INVALID_INPUT` before anything reaches the machine. With no `config.toml` on the new system, `bcd join --server`
+reads the gateway and the join pins from the control plane's `/.well-known/better-compute`, joins, and writes
+`config.toml` itself. A join unit that runs again after the node joined exits 0. The installed `bcd` joins through
+the `provisioned` attestor. `scripts/daemon-install-contract.mjs` writes the exact command lines the cloud-init,
+Ignition and Robot installs run, and bcd's `TestInstallContract` parses each with its real flags. Without a `resolveTarget` that maps the token to a node,
 the token must carry `expect: { productUuid }`, and the machine joins as a new node. See
 [attestors](/docs/extending/attestors).
 

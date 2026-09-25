@@ -42,7 +42,7 @@ the best worked examples of the contracts on the other pages of this section.
 | 1. Ubuntu autoinstall via Redfish virtual media | v0.2 | a control-plane step, a profile, a plugin | `tests/extensions/ubuntu-autoinstall.test.ts` | runs in simulation |
 | 2. VPS provider `acme-cloud` | v0.3 | `defineProvider`, conformance cases, a provider pool | `tests/extensions/acme-cloud.test.ts` | runs against an in-memory cloud emulator, live and from a recording |
 | 3. Talos on an agentless pool | v0.3 | a relaying step, a profile, `site.httpProxy` | `tests/extensions/talos.test.ts`, `tests/metal-fakedaemon.test.ts` | runs in simulation and on the dev stack |
-| 4. Kata runtime in Go | v0.5 | a bcx `runtime` plugin in `plugins.d` | none | not started |
+| 4. Kata runtime in Go | v0.5 | a bcx `runtime` plugin in bcd's `[plugins] dir` | none | not started; bcd hosts plugins, but its `instances` converger does not use them |
 | Emulated site | v0.2 | a hardware profile, the whole metal lifecycle | `examples/emulated-site` | configuration checked; needs Linux, KVM and a `bcd` build to run |
 
 <Callout type="warn" title="No real hardware yet">
@@ -179,13 +179,15 @@ pnpm vitest run tests/extensions/acme-cloud.test.ts
 
 ## Walkthrough 4: a Kata runtime over bcx
 
-A `runtime` driver written in Go, listed in `/etc/bcd/plugins.d/`, advertised in `Hello.drivers`, and selected by pools
+A `runtime` driver written in Go, pinned in bcd's `[plugins] dir`, advertised in `Hello.drivers`, and selected by pools
 through `vps({ runtimes })`. The TypeScript half of bcx is in `@better-compute/driver-sdk`, with a real-subprocess test
-suite, but `bcd` does not run plugins and the Go SDK does not exist. The control-plane half is in place: the gateway
-writes each driver a daemon advertises in `Hello.drivers` as the node label `bc.dev/driver.<id>=<version>`, and a
-`PlacementRequest.nodeLabels` constraint places only on nodes that carry it (see
-[placement](/docs/guides/capacity/placement#eligibility-filters)); vps does not set that constraint yet. See
-[drivers](/docs/extending/drivers#bcx-under-bcd).
+suite. bcd now hosts pinned plugins and advertises their drivers, and `bcx.Serve` in `daemon/internal/bcx` is the
+start of a Go plugin SDK, but bcd's `instances` converger drives only the runtimes built into bcd, not a plugin, and no
+Kata plugin exists. The control-plane half is in place: the gateway writes each driver a daemon advertises in
+`Hello.drivers` as the node label `bc.dev/driver.<id>=<version>`, and vps places an instance whose runtime is not built
+into bcd only on nodes carrying `bc.dev/driver.<runtime>` (`runtimeNodeLabels`, through
+`PlacementRequest.nodeLabels`; see [placement](/docs/guides/capacity/placement#eligibility-filters)). See
+[drivers](/docs/extending/drivers#driver-plugins-in-bcd).
 
 ## The emulated site
 

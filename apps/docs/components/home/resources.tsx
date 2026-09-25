@@ -74,7 +74,7 @@ const vm = await client.instances.create({
     label: 'Sandbox',
     unit: 'isolated VMs',
     summary:
-      'Run untrusted code in its own VM, started from a template and deleted when its time is up. A template keeps warm instances ready, so a sandbox is claimed instead of cold-booted. Nothing of the platform runs inside the guest. The API is built and tested against simulated hosts; the VM runtime on bcd is not built yet, and snapshots and exec are planned.',
+      'Run untrusted code in its own VM, started from a template and deleted when its time is up. A template keeps warm instances ready, so a sandbox is claimed instead of cold-booted, and it can be snapshotted and restored. Commands run over SSH with short-lived certificates, with nothing of the platform inside the guest. The API is built and tested against simulated hosts; the VM runtime on real bcd hosts is not built yet.',
     specs: [
       ['Started from', 'a template: pool, flavor, image'],
       ['Lifetime', 'TTL from admission, extendable'],
@@ -102,7 +102,8 @@ const sandbox = await client.sandboxes.create({
 });
 // { id: 'sbx_…', state: 'ready', warm: true, instanceId, expiresAt }
 
-await client.sandboxes.extend({ tenantId: 'acme', sandboxId: sandbox.id, by: '30m' });`,
+await client.sandboxes.extend({ tenantId: 'acme', sandboxId: sandbox.id, by: '30m' });
+// From a terminal: better-compute sandbox exec sbx_… -- make test`,
   },
 ];
 

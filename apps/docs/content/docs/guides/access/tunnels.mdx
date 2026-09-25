@@ -238,6 +238,7 @@ It refuses what cannot be tunneled:
 | An unknown instance, a draft, another tenant's instance, or a node the tenant cannot see | `NOT_FOUND` |
 | A provider instance, which has no node agent to tunnel through | `UNSUPPORTED` |
 | An instance that is not `running`, or a node that is not connected to a gateway | `INVALID_STATE` |
+| A [sandbox's](/docs/guides/vps/sandboxes#run-code-inside) instance or a warm sandbox instance, for any op: use `sandboxes.exec` | `INVALID_STATE` with `details.reason: 'sandbox-managed'` |
 | An instance `ssh` or `tcp` tunnel whose node's current session does not advertise the `tunnel.instance-dial` capability (`node_sessions.capabilities`, from `Hello`) | `UNSUPPORTED` with `details: { reason: 'daemon-capability', capability }` |
 
 The capability check exists because a daemon that cannot dial the instance's own address would reach the host's

@@ -27,6 +27,7 @@ sources:
   - tests/server-admission.test.ts
   - tests/server-admission-check.test.ts
   - tests/server-async-wait.test.ts
+  - scripts/api-surface.mjs
   - PLAN.md
 ---
 
@@ -386,3 +387,18 @@ logs. `isComputeError(error, code?)` recognizes errors from a second copy of the
 
 Leave `UNAUTHENTICATED`, `ACCESS_DENIED`, `CONFIRMATION_REQUIRED`, `CSRF_REJECTED` and the transport codes to the
 envelope. The [error reference](/docs/reference/errors) lists every code.
+
+## Adding a method to Better Compute itself
+
+This applies when you change the repository's own groups, not your plugin's. Better Compute's API surface is frozen
+toward v1.0: `pnpm lint:repo` runs `scripts/api-surface.mjs`, which compares every method of core's `apiSurface` and
+the registry (route, kind, IAM action, resource, alternatives, list flag, status, phase and input JSON Schema) and every
+error code's HTTP status with the recorded `generated/api-surface.json`. A new method, a new optional field or a
+wider schema is an addition and passes; removing a served method, changing its route, action or resource, or
+narrowing its input (a new required field, a tighter bound, a lost enum value) fails. A method that is still planned
+may change freely.
+
+After adding or widening a method, regenerate the docs (`node apps/docs/scripts/generate.mjs`, which the check reads)
+and record the addition with `pnpm api:surface`, so the new shape is frozen too. Until it is recorded the check only
+reports it. See [the API surface freeze](/docs/operations/testing#the-api-surface-freeze). A new (action, resource)
+pair is also covered by the authz matrix, from the §9.2 table in core, in both IAM modes.

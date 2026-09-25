@@ -81,6 +81,7 @@ broken set to `onError`. `serve` does this for you with `host.gateway.tlsFiles`;
 | `credits` | control 8, provision 4, bulk 2 | Commands in flight per node and lane |
 | `handshakesPerSecond` | 200 | Session opens and joins admitted per second |
 | `maxPendingHellos` | 64 | Hello transactions in flight at once |
+| `protocol` | `PROTOCOL_VERSION` (1..1) | The `{ min, max }` protocol range this gateway speaks, for skew tests and staged bumps; see [version skew](/docs/daemon/protocol#version-skew) |
 | `duplicateHellos` | `{ max: 3, windowMs: 600000 }` | More than `max` duplicate Hellos (a second live session from another boot) within `windowMs` quarantine the certificate; see [duplicate identity](/docs/daemon/sessions#duplicate-identity) |
 | `gatewayLeaseTtlMs`, `leaseRenewMs` | 20,000, 5,000 | The `gateway:<id>` lease |
 | `livenessFlushMs` | 15,000 | How often ages are flushed |
@@ -92,6 +93,7 @@ broken set to `onError`. `serve` does this for you with `host.gateway.tlsFiles`;
 | `revocations` | | Revoked serials; without it, `start()` warns that revoked certificates keep their sessions until they expire |
 | `tunnels` | | Exec-ticket verification and re-authorization (v0.3) |
 | `reports` | | Report and status handlers, below |
+| `commandOwner` | | Maps a command's idempotency key (`<reconciler>:<key>:…`) to the work item that owns it, which is woken when the command settles, so a reconciler waiting on a result sees it at once. `better-compute serve` and the dev stack pass `settledCommandOwner(compute)` (exported from the CLI), which accepts only reconcilers registered in the deployment |
 | `manual` | false | No timers: tests and the simulator step `gateway.jobs` themselves |
 
 ## Memory and PostgreSQL
@@ -279,9 +281,11 @@ every stream. With the bound, a refused `Hello` retries with jitter and the data
 
 PLAN.md's v0.1 gate is one Node gateway holding at least 5,000 mTLS sessions at 10-second heartbeats for 30 minutes,
 with dispatch p99 under 500 ms and RSS under 2 GiB; if it fails, the gateway is rewritten in Go on the same proto
-(decision D20). Indicative runs on a development workstation (PGlite, h2c, the load generator in the same process,
-60 seconds) held 5,000 sessions with dispatch p99 of 22 to 32 ms and RSS around 1 GiB, and survived a storm with
-5,000 of 5,000 back. A gate result needs the reference hardware, mTLS and 30 minutes; see `bench/gateway-streams`.
+(decision D20). On a development workstation (PGlite, 60 seconds), the gateway in its own process held 5,000 mTLS
+sessions, one TLS 1.3 connection per daemon, with dispatch p99 26 ms, a gateway process RSS of 1,240 MiB (PGlite
+included) and 0 drops, and survived a reconnect storm with 5,000 of 5,000 back within 39 seconds. That meets the
+gate's sessions, dispatch and RSS criteria; the 30-minute run on the reference host with Postgres remains. See
+[scaling](/docs/operations/scaling#gateway-sessions) and `bench/gateway-streams`.
 
 ### Several gateways
 

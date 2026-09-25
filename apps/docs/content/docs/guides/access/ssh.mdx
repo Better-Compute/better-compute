@@ -18,6 +18,8 @@ sources:
   - packages/core/src/domain.ts
   - proto/bettercompute/agent/v1/session.proto
   - apps/console/src/components/ssh-cert-panel.tsx
+  - packages/console-kit/src/ssh-access.ts
+  - packages/server/src/tunnels/sandbox-exec.ts
   - 'apps/console/src/app/(console)/nodes/[nodeId]/page.tsx'
   - daemon/internal/converge/converge.go
   - daemon/internal/agent/access.go
@@ -334,8 +336,31 @@ logins; its default, `prohibit-password`, does.
 
 A platform administrator sees a **Break-glass SSH** panel on each node's page. It takes your public key, the
 account (default `root`) and a lifetime of 5, 15, 30 or 60 minutes, and returns the certificate with a copy button
-and the file name to save it under, and it can revoke the certificate it just issued. When the session lacks MFA, it
-asks you to sign in again with a second factor instead of showing the error.
+and the commands to save and use it. A pasted private key is refused in the browser before anything is sent. When
+the session lacks MFA, it asks you to sign in again with a second factor instead of showing the error.
+
+Under **Who holds access** the panel lists the node's certificates from `nodes.listSshCerts` (holder, principal,
+issued, until, state and revocation reason, with **Include expired**), and every active one has a **Revoke** button
+that calls `nodes.revokeSshCert` after a confirmation. See [the console](/docs/guides/clients/console#break-glass-ssh).
+
+## Sandbox certificates are separate
+
+[Sandboxes](/docs/guides/vps/sandboxes#run-code-inside) use SSH certificates too, from a second CA: `tunnels.sandboxSsh`
+(the PKI bundle's sandbox SSH CA), never `tunnels.ssh`. The differences:
+
+| | Break-glass | Sandbox exec |
+| --- | --- | --- |
+| Method and action | `nodes.issueSshCert`, `compute:nodes:ssh-root` on the node | `sandboxes.exec`, `compute:sandboxes:exec` on the sandbox |
+| Principal | `<account>@<nodeId>` | `<account>@<instanceId>`, account default `sandbox` |
+| Lifetime | 60 s to 1 h, default 15 min | 60 s to 15 min, default 10 min |
+| Session | MFA by default | a signed-in session, not an API key; no MFA requirement |
+| Who trusts the CA | nodes, through NodeSpec `access` and bcd | sandbox guests, through the user data vps renders |
+| Revocation | recorded in `ssh_certificates`, KRL on the node, re-decided every minute | none in the guest: the short lifetime, plus tunnel re-authorization |
+| Path | your own network to the node's sshd | always through a tunnel |
+
+Because the two CAs differ, a sandbox certificate never opens a node and a break-glass certificate never opens a
+sandbox. The tunnels module refuses a CA public key that is not one printable line, since it is written into sshd
+configuration.
 
 ## Shipped and planned
 
@@ -348,5 +373,5 @@ asks you to sign in again with a second factor instead of showing the error.
 | Revoking certificates on `binding:deactivate` | Shipped as `serve`'s default IAM `binding` handler |
 | Revoking certificates on offboarding, expiry, deletion and session revocation | Shipped as `serve`'s default `identity` and `sessions` handlers |
 | Re-deciding live certificates every minute (`tunnels.ssh-certificates-reauthorize`) | Shipped; IAM unreachable keeps a certificate until it expires |
-| `nodes.listSshCerts`: who holds or held a certificate for a node, with its state | Shipped |
+| `nodes.listSshCerts`: who holds or held a certificate for a node, with its state | Shipped, and in the console's node page with a revoke button per certificate |
 | Rotating the SSH CA | No rotation flow; `access.sshCaPublicKeys` lists only the current key |

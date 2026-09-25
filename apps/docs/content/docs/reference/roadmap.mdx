@@ -47,6 +47,16 @@ sources:
   - packages/core/src/catalog.ts
   - packages/iam/src/setup.ts
   - bench/placements/results
+  - bench/gateway-streams/results
+  - daemon/internal/bcx/host.go
+  - daemon/cmd/bcd/plugins.go
+  - scripts/api-surface.mjs
+  - tests/gateway-protocol.test.ts
+  - tests/skew-matrix.test.ts
+  - tests/sim/upgrade.test.ts
+  - tests/iam-bridge-matrix.test.ts
+  - .github/workflows/nightly.yml
+  - .github/workflows/release.yml
 ---
 
 Better Compute is built in phases, each defined in PLAN.md §16 by its deliverables, its acceptance criteria and its
@@ -88,8 +98,8 @@ yet. This page tracks each item as:
 | [v0.2](#v02-metal) | Bare metal | Control plane done and tested in simulation; `bcd site` and `bcd ramdisk` written (Go unit tests only, not released), never run against the control plane or on hardware |
 | [v0.3](#v03-vps-and-access) | VPS and access | Control plane done; tunnels and the `access` section done in bcd (not released); host runtimes in bcd not written |
 | [v0.4](#v04-scale-and-ha) | Scale and HA | Mostly done in simulation; `bcd helper` missing, and the numbers need the reference PostgreSQL |
-| [v0.5](#v05-gpu-depth-and-ecosystem) | GPU depth and ecosystem | Control plane done ahead of schedule; sandboxes served except snapshots and exec; hardware exits not run |
-| [v1.0](#v10-freeze) | Freeze | Not started |
+| [v0.5](#v05-gpu-depth-and-ecosystem) | GPU depth and ecosystem | Control plane done ahead of schedule; sandboxes served in full on the control plane; hardware exits not run |
+| [v1.0](#v10-freeze) | Freeze | Started: the API surface freeze check, bcd's SLSA3 release pipeline, the N-2 skew matrix and the upgrade-in-place scenario exist (FakeDaemons); the security review and npm publishing do not |
 
 Every package is at version 0.1.0 and none is published: npm publishing waits until Better IAM is on npm.
 
@@ -108,7 +118,7 @@ reviewed edits.
 | Packages `core`, `protocol`, `postgres` (with `./pglite` and `compute_now()`), shells of `server`, `client`, `cli`, `testing`, stubs of `inventory`, `provision`, `metal`, `vps`, and the umbrella | Done | The stubs have since been implemented |
 | `protocol` with TypeScript and Go generated code committed | Done | TypeScript by `scripts/proto-gen.mjs`; Go in `daemon/gen/` by `scripts/daemon-proto-gen.mjs` (protoc-gen-go v1.36.12, protoc-gen-connect-go v1.21.0), with `--check` |
 | `daemon/` skeleton and goreleaser configuration | Done | The module builds and its tests pass (`node scripts/daemon-test.mjs`; cross-compiled and run in WSL on Windows). goreleaser is configured and checked in CI, but no release has been cut |
-| CI: Ubuntu and Windows on Node 22 and 24, a PostgreSQL job, a Go job; the IAM contract test; `bench/REFERENCE.md` | Done | `.github/workflows/ci.yml` and `daemon.yml` are defined; this page does not track CI runs |
+| CI: Ubuntu and Windows on Node 22 and 24, a PostgreSQL job, a Go job; the IAM contract test; `bench/REFERENCE.md` | Done | `.github/workflows/ci.yml` and `daemon.yml` are defined, and since then `nightly.yml` (the simulation matrix with the 10k cold start, the IAM-guarded suite in both IAM modes, the whole suite on Postgres, a green-night streak) and `release.yml` (bcd with SBOMs, cosign and SLSA3 provenance); see [CI](/docs/operations/testing#ci-and-the-repository-checks). This page does not track CI runs |
 
 | Exit | State |
 | --- | --- |
@@ -154,7 +164,7 @@ The v0.1 gates are where the phase is really held open:
 
 | Gate | State |
 | --- | --- |
-| **Gateway**: one Node gateway holds 5,000 mTLS sessions at 10 s heartbeats for 30 minutes, dispatch p99 under 500 ms, RSS under 2 GiB | Indicative pass only. On a development workstation (PGlite, cleartext HTTP/2, the load generator in the same process, 60 s): 5,000 sessions held, dispatch p99 32 ms, RSS 924 MiB, 0 drops, and a reconnect storm with every command settled once. The 30-minute run with mTLS and PostgreSQL 17 on the reference host has not happened, so D20 (a Go gateway) stays undecided |
+| **Gateway**: one Node gateway holds 5,000 mTLS sessions at 10 s heartbeats for 30 minutes, dispatch p99 under 500 ms, RSS under 2 GiB | Sessions, dispatch and RSS criteria met on a workstation; the reference run remains. On a development workstation (PGlite, 60 s, the gateway and its store in their own process): 5,000 mTLS sessions, one TLS 1.3 connection each, dispatch p99 26 ms, gateway process RSS 1,240 MiB, 0 drops, and a reconnect storm with 5,000 of 5,000 back in 39 s and every command settled once. The 30-minute run with PostgreSQL 17 on the reference host has not happened, so D20 (a Go gateway) stays formally undecided. See [scaling](/docs/operations/scaling#gateway-sessions) |
 | **IAM lane**: embedded Better IAM on adapter-postgres sustains 50 admissions/s with lock wait under 50%, and the ceiling is recorded | Not started: the suite exists (`tests/bench/iam-lane.bench.ts`) but needs PostgreSQL, so D18 (proposing R1 upstream) stays open |
 | Placements/s recorded | Done on PGlite: 35.7/s for the inline placer at 1k nodes |
 
@@ -241,13 +251,14 @@ The v0.4 acceptance is set at 10,000 nodes and 100,000 GPUs on the reference Pos
 | At least 200 placements/s | Indicative: with the pool-lease placer on PGlite, 1,092/s end to end at 1k nodes; at 10k nodes 464/s in the latest recorded run (`bench/placements/results`), and about 1,058/s in the measurement taken when the pool index started loading devices per node on demand (not yet a recorded result); see [scaling](/docs/operations/scaling#placements). The benchmark's sustained mode (`BENCH_PLACE_SUSTAIN_SECONDS=1800` for the acceptance, gate `BENCH_PLACE_GATE`, default 200, judged on the slowest 10 s window, I1 checked) measured 699/s, slowest window 639/s, over 30 s at 1k nodes on PGlite |
 | Cold start under 3 minutes | Met in simulation: `runColdStart` in `@better-compute/testing` runs the scenario on the real control plane and 3 real gateways in simulated time. The recorded 10k run (`bench/cold-start`) had every node connected, adopted and schedulable at 80 s and back 40 s after a power cycle, with 0 unreachable marks and 0 invariant violations; see [scaling](/docs/operations/scaling#cold-start). The CI-sized run (24 nodes, `tests/sim/cold-start.test.ts`) checks the same in every build. The wall-clock run needs the reference PostgreSQL |
 | Command p99 under 1.5 s with polling only, PostgreSQL CPU under 50% | Not measured: needs the reference PostgreSQL |
-| Suites green in both IAM modes | Done: `pnpm check` runs `pnpm test:iam-remote`, which reruns the IAM-dependent suites against IAM over HTTP |
-| Every §15 v0.4 scenario green on 3 consecutive nights | In progress: the scenarios run in the simulator and `sim:nightly` exists; no nightly history is recorded |
+| Suites green in both IAM modes | Done: `pnpm check` runs `pnpm test:iam-remote`, which reruns the IAM-dependent suites against IAM over HTTP, the authz matrix's IAM side included (every §9.2 action and resource pair decided through `bridge.remote`) |
+| Every §15 v0.4 scenario green on 3 consecutive nights | In progress: the scenarios run in the simulator, and the `nightly` workflow runs `sim:nightly`, the IAM-guarded suite and the Postgres suite every night and counts consecutive green nights; this page records no nightly history |
 
 ## v0.5: GPU depth and ecosystem
 
-Most of v0.5 landed early, on the control plane. Sandboxes joined the phase on 2026-09-24 (D24): templates,
-sandboxes with a TTL, warm pools and paused instances are served; snapshots, exec and the exit test are not.
+Most of v0.5 landed early, on the control plane. Sandboxes joined the phase on 2026-09-24 (D24): all 12 methods are
+served, with templates, TTL expiry, warm pools, snapshots and exec, and the exit test runs on emulated hosts. Real
+hosts still cannot boot one, since bcd has no real VM runtime.
 
 | Deliverable | State | Notes |
 | --- | --- | --- |
@@ -258,19 +269,19 @@ sandboxes with a TTL, warm pools and paused instances are served; snapshots, exe
 | `dedicated-root` metal and `binding: 'node'` | Done | See [dedicated root](/docs/guides/bare-metal/dedicated-root) |
 | TPM attestor | In progress | The verifier and a software TPM producer are done; bcd's agent side (go-attestation) is not |
 | Optional workload identity | Done on the control plane | Workload OIDC tokens and the IMDS token exchange in pki, `WorkloadTokenRequest` over the session, the workload broker, and the issuer's discovery document and JWKS in `serve`. bcd sends the request from its own metadata service (`[imds] listen`), which serves only instances of its fakehw stand-in runtime until a real runtime exists. See [workload identity](/docs/guides/vps/instances#workload-identity) |
-| bcx and `driver-sdk` | In progress | The TypeScript SDK runs drivers out of process with mutual TLS; bcd cannot load them yet (it has no `driver.invoke` kind) |
+| bcx and `driver-sdk` | In progress | The TypeScript SDK runs drivers out of process with mutual TLS. bcd hosts sha256-pinned plugins from `[plugins] dir` and runs `driver.invoke` in them (`daemon/internal/bcx`, with `bcx.Serve` as the start of a Go plugin SDK), tested by Go unit tests only. Open: an end-to-end run of bcd with a plugin, plugin supervision and isolation (restart, own uid, seccomp, cgroups), and the control plane merging advertised drivers into its registry. See [drivers](/docs/extending/drivers#driver-plugins-in-bcd) |
 | `provider-proxmox` | Done | |
 | console-kit and `apps/console` | Done | |
 | Walkthrough 4, a Kata runtime in Go | Not started | |
-| Sandboxes (PLAN.md §3.7): templates, TTL, warm pools, snapshots, exec over SSH certificates | In progress: 10 of 12 methods served | Added to v0.5 by D24. Served: `sandboxTemplates` create, list, get, update and delete, and `sandboxes` create, list, get, extend and delete, with migration `vps/0004_sandboxes`, the `vps.sandboxes` reconciler (TTL expiry, `sandbox.*` events, warm pools), paused instances for warm pools, the instance guard and vps's tenant teardown (`tests/vps-sandboxes.test.ts`). Planned: `sandboxes.snapshot` and restore, `sandboxes.exec`, template `env` and `network`, the `vps.sandbox.warm` meter. Hosted runtimes in bcd are still missing, so no real host boots a sandbox yet. See [sandboxes](#sandboxes) |
+| Sandboxes (PLAN.md §3.7): templates, TTL, warm pools, snapshots, exec over SSH certificates | Done on the control plane: 12 of 12 methods served | Added to v0.5 by D24. Served: `sandboxTemplates` create, list, get, update and delete (with `env` and `network`), and `sandboxes` create (with `fromSnapshot`), list, get, extend, snapshot, exec and delete, with migrations `vps/0004` to `vps/0008`, the `vps.sandboxes` reconciler (TTL expiry, `sandbox.*` events, warm pools, snapshot settling), the `vps.sandbox.warm` meter, the instance guard and vps's tenant teardown. The CLI's `sandbox` commands, six MCP tools and the console's Sandboxes page use them. Open: bcd's real VM runtimes, so no real host boots a sandbox yet, and bcd enforcing a template's `network`. See [sandboxes](#sandboxes) |
 
 | Exit | State |
 | --- | --- |
 | The MIG torture test and the real-hardware nightly | The torture test runs on a simulated MIG pool; nothing has run on hardware (D15) |
 | A `dedicated-root` lease and release yield a new identity generation | Done |
-| A third-party TypeScript driver runs on a node via bcx | Done with a FakeDaemon as the node (`tests/e2e/bcx.test.ts`): a module profile's `power.*` steps go out as `driver.invoke` commands through the real engine, queue and gateway, and run in a pinned bcx plugin process. On a real node it needs bcd |
+| A third-party TypeScript driver runs on a node via bcx | Done with a FakeDaemon as the node (`tests/e2e/bcx.test.ts`): a module profile's `power.*` steps go out as `driver.invoke` commands through the real engine, queue and gateway, and run in a pinned bcx plugin process. bcd now hosts bcx plugins and runs `driver.invoke`, but no test runs a TypeScript plugin under bcd yet |
 | IMDS cross-instance access fails | Done with FakeDaemon hosts (`tests/e2e/imds.test.ts`, `tests/pki-workload.test.ts`): one instance's session token fails for another and on another host, a host gets nothing for an instance placed elsewhere, forwarded requests and replays are refused |
-| `tests/e2e/sandboxes.test.ts`: 500 sandboxes expire on emulated hosts with the v0.3 zero-leak diff; a warm claim reaches `ready` without a placement; a snapshot round trip restores memory state; another tenant's snapshot is refused; instance methods on a sandbox's instance are refused | Not started: the test does not exist. `tests/vps-sandboxes.test.ts` covers expiry into an ordinary instance delete, a warm claim without a new allocation, and the instance guard, against emulated host reports; snapshots do not exist yet |
+| `tests/e2e/sandboxes.test.ts`: 500 sandboxes expire on emulated hosts with the v0.3 zero-leak diff; a warm claim reaches `ready` without a placement; a snapshot round trip restores memory state; another tenant's snapshot is refused; instance methods on a sandbox's instance are refused | Done with FakeDaemon hosts: `tests/e2e/sandboxes.test.ts` runs the real server and gateway with three FakeDaemon VPS hosts (fake `cloud-hypervisor`, which pauses): the warm claim, 500 expiring sandboxes with the zero-leak diff, a memory snapshot round trip, and a warm template's pool drained. Another tenant's snapshot and the instance guard are covered by `tests/vps-sandboxes.test.ts` against emulated host reports, not in the end-to-end file. Nothing runs on a real host |
 
 ## Sandboxes
 
@@ -282,29 +293,39 @@ does not:
 
 | Item | State | Notes |
 | --- | --- | --- |
-| The sandbox catalog | Done | `compute-sandbox` (parent: the pool; attributes `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `fromSnapshot`, `warm`) and `compute-sandbox-template`, the `compute:sandboxes:*` actions, and 12 method rows at phase v0.5. See [actions and resources](/docs/guides/iam/actions-and-resources) |
-| Templates | Done | `sandboxTemplates` create, list, get, update and delete: a hosted pool, a flavor, an image and the pool's own runtime, checked once; user data; `defaultTtlSeconds` (1 h) and `maxTtlSeconds` (24 h); `warm: { min, max }`. See [templates](/docs/guides/vps/sandboxes#templates) |
+| The sandbox catalog | Done | `compute-sandbox` (parent: the pool; attributes `templateId`, `vcpu`, `memoryGiB`, `gpus`, `ttlSeconds`, `fromSnapshot`, `warm`) and `compute-sandbox-template`, the `compute:sandboxes:*` actions, and 12 method rows at phase v0.5, all registered. See [actions and resources](/docs/guides/iam/actions-and-resources) |
+| Templates | Done | `sandboxTemplates` create, list, get, update and delete: a hosted pool, a flavor, an image and the pool's own runtime, checked once; user data; `defaultTtlSeconds` (1 h) and `maxTtlSeconds` (24 h); `warm: { min, max }`. Also in FleetConfig (`sandboxTemplates`). See [templates](/docs/guides/vps/sandboxes#templates) |
 | Sandboxes with a lifetime | Done | `sandboxes` create, list, get, extend and delete. One decision on `compute-sandbox/{draftId}`, the pool's budget check, then one hosted instance admitted, placed and charged like `instances.create`. The TTL starts at admission; `extend` stays within `maxTtlSeconds`; the `vps.sandboxes` reconciler expires sandboxes into an ordinary instance delete |
-| Warm pools | Done | `warm.min` instances per template, kept `paused` on runtimes that can pause (`libvirt-kvm`, `cloud-hypervisor`, `firecracker`) and `stopped` otherwise, at most 4 created per template per pass; claimed with `FOR UPDATE SKIP LOCKED` only after the sandbox's own allow, without a new placement; drained beyond `warm.max` |
+| Warm pools | Done | `warm.min` instances per template, kept `paused` on runtimes that can pause (`libvirt-kvm`, `cloud-hypervisor`, `firecracker`) and `stopped` otherwise, at most 4 created per template per pass; claimed with `FOR UPDATE SKIP LOCKED` only after the sandbox's own allow, without a new placement, and only when made from the template's current shape; drained beyond `warm.max` and when stale; metered as `vps.sandbox.warm` until claimed |
 | Paused instances | Done | `desiredState: 'paused'` in the lifecycle, `InstanceObservedState.PAUSED` in host reports, `RuntimeTraits.pause` |
-| Instance guard and teardown | Done | `instances.start`, `stop`, `resize` and `delete` refuse a sandbox's or a warm instance with `INVALID_STATE`; `instances.list` hides warm instances; `vps().tenantDeleted` deletes every instance of a deleted tenant, sandboxes' and warm ones included |
-| Hosted runtimes on your own servers | Not started | `libvirt-kvm` and `cloud-hypervisor` inside bcd (v0.3), not written; bcd has no `instances` converger, so no real host boots a sandbox yet. A Kata runtime plugin via bcx (v0.5) |
-| Snapshots and restore | Planned | `sandboxes.snapshot` and `create({ fromSnapshot })`. The protocol seams exist (`InstanceSpec.restoreFrom`, the `instance.snapshot` messages, `RuntimeDriver.snapshot`), not the method, the command kind or the snapshot images |
-| Exec | Planned | `sandboxes.exec` with a short-lived SSH certificate from a tenant sandbox CA. Meanwhile `tunnels.open` works on a running sandbox's instance. See [running code inside](/docs/guides/vps/sandboxes#run-code-inside) |
-| Template `env` and `network`; the `vps.sandbox.warm` meter | Planned | A template refuses `env` and `network` as unknown fields; warm instances are metered as ordinary hosted instances |
-| Agents managing sandboxes over MCP | Not started | The MCP tools cover instances only (`create_instance`, `list_instances`, …). See [MCP](/docs/guides/clients/mcp#the-tools) |
+| Instance guard and teardown | Done | `instances.start`, `stop`, `resize` and `delete` refuse a sandbox's or a warm instance with `INVALID_STATE`, and so does `tunnels.open` for every op (`reason: 'sandbox-managed'`); `instances.list` hides warm instances; `vps().tenantDeleted` deletes every instance and snapshot of a deleted tenant, sandboxes' and warm ones included |
+| Hosted runtimes on your own servers | In progress | bcd has the `instances` converger (fab94d4), `instance.snapshot` and `restore_from` (be1e7d9), but only fakehw builds have a runtime, a file-backed stand-in; `libvirt-kvm` and `cloud-hypervisor` are not written, so no real host boots a sandbox yet. A Kata runtime plugin via bcx (v0.5) is not started |
+| Snapshots and restore | Done on the control plane | `sandboxes.snapshot` with `vps({ snapshots: SnapshotStore })`, the `instance.snapshot` command kind, the `sandbox_snapshots` table, `sandbox.snapshot.ready` and `.failed`; `create({ fromSnapshot })` on the same runtime and, for memory, the same `cpu.model`. bcd runs both on fakehw builds. See [snapshots](/docs/guides/vps/sandboxes#snapshots-and-restore) |
+| Exec | Done on the control plane | `sandboxes.exec` (tunnels module): an `ssh` ticket and a certificate of at most 15 minutes from the deployment's sandbox SSH CA (`pki add-sandbox-ca`, `tunnelsOptions`), which guests trust through vps's user data; `better-compute sandbox exec` runs OpenSSH through the tunnel. No agent in the guest. The SDK helpers for commands and files PLAN.md describes are not built. See [running code inside](/docs/guides/vps/sandboxes#run-code-inside) |
+| Template `env` and `network`; the `vps.sandbox.warm` meter | Done on the control plane | `env` from the tenant's secrets, sealed into `/etc/sandbox/env`; `network` carried as `InstanceSpec.network_policy`, which bcd does not enforce yet; `vps.sandbox.warm` from placement to claim (create the meter in Better IAM yourself) |
+| Clients | Done | The CLI's `sandbox` commands, six MCP tools (no snapshot or exec tool; `gateTools()` has no rules for them yet), the console's Sandboxes page, and FleetConfig `sandboxTemplates`. See [MCP](/docs/guides/clients/mcp#the-tools) |
 
 ## v1.0: Freeze
 
-Not started. It freezes the API and the protocol, guarantees N-2 version skew, adds an external security review
-and SLSA level 3 builds, and publishes to npm with provenance once Better IAM is published. Its acceptance: upgrading
-from v0.5 disturbs no running allocation, with no open critical or high findings.
+v1.0 freezes the API and the protocol, guarantees N-2 version skew, adds an external security review and SLSA level 3
+builds, and publishes to npm with provenance once Better IAM is published. Its acceptance: upgrading from v0.5
+disturbs no running allocation, with no open critical or high findings.
+
+| Item | State | Notes |
+| --- | --- | --- |
+| API freeze | In progress | `scripts/api-surface.mjs`, run by `pnpm lint:repo`, fails on a breaking change to any served method or error code against `generated/api-surface.json`; additions are recorded with `pnpm api:surface`. See [the API surface freeze](/docs/operations/testing#the-api-surface-freeze) |
+| Protocol freeze | In progress | `agent/v1` and `common/v1` have been frozen since P0 (`buf breaking` in CI); the draft `site` and `driver` packages are not yet |
+| N-2 version skew | In progress | `createGateway({ protocol })` sets the range a gateway speaks. `tests/skew-matrix.test.ts` runs the matrix on real dev stacks: FakeDaemons built like the N, N-1 (v0.4) and N-2 (v0.3) lines (`daemonSkewProfiles` in `@better-compute/testing`) are welcomed, adopted and refuse the kinds they predate `UNSUPPORTED`, and a daemon below the gateway's minimum gets `upgrade_required`. No older real bcd build runs in it, and only protocol version 1 is defined. See [version skew](/docs/daemon/protocol#version-skew) |
+| SLSA level 3 builds | In progress | `release.yml` builds bcd with SBOMs, keyless cosign signatures and SLSA3 provenance; no release has been cut |
+| npm publishing with provenance | Not started | `ci.yml`'s publish job waits until Better IAM is on npm |
+| External security review | Not started | A process item |
+| Upgrading from v0.5 disturbs no running allocation | Done in simulation | `upgradeInPlace(rig, { migrations, rollDaemons })` in `@better-compute/testing` runs expand migrations, workers and api, each gateway killed and revived, then the daemons, and reports every disturbed allocation. `tests/sim/upgrade.test.ts` (6 nodes, 3 gateways, 6 active reservations, a signed rollout to 0.6.0) finds none, bills the hour exactly, and keeps I1, I2, I5 and I8; FakeDaemons only |
 
 ## What unblocks what
 
 | Unblocked by | Moves |
 | --- | --- |
-| Writing more of bcd (Go is installed now; P0's code generation, W1's node agent, `bcd site`, `bcd ramdisk` and the `instances` converger are done) | Real host runtimes, IPMI and vendor BMCs, the WebSocket and A/B paths, `bcd helper`, bcx on nodes, the TPM agent, NVML; an end-to-end run of the site agent and ramdisk |
+| Writing more of bcd (Go is installed now; P0's code generation, W1's node agent, `bcd site`, `bcd ramdisk` and the `instances` converger are done) | Real host runtimes, IPMI and vendor BMCs, the WebSocket and A/B paths, `bcd helper`, bcx plugin supervision and isolation, the TPM agent, NVML; an end-to-end run of the site agent and ramdisk, and of bcd with a bcx plugin |
 | A bcd release | Installing real nodes with the install script |
 | A PostgreSQL 17 server | The concurrent capacity and torture suites, the IAM-lane gate, the 30-minute gateway gate, every v0.4 number |
 | The D15 hardware | Real inventory and CDI on an NVIDIA host, emulation CI on a KVM runner, the MIG and real-hardware nightlies |

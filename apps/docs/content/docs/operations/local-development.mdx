@@ -188,6 +188,9 @@ events module's `GET /watch` (the examples do), `curl -N` on it streams `node.*`
 With `--sim`, `dev` issues exec tickets (the configured `tunnels.issuer`, or a throwaway one) and mounts
 `GET /api/compute/tunnels/{ticket}`. The gateway verifies tickets and serves its control API on loopback, and every
 simulated machine answers `OpenTunnel` with an echo shell, so [tunnels](/docs/guides/access/tunnels) work end to end.
+Unless the deployment's `tunnels` options bring their own, it also adds a throwaway break-glass SSH CA (`tunnels.ssh`,
+for `nodes.issueSshCert` and `better-compute ssh-cert`) and a separate throwaway sandbox SSH CA (`tunnels.sandboxSsh`),
+so both can be tried against the simulated fleet.
 With the embedded IAM, an open tunnel is not re-authorized every 60 seconds: the embedded test IAM has no session
 reviewer. `tunnels.open` still decides every ticket.
 
@@ -321,10 +324,12 @@ The repository is a pnpm workspace; `docs/development.md` is the full guide.
 
 | `pnpm …` | What it does |
 | --- | --- |
-| `check` | `typecheck`, `test`, `lint:repo` and `validate:packages`: what CI runs first |
+| `check` | `typecheck`, `test`, `test:iam-remote`, `lint:repo` and `validate:packages`: what CI runs first |
 | `test` | `vitest run` over `tests/`, against the packages' sources (no build needed) |
+| `test:iam-remote` | the IAM-dependent suites again with IAM over HTTP (`vitest.iam-remote.config.ts`) |
 | `typecheck` | `tsc -b`, plus the client type tests |
-| `lint:repo` | the dependency rules, the one-clock rule (`compute_now()` only) and the umbrella drift check |
+| `lint:repo` | the dependency rules, the one-clock rule (`compute_now()` only), the umbrella drift check, `proto-gen --check` and `--breaking`, and the v1.0 API surface freeze (`scripts/api-surface.mjs`) |
+| `api:surface` | records compatible API additions in `generated/api-surface.json`; see [the API surface freeze](/docs/operations/testing#the-api-surface-freeze) |
 | `test:postgres` | the Postgres-only suites (needs `BETTER_COMPUTE_POSTGRES_URL`) |
 | `bench:scale` | the scale benchmarks in `tests/bench/` (`vitest.bench.config.ts`) |
 | `sim:nightly` | the nightly simulation matrix in `tests/nightly/` |

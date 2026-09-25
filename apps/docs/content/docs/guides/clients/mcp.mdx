@@ -21,9 +21,8 @@ sources:
 ---
 
 `@better-compute/mcp` turns the compute API into [Model Context Protocol](https://modelcontextprotocol.io) tools, so
-an AI agent can find GPU capacity, reserve and release GPUs, create, stop, start and delete VPS instances, look at a
-node and run a diagnostic. There are no tools for [sandboxes](/docs/guides/vps/sandboxes) yet; an agent calls the
-`sandboxes` API directly. It is built for
+an AI agent can find GPU capacity, reserve and release GPUs, create, stop, start and delete VPS instances, create,
+extend and delete [sandboxes](/docs/guides/vps/sandboxes), look at a node and run a diagnostic. It is built for
 the v0.3 goal "an agent reserves via MCP with human confirmation, retrying with the same key", and the end-to-end
 test `tests/mcp-e2e-confirmation.test.ts` runs exactly that against a real server and an embedded Better IAM.
 
@@ -193,6 +192,12 @@ framework.
 | `start_instance` | `instances.start` | any authenticated caller | idempotent |
 | `stop_instance` | `instances.stop` | any authenticated caller | destructive, idempotent |
 | `delete_instance` | `instances.delete` | any authenticated caller | destructive, idempotent |
+| `list_sandbox_templates` | `sandboxTemplates.list` | no rule in `gateTools()` (see below) | read-only |
+| `create_sandbox` | `sandboxes.create`, confirmation-aware | no rule in `gateTools()` | idempotent |
+| `list_sandboxes` | `sandboxes.list`: the caller's own by default, `scope: 'all'`, filter `templateId`, `limit` 1 to 200, `cursor` | no rule in `gateTools()` | read-only |
+| `get_sandbox` | `sandboxes.get` | no rule in `gateTools()` | read-only |
+| `extend_sandbox` | `sandboxes.extend` by a duration | no rule in `gateTools()` | not idempotent: each call extends again |
+| `delete_sandbox` | `sandboxes.delete` | no rule in `gateTools()` | destructive, idempotent |
 | `exec_command` (with `execCommand: true`) | `commands.run`: `inventory.refresh`, `logs.collect` or `node.reboot` | `compute:nodes:read` on the node | destructive |
 | `fleet_export` (with `fleet: true`) | `fleet.export` | `compute:fleet:admin` on the fleet | read-only |
 | `fleet_plan` (with `fleet: true`) | `fleet.plan` | `compute:fleet:admin` on the fleet | read-only |
@@ -215,8 +220,16 @@ caller's tenant: `stop_instance` is a graceful shutdown that keeps the disk and 
 stopped instance again, and `delete_instance` removes the instance and its disk for good. Unlike `create_instance`,
 they do not turn `CONFIRMATION_REQUIRED` into a result; it comes back as a tool error.
 
+The sandbox tools act on the caller's tenant. `create_sandbox` takes a `templateId` (`sbxt_…`, from
+`list_sandbox_templates`) and optionally `ttlSeconds` (60 s to 30 days, at most the template's maximum), an
+`idempotencyKey` and `waitSeconds` (0 to 30, default 20), sent as `wait: { timeoutMs }`: the call returns once the
+sandbox is ready or failed, or the wait runs out. It answers `{ idempotencyKey, sandbox }` and, like
+`create_instance`, turns `CONFIRMATION_REQUIRED` into a result to retry with the same key. `extend_sandbox` takes a
+`sandboxId` and `by` (such as `30m`), and `get_sandbox` and `delete_sandbox` a `sandboxId`; `delete_sandbox` removes
+the sandbox and its disk before its TTL ends. There are no tools for snapshots or for `sandboxes.exec`.
+
 Every argument is checked against the tool's JSON Schema before anything is called: ids must match their prefix
-(`pool_…`, `node_…`, `rsv_…`, `inst_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
+(`pool_…`, `node_…`, `rsv_…`, `inst_…`, `sbxt_…`, `sbx_…`), and unknown arguments are refused. A bad argument is a tool error `INVALID_INPUT`
 with the path of the first problem.
 
 **Fleet tools plan but never apply.** `fleet_plan` returns the changes and the `planHash`, with the list of calls
@@ -236,6 +249,20 @@ deliberately light:
   filters and decides every call anyway, on the reservation or instance itself (`OwnReservations`, `BoundedExtend`,
   a delegation's confirm list).
 - The fleet tools need `compute:fleet:admin` on `compute-fleet/global`, which only resolves in the root tenant.
+- The sandbox tools have **no rule yet**, so with `unlisted: 'deny'` the gate refuses and hides them. To offer them,
+  add rules to the map `gateTools()` returns; since compute decides each call on the sandbox, its draft or the tenant,
+  they can be open like the instance tools:
+
+```ts
+const tools = {
+  ...gateTools(),
+  ...Object.fromEntries(
+    ['list_sandbox_templates', 'create_sandbox', 'list_sandboxes', 'get_sandbox', 'extend_sandbox', 'delete_sandbox']
+      .map((name) => [name, { public: true }]),
+  ),
+};
+const gate = createMcpGate({ iam, tenantId, tools, unlisted: 'deny' });
+```
 
 The gate never checks the action a tool performs, such as `compute:reservations:create`. That decision happens once,
 in compute, on the reservation draft with its full attributes. Actions a delegation holds back for confirmation are
@@ -246,8 +273,8 @@ never gate actions, so a person is never asked twice about two different resourc
 
 A tool result carries the compute response twice: as pretty-printed JSON text in `content`, and as
 `structuredContent` (an object; other values are wrapped as `{ result }`). `reserve_gpus` answers
-`{ idempotencyKey, reservation }` and `create_instance` `{ idempotencyKey, instance }`, so the model always has the key
-to retry with.
+`{ idempotencyKey, reservation }`, `create_instance` `{ idempotencyKey, instance }` and `create_sandbox`
+`{ idempotencyKey, sandbox }`, so the model always has the key to retry with.
 
 A compute error becomes a tool error with `isError: true`, the text `CODE: message`, and
 `structuredContent.error` holding `code`, `message`, and `retryAfterMs` and `details` when compute sent them. Any
@@ -263,8 +290,8 @@ and can list actions that the person must approve each time. When the agent call
 compute answers `CONFIRMATION_REQUIRED` and Better IAM opens a confirmation request. See
 [delegated confirmation](/docs/guides/iam/delegated-confirmation) for the whole mechanism.
 
-`reserve_gpus`, `extend_reservation` and `create_instance` turn that error into a normal result the model can act
-on (`extend_reservation` answers `{ idempotencyKey, extension }` once it goes through):
+`reserve_gpus`, `extend_reservation`, `create_instance` and `create_sandbox` turn that error into a normal result the
+model can act on (`extend_reservation` answers `{ idempotencyKey, extension }` once it goes through):
 
 ```json title="reserve_gpus, waiting for a person"
 {
@@ -304,8 +331,10 @@ to `expired`. Without a bearer token or a tenant it returns nothing and the tool
   and `node_status` or the command's own methods show it.
 - `reserve_gpus` always books with `binding: 'hold'`; whole-node leases, spot, gangs and calendar starts are not
   exposed as tool arguments.
-- `release_reservation`, `stop_instance` and `delete_instance` are marked destructive: many MCP hosts ask the user
-  before calling such a tool.
+- `release_reservation`, `stop_instance`, `delete_instance` and `delete_sandbox` are marked destructive: many MCP
+  hosts ask the user before calling such a tool.
+- The sandbox tools need gate rules you add yourself (see [the gate](#the-gate-checks-visibility-only)), and cannot
+  snapshot a sandbox or run code in it.
 - The server is stateless, with JSON responses only: it does not open SSE streams or send server notifications, and
   `tools.listChanged` is `false`. It negotiates protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`,
   answering with the newest when the client asks for another.

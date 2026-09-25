@@ -251,6 +251,7 @@ keys and wrong types are all errors with a line number, so a typo fails loudly. 
 | `dev_insecure_h2c` | no | `false` | Allows an `http://` `gateway_url` (cleartext HTTP/2 to a dev gateway). Only fakehw builds accept it; the host build refuses to start |
 | `[imds] listen` | no | | Where a VPS host serves its instances' metadata service, for example `169.254.169.254:80` on the instances' bridge; empty turns it off |
 | `[boot] ...` | no | | A site agent's boot server; see [site agents](#a-site-agent) |
+| `[plugins] dir` | no | | A directory of bcx driver plugins and their `pins` file (sha256sum format); only pinned plugins run. Empty runs none. See [driver plugins in bcd](/docs/extending/drivers#driver-plugins-in-bcd) |
 
 A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKeyInfo, the form HPKP and
 `curl --pinnedpubkey` use. `bcd doctor` warns when the file is readable or writable by anyone but its owner.
@@ -258,10 +259,16 @@ A pin is `sha256/` plus the standard base64 of the SHA-256 of a SubjectPublicKey
 ### join-encryption.jwk
 
 The pins alone cannot seal a token, so the script also writes the JoinService encryption public key as a JWK.
-`bcd join` uses it only when its SPKI hash equals `join_encryption_key_pin`. The design falls back to
-`GET {basePath}/.well-known/better-compute` when the file is missing or stale, accepting keys from there only when
-they match the pins, but bcd does not implement that fallback yet: a missing or mismatched file fails `bcd join`
-with exit code 1. See [the join key and its fallback](/docs/guides/nodes/joining#the-join-key-and-its-fallback).
+`bcd join` uses it only when its SPKI hash equals `join_encryption_key_pin`. When the file is absent and
+`bcd join --server https://…` names the control plane, bcd fetches `<server>/.well-known/better-compute` (system
+roots, a 30-second timeout, at most 64 KiB) and uses its `join.encryptionJwk`, again only when it matches the pin.
+The design's fallback for a stale file is not implemented: a mismatched file, or a missing one without `--server`,
+fails `bcd join` with exit code 1. See [the join key and its fallback](/docs/guides/nodes/joining#the-join-key-and-its-fallback).
+
+An OS that `deploy.image` installed needs neither the script nor this file: the ramdisk writes its own pinned
+`config.toml` (gateway, server name, site and the three pins) and `join-encryption.jwk` into the installed root, both
+mode 0600, and the deploy's user data runs `bcd join --server … --token-file /etc/bcd/join-token --node-id …`, then
+`bcd node`. See [profiles and images](/docs/guides/bare-metal/profiles-and-images).
 
 ## The systemd unit
 

@@ -339,9 +339,12 @@ whose `join` section the server publishes when `pki.join` is configured:
 
 The daemon accepts these keys only when they match its pins, so the fetch needs no trust in the transport.
 
-bcd does not implement this fallback yet: its configuration has no control-plane URL, and `bcd join` fails when
-`join-encryption.jwk` is missing or does not match `join_encryption_key_pin`. After rotating the key, generate the
-install script again and rerun it, which rewrites the file and the pins.
+bcd implements half of it. Its configuration has no control-plane URL, so the fetch happens only when
+`join-encryption.jwk` is absent and `bcd join --server https://…` names the control plane: bcd then reads
+`<server>/.well-known/better-compute` and uses `join.encryptionJwk` if it matches `join_encryption_key_pin`. That is
+how an OS a deploy installed joins (`--server`, `--token-file` and `--node-id`, from the deploy's user data). A key
+file that is present but does not match the pin still fails `bcd join`: after rotating the key, generate the install
+script again and rerun it, which rewrites the file and the pins.
 
 ## Placeholder hardware and reclaims
 

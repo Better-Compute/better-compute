@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: Use the better-compute command line as a tenant or operator client - authenticate with a token, call any method, reserve GPUs, run fleet plans and verify the audit trail.
+description: Use the better-compute command line as a client - authenticate with a token, call any method, reserve GPUs, run sandboxes, plan the fleet and verify audit.
 metaTitle: The better-compute CLI as a client
 icon: SquareTerminal
 packages: ['@better-compute/cli']
@@ -17,6 +17,8 @@ sources:
   - packages/cli/src/commands/auth.ts
   - packages/cli/src/commands/tunnel.ts
   - packages/cli/src/commands/ssh.ts
+  - packages/cli/src/commands/sandbox.ts
+  - packages/cli/src/commands/pki.ts
   - packages/cli/src/credentials.ts
   - packages/cli/src/embed.ts
   - apps/docs/content/docs/reference/cli.mdx
@@ -40,7 +42,7 @@ Every command declares a target, and the target decides what it needs:
 
 | Target | Needs | Commands |
 | --- | --- | --- |
-| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `auth login` |
+| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `sandbox create/list/get/extend/snapshot/delete/exec/templates`, `console`, `exec`, `forward`, `ssh-cert`, `fleet export/plan/status/apply`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
 | `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `audit check-proof` |
 
@@ -163,6 +165,45 @@ with that `--key`. It waits up to `--wait` seconds (default 20) while the reserv
 shorthand such as `gpuProduct in (H100-SXM5-80GB), vramGiB >= 80`, and `--model` and `--product` add a `gpuModel`
 or `gpuProduct` match. See [reservations](/docs/guides/capacity/reservations).
 
+## Sandboxes
+
+The `sandbox` commands (help group `Sandboxes`) wrap the `sandboxes` and `sandboxTemplates` methods of
+[sandboxes](/docs/guides/vps/sandboxes):
+
+```bash
+better-compute sandbox templates --format table                 # sandboxTemplates.list, with warm pools
+better-compute sandbox create --template sbxt_01k5w… --ttl 30m   # sandboxes.create
+better-compute sandbox list --all --template sbxt_01k5w…
+better-compute sandbox get sbx_01k5w…                           # with its snapshots
+better-compute sandbox extend sbx_01k5w… --by 30m
+better-compute sandbox snapshot sbx_01k5w… --keep
+better-compute sandbox exec sbx_01k5w… -- pytest -q
+better-compute sandbox delete sbx_01k5w…
+```
+
+| Command | Flags | Calls |
+| --- | --- | --- |
+| `sandbox create` | `--template ID` (required), `--ttl DURATION` (`15m`, `2h`; whole seconds), `--from-snapshot ID`, `--wait SECONDS` (0 to 30, default 30), `--key KEY` | `sandboxes.create`, with a new idempotency key unless `--key` is given; waits until the sandbox leaves `starting` |
+| `sandbox list` | `--all` (the tenant's, not only yours), `--deleted`, `--template ID`, `--limit N`, `--cursor` | `sandboxes.list`; the API takes a `limit` of 1 to 200 |
+| `sandbox get SANDBOX` | | `sandboxes.get` |
+| `sandbox extend SANDBOX` | exactly one of `--by DURATION` or `--until TIME` (ISO 8601, epoch ms, or `+DURATION` from now) | `sandboxes.extend` |
+| `sandbox snapshot SANDBOX` | `--no-memory` (disk only), `--keep` (outlive the sandbox), `--key KEY` | `sandboxes.snapshot`, always with an idempotency key |
+| `sandbox delete SANDBOX` | | `sandboxes.delete` |
+| `sandbox exec SANDBOX [-- COMMAND…]` | `--key PATH` (default `~/.ssh/id_ed25519`), `--minutes N` (1 to 15, default 10), `--ssh PROGRAM` (default `ssh`) | `sandboxes.exec`, then OpenSSH through the tunnel |
+| `sandbox templates` | | `sandboxTemplates.list` |
+
+A sandbox id that does not look like `sbx_…` is a usage error (exit 2) before anything is sent.
+
+**`sandbox exec`** gets a short-lived certificate for your own key and runs `ssh` through a single-use tunnel; there
+is no agent in the guest. It sends the public key beside `--key` (`<key>.pub`; a file that holds a private key is
+refused) and never the private key, writes the certificate into a temporary directory, listens on a random
+`127.0.0.1` port for one connection that it bridges to the tunnel, and runs `--ssh` with `-i <key>`,
+`CertificateFile`, `IdentitiesOnly=yes`, a known-hosts file of its own with `StrictHostKeyChecking=accept-new` and
+`HostKeyAlias=<sandbox id>`, as the account the server names. The command after `--` runs remotely; without one you
+get a login shell. The temporary directory is removed afterwards, whatever happened, and the CLI exits with ssh's own
+status (`REMOTE_EXIT`). Like the other tunnel commands it needs `--url`, and `sandboxes.exec` needs a signed-in
+session rather than an API key.
+
 ## Interactive access
 
 Four commands in the `Access` group reach a node or an instance from your terminal, decided like any other call as
@@ -189,7 +230,9 @@ better-compute ssh-cert --tenant acme --node node_01k5w… && ssh -i ~/.ssh/id_e
   connection to that port of the running instance through a `tcp` tunnel of its own, a fresh `tunnels.open` per
   connection decided as `compute:instances:exec`. It runs until Ctrl-C. The token is resolved before anything
   listens, and it needs `--url` like `console` and `exec`. A connection that cannot be opened is closed with a note;
-  the tunnel has no half-close, so a client that ends its side ends the connection. A `--bind` other than loopback
+  the tunnel has no half-close, so a client that ends its side ends the connection. Memory stays bounded: the local
+  socket pauses while the tunnel holds more than 4 MiB unsent and resumes below 1 MiB, and a local reader more than
+  16 MiB behind is disconnected, since the WebSocket's receiving side cannot be paused. A `--bind` other than loopback
   lets anyone who reaches that address use your access. Instance `tcp` and `ssh` tunnels open only when the node's
   daemon advertises the `tunnel.instance-dial` capability in its `Hello`; otherwise `tunnels.open` answers
   `UNSUPPORTED` with `details.reason: 'daemon-capability'`.
@@ -204,7 +247,8 @@ See [tunnels](/docs/guides/access/tunnels) and [break-glass SSH](/docs/guides/ac
 
 ## Fleet configuration
 
-`fleet` manages a tenant's platform objects (sites, provider accounts, pools with quotas and offers, VPS flavors) as
+`fleet` manages a tenant's platform objects (sites, provider accounts, pools with quotas and offers, VPS flavors,
+sandbox templates) as
 one [FleetConfig](/docs/guides/fleet-config) document. The loop is export, edit, plan, review, apply:
 
 <Steps>
@@ -290,7 +334,7 @@ The rest of the CLI runs and maintains a deployment. Briefly:
 | `serve` | runs the API and the worker roles (`--roles api`, `controllers,sinks`, `gateway`, …) |
 | `dev [--sim N]` | a local server with PGlite and, with `--sim`, N simulated machines and an embedded Better IAM |
 | `sim` | the deterministic fleet simulator and its invariants |
-| `pki init / show / issue-gateway` | the machine PKI bundle, its pins, gateway certificates |
+| `pki init / show / issue-gateway / renew-ca / rotate-command-root / add-sandbox-ca / reseal` | the machine PKI bundle, its pins, gateway certificates, CA renewal and rotation, the sandbox SSH CA, re-sealing in the current format; see [PKI](/docs/operations/pki) |
 | `daemon install-script` | the POSIX installer that joins a server to a pool |
 | `iam setup [--meters]` | prints the example policies; creates the billing meters in Better IAM |
 | `release keygen / sign / cosign / verify` | signed bcd release manifests |
@@ -311,7 +355,7 @@ exit non-zero with the error's code:
 | `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
 | `AUDIT_TAMPERED`, `INVALID_PROOF`, `AUDIT_KEY_MISSING`, `PKI_NOT_FOUND` | audit verification outcomes |
 | `DOCTOR_FINDINGS` | `doctor --strict` found an error or warning |
-| `REMOTE_EXIT` | `console` or `exec`: the binary exits with the remote program's own status (1 to 255), or 255 when the tunnel broke |
+| `REMOTE_EXIT` | `console`, `exec` or `sandbox exec`: the binary exits with the remote program's own status (1 to 255), or 255 when the tunnel broke (or ssh was ended by a signal) |
 
 ## Project commands
 
@@ -358,3 +402,40 @@ words), in a `Compute` help group. Each spec declares compute's own flags plus `
 adds its output flags; running it runs compute's program with the flags given, so compute reads its own
 `BETTER_COMPUTE_*` environment, loads its deployment and prints its own output, errors included. `exclude` leaves
 commands out, such as `dev` and `serve` for a client-only binary.
+
+## Run commands from code
+
+`runCli(argv, io?)` runs one command line and rejects with the failure's `ComputeError`, `CliError` or
+`ComputeClientError`; `createCli(options?)` returns a program whose `run(argv, io?)` does the same with your own
+commands added. `main(argv?, cli?, io?)` behaves like the binary: it prints `CODE: message` on failure and resolves with
+the exit status, 0, 2 for a usage mistake, 1 otherwise, and the remote program's own status when a `console`, `exec`
+or `sandbox exec` ends with one (a `RemoteExitError`, whose `exitStatus` is 1 to 255, or 255 when the tunnel broke).
+
+Everything a command touches comes through a `CliIO`, so programs and tests can run commands without a real terminal:
+
+| Field | Used for | Default (`processIO()`) |
+| --- | --- | --- |
+| `out(message)`, `err?(message)` | results on stdout; progress and failures on stderr | `console.log`, `console.error` |
+| `env` | the environment commands read; `process.env` is never read implicitly | `process.env` |
+| `stdin?()`, `cwd?`, `fetch?` | `--data -`, relative paths and configuration discovery, remote calls | the process's |
+| `signal?` | an `AbortSignal` that ends long-running commands (`serve`, `dev`, `forward`) and detaches `console` and `exec` | SIGINT or SIGTERM |
+| `terminal?` | the interactive terminal `console` and `exec` attach to: `onInput`, `write(data, channel)`, and optional `size`, `onResize` and `raw` | the process's stdin and stdout, raw mode on a TTY |
+| `spawn?(command, args)` | runs a program with inherited stdio and resolves with its exit status; `sandbox exec` runs OpenSSH through it | `child_process.spawn`; a program ended by a signal reports 255 |
+
+When you pass your own `CliIO` without `terminal`, `console` and `exec` fail with `UNSUPPORTED` before a ticket is
+spent; without `spawn`, `sandbox exec` fails with `UNSUPPORTED` after the grant, since it cannot run ssh.
+
+```ts title="run.ts"
+import { RemoteExitError, runCli } from 'better-compute/cli';
+
+try {
+  await runCli(['sandbox', 'exec', sandboxId, '--', 'make', 'test'], {
+    out: (line) => log.push(line),
+    env: { ...process.env, BETTER_COMPUTE_URL: 'https://compute.example.com' },
+    spawn: (command, args) => runWithInheritedStdio(command, args), // resolves with the exit status
+  });
+} catch (error) {
+  if (error instanceof RemoteExitError) process.exitCode = error.exitStatus; // the remote command failed
+  else throw error;
+}
+```

@@ -117,6 +117,7 @@ and meter in `usage_windows`.
 | MIG instances and slots | The same GPU meter, at the atom's share of a GPU; see [fractional GPUs](/docs/guides/capacity/fractional-gpus) |
 | A `binding: 'node'` lease | `node.metal.hours`, plus the GPU meter for the GPUs healthy at each window's start |
 | A VPS instance | `vps.vcpu.hours`, `vps.memory.gib.hours`, and `gpu.<model>.hours` for GPU flavors, written by the `vps.usage` job |
+| A warm sandbox instance (v0.5) | `vps.sandbox.warm`, its flavor's vCPUs per hour, attributed to the tenant with no identity until a sandbox claims it; from the claim on, the lines of a VPS instance for the sandbox's owner. See [warm pools](/docs/guides/vps/sandboxes#warm-pools) |
 
 Tags have bounded cardinality: `region`, `pool`, `gpuModel`, `project` and `agent`, never a
 reservation, allocation or node id. The window is attributed to the reservation's owner identity: the
@@ -143,8 +144,9 @@ batch is bisected down to the event, so one bad window never blocks the others.
 
 The meters must exist in Better IAM billing. `better-compute iam setup --meters` creates
 `gpu.<model>.hours` for each model in `--gpu-models` (every known GPU family by default),
-`node.metal.hours`, `vps.vcpu.hours` and `vps.memory.gib.hours`. It does not create spot meters: create `gpu.<model>.spot.hours` yourself before
-you sell spot capacity, or those windows are dead-lettered. Prices, invoices and spend reports are
+`node.metal.hours`, `vps.vcpu.hours` and `vps.memory.gib.hours`. It does not create spot meters or
+`vps.sandbox.warm`: create `gpu.<model>.spot.hours` yourself before you sell spot capacity, and `vps.sandbox.warm`
+before a sandbox template keeps a warm pool, or those windows are dead-lettered. Prices, invoices and spend reports are
 Better IAM's; see [billing and usage](/docs/guides/iam/billing-and-usage).
 
 ## Read usage
@@ -205,7 +207,7 @@ policy `gpu-user` that `better-compute iam setup` prints includes
 Every create and extend is decided by Better IAM, so once a tenant's spend passes its budget no new
 reservation, extension or instance is allowed. Reservations and instances that are already running continue.
 The two sandbox actions cover [sandboxes](/docs/guides/vps/sandboxes): `sandboxes.create`, and `sandboxes.extend`
-under `sandboxes:update` (which will also cover the planned `snapshot`). On top of the decision,
+and `sandboxes.snapshot` under `sandboxes:update`. On top of the decision,
 `reservations.create`, `reservations.extend`, `instances.create` and `sandboxes.create` run a per-pool budget check
 after it (`budgetAdmissionCheck`): when the pool's `policy.admission.budgetCheck` is `'meter'`, or the tenant's
 offering has `onBudgetExceeded: 'stop-new'` or `'drain'`, they call Better IAM's `billing.check` and refuse a

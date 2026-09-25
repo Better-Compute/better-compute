@@ -119,11 +119,16 @@ Registering the module adds:
 - the migrations `vps/0001_instances`, with the tables `flavors`, `provider_accounts`, `instances`, `ip_pools` and
   `ip_leases`, `vps/0002_sealed_user_data` (`instances.user_data_sealed`), `vps/0003_provider_bootstraps`
   (`provider_bootstraps`, for [bootstrapping provider machines](/docs/extending/providers#bootstrapping-machines))
-  and `vps/0004_sandboxes` (the tables `sandbox_templates` and `sandboxes`, the columns `instances.sandbox_id` and
-  `instances.warm_template_id`, and `paused` as a desired state);
+  and, for sandboxes, `vps/0004_sandboxes` (the tables `sandbox_templates` and `sandboxes`, the columns
+  `instances.sandbox_id` and `instances.warm_template_id`, and `paused` as a desired state),
+  `vps/0005_sandbox_snapshots` (`sandbox_snapshots`, `instances.restore_from`, `sandboxes.from_snapshot`),
+  `vps/0006_warm_claims` (`instances.claimed_at`), `vps/0007_template_env` (`sandbox_templates.env`) and
+  `vps/0008_template_network` (`sandbox_templates.network` and `instance_version`, `instances.network_policy` and
+  `warm_template_version`);
 - the `vps.instances` reconciler, woken through the <Term id="work-queue">work queue</Term> by every change, the
-  `vps.sandboxes` reconciler (every 15 seconds: sandbox expiry, sandbox events and warm pools), and the `vps.usage`
-  job, which meters hosted instances every 5 minutes;
+  `vps.sandboxes` reconciler (every 15 seconds: sandbox expiry, sandbox events, warm pools and settling snapshots),
+  and the `vps.usage` job, which meters hosted instances every 5 minutes;
+- the `instance.snapshot` command kind (lane `bulk`, timeout 1 h) for sandbox snapshots;
 - a `tenantDeleted` hook that deletes every instance of a deleted IAM tenant, sandboxes' and warm ones included;
 - an `instances` section in the <Term id="nodespec">NodeSpec</Term> of each hosted node;
 - the `runtime` driver kind, merged into `DriverKinds` of `@better-compute/core` when you import the package;
@@ -245,7 +250,7 @@ allocation, IP lease, scalar claim or quota). What runs the VMs on a host is not
 | Runtimes as out-of-process plugins (Kata, and others)       | Planned for v0.5 with bcx.                                                                                                                                                                                              |
 | Single-tenant container runtimes                            | Planned for v0.3; the `RuntimeTraits` contract describes them, nothing enforces single tenancy yet.                                                                                                                     |
 | Interactive access (exec, SSH, TCP through a tunnel)        | `tunnels.open` with an `instanceId`, decided as `compute:instances:exec`: hosted instances only, and only when the deployment configures tunnels. The API reference lists it as planned. See [tunnels](/docs/guides/access/tunnels). |
-| Sandboxes (`sandboxes`, `sandboxTemplates`)                 | v0.5: served. Templates, TTL expiry, warm pools of paused instances, the instance guard, tenant teardown (`tests/vps-sandboxes.test.ts`). Snapshots, exec, template `env` and `network` are planned. Like every hosted instance, a sandbox needs a host runtime. See [sandboxes](/docs/guides/vps/sandboxes). |
+| Sandboxes (`sandboxes`, `sandboxTemplates`)                 | v0.5: served, all 12 methods. Templates with `env` and `network`, TTL expiry, warm pools of paused instances and their `vps.sandbox.warm` meter, snapshots and restores, `sandboxes.exec` (from the tunnels module), the instance guard, tenant teardown (`tests/vps-sandboxes.test.ts`, `tests/e2e/sandboxes.test.ts`). bcd does not enforce a template's `network` yet. Like every hosted instance, a sandbox needs a host runtime. See [sandboxes](/docs/guides/vps/sandboxes). |
 | Per-instance metadata service and workload identity         | v0.5, optional. The control plane half (the workload broker, the session frames, the issuer and its published JWKS) is built and tested against the FakeDaemon's metadata service; bcd serves the same contract on `[imds] listen`, for instances of its fakehw stand-in runtime only so far. See [workload identity](/docs/guides/vps/instances#workload-identity). |
 
 The TypeScript `FakeDaemon` in `@better-compute/testing` speaks the real protocol for the simulator and

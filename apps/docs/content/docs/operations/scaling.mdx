@@ -7,6 +7,8 @@ sources:
   - PLAN.md
   - bench/REFERENCE.md
   - bench/gateway-streams/README.md
+  - bench/gateway-streams/results
+  - tests/bench/gateway-streams.bench.ts
   - bench/iam-lane/README.md
   - bench/placements/README.md
   - bench/placements/results
@@ -60,7 +62,7 @@ never share a host with the process they measure.
 
 | Gate | Phase | Target | Measured so far |
 | --- | --- | --- | --- |
-| Gateway streams | v0.1 | One Node gateway holds 5,000 or more mTLS sessions at 10 s heartbeats for 30 min, dispatch p99 below 500 ms, RSS below 2 GiB; otherwise decide D20 (a Go gateway) before v0.2 | 5,000 sessions held for 60 s over h2c, dispatch p99 22 to 32 ms, RSS 924 to 1,115 MiB, 0 drops |
+| Gateway streams | v0.1 | One Node gateway holds 5,000 or more mTLS sessions at 10 s heartbeats for 30 min, dispatch p99 below 500 ms, RSS below 2 GiB; otherwise decide D20 (a Go gateway) before v0.2 | Sessions, dispatch and RSS criteria met on a workstation: 5,000 mTLS sessions with the gateway in its own process (PGlite), dispatch p99 26 ms, gateway RSS 1,240 MiB, 0 drops, for 60 s. Left: the 30 min run on the reference host with Postgres |
 | IAM lane | v0.1 | Embedded better-iam on adapter-postgres sustains 50 or more admissions/s (about 150 lock acquisitions/s) with lock wait below 50%; record the ceiling; below 200 admissions/s, propose R1 (D18) | not run: it needs Postgres |
 | Placements | v0.1 | Placements/s recorded | 35.7/s inline, 1k nodes, PGlite (see below) |
 | Place to active | v0.1 | p99 below 2 s with 1k FakeDaemons in the real-time harness | 1.02 s at 5/s in the first runs; 101 to 191 ms at 5/s and 176 ms at 10/s in later runs |
@@ -79,19 +81,30 @@ their knobs.
 ### Gateway sessions
 
 `bench/gateway-streams`: 5,000 simulated daemons each open a real `Session` with a `Hello` over HTTP/2 (100 streams
-per connection), heartbeat every 10 s, and answer 50 commands/s enqueued at random.
+per connection over h2c; with `BENCH_GW_TLS=1`, one mTLS connection per daemon with its own node certificate),
+heartbeat every 10 s, and answer 50 commands/s enqueued at random. `BENCH_GW_SPLIT=1` runs the gateway and its store
+in their own process, so RSS is the gateway's alone. All runs are on a 64 vCPU workstation with PGlite.
 
 | Run | Ramp | Dispatch p50 / p99 / max | RSS max | Drops |
 | --- | --- | --- | --- | --- |
-| 60 s | 24.8 s (bound by the 200/s handshake bucket) | 4 / 22 / 381 ms | 1,115 MiB | 0 |
-| 30 s, before admission control | 58 s, 9,880 opens for 5,000 sessions | 15 / 924 / 7,606 ms | 871 MiB | 5,464 |
-| 60 s with a reconnect storm, `maxPendingHellos` on | 25.5 s | 5 / 32 / 101 ms | 924 MiB | 0 |
+| 60 s, h2c | 24.8 s (bound by the 200/s handshake bucket) | 4 / 22 / 381 ms | 1,115 MiB | 0 |
+| 30 s, h2c, before admission control | 58 s, 9,880 opens for 5,000 sessions | 15 / 924 / 7,606 ms | 871 MiB | 5,464 |
+| 60 s, h2c, with a reconnect storm, `maxPendingHellos` on | 25.5 s | 5 / 32 / 101 ms | 924 MiB | 0 |
+| 60 s, mTLS, storm, generator in process | 83.8 s (refused dials: the Windows accept queue) | 12 / 27 / 99 ms | 2,183 MiB (includes the generator's 5,000 client TLS sessions) | 0 |
+| 60 s, mTLS, storm, split | 32.1 s (120 refused dials) | 14 / 26 / 94 ms | 1,240 MiB (the gateway process, PGlite included) | 0 |
+
+The split mTLS run meets the gate's sessions, dispatch p99 and RSS criteria; its storm brought all 5,000 back
+(p99 38.8 s, all 39.0 s) with 3,464 of 3,464 commands succeeded, and the gateway's event-loop p99 was 25 ms. The
+result file still records `met: false`, because the run lasted 60 s: the 30 min run on the reference host with
+Postgres is what remains (D15, D20). The suite's test timeout follows `BENCH_GW_DURATION_MS`, so a 30 min run is not
+cut off by the default timeout.
 
 The failed run found that a storm could make the gateway fence itself: Hellos queued without bound behind a slow
 store, the gateway's own lease renewal waited past its 20 s TTL, and every fenced transaction dropped its streams.
 `maxPendingHellos` (default 64) now refuses Hellos beyond that with `RESOURCE_EXHAUSTED`, and daemons retry with
-jitter. In the storm run all 5,000 sessions came back, p99 32.5 s and all within 33.2 s, and 3,056 of 3,056
-commands succeeded. RSS includes the in-process load generator, and h2c leaves out TLS handshake cost.
+jitter. In the h2c storm run all 5,000 sessions came back, p99 32.5 s and all within 33.2 s, and 3,056 of 3,056
+commands succeeded. In the h2c runs RSS includes the in-process load generator, and h2c leaves out TLS handshake
+cost.
 
 ### Placements
 

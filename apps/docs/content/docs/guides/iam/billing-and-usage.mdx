@@ -48,6 +48,7 @@ unit. All are counted in hours:
 | `node.metal.hours` | A whole-node lease (`binding: 'node'`, v0.5): one per lease hour, on top of its GPUs |
 | `vps.vcpu.hours` | A hosted instance's vCPUs |
 | `vps.memory.gib.hours` | A hosted instance's memory in GiB |
+| `vps.sandbox.warm` | A warm [sandbox](/docs/guides/vps/sandboxes#warm-pools) instance's vCPUs until a sandbox claims it, billed to the tenant with no identity (v0.5) |
 
 A fractional atom bills its share of a GPU: a MIG instance its compute slices over 7 (`3g.40gb` is 3/7), a
 time-slice slot one over the number of slots, and an MPS slot its units over 100. See
@@ -70,7 +71,8 @@ BETTER_IAM_TOKEN=biam_... better-compute iam setup --audience https://compute.ex
   `@better-iam/client`.
 - Without `--gpu-models` it creates a meter for every known family: `H100`, `H200`, `B200`, `GB200`, `A100`,
   `L40S`, `L4` and `RTX-PRO-6000` (`gpu.rtx-pro-6000.hours`), plus `node.metal.hours`, `vps.vcpu.hours` and
-  `vps.memory.gib.hours`.
+  `vps.memory.gib.hours`. `vps.sandbox.warm` is not in the set: create it yourself in Better IAM billing before a
+  sandbox template keeps a warm pool, or its windows are dead-lettered.
 - The result lists `meters.created` and `meters.existing`. No prices are set: pricing is your decision, made
   with Better IAM's `billing.setPrice`.
 

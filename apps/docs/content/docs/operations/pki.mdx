@@ -30,6 +30,9 @@ sources:
   - packages/server/src/join/allocation-binding.ts
   - packages/gateway/src/store.ts
   - packages/server/src/tunnels/module.ts
+  - packages/server/src/tunnels/sandbox-exec.ts
+  - packages/vps/src/module.ts
+  - tests/pki-sandbox-ca.test.ts
   - packages/postgres/src/migrations/0002_base.ts
   - packages/postgres/src/migrations/0023_session_trust_version.ts
   - proto/bettercompute/agent/v1/session.proto
@@ -43,7 +46,7 @@ sources:
 
 Better IAM identifies people and AI agents. Machines are identified by Better Compute's own PKI: a set of local
 certificate authorities and keys that one deployment owns, created once with `better-compute pki init` and loaded by
-every process at start. Everything is ECDSA P-256 with SHA-256, except the SSH CA, which is Ed25519 by default, and
+every process at start. Everything is ECDSA P-256 with SHA-256, except the two SSH CAs, which are Ed25519 by default, and
 the package needs nothing beyond `node:crypto`.
 
 The design rule is that **no key does two jobs**. A CA that signs agent certificates cannot sign a gateway's server
@@ -62,6 +65,7 @@ certificate, and the key that signs `JoinResponse` is not the one join tokens ar
 | Command-signing root (v0.2) | 24 h worker keys, which sign every command | 5 years | Daemons, through the trust bundle |
 | Exec ticket key (v0.3) | 60 s single-use tunnel tickets | — | Gateways (their tunnel JWKS) and daemons (the JWKS in NodeSpec) |
 | SSH CA (v0.3) | Break-glass OpenSSH user certificates, at most 1 h | — | Nodes' sshd, through NodeSpec |
+| Sandbox SSH CA (v0.5) | `sandboxes.exec` certificates, at most 15 minutes, for `<account>@<instanceId>` | — | Sandbox guests' sshd, through the user data vps renders |
 | Audit signing key (v0.4) | Per-tenant Merkle checkpoints of `audit_events` | Certificate 10 years | `audit verify` and third parties, by pin |
 
 Subordinate CAs never outlive the root: a CA certificate's `notAfter` is capped at the root's. Leaf lifetimes are
@@ -85,9 +89,24 @@ are sealed with AES-256-GCM under a key derived (HKDF-SHA256) from `BETTER_COMPU
 the authenticated data. The sealed payload also carries a SHA-256 over every public field (certificates, trust
 anchors, the trust version), so whoever can write the file but lacks the secret cannot add a command-signing root or
 pin a trust version: loading refuses a sealed bundle whose public parts changed (`INVALID_CONFIG`; restore it from a
-backup), while reformatting the JSON is harmless. A bundle sealed before this check still loads unless it carries
-rotation fields, which cannot be trusted there; restore the copy from before the rotation and run
-`pki rotate-command-root` again. Any CLI write-back re-seals in the new format. `pki init` prints the pins, like `pki show`.
+backup), while reformatting the JSON is harmless. Any CLI write-back re-seals in the current format. `pki init`
+prints the pins, like `pki show`.
+
+<Callout type="warn" title="Re-seal bundles sealed before 482dea8">
+A bundle sealed in the former format (before the seal covered the public parts, commits 482dea8 and 7b9e9af) is
+refused wherever it is loaded (`INVALID_CONFIG`: "sealed in the former format"), and so is an unsealed bundle when
+`BETTER_COMPUTE_SECRET` is set, since a sealed one may have been replaced. Nothing authenticates such a file: whoever
+could write it could have added a trust anchor or a second SSH CA line. `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED=1`
+makes every loader accept it again; set it only for the one check below, never on a running deployment. Once:
+
+1. compare the pins of `pki show` with the ones your install scripts and join tokens use (with the secret set,
+   `pki show` needs the variable too; without the secret it prints the pins with a warning that nothing vouches for
+   them);
+2. run [`pki reseal`](#pki-reseal), which accepts the old format by itself and writes the bundle in the current one.
+
+A former-format bundle that carries command-signing rotation fields cannot be re-sealed: restore the copy from
+before the rotation and run `pki rotate-command-root` again.
+</Callout>
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -102,7 +121,10 @@ servers: it is needed only to replace a CA.
 
 ### pki show
 
-`pki show` reads only the public half of the bundle, so it needs no secret. It prints:
+`pki show` reads the public half of the bundle. With `BETTER_COMPUTE_SECRET` it first checks that half against the
+seal and prints `authenticated: true`; without the secret it still prints the pins, with `authenticated: false` and
+a warning that whoever can write the file chooses them. `audit verify` and `daemon install-script` read pins the same
+way. It prints:
 
 | Field | Used by |
 | --- | --- |
@@ -113,6 +135,7 @@ servers: it is needed only to replace a CA.
 | `auditSigningKeyPin` | `audit verify` |
 | `execTicketKeyId` | The `kid` of the exec ticket key (its RFC 7638 thumbprint) |
 | `sshCaPublicKey` | The OpenSSH public key sshd trusts |
+| `sandboxSshCaPublicKey` | The sandbox SSH CA's public key, which sandbox guests trust (`vps({ sandboxExec: { caPublicKey } })`) |
 | `commandSigningRootSha256` | The command-signing root, as trust bundles list it |
 | `commandSigningNextRootSha256`, `commandSigningPreviousRootSha256`, `trustVersion` | During a root rotation: the root published but not signing yet, the former root still trusted, and the trust bundle's version |
 | `expires` | When the root, node, serving, internal and command-signing certificates expire |
@@ -137,6 +160,31 @@ earlier files atomically.
 | `--name NAME` | `gateway` | File name stem |
 | `--days N` | 30 | Lifetime, from 1 to 30 days |
 | `--pki PATH` | `.better-compute/pki.json` | The bundle |
+
+### pki add-sandbox-ca
+
+```bash
+better-compute pki add-sandbox-ca
+```
+
+Bundles from `pki init` already hold a [sandbox SSH CA](#the-sandbox-ssh-ca). For a bundle made before sandboxes,
+this creates one (Ed25519, comment `<trust domain> sandbox ssh ca`), writes the bundle back (sealed when
+`BETTER_COMPUTE_SECRET` is set; an offline root stays out) and prints `sandboxSshCaPublicKey`. A bundle that already
+has one is `INVALID_STATE`. It loads the bundle like any other command, so re-seal a former-format bundle first. Roll
+the bundle out to every api replica, and give vps the public key as `sandboxExec.caPublicKey`. The only flag is
+`--pki`.
+
+### pki reseal
+
+```bash
+better-compute pki show && better-compute pki reseal
+```
+
+It rewrites the bundle sealed with `BETTER_COMPUTE_SECRET` (required, at least 32 characters; `MISSING_ENV`
+otherwise) in the current format, where the seal also covers every certificate and pin, so a file changed without the
+secret no longer loads. It accepts a bundle sealed in the former format, or left unsealed, without any variable, and
+keeps every key and certificate: nothing is rotated. It prints the pins it now vouches for, with
+`authenticated: true`. It seals whatever the file holds, so compare the pins first. The only flag is `--pki`.
 
 ### pki renew-ca
 
@@ -198,12 +246,13 @@ in the clear and the private keys either sealed or, with `--plaintext`, as PEM.
 
 | Function | Package | Does |
 | --- | --- | --- |
-| `loadPkiBundle(path, env)` | `better-compute/cli` | Reads the file and unseals it with `env.BETTER_COMPUTE_SECRET` |
-| `importPkiBundle(text, { secret?, rootKey? })` | `better-compute/pki` | Loads a bundle; `INVALID_CONFIG` on a wrong secret, a damaged file or a key that does not match its certificate |
+| `loadPkiBundle(path, env)` | `better-compute/cli` | Reads the file and unseals it with `env.BETTER_COMPUTE_SECRET` (and `BETTER_COMPUTE_PKI_ALLOW_UNAUTHENTICATED`) |
+| `importPkiBundle(text, { secret?, rootKey?, allowUnauthenticated? })` | `better-compute/pki` | Loads a bundle; `INVALID_CONFIG` on a wrong secret, a damaged file, a key that does not match its certificate, changed public parts, or (unless `allowUnauthenticated`) a former-format seal or an unsealed bundle with a secret |
 | `exportPkiBundle(bundle, { secret?, omitRootKey? })` | `better-compute/pki` | Serializes a bundle, sealed when `secret` is given |
 | `exportRootKey(bundle, { secret? })` | `better-compute/pki` | The root key alone, for keeping it offline |
-| `readPkiPins(text)` | `better-compute/pki` | The pins and expiry dates from the public half |
+| `readPkiPins(text, { secret? })` | `better-compute/pki` | The pins and expiry dates from the public half, and `authenticated` (checked against the seal when `secret` is given) |
 | `createPkiBundle({ trustDomain })` | `better-compute/pki` | What `pki init` runs |
+| `tunnelsOptions(bundle, { issuer })` | `better-compute/pki` | The `tunnels` options: the exec ticket issuer, `ssh` (break-glass) and `sandboxSsh`, when the bundle has them |
 
 Wire it into the options and the gateway:
 
@@ -223,13 +272,17 @@ export default defineConfig(() => ({
     commandSigning: bundle.commandSigning, // v0.2 signed intent
   },
   // The ticket issuer must be baseURL's origin: the api accepts only tickets from it.
-  tunnels: { issuer: execTicketIssuer(bundle, { issuer: 'https://compute.example.com' }), ssh: bundle.sshCa },
-  modules: [auditModule({ signer: bundle.auditSigning })],
+  // Equivalent to { issuer: execTicketIssuer(bundle, …), ssh: bundle.sshCa, sandboxSsh: bundle.sandboxSshCa }.
+  tunnels: tunnelsOptions(bundle, { issuer: 'https://compute.example.com' }),
+  modules: [
+    auditModule({ signer: bundle.auditSigning }),
+    vps({ images, sandboxExec: { caPublicKey: bundle.sandboxSshCa!.publicKey } }), // sandbox guests trust it
+  ],
 }));
 ```
 
 Bundles made before a key existed still load; they lack that key (`auditSigning`, `execTicketKey`, `sshCa`,
-`commandSigning` are optional), and `execTicketIssuer` then fails with `INVALID_CONFIG`.
+`sandboxSshCa`, `commandSigning` are optional), and `execTicketIssuer` then fails with `INVALID_CONFIG`.
 
 `doctor` checks the bundle at `--pki`: `pki.unreadable` when it cannot be parsed, `pki.unseal` when it does not
 open with this deployment's secret, `pki.ca-expired` for an expired CA, `pki.ca-expiring` for one that expires
@@ -362,6 +415,23 @@ requesting session, with the principal `<account>@<nodeId>` so a certificate ope
 issuance is a row in `ssh_certificates`; `nodes.revokeSshCert` adds the serial to the node's key revocation list in
 its next NodeSpec. See [SSH](/docs/guides/access/ssh) and [tunnels](/docs/guides/access/tunnels).
 
+## The sandbox SSH CA
+
+The bundle's `sandboxSshCa` (v0.5) is a second OpenSSH CA, used only by `sandboxes.exec`. It signs user certificates
+of 60 seconds to 15 minutes, never past the caller's session, for the one principal `<account>@<instanceId>`. It is
+kept apart from the break-glass CA so neither certificate opens what the other is for: nodes never trust the sandbox
+CA, and sandbox guests never trust the break-glass CA.
+
+- **Signing.** Pass it as `tunnels.sandboxSsh` (`tunnelsOptions(bundle, …)` does). Without it, `sandboxes.exec` is
+  `UNSUPPORTED`.
+- **Trust.** Pass its public key as `vps({ sandboxExec: { caPublicKey } })`. vps writes it into every sandbox
+  instance's user data as `TrustedUserCAKeys`, with an `AuthorizedPrincipalsFile` holding that instance's own
+  principal. vps and the tunnels module each refuse a key that is not one line (an ed25519 or ECDSA P-256 key for
+  vps), since a second line would be a second trusted CA; the bundle loader refuses one too.
+- **Older bundles.** `pki add-sandbox-ca` adds it; `pki show` prints it as `sandboxSshCaPublicKey`.
+- **Revocation.** Guests have no agent and receive no revocation list, so the short lifetime and tunnel
+  re-authorization are the controls. See [sandboxes](/docs/guides/vps/sandboxes#run-code-inside).
+
 ## The audit key
 
 With the bundle's `auditSigning` key, `auditModule({ signer })` seals `audit_events` into signed, hash-chained,
@@ -405,6 +475,8 @@ fakehw builds of bcd run instances to serve so far. What the broker checks is in
 | Gateway serving certificates | `pki issue-gateway` before the 30 days run out; gateways with `host.gateway.tlsFiles` hot-reload it, others need a restart one at a time |
 | Command-signing root | `pki rotate-command-root`, the three steps above |
 | Exec ticket key | `rotate()` on the issuer; the previous key stays in the JWKS |
+| SSH CA, sandbox SSH CA | Not automated. A new sandbox CA reaches only instances created after it, since the key is in their user data |
+| A bundle sealed in the former format | Once, `pki reseal` (see [pki reseal](#pki-reseal)) |
 | Workload issuer keys | `addKey()`, `promote(kid)`, then `retire(kid)` once the old key's tokens expired |
 | Sealed secrets | `localSealedSecretStore` with several keys, then `reseal()` (see [configuration](/docs/operations/configuration#the-deployment-secret)) |
 | Node, serving and internal CAs (1 year) | `pki renew-ca --ca node` (or `serving`, `internal`) before they expire (`doctor` warns 30 days ahead); see [pki renew-ca](#pki-renew-ca) |

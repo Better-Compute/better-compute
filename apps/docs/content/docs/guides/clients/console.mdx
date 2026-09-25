@@ -16,6 +16,10 @@ sources:
   - apps/console/src/app/(console)/permissions.ts
   - apps/console/src/app/(console)/activity/page.tsx
   - apps/console/src/app/(console)/nodes/[nodeId]/page.tsx
+  - apps/console/src/app/(console)/sandboxes/page.tsx
+  - apps/console/src/components/ssh-cert-panel.tsx
+  - packages/console-kit/src/sandboxes.ts
+  - packages/console-kit/src/ssh-access.ts
   - apps/console/src/app/api/compute/[...path]/route.ts
   - apps/console/src/app/api/compute/watch/route.ts
   - apps/console/src/components/console-provider.tsx
@@ -90,7 +94,7 @@ node server.mjs --dev      # or: pnpm dev
 ```
 
 `--dev` sets `CONSOLE_DEV=1`, the only mode in which the console generates secrets for itself: the session secret,
-the exec ticket key and the SSH CA key (under `.console-data/`) and, on the first start, the root administrator's
+the exec ticket key, the break-glass and sandbox SSH CA keys (under `.console-data/`) and, on the first start, the root administrator's
 password, printed once. It also allows gateways without TLS. Open `http://localhost:3100/login` and sign in as
 `admin@console.local`. Members of an organization sign in at `/login?org=<slug>`.
 
@@ -116,6 +120,7 @@ Run it from `apps/console`: the stack file and the data directory are resolved a
 | `CONSOLE_ADMIN_EMAIL`, `CONSOLE_ADMIN_PASSWORD` | `admin@console.local`, a generated password | the password is required on the first start |
 | `CONSOLE_EXEC_TICKET_KEY_FILE` | a generated `exec-ticket.pem` | unset: tunnels are off |
 | `CONSOLE_SSH_CA_KEY_FILE` | a generated `ssh-ca.pem` | unset: no break-glass SSH |
+| `CONSOLE_SANDBOX_SSH_CA_KEY_FILE` | a generated `sandbox-ssh-ca.pem` (Ed25519) | unset: no `sandboxes.exec` (`UNSUPPORTED`), and sandbox guests trust no CA |
 | `CONSOLE_GATEWAY_TLS_CERT`, `_KEY`, `_CA` | none needed (h2c gateways) | all three or none; tunnels need them |
 | `CONSOLE_AUDIT_KEY_FILE` | a generated `audit-checkpoint.pem` (P-256 PKCS#8) | unset: no audit checkpoints; every replica shares the key |
 | `CONSOLE_RELEASE_PINS`, `CONSOLE_DOWNLOADS_URL`, `CONSOLE_RELEASE_THRESHOLD` | unset: no rollout module | set the first two to mount rollouts |
@@ -123,8 +128,10 @@ Run it from `apps/console`: the stack file and the data directory are resolved a
 | `PORT`, `HOSTNAME` | `3100`, `localhost` | the same |
 
 Every replica and gateway must share the exec ticket key, and nodes pin its public key and the SSH CA's, so
-production supplies the key files rather than generating them. The stack is built once per process from
-`console.config.mjs` (loaded at run time, never bundled): Better IAM, then compute with the `vps`, `fleet` and
+production supplies the key files rather than generating them. The sandbox SSH CA is a separate key, so a sandbox
+certificate never opens a node and a break-glass one never opens a sandbox; the console passes its public key to
+`vps({ sandboxExec })` so every sandbox guest trusts it. Every replica must share it too. The stack is built once per
+process from `console.config.mjs` (loaded at run time, never bundled): Better IAM, then compute with the `vps`, `fleet` and
 `events` (webhooks) modules and `retentionModule()` (the console builds `betterCompute()` itself, so the CLI's
 automatic retention does not apply), `audit` when an audit key is available, and `rollout` when release pins are set.
 
@@ -143,7 +150,8 @@ console-kit, for the tenant the session acts in. Platform pages appear only for 
 | Overview | `/` | capacity per pool, quota alerts |
 | Reservations | `/reservations`, `/reservations/[id]` | the form with a capacity preview, the earliest start and approvals; the list and each reservation's actions |
 | Instances | `/instances`, `/instances/[id]`, `/instances/[id]/terminal` | the form with sizes per pool; list, detail and a browser terminal |
-| Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, recent commands, the node console, and break-glass SSH certificates for root |
+| Sandboxes | `/sandboxes` | a create form over the tenant's templates (each with its flavor and warm pool size) and a lifetime in minutes, capped at the template's maximum; the person's own sandboxes, or everyone's, with state, a countdown to expiry (a warning in the last 5 minutes), **+30 min**, **Snapshot** and **Delete**, and the `better-compute sandbox exec` line for a shell |
+| Nodes | `/nodes`, `/nodes/[id]`, `/nodes/[id]/console` | a filterable table; conditions, cordon, uncordon and drain, recent commands, the node console, and the break-glass SSH panel (below) |
 | Pools & capacity | `/pools`, `/pools/[id]` | pools owned or offered, a 7-day booking calendar, join tokens and join requests |
 | Quotas | `/quotas` | used of max per pool and resource |
 | Usage & spend | `/usage` | usage per meter, day, project and person, with a CSV export |
@@ -159,6 +167,35 @@ Buttons follow two checks. A button is enabled only when the item's state allows
 reservation offers nothing) and Better IAM would allow it for the signed-in person. The second check is advisory: a
 server action batches up to 50 checks through Better IAM's `can`, and the compute API still decides the real call.
 A delegated call held back for approval shows "awaiting approval" with the confirmation id.
+
+### Sandboxes
+
+The **Sandboxes** page (`createSandboxesView` in console-kit) works on [sandboxes](/docs/guides/vps/sandboxes) of the
+session's tenant. Templates are created elsewhere (`sandboxTemplates.create`, or a FleetConfig document); with none,
+the page says so. Create sends `sandboxes.create` with a fresh `console-…` idempotency key and waits up to 20 seconds
+for the sandbox to leave `starting`. The list shows the person's own sandboxes, or, with **Everyone's sandboxes**,
+the tenant's (`scope: 'all'`), each with its template name, `warm` and the snapshot it was restored from. The
+countdown ticks every second from `expiresAt` and reads `expired` at zero.
+
+Its buttons are not gated by IAM checks in advance: the call is decided and an error is shown in place. **+30 min**
+is `sandboxes.extend` with `by` of 30 minutes, **Snapshot** takes a memory snapshot that goes with the sandbox, and
+**Delete** asks for confirmation first. A shell is not opened in the browser: the page shows the
+`better-compute sandbox exec sbx_…` command, which runs OpenSSH through a tunnel. The console's own stack configures
+the sandbox SSH CA but no snapshot store, so **Snapshot** answers `INVALID_CONFIG` there until you give
+`vps({ snapshots })` a store in `console.config.mjs`.
+
+### Break-glass SSH
+
+A node's page carries the **Break-glass SSH** panel for [SSH certificates](/docs/guides/access/ssh), for platform
+administrators. It takes your public key (a pasted private key, several lines or an unsupported key type is refused
+before anything is sent), the account (default `root`) and a lifetime of 5, 15, 30 or 60 minutes, and issues a
+certificate with `nodes.issueSshCert`; the certificate is shown once, with a copy button and the commands to save it
+as `<key>-cert.pub` and connect. A session without MFA is told to sign in again with a second factor.
+
+Below it, **Who holds access** lists the node's certificates from `nodes.listSshCerts`: holder, principal, issue
+and expiry times, and state (`active`, `expired` or `revoked`, with the revocation reason), with **Include expired**
+to show those too. Each active certificate has a **Revoke** button, which asks for confirmation and calls
+`nodes.revokeSshCert` with the reason `revoked from the console`.
 
 ## console-kit
 
@@ -191,7 +228,10 @@ live.connection.subscribe(() => showBadge(live.connection.get().status));
 | Forms | `createReservationForm`, `validateReservation`, `createInstanceForm`, `validateInstance` | validation that mirrors the server, a debounced `capacity.preview`, one idempotency key per attempt kept across retries and confirmations |
 | Views | `capacityChart`, `quotaView`, `createQuotaView`, `timelineView`, `earliestFit`, `usageView`, `usageCsv` | stacked capacity bars, quota meters (warning from 80 %), the booking calendar and earliest free window, usage and estimated spend |
 | Admin | `createRolloutView`, `rolloutProgress`, `createFleetDriftView`, `nodeTable` | rollout waves, fleet drift by kind, a filterable, stably sorted node table |
+| Sandboxes | `createSandboxesView`, `timeLeft`, `sandboxExecCommand` | a tenant's sandboxes (`scope` mine or all) and templates, `detail`, `create`, `extend`, `snapshot` and `remove`, each refreshing the list; the remaining lifetime as `12m 03s` or `1h 05m`, urgent in the last 5 minutes; the CLI line that opens a shell |
+| SSH access | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's break-glass certificates: `issue` (held in `view.issued` until dismissed), `revoke`, `showExpired`; a public key check that refuses private keys; the commands to use a certificate |
 | Webhooks | `createWebhooksView`, `deliverySummary` | a tenant's webhooks over the `webhooks` group (list, create, pause, rotate, delete, ping, deliveries, redeliver, event types); the secret from create or rotate sits in `view.secret` until `dismissSecret()` and is never stored or re-read; delivery counts by state and the latest failure |
+| Break-glass SSH | `createSshAccessView`, `checkSshPublicKey`, `sshUsage` | one node's certificates over `nodes.listSshCerts` (expired ones with `showExpired(true)`), `issue({ publicKey, account?, minutes? })` (1 to 60 minutes, 15 by default) and `revoke(serial, reason?)`; a pasted private key, a multi-line paste or a key type other than Ed25519 or ECDSA P-256 is refused before anything is sent; the issued certificate sits in `issued` until `dismissIssued()`, and `sshUsage` gives the commands to use it. The console's node page uses it |
 | Terminal | `createTerminalSession`, `createScreen`, `keyInput` | `tunnels.open`, then the WebSocket; a VT100/xterm screen model with scrollback, no DOM |
 | React | `bindReact`, and `@better-compute/console-kit/react` | `useStore`, `useList`, `usePermission`, `useDetail`, `useAction` |
 

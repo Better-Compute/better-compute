@@ -18,6 +18,8 @@ sources:
   - packages/inventory/src/health.ts
   - packages/inventory/src/hygiene.ts
   - packages/inventory/src/pressure.ts
+  - packages/inventory/src/image-cache.ts
+  - packages/metal/src/steps.ts
   - packages/gateway/src/health.ts
   - packages/gateway/src/store.ts
   - packages/provision/src/remediation.ts
@@ -115,6 +117,27 @@ Applying an inventory:
 - publishes `node.inventory.changed` (`snapshotId`, `digest`, `sections`, `changes`) and one event per change:
   `node.gpu.missing`, `node.gpu.added`, `node.disk.replaced`, `node.driver.changed`, `node.mig.layout.changed`.
 
+### Trust: tenant-controlled nodes are advisory
+
+A node under a [dedicated-root lease](/docs/guides/bare-metal/dedicated-root) has `trust: 'tenant-controlled'`:
+the lessee has root, so it can report anything. Its reports are advisory (PLAN.md §10.1 Trust). For such a node:
+
+- `applyInventory` appends the snapshot and publishes `node.inventory.changed` with `advisory: true` (and no
+  per-change events), and changes nothing else. Devices, device health, labels, conditions, `noScheduleReasons`,
+  the image cache and the hardware key keep the platform's last view, and the applied snapshot stays the
+  platform's last one. The result status is `advisory`.
+- The applied digest is stored as `advisory:<digest>`, so hash reports treat the set as applied and heartbeats do
+  not queue it again.
+- `recordXid` ignores its XIDs (no condition, no quarantine, no NoSchedule), and `recordHostPressure` ignores its
+  pressure, so a lessee cannot make a `vps-host` pool's node NoSchedule or raise conditions.
+- The pool's image cache query for the `image-cached` scorer skips tenant-controlled nodes.
+
+Without this, a GPU the lessee reports missing or unhealthy (or a faked XID) would turn the device
+`healthy: false` and leave the lease's bill. The `inventory.get`, `inventory.history` and `inventory.diff`
+methods still read the appended snapshots, the lessee's included. When metal ends the lease,
+`metal.exitTenantRoot` calls `endAdvisoryInventory`, which clears the advisory digest, so the next report applies
+the set for real under platform trust even if it did not change.
+
 ## Reading inventory
 
 All three methods are decided as `compute:nodes:read` on the node, and answer `NOT_FOUND` for a node of another
@@ -198,7 +221,8 @@ Inventory also writes node labels with source `inventory`, the way NVIDIA's GPU 
 `os.kernel` and `kvm.available`. A label whose GPUs disagree reads `mixed`. `nodes.label` cannot overwrite them.
 `cpu.model` is the reported model with trademark marks dropped and every other run of characters outside
 `A-Z a-z 0-9 . _` turned into `-` (`AMD EPYC 9654 96-Core Processor` reads `AMD-EPYC-9654-96-Core-Processor`);
-sandbox memory snapshots, which are planned, are to restore only on hosts with an equal value.
+a sandbox snapshot that includes memory restores only on hosts with an equal value (see
+[snapshots](/docs/guides/vps/sandboxes#snapshots-and-restore)).
 
 The gateway writes one more kind at every `Hello`: each driver the daemon advertises in `Hello.drivers` becomes
 the label `bc.dev/driver.<id>=<version>` with source `system` (a missing version reads `unknown`; ids outside
@@ -278,7 +302,8 @@ when the kernel exposes no PSI. `recordHostPressure(tx, nodeId, report)` turns i
 
 Between the two levels a condition keeps its status, so a host hovering at a threshold does not flap. On nodes of
 `vps-host` pools the conditions are NoSchedule; elsewhere they only alert through `node.condition.changed`.
-Nothing is written while nothing changes. The gateway runs it only when the host installs the status handler:
+Nothing is written while nothing changes, and nothing at all for a `tenant-controlled` node (see
+[trust](#trust-tenant-controlled-nodes-are-advisory)). The gateway runs it only when the host installs the status handler:
 
 ```ts
 import { createGateway, xidStatusHandler } from 'better-compute/gateway';
@@ -307,7 +332,7 @@ eight-GPU machine, while a GPU that fell off the bus usually needs a reboot of t
 - **XID events.** The daemon reports XIDs as `Xid<n>` conditions on a GPU in its status reports. With the
   gateway's `xidStatusHandler` installed (`createGateway({ reports: { ...gatewayReportHandlers, status:
   xidStatusHandler } })`), each one goes through `recordXid`. XIDs without a policy (13, 31, 43, 45 and other
-  application faults) are only recorded as events.
+  application faults) are only recorded as events, and XIDs from a `tenant-controlled` node change nothing.
 - **XIDs in bcd.** bcd follows `/dev/kmsg` from its end and parses driver lines of the form
   `NVRM: Xid (PCI:0000:18:00): 79, ...`. It normalizes the bus id to NVML's form (`00000000:18:00.0`), finds the GPU
   with that bus id in its inventory, and raises condition `Xid79` (status `TRUE`, `device_id` the GPU's UUID, the
