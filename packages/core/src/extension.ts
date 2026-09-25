@@ -1108,6 +1108,14 @@ export interface MethodAdmission<I, O> {
    * the same key decides again (e.g. once the budget window resets).
    */
   check?(context: MethodContext, input: I, resource: MethodResource): Promise<void>;
+  /**
+   * Its own transaction after an ALLOWED request's handler (transaction 2) threw, e.g. the resource
+   * changed between the transactions: best-effort cleanup of what `prepare` staged that would
+   * otherwise outlive the request (pending authz attributes an `extend` set are merged into every
+   * later decision on the resource). Keep a retry with the same key possible. A throw here is
+   * logged; the caller sees the handler's error.
+   */
+  abandoned?(context: MethodContext, input: I, tx: SqlTx, error: unknown): Promise<void>;
 }
 
 export function defineMethod<I, O>(method: MethodDefinition<I, O>): MethodDefinition<I, O> {

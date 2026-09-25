@@ -22,6 +22,7 @@ let compute: ReturnType<typeof build>;
 let overBudget = true;
 const checks: { resource: MethodResource }[] = [];
 let denials = 0;
+const abandons: string[] = [];
 
 interface OrderInput {
   tenantId: string;
@@ -52,6 +53,10 @@ const shop = definePlugin({
           async denied() {
             denials++;
           },
+          async abandoned(_context, input, tx, error) {
+            abandons.push((error as ComputeError).code);
+            await tx.query('INSERT INTO plg_shop_orders (key) VALUES ($1)', [`abandoned:${input.idempotencyKey}`]);
+          },
           async check(_context, _input, resource) {
             checks.push({ resource });
             if (overBudget)
@@ -64,6 +69,8 @@ const shop = definePlugin({
           await context.sql.query('INSERT INTO plg_shop_orders (key) VALUES ($1)', [
             input.idempotencyKey,
           ]);
+          if (input.idempotencyKey.startsWith('gone'))
+            throw new ComputeError('INVALID_STATE', 'The order went away between the transactions');
           return { key: input.idempotencyKey };
         },
       }),
@@ -110,6 +117,19 @@ describe('MethodAdmission.check', () => {
     // A replay needs no decision and no check.
     expect(await order('o1')).toEqual({ key: 'o1' });
     expect(checks).toHaveLength(2);
+  });
+
+  it('runs abandoned in its own transaction when an allowed handler throws', async () => {
+    iam.allow({ token: USER });
+    overBudget = false;
+    await expect(order('gone-1')).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect(abandons).toEqual(['INVALID_STATE']);
+    // The handler's write rolled back with transaction 2; the cleanup committed on its own.
+    const { rows } = await database.query<{ key: string }>(
+      `SELECT key FROM plg_shop_orders WHERE key LIKE '%gone-1'`,
+    );
+    expect(rows.map((row) => row.key)).toEqual(['abandoned:gone-1']);
+    expect(denials).toBe(0);
   });
 
   it('never runs for a caller IAM refuses', async () => {

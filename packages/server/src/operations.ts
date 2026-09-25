@@ -399,14 +399,33 @@ export function createOperations(
       await admission.check(contextFor(outsideTransaction(database)), input, resource);
     const admitted = admissionOf(caller, decision, requestId, clock.now());
     // Transaction 2: the handler with the recorded decision, and its audit row.
-    return database.transaction(async (tx) => {
-      const value = await definition.handler(
-        contextFor(withinTransaction(database, tx), admitted),
-        input,
-      );
-      await recordAudit(tx, admitted);
-      return value;
-    });
+    try {
+      return await database.transaction(async (tx) => {
+        const value = await definition.handler(
+          contextFor(withinTransaction(database, tx), admitted),
+          input,
+        );
+        await recordAudit(tx, admitted);
+        return value;
+      });
+    } catch (error) {
+      // Transaction 2 rolled back, and with it any cleanup of its own: what `prepare` staged in
+      // transaction 1 is undone here, best effort, in a third.
+      if (admission.abandoned) {
+        try {
+          await database.transaction((tx) =>
+            admission.abandoned!(contextFor(withinTransaction(database, tx)), input, tx, error),
+          );
+        } catch (cleanup) {
+          log.warn('An admission abandon hook failed', {
+            requestId,
+            route: path,
+            error: cleanup instanceof Error ? cleanup.message : String(cleanup),
+          });
+        }
+      }
+      throw error;
+    }
   }
 
   /**
