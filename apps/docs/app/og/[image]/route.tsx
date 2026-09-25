@@ -8,7 +8,7 @@ export const revalidate = false;
 const cards: Record<string, SocialCard> = {
   'home.png': {
     trail: ['Open source', 'Apache 2.0'],
-    title: 'GPU and bare-metal capacity for TypeScript',
+    title: 'GPU, CPU and sandbox capacity for TypeScript',
     description:
       'Nodes, reservations, PXE provisioning, and VPS instances in your own PostgreSQL, with double booking impossible by construction.',
     tags: [

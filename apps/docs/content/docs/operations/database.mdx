@@ -122,8 +122,8 @@ not block startup. Its tables stay.
 Migrations run in registration order:
 
 1. the base schema, owner `core`, which is reserved for it;
-2. the built-in modules: node controllers, site boot, `inventory`, `capacity` (`capacity/0001_device_links`,
-   `capacity/0002_lease_health`), `pki/0001_sealed_secrets` when the default secret store is in use, and the tunnels
+2. the built-in modules: node controllers, site boot, `inventory`, `capacity` (`capacity/0001_device_links` to
+   `capacity/0004_mig_layouts`), `pki/0001_sealed_secrets` when the default secret store is in use, and the tunnels
    module when `tunnels` is set;
 3. your `modules`, in the order you list them;
 4. your `plugins`.
@@ -147,21 +147,30 @@ Migrations run in registration order:
 | `core/0013_image_cache` | `node_image_cache` |
 | `core/0014_ssh_certificates` | `ssh_certificates`, for break-glass revocation and audit |
 | `core/0015_inventory_images` | The `images` inventory section |
+| `core/0016_duplicate_identity` | `node_sessions.duplicate_hellos` and `duplicate_since`, for the duplicate-identity quarantine |
+| `core/0017_allocation_evidence` | `allocations.bound_report`, `bound_sig_kid`, `bound_sig`: node-attested `AllocationBound` |
+| `core/0018_partitioned_history` | `audit_events`, `inventory_snapshots` and `usage_windows` partitioned by month, and `compute_history_partition()` |
+| `core/0019_outbox_dead_letters` | `outbox_dead_letters`: events a sink always refuses, set aside |
+| `core/0020_command_created_at` | `commands.created_at`, for command latency, and the `commands_settled` index |
+| `core/0021_signed_specs` | `nodes.spec_body` and `spec_signature`: the signed bytes of each NodeSpec generation |
 
 ### Module migrations
 
 | Owner | Migrations |
 | --- | --- |
-| `capacity` | `0001_device_links`, `0002_lease_health` |
+| `capacity` | `0001_device_links`, `0002_lease_health`, `0003_device_counts` (`capacity_device_counts`, kept by a trigger on `devices`), `0004_mig_layouts` (`capacity_mig_layouts`, the MIG layout gate) |
 | `pki` | `0001_sealed_secrets` |
 | `iam` | `0001_successors` |
-| `provision` | `0001_workflows`, `0002_images`, `0003_workflow_owner` |
+| `provision` | `0001_workflows`, `0002_images`, `0003_workflow_owner`, `0004_gated_mig_layout` |
 | `metal` | `0001_nodes`, `0002_addresses`, `0003_tenant_root`, `0004_bmc_credentials` |
-| `vps` | `0001_instances` |
-| `events` | `0001_webhooks` |
+| `vps` | `0001_instances`, `0002_sealed_user_data`, `0003_provider_bootstraps` |
+| `events` | `0001_webhooks`, `0002_delivery_retention` |
 | `fleet` | `0001_names`, `0002_applied` |
 | `rollout` | `0001_rollouts` |
-| `audit` | `0001_checkpoints` |
+| `audit` | `0001_checkpoints`, `0002_archives` |
+
+The [modules reference](/docs/reference/modules) is generated from a deployment with every module and lists the
+same migrations.
 
 A module you write owns its own prefix; see [modules](/docs/extending/modules).
 

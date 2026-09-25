@@ -292,6 +292,11 @@ better-compute doctor --strict --query "findings[].check"
 | `events.webhook-dead-letters` | warning | Webhook deliveries that failed every attempt |
 | `events.webhook-backlog` | warning | More than 1,000 deliveries overdue by 5 minutes |
 | `capacity.reservations.stale` | warning | Reservations more than 10 minutes past their end and not released |
+| `capacity.device_counts.drift` | error | The trigger-kept per-node device counts the placement shortlist ranks on disagree with `devices` (a `TRUNCATE` bypasses the trigger) |
+| `vps.pools.runtime` | error | A `vps-host` pool runs a runtime this deployment does not list in `vps({ runtimes })` |
+| `vps.pools.single-tenant` | error | A container-runtime pool without `policy.singleTenant: true`, which cannot run instances |
+| `vps.pools.ipam` | warning | A `vps-host` pool without an IP range, so its instances get no address |
+| `vps.hosts.capacity` | warning | Adopted VPS hosts without vCPU, memory and disk capacity rows: no inventory yet, or no worker runs `vps.hosts` |
 | `audit.checkpoints` | warning | Audit rows older than 3 hours not sealed by a checkpoint |
 | `pki.*` | error or warning | The PKI bundle unreadable or not unsealable, or a CA expired (error) or expiring (warning) |
 | `host.*` | error or warning | The `host` export: routes, tunnels, IAM, and whether the gateway role can authenticate daemons, reach the API's pokes, tunnels and revocations |

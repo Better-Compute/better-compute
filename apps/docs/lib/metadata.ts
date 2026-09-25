@@ -6,13 +6,16 @@ import { appName, creator, repositoryUrl, siteUrl, version } from './shared';
  * format, `pageMetadata()` for a page's canonical URL and Open Graph / X card tags, and the JSON-LD builders.
  */
 
-export const siteTitle = `${appName}: GPU and bare-metal capacity for TypeScript`;
+export const siteTitle = `${appName}: GPU, CPU and sandbox capacity for TypeScript`;
 /** The search snippet and social card text for the site (at most about 160 characters). */
 export const siteDescription =
-  'An embeddable TypeScript control plane for GPU and bare-metal capacity: node fleets, reservations, PXE provisioning, and VPS, authorized by Better IAM.';
+  'A TypeScript control plane for GPU, CPU and sandbox capacity: node fleets, reservations, bare-metal provisioning and isolated VMs, authorized by Better IAM.';
 export const siteKeywords = [
   appName,
   'GPU capacity',
+  'CPU capacity',
+  'sandboxes',
+  'isolated VMs',
   'bare metal',
   'bare-metal provisioning',
   'control plane',
@@ -46,7 +49,7 @@ export const sectionNames: Record<string, string> = {
 
 /** Extra keywords for every page in a section. */
 const sectionKeywords: Record<string, string[]> = {
-  guides: ['GPU capacity', 'reservations', 'bare-metal provisioning', 'node fleet'],
+  guides: ['GPU capacity', 'CPU capacity', 'sandboxes', 'reservations', 'bare-metal provisioning'],
   extending: ['modules', 'drivers', 'providers', 'plugins', 'extension API'],
   daemon: ['bcd', 'node agent', 'gRPC', 'mTLS', 'gateway', 'protocol'],
   operations: ['deployment', 'production', 'PostgreSQL', 'PGlite', 'observability'],
@@ -61,7 +64,7 @@ export function docsKeywords(section: string, terms: (string | undefined)[]): st
     ...(sectionKeywords[section] ?? []),
     appName,
     'TypeScript',
-    'GPU and bare-metal capacity',
+    'GPU, CPU and sandbox capacity',
   ]);
 }
 
@@ -73,7 +76,7 @@ export const socialImageSize = { width: 1200, height: 630 };
 
 /** Routes of the site-wide social cards (`app/og/[image]/route.tsx`). */
 export const siteImages = {
-  home: { url: '/og/home.png', alt: `${appName}: GPU and bare-metal capacity for TypeScript` },
+  home: { url: '/og/home.png', alt: `${appName}: GPU, CPU and sandbox capacity for TypeScript` },
 } satisfies Record<string, SocialImage>;
 
 export interface SocialImage {
@@ -198,7 +201,7 @@ export function siteJsonLd() {
         url: absolute('/'),
         image: absolute(siteImages.home.url),
         applicationCategory: 'DeveloperApplication',
-        applicationSubCategory: 'Infrastructure management: GPU and bare-metal capacity',
+        applicationSubCategory: 'Infrastructure management: GPU, CPU and sandbox capacity',
         operatingSystem: 'Node.js, Linux',
         softwareVersion: version,
         license: 'https://www.apache.org/licenses/LICENSE-2.0',

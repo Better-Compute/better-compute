@@ -271,9 +271,11 @@ better-compute sim --seed nightly-42 --nodes 500 --duration 1h --chaos heavy --l
 | `heavy` | 5 ms latency, 20 ms jitter, 0.0005 drop (reset), 0.01 duplicate, 0.002 reorder down | 5 s: crash 0.3, reboot 0.1, journal loss 0.05, partition 0.3, isolate 0.1, half-open 0.1, reset 0.2, stall 0.2, gateway kill 0.02 |
 
 It checks I1 (no overlapping bookings or node-held devices), I2 (at most one execution per command; after a journal
-loss, in-flight commands that are not retry-safe fail instead of replaying), I5 (no release caused by
-connectivity) and I8 (usage windows add up to booked time times atoms, with no duplicate keys). See
-[testing](/docs/operations/testing#invariants).
+loss, in-flight commands that are not retry-safe fail instead of replaying), I3 (a delivered spec is reported
+observed within 60 s while the node stays reachable), I4 (no node marked unreachable within 20 s of a gateway hearing
+from it), I5 (no release caused by connectivity) and I8 (usage windows add up to booked time times atoms, with no
+duplicate keys). The command's own help text still lists only I1, I2, I5 and I8; the checks come from the simulator's
+`invariants()`. See [testing](/docs/operations/testing#invariants).
 
 The report is JSON: `seed`, `nodes`, `chaos`, `simulatedMs`, `wallMs`, `digest` (SHA-256 of the event log),
 `commands` (`total`, `open`), `faults` (`crashes`, `reboots`, `journalLosses`, `gatewayKills`), `violations` and the

@@ -55,10 +55,11 @@ idempotent `plan(desired, observed)` and `apply`:
 | `access` | The exec-ticket JWKS, SSH CA keys and principals, revoked certificate serials; empty in v0.1 | v0.3 |
 | `telemetry` | The OTLP endpoint, export interval, resource attributes and a secret reference for headers | v0.1 |
 | `daemon` | The self-update target: version, URL, SHA-256, signature | v0.4 |
-| `site` | The site agent's boot lease state (draft, site agents only) | v0.2 |
+| `site` | The site agent's boot lease state and `cache_images`, the images its cache pre-warms (`url`, `sha256`, `format`; the agent re-verifies each digest before serving it); draft, site agents only | v0.2 |
 
 The control plane builds the spec in the NodeSpec reconciler: the base sections plus every module's `nodeSpec()`
-contribution, stored in `nodes.spec` as protobuf JSON. It raises `nodes.generation` only when the canonical JSON
+contribution (a `NodeSpecPart`; the `site` section merges field by field across modules), stored in `nodes.spec`
+as protobuf JSON, with `cache_images` sorted by URL. It raises `nodes.generation` only when the canonical JSON
 (sorted keys) differs from the stored spec, so re-running the reconciler never produces a new generation for
 nothing. Desired state applies once a node is adopted or deployed.
 
@@ -253,7 +254,9 @@ Two signatures keep a compromised gateway, which can delay, drop or read frames,
   columns, so a signature never outlives its generation. The daemon checks the signature with `verifyDesiredState`:
   one is required for a spec that changes the `access` section (v0.2) and, with the v0.4 policy, for every spec; a
   present one is always checked. A refused spec is not applied. The FakeDaemon implements this
-  (`intent.signedSpecs: 'access' | 'always'`, refusals in `specRejections`); bcd must implement the same rule.
+  (`intent.signedSpecs`, default `'always'`: with command-signing roots every spec must be signed, because an
+  unsigned spec with a high generation would freeze all later ones; `'access'` for a control plane that signs only
+  access changes; refusals in `specRejections`); bcd must implement the same rule.
 - **Attested results.** For attested kinds (`diag.*`, `gpu.reset`, and later `wipe`, `deploy.*`, `firmware.*`) the
   node signs `CommandUpdate.node_sig` over the command id, the state and the SHA-256 of the result, and allocation
   reports travel as node-signed `AttestedReport`s. Workers verify them against `node_certs` before any state

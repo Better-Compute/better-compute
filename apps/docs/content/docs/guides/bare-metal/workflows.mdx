@@ -207,9 +207,9 @@ The workflow's own error is `<stepId> (<action>): <message>` with the step's cod
 
 ## The workflows API
 
-The `workflows` group reads a node's workflows and lets an operator abort or retry one. All four
-methods are decided on the node (`compute-node`): `get` and `list` as `compute:workflows:read`,
-`abort` and `retry` as `compute:workflows:manage`.
+The `workflows` group reads a node's workflows and lets an operator abort, retry, pause or resume one.
+All six methods are decided on the node (`compute-node`): `get` and `list` as `compute:workflows:read`,
+`abort`, `retry`, `pause` and `resume` as `compute:workflows:manage`.
 
 ```ts
 const { items } = await compute.api.workflows.list(credential, {
@@ -230,8 +230,12 @@ const wf = await compute.api.workflows.get(credential, { tenantId: 'root', nodeI
   `fromStep`, by default the first main step that did not succeed. That step and every later main step
   go back to `pending` with the next attempt number, and the on-failure and cleanup steps are re-armed.
   It is `CONFLICT` when the node has another active workflow by now.
-- Pausing is available to hosts as `pauseWorkflow` and `resumeWorkflow` (the step in flight finishes,
-  nothing new starts). The API has no pause method.
+- [`workflows.pause`](/docs/reference/api/workflows#pause) and
+  [`workflows.resume`](/docs/reference/api/workflows#resume) (v0.2, `compute:workflows:manage`) take
+  `{ tenantId, nodeId, workflowId }` and return the workflow. Pause applies to a `running` workflow: the step
+  in flight finishes and no further step starts until `resume`, which puts it back to `running` and wakes it.
+  A workflow in its cleanup phase cannot pause, and pausing or resuming from any other state is
+  `INVALID_STATE`. Hosts call the same engine functions, `pauseWorkflow` and `resumeWorkflow`.
 
 <Callout type="warn" title="Metal's own workflows">
 Metal reacts to the end of every workflow it owns. Aborting one with `workflows.abort` fails the

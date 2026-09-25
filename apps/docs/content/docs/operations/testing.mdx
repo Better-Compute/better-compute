@@ -46,7 +46,7 @@ measurements. No database server is needed.
 | Control plane fixture | `computeFixture`, `closeFixtures`, `fakeIam` | sim or wall |
 | Daemon side | `FakeDaemon`, `createDaemonHarness`, `fakeHardware`, `MemoryJournal` and the journal rules | sim |
 | Links | `createAgentLink`, `createFramePair`, `FrameConn` | sim |
-| Fleet simulator | `createFleetSim`, `GatewayStub`, `checkI1`, `checkI2`, `checkI5`, `checkI8`, `assertInvariants` | sim |
+| Fleet simulator | `createFleetSim`, `GatewayStub`, `checkI1`, `checkI2`, `checkI3`, `checkI4`, `checkI5`, `checkI7`, `checkI8`, `assertInvariants` | sim |
 | Real control plane under the simulator | `createControlPlaneSim`, `controlPlaneFacts`, `runNightly` | sim |
 | Wall-clock harnesses | `createRealtimeHarness`, `createRealtimeFleet`, `probeLeases`, `createH2cClient` | wall |
 | Local stack | `createDevStack`, `attachDevFleet` (see [local development](/docs/operations/local-development#the-dev-stack-in-code)) | wall |
@@ -156,11 +156,14 @@ API admission. See [policies](/docs/guides/iam/policies).
   (not retry-safe). `knobs` make them fail: `diag.nvmlInitFails`, `diag.failGpus`, `diag.error`,
   `logs.uploadFails`, `cdiWriteFailures`.
 - **Beyond v0.1.** With `intent`, it verifies signed commands (`BAD_SIGNATURE`) and signed NodeSpecs:
-  `intent.signedSpecs` is `'access'` (the default: a spec that changes `access` must be signed) or `'always'`, and
-  refused specs are listed in `specRejections`. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
+  `intent.signedSpecs` is `'always'` (the default: with command-signing roots every spec must be signed, since an
+  unsigned spec with a high generation would freeze all later ones) or `'access'` (only a spec that changes `access`
+  must be signed, for a control plane that signs nothing else), and refused specs are listed in `specRejections`.
+  `setPressure(pressure)` puts a `HostPressure` into every status report. With `tunnels`, it answers `OpenTunnel`; with `nodeKey`, attested
   results and allocation reports carry `node_sig`. With `instances` (a `FakeHypervisor` or its options) it plays a
   VPS host, converging domains, overlay disks, NoCloud seeds and taps and fetching user data through the secret
-  broker. With `selfUpdate: { badVersions?, swapMs? }` it converges `NodeSpec.daemon` by swapping and restarting,
+  broker; as such a host, `handleImds(request, instanceId)` answers a running instance's metadata request (v0.5,
+  a `FakeImds`), minting its workload token through a `WorkloadTokenRequest` on the session. With `selfUpdate: { badVersions?, swapMs? }` it converges `NodeSpec.daemon` by swapping and restarting,
   and a bad build falls back to its previous slot and reports the section failed. `fakeDriverInvoke({ drivers })`
   adds the `driver.invoke` kind, running in-process or bcx drivers. `createWsDialer()` dials the WebSocket fallback.
 
@@ -242,12 +245,16 @@ control plane or a database snapshot.
 | --- | --- | --- |
 | I1 | No atom is booked by two allocations at one instant, and no node holds one device for two allocations at once (and only binds what its allocation booked) | `checkI1` |
 | I2 | A non-retry-safe or self-terminating command starts its side effect at most once; a retry-safe one re-runs only after a crash interrupted it; after a journal loss, in-flight non-retry-safe commands fail rather than replay | `checkI2` |
+| I3 | Every `DesiredState` a daemon received is reported observed (a status report at that generation or later) within `CONVERGENCE_MS` (60 s), judged only while a gateway heard from the node at least every 15 s and only once the window has passed | `checkI3` |
+| I4 | No node is marked `unreachable` or `lost` within `LIVENESS_WINDOW_MS` (20 s) of a gateway receiving a frame from it; the times come from the transport on the simulator's clock, so gateway clock skew cannot hide a false positive | `checkI4` |
 | I5 | Every release has an allowed cause (end of booking, release, cancel, lapsed lease, failed bind); none is caused by a disconnect | `checkI5` |
+| I7 | After a quiet period, no pending reservation would fit if planned alone now; the input is capacity's offline solver, `placeablePending(tx, { now })` | `checkI7` |
 | I8 | Per allocation, usage windows do not overlap, stay inside the booking and add up to its duration times atoms, with no duplicate keys | `checkI8` |
 
-`assertInvariants(violations, limit?)` throws one error listing them. PLAN.md section 15 also names I3
-(convergence within T), I4 (no liveness false positives), I6 (latency SLOs) and I7 (nothing pending that an offline
-solver can place); the kit does not check those. The real-time benchmarks measure I6-style latencies instead.
+`assertInvariants(violations, limit?)` throws one error listing them. The fleet simulator's `invariants()` checks I1,
+I2, I3, I4, I5 and I8 (I4, I5 and I8 read the gateway port's `facts()`, which the stub gateway and the control-plane
+simulator provide). I7 needs a database: pass it to `runNightly({ invariants })`, as the CI-sized night does.
+PLAN.md section 15 also names I6 (latency SLOs); the kit does not check it, and the real-time benchmarks measure I6-style latencies instead.
 
 ## The control-plane simulator
 
@@ -270,16 +277,17 @@ ticks.
 The rig offers `run(ms)`, `api(fn)`, `killGateway(i)`, `reviveGateway(i)`, `stallGateway(i, stalled)`,
 `pauseWorkers(paused)`, `revokeNode(nodeId)`, `homeOf(nodeId)`, `serialOf(nodeId)` and `invariants()`, which reads
 the facts from compute's own tables (bookings, billed allocations and usage windows, command outcomes,
-connectivity) and checks I1, I2, I5 and I8. `tests/sim/multi-gateway.test.ts` uses it for a gateway killed
+connectivity) and checks I1, I2, I3, I4, I5 and I8. `tests/sim/multi-gateway.test.ts` uses it for a gateway killed
 mid-command and a zombie gateway fenced by its session epoch.
 
 ### The nightly simulation
 
-`runNightly({ seed, nodes?, gateways?, minutes?, chaos?, stepMs?, modules?, inspect? })` runs one simulated night on
+`runNightly({ seed, nodes?, gateways?, minutes?, chaos?, stepMs?, modules?, inspect?, invariants? })` runs one simulated night on
 the control-plane simulator: three minutes of start-up, then `minutes` (default 30) of tenants reserving with every
 placement feature (half and whole nodes, gangs of two, spot, calendar starts, early releases) and operators running
 commands, under chaos. Chaos adds gateway kills and revivals, worker outages and, at `heavy`, one certificate
-revocation per night. The report has the invariant violations, `kindLeaks` (commands queued outside a restricted
+revocation per night. `invariants(rig)` adds checks run after the quiet period, such as I7 with capacity's
+`placeablePending`. The report has the invariant violations, `kindLeaks` (commands queued outside a restricted
 certificate's kinds, which must be 0), place-to-active and command latencies in simulated time, and two digests:
 the workload (a function of the seed) and the id-free outcome. Compute mints random ids, so outcomes can differ
 between runs of one seed.
@@ -292,7 +300,8 @@ SIM_NIGHTLY_SEEDS=1,2,3,4 SIM_NIGHTLY_CHAOS=heavy SIM_NIGHTLY_NODES=32 SIM_NIGHT
 `pnpm sim:nightly` (`vitest.nightly.config.ts`, `tests/nightly/*.nightly.ts`) runs every seed times chaos level one
 after another, with `auditModule` checkpointing every 10 simulated minutes and every tenant's audit chain verified at
 the end. Defaults: seeds `1,2,3`, chaos `light,heavy`, 16 nodes, 3 gateways, 60 simulated minutes; reports land in
-`bench/sim-nightly/results`. A CI-sized night (4 nodes, 2 gateways, 6 minutes) runs in `tests/sim/nightly.test.ts`.
+`bench/sim-nightly/results`. A CI-sized night (4 nodes, 2 gateways, 6 minutes) runs in `tests/sim/nightly.test.ts`;
+both check I7 through `invariants`.
 The v0.4 exit asks for every section 15 scenario green on three consecutive nights.
 
 ## Real-time harnesses

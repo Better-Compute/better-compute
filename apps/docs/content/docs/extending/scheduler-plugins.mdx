@@ -68,13 +68,15 @@ scorers and pickers are synchronous and pure: no SQL, no clock, no network. They
 />
 
 The request carries `tenantId`, `poolId`, `projectId`, `reservationId` or `instanceId`, `devices` (class, count,
-selector, topology, sharing), `topology`, `gang`, `resources`, `imageId`, `during`, `priority` and `excludeNodes`.
+selector, topology, sharing), `topology`, `gang`, `resources`, `imageId`, `during`, `priority`, `excludeNodes` and
+`nodeLabels` (labels every candidate must carry with exactly those values; the built-in `labels` filter drops the
+others before plugin filters run, so a plugin never sees them).
 
 ## Where each hook runs
 
 ```mermaid
 flowchart TD
-  A["admit() of every plugin, once per request"] --> E["Built-in: excluded, pool, eligibility, scalars"]
+  A["admit() of every plugin, once per request"] --> E["Built-in: excluded, pool, eligibility, labels, scalars"]
   E --> F["Plugin filters, in plugin order"]
   F --> K["Per device request: plugin pickers, else the default pick; nvlink-all check"]
   K --> S["Built-in scorers + plugin scorers, weighted sum"]

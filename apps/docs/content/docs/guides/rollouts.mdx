@@ -313,7 +313,9 @@ A daemon older than the server's minimum protocol gets `Welcome.upgrade_required
 `node_sessions.proto_max` is below the minimum), it also enqueues a `daemon.upgrade` command with the same target,
 idempotency key `rollout:<rolloutId>:<nodeId>`, expiring after the upgrade timeout. The kind runs on the `control`
 lane, is retry-safe and self-terminating, times out after 15 minutes, and takes the `DaemonSection` as its payload.
-See [command kinds](/docs/reference/command-kinds).
+The gateway dispatches only that kind to an upgrade-only session (and replays an in-flight one at `Hello`); the node's
+other commands stay `pending` until it rejoins at a supported version. See [command kinds](/docs/reference/command-kinds)
+and [sessions](/docs/daemon/sessions).
 
 ## Pause, resume, abort
 

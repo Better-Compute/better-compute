@@ -75,7 +75,7 @@ itself (see `bench/gateway-streams`).
 | `node_id`, `role` | Who is speaking; checked against the certificate |
 | `boot_id` | The kernel boot id, which changes on every boot |
 | `journal_id` | The journal's id, which changes when the journal is lost |
-| `daemon_version`, `proto_min`, `proto_max`, `capabilities`, `drivers` | Versions and what the daemon offers |
+| `daemon_version`, `proto_min`, `proto_max`, `capabilities`, `drivers` | Versions and what the daemon offers; each driver becomes the node label `bc.dev/driver.<id>=<version>` |
 | `last_epoch` | The last epoch the daemon saw; diagnostics only |
 | `applied_generation`, `applied_spec_hash` | The newest desired state it holds, and that spec's hash |
 | `unacked_results` | Terminal command results the control plane has not acknowledged |
@@ -135,6 +135,11 @@ session") without a disconnect write: its row already belongs to the new session
 | `trust` | | A newer command-signing trust bundle, signed by the JoinService key |
 | `upgrade_required` | false | The daemon is below the minimum protocol; only `daemon.upgrade` follows |
 | `capabilities` | | What the gateway offers |
+
+An upgrade-only session (`upgrade_required`) is still dispatched to, but only `daemon.upgrade`: `Hello` replays an
+in-flight upgrade, the dispatch loop sends a pending one, every other command stays `pending` until the daemon
+rejoins at a supported version, and no spec is sent. This is how a rollout reaches a daemon too old for the current
+protocol (see [rollouts](/docs/guides/rollouts#daemonupgrade-for-restricted-sessions)).
 
 Right after `Welcome`, the gateway sends an `Ack` for the replayed results it stored. Then, unless the session is
 upgrade-only, a full `DesiredState` when the node's generation is above `applied_generation` (or the node has a

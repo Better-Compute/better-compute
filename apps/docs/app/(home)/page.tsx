@@ -27,6 +27,7 @@ import { MetalLifecycle } from '@/components/home/metal-lifecycle';
 import { MotionProvider, Reveal } from '@/components/home/motion';
 import { Pipeline } from '@/components/home/pipeline';
 import { PlacementDemo } from '@/components/home/placement-demo';
+import { SandboxPanel } from '@/components/home/sandbox-panel';
 import { SplitExplainer, StackedExplainer } from '@/components/home/section';
 import { LogoMark } from '@/components/logo';
 import { ActionLink, TextLink } from '@/components/site/action';
@@ -125,7 +126,7 @@ export default function HomePage() {
             eyebrow="Capacity"
             sunken
             title="The database referees every booking"
-            lede="Reservations book GPU atoms in Postgres. An EXCLUDE constraint on device bookings, guarded counters, and row locks make a double booking impossible, however many API replicas place at once."
+            lede="Reservations book GPU atoms, and instances claim vCPUs, memory, and disk, in Postgres. An EXCLUDE constraint on device bookings, guarded counters on CPU and memory, and row locks make a double booking impossible, however many API replicas place at once."
             points={[
               {
                 lead: 'One decision per request.',
@@ -149,9 +150,38 @@ export default function HomePage() {
             visual={<PlacementDemo />}
           />
 
+          <StackedExplainer
+            id="sandboxes"
+            index="05"
+            eyebrow="Sandboxes"
+            title="Isolated VMs as sandboxes, on CPU or GPU"
+            lede="A sandbox is a VPS instance: its own VM from a flavor of vCPUs, memory, disk, and optionally whole GPUs, placed on your hosts or a provider’s. The same admission, quotas, and audit trail apply as for a GPU reservation, and nothing of the platform runs inside the guest."
+            points={[
+              {
+                lead: 'CPU-first flavors.',
+                body: 'A flavor is vCPUs, memory, and disk, with 0 to 16 GPUs passed through VFIO. CPU and memory fit under a per-host overcommit ratio; GPUs are never overcommitted.',
+              },
+              {
+                lead: 'Nothing to steal inside.',
+                body: 'The guest gets no join token, no bcd, and no IAM key. Its user data is sealed and released only to its own tenant.',
+              },
+              {
+                lead: 'Audited access.',
+                body: 'Exec, SSH, and TCP forwards go through a single-use tunnel ticket, decided as compute:instances:exec.',
+              },
+              {
+                lead: 'Where it runs today.',
+                body: 'The control plane is built, and Hetzner Cloud and Proxmox VE run the VMs. Hosted runtimes (libvirt-kvm, cloud-hypervisor) arrive with bcd in v0.3; a dedicated sandbox API is on the roadmap.',
+              },
+            ]}
+            href="/docs/guides/vps/sandboxes"
+            linkLabel="Sandboxes"
+            visual={<SandboxPanel />}
+          />
+
           <SplitExplainer
             id="bare-metal"
-            index="05"
+            index="06"
             eyebrow="Bare metal"
             reverse
             title="From a BMC address to a booted image"
@@ -181,7 +211,7 @@ export default function HomePage() {
 
           <StackedExplainer
             id="commands"
-            index="06"
+            index="07"
             eyebrow="Commands"
             sunken
             title="Commands that settle once, over any network"
@@ -211,7 +241,7 @@ export default function HomePage() {
 
           <SplitExplainer
             id="fleet"
-            index="07"
+            index="08"
             eyebrow="Fleet as code"
             title="Your fleet, reviewed like code"
             lede="Describe a tenant’s sites, provider accounts, pools, offers, and flavors in one FleetConfig document. Plan shows every change and the exact calls it would make; apply runs all of them in one transaction, or none."
@@ -240,7 +270,7 @@ export default function HomePage() {
 
           <StackedExplainer
             id="audit"
-            index="08"
+            index="09"
             eyebrow="Audit"
             sunken
             title="An audit trail you can prove"
@@ -266,7 +296,7 @@ export default function HomePage() {
 
           <StackedExplainer
             id="iam"
-            index="09"
+            index="10"
             eyebrow="IAM"
             title="Better IAM decides, and the fleet never waits on it"
             lede="Better IAM is the only identity provider, policy decision point, and billing ledger. Each admission makes exactly one decision, while the fleet’s joins, heartbeats, inventory reports, and commands make none."
@@ -309,7 +339,7 @@ function MoreSection() {
       title: 'VPS and providers',
       href: '/docs/guides/vps',
       items: [
-        'Hosted VMs on your own GPU hosts, with whole GPUs passed through VFIO',
+        'Hosted VMs on your own CPU or GPU hosts, with whole GPUs passed through VFIO',
         'Hetzner Cloud and Proxmox VE as provider pools',
         'Hetzner Robot servers bootstrapped into metal pools',
         'Flavors, pool IPAM, and provider credentials only as secret references',
@@ -428,7 +458,7 @@ function ReferenceSection() {
     <Band id="reference" frameClassName="bg-surface-sunken">
       <div className={cx('grid gap-8 py-16 md:py-20 lg:grid-cols-12', gutter)}>
         <SectionHeading
-          index="10"
+          index="11"
           eyebrow="Reference"
           title="Generated from the source"
           className="lg:col-span-6"
@@ -522,7 +552,7 @@ function FinalCta() {
           <Reveal className="relative flex flex-col items-start gap-6">
             <LogoMark className="size-10 text-signal-fill" />
             <h2 className="max-w-md text-display-4-semibold tracking-[-0.03em] text-balance md:text-display-3-semibold md:leading-[1.12]">
-              Run your own GPU capacity, with the guarantees of a database
+              Run your own GPU, CPU and sandbox capacity, with the guarantees of a database
             </h2>
             <p className="max-w-md text-headline-regular leading-7 text-pretty text-text-secondary">
               Start with simulated machines on PGlite, move to PostgreSQL, and keep every node,

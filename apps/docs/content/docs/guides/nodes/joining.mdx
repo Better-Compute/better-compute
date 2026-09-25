@@ -160,7 +160,10 @@ sequenceDiagram
    the role, and consumes one use. JoinService then enforces `expect`, the placeholder rule and the reclaim
    rules below, checks that the pool runs the daemon and belongs to the token's tenant, and inserts the node in
    `adopting` with `identityGeneration` 1. It writes the node's authorization projection row, publishes
-   `node.joined`, writes the `node.joined` audit row and queues the node for its controllers.
+   `node.joined` and writes the `node.joined` audit row. A node in a pool without acceptance checks (and a site
+   agent) is queued for its controllers at once and adopted; when the pool runs acceptance checks the node is
+   still disconnected, so JoinService does not queue it, and its first `Hello` wakes the controller that starts
+   acceptance.
 5. **Signed response.** The answer is `JoinResponse{ body, sig }`, signed with the pinned join-signing key. The
    body holds the node id, the certificate chain, the command-signing trust bundle, `csr_sha256`, the trust
    domain, the site and the role. The daemon checks, in order: the signature under the pinned key, that

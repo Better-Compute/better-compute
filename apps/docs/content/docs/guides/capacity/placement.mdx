@@ -53,6 +53,7 @@ type PlacementOutcome =
     resources: { type: 'Record<string, number>', description: 'Scalar claims such as vcpu or memoryGiB, non-negative integers.' },
     during: { type: '{ start: number; end: number }', description: 'The booked interval in epoch milliseconds; must be non-empty.', required: true },
     excludeNodes: { type: 'string[]', description: 'Nodes to leave out, as after a lost race.' },
+    nodeLabels: { type: 'Record<string, string>', description: 'Labels every candidate must carry with exactly these values, such as a runtime a daemon advertised (bc.dev/driver.kata). Absent: no label constraint.' },
   }}
 />
 
@@ -97,7 +98,7 @@ flowchart TD
   V["Validate the request"] --> P["Read the pool (archived: pending)"]
   P --> AD["Scheduler plugins: admit()"]
   AD --> C["Candidates: SQL shortlist, or every node of the pool"]
-  C --> F["Filters: eligibility, excluded, scalars, plugin filters, device fit"]
+  C --> F["Filters: eligibility, excluded, labels, scalars, plugin filters, device fit"]
   F --> K["Atom pick: plugin preferAllocation, else NVLink and NUMA aware"]
   K --> S["Scorers: binpack, topology, fragmentation, spread, plugins"]
   S --> T["Random pick among the top N"]
@@ -128,6 +129,7 @@ checked in this order:
 | `eligible` | `awaiting its first converged spec` | provisioning |
 | `eligible` | `connectivity <connectivity>` | unreachable |
 | `eligible` | `NoSchedule: <reasons>` | unhealthy |
+| `labels` | `needs label <key>=<value>` (the first `nodeLabels` entry the node lacks) | |
 | `fits` | `no <resource>`, or `<resource>: <n> requested, <m> free` | |
 | a plugin filter's id | the plugin's reason | |
 | `fits` | `<n> of <count> <class> free` (plus `matching the selector`) | |
@@ -141,6 +143,16 @@ check exists twice, as `ineligibility(node, pool, tenantId?)` in TypeScript and 
 with (`schedulableSqlTolerating`), and a test keeps the two in agreement.
 
 Scalar room is `floor(allocatable × ratio) − allocated` from the node's `node_resources` row.
+
+`nodeLabels` (v0.2) is checked on every path: the pipeline filter above, the SQL shortlist (a `node_labels` check
+added only when the request names labels, so other requests pay nothing) and the pool-lease index, which memoizes
+its rankings per label set. The labels a request usually needs are the ones the gateway writes at every `Hello`:
+each driver the daemon advertises becomes the system label `bc.dev/driver.<id>=<version>` (see
+[inventory and health](/docs/guides/nodes/inventory-and-health)). Labels are read at planning time, not locked at
+commit, so a `Hello` that drops a driver at that moment races like any inventory change, and the daemon refuses a
+runtime it does not have. The capacity API does not take `nodeLabels` from callers, and no built-in module sets it
+yet; a module sets it on the requests it builds through the capacity port (PLAN.md's walkthrough 4, a Kata
+runtime, is the intended user).
 
 ## Device fit and selectors
 

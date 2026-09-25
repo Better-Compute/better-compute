@@ -1,6 +1,6 @@
 {
   "title": "Guides",
-  "description": "Concepts, nodes, capacity, bare metal, VPS and the platform around them",
+  "description": "Concepts, nodes, GPU and CPU capacity, bare metal, VPS and sandboxes, and the platform around them",
   "root": true,
   "icon": "BookOpen",
   "pages": [

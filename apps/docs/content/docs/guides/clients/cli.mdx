@@ -14,6 +14,9 @@ sources:
   - packages/cli/src/commands/capacity.ts
   - packages/cli/src/commands/fleet.ts
   - packages/cli/src/commands/audit.ts
+  - packages/cli/src/commands/auth.ts
+  - packages/cli/src/credentials.ts
+  - packages/cli/src/embed.ts
   - apps/docs/content/docs/reference/cli.mdx
   - PLAN.md
 ---
@@ -35,7 +38,7 @@ Every command declares a target, and the target decides what it needs:
 
 | Target | Needs | Commands |
 | --- | --- | --- |
-| `token` | `BETTER_COMPUTE_TOKEN`, and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `fleet export/plan/status/apply` |
+| `token` | a credential (`BETTER_COMPUTE_TOKEN` or a saved one, see [authenticate](#authenticate)), and either `--url` or a configuration | `api`, `reserve`, `release`, `extend`, `reservations list/get`, `pools list`, `capacity`, `fleet export/plan/status/apply`, `auth login` |
 | `config` | the configuration (`--config`, `BETTER_COMPUTE_CONFIG`, the nearest `better-compute.config.{mjs,js,ts,mts}`, or `BETTER_COMPUTE_DATABASE_URL`) and no credential | `migrate`, `doctor`, `serve`, `audit checkpoint/verify/prove` |
 | `none` | neither | `init`, `version`, `dev` (it finds a configuration itself, or runs PGlite), `sim`, `pki`, `daemon install-script`, `iam setup`, `release keygen/sign/cosign/verify`, `audit check-proof` |
 
@@ -44,8 +47,17 @@ database, so it is not decided by IAM. A `token` command never reads the databas
 
 ## Authenticate
 
-Token commands act as `BETTER_COMPUTE_TOKEN`: a Better IAM session token, API key or session JWT. Without it they
-stop with `MISSING_ENV`; public methods such as `system.version` need no token.
+Token commands act as a Better IAM session token, API key or session JWT. They take the first credential they find,
+in PLAN.md section 9.3's order:
+
+1. `BETTER_COMPUTE_TOKEN`;
+2. Better IAM's saved session (`better-iam login`), when the optional `@better-iam/cli` peer is installed: its profile
+   store, profile `BETTER_IAM_PROFILE` or its current one;
+3. compute's own credentials file, written by `better-compute auth login`: profile `BETTER_COMPUTE_PROFILE`, else the
+   file's current profile, else `default`.
+
+Expired saved sessions are skipped, and a broken Better IAM file never blocks compute's own. Without any credential
+token commands stop with `MISSING_ENV`; public methods such as `system.version` need no token.
 
 ```bash
 export BETTER_COMPUTE_URL=https://compute.example.com
@@ -54,11 +66,22 @@ export BETTER_COMPUTE_TENANT=acme           # the default --tenant
 better-compute api system.whoami
 ```
 
-<Callout type="warn" title="Only the environment variable">
-  PLAN.md section 9.3 describes a fallback to Better IAM's profile store and to a 0600 credentials file. Neither is
-  implemented: the CLI reads `BETTER_COMPUTE_TOKEN` and nothing else. Keep the token out of shell history, for
-  example by exporting it from your secret manager.
-</Callout>
+**Saved credentials.** `auth login` reads the token from standard input or `BETTER_COMPUTE_TOKEN`, never from an
+argument, checks it with `system.whoami` against the deployment (`--url`, or the configuration in process;
+`--no-verify` skips the check), and saves it with its tenant under `--profile`, which becomes the current profile:
+
+```bash
+better-compute auth login --url https://compute.example.com < token.txt
+BETTER_COMPUTE_TOKEN=biam_key_… better-compute auth login --profile ci --no-verify
+better-compute auth status          # which credential commands use: source, profile, path; never a token
+better-compute auth logout --profile ci
+```
+
+The file is `BETTER_COMPUTE_CREDENTIALS`, else `%APPDATA%\better-compute\credentials.json` on Windows, else
+`$XDG_CONFIG_HOME/better-compute/credentials.json` or `~/.config/better-compute/credentials.json`. It is found only
+from the environment, and every write replaces it atomically with mode 0600; treat it like a password. `auth logout`
+forgets a profile but does not revoke the session in Better IAM (`better-iam logout` does). A saved profile records
+the `--url` it was saved for, but commands still take the URL from `--url` or `BETTER_COMPUTE_URL`.
 
 **Where the call goes.**
 
@@ -238,7 +261,7 @@ exit non-zero with the error's code:
 
 | Code | Meaning |
 | --- | --- |
-| `MISSING_ENV` | a token command without `BETTER_COMPUTE_TOKEN` |
+| `MISSING_ENV` | a token command with no credential: no `BETTER_COMPUTE_TOKEN` and no saved session or profile |
 | `CONFIG_NOT_FOUND` | no configuration found, and no `--url` or `BETTER_COMPUTE_DATABASE_URL` |
 | `UNAUTHENTICATED`, `ACCESS_DENIED`, `CONFIRMATION_REQUIRED`, … | the API's own codes, from the server; see [errors](/docs/reference/errors) |
 | `FLEET_DRIFTED`, `PLAN_BLOCKED`, `CONFIG_DRIFT` | fleet plan, status and apply outcomes |
@@ -269,4 +292,24 @@ export const commands = [
 ```
 
 A `token` project command gets `context.api()`, the same transport the built-in commands use, so it is decided as
-`BETTER_COMPUTE_TOKEN` like any other call.
+the resolved credential like any other call.
+
+## Inside another CLI
+
+PLAN.md section 9.3 asks for one binary for IAM and compute. `computeCommands(define, options?)` from
+`better-compute/cli` turns every built-in command into a spec of another framework's `defineCommand`; with Better
+IAM's:
+
+```ts title="bin.ts"
+import { createCli, defineCommand } from '@better-iam/cli';
+import { computeCommands } from 'better-compute/cli';
+
+const cli = createCli({ commands: computeCommands(defineCommand, { exclude: ['dev', 'serve'] }) });
+await cli.run(process.argv.slice(2)); // better-iam compute-reserve …, compute-api …, compute-support-bundle …
+```
+
+Names are `compute-<command>` by default (`prefix`, and `separator: ' '` for a framework that matches several
+words), in a `Compute` help group. Each spec declares compute's own flags plus `--config` and `--url`, and the host
+adds its output flags; running it runs compute's program with the flags given, so compute reads its own
+`BETTER_COMPUTE_*` environment, loads its deployment and prints its own output, errors included. `exclude` leaves
+commands out, such as `dev` and `serve` for a client-only binary.

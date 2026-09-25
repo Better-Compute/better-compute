@@ -159,8 +159,12 @@ its next frame is handled, so per-session order holds, and a lone frame never wa
 Update transactions lock every command involved in id order, so two concurrent flushes never deadlock; event
 transactions lock session rows in node-id order. When a batch fails, each entry is retried alone, so one bad frame
 cannot fail the others. Inventory sections are not awaited by the frame queue at all: a section is an idempotent
-upsert, so a node's sections sent back to back after `Welcome` share one transaction, each under its own savepoint;
-a section lost to an error is simply requested again at the next `Hello`.
+upsert, so the sections of every session in one flush (a node's sections sent back to back after `Welcome`, and
+other nodes' at the same time) share one transaction. They are ingested set-wise through the inventory port's
+`ingestSections` (inventory's `ingestInventorySections`): one `INSERT … SELECT FROM unnest` for the whole batch and
+one `enqueueMany` of the distinct nodes, where a corrupt section or an unknown node fails only its own slot. Heartbeat
+hash reports, and sections when the port has no `ingestSections`, still run each under its own savepoint. A section
+lost to an error is simply requested again at the next `Hello`.
 
 ## The lease and fencing
 

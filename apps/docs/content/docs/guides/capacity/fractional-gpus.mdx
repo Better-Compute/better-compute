@@ -9,12 +9,14 @@ sources:
   - packages/inventory/src/devices.ts
   - packages/capacity/src/reservations.ts
   - packages/capacity/src/partition.ts
+  - packages/capacity/src/mig.ts
   - packages/capacity/src/usage.ts
   - packages/capacity/src/module.ts
   - packages/core/src/domain.ts
   - packages/provision/src/config-units.ts
   - daemon/internal/converge/converge.go
   - tests/capacity-fractional.test.ts
+  - tests/capacity-mig-gate.test.ts
   - PLAN.md
 ---
 
@@ -131,6 +133,26 @@ An unknown GPU is `NOT_FOUND`. For `mig` pools, `policy.migLayout` names the lay
 config unit applies, such as `all-1g.10gb` or `mixed:3g.40gb+2x2g.20gb`; a profile's host config can take
 it with `from: 'pool'` (see [profiles and images](/docs/guides/bare-metal/profiles-and-images)).
 
+### The MIG layout gate
+
+Changing `policy.migLayout` on a `mig` pool must not repartition MIG instances under their holders, so the capacity
+module gates the change per node, with the atom rule:
+
+1. [`pools.update`](/docs/reference/api/pools#update) with a new `migLayout` freezes every node of the pool at its
+   current layout, with the new one pending, in `capacity_mig_layouts` (migration `capacity/0004_mig_layouts`); a newer
+   change replaces a pending one. Provision's `mig-layout` unit reads the node's frozen layout
+   (`provision_gated_mig_layout`), falling back to the pool's for a node never gated.
+2. The `capacity.mig` reconciler (sharded by node) books every GPU family of the node, parent and atoms, from the end
+   of its last live booking onward, so idle time before that still books but nothing lands past it
+   (`node.mig.scheduled`, with the time).
+3. At that time it grants the new layout and invalidates the node's spec (`node.mig.granted`); the daemon
+   repartitions the idle GPUs.
+4. Once the node has converged a newer spec (a higher generation, observed), or after 5 minutes if the generation
+   never moved because its spec does not carry the layout, it releases the partition bookings (`node.mig.applied`)
+   and the new atoms take work.
+
+A node that joins later reads the pool's layout directly: it is not schedulable before its first converged spec.
+
 ## What runs today
 
 Shipped in the control plane:
@@ -138,14 +160,14 @@ Shipped in the control plane:
 - atoms derived from inventory for all three modes, with `partitionPending` during a MIG mode change;
 - the sharing checks at admission, and placement, booking and exclusivity of `gpu.mig` and `gpu.slot`
   atoms (covered by `tests/capacity-fractional.test.ts`);
-- the atom-rule primitive, fractional metering and the single-tenant offering rule.
+- the atom-rule primitive, fractional metering and the single-tenant offering rule;
+- the MIG layout gate, which wraps a pool's layout change in `bookPartitionChange` (covered by
+  `tests/capacity-mig-gate.test.ts`).
 
 Still to come in v0.5:
 
 - the node side: `bcd` is written but not built or released, its devices converger (the CDI hold) is
   not written, and applying MIG layouts on the node is scheduled for v0.5;
-- a caller for `bookPartitionChange`: nothing in the control plane wraps layout changes in it yet, so
-  a host that changes layouts must do so itself;
 - the v0.5 exit tests, the MIG torture test and the real-hardware nightly.
 
 PLAN.md plans to reset GPUs on release and leaves one question open: clearing memory between tenants

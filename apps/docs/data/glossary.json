@@ -1,5 +1,11 @@
 [
   {
+    "id": "sandbox",
+    "term": "Sandbox",
+    "definition": "An isolated place to run untrusted code. In Better Compute it is a VPS instance: its own VM sized by a flavor of vCPUs, memory, disk and optional GPUs, with no platform secrets inside and access only through audited tunnels. A dedicated sandbox API is not built.",
+    "href": "/docs/guides/vps/sandboxes"
+  },
+  {
     "id": "admission",
     "term": "Admission",
     "definition": "The request-as-resource path every `create` of a reservation or instance takes: the request is written as a draft, Better IAM decides on that draft with its attributes, and only an allowed draft is placed. A retry with the same idempotency key replays the stored result.",

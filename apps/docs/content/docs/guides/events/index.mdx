@@ -134,12 +134,12 @@ writes a type outside the catalog.
 | Family | Subject | Module | Types you will see |
 | --- | --- | --- | --- |
 | `site.*` | `site/{id}` | server | `site.created`, `site.updated`, `site.deleted`, `site.boot` |
-| `project.*` | `project/{id}` | server | `project.created` |
+| `project.*` | `project/{id}` | server | `project.created`, `project.archived` |
 | `pool.*` | `pool/{id}` | capacity | `pool.created`, `pool.updated`, `pool.offered`, `pool.unoffered`, `pool.archived` |
 | `quota.updated` | `pool/{id}` | capacity | `quota.updated` |
 | `reservation.*` | `reservation/{id}` | capacity | `reservation.placed`, `pending`, `queued`, `binding`, `active`, `extended`, `preempting`, `preempted`, `repaired`, `failed`, `cancelled`, `expired`, `awaiting-confirmation`, `binding-rejected`, and one per state change |
-| `node.*` | `node/{id}` | server | `node.joined`, `node.acceptance.started`, `node.acceptance.failed`, `node.adopted`, `node.connected`, `node.disconnected`, `node.unreachable`, `node.lost`, `node.status`, `node.cordoned`, `node.uncordoned`, `node.draining`, `node.drained`, `node.labeled`, `node.tainted`, `node.adopting`, `node.deleted`, `node.command.queued`, `node.report-failed`, `node.ssh-cert.issued`, `node.ssh-cert.revoked` |
-| `node.inventory.changed`, `node.gpu.*`, `node.mig.*`, `node.disk.*`, `node.driver.*` | `node/{id}` | inventory | `node.gpu.added`, `node.gpu.missing`, `node.mig.layout.changed`, `node.disk.replaced`, `node.driver.changed` |
+| `node.*` | `node/{id}` | server | `node.joined`, `node.acceptance.started`, `node.acceptance.failed`, `node.adopted`, `node.connected`, `node.disconnected`, `node.unreachable`, `node.lost`, `node.status`, `node.cordoned`, `node.uncordoned`, `node.draining`, `node.drained`, `node.labeled`, `node.tainted`, `node.adopting`, `node.deleted`, `node.command.queued`, `node.command.cancel-requested`, `node.report-failed`, `node.ssh-cert.issued`, `node.ssh-cert.revoked` |
+| `node.inventory.changed`, `node.gpu.*`, `node.mig.*`, `node.disk.*`, `node.driver.*` | `node/{id}` | inventory | `node.gpu.added`, `node.gpu.missing`, `node.mig.layout.changed`, `node.disk.replaced`, `node.driver.changed`; `node.mig.scheduled`, `node.mig.granted` and `node.mig.applied` from capacity's MIG layout gate; also `node.condition.changed` from the hygiene sweep and host pressure (within `node.*`) |
 | `node.enrolled`, `node.provision.*` | `node/{id}` | metal | `node.provision.<state>` for each provisioning transition |
 | `command.settled` | `command/{id}` | gateway | A command reached a terminal state |
 | `workflow.*` | `workflow/{id}` | provision | `workflow.created`, `started`, `paused`, `resumed`, `retried`, `cancelled`, and one per state |
@@ -147,7 +147,7 @@ writes a type outside the catalog.
 | `fleet.*` | `fleet/{id}` | fleet | `fleet.drifted`, `fleet.converged` |
 | `rollout.*` | `rollout/{id}` | rollout | `rollout.started`, `paused`, `resumed`, `aborted`, `completed` |
 | `tunnel.*` | `tunnel/{id}` | server | `tunnel.issued` |
-| `security.*` | varies | server | `security.join-token.created`, `security.join-token.revoked`, `security.site-token.created`, `security.site-token.revoked`, `security.join.refused`, `security.certificate-revoked`, `security.node.identity-revoked`, `security.node.duplicate-session` and `security.node.quarantined` (from the gateway), `security.secret.put`, `security.secret.deleted`, `security.secret.refused` |
+| `security.*` | varies | server | `security.join-token.created`, `security.join-token.revoked`, `security.site-token.created`, `security.site-token.revoked`, `security.join.refused`, `security.certificate-revoked`, `security.node.identity-revoked`, `security.node.duplicate-session` and `security.node.quarantined` (from the gateway), `security.secret.put`, `security.secret.deleted`, `security.secret.refused`, `security.workload.refused` (v0.5) |
 | `webhook.ping` | `webhook/{id}` | events | A test delivery from `webhooks.ping` |
 
 The catalog names the subject each family is declared with, but code is the final word: `tunnel.issued`, for

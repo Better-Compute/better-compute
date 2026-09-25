@@ -412,9 +412,72 @@ Instance events have subject `instance/<id>` and carry `state`, `desiredState` a
 
 ## Access to an instance
 
-Console, exec and SSH into a hosted instance go through a <Term id="tunnel">tunnel</Term>:
-`tunnels.open({ tenantId, instanceId, op })` is decided as `compute:instances:exec` and returns a single-use
+Exec, SSH and TCP port forwards into a hosted instance go through a <Term id="tunnel">tunnel</Term> (`console` is
+for nodes, and an instance refuses it with `INVALID_INPUT`): `tunnels.open({ tenantId, instanceId, op })` with `op`
+`exec`, `ssh` or `tcp` (plus a `port`) is decided as `compute:instances:exec` and returns a single-use
 <Term id="exec-ticket">exec ticket</Term> for the instance's node. The instance must be `running` and its node
 connected; provider instances are `UNSUPPORTED`, since no platform agent runs next to them. The method is registered
 only when the deployment configures tunnels. See [tunnels](/docs/guides/access/tunnels) and
 [SSH](/docs/guides/access/ssh).
+
+## Workload identity
+
+A hosted instance can prove who it is to a third party (Better IAM's `sts/assumeRoleWithWebIdentity`, a cloud STS)
+with a short-lived OIDC token, `sub = "t:<tenantId>:instance:<instanceId>"`, that it fetches from its host's
+metadata service (IMDS). This is v0.5 and optional: the control plane half is built and tested end to end against
+the FakeDaemon (`tests/e2e/imds.test.ts`); the IMDS in `bcd` is not built.
+
+```mermaid
+sequenceDiagram
+  participant I as Instance
+  participant H as Host (IMDS in bcd)
+  participant G as Gateway
+  participant B as Workload broker (api)
+  I->>H: PUT /latest/api/token (x-bc-metadata-token-ttl-seconds)
+  H-->>I: session token, HMAC-bound to this instance
+  I->>H: GET /latest/identity-token?audience=… (x-bc-metadata-token)
+  H->>G: WorkloadTokenRequest (node-signed, one-time key)
+  G->>B: relay
+  B-->>G: WorkloadTokenResponse (JWE to the one-time key)
+  G-->>H: relay
+  H-->>I: the workload JWT
+```
+
+- **The metadata service.** The host serves each instance on its own interface and knows the instance from where
+  the request arrived, never from a request field. `PUT /latest/api/token` with `x-bc-metadata-token-ttl-seconds`
+  (1 to 21,600) returns a session token bound to that instance; `GET /latest/identity-token?audience=…` with
+  `x-bc-metadata-token` returns the token. A session token from one instance fails for any other, and requests with
+  `X-Forwarded-For` or `Forwarded` are refused, which blocks the usual SSRF relays.
+- **The host holds no signing key.** It sends a `WorkloadTokenRequest` over its session, signed by its node key, and
+  gets the token sealed to a one-time key, so the gateway only relays ciphertext.
+- **The broker mints only when** the request is signed by the node's current certificate of role `node` (never
+  `node-tenant`, a ramdisk, a site agent or a kind-restricted certificate) naming the session's node; the instance
+  is live, placed on that node, with its live allocation there; its pool has `policy.workloadIdentity: true`; the
+  audience is the issuer's default or a configured one; the request id is new; and the instance is within its rate
+  (30 tokens a minute by default). Tokens live at most 15 minutes.
+- **Refusals are answers**, not errors: `not-bound`, `disabled`, `audience`, `rate-limited`, `access-denied` or
+  `unavailable`. Each one publishes `security.workload.refused` (rate-limited per reason); each token issued writes
+  the audit row `workload.token.issued` with its `jti`, never the token.
+
+Turn it on with a workload issuer from `@better-compute/pki` and the pools that should use it:
+
+```ts title="compute.ts"
+import { createWorkloadIssuer } from '@better-compute/pki';
+
+export const compute = betterCompute({
+  // …
+  workloadIdentity: {
+    issuer: createWorkloadIssuer({
+      issuer: 'https://compute.example.com/workload', // https on 443
+      defaultAudience: 'https://iam.example.com',
+    }),
+    audiences: ['sts.example.com'], // besides the default
+    ttlSeconds: 900, // default and maximum
+    perInstancePerMinute: 30,
+  },
+});
+```
+
+`better-compute serve` publishes the issuer's discovery document and JWKS under the issuer URL's path, so relying
+parties can verify the tokens. See [workload identity](/docs/operations/pki#workload-identity) for the keys and
+their rotation.

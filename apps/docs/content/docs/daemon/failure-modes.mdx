@@ -33,19 +33,21 @@ for each failure, what state is lost, and which invariant the behavior protects.
 
 ## The invariants
 
-PLAN.md §15 defines the fleet invariants. Four of them are checked mechanically after every simulated run, by pure
-functions in `@better-compute/testing` (`checkI1`, `checkI2`, `checkI5`, `checkI8`):
+PLAN.md §15 defines the fleet invariants. Six of them are checked mechanically after every simulated run, and a
+seventh after a simulated night, by pure functions in `@better-compute/testing` (`checkI1`, `checkI2`, `checkI3`,
+`checkI4`, `checkI5`, `checkI7`, `checkI8`):
 
 | Id | Invariant | Checked over |
 | --- | --- | --- |
 | I1 | No overlapping bookings or node-reported assignments: no atom booked by two allocations at one instant, no device bound by a node for two allocations at once, and no binding of a device its allocation did not book | `device_bookings` rows and the bindings nodes reported |
 | I2 | At most one execution per command: a non-retry-safe or self-terminating command starts its side effect at most once; a retry-safe one re-executes only after a crash interrupted it; after a journal loss, a non-retry-safe command accepted in the lost journal never starts again and never ends `succeeded` | the side-effect facts the daemons record, journal losses, and outcomes |
+| I3 | Convergence within a bound: a delivered spec is reported observed within 60 s while the node stays reachable | specs delivered and status reports, from the simulator's links |
+| I4 | No false liveness positives: no node is marked `unreachable` or `lost` within 20 s of a gateway hearing from it, whatever the gateway's clock says | connectivity transitions against the frames the transport delivered |
 | I5 | No allocation released only because a node disconnected | release reasons against connectivity transitions |
+| I7 | Nothing pending that an offline solver could place (checked after the nightly simulation's quiet period) | capacity's `placeablePending` |
 | I8 | Billing conservation: the sum of usage equals the sum of booking duration times atoms, with no duplicate keys | allocations and flushed usage windows |
 
-I3 (convergence within a bound), I4 (no false liveness positives, including under gateway clock skew), I6
-(latency) and I7 (nothing pending that an offline solver could place) are part of the design but have no
-checker in this module.
+I6 (latency) is part of the design but has no checker in this module; the real-time benchmarks measure it.
 
 ## At a glance
 
@@ -276,8 +278,8 @@ keep running (nothing is released, I5); an operator re-joins it with a new token
     from compute's own tables.
   </Card>
   <Card title="better-compute sim" href="/docs/reference/cli">
-    Runs the fleet simulator with a steady workload and `--chaos none`, `light` or `heavy`, then checks I1, I2, I5
-    and I8 and prints the event-log digest.
+    Runs the fleet simulator with a steady workload and `--chaos none`, `light` or `heavy`, then checks the
+    simulator's invariants (I1, I2, I3, I4, I5 and I8) and prints the event-log digest.
   </Card>
   <Card title="The nightly and bench suites" href="/docs/operations/testing">
     `tests/sim/multi-gateway.test.ts` (a kill mid-command, a zombie gateway, a revocation), the nightly simulation

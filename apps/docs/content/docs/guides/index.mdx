@@ -1,6 +1,6 @@
 ---
 title: Introduction
-description: Better Compute is an embeddable TypeScript control plane for GPU and bare-metal capacity that uses Better IAM for identity, policy and billing.
+description: Better Compute is an embeddable TypeScript control plane for GPU, CPU and sandbox capacity that uses Better IAM for identity, policy and billing.
 icon: Sparkles
 packages: ['better-compute']
 sources: ['README.md', 'PLAN.md', 'CHANGELOG.md', 'packages/better-compute/README.md', 'packages/server/README.md', 'packages/server/src/index.ts', 'daemon/README.md', '.claude/coordination.md']
@@ -8,10 +8,11 @@ sources: ['README.md', 'PLAN.md', 'CHANGELOG.md', 'packages/better-compute/READM
 
 import { Blocks, Code, Cpu, FileCodeCorner, HardDrive, Instance, KeyRound, Rocket, Server, ShieldCheck, Webhook } from '@/lib/icons';
 
-Better Compute tracks GPU and bare-metal capacity: what hardware exists, what is free, and who holds it. The
-database referees every booking, so a GPU can never be given to two holders at once. It also makes machines useful:
-you can adopt a server that is already running, deploy an image to a bare machine over PXE, or run a VPS on your own
-hosts or on a provider's.
+Better Compute tracks GPU and CPU capacity: what hardware exists, what is free, and who holds it, from a whole NVLink
+set of GPUs to a few vCPUs and GiB of memory. The database referees every booking, so a GPU or a vCPU can never be
+given to two holders at once. It also makes machines useful: you can adopt a server that is already running, deploy
+an image to a bare machine over PXE, or run isolated VMs, as VPS or as [sandboxes](/docs/guides/vps/sandboxes), on
+your own hosts or on a provider's.
 
 It is a library, not a hosted service. You construct the control plane with `betterCompute()` in your own process,
 on your own PostgreSQL, the same way you construct Better IAM with `betterIam()`:

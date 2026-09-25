@@ -377,8 +377,11 @@ are backed by the plugin:
 PLAN.md §5.5 has `bcd` run bcx plugins that are sha256-pinned in `/etc/bcd/plugins.d/`, each under its own uid with
 seccomp and cgroup limits, and advertise their manifests in `Hello.drivers` so the control plane merges them as remote
 drivers scoped to those agents. A Go SDK, `daemon/pkg/bcx.Serve`, would serve the same protocol. None of this is in
-the daemon yet, and the control plane does not merge `Hello.drivers` today; the FakeDaemon only advertises an
-`nvidia` driver of kind `config` on GPU hosts. PLAN.md's v0.5 acceptance includes "a third-party TS driver runs on a
+the daemon yet, and the control plane does not merge `Hello.drivers` into its driver registry. What it does with
+them today is label the node: at every `Hello` the gateway writes each advertised driver as the system label
+`bc.dev/driver.<id>=<version>` and drops the ones no longer advertised, so placement can require a runtime with
+`PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)). The FakeDaemon
+only advertises an `nvidia` driver of kind `config` on GPU hosts. PLAN.md's v0.5 acceptance includes "a third-party TS driver runs on a
 node via bcx" and a Kata `runtime` plugin in Go (walkthrough 4).
 
 ## Testing a driver

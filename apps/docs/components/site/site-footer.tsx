@@ -57,8 +57,8 @@ export function SiteFooter() {
           <div className="col-span-2 flex flex-col gap-3 md:col-span-1">
             <Logo />
             <p className="max-w-xs text-body-regular leading-6 text-text-secondary">
-              An embeddable TypeScript control plane for GPU and bare-metal capacity, provisioning,
-              and VPS.
+              An embeddable TypeScript control plane for GPU, CPU and sandbox capacity: nodes,
+              reservations, bare-metal provisioning, and isolated VMs.
             </p>
             <CreatorCredit className="mt-1" />
           </div>

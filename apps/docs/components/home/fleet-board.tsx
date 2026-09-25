@@ -4,47 +4,74 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import { cx } from '@/utils/cx';
 
 /**
- * The hero's fleet board: a simulated pool of ten 8-GPU nodes where reservations book and release GPUs, drawn like
- * the front panel of a rack. It is an illustration, labelled SIMULATED, not live data. It follows the placer's
- * default scoring in miniature (packages/capacity/src/pipeline.ts): binpack (the fullest node that fits wins), 4-GPU
- * requests as a whole NVLink set (`topology: 'nvlink-all'`, GPUs 0-3 or 4-7), small requests into partly used sets
- * first so whole sets stay whole (the fragmentation score), no placement on a cordoned node, and a request that fits
- * no node stays pending instead of being split. A GPU is only ever held by one reservation; the OVERLAPS counter
- * re-checks that on every tick.
+ * The hero's fleet board: a simulated site with two pools, drawn like the front panel of a rack. Seven 8-GPU nodes
+ * take GPU reservations; three CPU hosts run sandbox VMs (VPS instances with GPU-less flavors), whose vCPUs are
+ * shown two to a cell. It is an illustration, labelled SIMULATED, not live data.
+ *
+ * It follows the real rules in miniature:
+ * - GPUs (packages/capacity/src/pipeline.ts): binpack (the fullest node that fits wins), 4-GPU requests as a whole
+ *   NVLink set (`topology: 'nvlink-all'`, GPUs 0-3 or 4-7), small requests into partly used sets first so whole
+ *   sets stay whole, no placement on a cordoned node.
+ * - vCPUs (packages/vps flavors, capacity scalars): an instance claims its flavor's vCPUs on one host, packed onto
+ *   the fullest host that fits.
+ * - A request that fits nowhere stays pending instead of being split. A GPU or vCPU is only ever held by one
+ *   booking; the OVERLAPS counter re-checks that on every tick.
  *
  * Deterministic: a seeded PRNG builds the same first frame on the server and the client, and ticks start after
  * mount. Pointing at the board holds it; reduced motion shows the first frame only.
  */
 
-const NODES = 10;
-const GPUS = 8;
+type Kind = 'gpu' | 'cpu';
+
+interface Machine {
+  name: string;
+  kind: Kind;
+  cells: number;
+  cordoned?: boolean;
+}
+
+const machines: Machine[] = [
+  ...Array.from({ length: 7 }, (_, i) => ({
+    name: `gpu-${String(i + 1).padStart(2, '0')}`,
+    kind: 'gpu' as const,
+    cells: 8,
+    ...(i === 4 ? { cordoned: true } : {}),
+  })),
+  ...Array.from({ length: 3 }, (_, i) => ({
+    name: `cpu-${String(i + 1).padStart(2, '0')}`,
+    kind: 'cpu' as const,
+    // 32 vCPUs, two per cell.
+    cells: 16,
+  })),
+];
+
 const SET = 4;
-const CORDONED = 6;
+const VCPU_PER_CELL = 2;
 const TICK_MS = 1100;
 const FRESH_MS = 900;
 const LOG_LINES = 7;
 
 type Cell = string | null;
 
-interface Reservation {
+interface Booking {
   id: string;
-  node: number;
-  gpus: number[];
+  machine: number;
+  cells: number[];
 }
 
 interface LogLine {
   seq: number;
-  kind: 'active' | 'released' | 'refused';
+  kind: 'active' | 'released' | 'pending';
   text: string;
 }
 
 interface Fleet {
   cells: Cell[][];
-  reservations: Reservation[];
+  bookings: Booking[];
   fresh: Record<string, number>;
   log: LogLine[];
   placed: number;
-  refused: number;
+  pending: number;
   seq: number;
   rand: number;
 }
@@ -58,9 +85,7 @@ function next(state: number): [number, number] {
   return [((t ^ (t >>> 14)) >>> 0) / 4294967296, seed];
 }
 
-const nodeName = (node: number) => `node-${String(node + 1).padStart(2, '0')}`;
-
-function reservationId(seq: number) {
+function bookingId(kind: Kind, seq: number) {
   const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
   let n = (seq * 2654435761) >>> 0;
   let out = '';
@@ -68,18 +93,23 @@ function reservationId(seq: number) {
     out += alphabet[n % 32];
     n = Math.floor(n / 32);
   }
-  return `rsv_${out}`;
+  return `${kind === 'gpu' ? 'rsv' : 'inst'}_${out}`;
 }
 
-/** The GPUs a request of `count` gets on `node`, or undefined. Mirrors the placer's topology preference. */
-function fit(cells: Cell[][], node: number, count: number): number[] | undefined {
-  if (node === CORDONED) return undefined;
-  const row = cells[node]!;
-  const free = (gpu: number) => row[gpu] === null;
-  if (count === GPUS) return row.every((cell) => cell === null) ? [...row.keys()] : undefined;
+/** The cells a request of `count` gets on `machine`, or undefined. */
+function fit(cells: Cell[][], machine: number, count: number): number[] | undefined {
+  const spec = machines[machine]!;
+  if (spec.cordoned) return undefined;
+  const row = cells[machine]!;
+  const free = (cell: number) => row[cell] === null;
+  if (spec.kind === 'cpu') {
+    const open = [...row.keys()].filter(free);
+    return open.length >= count ? open.slice(0, count) : undefined;
+  }
+  if (count === spec.cells) return row.every((cell) => cell === null) ? [...row.keys()] : undefined;
   const sets = [0, SET].map((start) => [...Array(SET).keys()].map((i) => start + i));
   if (count === SET) return sets.find((set) => set.every(free));
-  // Small requests: a partly used set first (keeps whole sets whole), then an empty one.
+  // Small GPU requests: a partly used set first (keeps whole sets whole), then an empty one.
   const byUse = [...sets].sort(
     (a, b) => a.filter(free).length - b.filter(free).length || a[0]! - b[0]!,
   );
@@ -90,54 +120,54 @@ function fit(cells: Cell[][], node: number, count: number): number[] | undefined
   return undefined;
 }
 
-function place(fleet: Fleet, count: number, now: number): Fleet {
+const describe = (kind: Kind, count: number) =>
+  kind === 'gpu' ? `${count}×H100${count >= SET ? ' nvlink' : ''}` : `${count * VCPU_PER_CELL} vCPU`;
+
+function place(fleet: Fleet, kind: Kind, count: number, now: number): Fleet {
   let rand = fleet.rand;
   let r: number;
   [r, rand] = next(rand);
-  const start = Math.floor(r * NODES);
-  // Binpack, like the placer's default score: the fullest node that fits wins; ties rotate so the board moves.
-  const candidates = [...Array(NODES).keys()]
-    .map((i) => (start + i) % NODES)
-    .map((node) => ({ node, gpus: fit(fleet.cells, node, count) }))
-    .filter((c): c is { node: number; gpus: number[] } => c.gpus !== undefined)
-    .map((c) => ({ ...c, used: fleet.cells[c.node]!.filter(Boolean).length }))
-    .sort((a, b) => b.used - a.used);
-  for (const { node, gpus } of candidates.slice(0, 1)) {
-    const seq = fleet.seq + 1;
-    const id = reservationId(seq);
-    const cells = fleet.cells.map((row, index) =>
-      index === node ? row.map((cell, gpu) => (gpus.includes(gpu) ? id : cell)) : row,
-    );
-    const topology = count >= SET ? ' nvlink' : '';
+  const start = Math.floor(r * machines.length);
+  // Binpack, like the placer's default score: the fullest machine that fits wins; ties rotate so the board moves.
+  const best = [...machines.keys()]
+    .map((i) => (start + i) % machines.length)
+    .filter((machine) => machines[machine]!.kind === kind)
+    .map((machine) => ({ machine, cells: fit(fleet.cells, machine, count) }))
+    .filter((c): c is { machine: number; cells: number[] } => c.cells !== undefined)
+    .map((c) => ({ ...c, used: fleet.cells[c.machine]!.filter(Boolean).length }))
+    .sort((a, b) => b.used - a.used)[0];
+  const seq = fleet.seq + 1;
+  if (!best) {
+    const reason = kind === 'gpu' ? (count === SET ? 'no whole NVLink set' : 'no room') : 'no host';
     return {
       ...fleet,
       rand,
       seq,
-      cells,
-      reservations: [...fleet.reservations, { id, node, gpus }],
-      fresh: { ...fleet.fresh, [id]: now },
-      placed: fleet.placed + 1,
+      pending: fleet.pending + 1,
       log: [
-        {
-          seq,
-          kind: 'active' as const,
-          text: `${id} ${nodeName(node)} ${count}×H100${topology}`,
-        },
+        { seq, kind: 'pending' as const, text: `${describe(kind, count)} ${reason}` },
         ...fleet.log,
       ].slice(0, LOG_LINES),
     };
   }
-  const seq = fleet.seq + 1;
+  const id = bookingId(kind, seq);
+  const { machine, cells: taken } = best;
+  const suffix = kind === 'cpu' ? ' sandbox' : '';
   return {
     ...fleet,
     rand,
     seq,
-    refused: fleet.refused + 1,
+    cells: fleet.cells.map((row, index) =>
+      index === machine ? row.map((cell, i) => (taken.includes(i) ? id : cell)) : row,
+    ),
+    bookings: [...fleet.bookings, { id, machine, cells: taken }],
+    fresh: { ...fleet.fresh, [id]: now },
+    placed: fleet.placed + 1,
     log: [
       {
         seq,
-        kind: 'refused' as const,
-        text: `${count}×H100 ${count === GPUS ? 'no idle node' : count === SET ? 'no whole NVLink set' : 'no room'}`,
+        kind: 'active' as const,
+        text: `${id} ${machines[machine]!.name} ${describe(kind, count)}${suffix}`,
       },
       ...fleet.log,
     ].slice(0, LOG_LINES),
@@ -148,7 +178,7 @@ function release(fleet: Fleet): Fleet {
   let rand = fleet.rand;
   let r: number;
   [r, rand] = next(rand);
-  const victim = fleet.reservations[Math.floor(r * fleet.reservations.length)];
+  const victim = fleet.bookings[Math.floor(r * fleet.bookings.length)];
   if (!victim) return { ...fleet, rand };
   const seq = fleet.seq + 1;
   return {
@@ -156,19 +186,27 @@ function release(fleet: Fleet): Fleet {
     rand,
     seq,
     cells: fleet.cells.map((row) => row.map((cell) => (cell === victim.id ? null : cell))),
-    reservations: fleet.reservations.filter((item) => item.id !== victim.id),
+    bookings: fleet.bookings.filter((item) => item.id !== victim.id),
     log: [
-      { seq, kind: 'released' as const, text: `${victim.id} ${nodeName(victim.node)}` },
+      {
+        seq,
+        kind: 'released' as const,
+        text: `${victim.id} ${machines[victim.machine]!.name}`,
+      },
       ...fleet.log,
     ].slice(0, LOG_LINES),
   };
 }
 
-/** Request sizes, weighted toward small jobs so partly used nodes show up beside full ones. */
-const sizes = [1, 1, 1, 2, 2, 3, 4, 8];
+/** Request sizes in cells, weighted toward small jobs so partly used machines show up beside full ones. */
+const sizes: Record<Kind, number[]> = {
+  gpu: [1, 1, 1, 2, 2, 3, 4, 8],
+  // 2, 4, 8 or 16 vCPU sandboxes.
+  cpu: [1, 1, 2, 2, 2, 4, 4, 8],
+};
 
 function step(fleet: Fleet, now: number): Fleet {
-  const capacity = (NODES - 1) * GPUS;
+  const capacity = machines.reduce((sum, m) => sum + (m.cordoned ? 0 : m.cells), 0);
   const booked = fleet.cells.flat().filter(Boolean).length;
   let r: number;
   let rand = fleet.rand;
@@ -176,38 +214,52 @@ function step(fleet: Fleet, now: number): Fleet {
   const load = booked / capacity;
   const book = load < 0.35 || (load < 0.8 && r < 0.58);
   [r, rand] = next(rand);
-  const size = sizes[Math.floor(r * sizes.length)]!;
+  const kind: Kind = r < 0.55 ? 'gpu' : 'cpu';
+  [r, rand] = next(rand);
+  const size = sizes[kind][Math.floor(r * sizes[kind].length)]!;
   const fresh = Object.fromEntries(
     Object.entries(fleet.fresh).filter(([, at]) => now - at < FRESH_MS),
   );
   const base = { ...fleet, rand, fresh };
-  return book ? place(base, size, now) : release(base);
+  return book ? place(base, kind, size, now) : release(base);
 }
 
 function initialFleet(): Fleet {
   let fleet: Fleet = {
-    cells: Array.from({ length: NODES }, () => Array<Cell>(GPUS).fill(null)),
-    reservations: [],
+    cells: machines.map((m) => Array<Cell>(m.cells).fill(null)),
+    bookings: [],
     fresh: {},
     log: [],
     placed: 0,
-    refused: 0,
+    pending: 0,
     seq: 0,
     rand: 0x5eed,
   };
-  for (let i = 0; i < 22; i++) fleet = step(fleet, -FRESH_MS);
+  for (let i = 0; i < 26; i++) fleet = step(fleet, -FRESH_MS);
   return { ...fleet, fresh: {} };
 }
 
-/** A GPU held by two reservations would show here; the booking rules above make it impossible, as Postgres does. */
+/** A cell held by two bookings would show here; the booking rules above make it impossible, as Postgres does. */
 function overlaps(fleet: Fleet): number {
   const holders = new Map<string, number>();
-  for (const reservation of fleet.reservations)
-    for (const gpu of reservation.gpus) {
-      const key = `${reservation.node}:${gpu}`;
+  for (const booking of fleet.bookings)
+    for (const cell of booking.cells) {
+      const key = `${booking.machine}:${cell}`;
       holders.set(key, (holders.get(key) ?? 0) + 1);
     }
   return [...holders.values()].filter((count) => count > 1).length;
+}
+
+function usage(fleet: Fleet, kind: Kind) {
+  let used = 0;
+  let total = 0;
+  machines.forEach((m, i) => {
+    if (m.kind !== kind || m.cordoned) return;
+    total += m.cells;
+    used += fleet.cells[i]!.filter(Boolean).length;
+  });
+  const unit = kind === 'cpu' ? VCPU_PER_CELL : 1;
+  return `${used * unit}/${total * unit}`;
 }
 
 export function FleetBoard({ className }: { className?: string }) {
@@ -230,9 +282,6 @@ export function FleetBoard({ className }: { className?: string }) {
     return () => window.clearInterval(timer);
   }, []);
 
-  const capacity = (NODES - 1) * GPUS;
-  const booked = fleet.cells.flat().filter(Boolean).length;
-
   return (
     <div
       className={cx(
@@ -245,7 +294,7 @@ export function FleetBoard({ className }: { className?: string }) {
       <div className="flex items-center gap-3 border-b border-separator-border px-3 py-2 tracking-[0.06em] text-text-secondary uppercase">
         <span className="live-dot" />
         <span className="text-text-primary">Fleet</span>
-        <span className="hidden sm:inline">pool gpu-h100 · site fsn1</span>
+        <span className="hidden sm:inline">site fsn1 · gpu-h100 + cpu-sandbox</span>
         <span
           className={cx(
             'ms-auto border px-1.5 py-px',
@@ -261,26 +310,44 @@ export function FleetBoard({ className }: { className?: string }) {
       <div className="grid lg:grid-cols-[minmax(0,1fr)_13.5rem]">
         <ol
           className="scanlines flex flex-col gap-1.5 px-3 py-3"
-          aria-label="Simulated nodes and their GPUs"
+          aria-label="Simulated GPU nodes and CPU hosts"
         >
-          {fleet.cells.map((row, node) => {
-            const cordoned = node === CORDONED;
+          {fleet.cells.map((row, index) => {
+            const machine = machines[index]!;
             const used = row.filter(Boolean).length;
+            const cpu = machine.kind === 'cpu';
+            const groups = cpu ? [0, 8] : [0, SET];
+            const width = cpu ? 8 : SET;
             return (
-              <li key={node} className="flex items-center gap-3">
-                <span className="w-14 shrink-0 text-text-secondary">{nodeName(node)}</span>
+              <li
+                key={machine.name}
+                className={cx(
+                  'flex items-center gap-3',
+                  cpu && index === 7 && 'mt-1.5 border-t border-dashed border-separator-border pt-3',
+                )}
+              >
+                <span className="w-14 shrink-0 text-text-secondary">{machine.name}</span>
                 <span className="flex gap-2.5">
-                  {[0, SET].map((start) => (
-                    <span key={start} className="flex gap-1">
-                      {row.slice(start, start + SET).map((cell, i) => {
+                  {groups.map((start) => (
+                    <span key={start} className={cx('flex', cpu ? 'gap-0.5' : 'gap-1')}>
+                      {row.slice(start, start + width).map((cell, i) => {
                         const fresh = cell !== null && fleet.fresh[cell] !== undefined;
                         return (
                           <span
                             key={start + i}
-                            title={cell ?? (cordoned ? 'cordoned' : 'idle')}
-                            className="gpu-cell block size-3.5 sm:size-4"
+                            title={cell ?? (machine.cordoned ? 'cordoned' : 'idle')}
+                            className={cx(
+                              'gpu-cell block',
+                              cpu ? 'h-3.5 w-[5px] sm:h-4 sm:w-[6px]' : 'size-3.5 sm:size-4',
+                            )}
                             data-state={
-                              cordoned ? 'cordoned' : cell ? (fresh ? 'fresh' : 'booked') : 'idle'
+                              machine.cordoned
+                                ? 'cordoned'
+                                : cell
+                                  ? fresh
+                                    ? 'fresh'
+                                    : 'booked'
+                                  : 'idle'
                             }
                           />
                         );
@@ -289,11 +356,15 @@ export function FleetBoard({ className }: { className?: string }) {
                   ))}
                 </span>
                 <span className="ms-auto text-end tabular-nums text-text-tertiary">
-                  {cordoned ? (
+                  {machine.cordoned ? (
                     <span className="tracking-[0.06em] uppercase">cordoned</span>
                   ) : (
                     <>
-                      <span className={used ? 'text-text-primary' : undefined}>{used}</span>/{GPUS}
+                      <span className={used ? 'text-text-primary' : undefined}>
+                        {cpu ? used * VCPU_PER_CELL : used}
+                      </span>
+                      /{cpu ? machine.cells * VCPU_PER_CELL : machine.cells}
+                      {cpu ? ' vCPU' : ''}
                     </>
                   )}
                 </span>
@@ -314,10 +385,10 @@ export function FleetBoard({ className }: { className?: string }) {
                     'shrink-0',
                     line.kind === 'active' && 'text-signal',
                     line.kind === 'released' && 'text-text-tertiary',
-                    line.kind === 'refused' && 'text-text-secondary',
+                    line.kind === 'pending' && 'text-text-secondary',
                   )}
                 >
-                  {line.kind === 'active' ? '+' : line.kind === 'released' ? '−' : '×'}
+                  {line.kind === 'active' ? '+' : line.kind === 'released' ? '−' : '…'}
                 </span>
                 <span
                   className={cx(
@@ -325,7 +396,7 @@ export function FleetBoard({ className }: { className?: string }) {
                     line.kind === 'active' ? 'text-text-primary' : 'text-text-secondary',
                   )}
                 >
-                  {line.kind === 'refused' ? `pending ${line.text}` : line.text}
+                  {line.kind === 'pending' ? `pending ${line.text}` : line.text}
                 </span>
               </li>
             ))}
@@ -335,9 +406,9 @@ export function FleetBoard({ className }: { className?: string }) {
 
       <dl className="grid grid-cols-2 border-t border-separator-border sm:grid-cols-4">
         {[
-          ['Booked', `${booked}/${capacity}`, true],
-          ['Placed', String(fleet.placed), false],
-          ['Pending', String(fleet.refused), false],
+          ['GPUs', usage(fleet, 'gpu'), true],
+          ['vCPUs', usage(fleet, 'cpu'), true],
+          ['Pending', String(fleet.pending), false],
           ['Overlaps', String(overlaps(fleet)), false],
         ].map(([label, value, lit], index) => (
           <div

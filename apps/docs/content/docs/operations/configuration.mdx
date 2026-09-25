@@ -114,6 +114,7 @@ Anything wrong throws `INVALID_CONFIG` before a connection is opened.
 | `worker` | see below | Worker runtime tuning. |
 | `ports` | built-in | Replace `ctx.capacity` or `ctx.inventory`. |
 | `downloads` | none | `{ dir?, blob? }` (at least one): where `GET {basePath}/downloads/bcd/{version}/{os}-{arch}` finds `bcd` binaries. See [installing bcd](/docs/daemon/install#serving-the-binaries). |
+| `supportBundles` | none | `{ blob, maxBytes? }`: a `BlobStore` with `get` and `presign`, and the largest upload (a positive integer, default 256 MiB). `commands.run` `logs.collect` then hands the daemon a presigned PUT for `support-bundles/{nodeId}/{key}.bundle`. Without it `logs.collect` has no upload destination. The CLI host does not set it. See [support bundles](/docs/guides/nodes/commands#support-bundles). |
 | `gateway` | none | Accepted and typed for a later phase (gateway public URLs); nothing reads it yet. |
 
 ### capacity

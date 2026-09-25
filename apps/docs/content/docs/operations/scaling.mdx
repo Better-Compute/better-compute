@@ -23,6 +23,10 @@ sources:
   - packages/gateway/src/gateway.ts
   - packages/capacity/src/module.ts
   - packages/capacity/src/placer.ts
+  - packages/capacity/src/shortlist.ts
+  - packages/capacity/src/migrations.ts
+  - packages/gateway/src/store.ts
+  - packages/inventory/src/store.ts
   - packages/postgres/src/pglite.ts
   - .claude/coordination.md
 ---
@@ -103,8 +107,11 @@ commands succeeded. RSS includes the in-process load generator, and h2c leaves o
 End to end through the pool-lease worker's `placeQueued` (reservation rows, an event and a work-queue write each):
 224/s one reservation at a time at 1k nodes; with set-based commits (one bookings insert, one allocations insert and
 one reservations update per batch), 1,092/s at 1k nodes and 161/s at 10k nodes. The shortlist
-(`packages/capacity/src/shortlist.ts`) counts free atoms per node in SQL and plans only the best 48 nodes, and it is
-exact: when a node outside the shortlist could reach the top N, the placer plans the whole pool.
+(`packages/capacity/src/shortlist.ts`) ranks nodes in SQL and plans only the best 48, and it is exact: when a node
+outside the shortlist could reach the top N, the placer plans the whole pool. It reads per-node device totals from
+`capacity_device_counts` (migration `capacity/0003_device_counts`), which a row trigger on `devices` keeps exact,
+instead of aggregating every device of the pool per placement: inline at 10k nodes went from 7.7 to 7.8/s to 10 to
+12.3/s on PGlite. `doctor` reports `capacity.device_counts.drift` if the counts ever disagree with `devices`.
 
 ### Place to active, joins and commands
 
@@ -128,6 +135,13 @@ after `placed`.
 ones, with Join RPC p50 about 1.8 to 3 s: every Join runs JoinService, the node CA and acceptance on the one PGlite.
 The target set for join throughput, 1k joins in under 30 s on PGlite, is not met in these runs. In the multi-gateway
 simulation, 1,000 nodes joined through JoinService in 9.8 s of wall time and 10,000 in 97 s.
+
+A join-storm profile then cut the statements each join costs from 168 to 97 (200 joins on PGlite: 17.5 s to 10.7 s):
+the gateway ingests the inventory sections of a whole group commit set-wise (one insert and one work-queue write per
+batch, instead of a savepoint, an insert and an enqueue per section), inventory applies devices, labels, health
+findings and conditions with one statement each, the node's authorization row is refreshed in one statement, and
+JoinService no longer wakes the node controller at join when the pool runs acceptance checks (the first `Hello`
+does).
 
 **Commands.** `bench/realtime-fleet` times dispatch on 1k connected nodes. Gateway group commit (CommandUpdate and
 event ingestion from every session in one I/O turn share one transaction, up to 500 per flush) moved ack p99 from

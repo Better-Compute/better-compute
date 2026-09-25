@@ -11,6 +11,7 @@ sources:
   - packages/server/src/options.ts
   - packages/server/src/join/gateway-services.ts
   - packages/server/src/join/secret-broker.ts
+  - packages/server/src/join/workload-broker.ts
   - packages/server/src/join/allocation-binding.ts
   - packages/server/src/join/gateway-reports.ts
   - packages/server/src/controllers/nodespec.ts
@@ -70,8 +71,8 @@ are built, and ends with a hardening checklist.
 
 ## Gateway processes
 
-The gateway package holds no CA, signing or encryption key: it relays `Join`, `Renew` and `SecretRequest` to
-`gatewayServices` and returns the answers verbatim. The design puts those services in the api process behind
+The gateway package holds no CA, signing or encryption key: it relays `Join`, `Renew`, `SecretRequest` and
+`WorkloadTokenRequest` to `gatewayServices` and returns the answers verbatim. The design puts those services in the api process behind
 internal mutual TLS.
 
 In this release, `serve --roles gateway` builds `compute.gatewayServices` in the gateway's own process from the
@@ -119,8 +120,10 @@ With `pki.commandSigning`, every command is signed by a 24 h worker key that the
 and so is every NodeSpec generation (v0.4): the NodeSpec controller signs the exact `DesiredStateBody` bytes of each
 new generation (purpose `desired-state`) and stores them in `nodes.spec_body` and `nodes.spec_signature`. The gateway
 relays those signatures verbatim; it cannot produce them. A daemon requires a signature for the kinds its own table
-marks destructive and checks any that is present. For desired state, the FakeDaemon requires a signature on any spec
-that changes the `access` section (v0.2) and, with `signedSpecs: 'always'`, on every spec (v0.4), as bcd must. See
+marks destructive and checks any that is present. For desired state, the FakeDaemon with command-signing roots
+requires a signature on every spec by default (`signedSpecs: 'always'`, v0.4), as bcd must, since an unsigned spec
+with a high generation would freeze all later ones; `signedSpecs: 'access'` requires one only on a spec that changes
+the `access` section (v0.2). See
 [PKI](/docs/operations/pki#signed-intent).
 
 ### Attested results
@@ -151,6 +154,18 @@ gateway's report handlers also ignore reports about allocations placed on anothe
   tenant, so one tenant's VM cannot boot with another tenant's secret; `instances.create` refuses a foreign
   reference up front as well.
 - Commands carry references, never values.
+
+### Workload identity (v0.5)
+
+With `workloadIdentity` configured, a VPS host's metadata service can get a hosted instance's OIDC token. The
+broker (`gatewayServices.workloadToken`) mints one only when the request is signed by the node's current platform
+certificate of role `node` (never `node-tenant`, ramdisk, site or a kind-restricted certificate) naming the session's
+node, for a live instance placed on that node with its live allocation there, in a pool with
+`policy.workloadIdentity: true`, for an allowed audience, with a fresh request id and within the instance's rate.
+The gateway refuses a tenant-controlled session without asking, since the lessee holds root there. The token is a
+JWE to the request's one-time key, lives at most 15 minutes, and its audit row carries only the `jti`. Refusals
+publish `security.workload.refused`. On the host, a session token binds each metadata request to one instance and
+forwarded requests are refused. See [workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels, tickets and break-glass SSH
 
@@ -213,7 +228,8 @@ See [tenancy](/docs/guides/iam/tenancy).
 | Duplicate `Hello`s | More than 3 from a second machine within 10 minutes quarantine the certificate (`createGateway({ duplicateHellos: { max, windowMs } })`) |
 | Tunnels, break-glass certificates | 10 a minute and 20 an hour per identity, per api replica |
 | Better IAM | A 429 from IAM becomes `RATE_LIMITED`, with `Retry-After` |
-| Security events | Join and secret refusal events: 60 a minute per reason by default; the rest are counted as suppressed |
+| Security events | Join, secret and workload-token refusal events: 60 a minute per reason by default; the rest are counted as suppressed |
+| Workload tokens | 30 a minute per instance by default (`workloadIdentity.perInstancePerMinute`) |
 
 ### Tamper-evident audit
 

@@ -15,6 +15,9 @@ sources:
   - packages/pki/src/signing.ts
   - packages/pki/src/revocation-feed.ts
   - packages/pki/src/secrets.ts
+  - packages/pki/src/workload.ts
+  - packages/pki/src/workload-request.ts
+  - packages/cli/src/host/workload.ts
   - packages/cli/src/commands/pki.ts
   - packages/cli/src/commands/audit.ts
   - packages/cli/src/commands/daemon.ts
@@ -300,6 +303,30 @@ per-tenant Merkle checkpoints every hour. `better-compute audit verify --tenant 
 the key's pin, taken from `--pin`, `BETTER_COMPUTE_AUDIT_PIN` or the bundle's public half, and exits
 `AUDIT_TAMPERED` on any problem. See [audit](/docs/guides/events/audit).
 
+## Workload identity
+
+Workload identity (v0.5, optional) gives hosted VPS instances short-lived OIDC tokens. Its key is not part of the
+bundle: `createWorkloadIssuer({ issuer, defaultAudience, keys? })` from `@better-compute/pki` holds its own P-256
+keys, and you pass the issuer as `betterCompute({ workloadIdentity: { issuer } })`.
+
+- **Tokens.** ES256 JWTs with `iss`, `sub = "t:<tenantId>:instance:<instanceId>"`, `aud` (the default audience
+  unless the request names an allowed one), `iat`, `nbf`, `exp`, `jti`, `tenant_id` and `instance_id`, living 60 to
+  900 seconds. Extra claims may not shadow those.
+- **Publication.** The issuer URL must be https on port 443, without query. `better-compute serve` answers
+  `GET` and `HEAD` on `<issuer path>/.well-known/openid-configuration` and `<issuer path>/.well-known/jwks.json`,
+  public, cached 5 minutes, with `access-control-allow-origin: *`; the JWKS is read per request, so an added key
+  shows at once. The issuer URL has to reach that host.
+- **Rotation**, in three steps so no token ever fails verification: `addKey()` publishes a new key while the old one
+  still signs; once verifiers have re-read the JWKS, `promote(kid)` signs with it; `retire(kid)` drops the old key,
+  refused until its last token has expired (15 minutes plus a minute after it stopped signing).
+  `exportKeys()` returns the keys as PKCS#8 PEM with their state, for storage; handle them as secrets.
+
+The host asks for a token over its session with a `WorkloadTokenRequest` signed by its node key (purpose
+`workload-token`), and the answer is sealed to a one-time key (JWE `typ: bcworkload+jwe`, binding the request id,
+the instance and the expiry). `createWorkloadTokenRequest` and `openWorkloadTokenResponse` are the host's half,
+`openWorkloadTokenRequest`, `sealWorkloadTokenResponse` and `refuseWorkloadTokenRequest` the broker's. What the
+broker checks is in [VPS instances](/docs/guides/vps/instances#workload-identity).
+
 ## Rotation and expiry
 
 | What | How it is replaced today |
@@ -309,6 +336,7 @@ the key's pin, taken from `--pin`, `BETTER_COMPUTE_AUDIT_PIN` or the bundle's pu
 | Gateway serving certificates | `pki issue-gateway` before the 30 days run out; gateways with `host.gateway.tlsFiles` hot-reload it, others need a restart one at a time |
 | Command-signing root | The three steps above |
 | Exec ticket key | `rotate()` on the issuer; the previous key stays in the JWKS |
+| Workload issuer keys | `addKey()`, `promote(kid)`, then `retire(kid)` once the old key's tokens expired |
 | Sealed secrets | `localSealedSecretStore` with several keys, then `reseal()` (see [configuration](/docs/operations/configuration#the-deployment-secret)) |
 | Node, serving and internal CAs (1 year) | Not automated: no CLI command reissues a CA from the root yet. `doctor` warns 30 days ahead. |
 | JoinService keys | Not automated. Daemons pin them, so new keys mean new pins in every machine's configuration. |

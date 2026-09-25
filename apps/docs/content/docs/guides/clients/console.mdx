@@ -31,6 +31,8 @@ sources:
   - packages/console-kit/src/resources.ts
   - packages/console-kit/src/react.ts
   - packages/console-kit/src/react-entry.ts
+  - packages/console-kit/src/webhooks.ts
+  - apps/console/src/app/(console)/webhooks/page.tsx
   - PLAN.md
 ---
 
@@ -146,6 +148,7 @@ console-kit, for the tenant the session acts in. Platform pages appear only for 
 | Quotas | `/quotas` | used of max per pool and resource |
 | Usage & spend | `/usage` | usage per meter, day, project and person, with a CSV export |
 | Activity | `/activity` | the live event stream: the last 300 events this session received, filterable by type |
+| Webhooks | `/webhooks` | the tenant's endpoints: create one (URL, event patterns, description) with its signing secret shown once to copy, pause and resume, ping, rotate the secret with a 1 h overlap, recent deliveries with redelivery of dead ones, delete |
 | Rollouts (root) | `/admin/rollouts` | daemon rollouts wave by wave; pause, resume and abort |
 | Fleet drift (root) | `/admin/fleet` | drift of the fleet from its applied FleetConfig |
 
@@ -188,6 +191,7 @@ live.connection.subscribe(() => showBadge(live.connection.get().status));
 | Forms | `createReservationForm`, `validateReservation`, `createInstanceForm`, `validateInstance` | validation that mirrors the server, a debounced `capacity.preview`, one idempotency key per attempt kept across retries and confirmations |
 | Views | `capacityChart`, `quotaView`, `createQuotaView`, `timelineView`, `earliestFit`, `usageView`, `usageCsv` | stacked capacity bars, quota meters (warning from 80 %), the booking calendar and earliest free window, usage and estimated spend |
 | Admin | `createRolloutView`, `rolloutProgress`, `createFleetDriftView`, `nodeTable` | rollout waves, fleet drift by kind, a filterable, stably sorted node table |
+| Webhooks | `createWebhooksView`, `deliverySummary` | a tenant's webhooks over the `webhooks` group (list, create, pause, rotate, delete, ping, deliveries, redeliver, event types); the secret from create or rotate sits in `view.secret` until `dismissSecret()` and is never stored or re-read; delivery counts by state and the latest failure |
 | Terminal | `createTerminalSession`, `createScreen`, `keyInput` | `tunnels.open`, then the WebSocket; a VT100/xterm screen model with scrollback, no DOM |
 | React | `bindReact`, and `@better-compute/console-kit/react` | `useStore`, `useList`, `usePermission`, `useDetail`, `useAction` |
 

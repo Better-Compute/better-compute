@@ -177,7 +177,9 @@ const page = await compute.api.usage.list(credential, {
 }
 ```
 
-[`usage.export`](/docs/reference/api/usage#export) is planned for v0.2 and not served yet.
+[`usage.export`](/docs/reference/api/usage#export) (v0.2) returns the windows of a range of at most 93 days in one
+response, as CSV or JSON lines, with the total quantity per meter; it stops at 50,000 windows and says so with
+`truncated`. See [exporting usage](/docs/guides/iam/billing-and-usage#export-usage).
 
 ## Spend and budgets
 

@@ -148,8 +148,12 @@ const project = await compute.api.projects.create(credential, {
   and the same key with a different name is `CONFLICT`. A second project with the same name is `CONFLICT` too.
 - The creator becomes the project's `ownerId` in the projection. Membership is a Better IAM relationship on
   `compute-project/{id}`, with the relations `member` and `admin`.
-- `projects.get` decides `compute:projects:read` on the project; `projects.list` follows the list recipe.
-  `projects.archive` is planned for v0.2.
+- `projects.get` decides `compute:projects:read` on the project; `projects.list` follows the list recipe and
+  filters by `state`.
+- `projects.archive` (v0.2) decides `compute:projects:manage` on the project. It sets `state` to `archived`, bumps
+  `version` and publishes `project.archived` (`projectId`, `name`); archiving an archived project returns it
+  unchanged, with no event. Archiving only changes the state: compute does not check it when a reservation or
+  instance names the project.
 
 Reservations and instances take an optional `projectId`, which becomes the `projectId` attribute of their
 resource and the `project` tag of their usage windows. `usage.list` with a `projectId` decides

@@ -146,7 +146,7 @@ const handler = createMcpHandler(() => {
     { name: 'better-compute-docs', version },
     {
       instructions:
-        'Documentation for Better Compute, an embeddable TypeScript control plane for GPU and bare-metal capacity (nodes, reservations, provisioning, VPS instances), authorized by Better IAM. Use `search` to find pages, `get_page` to read one as Markdown, `lookup_api_method` for the route, authorization, and status of a `compute.api.{group}.{method}` call, `lookup_error_code` for what a ComputeError code means, and `lookup_cli_command` for a `better-compute` command and its flags.',
+        'Documentation for Better Compute, an embeddable TypeScript control plane for GPU, CPU and sandbox capacity (nodes, reservations, bare-metal provisioning, isolated VPS instances), authorized by Better IAM. Use `search` to find pages, `get_page` to read one as Markdown, `lookup_api_method` for the route, authorization, and status of a `compute.api.{group}.{method}` call, `lookup_error_code` for what a ComputeError code means, and `lookup_cli_command` for a `better-compute` command and its flags.',
     },
   );
   registerSearchTool(mcp, searchApi);

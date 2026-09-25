@@ -52,7 +52,7 @@ interface ComputeModule<Name extends string = string, A extends ApiGroups = {}> 
   api?(context: ModuleContext): A;
   reconcilers?: Reconciler[];
   commandKinds?: CommandKindSpec[];
-  nodeSpec?(context: ModuleContext, node: NodeRecord): Promise<Partial<NodeSpec>>;
+  nodeSpec?(context: ModuleContext, node: NodeRecord): Promise<NodeSpecPart>;
   catalog?: { actions?: string[]; resourceTypes?: Record<string, ComputeResourceType> };
   commands?: CliCommandSpec[];
   profiles?: ProfileDocument[];
@@ -71,7 +71,7 @@ interface ComputeModule<Name extends string = string, A extends ApiGroups = {}> 
     api: { type: '(ctx) => ApiGroups', description: 'Returns { group: { method: defineMethod(...) } }. Called once, while the registry is built.' },
     reconcilers: { type: 'Reconciler[]', description: 'Level-triggered workers on the work queue. See Reconcilers.' },
     commandKinds: { type: 'CommandKindSpec[]', description: 'Agent command kinds this module sends. Each kind is registered once across all modules.' },
-    nodeSpec: { type: '(ctx, node) => Partial<NodeSpec>', description: "The module's sections of a node's desired state." },
+    nodeSpec: { type: '(ctx, node) => NodeSpecPart', description: "The module's sections of a node's desired state." },
     catalog: { type: '{ actions?, resourceTypes? }', description: 'Merged into the IAM catalog. Every action matches compute:<area>:<verb>.' },
     commands: { type: 'CliCommandSpec[]', description: 'CLI commands the module adds: { name, summary, group? }.' },
     profiles: { type: 'ProfileDocument[]', description: 'Provisioning profiles the module ships; see steps and profiles.' },
@@ -297,6 +297,8 @@ Reconcilers from the built-in modules, for reference:
 | `capacity.reservations` | capacity | `none` | edge-triggered, with `notBefore` wake-ups |
 | `capacity.placer` (role `scheduler`) | capacity (`placer: 'pool-lease'`) | `pool` | |
 | `capacity.rollup`, `capacity.usage` | capacity | `none` | `all` every `5m` |
+| `capacity.mig` | capacity (the MIG layout gate) | `node` | edge-triggered, with `notBefore` wake-ups |
+| `inventory.hygiene` | inventory | `none` | `all` every `5m` |
 | `events.fanout`, `events.deliver`, `events.prune` | events | `none` | every `1s`, `2s`, `1h` (`events.prune` only unless `retention: false`) |
 | `audit-sinks` | audit-sinks (built in, with audit sinks) | `none` | `tick` every `5s` |
 | `fleet.drift` | fleet | `none` | every `15m` by default |
@@ -343,13 +345,18 @@ out a command, it wakes the node's controller and, if the key's first segment na
 
 ## NodeSpec sections
 
-`nodeSpec(ctx, node)` returns this module's part of the node's <Term id="nodespec">NodeSpec</Term>. The NodeSpec
-controller calls every module's `nodeSpec` in registration order and merges the parts:
+`nodeSpec(ctx, node)` returns this module's part of the node's <Term id="nodespec">NodeSpec</Term>, a
+`NodeSpecPart` from `@better-compute/core` (`Partial<NodeSpec>` whose `site` is a `Partial<SiteSpec>`). The
+NodeSpec controller calls every module's `nodeSpec` in registration order and merges the parts:
 
 - `host.config`, `telemetry` and `access` merge key by key, later modules winning; `access.sshCaPublicKeys` is a
   union;
 - `devices.assignments` merge by `allocationId` and `instances` by `id`;
-- `daemon` and `site` are taken whole from the last module that returns them.
+- `site` merges field by field, the last contribution per field winning, so one module's `boot` and another's
+  `cacheImages` do not erase each other (the site-boot module contributes `boot`; `cacheImages` is meant for
+  provision, which does not contribute it yet). A `site` section with no `boot` goes on the wire as
+  `boot { active: false }`;
+- `daemon` is taken whole from the last module that returns it.
 
 The controller bumps the node's generation only when the merged spec's hash changes. Your module must say when its
 contribution may have changed: call `ctx.desired.invalidate(tx, nodeId)` in the transaction that changes it. The

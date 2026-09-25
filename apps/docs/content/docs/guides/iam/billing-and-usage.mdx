@@ -219,7 +219,31 @@ const page = await compute.api.usage.list(credential, {
 ```
 
 It decides `compute:usage:read` on `compute-tenant/{t}`, or on `compute-project/{id}` when the input names a
-project. `usage.export` is planned for v0.2. Prices, totals and invoices come from Better IAM's own billing API.
+project. Prices and invoices come from Better IAM's own billing API.
+
+### Export usage
+
+[`usage.export`](/docs/reference/api/usage#export) (v0.2) returns every window of a range in one response, for a
+billing export, with the same decision as `usage.list`:
+
+```ts title="export.ts"
+const exported = await compute.api.usage.export(credential, {
+  tenantId,
+  projectId, // optional, as for usage.list
+  meter: 'gpu.h100.hours', // optional
+  from: Date.parse('2026-09-01T00:00:00Z'),
+  to: Date.parse('2026-10-01T00:00:00Z'), // after from, at most 93 days later
+  format: 'csv', // or 'jsonl'
+});
+// { format, data, count, totals: { 'gpu.h100.hours': 812 }, truncated }
+```
+
+- `csv` (the default) is RFC 4180 CSV with a header row: `idempotencyKey`, `allocationId`, `tenantId`,
+  `identityId`, `meter`, `quantity`, `windowStart`, `windowEnd`, `tags`, `recordedAt`, `outcome`, times as ISO
+  8601 and `tags` as JSON. `jsonl` is one JSON window per line.
+- `totals` sums `quantity` per meter over the exported windows.
+- At most 50,000 windows, ordered by start: `truncated: true` means more matched, so narrow the range or the
+  meter.
 
 ## Budgets
 

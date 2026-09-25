@@ -82,6 +82,13 @@ payloads are messages of `bettercompute.site.v1`, which stays a draft package un
 [BMC drivers and credentials](/docs/guides/bare-metal/bmc) and the
 [command kinds reference](/docs/reference/command-kinds).
 
+The agent's desired state is the `site` section of its NodeSpec (`SiteSpec`): the boot lease state (below) and,
+since v0.2, `cacheImages`, the verified catalog images its cache pre-warms (`url`, `sha256`, `format`). PLAN.md
+fills that list from the pools' policy, and the agent pulls each image and re-verifies its digest before serving
+it. The field and its wire form exist, but no built-in module contributes it yet; modules contribute `site`
+fields independently, because the section merges field by field (see
+[NodeSpec sections](/docs/extending/modules#nodespec-sections)).
+
 <Callout type="info" title="Status">
 `bcd site` is designed and its contracts are in `proto/bettercompute/site/v1`, but the Go daemon is
 not built yet. The dev stack joins site agents as FakeDaemons with role `site`

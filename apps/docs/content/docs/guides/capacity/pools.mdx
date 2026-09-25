@@ -114,10 +114,14 @@ for in each mode.
       type: '{ replicas?: number }',
       description: 'timeslice and mps pools: slot atoms per GPU (1 to 64). Defaults are 4 for timeslice and 10 for mps.',
     },
-    migLayout: { type: 'string', description: 'mig pools: the layout the mig-layout config unit applies, such as all-1g.10gb.' },
+    migLayout: { type: 'string', description: 'mig pools: the layout the mig-layout config unit applies, such as all-1g.10gb. A change reaches each node only once its GPUs are free (the MIG layout gate, /docs/guides/capacity/fractional-gpus#the-mig-layout-gate).' },
     tenantRoot: {
       type: 'boolean',
       description: "Dedicated-root pools (v0.5): reservations may use binding 'node' to lease whole machines.",
+    },
+    workloadIdentity: {
+      type: 'boolean',
+      description: "VPS pools (v0.5): hosted instances may get workload identity tokens from their host's metadata service. Off by default. See /docs/guides/vps/instances#workload-identity.",
     },
     admission: {
       type: "{ budgetCheck?: 'none' | 'meter' }",

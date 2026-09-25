@@ -42,7 +42,7 @@ command from the API. It accepts an allowlist of kinds; any other kind is `UNSUP
 | --- | --- | --- |
 | `diag.nvml` | `{}` | NVML health check of every visible GPU; attested |
 | `inventory.refresh` | `{ sections?, rescan? }`: 1 to 8 of `system`, `cpu`, `memory`, `disks`, `nics`, `gpus`, `bmc`, `os`; `rescan` re-collects from the hardware first | Re-sends inventory |
-| `logs.collect` | `{ sinceSeconds?, units? }`: 60 to 604,800 seconds, up to 16 systemd units | Collects logs (the upload destination arrives in v0.2) |
+| `logs.collect` | `{ sinceSeconds?, units? }`: 60 to 604,800 seconds, up to 16 systemd units | Collects logs and, when the server has `supportBundles`, uploads a support bundle (see [support bundles](#support-bundles)) |
 | `node.reboot` | `{}` | Reboots the machine; completes when the node rejoins |
 
 ```ts
@@ -69,6 +69,19 @@ better-compute api commands.run tenantId=$TENANT nodeId=node_… kind=node.reboo
 
 Modules queue any registered kind through the command queue, `ctx.commands.enqueue(tx, command)`, in their own
 transaction. See [modules](/docs/extending/modules).
+
+### Support bundles
+
+`logs.collect` uploads only when the server is given `supportBundles: { blob, maxBytes? }`, a `BlobStore` that
+can `presign` (see [configuration](/docs/operations/configuration)). `commands.run` then puts a presigned PUT
+URL for `support-bundles/{nodeId}/{key}.bundle` into the command (`key` is the queue's `api:…` idempotency key
+derived from yours, without the `api:` prefix; `supportBundleKey(nodeId, key)` computes it), valid until the command's `not_after` plus 15 minutes, with a byte cap
+(`maxBytes`, default 256 MiB; the daemon truncates oldest first) and `supportBundle: true`. No credential travels
+in the command, and a retry with the same idempotency key presigns nothing new.
+
+`commands.run`, `commands.get` and `commands.list` show the key as the command's `bundleKey`. There is no API to
+download a bundle yet; operators read it from the blob store. Without `supportBundles`, `logs.collect` has no
+upload destination.
 
 ## Kinds and lanes
 
@@ -203,14 +216,22 @@ one-time key. See [security](/docs/operations/security).
 
 ## Cancelling
 
-[`commands.cancel`](/docs/reference/api/commands#cancel) is planned for v0.2. The command queue already
-implements cancellation for modules (`ctx.commands.cancel(tx, commandId)`):
+[`commands.cancel`](/docs/reference/api/commands#cancel) (`compute:nodes:exec` on `compute-node/{nodeId}`,
+v0.2) takes `{ tenantId, nodeId, commandId }` and returns the command. Modules cancel through the same command
+queue, `ctx.commands.cancel(tx, commandId)`:
 
-- a `pending` command becomes `cancelled` at once;
+- a `pending` command becomes `cancelled` at once and never runs;
 - an in-flight command keeps its state and is marked `cancel_requested_at`; the gateway sends `Cancel` until the
   daemon reports a terminal state. The daemon stops between actions and reports the real outcome, so a side
   effect that already happened is never hidden;
-- a terminal command is left alone; an unknown id is `NOT_FOUND`.
+- a terminal command is returned unchanged; an unknown id (or a node your tenant cannot see) is `NOT_FOUND`.
+
+`commands.cancel` publishes `node.command.cancel-requested` (`nodeId`, `commandId`, `kind`, `state`) for a command
+that was not yet terminal; `state` is `cancelled` for a pending one and the in-flight state otherwise.
+
+```ts
+const command = await client.commands.cancel({ tenantId, nodeId, commandId: 'cmd_…' });
+```
 
 Deleting a node cancels its pending commands with reason `node-deleted`.
 
@@ -234,6 +255,7 @@ up to 200 per page (100 by default).
     retrySafe: { type: 'boolean', description: 'From the kind.' },
     selfTerminating: { type: 'boolean', description: 'From the kind.' },
     attested: { type: 'boolean', description: 'From the kind.' },
+    bundleKey: { type: 'string', description: 'logs.collect with supportBundles: the blob key the bundle is uploaded to.' },
   }}
 />
 

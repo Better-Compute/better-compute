@@ -13,6 +13,8 @@ sources:
   - tests/metal-fakedaemon.test.ts
   - tests/metal-dev-site.test.ts
   - tests/metal-chaos.test.ts
+  - tests/extensions/acme-cloud.test.ts
+  - tests/extensions/acme-cloud/provider.ts
   - tests/vps-provider.test.ts
   - tests/vps-instances.test.ts
   - tests/provider-hetzner.test.ts
@@ -38,7 +40,7 @@ the best worked examples of the contracts on the other pages of this section.
 | Walkthrough | Phase | Extension points | Where | State |
 | --- | --- | --- | --- | --- |
 | 1. Ubuntu autoinstall via Redfish virtual media | v0.2 | a control-plane step, a profile, a plugin | `tests/extensions/ubuntu-autoinstall.test.ts` | runs in simulation |
-| 2. VPS provider `acme-cloud` | v0.3 | `defineProvider`, conformance cases, a provider pool | `tests/vps-provider.test.ts`, `tests/vps-instances.test.ts`, the provider suites | covered piecewise, no single walkthrough test |
+| 2. VPS provider `acme-cloud` | v0.3 | `defineProvider`, conformance cases, a provider pool | `tests/extensions/acme-cloud.test.ts` | runs against an in-memory cloud emulator, live and from a recording |
 | 3. Talos on an agentless pool | v0.3 | a relaying step, a profile, `site.httpProxy` | `tests/extensions/talos.test.ts`, `tests/metal-fakedaemon.test.ts` | runs in simulation and on the dev stack |
 | 4. Kata runtime in Go | v0.5 | a bcx `runtime` plugin in `plugins.d` | none | not started |
 | Emulated site | v0.2 | a hardware profile, the whole metal lifecycle | `examples/emulated-site` | configuration checked; needs Linux, KVM and a `bcd` build to run |
@@ -145,26 +147,41 @@ pnpm vitest run tests/extensions/talos.test.ts tests/metal-fakedaemon.test.ts
 ## Walkthrough 2: a VPS provider
 
 PLAN.md describes it as `defineProvider(…)`, `providerConformance(acmeCloud, { recordReplay })`, a provider account, and
-a `class: 'provider'` pool with `agent: 'none'` whose instances run through the generic provider steps. What exists:
+a `class: 'provider'` pool with `agent: 'none'` whose instances run through the generic provider steps.
+`tests/extensions/acme-cloud.test.ts` runs it as a third party would, with zero edits to `@better-compute/*`:
 
-- `tests/vps-provider.test.ts` declares an `acme-cloud` provider with `defineProvider`, checks that its accounts are
-  validated by its manifest and typed from it, and checks every shape refusal.
-- `tests/vps-instances.test.ts` registers a `fake-cloud` provider in `vps({ providers })` and runs instances of a
-  provider pool through it: an idempotent create followed to `running`, provider errors recorded and retried, a
-  vanished machine marked `lost`.
-- The conformance API is `providerConformanceCases()` with `runConformance`, not a single `providerConformance`
-  function, and recording is left to the transport: adapters take a `fetch`. The Hetzner Cloud, Hetzner Robot and
-  Proxmox suites run the cases against in-memory emulators.
+- **The plugin.** `tests/extensions/acme-cloud/provider.ts` is a `defineProvider` over Acme Cloud's HTTP API with an
+  injectable `fetch`; `cloud.ts` is an in-memory emulator of that API, and `record-replay.ts` a transport that records
+  every exchange and replays it.
+- **Conformance, live and offline.** `runConformance(providerConformanceCases(), subject)` passes against the emulator
+  through the recording transport, leaving no server behind, and passes again offline from the recording with every
+  exchange consumed. A wrong account token is a configuration error, not a provider outage.
+- **On a real server.** With `vps({ providers: [acmeCloudProvider({ fetch })] })` on a compute fixture: a provider
+  account whose token is sealed in the secret store, a `class: 'provider'` pool (its `agent` is `none`) offered to a
+  tenant with a quota, and a flavor mapped onto the provider's offer. The tenant's instance is created once (a
+  retried reconciler pass creates nothing new), with the SSH key and no join token in its user data, followed to
+  `running`, stopped (the machine powered off) and deleted; a third instance over the tenant's quota is refused, and
+  the pool never gets a node.
 
-Instances of provider pools are driven by the `vps.instances` reconciler calling the account's client, not by
-workflow steps. [Providers](/docs/extending/providers) shows how to write and test one.
+The conformance API is `providerConformanceCases()` with `runConformance`, not a single `providerConformance`
+function, and recording is left to the transport: adapters take a `fetch`. Instances of provider pools are driven by
+the `vps.instances` reconciler calling the account's client, not by workflow steps. `tests/vps-provider.test.ts`
+(manifest-typed accounts and shape refusals) and the Hetzner Cloud, Hetzner Robot and Proxmox suites cover the same
+contract piecewise. [Providers](/docs/extending/providers) shows how to write and test one.
+
+```bash
+pnpm vitest run tests/extensions/acme-cloud.test.ts
+```
 
 ## Walkthrough 4: a Kata runtime over bcx
 
 A `runtime` driver written in Go, listed in `/etc/bcd/plugins.d/`, advertised in `Hello.drivers`, and selected by pools
 through `vps({ runtimes })`. The TypeScript half of bcx is in `@better-compute/driver-sdk`, with a real-subprocess test
-suite, but `bcd` does not run plugins, the Go SDK does not exist, and the control plane does not merge
-`Hello.drivers`. See [drivers](/docs/extending/drivers#bcx-under-bcd).
+suite, but `bcd` does not run plugins and the Go SDK does not exist. The control-plane half is in place: the gateway
+writes each driver a daemon advertises in `Hello.drivers` as the node label `bc.dev/driver.<id>=<version>`, and a
+`PlacementRequest.nodeLabels` constraint places only on nodes that carry it (see
+[placement](/docs/guides/capacity/placement#eligibility-filters)); vps does not set that constraint yet. See
+[drivers](/docs/extending/drivers#bcx-under-bcd).
 
 ## The emulated site
 

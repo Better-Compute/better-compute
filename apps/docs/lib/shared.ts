@@ -7,7 +7,7 @@ export { newIssueUrl, repositoryBranch, repositoryUrl, sourceFileUrl } from './r
 
 export const appName = 'Better Compute';
 export const appDescription =
-  'An embeddable TypeScript control plane for GPU and bare-metal capacity: nodes, reservations, provisioning, and VPS instances, authorized by Better IAM.';
+  'An embeddable TypeScript control plane for GPU, CPU and sandbox capacity: nodes, reservations, bare-metal provisioning, and isolated VMs, authorized by Better IAM.';
 /**
  * The released version, as the CLI reports it (every package shares one version; see lib/stats.ts). This pulls in
  * the generated reference data, so client components import lib/repository.ts or lib/routes.ts instead.

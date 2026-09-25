@@ -16,7 +16,10 @@ sources:
   - packages/inventory/src/hardware-key.ts
   - packages/inventory/src/conditions.ts
   - packages/inventory/src/health.ts
+  - packages/inventory/src/hygiene.ts
+  - packages/inventory/src/pressure.ts
   - packages/gateway/src/health.ts
+  - packages/gateway/src/store.ts
   - packages/provision/src/remediation.ts
   - packages/server/src/controllers/lifecycle.ts
   - proto/bettercompute/agent/v1/inventory.proto
@@ -176,6 +179,12 @@ Inventory also writes node labels with source `inventory`, the way NVIDIA's GPU 
 `nvidia.driver.version`, `mig.capable`, `fabric.domain`, `cpu.arch`, `cpu.vendor`, `os.distro`, `os.kernel` and
 `kvm.available`. A label whose GPUs disagree reads `mixed`. `nodes.label` cannot overwrite them.
 
+The gateway writes one more kind at every `Hello`: each driver the daemon advertises in `Hello.drivers` becomes
+the label `bc.dev/driver.<id>=<version>` with source `system` (a missing version reads `unknown`; ids outside
+`[a-z0-9._-]` are skipped), and driver labels the daemon no longer advertises are dropped, in one statement that
+writes nothing when they did not change. Operators cannot overwrite them either. Placement can require them with
+`PlacementRequest.nodeLabels` (see [placement](/docs/guides/capacity/placement#eligibility-filters)).
+
 ### The hardware key
 
 The hardware key identifies the machine rather than its operating system. It is the SHA-256 over the normalized
@@ -209,10 +218,53 @@ puts its type into `noScheduleReasons`, in the same transaction.
 | `RowRemapPending` (v0.2) | XID 63, or inventory's row-remap state | NoSchedule; a GPU reset once no allocation is live |
 | `RowRemapFailed` (v0.2) | XID 64, or inventory's row-remap state | the GPU is quarantined for replacement |
 | `EccUncorrectable`, `NvlinkDegraded` (v0.2) | inventory: volatile uncorrectable ECC errors, or NVLinks down on a GPU that has NVLink peers | the GPU is quarantined |
+| `DriverMismatch`, `CertExpiring`, `DaemonOutdated` | the hygiene sweep, see below | NoSchedule, plus `node.condition.changed` |
+| `CpuPressure`, `MemoryPressure`, `DiskPressure` (v0.3) | host pressure in status reports, see below | NoSchedule on `vps-host` pools; an alert elsewhere |
 
-The condition table in `@better-compute/inventory` (`nodeConditionTypes`) also defines `PcieReplayHigh`,
-the v0.3 `DiskPressure`, `MemoryPressure` and `CpuPressure` (NoSchedule on VPS hosts), and `DriverMismatch`,
-`DaemonOutdated`, `CertExpiring` and `ClockSkew`. No controller raises those on nodes yet.
+The condition table in `@better-compute/inventory` (`nodeConditionTypes`) also defines `PcieReplayHigh` and
+`ClockSkew`. No controller raises those on nodes yet.
+
+### Node hygiene
+
+Some faults no single report shows. The inventory module's `inventory.hygiene` reconciler, a periodic singleton,
+sweeps every node that is not deleted or retired every 5 minutes, 500 nodes per transaction:
+
+| Condition | Raised when |
+| --- | --- |
+| `DriverMismatch` | The node converged (`observed_generation >= generation`) on a spec whose `nvidia-driver` host unit wants branch B, while its GPUs report a driver of another branch. |
+| `CertExpiring` | The newest unrevoked certificate of the node's identity generation (ramdisk certificates aside) has less than a tenth of its lifetime left, and at least an hour, so renewal is failing. |
+| `DaemonOutdated` | The session's `proto_max` is below the control plane's protocol version, or `bcd` runs below a configured `minDaemonVersion`. |
+
+Each raised condition adds a NoSchedule reason and publishes `node.condition.changed` (`condition`, `status`,
+`reason`, `noSchedule`); both go when the cause does. Only changes are written. The built-in reconciler uses the
+defaults; `hygieneReconciler(options)` and `runHygiene(sql, options)` take `every`, `minDaemonVersion`,
+`protocolMax`, `certExpiringFraction`, `certExpiringMinSeconds` and `batch`.
+
+### Host pressure
+
+Since protocol v0.3, `StatusReport.pressure` carries the host's Linux pressure stall information ("some" avg10
+from `/proc/pressure/*`, percent of wall time) and CPU steal (percent of the last report interval); it is absent
+when the kernel exposes no PSI. `recordHostPressure(tx, nodeId, report)` turns it into conditions:
+
+| Condition | Raised at | Cleared below |
+| --- | --- | --- |
+| `CpuPressure` | CPU PSI 50%, or steal 20% | half of each |
+| `MemoryPressure` | memory PSI 20% | 10% |
+| `DiskPressure` | I/O PSI 40% | 20% |
+
+Between the two levels a condition keeps its status, so a host hovering at a threshold does not flap. On nodes of
+`vps-host` pools the conditions are NoSchedule; elsewhere they only alert through `node.condition.changed`.
+Nothing is written while nothing changes. The gateway runs it only when the host installs the status handler:
+
+```ts
+import { createGateway, xidStatusHandler } from 'better-compute/gateway';
+import { hostPressureStatusHandler } from 'better-compute/inventory';
+
+createGateway({ reports: { status: [xidStatusHandler, hostPressureStatusHandler({ events })] } });
+```
+
+`hostPressureStatusHandler({ thresholds })` takes other raise thresholds (`cpu`, `steal`, `memory`, `io`). In
+tests, `FakeDaemon.setPressure()` puts a `HostPressure` into every status report.
 
 ## Health, quarantines and remediation
 

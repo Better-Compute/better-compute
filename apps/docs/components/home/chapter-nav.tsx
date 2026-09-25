@@ -11,6 +11,7 @@ export const chapters = [
   { id: 'build', label: 'Build' },
   { id: 'join', label: 'Join' },
   { id: 'capacity', label: 'Capacity' },
+  { id: 'sandboxes', label: 'Sandboxes' },
   { id: 'bare-metal', label: 'Bare metal' },
   { id: 'commands', label: 'Commands' },
   { id: 'fleet', label: 'Fleet as code' },

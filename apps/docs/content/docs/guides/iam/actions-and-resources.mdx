@@ -187,7 +187,7 @@ bridge, allowing each only when granted.
 | [`projects.create`](/docs/reference/api/projects#create) | `compute:projects:manage` | `compute-tenant` | v0.1 |
 | [`projects.get`](/docs/reference/api/projects#get) | `compute:projects:read` | `compute-project` | v0.1 |
 | [`projects.list`](/docs/reference/api/projects#list) | `compute:projects:read` | `compute-tenant` + items | v0.1 |
-| [`projects.archive`](/docs/reference/api/projects#archive) | `compute:projects:manage` | `compute-project` | v0.2, planned |
+| [`projects.archive`](/docs/reference/api/projects#archive) | `compute:projects:manage` | `compute-project` | v0.2 |
 | [`sites.list`](/docs/reference/api/sites#list) | `compute:sites:read` | `compute-tenant` + items | v0.1 |
 | [`sites.get`](/docs/reference/api/sites#get) | `compute:sites:read` | `compute-site` | v0.1 |
 | [`sites.create`](/docs/reference/api/sites#create) | `compute:sites:manage` | `compute-fleet` or `compute-tenant` | v0.1 |
@@ -227,7 +227,7 @@ bridge, allowing each only when granted.
 | [`commands.run`](/docs/reference/api/commands#run) | `compute:nodes:exec` | `compute-node` | v0.1 |
 | [`commands.get`](/docs/reference/api/commands#get) | `compute:nodes:read` | `compute-node` | v0.1 |
 | [`commands.list`](/docs/reference/api/commands#list) | `compute:nodes:read` | `compute-node` | v0.1 |
-| [`commands.cancel`](/docs/reference/api/commands#cancel) | `compute:nodes:exec` | `compute-node` | v0.2, planned |
+| [`commands.cancel`](/docs/reference/api/commands#cancel) | `compute:nodes:exec` | `compute-node` | v0.2 |
 | [`tunnels.open`](/docs/reference/api/tunnels#open) | `compute:instances:exec` | `compute-instance` or `compute:nodes:console` on `compute-node` | v0.3, planned |
 
 ### Capacity
@@ -261,7 +261,7 @@ bridge, allowing each only when granted.
 | Method | Action | Decided on | Phase |
 | --- | --- | --- | --- |
 | [`usage.list`](/docs/reference/api/usage#list) | `compute:usage:read` | `compute-tenant` or `compute-project` | v0.1 |
-| [`usage.export`](/docs/reference/api/usage#export) | `compute:usage:read` | `compute-tenant` or `compute-project` | v0.2, planned |
+| [`usage.export`](/docs/reference/api/usage#export) | `compute:usage:read` | `compute-tenant` or `compute-project` | v0.2 |
 | [`events.list`](/docs/reference/api/events#list) | `compute:events:read` | `compute-tenant` | v0.1 |
 | [`webhooks.create`](/docs/reference/api/webhooks#create) | `compute:webhooks:manage` | `compute-tenant` | v0.3 |
 | [`webhooks.list`](/docs/reference/api/webhooks#list) | `compute:webhooks:manage` | `compute-tenant` | v0.3 |
@@ -293,6 +293,8 @@ bridge, allowing each only when granted.
 | [`workflows.list`](/docs/reference/api/workflows#list) | `compute:workflows:read` | `compute-node` | v0.2 |
 | [`workflows.abort`](/docs/reference/api/workflows#abort) | `compute:workflows:manage` | `compute-node` | v0.2 |
 | [`workflows.retry`](/docs/reference/api/workflows#retry) | `compute:workflows:manage` | `compute-node` | v0.2 |
+| [`workflows.pause`](/docs/reference/api/workflows#pause) | `compute:workflows:manage` | `compute-node` | v0.2 |
+| [`workflows.resume`](/docs/reference/api/workflows#resume) | `compute:workflows:manage` | `compute-node` | v0.2 |
 | [`metal.enroll`](/docs/reference/api/metal#enroll) | `compute:nodes:provision` | `compute-pool` | v0.2 |
 | [`metal.manage`](/docs/reference/api/metal#manage) | `compute:nodes:provision` | `compute-node` | v0.2 |
 | [`metal.inspect`](/docs/reference/api/metal#inspect) | `compute:nodes:provision` | `compute-node` | v0.2 |

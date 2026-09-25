@@ -30,6 +30,8 @@ sources:
   - tests/bench/placements.bench.ts
   - tests/mcp-e2e-confirmation.test.ts
   - tests/pki-workload.test.ts
+  - tests/e2e/imds.test.ts
+  - tests/extensions/acme-cloud.test.ts
 ---
 
 Better Compute is built in phases, each defined in PLAN.md §16 by its deliverables, its acceptance criteria and its
@@ -177,7 +179,7 @@ v0.2 takes servers from a BMC and network boot to a deployed OS and back, with v
 | `mcp` | Done | `@better-compute/mcp` |
 | Delegated confirmation | Done | |
 | The `cloud-iid` attestor | Done | |
-| Walkthrough 2 (a VPS provider plugin) and walkthrough 3 (Talos) | Done in tests | `tests/vps-provider.test.ts`, `tests/extensions/talos.test.ts` |
+| Walkthrough 2 (a VPS provider plugin) and walkthrough 3 (Talos) | Done in tests | `tests/extensions/acme-cloud.test.ts` (against an emulator, live and from a recording), `tests/extensions/talos.test.ts` |
 
 | Acceptance and exit | State |
 | --- | --- |
@@ -231,7 +233,7 @@ Most of v0.5 landed early, on the control plane.
 | Spot | Done | See [spot and preemption](/docs/guides/capacity/spot-and-preemption) |
 | `dedicated-root` metal and `binding: 'node'` | Done | See [dedicated root](/docs/guides/bare-metal/dedicated-root) |
 | TPM attestor | In progress | The verifier and a software TPM producer are done; bcd's agent side (go-attestation) is not |
-| Optional workload identity | Done in pki | Workload OIDC tokens and the IMDS token exchange |
+| Optional workload identity | Done on the control plane | Workload OIDC tokens and the IMDS token exchange in pki, `WorkloadTokenRequest` over the session, the workload broker, and the issuer's discovery document and JWKS in `serve`; the IMDS on a host is bcd's. See [workload identity](/docs/guides/vps/instances#workload-identity) |
 | bcx and `driver-sdk` | In progress | The TypeScript SDK runs drivers out of process with mutual TLS; loading them from bcd needs Go |
 | `provider-proxmox` | Done | |
 | console-kit and `apps/console` | Done | |
@@ -242,7 +244,19 @@ Most of v0.5 landed early, on the control plane.
 | The MIG torture test and the real-hardware nightly | The torture test runs on a simulated MIG pool; nothing has run on hardware (D15) |
 | A `dedicated-root` lease and release yield a new identity generation | Done |
 | A third-party TypeScript driver runs on a node via bcx | Done with a FakeDaemon as the node (`tests/e2e/bcx.test.ts`): a module profile's `power.*` steps go out as `driver.invoke` commands through the real engine, queue and gateway, and run in a pinned bcx plugin process. On a real node it needs bcd |
-| IMDS cross-instance access fails | Done (`tests/pki-workload.test.ts`) |
+| IMDS cross-instance access fails | Done with FakeDaemon hosts (`tests/e2e/imds.test.ts`, `tests/pki-workload.test.ts`): one instance's session token fails for another and on another host, a host gets nothing for an instance placed elsewhere, forwarded requests and replays are refused |
+
+## Sandboxes
+
+Sandboxes are part of the product direction beside GPU and CPU capacity. PLAN.md's v1 non-goals still list "a sandbox
+product", so nothing below has a phase or a design section yet. What exists and what does not:
+
+| Item | State | Notes |
+| --- | --- | --- |
+| Isolated VMs as sandboxes | Done in the control plane (v0.3) | A sandbox is a VPS instance: flavors of vCPU, memory, disk and 0 to 16 GPUs, one IAM decision per create, quota, metering, sealed user data, no platform secrets in the guest, exec, SSH and TCP through tunnels. See [sandboxes](/docs/guides/vps/sandboxes) |
+| Provider pools running them | Done | Hetzner Cloud and Proxmox VE |
+| Hosted runtimes on your own servers | Not started | `libvirt-kvm` and `cloud-hypervisor` inside bcd (v0.3), which needs Go; a Kata runtime plugin via bcx (v0.5) |
+| A dedicated sandbox API | Not planned in PLAN.md yet | Templates, snapshots, pause and resume, time-to-live and fast start from a warm pool are not in the code or the plan |
 
 ## v1.0: Freeze
 

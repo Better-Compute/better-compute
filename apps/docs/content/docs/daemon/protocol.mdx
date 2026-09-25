@@ -134,10 +134,11 @@ send frames as they need to.
 | `heartbeat` | Free lane credits, coarse load, applied generation; inventory hashes on every 10th |
 | `update` | A `CommandUpdate`: acked, running, or a terminal outcome |
 | `events` | An `EventBatch` of journaled events for one `journal_id` |
-| `status` | A `StatusReport`: observed and applied generation, section states, conditions |
+| `status` | A `StatusReport`: observed and applied generation, section states, conditions; from v0.3 the hosted instances and `pressure` (`HostPressure`: CPU, memory and I/O PSI "some" avg10 and CPU steal) |
 | `inventory` | One `InventorySection`: the canonical encoding of a section and its SHA-256 |
 | `spec_request` | Asks for a full `DesiredState` |
 | `secret_request` | Asks for one secret, sealed to a one-time key (v0.2) |
+| `workload_token_request` | A hosted instance's workload identity token, sealed to a one-time key (v0.5) |
 
 | ServerFrame (gateway to daemon) | Purpose |
 | --- | --- |
@@ -150,6 +151,7 @@ send frames as they need to.
 | `drain` | Reconnect elsewhere after `reconnect_after_ms` |
 | `revoked` | This certificate is revoked; the session closes |
 | `secret` | The answer to a `secret_request`: a JWE, or an error |
+| `workload_token` | The answer to a `workload_token_request`: a JWE and its expiry, or an error (v0.5) |
 
 A gateway ignores an `AgentFrame` case it does not know, so a newer daemon can send frames an older gateway does
 not understand. Sessions are covered in [sessions](/docs/daemon/sessions); commands, desired state and events in
@@ -164,6 +166,17 @@ reference is bound to the agent's current step or allocation, and answers with a
 (`ECDH-ES+A256KW`, `A256GCM`) to `epk`, or with an `error` of `not-found`, `not-bound`, `access-denied` or
 `unavailable`. Gateways see ciphertext only. A session whose certificate is tenant-controlled always gets
 `access-denied`.
+
+### Workload tokens (v0.5)
+
+A VPS host's metadata service gets a hosted instance's workload identity token the same way:
+`WorkloadTokenRequest{request_id, instance_id, audience, epk, node_sig}`, where `audience` is empty for the issuer's
+default, `epk` is a fresh P-256 key used once, and `node_sig` (purpose `workload-token`) covers the other fields. The
+gateway relays it to `GatewayServices.workloadToken` outside the frame queue, and the answer is
+`WorkloadTokenResponse{request_id, jwe, expires_at, error}`: a compact JWE of the token to `epk`, or an `error` of
+`not-bound`, `disabled`, `audience`, `rate-limited`, `access-denied` or `unavailable`. A gateway without the service
+answers `unavailable`, and a tenant-controlled session always gets `access-denied`. See
+[workload identity](/docs/guides/vps/instances#workload-identity).
 
 ### Tunnels (v0.3)
 
@@ -209,6 +222,7 @@ part  = uint32_be(len(bytes)) || bytes
 | `attested-report` | node key | `[AttestedReport.body]` |
 | `command-update` | node key | `[command_id, uint32_be(state), sha256(result)]` |
 | `secret-request` | node key | `[request_id, ref, workflow_id, step_id, allocation_id, epk]` |
+| `workload-token` | node key | `[request_id, instance_id, audience, epk]` (v0.5) |
 | `renew-pop` | current node key | `[sha256(csr), node_id, client_time]` |
 | `x509pop` | node key of a possibly expired certificate | `[sha256(csr), node_id, client_time]` |
 | `discovery-assertion` | site agent node key | `[SignedDiscoveryAssertion.body]` |

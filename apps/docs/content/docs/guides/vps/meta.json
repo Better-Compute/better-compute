@@ -1,5 +1,5 @@
 {
-  "title": "VPS",
+  "title": "VPS and sandboxes",
   "icon": "Instance",
-  "pages": ["index", "instances", "flavors", "providers", "networking"]
+  "pages": ["index", "instances", "sandboxes", "flavors", "providers", "networking"]
 }

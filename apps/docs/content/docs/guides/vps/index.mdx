@@ -120,7 +120,10 @@ Registering the module adds:
 - the `vps.instances` reconciler, woken through the <Term id="work-queue">work queue</Term> by every change, and
   the `vps.usage` job, which meters hosted instances every 5 minutes;
 - an `instances` section in the <Term id="nodespec">NodeSpec</Term> of each hosted node;
-- the `runtime` driver kind, merged into `DriverKinds` of `@better-compute/core` when you import the package.
+- the `runtime` driver kind, merged into `DriverKinds` of `@better-compute/core` when you import the package;
+- `doctor` findings for hosted pools: `vps.pools.runtime` (a runtime the deployment does not list),
+  `vps.pools.single-tenant` (a container pool without `policy.singleTenant`), `vps.pools.ipam` (no IP range) and
+  `vps.hosts.capacity` (adopted hosts without capacity rows); see [doctor](/docs/operations/observability#doctor).
 
 Hosted pools also need the <Term id="gateway">gateway</Term> to feed each host's runtime report to vps. Pass
 `instanceStatusHandler` as a status handler. It runs next to the built-in XID health handler, each under its own
@@ -234,8 +237,8 @@ allocation, IP lease, scalar claim or quota). What runs the VMs on a host is not
 | Host runtimes `libvirt-kvm` and `cloud-hypervisor`          | Planned for bcd (v0.3). The `RuntimeDriver` contract and the protocol messages exist; bcd is written in `daemon/` but not built or released, and its `instances` section has no runtime behind it yet.                 |
 | Runtimes as out-of-process plugins (Kata, and others)       | Planned for v0.5 with bcx.                                                                                                                                                                                              |
 | Single-tenant container runtimes                            | Planned for v0.3; the `RuntimeTraits` contract describes them, nothing enforces single tenancy yet.                                                                                                                     |
-| Interactive access (console, exec, SSH through a tunnel)    | `tunnels.open` with an `instanceId`, decided as `compute:instances:exec`: hosted instances only, and only when the deployment configures tunnels. The API reference lists it as planned. See [tunnels](/docs/guides/access/tunnels). |
-| Per-instance metadata service and workload identity         | Planned for v0.5.                                                                                                                                                                                                       |
+| Interactive access (exec, SSH, TCP through a tunnel)        | `tunnels.open` with an `instanceId`, decided as `compute:instances:exec`: hosted instances only, and only when the deployment configures tunnels. The API reference lists it as planned. See [tunnels](/docs/guides/access/tunnels). |
+| Per-instance metadata service and workload identity         | v0.5, optional. The control plane half (the workload broker, the session frames, the issuer and its published JWKS) is built and tested against the FakeDaemon's metadata service; the IMDS in bcd is not built. See [workload identity](/docs/guides/vps/instances#workload-identity). |
 
 The TypeScript `FakeDaemon` in `@better-compute/testing` speaks the real protocol for the simulator and
 `better-compute dev --sim N`, but it does not emulate a VM runtime: it never reports instances. The tests emulate
