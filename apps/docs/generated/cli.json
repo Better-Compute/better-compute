@@ -561,6 +561,90 @@
       ]
     },
     {
+      "name": "console",
+      "aliases": [],
+      "group": "Access",
+      "summary": "Open an interactive console on a node",
+      "description": "console opens a root console on one node through tunnels.open (compute:nodes:console on the node). The session runs over the server’s tunnel WebSocket, so it needs --url (or BETTER_COMPUTE_URL). The terminal is in raw mode until the remote program exits: every key, Ctrl-C included, goes to the remote, and Ctrl-] detaches. The command exits with the remote program’s status (255 when the tunnel breaks), like ssh. Tickets are single-use and the gateway and the node verify them again; revoking your session or the delegation closes the tunnel.",
+      "usage": "better-compute console --tenant ID --node ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--node",
+          "value": "ID",
+          "optional": false,
+          "description": "The node"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        }
+      ],
+      "examples": [
+        "better-compute console --url https://compute.example.com --tenant org_acme --node node_01k5w…"
+      ]
+    },
+    {
+      "name": "exec",
+      "aliases": [],
+      "group": "Access",
+      "summary": "Open an interactive shell in a running instance",
+      "description": "exec opens a shell in one running instance through tunnels.open (compute:instances:exec on the instance); its node's agent runs it. The session runs over the server’s tunnel WebSocket, so it needs --url (or BETTER_COMPUTE_URL). The terminal is in raw mode until the remote program exits: every key, Ctrl-C included, goes to the remote, and Ctrl-] detaches. The command exits with the remote program’s status (255 when the tunnel breaks), like ssh. Tickets are single-use and the gateway and the node verify them again; revoking your session or the delegation closes the tunnel.",
+      "usage": "better-compute exec --tenant ID --instance ID [--config PATH] [--url URL]",
+      "target": "token",
+      "args": [],
+      "flags": [
+        {
+          "flag": "--tenant",
+          "value": "ID",
+          "optional": false,
+          "description": "The tenant acting (the caller’s organization)",
+          "env": "BETTER_COMPUTE_TENANT"
+        },
+        {
+          "flag": "--instance",
+          "value": "ID",
+          "optional": false,
+          "description": "The instance"
+        },
+        {
+          "flag": "--config",
+          "value": "PATH",
+          "optional": true,
+          "description": "Configuration module; default: the nearest better-compute.config.{mjs,js,ts,mts}",
+          "env": "BETTER_COMPUTE_CONFIG"
+        },
+        {
+          "flag": "--url",
+          "value": "URL",
+          "optional": true,
+          "description": "Call a running compute server (https://host or https://host/api/compute) instead of loading the configuration",
+          "env": "BETTER_COMPUTE_URL"
+        }
+      ],
+      "examples": [
+        "better-compute exec --url https://compute.example.com --tenant org_acme --instance inst_01k5w…"
+      ]
+    },
+    {
       "name": "reserve",
       "aliases": [],
       "group": "Capacity",
