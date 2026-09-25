@@ -280,7 +280,57 @@
         "phase": "v1.0",
         "module": "quorum",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "payloadSha256": {
+                    "type": "string"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "typeUrl": {
+                        "type": "string"
+                      },
+                      "value": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["typeUrl", "value"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["subject", "kind"],
+                "additionalProperties": false
+              }
+            },
+            "notAfterSeconds": {
+              "type": "integer"
+            },
+            "idempotencyKey": {
+              "type": "string"
+            }
+          },
+          "required": ["tenantId", "reason", "scope", "idempotencyKey"],
+          "additionalProperties": false
+        },
         "summary": "Creates a batch from its (subject, kind) leaves, each optionally bound to a payload's SHA-256, a reason and a lifetime; returns it `pending`, with the approvals its size needs.",
         "description": "Creates a batch from its (subject, kind) leaves, each optionally bound to a payload's SHA-256, a reason and a lifetime; returns it `pending`, with the approvals its size needs.\n\n- The tree is fixed now: its root, size and every leaf's proof are stored, so what approvers review is what the daemons check. Subjects are computed as the executing agent does (see pki `batchSubject`): the node id, `bmc:<site agent>/<address>` for BMC kinds, `node:<target>` for `site.httpProxy`. A leaf without `payloadSha256` admits any payload of its kind, and `scope` flags it to approvers.\n- **Idempotency.** The batch id derives from the tenant, the caller and `idempotencyKey`. The same request again (the same leaves in any order, reason and lifetime) returns the stored batch without a new event; a different request under the key is `CONFLICT`.\n- The lifetime is `notAfterSeconds` (default 24 hours): after it the batch admits no commands and can no longer be approved. At most 50,000 leaves.\n\nPublishes `command.batch.created` with the scope size and the approvals required."
       },
@@ -295,7 +345,19 @@
         "phase": "v1.0",
         "module": "quorum",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "batchId": {
+              "type": "string"
+            }
+          },
+          "required": ["tenantId", "batchId"],
+          "additionalProperties": false
+        },
         "summary": "Returns one batch of the tenant: its reason, state, scope root and size, the approvals it needs and has, and how many of its commands are in each state.",
         "description": "Returns one batch of the tenant: its reason, state, scope root and size, the approvals it needs and has, and how many of its commands are in each state.\n\nThe state is `expired` as soon as `notAfter` passes, even before the minute sweep writes it. A batch of another tenant is `NOT_FOUND`."
       },
@@ -310,7 +372,25 @@
         "phase": "v1.0",
         "module": "quorum",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "state": {
+              "enum": ["pending", "approved", "expired", "cancelled"]
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "cursor": {
+              "type": "string"
+            }
+          },
+          "required": ["tenantId"],
+          "additionalProperties": false
+        },
         "summary": "Returns the tenant's batches, newest first, filtered by `state`.",
         "description": "Returns the tenant's batches, newest first, filtered by `state`.\n\n`limit` is 1 to 200 (default 50); `next`, when present, is the `cursor` for the following page."
       },
@@ -325,7 +405,25 @@
         "phase": "v1.0",
         "module": "quorum",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "batchId": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "integer"
+            },
+            "limit": {
+              "type": "integer"
+            }
+          },
+          "required": ["tenantId", "batchId"],
+          "additionalProperties": false
+        },
         "summary": "Returns a batch's leaves in leaf order, for approvers to review before signing: each leaf's index, subject, kind and `payloadSha256`.",
         "description": "Returns a batch's leaves in leaf order, for approvers to review before signing: each leaf's index, subject, kind and `payloadSha256`.\n\nAn empty `payloadSha256` marks a leaf that admits any payload of its kind, which approvers should look at closely. Pages hold 1 to 5,000 leaves (1,000 by default); `next` is the leaf index to pass as `cursor`."
       },
@@ -340,7 +438,32 @@
         "phase": "v1.0",
         "module": "quorum",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "batchId": {
+              "type": "string"
+            },
+            "signature": {
+              "type": "object",
+              "properties": {
+                "kid": {
+                  "type": "string"
+                },
+                "sig": {
+                  "type": "string"
+                }
+              },
+              "required": ["kid", "sig"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["tenantId", "batchId", "signature"],
+          "additionalProperties": false
+        },
         "summary": "Adds one approver's signature over the batch's root; once the signatures meet the threshold for its size, the batch becomes `approved` and its held commands are released at once.",
         "description": "Adds one approver's signature over the batch's root; once the signatures meet the threshold for its size, the batch becomes `approved` and its held commands are released at once.\n\n- `signature` is `{ kid, sig }`: the approver key id and a base64url P-256 signature over the batch (id, root, size, end, trust domain), made off the control plane. A signature by a key outside the published set, or over anything else, is `ACCESS_DENIED`. The same approver twice counts once.\n- Decided as `compute:batches:approve`, on top of the signature, never instead of it.\n- `INVALID_STATE` for a batch that is not `pending`, or one that needs no approvals (no approver keys, or a size the tiers exempt). `INVALID_CONFIG` when the deployment has no trust domain (no `pki.join`).\n\nPublishes `command.batch.approved` with the approver key ids when the batch completes."
       },
@@ -355,7 +478,19 @@
         "phase": "v1.0",
         "module": "quorum",
         "status": "registered",
-        "input": null,
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string"
+            },
+            "batchId": {
+              "type": "string"
+            }
+          },
+          "required": ["tenantId", "batchId"],
+          "additionalProperties": false
+        },
         "summary": "Ends a pending batch: it becomes `cancelled` and its held commands are cancelled with it.",
         "description": "Ends a pending batch: it becomes `cancelled` and its held commands are cancelled with it.\n\nA batch that is not `pending` is `INVALID_STATE`. Decided as `compute:batches:approve`."
       }
@@ -2485,6 +2620,67 @@
         },
         "summary": "Queues a `bmc.power` command to the site agent of the node's site and returns its `commandId`; the provision state does not change.",
         "description": "Queues a `bmc.power` command to the site agent of the node's site and returns its `commandId`; the provision state does not change.\n\n- Decided as `compute:nodes:power` on the node.\n- `action` is `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle` or `nmi`.\n- `INVALID_STATE` when the node has no BMC credentials, while it is `inspecting`, `commissioning`, `deploying` or `releasing` (a workflow controls its power then), or when no site agent serves its site.\n\nThe command expires five minutes after it is queued. Its idempotency key derives from the request id, so a retry with the same `X-Request-Id` header returns the same command."
+      },
+      {
+        "method": "bulk",
+        "route": "POST /api/compute/metal/bulk",
+        "kind": "mutation",
+        "action": "compute:nodes:provision",
+        "resource": "compute-pool",
+        "alternatives": [],
+        "list": false,
+        "phase": "v1.0",
+        "module": "metal",
+        "status": "registered",
+        "input": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+              "maxLength": 128,
+              "description": "The tenant the call acts in"
+            },
+            "poolId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "description": "The pool every node is in"
+            },
+            "verb": {
+              "enum": ["manage", "inspect", "provide", "undeploy", "rescue", "retire"],
+              "description": "The verb every node gets"
+            },
+            "nodeIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10000,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+                "maxLength": 57,
+                "description": "The node"
+              },
+              "description": "The nodes, all in the tenant"
+            },
+            "wipe": {
+              "enum": ["none", "quick", "secure-erase", "crypto-erase"],
+              "default": "quick",
+              "description": "undeploy: how the disks are wiped on release"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "What the batch is for: the approvers see it"
+            }
+          },
+          "required": ["tenantId", "poolId", "verb", "nodeIds", "reason"],
+          "additionalProperties": false
+        },
+        "summary": "",
+        "description": ""
       }
     ]
   },

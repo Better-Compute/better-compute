@@ -294,7 +294,39 @@
       "list": false,
       "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "batchId": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "kid": {
+                "type": "string"
+              },
+              "sig": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kid",
+              "sig"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tenantId",
+          "batchId",
+          "signature"
+        ],
+        "additionalProperties": false
+      }
     },
     "commandBatches.cancel": {
       "route": "POST /api/compute/commandBatches/cancel",
@@ -305,7 +337,22 @@
       "list": false,
       "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "batchId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenantId",
+          "batchId"
+        ],
+        "additionalProperties": false
+      }
     },
     "commandBatches.create": {
       "route": "POST /api/compute/commandBatches/create",
@@ -316,7 +363,68 @@
       "list": false,
       "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "subject": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "payloadSha256": {
+                  "type": "string"
+                },
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "typeUrl": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "typeUrl",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "subject",
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "notAfterSeconds": {
+            "type": "integer"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenantId",
+          "reason",
+          "scope",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      }
     },
     "commandBatches.get": {
       "route": "POST /api/compute/commandBatches/get",
@@ -327,7 +435,22 @@
       "list": false,
       "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "batchId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenantId",
+          "batchId"
+        ],
+        "additionalProperties": false
+      }
     },
     "commandBatches.list": {
       "route": "POST /api/compute/commandBatches/list",
@@ -338,7 +461,32 @@
       "list": false,
       "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "approved",
+              "expired",
+              "cancelled"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "cursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenantId"
+        ],
+        "additionalProperties": false
+      }
     },
     "commandBatches.scope": {
       "route": "POST /api/compute/commandBatches/scope",
@@ -349,7 +497,28 @@
       "list": false,
       "status": "registered",
       "phase": "v1.0",
-      "input": null
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string"
+          },
+          "batchId": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tenantId",
+          "batchId"
+        ],
+        "additionalProperties": false
+      }
     },
     "commands.cancel": {
       "route": "POST /api/compute/commands/cancel",
@@ -1934,6 +2103,81 @@
         "required": [
           "tenantId",
           "nodeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metal.bulk": {
+      "route": "POST /api/compute/metal/bulk",
+      "kind": "mutation",
+      "action": "compute:nodes:provision",
+      "resource": "compute-pool",
+      "alternatives": [],
+      "list": false,
+      "status": "registered",
+      "phase": "v1.0",
+      "input": {
+        "type": "object",
+        "properties": {
+          "tenantId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "maxLength": 128,
+            "description": "The tenant the call acts in"
+          },
+          "poolId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The pool every node is in"
+          },
+          "verb": {
+            "enum": [
+              "manage",
+              "inspect",
+              "provide",
+              "undeploy",
+              "rescue",
+              "retire"
+            ],
+            "description": "The verb every node gets"
+          },
+          "nodeIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10000,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^node_[0-9a-hjkmnp-tv-z]{26,52}$",
+              "maxLength": 57,
+              "description": "The node"
+            },
+            "description": "The nodes, all in the tenant"
+          },
+          "wipe": {
+            "enum": [
+              "none",
+              "quick",
+              "secure-erase",
+              "crypto-erase"
+            ],
+            "default": "quick",
+            "description": "undeploy: how the disks are wiped on release"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "What the batch is for: the approvers see it"
+          }
+        },
+        "required": [
+          "tenantId",
+          "poolId",
+          "verb",
+          "nodeIds",
+          "reason"
         ],
         "additionalProperties": false
       }

@@ -7,7 +7,7 @@ description: "The metal group enrolls machines by their BMCs and moves them thro
 
 The metal group enrolls machines by their BMCs and moves them through the provision state machine: inspect, commission, deploy, rescue, release and retire. Each verb checks the move against the provision state table, records it in one transaction and queues the metal reconciler, which runs the workflow of the new state; no verb touches the machine itself. Every method returns the node's metal view, which reports whether BMC credentials are set but never returns them. See [Bare metal](/docs/guides/bare-metal) and [BMC drivers and credentials](/docs/guides/bare-metal/bmc).
 
-All 12 methods are served by this release.
+All 13 methods are served by this release.
 
 | Method                  | Kind     | Authorization                              | Phase | Status     |
 | ----------------------- | -------- | ------------------------------------------ | ----- | ---------- |
@@ -23,6 +23,7 @@ All 12 methods are served by this release.
 | [`recover`](#recover)   | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | registered |
 | [`retire`](#retire)     | mutation | `compute:nodes:provision` @ `compute-node` | v0.2  | registered |
 | [`power`](#power)       | mutation | `compute:nodes:power` @ `compute-node`     | v0.2  | registered |
+| [`bulk`](#bulk)         | mutation | `compute:nodes:provision` @ `compute-pool` | v1.0  | registered |
 
 ## enroll
 
@@ -293,3 +294,23 @@ The command expires five minutes after it is queued. Its idempotency key derives
 | `tenantId` | string                                                                          | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$`        |
 | `nodeId`   | string                                                                          | yes      | at most 57 characters; matches `^node_[0-9a-hjkmnp-tv-z]{26,52}$` |
 | `action`   | one of `on`, `off`, `graceful-off`, `reset`, `graceful-restart`, `cycle`, `nmi` | yes      |                                                                   |
+
+## bulk
+
+`POST /api/compute/metal/bulk`
+
+- **Kind:** mutation
+- **Authorization:** `compute:nodes:provision` @ `compute-pool`
+- **Module:** `metal`
+- **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type                                                                  | Required | Constraints                                                |
+| ---------- | --------------------------------------------------------------------- | -------- | ---------------------------------------------------------- |
+| `tenantId` | string                                                                | yes      | at most 128 characters; matches `^[A-Za-z0-9._:-]{1,128}$` |
+| `poolId`   | string                                                                | yes      | 1-128 characters                                           |
+| `verb`     | one of `manage`, `inspect`, `provide`, `undeploy`, `rescue`, `retire` | yes      |                                                            |
+| `nodeIds`  | list of string                                                        | yes      | 1-10000 items; no repeats                                  |
+| `wipe`     | one of `none`, `quick`, `secure-erase`, `crypto-erase`                |          | default `"quick"`                                          |
+| `reason`   | string                                                                | yes      | 1-512 characters                                           |

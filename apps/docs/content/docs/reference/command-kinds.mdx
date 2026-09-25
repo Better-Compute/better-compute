@@ -29,4 +29,4 @@ Commands reach a node over its gateway session, one lane per kind. _Retry-safe_ 
 | `inventory.refresh`   | control   | node, site, ramdisk | yes        |                  |          |             | `2m`    | `bettercompute.agent.v1.InventoryRefreshRequest` |
 | `logs.collect`        | bulk      | node, site, ramdisk | yes        |                  |          |             | `15m`   | `bettercompute.agent.v1.LogsCollectRequest`      |
 | `node.reboot`         | control   | node, site          | yes        | yes              |          | yes         | `15m`   | `bettercompute.agent.v1.NodeRebootRequest`       |
-| `site.httpProxy`      | control   | site                |            |                  |          |             | `1m`    | `bettercompute.site.v1.HttpProxyRequest`         |
+| `site.httpProxy`      | control   | site                |            |                  |          | yes         | `1m`    | `bettercompute.site.v1.HttpProxyRequest`         |

@@ -35,6 +35,22 @@ Publishes `command.batch.created` with the scope size and the approvals required
 - **Module:** `quorum`
 - **Phase:** v1.0 (registered)
 
+**Input**
+
+| Field                     | Type           | Required | Constraints |
+| ------------------------- | -------------- | -------- | ----------- |
+| `tenantId`                | string         | yes      |             |
+| `reason`                  | string         | yes      |             |
+| `scope`                   | list of object | yes      |             |
+| `scope[].subject`         | string         | yes      |             |
+| `scope[].kind`            | string         | yes      |             |
+| `scope[].payloadSha256`   | string         |          |             |
+| `scope[].payload`         | object         |          |             |
+| `scope[].payload.typeUrl` | string         | yes      |             |
+| `scope[].payload.value`   | string         | yes      |             |
+| `notAfterSeconds`         | integer        |          |             |
+| `idempotencyKey`          | string         | yes      |             |
+
 ## get
 
 `POST /api/compute/commandBatches/get`
@@ -47,6 +63,13 @@ The state is `expired` as soon as `notAfter` passes, even before the minute swee
 - **Authorization:** `compute:batches:read` @ `compute-tenant`
 - **Module:** `quorum`
 - **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints |
+| ---------- | ------ | -------- | ----------- |
+| `tenantId` | string | yes      |             |
+| `batchId`  | string | yes      |             |
 
 ## list
 
@@ -61,6 +84,15 @@ Returns the tenant's batches, newest first, filtered by `state`.
 - **Module:** `quorum`
 - **Phase:** v1.0 (registered)
 
+**Input**
+
+| Field      | Type                                                 | Required | Constraints |
+| ---------- | ---------------------------------------------------- | -------- | ----------- |
+| `tenantId` | string                                               | yes      |             |
+| `state`    | one of `pending`, `approved`, `expired`, `cancelled` |          |             |
+| `limit`    | integer                                              |          |             |
+| `cursor`   | string                                               |          |             |
+
 ## scope
 
 `POST /api/compute/commandBatches/scope`
@@ -73,6 +105,15 @@ An empty `payloadSha256` marks a leaf that admits any payload of its kind, which
 - **Authorization:** `compute:batches:read` @ `compute-tenant`
 - **Module:** `quorum`
 - **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type    | Required | Constraints |
+| ---------- | ------- | -------- | ----------- |
+| `tenantId` | string  | yes      |             |
+| `batchId`  | string  | yes      |             |
+| `cursor`   | integer |          |             |
+| `limit`    | integer |          |             |
 
 ## approve
 
@@ -91,6 +132,16 @@ Publishes `command.batch.approved` with the approver key ids when the batch comp
 - **Module:** `quorum`
 - **Phase:** v1.0 (registered)
 
+**Input**
+
+| Field           | Type   | Required | Constraints |
+| --------------- | ------ | -------- | ----------- |
+| `tenantId`      | string | yes      |             |
+| `batchId`       | string | yes      |             |
+| `signature`     | object | yes      |             |
+| `signature.kid` | string | yes      |             |
+| `signature.sig` | string | yes      |             |
+
 ## cancel
 
 `POST /api/compute/commandBatches/cancel`
@@ -103,3 +154,10 @@ A batch that is not `pending` is `INVALID_STATE`. Decided as `compute:batches:ap
 - **Authorization:** `compute:batches:approve` @ `compute-tenant`
 - **Module:** `quorum`
 - **Phase:** v1.0 (registered)
+
+**Input**
+
+| Field      | Type   | Required | Constraints |
+| ---------- | ------ | -------- | ----------- |
+| `tenantId` | string | yes      |             |
+| `batchId`  | string | yes      |             |

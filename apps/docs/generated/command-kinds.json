@@ -225,7 +225,7 @@
     "retrySafe": false,
     "selfTerminating": false,
     "attested": false,
-    "destructive": false,
+    "destructive": true,
     "timeout": "1m",
     "roles": ["site"],
     "payload": "bettercompute.site.v1.HttpProxyRequest"
