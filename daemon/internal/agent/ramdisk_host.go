@@ -193,6 +193,14 @@ func (h *RealHost) InstallUserData(ctx context.Context, d *inventory.Disk, kind 
 	}
 	switch kind {
 	case "", "cloud-init":
+		seed := map[string][]byte{
+			"/var/lib/cloud/seed/nocloud/user-data": data,
+			"/var/lib/cloud/seed/nocloud/meta-data": []byte("instance-id: " + d.Name + "\n"),
+		}
+		// ext root filesystems are written in userspace; others are mounted (nodev,nosuid).
+		if ok, err := installOnExt(ctx, parts, seed); ok || err != nil {
+			return err
+		}
 		dir, _, unmount, err := h.mountFirst(ctx, parts, false, func(dir string) bool { return exists(filepath.Join(dir, "etc")) })
 		if err != nil {
 			return err
@@ -229,6 +237,10 @@ func (h *RealHost) InstallFiles(ctx context.Context, d *inventory.Disk, files ma
 	} else {
 		parts, err := h.diskPartitions(ctx, d)
 		if err != nil {
+			return err
+		}
+		// ext root filesystems are written in userspace; others are mounted (nodev,nosuid).
+		if ok, err := installOnExt(ctx, parts, files); ok || err != nil {
 			return err
 		}
 		dir, _, um, err := h.mountFirst(ctx, parts, false, func(dir string) bool { return exists(filepath.Join(dir, "etc")) })
